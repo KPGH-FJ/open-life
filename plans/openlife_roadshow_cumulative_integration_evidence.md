@@ -13,6 +13,8 @@
   deterministic-selection, captured-HTTP Provider, and backend citation-
   validation mechanical runs.
 - RC-04 has passed a single-command mechanical integration run.
+- RC-05 has passed a three-process create, complete, replay, undo, and final
+  audit mechanical run against file-backed canonical stores.
 - RC-08 has passed a local cancellation/new-operation-retry mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
   mechanical run and a forged-Web-citation counterfactual.
@@ -21,12 +23,13 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-01 through RC-04, RC-08, and CC-01 through CC-03 have **not** received
+- RC-01 through RC-05, RC-08, and CC-01 through CC-03 have **not** received
   native desktop, external live-provider, repeated product-trial, or
   independent-review credit.
-- RC-08 full application-process restart remains pending. CC-03 now has a
-  separate backend OS-process reopen proof; packaged Tauri bootstrap, keychain,
-  window relaunch, and native UI evidence remain pending.
+- RC-08 full application-process restart remains pending. RC-05 and CC-03 now
+  have separate backend OS-process reopen proofs; packaged Tauri bootstrap,
+  window relaunch, native UI, and CC-03 production-keychain evidence remain
+  pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-01 exact scenario
@@ -233,6 +236,66 @@ model authorize the Web route.
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 
 Implementation commit: `02fd7580a1078a57e6308921a5ed61f357e4e17d`.
+
+## RC-05 exact daily-task lifecycle
+
+Frozen create prompt:
+
+> 今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。
+
+The cumulative harness uses three distinct backend OS processes and one shared
+file-backed Conversation, AgentRun, TaskSession, ActionQueue, TurnEvent,
+StateStore, and LifeModel root:
+
+1. the seed process creates the task and completes it through ordinary Main
+   Chat, then exits;
+2. the verify process reopens every store, replays the same create and complete
+   operation identities with zero event growth, performs one natural-language
+   undo, replays that undo once, then exits;
+3. the audit process reopens the stores again without executing a turn and
+   verifies the one canonical tombstone and complete operation history.
+
+Observed facts:
+
+- create, complete, and undo remain deterministic
+  `transient_state_command` operations with no Provider or Tool dispatch;
+- one asset moves through versions 1, 2, and 3 and ends tombstoned, with zero
+  active daily tasks after the final restart;
+- exact replays do not add Conversation messages, durable events, or state
+  mutations; the final audit observes six messages total, not duplicates;
+- each operation has one minimal StateStore receipt, one `effect_committed`,
+  and one `final_delivery.created` event;
+- StateGateway mutations create no Tool/ActionQueue record and no Proposal;
+- immutable `effect_committed` records preserve transaction-time
+  `projectionStatus=pending`, while the current canonical receipt/read model
+  reports `applied`; historical events are not rewritten as current truth;
+- the backend task projection is empty after the tombstone and restart.
+
+The widened gate exposed and corrected one stale test expectation that treated
+the immutable event's projection status as the current read-model status. The
+product implementation already stored the correct transaction-time event and
+current receipt; the repair keeps those two truths separate instead of
+rewriting event history.
+
+This is backend OS-process and mock Tauri command-surface evidence. It is not a
+packaged desktop relaunch, native UI task interaction, legacy YAML migration
+cutover, or independent-review claim. Expiry behavior remains separately
+covered by the StateStore fault/restart suite rather than this exact journey.
+
+RC-05 cumulative evidence commit:
+`6c40b30f8c0659efd7d351fb31ea6fc234617861`.
+
+Mechanical evidence after the repair:
+
+- three-process RC-05 exact lifecycle — passed;
+- StateStore transaction/replay/concurrency/expiry filter — 19 passed;
+- transient-state Tauri/runtime filter — 4 passed;
+- full Main Chat command surface — 91 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check` and `git diff --check` — passed.
 
 ## RC-08 exact scenario
 
@@ -562,6 +625,8 @@ are not hidden by the scoped green gates.
 - RC-01 external live Provider and native product UI trial.
 - RC-02/RC-03 native picker, external live Provider, packaged restart, and
   repeated product trial.
+- RC-05 packaged Tauri relaunch, native task UI trial, and repeated product
+  trial.
 - RC-08 full application-process restart/reopen and native UI projection.
 - CC-03 packaged Tauri desktop restart and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system

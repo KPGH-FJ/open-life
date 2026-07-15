@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc01_rc02_rc03_rc04_rc08_cc01_cc02_and_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_rc01_rc02_rc03_rc04_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
-      "commit": "cf269e536425198139fcb865355cb3165e2992df",
+      "status": "in_progress_rc01_through_rc05_rc08_and_cc01_through_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc01_through_rc05_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
+      "commit": "6c40b30f8c0659efd7d351fb31ea6fc234617861",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -293,6 +293,15 @@
     "rc04_native_product_trial": "pending",
     "rc04_external_live_provider_and_web": "pending",
     "rc04_independent_review": "pending",
+    "rc05_exact_prompt": "passed_current_user_daily_task_create_then_natural_language_complete_and_undo_one_asset_versions_one_two_three_final_tombstone_zero_provider_tool_proposal_or_actionqueue_effect",
+    "rc05_process_restart": "passed_three_independent_backend_test_processes_one_file_backed_store_root_seed_verify_audit_zero_duplicate_messages_events_receipts_or_mutations",
+    "rc05_replay": "passed_same_create_complete_and_undo_operation_identities_recover_original_final_and_leave_event_sets_unchanged",
+    "rc05_event_truth": "passed_each_operation_one_minimal_effect_committed_before_one_final_delivery_transaction_event_pending_not_rewritten",
+    "rc05_projection_truth": "passed_current_statestore_receipt_applied_immutable_event_pending_backend_task_projection_empty_after_tombstone_restart",
+    "rc05_expiry": "passed_separate_statestore_restart_and_projection_failure_suite_not_exact_three_process_journey_credit",
+    "rc05_full_application_restart": "partial_three_backend_os_processes_passed_packaged_tauri_bootstrap_keychain_window_and_ui_pending",
+    "rc05_native_product_ui_trial": "pending",
+    "rc05_independent_review": "pending",
     "rc08_exact_prompt": "passed_local_web_then_hanging_provider_cancel_under_one_second_remote_unknown_no_late_event_and_one_new_operation_retry",
     "rc08_governance": "passed_read_only_web_authority_zero_proposals_zero_effect_commits",
     "rc08_retry_dispatch": "passed_one_web_action_one_provider_synthesis_request_and_one_completed_retry_agentrun",
@@ -339,5 +348,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T13:09:30+08:00"
+  "last_updated_at": "2026-07-15T13:24:42+08:00"
 }
