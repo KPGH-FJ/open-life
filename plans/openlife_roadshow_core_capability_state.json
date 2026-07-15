@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc01_through_rc08_and_cc01_through_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
+      "status": "in_progress_rc01_through_rc08_and_cc01_through_cc03_local_mechanics_verified_remaining_combined_live_product_and_review_evidence_pending",
       "completion_claim": "no_cumulative_completion_claim_rc01_through_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
-      "commit": "bf06b0e9d5dc52f8c4fe48d2477dc26c8ba06470",
+      "commit": "1b3ec4975f6947bcd7dcb01a085c11cb44fe8867",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -318,7 +318,9 @@
     "rc08_governance": "passed_read_only_web_authority_zero_proposals_zero_effect_commits",
     "rc08_retry_dispatch": "passed_one_web_action_one_provider_synthesis_request_and_one_completed_retry_agentrun",
     "rc08_process_local_reset": "passed_durable_first_attempt_truth_after_main_chat_runtime_state_reset",
-    "rc08_full_process_restart": "pending",
+    "rc08_backend_os_process_restart": "passed_three_independent_backend_test_processes_seed_cancel_verify_retry_audit_one_file_backed_store_set_no_late_durable_commit",
+    "rc08_cancelled_action_projection": "passed_cancelled_actionqueue_projection_hidden_after_reopen_immutable_tool_completed_turnevent_remains_historical_authority",
+    "rc08_full_process_restart": "partial_three_backend_os_processes_passed_packaged_tauri_bootstrap_window_relaunch_and_native_ui_pending",
     "rc08_native_product_ui_trial": "pending",
     "rc08_external_live_provider_and_web": "pending",
     "rc08_independent_review": "pending",
@@ -360,5 +362,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T13:35:30+08:00"
+  "last_updated_at": "2026-07-15T13:46:54+08:00"
 }

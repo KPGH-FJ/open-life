@@ -18,7 +18,8 @@
 - RC-06 has passed a three-process wait-for-review, accept, replay, and final
   audit run. RC-07 has passed its exact two-artifact journey and artifact crash
   reconciliation matrix.
-- RC-08 has passed a local cancellation/new-operation-retry mechanical run.
+- RC-08 has passed both a local cancellation/new-operation-retry run and a
+  three-process cancel, reopen, explicit retry, and audit mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
   mechanical run and a forged-Web-citation counterfactual.
 - CC-02 has passed a local Resource-to-atomic-transient-task mechanical run
@@ -29,10 +30,9 @@
 - RC-01 through RC-08 and CC-01 through CC-03 have **not** received
   native desktop, external live-provider, repeated product-trial, or
   independent-review credit.
-- RC-08 full application-process restart remains pending. RC-05, RC-06, and
-  CC-03 now have separate backend OS-process reopen proofs; packaged Tauri
-  bootstrap, window relaunch, native UI, and CC-03 production-keychain evidence
-  remain pending.
+- RC-05, RC-06, RC-08, and CC-03 now have separate backend OS-process reopen
+  proofs. Packaged Tauri bootstrap, window relaunch, native UI, and CC-03
+  production-keychain evidence remain pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-01 exact scenario
@@ -384,17 +384,35 @@ Observed first-attempt facts:
 - releasing the late Provider response changes zero durable events;
 - the AgentRun remains `Cancelled`.
 
-The harness then clears process-local Main Chat runtime facts and performs the
-explicit retry as a new UUIDv4 operation. The retry rebinds the same fixture,
-dispatches one Web action and one Provider synthesis request, validates both
-Resource and Web citations, creates zero proposals, and finishes one AgentRun
-as `Completed`. The raw Web body marker remains absent from product IPC and its
-execution receipt.
+The original harness then clears process-local Main Chat runtime facts and
+performs the explicit retry as a new UUIDv4 operation. A second harness now
+uses three distinct backend OS processes and one shared file-backed Main Chat
+store set:
 
-This proves local runtime-state loss and a user-visible new-operation retry. It
-does **not** prove full application-process restart/reopen, native desktop UI,
-external live Web, or external cloud Provider behavior; those evidence
-dimensions remain pending.
+1. the seed process binds the frozen Resource, completes one governed Web read,
+   observes Provider dispatch, cancels locally, records `remote_unknown`, and
+   proves that releasing the late Provider response changes zero durable
+   events;
+2. the verify process reopens the durable stores, proves that the first
+   AgentRun is still `Cancelled`, rebinds the same frozen Resource to a new
+   UUIDv4 operation, and performs exactly one Web action and one Provider
+   synthesis request with zero proposals;
+3. the audit process reopens the stores again and proves that the first attempt
+   still has one `provider.remote_unknown`, one `local_aborted`, one historical
+   `tool.completed`, and no `provider.completed` or `effect_committed`, while
+   the retry has one `provider.completed`, one final delivery, and a completed
+   AgentRun.
+
+The cancelled session's ActionQueue projection is intentionally hidden after
+reopen; the immutable `tool.completed` TurnEvent remains the historical
+authority. The retry's ActionQueue contains one `web.search`. This distinction
+prevents a transient projection from being presented as canonical history.
+
+This proves recovery after loss of all backend process-local runtime/cache
+state and a user-visible new-operation retry. It does **not** prove packaged
+Tauri bootstrap, native window relaunch, native UI projection, external live
+Web, or external cloud Provider behavior; those evidence dimensions remain
+pending.
 
 The exact Chinese `检索网页` phrase initially failed to authorize Web read
 capability. Policy intent classification now recognizes explicit search/query
@@ -404,12 +422,18 @@ Web authority. The model cannot grant this capability.
 RC-08 implementation/evidence commit:
 `f84bed579b9e27bb0e3eb974cd66c38082a369b3`.
 
+RC-08 separate-process evidence commit:
+`1b3ec4975f6947bcd7dcb01a085c11cb44fe8867`.
+
 Additional mechanical evidence:
 
-- exact RC-04, RC-06, and RC-08 roadshow command tests — 3 passed;
+- exact RC-04, RC-06, and RC-08 roadshow command tests, including the RC-08
+  three-process lifecycle — passed;
 - `roadshow_external_read_policy_tests` — 3 passed;
 - generic released-late-provider cancellation regression — passed;
-- full Main Chat command surface — 75 passed;
+- full Main Chat command surface — 93 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
   warnings only.
 
@@ -692,7 +716,7 @@ are not hidden by the scoped green gates.
   trial.
 - RC-06/RC-07 external live Provider, packaged/native Review Center and file
   trial, plus RC-07 separate-process end-to-end bundle evidence.
-- RC-08 full application-process restart/reopen and native UI projection.
+- RC-08 packaged Tauri bootstrap/window relaunch and native UI projection.
 - CC-03 packaged Tauri desktop restart and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
   guards, widened frontend/backend regression, reliability loops, live product
