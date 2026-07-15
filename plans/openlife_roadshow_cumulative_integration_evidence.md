@@ -668,11 +668,11 @@ Mechanical evidence after the repair:
 - exact CC-01 positive and forged-citation tests — 2 passed;
 - `generated_artifact_policy_tests` — 3 passed;
 - Resource and Web citation modules — 8 passed;
-- full Main Chat kernel — 71 passed;
+- full Main Chat kernel — 73 passed;
 - full Main Chat command surface — 77 passed;
 - single-system authority guards — 32 passed;
 - Main Chat runtime module — 30 passed;
-- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+- `cargo check -p openlife-tauri --tests --locked` — passed with existing dead-code
   warnings only;
 - `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
   passed.
@@ -771,22 +771,39 @@ Root failures found and removed:
    transaction-time fact; mutable projection and replay truth stays in the
    outbox-backed receipt and execution metadata.
 
-This is canonical local storage and command-surface evidence. CC-02 uses the
-frozen DOCX bytes plus canonical paragraph representation; it does not claim a
-second native-picker/parser trial, external Provider credit, native desktop
-credit, or application-process restart credit.
+The separate restart gate then runs three independent backend OS processes over
+one file-backed ResourceStore, StateStore, Conversation, EventStore, AgentRun,
+TaskSession, ActionQueue, ProposalStore, and LifeModel compatibility root:
+
+1. `seed` imports the frozen DOCX, binds four canonical paragraph chunks to one
+   UUIDv4 operation, and commits exactly three ordered tasks in one batch;
+2. `verify` reopens every store, proves the Resource binding and task batch are
+   present, and replays the same operation without changing the tasks, batch
+   receipt, events, or Conversation;
+3. `audit` reopens the stores again and proves four Resource chunks, three
+   tasks, three `effect_committed` facts, one final delivery, one completed
+   AgentRun, two Conversation messages, and zero proposals or tool actions.
+
+This is canonical local storage, command-surface, and backend OS-process restart
+evidence. It does not claim a second native-picker/parser trial, external
+Provider credit, native desktop credit, or full packaged application restart
+credit.
 
 CC-02 implementation commit:
 `3d2fff23d0df8ce185d2944918828cb83276ec12`.
 
+CC-02 separate-process evidence commit:
+`6499dc7cf7fe14bd31a78398a79e81c6ea53fb36`.
+
 Mechanical evidence after the repair:
 
-- exact CC-02 positive and untrusted-attachment tests — 2 passed;
+- exact CC-02 positive, untrusted-attachment, and separate-process tests — 3
+  passed;
 - CC-02 Policy test — 1 passed;
 - StateStore tests, including v1/v2 migration, atomic rollback, concurrent
   same-operation replay, ordering, and minimal receipts — 19 passed;
 - full Main Chat kernel — 71 passed;
-- full Main Chat command surface — 79 passed;
+- full Main Chat command surface — 94 passed;
 - Main Chat runtime module — 30 passed;
 - single-system authority guards — 32 passed;
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
@@ -1039,6 +1056,8 @@ without an identity/keychain/data migration decision.
   Provider gates are now complete twice.
 - CC-01 native picker, live-Web report review, and file trial; its exact external
   live backend gate is now complete twice.
+- CC-02 native picker/parser, transient-task projection, and healthy packaged
+  application trial; its three-process backend restart gate is now complete.
 - RC-08 native cancel/retry projection and external live Web/search-provider
   journey; external Provider cancellation/retry is now complete twice with a
   governed fixture Web observation, and generic shell bootstrap/relaunch is

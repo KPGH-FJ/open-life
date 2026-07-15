@@ -344,7 +344,8 @@
     "cc02_untrusted_attachment": "passed_english_and_chinese_instruction_paragraphs_zero_authority_escalation_zero_file_tool_or_proposal_effect",
     "cc02_conditional_file_branch": "not_exercised_because_no_file_needed_and_conditional_clause_is_not_write_authorization_rc06_cc01_cover_reviewed_artifact_chain",
     "cc02_native_picker_parser_product_trial": "pending_v1_parser_mechanics_are_separate_credit",
-    "cc02_process_restart": "pending",
+    "cc02_process_restart": "passed_three_independent_backend_test_processes_one_file_backed_resource_state_conversation_event_agentrun_store_set_same_operation_replay_zero_duplicate_resource_task_receipt_event_message_proposal_or_tool_effect",
+    "cc02_full_application_restart": "partial_backend_os_process_restart_passed_packaged_native_picker_task_projection_and_healthy_keychain_journey_pending",
     "cc02_independent_review": "pending",
     "cc03_exact_prompt": "passed_one_explicit_preference_owner_created_then_one_rollback_tombstone_applied_zero_active_memory_and_zero_proposal_tool_provider_file_or_hs_effect",
     "cc03_policy_authority": "passed_current_canonical_user_message_only_typed_commit_and_rollback_grants_file_web_tool_and_assistant_quotes_zero_authority",
@@ -392,5 +393,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T18:26:18+08:00"
+  "last_updated_at": "2026-07-15T18:44:18+08:00"
 }
