@@ -17,6 +17,9 @@
 - RC-04 has passed a single-command mechanical integration run.
 - RC-05 has passed a three-process create, complete, replay, undo, and final
   audit mechanical run against file-backed canonical stores.
+- The V3 typed short-lived state slice has passed buffered record, streamed
+  list/undo, TTL expiry, restart, concurrency, cancellation, minimization, and
+  old `record_state` product-route deletion gates through canonical StateStore.
 - RC-06 has passed a three-process wait-for-review, accept, replay, and final
   audit run. RC-07 has passed its exact two-artifact journey and artifact crash
   reconciliation matrix. Both exact frozen prompts have also passed two
@@ -1031,6 +1034,51 @@ These are repeatability and mechanical regression facts. They do not replace a
 native product journey, an external live Provider run, or an independent
 read-only review. The two previously recorded Phase0 historical-governance
 failures remain red and were not renamed or waived to make this section green.
+
+## V3 typed transient-state observation closure
+
+Commit `99d53a81d7cf0ebc85bd104eda3c1f594094bd7a` closes the bounded typed
+observation part of ADR 0015 without reviving the old `record_state` product
+route.
+
+The exact product path now accepts `/state 专注度 8 分`, `/state`, and
+`/state undo 专注度` through the same Main Chat TurnRuntime. The first command
+creates one typed StateStore observation, the second streams the canonical
+active read, and the third creates one durable tombstone. All three paths use
+no Provider, Tool, ActionQueue effect, or Proposal. The canonical receipt and
+durable event contain no dimension/value/unit body.
+
+StateStore schema v4 adds separate observation, version, and operation tables
+inside the existing canonical database rather than disguising observations as
+daily tasks or adding a second store. Task, resource-batch, and observation
+operation ids share one conflict-checked UUID namespace. Same-operation
+concurrency has one winner; request/payload drift, invalid TTL/value/source,
+and cancellation before commit fail closed. StateGateway reconciles expiry
+before canonical product reads so an application left open beyond the TTL
+does not keep presenting an expired observation as active.
+
+Observation outbox facts intentionally have zero projection targets in this
+slice. `projectionStatus=applied` means that no derived projection was
+requested; it does not mean that YAML or HS was changed. Legacy state-history
+and YAML parity/cutover remain pending.
+
+Mechanical evidence on the implementation commit:
+
+- StateStore suite — 32/32 passed;
+- Core Main Chat suite — 144/144 passed;
+- exact typed observation buffered/stream journey — passed;
+- Main Chat runtime module — 30/30 passed;
+- Main Chat command surface — 96/96 passed;
+- single-system authority guards — 32/32 passed;
+- Tauri tests compile, frontend typecheck passes, focused bridge tests are
+  44/44, and format/diff/JSON checks pass;
+- Core Clippy completes with 35 existing warnings outside StateStore; no
+  warning-free repository claim is made.
+
+The old `record_state` shipped handler, command, frontend bridge, MemoryGateway
+adapter, mock, and test route are absent. Native product execution,
+legacy-data parity/import/rollback rehearsal, independent review, healthy
+signing/Keychain, and final roadshow acceptance remain uncredited.
 
 ## Default-feature bundle and native shell trial
 
