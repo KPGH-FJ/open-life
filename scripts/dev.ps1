@@ -150,7 +150,7 @@ if ($env:OPENLIFE_DEV_AUTOSTART_A2A -eq "1") {
         exit 1
     }
     Write-Host "[INFO] 构建显式启用的开发 A2A sidecar..." -ForegroundColor Blue
-    cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server --features dev-extensions
+    cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
 }
 
 Push-Location $RepoRoot

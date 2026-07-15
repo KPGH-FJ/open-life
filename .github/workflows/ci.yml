@@ -62,7 +62,7 @@ jobs:
         run: cargo test --all --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
-        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+        run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   frontend-check:
     name: Frontend Check
@@ -156,7 +156,7 @@ jobs:
         run: cargo test --all --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
-        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+        run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   rust-check-windows:
     name: Rust Check (Windows)
@@ -183,7 +183,7 @@ jobs:
         run: cargo test -p openlife-tauri --bins --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
-        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+        run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   # ============================================
   # Rust 覆盖率（可选，仅在 dev → main 时运行）

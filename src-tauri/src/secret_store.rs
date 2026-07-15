@@ -4,6 +4,8 @@ use openlife_core::config::AppConfig;
 use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 const SERVICE: &str = "com.openlife.desktop";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
@@ -122,6 +124,83 @@ pub(crate) trait SecretStore {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct KeyringSecretStore;
+
+const STARTUP_SECRET_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Startup runs before Tauri owns an event loop or can present a useful
+/// credential prompt. A blocked OS credential call must therefore degrade the
+/// affected capabilities instead of preventing the product window from ever
+/// appearing. Settings keeps using `KeyringSecretStore` directly so explicit
+/// user-initiated credential changes may still use the platform UI.
+#[derive(Debug, Default)]
+pub(crate) struct StartupKeyringSecretStore {
+    timed_out: AtomicBool,
+}
+
+impl StartupKeyringSecretStore {
+    fn run<T, F>(&self, operation_name: &'static str, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        self.run_with_timeout(operation_name, STARTUP_SECRET_OPERATION_TIMEOUT, operation)
+    }
+
+    fn run_with_timeout<T, F>(
+        &self,
+        operation_name: &'static str,
+        timeout: Duration,
+        operation: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        if self.timed_out.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "OS credential startup access is unavailable after a prior bounded timeout"
+            );
+        }
+
+        // Keep the platform interaction guard on the caller. Even if the OS
+        // worker outlives the bounded deadline, returning from this function
+        // restores normal Keychain UI for later user-initiated Settings work.
+        let _interaction_guard = disable_startup_keyring_interaction()?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name(format!("openlife-startup-secret-{operation_name}"))
+            .spawn(move || {
+                let result = operation();
+                let _ = sender.send(result);
+            })
+            .context("spawn bounded OS credential startup operation")?;
+
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.timed_out.store(true, Ordering::Release);
+                anyhow::bail!(
+                    "OS credential {operation_name} exceeded the bounded startup deadline"
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("OS credential {operation_name} worker exited without a result")
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn disable_startup_keyring_interaction(
+) -> Result<security_framework::os::macos::keychain::KeychainUserInteractionLock> {
+    security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
+        .context("disable interactive macOS Keychain UI during startup")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_startup_keyring_interaction() -> Result<()> {
+    Ok(())
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
@@ -294,6 +373,24 @@ impl SecretStore for KeyringSecretStore {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error).context("delete secret from OS credential store"),
         }
+    }
+}
+
+impl SecretStore for StartupKeyringSecretStore {
+    fn get(&self, secret_ref: &str) -> Result<Option<String>> {
+        let secret_ref = secret_ref.to_string();
+        self.run("read", move || KeyringSecretStore.get(&secret_ref))
+    }
+
+    fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
+        let secret_ref = secret_ref.to_string();
+        let value = value.to_string();
+        self.run("write", move || KeyringSecretStore.set(&secret_ref, &value))
+    }
+
+    fn delete(&self, secret_ref: &str) -> Result<()> {
+        let secret_ref = secret_ref.to_string();
+        self.run("delete", move || KeyringSecretStore.delete(&secret_ref))
     }
 }
 
@@ -837,6 +934,25 @@ mod tests {
         assert_eq!(hydrated.materials.len(), 2);
         assert_eq!(hydrated.configs.last().unwrap().mode, KeyMode::Keychain);
         assert!(hydrated.configs[1].epoch > hydrated.configs[0].epoch);
+    }
+
+    #[test]
+    fn startup_secret_timeout_opens_a_circuit_for_later_operations() {
+        let store = StartupKeyringSecretStore::default();
+        let first = store
+            .run_with_timeout("test-read", Duration::from_millis(20), || {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(first.to_string().contains("bounded startup deadline"));
+
+        let started = std::time::Instant::now();
+        let second = store
+            .run_with_timeout("test-write", Duration::from_secs(1), || Ok(()))
+            .unwrap_err();
+        assert!(second.to_string().contains("prior bounded timeout"));
+        assert!(started.elapsed() < Duration::from_millis(50));
     }
 
     #[test]

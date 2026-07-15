@@ -52,6 +52,7 @@ openlife-core = { path = "../openlife-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+security-framework = "3.7.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
@@ -63,8 +64,3 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 tauri = { version = "2.5", features = ["test"] }
 tempfile = "3.14"
 openlife-core = { path = "../openlife-core", features = ["test-utils"] }
-
-[[bin]]
-name = "openlife-a2a-server"
-path = "src/bin/a2a_server.rs"
-required-features = ["dev-extensions"]

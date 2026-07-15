@@ -3345,6 +3345,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlife-a2a-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "openlife-core",
+ "openlife-tauri",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "openlife-core"
 version = "0.1.0"
 dependencies = [
@@ -3405,6 +3418,7 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "serde_yaml",

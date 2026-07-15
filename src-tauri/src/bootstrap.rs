@@ -6,8 +6,8 @@ use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigest
 use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::{
     hydrate_config_secrets, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, hydrate_or_create_mcp_audit_keys, KeyringSecretStore,
-    SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
+    hydrate_or_create_integrity_key, hydrate_or_create_mcp_audit_keys, SecretStore,
+    StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
     MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::AppState;
@@ -1585,7 +1585,7 @@ fn stage_legacy_scheduled_task_review_proposals(
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
-    bootstrap_with_secret_store(data_dir, &KeyringSecretStore)
+    bootstrap_with_secret_store(data_dir, &StartupKeyringSecretStore::default())
 }
 
 #[cfg(test)]

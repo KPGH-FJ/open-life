@@ -434,7 +434,7 @@ start_dev() {
             exit 1
         fi
         log_info "构建显式启用的开发 A2A sidecar..."
-        cargo build --bin openlife-a2a-server --features dev-extensions
+        cargo build -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
     fi
 
     # 检查使用哪种方式启动 Tauri
@@ -476,7 +476,7 @@ start_a2a() {
     log_info "  POST http://127.0.0.1:$A2A_PORT/tasks/send (Bearer paired)"
 
     cd "$TAURI_DIR"
-    cargo run --bin openlife-a2a-server --features dev-extensions
+    cargo run -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
 }
 
 # =============================================================================
