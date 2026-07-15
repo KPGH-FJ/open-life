@@ -13,9 +13,14 @@
   mechanical run and a forged-Web-citation counterfactual.
 - CC-02 has passed a local Resource-to-atomic-transient-task mechanical run
   and untrusted-attachment counterfactual.
-- RC-04, RC-08, CC-01, and CC-02 have **not** received native desktop, external
-  live-provider, repeated product-trial, or independent-review credit.
-- RC-08 full process-restart reconciliation and CC-03 remain pending.
+- CC-03 has passed a canonical explicit-Memory commit, rollback, and
+  same-identity persistent-store reopen/recovery mechanical run, plus quoted-
+  source and pre-existing-owner counterfactuals.
+- RC-04, RC-08, CC-01, CC-02, and CC-03 have **not** received native desktop,
+  external live-provider, repeated product-trial, or independent-review
+  credit.
+- RC-08 and CC-03 full application-process restart/native UI evidence remains
+  pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-04 exact scenario
@@ -292,10 +297,104 @@ Mechanical evidence after the repair:
 - `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
   passed.
 
+## CC-03 exact scenario
+
+Frozen prompt:
+
+> 请记住：我的路演回答偏好是先给一句结论，再给三点证据。随后撤销这条记忆并重启检查。
+
+Policy treats this as one explicit low/medium-risk reversible Memory fact plus
+one narrowly bound same-instruction rollback. The source must be the current
+canonical user message. The rollback grant is non-cloneable, non-serializable,
+bound to the Policy contract, candidate, canonical owner, and exact commit
+receipt, and consumed at MemoryGateway.
+
+Observed positive facts:
+
+- selected strategy remains `reversible_memory_commit` and Policy grants only
+  the explicit Memory commit and rollback capabilities;
+- the canonical lifecycle store records one `owner_created` admission followed
+  by one rollback tombstone and an applied outbox projection;
+- the final record is `rolled_back`, excluded from runtime retrieval, and the
+  active Memory count returns to zero;
+- execution order contains one completed `memory.explicit_write` action and
+  one completed `memory.explicit_rollback` action;
+- aggregate truth distinguishes the historical write/rollback from current
+  active truth: `canonicalMemoryActive=false` and
+  `acceptedDurableTruthWritten=false`;
+- commit and rollback receipts contain references, digests, status, and
+  projection facts but do not copy the Memory body;
+- the turn creates zero Proposal, Tool, Provider, file, or canonical
+  LifeModel-HS effects.
+
+The recovery run reconstructs process-local runtime state around the same
+persistent MemoryLifecycleStore and retries the same canonical session,
+message, and UUIDv4 operation identity. It observes `terminal_historical`,
+recovers the original rollback receipt with `replayed=true`, executes no new
+direct Memory write or rollback, leaves zero active Memory, and retains exactly
+one rollback event. This is persistent-store reopen and response-loss recovery;
+it is not evidence that the desktop application process was actually stopped
+and relaunched.
+
+Counterfactual evidence:
+
+- the same text quoted from File, Web, MCP/tool, or Assistant content grants
+  neither commit nor rollback authority and yields zero Memory candidate;
+- a separate explicit instruction cannot use this lane to roll back an active
+  owner created by an earlier instruction; `alias_linked` is preserved and the
+  owner remains active;
+- terminal-history recovery is reported as recovered prior fact, not as a new
+  write or rollback;
+- the cancellation commit permit is never held across an external `await`.
+
+Root failures found and removed:
+
+1. Policy had no typed representation for the compound rollback request. The
+   new capability is deterministic and is issued only when the same current
+   user message explicitly requests commit then rollback.
+2. The frozen preference was typed as a generic semantic fact. Explicit
+   preference claims now keep the reversible Memory destination while carrying
+   `Preference` fact identity; this does not promote them to canonical HS.
+3. Main Chat previously stopped after commit. The existing MemoryGateway and
+   MemoryLifecycleStore now perform the exact rollback and project a minimal
+   receipt; no second Memory store or runtime was added.
+4. A naive implementation held the deliberately non-`Send` canonical commit
+   permit across async projection work. The final implementation fences only
+   the synchronous SQLite mutation and reconciles projection after the permit
+   is settled.
+5. Retrying after response loss needed to distinguish historical recovery from
+   new execution. Product wording and aggregate booleans now preserve that
+   distinction.
+
+CC-03 implementation commit:
+`b080aaa051270318f86254987818d49809d9c568`.
+
+Mechanical evidence after the repair:
+
+- exact CC-03 positive/reopen and pre-existing-owner tests — 2 passed;
+- CC-03 Policy positive and four-source quoted counterfactual matrix — 2
+  passed;
+- Memory candidate tests — 18 passed;
+- Memory lifecycle transaction/concurrency/migration tests — 37 passed;
+- MemoryGateway tests — 27 passed;
+- Main Chat kernel-filtered regression — 99 passed;
+- full Main Chat command surface — 85 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
+  passed.
+
+The broad legacy/core `main_chat_agent_v1` filter remains 132 passed / 8
+pre-existing RED, matching the already-recorded H2 baseline debt. Those stale
+MCP/network/eval/minimization assertions are not counted as CC-03 evidence and
+are not hidden by the scoped green gates.
+
 ## Remaining cumulative work
 
 - RC-08 full application-process restart/reopen and native UI projection.
-- CC-03 explicit reversible Memory + undo + restart.
+- CC-03 full application-process restart/reopen and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
   guards, widened frontend/backend regression, reliability loops, live product
   rounds, and independent rereview.
