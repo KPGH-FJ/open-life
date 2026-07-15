@@ -9,9 +9,11 @@
 - Cumulative Integration is **in progress**.
 - RC-04 has passed a single-command mechanical integration run.
 - RC-08 has passed a local cancellation/new-operation-retry mechanical run.
-- RC-04 and RC-08 have **not** received native desktop, external live-provider,
-  repeated product-trial, or independent-review credit.
-- RC-08 full process-restart reconciliation and CC-01 through CC-03 remain
+- CC-01 has passed a local Resource + Web + reviewed Markdown artifact
+  mechanical run and a forged-Web-citation counterfactual.
+- RC-04, RC-08, and CC-01 have **not** received native desktop, external
+  live-provider, repeated product-trial, or independent-review credit.
+- RC-08 full process-restart reconciliation and CC-02 through CC-03 remain
   pending.
 - The roadshow candidate remains **NO-GO**.
 
@@ -129,10 +131,85 @@ Additional mechanical evidence:
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
   warnings only.
 
+## CC-01 exact scenario
+
+Frozen prompt:
+
+> 读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。
+
+The exact test binds the frozen `roadshow_combined_report.pdf` bytes and two
+page-provenance chunks to the same UUIDv4 operation. It executes one governed
+`web.search`, sends one bounded Resource + Web synthesis request through the
+local HTTP Provider adapter, and requires the Provider's Markdown field to use
+both request-scoped citation classes. The backend appends Resource and Web
+source sections inside the typed artifact envelope before ReviewWorkflow
+staging.
+
+Observed positive facts:
+
+- Policy remains `proposal_only_write` with exactly `file_write_proposal`,
+  `provider_generation`, and `web_search` capabilities;
+- one `web.search` ActionQueue item reaches `Completed` with a verified
+  ToolGateway receipt;
+- one Provider request contains the bounded PDF evidence and bounded Web
+  observation with canonical `cite_...` and `webref_...` identities;
+- exactly one external-write artifact proposal is pending;
+- the target file is absent before acceptance;
+- acceptance materializes one Markdown file whose observed digest equals the
+  committed digest and whose two source footers are backend-owned;
+- the raw Web body marker is absent from product IPC and the tool receipt;
+- no Memory or LifeModel proposal is created.
+
+The counterfactual returns a valid issued Resource citation and a forged Web
+citation. The Web read remains visible as a completed fact, but synthesis ends
+with `web_citation_validation_failed`, creates zero proposals, and writes zero
+files.
+
+Root failures found and removed:
+
+1. The file-review Policy route dropped the already-classified Web capability.
+   It now reuses the existing typed read-capability authority only when the
+   current authenticated request explicitly requires external evidence.
+2. Runtime read planning accepted only a pure `ReadOnly` action effect. The
+   same read executor now admits a narrow compound lane only when Policy also
+   authorizes `FileWriteProposal` and `ProviderGeneration`.
+3. Resource citation rendering appended prose after Provider JSON. Artifact
+   drafts now validate and render canonical Resource provenance inside the
+   Markdown field; the typed artifact parser still rejects unknown fields,
+   paths, empty content, and invalid CSV.
+4. The write-result assembler hard-coded an empty tool-call list. It now
+   reuses the canonical tool graph and existing tool-evidence projection before
+   staging the proposal.
+5. Durable Provider lifecycle validation omitted the already-defined
+   `main_chat_artifact_draft` purpose. The closed list now includes that exact
+   enum value; it was not widened to arbitrary strings.
+
+This is canonical local storage, a fixture-backed Web adapter, and a local HTTP
+Provider boundary. It is not native desktop, external live Web, or external
+cloud-provider credit. The PDF parser itself was proven in V1; CC-01 consumes
+the frozen PDF bytes and canonical page-provenance representation rather than
+claiming a second parser trial.
+
+CC-01 implementation commit:
+`32923b1b18cd509a4acfc70739524ba2543cd90a`.
+
+Mechanical evidence after the repair:
+
+- exact CC-01 positive and forged-citation tests — 2 passed;
+- `generated_artifact_policy_tests` — 3 passed;
+- Resource and Web citation modules — 8 passed;
+- full Main Chat kernel — 71 passed;
+- full Main Chat command surface — 77 passed;
+- single-system authority guards — 32 passed;
+- Main Chat runtime module — 30 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
+  passed.
+
 ## Remaining cumulative work
 
 - RC-08 full application-process restart/reopen and native UI projection.
-- CC-01 Resource + Web + reviewed Markdown artifact.
 - CC-02 Resource + transient tasks + conditional reviewed file write.
 - CC-03 explicit reversible Memory + undo + restart.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
