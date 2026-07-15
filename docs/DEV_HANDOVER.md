@@ -37,12 +37,12 @@
 │       ├── mcp.rs              # MCP 客户端
 │       ├── feedback.rs         # 反馈与事件存储
 │       └── ...
-└── src-tauri/                  # Tauri 桌面壳
-    ├── src/
-    │   ├── lib.rs              # ⭐ Command 注册地（30+ 命令）
-    │   ├── main.rs             # 桌面应用入口
-    │   └── bin/a2a_server.rs   # 独立 A2A HTTP 服务器
-    └── tauri.conf.json
+├── src-tauri/                  # Tauri 桌面壳
+│   ├── src/
+│   │   ├── lib.rs              # ⭐ Command 注册地（30+ 命令）
+│   │   └── main.rs             # 桌面应用入口
+│   └── tauri.conf.json
+└── tools/openlife-a2a-server/  # 仅 dev-extensions 的独立认证 A2A 开发工具
 ```
 
 ### 关键文件对照表

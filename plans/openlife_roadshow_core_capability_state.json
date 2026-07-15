@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "cumulative_integration_in_progress_rc01_through_rc08_cc01_through_cc03_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
+  "status": "reliability_and_trial_in_progress_rc01_through_rc08_cc01_through_cc03_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,7 +23,7 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "CUMULATIVE_INTEGRATION",
+  "current_phase": "RELIABILITY_AND_TRIAL",
   "schedule": {
     "p50_hours": "40-48 after H0 infrastructure blockers",
     "p80_hours": "56-72 after H0 infrastructure blockers",
@@ -116,16 +116,17 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_primary_combined_local_rc04_external_live_and_release_quarantine_verified_remaining_product_reliability_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_primary_combined_local_rc04_external_live_and_release_quarantine_evidence_only",
-      "commit": "a53688fe8da834bfd8bab528cdf2a1049caf45f9",
+      "status": "in_progress_primary_combined_local_rc04_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc04_reliability_release_quarantine_and_packaged_shell_evidence_only",
+      "commit": "ea8a7b246e845f05fbe663cc96e5c5599715d2ae",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
       "id": "RELIABILITY_AND_TRIAL",
-      "status": "not_started",
-      "completion_claim": "none",
-      "commit": null
+      "status": "in_progress_reliability_loops_and_default_feature_packaged_shell_start_restart_verified_native_safe_mode_observed_live_capability_journeys_signed_release_and_independent_review_pending",
+      "completion_claim": "no_phase_completion_claim_reliability_and_packaged_shell_only",
+      "commit": "ea8a7b246e845f05fbe663cc96e5c5599715d2ae",
+      "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     }
   ],
   "h0_decision": {
@@ -301,7 +302,7 @@
     "rc05_event_truth": "passed_each_operation_one_minimal_effect_committed_before_one_final_delivery_transaction_event_pending_not_rewritten",
     "rc05_projection_truth": "passed_current_statestore_receipt_applied_immutable_event_pending_backend_task_projection_empty_after_tombstone_restart",
     "rc05_expiry": "passed_separate_statestore_restart_and_projection_failure_suite_not_exact_three_process_journey_credit",
-    "rc05_full_application_restart": "partial_three_backend_os_processes_passed_packaged_tauri_bootstrap_keychain_window_and_ui_pending",
+    "rc05_full_application_restart": "partial_three_backend_os_processes_and_default_feature_packaged_shell_bootstrap_window_relaunch_passed_healthy_keychain_and_native_task_journey_pending",
     "rc05_native_product_ui_trial": "pending",
     "rc05_independent_review": "pending",
     "rc06_exact_prompt": "passed_one_local_http_provider_request_one_canonical_path_bound_pending_proposal_zero_preaccept_file_confirmed_digest_exact_summary_and_completed_task",
@@ -322,7 +323,7 @@
     "rc08_process_local_reset": "passed_durable_first_attempt_truth_after_main_chat_runtime_state_reset",
     "rc08_backend_os_process_restart": "passed_three_independent_backend_test_processes_seed_cancel_verify_retry_audit_one_file_backed_store_set_no_late_durable_commit",
     "rc08_cancelled_action_projection": "passed_cancelled_actionqueue_projection_hidden_after_reopen_immutable_tool_completed_turnevent_remains_historical_authority",
-    "rc08_full_process_restart": "partial_three_backend_os_processes_passed_packaged_tauri_bootstrap_window_relaunch_and_native_ui_pending",
+    "rc08_full_process_restart": "partial_three_backend_os_processes_and_default_feature_packaged_shell_bootstrap_window_relaunch_passed_native_cancel_retry_projection_journey_pending",
     "rc08_native_product_ui_trial": "pending",
     "rc08_external_live_provider_and_web": "pending",
     "rc08_independent_review": "pending",
@@ -349,7 +350,7 @@
     "cc03_response_loss_recovery": "passed_same_session_message_and_operation_identity_store_reopen_terminal_historical_receipt_replay_zero_duplicate_write_or_rollback",
     "cc03_process_store_reopen": "passed_process_local_runtime_reconstruction_around_persistent_memory_store_not_full_application_process_restart_credit",
     "cc03_backend_os_process_restart": "passed_two_independent_test_processes_one_file_backed_appstate_same_operation_zero_conversation_action_event_or_memory_growth",
-    "cc03_full_application_restart": "partial_backend_os_process_passed_packaged_tauri_bootstrap_keychain_and_window_relaunch_pending",
+    "cc03_full_application_restart": "partial_backend_os_process_and_default_feature_packaged_shell_bootstrap_window_relaunch_passed_healthy_keychain_and_native_memory_journey_pending",
     "cc03_native_product_ui_trial": "pending",
     "cc03_independent_review": "pending",
     "cc03_broad_core_main_chat_agent_v1": "failed_132_of_140_passed_same_8_preexisting_red",
@@ -360,6 +361,15 @@
     "cumulative_external_provider_regression": "passed_direct_answer_and_33_provider_bound_chunk_stream_final_last",
     "cumulative_release_quarantine": "passed_default_release_extension_registry_mcp_a2a_plugin_ipc_and_scheduler_vector_background_routes_quarantined_backend_build_truth_drives_frontend_core_web_file_task_memory_retained",
     "cumulative_release_quarantine_dev_build": "passed_dev_extensions_tauri_test_compile",
+    "cumulative_reliability_deterministic_loops": "passed_50_rounds_900_of_900_assertions",
+    "cumulative_reliability_race_loops": "passed_20_rounds_120_of_120_assertions",
+    "cumulative_reliability_mixed_capability_loops": "passed_20_rounds_140_of_140_assertions",
+    "cumulative_reliability_fault_injection": "passed_14_of_14_assertions",
+    "cumulative_packaged_default_bundle": "passed_default_feature_tauri_debug_bundle_contains_only_openlife_tauri_product_binary_and_no_mcp_or_a2a_artifact",
+    "cumulative_packaged_startup": "partial_startup_keyring_operations_bounded_noninteractive_and_fail_closed_window_reaches_appkit_event_loop_and_same_commit_shell_restarts_safe_mode_due_keychain_unavailable",
+    "cumulative_native_release_surface": "partial_release_profile_navigation_and_settings_hide_mcp_a2a_and_plugin_surfaces_core_navigation_visible_no_live_journey_credit",
+    "cumulative_packaged_release_boundary": "pending_bundle_is_adhoc_debug_not_signed_notarized_release_and_healthy_keychain_provider_native_picker_and_full_journey_evidence_remain_unverified",
+    "cumulative_a2a_package_boundary": "passed_a2a_server_removed_from_product_package_and_retained_as_explicit_authenticated_dev_only_workspace_tool",
     "cumulative_historical_phase0_debt": "failed_preexisting_br4_d044_fingerprint_and_removed_mcp_test_reference_not_counted_as_quarantine_credit",
     "cumulative_completion": "forbidden",
     "roadshow_release": "no_go"
@@ -372,5 +382,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T14:52:36+08:00"
+  "last_updated_at": "2026-07-15T15:59:24+08:00"
 }

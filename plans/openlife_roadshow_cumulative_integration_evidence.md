@@ -780,19 +780,88 @@ traceability reference to the removed test name
 failure is counted as quarantine credit or changed to obtain a green result.
 They remain explicit historical-governance debt outside this roadshow slice.
 
+## Reliability stress and fault-injection gates
+
+The current cumulative implementation completed the frozen repeated-run gates
+without weakening assertions or changing expected outcomes:
+
+- deterministic journey loops: 50 rounds, 900/900 assertions passed;
+- race and replay loops: 20 rounds, 120/120 assertions passed;
+- mixed-capability loops: 20 rounds, 140/140 assertions passed;
+- fault-injection matrix: 14/14 assertions passed;
+- current default Main Chat command surface: 89/89 passed;
+- Main Chat runtime module: 30/30 passed;
+- single-system authority guards: 32/32 passed;
+- focused frontend release-route/settings/privacy behavior: 66/66 passed,
+  with frontend typecheck and format checks green;
+- development-extension Tauri test compilation and the authenticated A2A
+  parent/auth/bounds suite: passed.
+
+These are repeatability and mechanical regression facts. They do not replace a
+native product journey, an external live Provider run, or an independent
+read-only review. The two previously recorded Phase0 historical-governance
+failures remain red and were not renamed or waived to make this section green.
+
+## Default-feature bundle and native shell trial
+
+Commit `ea8a7b246e845f05fbe663cc96e5c5599715d2ae` removed two real blockers found
+by building and launching the product artifact rather than inferring readiness
+from unit tests.
+
+First, the Tauri bundler enumerated the feature-gated A2A binary from the
+product Cargo package and failed because the default build correctly had not
+produced that binary. The A2A server now lives in the explicit
+`tools/openlife-a2a-server` workspace package, remains authenticated and
+`dev-extensions`-gated, and is no longer a product-package binary target. The
+default-feature bundle now succeeds and its `Contents/MacOS` directory contains
+only `openlife-tauri`; no MCP or A2A executable/resource is present.
+
+Second, the first packaged launch blocked before creating a window. A native
+process sample traced the main thread to synchronous macOS Keychain access
+during bootstrap. Startup-only secret operations now run through a bounded,
+noninteractive adapter with a 1.5 second hard timeout and an open circuit after
+the first timeout. The Keychain interaction guard remains owned by the caller,
+so it is restored even if the worker outlives the timeout. Settings-time secret
+access remains interactive; no plaintext, file, or ephemeral-key fallback was
+added.
+
+Observed native facts on an isolated release-profile data directory:
+
+- the packaged process reaches the AppKit event loop and displays a window;
+- the same commit artifact quits and relaunches successfully;
+- the build identity shown by the product is
+  `OpenLife release · debug_bundle · ea8a7b2`;
+- release navigation exposes Today, Companion, Mailbox, Life Model, Runs, and
+  Settings; the Advanced area exposes Metrics, Calibration, and Versions;
+- MCP, A2A, and Plugin administration surfaces are absent;
+- when the ad-hoc debug bundle cannot access the expected Keychain secret, the
+  product enters explicit Safe Mode, disables canonical writes/Provider/tool
+  execution, and keeps unavailable truth unknown instead of silently creating
+  replacement keys.
+
+Evidence boundary: this is a default-feature **debug, ad-hoc bundle**, not a
+signed or notarized production release. Safe Mode proves bounded fail-closed
+startup and shell relaunch, not healthy production Keychain integration. It
+does not earn native RC-01 through RC-08 or CC-01 through CC-03 journey credit,
+external live Provider credit, native picker credit, or full packaged restart
+credit for their domain effects. The Tauri bundle-identifier warning for
+`ai.openlife.app` is recorded as release configuration debt and is not changed
+without an identity/keychain/data migration decision.
+
 ## Remaining cumulative work
 
 - RC-01 external live Provider and native product UI trial.
-- RC-02/RC-03 native picker, external live Provider, packaged restart, and
-  repeated product trial.
-- RC-05 packaged Tauri relaunch, native task UI trial, and repeated product
-  trial.
+- RC-02/RC-03 native picker, external live Provider, healthy packaged restart,
+  and repeated product trial.
+- RC-05 native task journey and repeated product trial on a healthy packaged
+  application; generic shell bootstrap/relaunch is now evidenced separately.
 - RC-06/RC-07 external live Provider, packaged/native Review Center and file
   trial, plus RC-07 separate-process end-to-end bundle evidence.
-- RC-08 packaged Tauri bootstrap/window relaunch and native UI projection.
-- CC-03 packaged Tauri desktop restart and native UI projection.
-- widened frontend behavioral regression, reliability loops, packaged/native
-  live product rounds, and independent rereview. The combined deterministic
-  gate already ran all primary/combined test owners (10 RC-filtered + 1 RC-07 +
-  7 CC tests), the current 89-test default command surface, runtime/authority
-  guards, frontend typecheck/format, and all eight frozen fixture digests.
+- RC-08 native cancel/retry projection and external live Provider/Web journey;
+  generic shell bootstrap/relaunch is now evidenced separately.
+- CC-03 native Memory commit/rollback projection on a healthy packaged
+  application; generic shell bootstrap/relaunch is now evidenced separately.
+- signed/notarized release identity, healthy production Keychain access,
+  packaged/native live product rounds, and independent rereview. Widened
+  frontend regression and reliability loops are complete, but do not substitute
+  for those remaining evidence dimensions.
