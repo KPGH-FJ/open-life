@@ -11,10 +11,11 @@
 - RC-08 has passed a local cancellation/new-operation-retry mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
   mechanical run and a forged-Web-citation counterfactual.
-- RC-04, RC-08, and CC-01 have **not** received native desktop, external
+- CC-02 has passed a local Resource-to-atomic-transient-task mechanical run
+  and untrusted-attachment counterfactual.
+- RC-04, RC-08, CC-01, and CC-02 have **not** received native desktop, external
   live-provider, repeated product-trial, or independent-review credit.
-- RC-08 full process-restart reconciliation and CC-02 through CC-03 remain
-  pending.
+- RC-08 full process-restart reconciliation and CC-03 remain pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-04 exact scenario
@@ -207,10 +208,93 @@ Mechanical evidence after the repair:
 - `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
   passed.
 
+## CC-02 exact scenario
+
+Frozen prompt:
+
+> 从附件提取今天的准备事项，创建短期任务；如果要写文件，先等待我确认，然后继续。
+
+The exact test binds the frozen `roadshow_checklist.docx` bytes and four
+canonical paragraph-provenance chunks to the same UUIDv4 Main Chat operation.
+The Resource digest is checked against the frozen scenario digest before the
+turn runs. Policy authorizes one bounded `TransientStateCommit`; attachment
+text supplies task data but never supplies write authority.
+
+Observed positive facts:
+
+- selected strategy is `transient_state_command` with reason
+  `explicit_resource_daily_task_batch`;
+- Policy grants `transient_state_commit` but grants neither
+  `file_write_proposal` nor `provider_generation`;
+- one StateGateway admission covers one SQLite transaction containing three
+  ordered task assets, three versions, three outbox rows, and one batch
+  operation receipt;
+- the canonical task order matches the attachment paragraph order;
+- each minimal asset receipt carries only identifiers, digests, projection
+  state, and Resource provenance; task bodies remain only in StateStore;
+- three immutable `effect_committed` facts contain no task bodies and keep
+  transaction-time projection/replay fields byte-stable for recovery;
+- LifeModel compatibility projection reaches `applied` without becoming a
+  second canonical owner;
+- same-operation replay and concurrent same-operation execution produce one
+  canonical batch and three tasks, not duplicate writes;
+- the reply reports three created tasks and explicitly reports that no file
+  approval was created.
+
+The prompt's file clause is conditional. The task can be completed without a
+file, so treating it as file-write authorization would be an overreach. This
+run therefore creates zero file proposals, zero files, zero tool calls, and
+zero Provider calls. The optional reviewed-file branch remains covered by the
+separate RC-06/CC-01 artifact chain rather than being fabricated inside CC-02.
+
+The counterfactual adds both English and Chinese prompt-injection paragraphs
+to the untrusted attachment. Neither paragraph becomes a task, tool call,
+proposal, or file effect. More importantly, even unrecognized attachment text
+cannot widen the sealed TransientState-only capability grant.
+
+Root failures found and removed:
+
+1. The frozen prompt initially routed to `direct_answer`. Deterministic intent
+   classification now recognizes only the explicit attachment + extraction +
+   today + task conjunction and seals a non-serializable transient-state
+   grant; the model cannot authorize the batch.
+2. Sequential single-task writes could partially commit. StateStore schema v3
+   adds one bounded batch operation and item receipts so all task assets,
+   versions, and outbox rows commit or roll back together.
+3. Equal task timestamps caused UUID ordering to scramble checklist order.
+   Canonical task reads now join the batch ordinal instead of changing
+   timestamps or adding a second task store.
+4. Reconstructing an immutable effect event with current projection/replay
+   state could conflict after recovery. The event now records the stable
+   transaction-time fact; mutable projection and replay truth stays in the
+   outbox-backed receipt and execution metadata.
+
+This is canonical local storage and command-surface evidence. CC-02 uses the
+frozen DOCX bytes plus canonical paragraph representation; it does not claim a
+second native-picker/parser trial, external Provider credit, native desktop
+credit, or application-process restart credit.
+
+CC-02 implementation commit:
+`3d2fff23d0df8ce185d2944918828cb83276ec12`.
+
+Mechanical evidence after the repair:
+
+- exact CC-02 positive and untrusted-attachment tests — 2 passed;
+- CC-02 Policy test — 1 passed;
+- StateStore tests, including v1/v2 migration, atomic rollback, concurrent
+  same-operation replay, ordering, and minimal receipts — 19 passed;
+- full Main Chat kernel — 71 passed;
+- full Main Chat command surface — 79 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
+  passed.
+
 ## Remaining cumulative work
 
 - RC-08 full application-process restart/reopen and native UI projection.
-- CC-02 Resource + transient tasks + conditional reviewed file write.
 - CC-03 explicit reversible Memory + undo + restart.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
   guards, widened frontend/backend regression, reliability loops, live product

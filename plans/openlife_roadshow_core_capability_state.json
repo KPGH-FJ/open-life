@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "cumulative_integration_in_progress_rc04_rc08_cc01_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
+  "status": "cumulative_integration_in_progress_rc04_rc08_cc01_cc02_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc04_rc08_and_cc01_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_rc04_rc08_cc01_local_mechanical_evidence_only",
-      "commit": "32923b1b18cd509a4acfc70739524ba2543cd90a",
+      "status": "in_progress_rc04_rc08_cc01_and_cc02_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc04_rc08_cc01_cc02_local_mechanical_evidence_only",
+      "commit": "3d2fff23d0df8ce185d2944918828cb83276ec12",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -284,7 +284,15 @@
     "cc01_native_product_trial": "pending",
     "cc01_external_live_provider_and_web": "pending",
     "cc01_independent_review": "pending",
-    "cc02": "pending",
+    "cc02_exact_prompt": "passed_one_resource_bound_operation_one_atomic_three_task_commit_ordered_projection_and_zero_file_proposal_tool_or_provider_effect",
+    "cc02_policy_authority": "passed_current_user_explicit_resource_task_batch_grant_attachment_text_is_data_not_authority",
+    "cc02_atomicity_and_replay": "passed_one_transaction_zero_partial_rows_concurrent_same_operation_one_winner_and_same_operation_no_duplicate_tasks",
+    "cc02_receipt_and_event_minimization": "passed_task_bodies_only_in_statestore_resource_provenance_by_digest_and_immutable_transaction_time_effect_facts",
+    "cc02_untrusted_attachment": "passed_english_and_chinese_instruction_paragraphs_zero_authority_escalation_zero_file_tool_or_proposal_effect",
+    "cc02_conditional_file_branch": "not_exercised_because_no_file_needed_and_conditional_clause_is_not_write_authorization_rc06_cc01_cover_reviewed_artifact_chain",
+    "cc02_native_picker_parser_product_trial": "pending_v1_parser_mechanics_are_separate_credit",
+    "cc02_process_restart": "pending",
+    "cc02_independent_review": "pending",
     "cc03": "pending",
     "cumulative_completion": "forbidden",
     "roadshow_release": "no_go"
@@ -297,5 +305,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T08:48:54+08:00"
+  "last_updated_at": "2026-07-15T10:43:27+08:00"
 }
