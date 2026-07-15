@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "reliability_and_trial_in_progress_rc01_through_rc08_cc01_through_cc03_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
+  "status": "reliability_and_trial_in_progress_rc01_rc04_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -116,16 +116,16 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_primary_combined_local_rc04_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc04_reliability_release_quarantine_and_packaged_shell_evidence_only",
-      "commit": "ea8a7b246e845f05fbe663cc96e5c5599715d2ae",
+      "status": "in_progress_primary_combined_local_rc01_rc04_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc01_rc04_reliability_release_quarantine_and_packaged_shell_evidence_only",
+      "commit": "157f466e9f56fe52a8408c423410abfdf823cbea",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
       "id": "RELIABILITY_AND_TRIAL",
-      "status": "in_progress_reliability_loops_and_default_feature_packaged_shell_start_restart_verified_native_safe_mode_observed_live_capability_journeys_signed_release_and_independent_review_pending",
-      "completion_claim": "no_phase_completion_claim_reliability_and_packaged_shell_only",
-      "commit": "ea8a7b246e845f05fbe663cc96e5c5599715d2ae",
+      "status": "in_progress_reliability_loops_rc01_rc04_external_live_and_default_feature_packaged_shell_start_restart_verified_native_capability_journeys_signed_release_and_independent_review_pending",
+      "completion_claim": "no_phase_completion_claim_reliability_rc01_rc04_external_live_and_packaged_shell_only",
+      "commit": "157f466e9f56fe52a8408c423410abfdf823cbea",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     }
   ],
@@ -269,7 +269,7 @@
     "rc01_conversation_reload": "passed_same_operation_terminal_recovery_without_second_provider_dispatch_in_same_application_process",
     "rc01_full_application_restart": "not_required_by_frozen_lifecycle_and_not_claimed",
     "rc01_seed_router_contract": "failed_9_of_10_existing_legacy_eval_drift_not_counted_as_rc01_evidence",
-    "rc01_external_live_provider": "pending_local_http_adapter_is_not_external_live_credit",
+    "rc01_external_live_provider": "passed_twice_exact_frozen_writing_and_plan_prompt_external_provider_three_opening_paragraphs_five_top_level_steps_true_stream_final_last_zero_tool_proposal_plan_session_or_durable_write_same_operation_replay_no_redispatch",
     "rc01_native_product_ui_trial": "pending",
     "rc01_independent_review": "pending",
     "rc02_exact_prompt": "passed_production_extractor_pdf_docx_same_turn_direct_answer_one_local_http_provider_request_backend_validated_page_and_paragraph_citations_zero_tool_proposal_or_write",
@@ -356,9 +356,10 @@
     "cc03_broad_core_main_chat_agent_v1": "failed_132_of_140_passed_same_8_preexisting_red",
     "cumulative_primary_and_combined_harness": "passed_10_rc_filtered_plus_1_rc07_plus_7_cc_tests_all_eleven_frozen_journey_owners_present",
     "cumulative_frozen_fixture_digests": "passed_all_8_files_match_frozen_sha256",
-    "cumulative_widened_backend_regression": "passed_current_default_main_chat_command_surface_89_runtime_module_30_single_system_32",
+    "cumulative_widened_backend_regression": "passed_current_default_main_chat_command_surface_93_runtime_module_30_single_system_32",
     "cumulative_frontend_static_regression": "passed_typecheck_format_and_66_focused_route_settings_privacy_behavior_tests",
     "cumulative_external_provider_regression": "passed_direct_answer_and_33_provider_bound_chunk_stream_final_last",
+    "cumulative_rc01_external_live": "passed_twice_current_commit_428_and_326_provider_bound_chunks_exact_three_paragraphs_and_steps_one_through_five_one_provider_terminal_zero_side_effects",
     "cumulative_release_quarantine": "passed_default_release_extension_registry_mcp_a2a_plugin_ipc_and_scheduler_vector_background_routes_quarantined_backend_build_truth_drives_frontend_core_web_file_task_memory_retained",
     "cumulative_release_quarantine_dev_build": "passed_dev_extensions_tauri_test_compile",
     "cumulative_reliability_deterministic_loops": "passed_50_rounds_900_of_900_assertions",
@@ -369,6 +370,7 @@
     "cumulative_packaged_startup": "partial_startup_keyring_operations_bounded_noninteractive_and_fail_closed_window_reaches_appkit_event_loop_and_same_commit_shell_restarts_safe_mode_due_keychain_unavailable",
     "cumulative_native_release_surface": "partial_release_profile_navigation_and_settings_hide_mcp_a2a_and_plugin_surfaces_core_navigation_visible_no_live_journey_credit",
     "cumulative_packaged_release_boundary": "pending_bundle_is_adhoc_debug_not_signed_notarized_release_and_healthy_keychain_provider_native_picker_and_full_journey_evidence_remain_unverified",
+    "cumulative_packaged_signing_preflight": "blocked_zero_valid_local_code_signing_identities_adhoc_executable_identity_does_not_prove_production_keychain_access",
     "cumulative_a2a_package_boundary": "passed_a2a_server_removed_from_product_package_and_retained_as_explicit_authenticated_dev_only_workspace_tool",
     "cumulative_historical_phase0_debt": "failed_preexisting_br4_d044_fingerprint_and_removed_mcp_test_reference_not_counted_as_quarantine_credit",
     "cumulative_completion": "forbidden",
@@ -382,5 +384,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T15:59:24+08:00"
+  "last_updated_at": "2026-07-15T16:39:27+08:00"
 }

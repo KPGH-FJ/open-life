@@ -8,7 +8,8 @@
 
 - Cumulative Integration is **in progress**.
 - RC-01 has passed a local captured-HTTP streaming, Provider-failure, and
-  same-operation terminal-recovery mechanical run.
+  same-operation terminal-recovery mechanical run, plus two consecutive
+  external live Provider runs for the exact frozen prompt.
 - RC-02 and RC-03 have passed frozen multi-file production-extractor,
   deterministic-selection, captured-HTTP Provider, and backend citation-
   validation mechanical runs.
@@ -27,10 +28,11 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-04 has now received two consecutive external live Provider + Web runs for
-  its frozen Resource/Web prompt. The other journeys have not received their
-  required external live credit, and no journey has received native desktop,
-  repeated product-trial, or independent-review credit.
+- RC-01 and RC-04 have now each received two consecutive external live runs for
+  their exact frozen prompts; RC-04 includes real Web evidence. The other
+  journeys have not received their required external live credit, and no
+  journey has received native desktop, repeated product-trial, or independent-
+  review credit.
 - RC-05, RC-06, RC-08, and CC-03 now have separate backend OS-process reopen
   proofs. Packaged Tauri bootstrap, window relaunch, native UI, and CC-03
   production-keychain evidence remain pending.
@@ -110,6 +112,37 @@ Mechanical evidence after the repair:
   warnings only;
 - `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
   passed.
+
+External live RC-01 evidence commit:
+`157f466e9f56fe52a8408c423410abfdf823cbea`.
+
+The initial external live attempts exposed unstable output-shape adherence.
+The model produced useful content, but the first validator also confused
+opening-list numbering with plan numbering and then accumulated format cases.
+After three RED attempts, implementation stopped adding parser exceptions and
+re-examined the architecture assumption. The root repair derives a bounded
+response-shape contract only from the current Policy-bound user message,
+appends it inside the existing PreparedProviderRequest authorization envelope,
+and explicitly grants no Tool, write, Memory, or policy authority. Unsupported
+counts fail closed to ordinary generation instead of being misparsed.
+
+Two consecutive runs against the external Provider on the final code observed:
+
+- exactly three opening prose paragraphs and top-level plan sequence
+  `[1, 2, 3, 4, 5]`;
+- 428 and 326 Provider-bound incremental chunks respectively;
+- one `provider.started`, one `provider.completed`, and one
+  `final_delivery.created` fact per operation;
+- `stream-message-done` once and last;
+- zero Tool, Proposal, tracked PlanExecute, review, or durable effect;
+- same-operation buffered recovery with no new event or Provider dispatch.
+
+The captured local request also proves that the bounded 3-paragraph/5-step
+contract reached the Provider payload after PrivacyPolicy filtering. Kernel
+regression passed 100/100, runtime module 30/30, command surface 93/93,
+single-system guards 32/32, and `cargo check -p openlife-tauri --tests --locked`
+passed. This closes only RC-01 external live Provider credit. Native product UI,
+signed application, and independent-review credit remain pending.
 
 ## RC-02 and RC-03 exact attachment scenarios
 
@@ -767,7 +800,7 @@ Mechanical evidence:
   absent — passed;
 - `cargo check -p openlife-tauri --tests --features dev-extensions` — passed,
   proving the isolated development surface still compiles;
-- current default Main Chat command surface — 89 passed;
+- current default Main Chat command surface — 93 passed;
 - Main Chat runtime module — 30 passed;
 - single-system authority guards — 32 passed;
 - focused frontend route/settings/privacy tests — 66 passed;
@@ -789,7 +822,7 @@ without weakening assertions or changing expected outcomes:
 - race and replay loops: 20 rounds, 120/120 assertions passed;
 - mixed-capability loops: 20 rounds, 140/140 assertions passed;
 - fault-injection matrix: 14/14 assertions passed;
-- current default Main Chat command surface: 89/89 passed;
+- current default Main Chat command surface: 93/93 passed;
 - Main Chat runtime module: 30/30 passed;
 - single-system authority guards: 32/32 passed;
 - focused frontend release-route/settings/privacy behavior: 66/66 passed,
@@ -839,6 +872,14 @@ Observed native facts on an isolated release-profile data directory:
   execution, and keeps unavailable truth unknown instead of silently creating
   replacement keys.
 
+Signing/credential preflight found zero valid local code-signing identities.
+The executable is linker ad-hoc signed with no TeamIdentifier, while the bundle
+metadata reports `ai.openlife.app`. Canonical credential-item metadata exists
+in the login Keychain, but no secret value was read during diagnosis; the
+packaged Provider credential remains unconfigured. Relaxing Keychain ACLs,
+copying plaintext, or minting replacement canonical keys was explicitly
+rejected as false-green evidence.
+
 Evidence boundary: this is a default-feature **debug, ad-hoc bundle**, not a
 signed or notarized production release. Safe Mode proves bounded fail-closed
 startup and shell relaunch, not healthy production Keychain integration. It
@@ -850,7 +891,8 @@ without an identity/keychain/data migration decision.
 
 ## Remaining cumulative work
 
-- RC-01 external live Provider and native product UI trial.
+- RC-01 native product UI trial; its exact external live Provider gate is now
+  complete twice on the current implementation.
 - RC-02/RC-03 native picker, external live Provider, healthy packaged restart,
   and repeated product trial.
 - RC-05 native task journey and repeated product trial on a healthy packaged
