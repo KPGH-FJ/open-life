@@ -235,7 +235,7 @@ impl LocalCitationEcho {
                 let web = issued_citation("webref_", 31);
                 match (resource, web) {
                     (Some(resource), Some(web)) => format!(
-                        "The attachment reports ROADSHOW_RESOURCE_SENTINEL [{resource}], while the retrieved Web evidence reports ROADSHOW_WEB_SENTINEL [{web}]."
+                        "Synthesis used the issued Resource citation [{resource}] and the issued Web citation [{web}]."
                     ),
                     _ => "Both issued Resource and Web citations were not observed.".into(),
                 }

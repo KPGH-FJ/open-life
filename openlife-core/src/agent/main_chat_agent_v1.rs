@@ -15080,25 +15080,26 @@ fn is_current_external_read_intent(lower: &str) -> bool {
             "now open",
         ],
     ) && !is_pure_offline_planning_expression(lower);
-    let explicit_public_web_evidence = contains_any(
-        lower,
-        &[
-            "公开网页中",
-            "公开网页上",
-            "公开网络中",
-            "网上公开",
-            "public web",
-            "public webpage",
-            "public web page",
-            "online sources",
-        ],
-    ) && contains_any(
-        lower,
-        &[
-            "结合", "根据", "查", "搜索", "检索", "读取", "引用", "来源", "evidence", "search",
-            "read", "look up", "cite", "from",
-        ],
-    );
+    let explicit_public_web_evidence =
+        (contains_any(
+            lower,
+            &[
+                "公开网页中",
+                "公开网页上",
+                "公开网络中",
+                "网上公开",
+                "public web",
+                "public webpage",
+                "public web page",
+                "online sources",
+            ],
+        ) && contains_any(
+            lower,
+            &[
+                "结合", "根据", "查", "搜索", "检索", "读取", "引用", "来源", "evidence", "search",
+                "read", "look up", "cite", "from",
+            ],
+        )) || contains_any(lower, &["检索网页", "搜索网页", "查询网页"]);
     known_current_external_fact || explicit_public_web_evidence
 }
 
@@ -15600,6 +15601,7 @@ mod roadshow_external_read_policy_tests {
 
     const RC04_PROMPT: &str =
         "结合附件中的产品数据和今天公开网页中的相关信息，给出有来源的路演风险摘要。";
+    const RC08_PROMPT: &str = "分析附件并检索网页；在执行中取消，然后重试一次。";
 
     #[test]
     fn exact_rc04_prompt_authorizes_one_read_only_web_route() {
@@ -15644,6 +15646,36 @@ mod roadshow_external_read_policy_tests {
         assert!(!decision
             .policy_decision
             .allows(AllowedCapability::WebSearch));
+    }
+
+    #[test]
+    fn exact_rc08_prompt_authorizes_web_read_without_write_authority() {
+        let decision = AgentIngress::default().decide(
+            "roadshow-rc08-policy",
+            RC08_PROMPT,
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(decision.intent_frame.requires_external_read);
+        assert_eq!(decision.policy_route, PolicyRouteKind::ReadOnlyTool);
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::ReActToolExecution
+        );
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::WebSearch));
+        assert_eq!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::ReadOnly
+        );
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::MemoryProposal));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
     }
 }
 
