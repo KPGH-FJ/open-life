@@ -1234,6 +1234,67 @@ fn isolated_command_surface_state_with_persistent_memory(
     state
 }
 
+fn isolated_command_surface_state_with_persistent_main_chat(
+    root: &std::path::Path,
+) -> std::sync::Arc<crate::AppState> {
+    let mut state_arc = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let state = std::sync::Arc::get_mut(&mut state_arc)
+        .expect("isolated process-restart state must have one owner");
+    let memory = openlife_core::memory::MemoryStore::new(root.join("conversation.sqlite"))
+        .expect("open process-restart Conversation store");
+    let receipt_key = openlife_core::agent::AgentRunReceiptKey::from_bytes([0x71; 32])
+        .expect("stable process-restart receipt key");
+    let agent_run = openlife_core::agent::AgentRunStore::new_with_receipt_key(
+        root.join("agent-run.sqlite"),
+        receipt_key.clone(),
+    )
+    .expect("open process-restart AgentRun store");
+    agent_run
+        .bind_canonical_memory_store(&memory)
+        .expect("bind process-restart AgentRun to Conversation");
+    let task_session =
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_with_receipt_key(
+            root.join("task-session.sqlite"),
+            receipt_key,
+        )
+        .expect("open process-restart TaskSession store");
+    task_session
+        .bind_canonical_memory_store(&memory)
+        .expect("bind process-restart TaskSession to Conversation");
+    let action_queue = openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new(
+        root.join("action-queue.sqlite"),
+    )
+    .expect("open process-restart ActionQueue store");
+    let event_store =
+        crate::main_chat_event_stream::MainChatAgentEventStore::new(root.join("turn-event.sqlite"))
+            .expect("open process-restart EventStore");
+    action_queue
+        .install_event_store_reconciliation_public_key(
+            &event_store
+                .reconciliation_attestation_public_key()
+                .expect("process-restart EventStore public key"),
+        )
+        .expect("bind process-restart ActionQueue to EventStore");
+
+    state.memory_store = std::sync::Arc::new(tokio::sync::Mutex::new(memory));
+    state.agent_run_store = Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_run)));
+    state.main_chat_agent_session_store =
+        Some(std::sync::Arc::new(tokio::sync::Mutex::new(task_session)));
+    state.main_chat_action_queue_store =
+        Some(std::sync::Arc::new(tokio::sync::Mutex::new(action_queue)));
+    state.main_chat_agent_event_store =
+        Some(std::sync::Arc::new(tokio::sync::Mutex::new(event_store)));
+    state.memory_lifecycle_store = Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+        openlife_core::agent::MemoryLifecycleStore::new(root.join("memory-lifecycle.sqlite"))
+            .expect("open process-restart MemoryLifecycle store"),
+    )));
+    state.life_model_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
+        openlife_core::life_model::LifeModelManager::new(root.join("life-model").join("current")),
+    ));
+
+    state_arc
+}
+
 fn bind_markdown_resource_to_command_surface_state(
     state: &std::sync::Arc<crate::AppState>,
     operation_id: &str,
@@ -5692,6 +5753,163 @@ async fn roadshow_cc03_exact_prompt_commits_then_rolls_back_and_recovers_after_s
         1,
         "same-operation recovery cannot append a second rollback"
     );
+}
+
+#[test]
+fn roadshow_cc03_separate_process_reopen_preserves_one_rollback_and_one_final() {
+    const TEST_NAME: &str = "main_chat_command_surface_tests::roadshow_cc03_separate_process_reopen_preserves_one_rollback_and_one_final";
+    const PHASE_ENV: &str = "OPENLIFE_ROADSHOW_CC03_PROCESS_PHASE";
+    const ROOT_ENV: &str = "OPENLIFE_ROADSHOW_CC03_PROCESS_ROOT";
+    const OPERATION_ENV: &str = "OPENLIFE_ROADSHOW_CC03_PROCESS_OPERATION";
+    const PROMPT: &str =
+        "请记住：我的路演回答偏好是先给一句结论，再给三点证据。随后撤销这条记忆并重启检查。";
+    const SESSION_ID: &str = "roadshow-cc03-process-restart";
+
+    if let Ok(phase) = std::env::var(PHASE_ENV) {
+        let root = std::path::PathBuf::from(
+            std::env::var_os(ROOT_ENV).expect("CC03 child process store root"),
+        );
+        let operation_id = std::env::var(OPERATION_ENV).expect("CC03 child operation id");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("CC03 child Tokio runtime");
+        runtime.block_on(async move {
+            let state = isolated_command_surface_state_with_persistent_main_chat(&root);
+            let before_events = state
+                .main_chat_agent_event_store
+                .as_ref()
+                .expect("CC03 child EventStore")
+                .lock()
+                .await
+                .list(&operation_id, 0, 250)
+                .expect("CC03 child events before turn");
+            let before_actions = list_command_surface_actions(&state, &operation_id).await;
+            let before_messages = state
+                .memory_store
+                .lock()
+                .await
+                .export_all_messages()
+                .expect("CC03 child Conversation before turn");
+            let before_records = state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("CC03 child MemoryLifecycleStore")
+                .lock()
+                .await
+                .list_records(None, None, 20, 0)
+                .expect("CC03 child Memory records before turn");
+
+            let result = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                state.clone(),
+                SESSION_ID,
+                PROMPT,
+                operation_id.clone(),
+            )
+            .await;
+            assert_eq!(result["status"], "completed", "CC03 {phase}: {result}");
+            assert_eq!(result["legacy_fallback_used"], false);
+            assert_eq!(result["model_invoked"], false);
+            assert_eq!(result["tool_invoked"], false);
+            assert!(list_command_surface_proposals(&state).await.is_empty());
+
+            let after_events = state
+                .main_chat_agent_event_store
+                .as_ref()
+                .expect("CC03 child EventStore after turn")
+                .lock()
+                .await
+                .list(&operation_id, 0, 250)
+                .expect("CC03 child events after turn");
+            let after_actions = list_command_surface_actions(&state, &operation_id).await;
+            let after_messages = state
+                .memory_store
+                .lock()
+                .await
+                .export_all_messages()
+                .expect("CC03 child Conversation after turn");
+            let lifecycle = state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("CC03 child MemoryLifecycleStore after turn")
+                .lock()
+                .await;
+            let records = lifecycle
+                .list_records(None, None, 20, 0)
+                .expect("CC03 child Memory records after turn");
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].status,
+                openlife_core::agent::MemoryLifecycleStatus::RolledBack
+            );
+            assert!(lifecycle
+                .list_active_records(None, 20)
+                .expect("CC03 child active Memory")
+                .is_empty());
+            assert_eq!(
+                lifecycle
+                    .lifecycle_events(&records[0].memory_id)
+                    .expect("CC03 child lifecycle events")
+                    .iter()
+                    .filter(|event| event.rollback_event.is_some())
+                    .count(),
+                1
+            );
+            drop(lifecycle);
+
+            assert_eq!(after_actions.len(), 2);
+            assert_eq!(after_messages.len(), 2);
+            assert_eq!(
+                after_events
+                    .iter()
+                    .filter(|event| event.event_type == "final_delivery.created")
+                    .count(),
+                1
+            );
+            if phase == "seed" {
+                assert!(before_events.is_empty());
+                assert!(before_actions.is_empty());
+                assert!(before_messages.is_empty());
+                assert!(before_records.is_empty());
+            } else if phase == "verify" {
+                assert_eq!(before_events, after_events);
+                assert_eq!(before_actions, after_actions);
+                assert_eq!(
+                    serde_json::to_value(&before_messages)
+                        .expect("serialize CC03 Conversation before recovery"),
+                    serde_json::to_value(&after_messages)
+                        .expect("serialize CC03 Conversation after recovery")
+                );
+                assert_eq!(before_records, records);
+            } else {
+                panic!("unexpected CC03 child phase: {phase}");
+            }
+        });
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("CC03 separate-process workspace");
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let executable = std::env::current_exe().expect("current Rust test executable");
+    for phase in ["seed", "verify"] {
+        let output = std::process::Command::new(&executable)
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(PHASE_ENV, phase)
+            .env(ROOT_ENV, workspace.path())
+            .env(OPERATION_ENV, &operation_id)
+            .output()
+            .expect("spawn CC03 child test process");
+        assert!(
+            output.status.success(),
+            "CC03 {phase} child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[tokio::test]
