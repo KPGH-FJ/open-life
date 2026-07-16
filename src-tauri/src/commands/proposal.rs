@@ -37,6 +37,31 @@ fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[derive(Clone, Copy)]
+enum ProposalReconciliationAdmission {
+    ProductEffects,
+    StartupInternal,
+}
+
+fn require_proposal_reconciliation_admission(
+    state: &Arc<AppState>,
+    admission: ProposalReconciliationAdmission,
+) -> Result<(), String> {
+    match admission {
+        ProposalReconciliationAdmission::ProductEffects => require_persistence_write(state),
+        ProposalReconciliationAdmission::StartupInternal
+            if state
+                .persistence_coordinator
+                .startup_reconciliation_mutations_safe() =>
+        {
+            Ok(())
+        }
+        ProposalReconciliationAdmission::StartupInternal => {
+            Err("startup_proposal_reconciliation_mutations_unavailable".into())
+        }
+    }
+}
+
 fn runtime_proposal_store_error(state: &Arc<AppState>, error: impl ToString) -> String {
     let error = error.to_string();
     state
@@ -613,7 +638,32 @@ pub(crate) async fn reconcile_durable_proposal_projections_with_state(
     state: &Arc<AppState>,
     limit: i64,
 ) -> Result<ProposalReconciliationReport, String> {
-    require_persistence_write(state)?;
+    reconcile_durable_proposal_projections_inner(
+        state,
+        limit,
+        ProposalReconciliationAdmission::ProductEffects,
+    )
+    .await
+}
+
+pub(crate) async fn reconcile_startup_durable_proposal_projections_with_state(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<ProposalReconciliationReport, String> {
+    reconcile_durable_proposal_projections_inner(
+        state,
+        limit,
+        ProposalReconciliationAdmission::StartupInternal,
+    )
+    .await
+}
+
+async fn reconcile_durable_proposal_projections_inner(
+    state: &Arc<AppState>,
+    limit: i64,
+    admission: ProposalReconciliationAdmission,
+) -> Result<ProposalReconciliationReport, String> {
+    require_proposal_reconciliation_admission(state, admission)?;
     let bounded_limit = limit.clamp(1, 200);
     let (artifact_effects_reconciled, artifact_backlog_may_remain) =
         reconcile_artifact_effects_with_state(state, bounded_limit).await?;

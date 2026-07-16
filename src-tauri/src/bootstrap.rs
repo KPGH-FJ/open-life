@@ -714,8 +714,10 @@ pub(crate) async fn reconcile_startup_canonical_outboxes(
     let mut lifemodel_drained = false;
     for _ in 0..STARTUP_CANONICAL_OUTBOX_PASSES {
         let report =
-            crate::life_model_write_gateway::reconcile_lifemodel_file_mutations_with_state(state)
-                .await?;
+            crate::life_model_write_gateway::reconcile_startup_lifemodel_file_mutations_with_state(
+                state,
+            )
+            .await?;
         if report.degraded > 0 {
             return Err(format!(
                 "LifeModel file projection reconciliation degraded: {} delivery attempts",
@@ -757,11 +759,12 @@ pub(crate) async fn reconcile_startup_proposal_projections(
     state: &Arc<AppState>,
 ) -> Result<bool, String> {
     for _ in 0..STARTUP_PROPOSAL_RECONCILIATION_SYNC_PASSES {
-        let report = crate::commands::proposal::reconcile_durable_proposal_projections_with_state(
-            state,
-            STARTUP_PROPOSAL_RECONCILIATION_BATCH,
-        )
-        .await?;
+        let report =
+            crate::commands::proposal::reconcile_startup_durable_proposal_projections_with_state(
+                state,
+                STARTUP_PROPOSAL_RECONCILIATION_BATCH,
+            )
+            .await?;
         let backlog = report.artifact_backlog_may_remain
             || report.projection_backlog_may_remain
             || report.agent_run_backlog_may_remain;

@@ -69,10 +69,29 @@ pub(crate) struct LifeModelFileReconciliationReport {
     pub backlog_may_remain: bool,
 }
 
+#[cfg(test)]
 pub(crate) async fn reconcile_lifemodel_file_mutations_with_state(
     state: &Arc<AppState>,
 ) -> Result<LifeModelFileReconciliationReport, String> {
     require_persistence_write(state)?;
+    reconcile_lifemodel_file_mutations_admitted(state).await
+}
+
+pub(crate) async fn reconcile_startup_lifemodel_file_mutations_with_state(
+    state: &Arc<AppState>,
+) -> Result<LifeModelFileReconciliationReport, String> {
+    if !state
+        .persistence_coordinator
+        .startup_reconciliation_mutations_safe()
+    {
+        return Err("startup_lifemodel_reconciliation_mutations_unavailable".into());
+    }
+    reconcile_lifemodel_file_mutations_admitted(state).await
+}
+
+async fn reconcile_lifemodel_file_mutations_admitted(
+    state: &Arc<AppState>,
+) -> Result<LifeModelFileReconciliationReport, String> {
     let _coordinator = state.life_model_write_coordinator.lock().await;
     let result =
         reconcile_lifemodel_file_mutations_unlocked(state, DailySnapshotFaultInjection::None, true)
