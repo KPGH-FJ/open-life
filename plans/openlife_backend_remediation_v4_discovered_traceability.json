@@ -1089,10 +1089,24 @@
         },
         "backend_roadshow_subset": {
           "scope": "required_backend_freeze_dependency",
-          "status": "focused_mechanical_gates_green_phase2_suite_still_red"
+          "status": "mechanically_verified_global_open"
         },
         "product_disposition": "preserve_proven_provider_dispatch_while_provider_terminal_state_remains_unknown",
-        "note": "A proof-backed adapter start now survives later attempt-state corruption without converting invalid or unknown state into completion. Six unrelated Phase 2 failures and independent read-only review remain pending."
+        "note": "A proof-backed adapter start now survives later attempt-state corruption without converting invalid or unknown state into completion. The complete Phase 2 suite is green after separately fixing BR4-D072; independent read-only review and global Phase7/V4 closure remain pending."
+      },
+      {
+        "id": "BR4-D072",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "mechanically_verified_global_open"
+        },
+        "product_disposition": "retain_one_per_turn_provider_proof_scope_and_chronological_cancellation_truth",
+        "note": "Candidate ranking and AgentLoop now share the TurnRuntime-owned per-turn provider proof scope; cancellation preserves the completed ranking and the hanging request as remote unknown in chronological order. Independent read-only review and global Phase7/V4 closure remain pending."
       }
     ],
     "historical_slice_commits": [
@@ -3390,14 +3404,95 @@
         ]
       },
       "roadshow_implementation": {
-        "status": "focused_mechanically_verified_phase2_suite_still_red",
+        "status": "mechanically_verified_independent_review_pending",
         "commit": "75bf0264f7b97f80461f53fe0af4172a79625d69",
         "anti_hallucination": [
           "model-invoked-is-recovered-only-from-an-exact-same-run-provider-request-lifecycle-event",
           "provider-receipt-state-failed-alone-does-not-count-as-dispatch",
           "invalid-provider-state-was-not-relabeled-completed-failed-or-cancelled",
           "no-provider-remote-unknown-terminal-was-invented-without-a-valid-cross-owner-contract",
-          "the-full-Phase2-suite-remains-red-at-21-of-27-and-global-completion-was-not-claimed"
+          "the-full-Phase2-suite-is-green-only-after-the-separate-D072-root-fix-and-global-completion-was-not-claimed"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D072",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "red_test:cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact",
+          "source_trace:candidate-ranking-and-AgentLoop-used-different-provider-receipt-collectors",
+          "source_trace:cancellation-terminalizer-could-observe-nested-start-without-its-durability-proof",
+          "source_trace:same-kind-provider-events-were-sorted-by-stable-id-before-occurrence-time"
+        ],
+        "failing_test": [
+          "red_test:cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact",
+          "red_assertion:completed-ranking-fact-and-proof-backed-hanging-start-must-both-survive-local-cancellation"
+        ],
+        "positive": [
+          "commit:3845044-preserve-nested-provider-cancellation-truth",
+          "commit:9e2740e-guard-provider-proof-scope-between-turns",
+          "gate:cancelled-hanging-AgentLoop-focused-test-green-2026-07-16",
+          "gate:backend-remediation-phase2-27-of-27-2026-07-16",
+          "gate:main-chat-task-control-53-of-53-2026-07-16",
+          "gate:main-chat-runtime-module-30-of-30-2026-07-16",
+          "gate:main-chat-command-surface-93-of-93-2026-07-16",
+          "gate:single-system-32-of-32-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-16",
+          "gate:cargo-fmt-check-2026-07-16",
+          "gate:git-diff-check-2026-07-16"
+        ],
+        "counterfactual": [
+          "test:first-ranking-request-keeps-provider-started-and-provider-completed",
+          "test:second-hanging-request-keeps-provider-started-and-provider-remote-unknown-without-provider-completed",
+          "test:cancel-requested-precedes-remote-unknown-and-local-aborted",
+          "test:next-turn-persists-its-own-provider-lifecycle-with-none-of-the-cancelled-turn-request-ids",
+          "test:coherent-provider-runtime-replacement-is-required-before-the-two-stage-turn"
+        ],
+        "deletion_or_absence": [
+          "absence:separate-AgentLoop-provider-receipt-collector-inside-one-turn",
+          "absence:dropped-kernel-future-as-sole-owner-of-nested-provider-proof",
+          "absence:stable-id-before-occurrence-time-ordering-for-same-kind-provider-facts",
+          "absence:remote-cancelled-claim-for-locally-aborted-hanging-provider-request"
+        ],
+        "capability_non_regression": [
+          "test:provider-backed-candidate-ranking-still-completes-before-AgentLoop-generation",
+          "test:ordinary-buffered-and-streamed-Main-Chat-still-share-one-TurnRuntime",
+          "test:task-control-cancellation-and-single-system-authority-suites-remain-green",
+          "test:provider-runtime-generation-remains-coherent-and-captured-once-per-turn"
+        ],
+        "live_boundary": [
+          "local-real-http-adapter-edge-credit-only",
+          "external-live-provider-credit-not-claimed",
+          "full-Phase2-suite-green-does-not-close-Phase7-or-global-V4",
+          "independent-read-only-implementation-review-pending",
+          "roadshow-GREEN-not-claimed"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "pending_independent_readonly_reviewer",
+        "decision": "mechanical-gates-green-independent-readonly-review-pending",
+        "evidence_refs": [
+          "commit:3845044",
+          "commit:9e2740e",
+          "test:cancelled-hanging-AgentLoop-generation-keeps-completed-ranking-fact",
+          "gate:backend-remediation-phase2-27-of-27",
+          "boundary:local-abort-keeps-remote-provider-state-unknown"
+        ]
+      },
+      "roadshow_implementation": {
+        "status": "mechanically_verified_independent_review_pending",
+        "commit": "38450441e0ad443850aea1fbfae45dd1a8a9e12d",
+        "anti_hallucination": [
+          "one-fresh-provider-receipt-collector-is-bound-by-TurnRuntime-for-each-turn",
+          "completed-ranking-and-in-flight-AgentLoop-attempt-share-the-same-proof-scope",
+          "the-hanging-request-is-remote-unknown-not-remotely-cancelled-or-completed",
+          "event-order-is-asserted-from-durable-sequences-not-only-live-stream-order",
+          "Phase2-27-of-27-does-not-claim-global-V4-Phase7-or-roadshow-completion"
         ]
       }
     }
@@ -3598,6 +3693,15 @@
       ],
       "kind": "provider_dispatch_truth_after_attempt_state_corruption",
       "scenario": "A proof-backed provider start followed by conflicting attempt metadata fails the turn closed with invalid and remote-unknown state, preserves model_invoked=true and the exact durable start, and invents no provider completion; the same state failure without a proven start leaves model_invoked=false.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-072",
+      "finding_ids": [
+        "BR4-D072"
+      ],
+      "kind": "nested_provider_proof_scope_and_cancellation_order",
+      "scenario": "One turn completes provider-backed candidate ranking, starts a hanging AgentLoop provider request and is locally cancelled: both attempts remain bound to the TurnRuntime per-turn proof scope, the durable order is first start then first completion then second start then cancel request then second remote unknown then local abort, and no cross-turn receipt or remote-cancel claim is invented.",
       "frozen_denominator_credit": false
     }
   ]

@@ -1063,6 +1063,52 @@
         "Invented provider completion or remote cancellation confirmation after metadata conflict"
       ],
       "immutable_fingerprint": "6d84efd9513db4357554104d113a9c5aaf213bd4e45313481a873e4419e1c6ef"
+    },
+    {
+      "id": "BR4-D072",
+      "discovered_at": "2026-07-16T23:43:49+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P0-01",
+        "P1-02",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen provider-truth and cancellation findings and BR4-D071 require truthful lifecycle facts, but they did not require nested candidate-ranking and AgentLoop provider attempts to share the TurnRuntime durability-proof scope or preserve their real chronological order when cancellation drops the kernel future.",
+      "title": "Nested AgentLoop provider attempts lose durability proof and reorder cancellation facts",
+      "observed_symptom": "A two-stage ReAct turn completed its provider-backed candidate ranking, started a second AgentLoop provider request and was locally cancelled while that request hung. The cancellation terminalizer could not prove the nested in-flight start, emitted provider.receipt_state_failed, and could order the second start before the first completion because same-kind facts were sorted by stable object id rather than occurrence time.",
+      "root_cause_hypothesis": "OpenLifeTurnRuntime did not own one fresh per-turn ProviderReceiptCollector. Candidate ranking used the captured scheduler collector while AgentLoop rebound a separate execution-local collector hidden inside the dropped future; cancellation could observe progress events without the matching durability authority, and its batch normalized receipt timestamps to the cancellation instant before stable-id ordering.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_turn_runtime.rs::OpenLifeTurnRuntime::execute",
+        "src-tauri/src/main_chat_turn_runtime.rs::persist_main_chat_cancellation_events",
+        "src-tauri/src/main_chat_react_runtime.rs::try_run_main_chat_react_agent_loop",
+        "src-tauri/src/main_chat_event_stream.rs::MainChatAgentRuntimeEventInput",
+        "src-tauri/src/backend_remediation_phase2_tests.rs::cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I08",
+        "I11",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2 and Phase 6",
+      "owner_module": "OpenLifeTurnRuntime per-turn provider proof scope and cancellation event batch",
+      "acceptance": [
+        "OpenLifeTurnRuntime installs one fresh ProviderReceiptCollector per turn and every nested provider route in that turn shares it without leaking receipts across turns",
+        "Cancelling after a completed ranking request and a started hanging AgentLoop request preserves the first started and completed facts and the second proof-backed started plus remote_unknown facts",
+        "The durable order is ranking start before ranking completion before AgentLoop start before cancel_requested before AgentLoop remote_unknown before local_aborted",
+        "The hanging request receives no provider.completed fact and local abort does not claim remote provider cancellation",
+        "Provider proof collection remains bound to the captured coherent provider generation and Phase 2, task-control, runtime, command-surface and single-system gates remain green"
+      ],
+      "deletion_targets": [
+        "Separate candidate-ranking and AgentLoop ProviderReceiptCollectors inside one turn",
+        "A dropped AgentLoop future owning the only durability proof for its in-flight provider request",
+        "Cancellation receipt timestamps rewritten to the cancellation instant",
+        "Same-kind provider lifecycle facts ordered by stable object id before occurrence time",
+        "provider.receipt_state_failed used as fallback for an otherwise proof-backed nested start"
+      ],
+      "immutable_fingerprint": "effa1cd6aa7afbae4cd09d9ff010d7bea9b3b99d1ec4ba5b2b8d00b63aa4a30b"
     }
   ]
 }
