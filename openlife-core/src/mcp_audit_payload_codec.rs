@@ -40,7 +40,11 @@ const AAD_EXPECTED_ROLE_TAG: u8 = 7;
 /// ceiling. The hard bound prevents an attacker-controlled database row from
 /// causing an unbounded allocation before authentication.
 const MAX_ENVELOPE_WIRE_BYTES: usize = 1_024;
-const MAX_ENVELOPE_ENCODED_BYTES: usize = (MAX_ENVELOPE_WIRE_BYTES + 2) / 3 * 4;
+/// Storage owners must apply this bound before materializing SQLite TEXT as a
+/// Rust `String`. The codec repeats the check so callers outside SQLite cannot
+/// bypass the allocation boundary.
+pub(crate) const MCP_AUDIT_MAX_ENVELOPE_ENCODED_BYTES: usize =
+    (MAX_ENVELOPE_WIRE_BYTES + 2) / 3 * 4;
 
 /// The semantic position of one encrypted receipt in an MCP audit row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +160,7 @@ impl MinimizedAuditReceiptV1 {
         }
     }
 
-    fn decode_strict(
+    pub(crate) fn decode_strict(
         plaintext: &[u8],
         authenticated_role: McpAuditPayloadRole,
     ) -> Result<Self, McpAuditPayloadCodecError> {
@@ -164,6 +168,11 @@ impl MinimizedAuditReceiptV1 {
             .map_err(|_| McpAuditPayloadCodecError::InvalidReceiptSchema)?;
         receipt.validate(authenticated_role)?;
         Ok(receipt)
+    }
+
+    pub(crate) fn to_json_string(&self) -> Result<String, McpAuditPayloadCodecError> {
+        serde_json::to_string(self)
+            .map_err(|_| McpAuditPayloadCodecError::ReceiptSerializationFailed)
     }
 
     fn validate(
@@ -189,22 +198,27 @@ impl MinimizedAuditReceiptV1 {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> McpAuditPayloadRole {
         self.kind
     }
 
+    #[cfg(test)]
     pub(crate) fn payload_stored(&self) -> bool {
         self.payload_stored
     }
 
+    #[cfg(test)]
     pub(crate) fn value_type(&self) -> McpAuditValueType {
         self.value_type
     }
 
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes
     }
 
+    #[cfg(test)]
     pub(crate) fn digest(&self) -> &str {
         &self.digest
     }
@@ -425,7 +439,7 @@ pub(crate) fn open_authenticated_audit_payload(
     expected_binding: &McpAuditPayloadBindingV1,
     encoded_envelope: &str,
 ) -> Result<AuthenticatedMinimizedAuditPayload, McpAuditPayloadCodecError> {
-    if encoded_envelope.len() > MAX_ENVELOPE_ENCODED_BYTES {
+    if encoded_envelope.len() > MCP_AUDIT_MAX_ENVELOPE_ENCODED_BYTES {
         return Err(McpAuditPayloadCodecError::EnvelopeTooLarge);
     }
     let envelope = decode_canonical_base64(encoded_envelope)?;
@@ -516,6 +530,20 @@ fn seal_plaintext(
         return Err(McpAuditPayloadCodecError::EnvelopeTooLarge);
     }
     Ok(general_purpose::STANDARD.encode(envelope))
+}
+
+/// Test-only fixture issuer for adversarial envelopes. Product code can only
+/// seal a validated `MinimizedAuditReceiptV1`; the D068 matrix additionally
+/// needs authenticated but structurally invalid plaintext to prove the strict
+/// decoder is the rejecting authority.
+#[cfg(test)]
+pub(crate) fn seal_payload_fixture_for_test(
+    key: &[u8; 32],
+    format_version: u32,
+    binding: &McpAuditPayloadBindingV1,
+    plaintext: &[u8],
+) -> Result<String, McpAuditPayloadCodecError> {
+    seal_plaintext(key, format_version, binding, plaintext)
 }
 
 fn envelope_header(format_version: u32, role: McpAuditPayloadRole) -> [u8; ENVELOPE_HEADER_BYTES] {
@@ -1063,7 +1091,7 @@ mod tests {
     #[test]
     fn mcp_audit_payload_codec_v1_rejects_oversized_envelopes_before_or_after_base64_decode() {
         let binding = binding(McpAuditPayloadRole::Arguments);
-        let oversized_encoded = "A".repeat(MAX_ENVELOPE_ENCODED_BYTES + 1);
+        let oversized_encoded = "A".repeat(MCP_AUDIT_MAX_ENVELOPE_ENCODED_BYTES + 1);
         assert_eq!(
             open_authenticated_audit_payload(&KEY, &binding, &oversized_encoded),
             Err(McpAuditPayloadCodecError::EnvelopeTooLarge)
@@ -1075,7 +1103,10 @@ mod tests {
         // pre-decode bound.
         let oversized_wire = vec![0_u8; MAX_ENVELOPE_WIRE_BYTES + 1];
         let canonical_oversized = general_purpose::STANDARD.encode(&oversized_wire);
-        assert_eq!(canonical_oversized.len(), MAX_ENVELOPE_ENCODED_BYTES);
+        assert_eq!(
+            canonical_oversized.len(),
+            MCP_AUDIT_MAX_ENVELOPE_ENCODED_BYTES
+        );
         assert_eq!(
             general_purpose::STANDARD
                 .decode(&canonical_oversized)

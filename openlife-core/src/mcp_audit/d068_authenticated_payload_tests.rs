@@ -63,13 +63,19 @@ fn artifact_family(path: &Path) -> Vec<AuditArtifact> {
 }
 
 fn material() -> AuditKeyMaterial {
+    material_at_epoch(7)
+}
+
+fn material_at_epoch(epoch: u64) -> AuditKeyMaterial {
     AuditKeyMaterial {
         config: AuditKeyConfig {
             mode: KeyMode::Keychain,
             salt_b64: None,
             env_var: None,
-            key_ref: Some("openlife/mcp-audit/d068/store-fixture/epoch/7".into()),
-            epoch: 7,
+            key_ref: Some(format!(
+                "openlife/mcp-audit/d068/store-fixture/epoch/{epoch}"
+            )),
+            epoch,
             created_at: "2026-07-13T12:00:00Z".into(),
         },
         key: [0xD6; 32],
@@ -100,12 +106,50 @@ fn insert_encrypted_row(
                 arguments_encrypted,
                 result_encrypted,
                 "2026-07-13T12:00:00Z",
-                store.key_config().epoch as i64,
+                McpAuditStore::sqlite_key_epoch(store.key_config().epoch).unwrap(),
                 payload_version,
             ],
         )
         .expect("insert D068 encrypted fixture row");
     connection.last_insert_rowid()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_current_fixture(
+    store: &McpAuditStore,
+    tool_name: &str,
+    arguments_role: &str,
+    arguments_format_version: i64,
+    arguments_receipt_json: &str,
+    result_role: &str,
+    result_format_version: i64,
+    result_receipt_json: &str,
+    database_version: i64,
+) -> i64 {
+    store
+        .d068_insert_current_payload_fixture_for_test(
+            tool_name,
+            arguments_role,
+            arguments_format_version,
+            arguments_receipt_json,
+            result_role,
+            result_format_version,
+            result_receipt_json,
+            database_version,
+        )
+        .expect("insert storage-bound D068 current fixture")
+}
+
+fn current_ciphertexts(store: &McpAuditStore, row_id: i64) -> (String, String) {
+    store
+        .conn()
+        .expect("open D068 fixture database")
+        .query_row(
+            "SELECT arguments_encrypted, result_encrypted FROM mcp_log WHERE id = ?1",
+            [row_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read D068 current fixture ciphertexts")
 }
 
 fn legacy_ciphertexts(store: &McpAuditStore) -> (String, String) {
@@ -286,30 +330,260 @@ fn d068_legal_current_product_write_remains_exactly_readable_and_minimized() {
 }
 
 #[test]
+fn d068_noncanonical_record_identity_replay_fails_live_and_restart_without_rewrite() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp_audit.db");
+    let store = create_store(&path);
+    store
+        .insert_log(
+            "d068_noncanonical_replay",
+            &json!({"bounded": true}),
+            "bounded-result",
+            true,
+            false,
+        )
+        .unwrap();
+    let connection = store.conn().unwrap();
+    connection
+        .execute(
+            "INSERT INTO mcp_log (
+                audit_record_id, tool_name, arguments_encrypted, result_encrypted,
+                success, pii_found, created_at, key_epoch, payload_minimized_version
+             )
+             SELECT replace(audit_record_id, '-', ''), tool_name,
+                    arguments_encrypted, result_encrypted, success, pii_found,
+                    created_at, key_epoch, payload_minimized_version
+             FROM mcp_log WHERE tool_name = 'd068_noncanonical_replay'",
+            [],
+        )
+        .expect("the binary TEXT uniqueness index admits a noncanonical UUID spelling");
+    let record_ids = connection
+        .prepare(
+            "SELECT audit_record_id FROM mcp_log
+             WHERE tool_name = 'd068_noncanonical_replay' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(record_ids.len(), 2);
+    assert_eq!(record_ids[0].replace('-', ""), record_ids[1]);
+    assert_eq!(
+        Uuid::parse_str(&record_ids[0]).unwrap(),
+        Uuid::parse_str(&record_ids[1]).unwrap(),
+        "the two SQLite identities are one authenticated UUID"
+    );
+    drop(connection);
+
+    let before_live_reads = artifact_family(&path);
+    let live = ProductReadObservation {
+        list: store.list_logs(100).map_err(|error| error.to_string()),
+        export: store.export_logs(30).map_err(|error| error.to_string()),
+    };
+    let after_live_reads = artifact_family(&path);
+    assert!(
+        live.both_failed_closed(),
+        "a noncanonical spelling must not become a second authenticated product DTO: {live:#?}"
+    );
+    assert!(
+        live.list
+            .as_ref()
+            .unwrap_err()
+            .contains("mcp_audit_record_id_noncanonical"),
+        "live list must fail for the canonical identity invariant"
+    );
+    assert!(
+        live.export
+            .as_ref()
+            .unwrap_err()
+            .contains("mcp_audit_record_id_noncanonical"),
+        "live export must fail for the canonical identity invariant"
+    );
+    assert_eq!(
+        after_live_reads, before_live_reads,
+        "failed live reads must not rewrite the SQLite family"
+    );
+
+    drop(store);
+    let before_restart = artifact_family(&path);
+    let restarted = restart_and_observe(&path);
+    let after_restart = artifact_family(&path);
+    assert!(
+        restarted.both_failed_closed(),
+        "restart preflight must reject the same noncanonical identity"
+    );
+    assert!(
+        restarted
+            .list
+            .as_ref()
+            .unwrap_err()
+            .contains("mcp_audit_record_id_noncanonical")
+            && restarted
+                .export
+                .as_ref()
+                .unwrap_err()
+                .contains("mcp_audit_record_id_noncanonical"),
+        "restart list/export must preserve the same root-cause disposition"
+    );
+    assert_eq!(
+        after_restart, before_restart,
+        "failed restart preflight must be byte-exact and zero-write"
+    );
+}
+
+#[test]
+fn d068_distinct_canonical_record_identities_remain_live_and_restart_readable() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp_audit.db");
+    let store = create_store(&path);
+    for _ in 0..2 {
+        store
+            .insert_log(
+                "d068_canonical_identity_control",
+                &json!({"bounded": true}),
+                "bounded-result",
+                true,
+                false,
+            )
+            .unwrap();
+    }
+    let record_ids = store
+        .conn()
+        .unwrap()
+        .prepare(
+            "SELECT audit_record_id FROM mcp_log
+             WHERE tool_name = 'd068_canonical_identity_control' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(record_ids.len(), 2);
+    assert_ne!(record_ids[0], record_ids[1]);
+    for record_id in record_ids {
+        assert_eq!(Uuid::parse_str(&record_id).unwrap().to_string(), record_id);
+    }
+    assert_eq!(store.list_logs(100).unwrap().len(), 2);
+    assert_eq!(store.export_logs(30).unwrap().entry_count, 2);
+    drop(store);
+    let (logs, export) = restart_and_observe(&path).into_successes();
+    assert_eq!(logs.len(), 2);
+    assert_eq!(export.entry_count, 2);
+}
+
+#[test]
+fn d068_epoch_above_sqlite_range_is_rejected_before_create_rotate_or_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let new_path = directory.path().join("must-not-be-created.db");
+    let before_new = artifact_family(&new_path);
+    let constructor =
+        McpAuditStore::with_key_materials(&new_path, vec![material_at_epoch(u64::MAX)]);
+    assert!(
+        constructor
+            .err()
+            .expect("oversized epoch hydration is rejected")
+            .to_string()
+            .contains("mcp_audit_key_epoch_exceeds_sqlite_range"),
+        "oversized epoch must fail hydration at the representation boundary"
+    );
+    assert_eq!(
+        artifact_family(&new_path),
+        before_new,
+        "rejected hydration must not create a SQLite family"
+    );
+
+    let path = directory.path().join("existing.db");
+    let mut store = create_store(&path);
+    store
+        .insert_log(
+            "d068_epoch_control",
+            &json!({"bounded": true}),
+            "bounded-result",
+            true,
+            false,
+        )
+        .unwrap();
+    let before_existing = artifact_family(&path);
+    let original_epoch = store.key_config().epoch;
+    assert!(store
+        .rotate_key_material(material_at_epoch(u64::MAX))
+        .unwrap_err()
+        .to_string()
+        .contains("mcp_audit_key_epoch_exceeds_sqlite_range"));
+    assert_eq!(store.key_config().epoch, original_epoch);
+    assert_eq!(artifact_family(&path), before_existing);
+
+    let mut poisoned_writer = store.clone();
+    poisoned_writer.key_config.epoch = u64::MAX;
+    let write_error = poisoned_writer
+        .insert_log(
+            "d068_epoch_must_not_wrap",
+            &json!({"bounded": true}),
+            "bounded-result",
+            true,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        write_error.contains("mcp_audit_key_epoch_exceeds_sqlite_range"),
+        "write boundary must independently reject an unrepresentable epoch: {write_error}"
+    );
+    assert_eq!(
+        artifact_family(&path),
+        before_existing,
+        "rejected rotation/write must not mutate or migrate the SQLite family"
+    );
+    assert_eq!(store.list_logs(100).unwrap().len(), 1);
+
+    drop(store);
+    let before_reopen = artifact_family(&path);
+    let reopen =
+        McpAuditStore::with_key_materials(&path, vec![material(), material_at_epoch(u64::MAX)]);
+    assert!(
+        reopen
+            .err()
+            .expect("oversized epoch reopen is rejected")
+            .to_string()
+            .contains("mcp_audit_key_epoch_exceeds_sqlite_range"),
+        "oversized epoch must fail before migration"
+    );
+    let read_only_reopen = McpAuditStore::open_read_only_existing_with_key_materials(
+        &path,
+        vec![material(), material_at_epoch(u64::MAX)],
+    );
+    assert!(
+        read_only_reopen
+            .err()
+            .expect("oversized epoch read-only reopen is rejected")
+            .to_string()
+            .contains("mcp_audit_key_epoch_exceeds_sqlite_range"),
+        "read-only hydration shares the same epoch authority boundary"
+    );
+    assert_eq!(
+        artifact_family(&path),
+        before_reopen,
+        "rejected reopen must not migrate an existing database"
+    );
+}
+
+#[test]
 fn d068_valid_current_fixture_uses_the_same_authenticated_envelope_decoder() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp_audit.db");
     let store = create_store(&path);
     let (arguments_receipt, result_receipt) = legal_receipts();
-    let arguments = store
-        .d068_encrypt_current_payload_fixture_for_test(
-            "arguments",
-            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-            &arguments_receipt,
-        )
-        .unwrap();
-    let result = store
-        .d068_encrypt_current_payload_fixture_for_test(
-            "result",
-            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-            &result_receipt,
-        )
-        .unwrap();
-    insert_encrypted_row(
+    insert_current_fixture(
         &store,
         "d068_current_fixture_control",
-        &arguments,
-        &result,
+        "arguments",
+        MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+        &arguments_receipt,
+        "result",
+        MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+        &result_receipt,
         MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
     );
     drop(store);
@@ -458,40 +732,26 @@ fn d068_strict_current_decoder_rejects_every_invalid_receipt_for_list_and_export
         let path = directory.path().join("mcp_audit.db");
         let store = create_store(&path);
         let (legal_arguments, legal_result) = legal_receipts();
-        let candidate = store
-            .d068_encrypt_current_payload_fixture_for_test(
-                role,
-                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-                &invalid_receipt.to_string(),
-            )
-            .unwrap();
+        let invalid_receipt = invalid_receipt.to_string();
         let arguments = if role == "arguments" {
-            candidate.clone()
+            invalid_receipt.as_str()
         } else {
-            store
-                .d068_encrypt_current_payload_fixture_for_test(
-                    "arguments",
-                    MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-                    &legal_arguments,
-                )
-                .unwrap()
+            legal_arguments.as_str()
         };
         let result = if role == "result" {
-            candidate
+            invalid_receipt.as_str()
         } else {
-            store
-                .d068_encrypt_current_payload_fixture_for_test(
-                    "result",
-                    MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-                    &legal_result,
-                )
-                .unwrap()
+            legal_result.as_str()
         };
-        insert_encrypted_row(
+        insert_current_fixture(
             &store,
             &format!("d068_invalid_{label}"),
-            &arguments,
-            &result,
+            "arguments",
+            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+            arguments,
+            "result",
+            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+            result,
             MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
         );
         drop(store);
@@ -522,32 +782,31 @@ fn d068_corrupt_current_ciphertext_fails_list_and_export_without_rewrite() {
         let path = directory.path().join("mcp_audit.db");
         let store = create_store(&path);
         let (arguments_receipt, result_receipt) = legal_receipts();
-        let mut arguments = store
-            .d068_encrypt_current_payload_fixture_for_test(
-                "arguments",
-                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-                &arguments_receipt,
-            )
-            .unwrap();
-        let mut result = store
-            .d068_encrypt_current_payload_fixture_for_test(
-                "result",
-                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-                &result_receipt,
-            )
-            .unwrap();
+        let row_id = insert_current_fixture(
+            &store,
+            &format!("d068_current_corrupt_{corrupt_role}"),
+            "arguments",
+            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+            &arguments_receipt,
+            "result",
+            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+            &result_receipt,
+            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+        );
+        let (mut arguments, mut result) = current_ciphertexts(&store, row_id);
         if corrupt_role == "arguments" {
             arguments = flip_authenticated_ciphertext(&arguments);
         } else {
             result = flip_authenticated_ciphertext(&result);
         }
-        insert_encrypted_row(
-            &store,
-            &format!("d068_current_corrupt_{corrupt_role}"),
-            &arguments,
-            &result,
-            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
-        );
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE mcp_log SET arguments_encrypted = ?1, result_encrypted = ?2 WHERE id = ?3",
+                params![arguments, result, row_id],
+            )
+            .unwrap();
         drop(store);
         let before = artifact_family(&path);
         let observation = restart_and_observe(&path);
@@ -598,36 +857,34 @@ fn d068_envelope_role_version_and_column_swaps_fail_closed_without_rewrite() {
         } else {
             "result"
         };
-        let mut arguments = store
-            .d068_encrypt_current_payload_fixture_for_test(
-                arguments_envelope_role,
-                envelope_version,
-                &arguments_receipt,
-            )
-            .unwrap();
-        let mut result = store
-            .d068_encrypt_current_payload_fixture_for_test(
-                result_envelope_role,
-                envelope_version,
-                &result_receipt,
-            )
-            .unwrap();
-        if scenario == "swap_columns" {
-            std::mem::swap(&mut arguments, &mut result);
-        }
         let database_version =
             if matches!(scenario, "column_version" | "matching_unsupported_version") {
                 MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION + 1
             } else {
                 MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION
             };
-        insert_encrypted_row(
+        let row_id = insert_current_fixture(
             &store,
             &format!("d068_{scenario}"),
-            &arguments,
-            &result,
+            arguments_envelope_role,
+            envelope_version,
+            &arguments_receipt,
+            result_envelope_role,
+            envelope_version,
+            &result_receipt,
             database_version,
         );
+        if scenario == "swap_columns" {
+            let (arguments, result) = current_ciphertexts(&store, row_id);
+            store
+                .conn()
+                .unwrap()
+                .execute(
+                    "UPDATE mcp_log SET arguments_encrypted = ?1, result_encrypted = ?2 WHERE id = ?3",
+                    params![result, arguments, row_id],
+                )
+                .unwrap();
+        }
         drop(store);
         let before = artifact_family(&path);
         let observation = restart_and_observe(&path);
