@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 7;
+const STATE_STORE_SCHEMA_VERSION: i64 = 8;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
 const LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND: &str = "legacy_state_history_import";
@@ -164,6 +164,8 @@ pub struct StateAsset {
     pub title: String,
     pub status: DailyTaskStatus,
     pub due_at: Option<DateTime<Utc>>,
+    pub time_block_start: Option<String>,
+    pub time_block_end: Option<String>,
     pub source_message_ref: String,
     pub risk: StateRisk,
     pub sensitivity: StateSensitivity,
@@ -839,6 +841,8 @@ impl StateStore {
                 title TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'tombstoned')),
                 due_at TEXT,
+                time_block_start TEXT,
+                time_block_end TEXT,
                 source_message_ref TEXT NOT NULL,
                 risk TEXT NOT NULL CHECK(risk IN ('low')),
                 sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal')),
@@ -864,6 +868,8 @@ impl StateStore {
                 status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'tombstoned')),
                 title TEXT NOT NULL,
                 due_at TEXT,
+                time_block_start TEXT,
+                time_block_end TEXT,
                 source_message_ref TEXT NOT NULL,
                 source_kind TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -1109,8 +1115,31 @@ impl StateStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        let needs_observation_history_backfill =
-            !matches!(existing_version.as_deref(), None | Some("6") | Some("7"));
+        let needs_observation_history_backfill = !matches!(
+            existing_version.as_deref(),
+            None | Some("6") | Some("7") | Some("8")
+        );
+        if existing_version.is_some() {
+            crate::sqlite_migration::ensure_column(
+                &tx,
+                "state_assets",
+                "time_block_start",
+                "TEXT",
+            )?;
+            crate::sqlite_migration::ensure_column(&tx, "state_assets", "time_block_end", "TEXT")?;
+            crate::sqlite_migration::ensure_column(
+                &tx,
+                "state_asset_versions",
+                "time_block_start",
+                "TEXT",
+            )?;
+            crate::sqlite_migration::ensure_column(
+                &tx,
+                "state_asset_versions",
+                "time_block_end",
+                "TEXT",
+            )?;
+        }
         match existing_version.as_deref() {
             None => {
                 tx.execute(
@@ -1125,41 +1154,47 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '7'
+                     SET value = '8'
                      WHERE key = 'schema_version';",
                 )?;
             }
             Some("2") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("3") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("4") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("5") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("6") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
-            Some("7") => {}
+            Some("7") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("8") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         if needs_observation_history_backfill {
@@ -1827,10 +1862,11 @@ impl StateStore {
             tx.execute(
                 "INSERT INTO state_assets (
                     asset_id, kind, version, title, status, due_at,
+                    time_block_start, time_block_end,
                     source_message_ref, risk, sensitivity, source_kind, confidence,
                     privacy_class, created_at, updated_at, expires_at,
                     tombstoned_at, tombstone_reason
-                 ) VALUES (?1, 'daily_task', 1, ?2, 'pending', NULL, ?3,
+                 ) VALUES (?1, 'daily_task', 1, ?2, 'pending', NULL, NULL, NULL, ?3,
                            'low', 'internal', 'current_authenticated_user_message', 1.0,
                            'private', ?4, ?4, ?5, NULL, NULL)",
                 params![
@@ -1844,9 +1880,10 @@ impl StateStore {
             tx.execute(
                 "INSERT INTO state_asset_versions (
                     asset_id, version, operation_id, payload_digest, mutation_kind,
-                    status, title, due_at, source_message_ref, source_kind,
+                    status, title, due_at, time_block_start, time_block_end,
+                    source_message_ref, source_kind,
                     created_at, expires_at, tombstone_reason
-                 ) VALUES (?1, 1, ?2, ?3, 'create', 'pending', ?4, NULL, ?5,
+                 ) VALUES (?1, 1, ?2, ?3, 'create', 'pending', ?4, NULL, NULL, NULL, ?5,
                            'current_authenticated_user_message', ?6, ?7, NULL)",
                 params![
                     asset_id,
@@ -1923,10 +1960,11 @@ impl StateStore {
         tx.execute(
             "INSERT INTO state_assets (
                 asset_id, kind, version, title, status, due_at,
+                time_block_start, time_block_end,
                 source_message_ref, risk, sensitivity, source_kind, confidence,
                 privacy_class, created_at, updated_at, expires_at,
                 tombstoned_at, tombstone_reason
-             ) VALUES (?1, 'daily_task', 1, ?2, 'pending', ?3, ?4, ?5, ?6,
+             ) VALUES (?1, 'daily_task', 1, ?2, 'pending', ?3, NULL, NULL, ?4, ?5, ?6,
                        ?7, ?8, ?9, ?10, ?10, ?11, NULL, NULL)",
             params![
                 asset_id,
@@ -1945,9 +1983,11 @@ impl StateStore {
         tx.execute(
             "INSERT INTO state_asset_versions (
                 asset_id, version, operation_id, payload_digest, mutation_kind,
-                status, title, due_at, source_message_ref, source_kind,
+                status, title, due_at, time_block_start, time_block_end,
+                source_message_ref, source_kind,
                 created_at, expires_at, tombstone_reason
-             ) VALUES (?1, 1, ?2, ?3, 'create', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+             ) VALUES (?1, 1, ?2, ?3, 'create', 'pending', ?4, ?5, NULL, NULL,
+                       ?6, ?7, ?8, ?9, NULL)",
             params![
                 asset_id,
                 prepared.operation_id,
@@ -2300,9 +2340,11 @@ impl StateStore {
         tx.execute(
             "INSERT INTO state_asset_versions (
                 asset_id, version, operation_id, payload_digest, mutation_kind,
-                status, title, due_at, source_message_ref, source_kind,
+                status, title, due_at, time_block_start, time_block_end,
+                source_message_ref, source_kind,
                 created_at, expires_at, tombstone_reason
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                       ?13, ?14, ?15)",
             params![
                 prepared.asset_id,
                 i64::try_from(next_version)?,
@@ -2312,6 +2354,8 @@ impl StateStore {
                 next_status.as_str(),
                 current.title,
                 current.due_at.map(|value| value.to_rfc3339()),
+                current.time_block_start,
+                current.time_block_end,
                 prepared.source_message_ref,
                 prepared.source_kind.as_str(),
                 current.created_at.to_rfc3339(),
@@ -2372,7 +2416,8 @@ impl StateStore {
         let conn = self.lock_connection()?;
         let mut statement = conn.prepare(if include_tombstoned {
             "SELECT assets.asset_id, assets.kind, assets.version, assets.title,
-                    assets.status, assets.due_at, assets.source_message_ref,
+                    assets.status, assets.due_at, assets.time_block_start,
+                    assets.time_block_end, assets.source_message_ref,
                     assets.risk, assets.sensitivity, assets.source_kind,
                     assets.confidence, assets.privacy_class, assets.created_at,
                     assets.updated_at, assets.expires_at, assets.tombstoned_at,
@@ -2387,7 +2432,8 @@ impl StateStore {
                       assets.asset_id ASC"
         } else {
             "SELECT assets.asset_id, assets.kind, assets.version, assets.title,
-                    assets.status, assets.due_at, assets.source_message_ref,
+                    assets.status, assets.due_at, assets.time_block_start,
+                    assets.time_block_end, assets.source_message_ref,
                     assets.risk, assets.sensitivity, assets.source_kind,
                     assets.confidence, assets.privacy_class, assets.created_at,
                     assets.updated_at, assets.expires_at, assets.tombstoned_at,
@@ -3457,7 +3503,8 @@ fn observation_operation_receipt(
 fn load_asset(conn: &Connection, asset_id: &str) -> Result<Option<StateAsset>> {
     conn.query_row(
         "SELECT asset_id, kind, version, title, status, due_at,
-                source_message_ref, risk, sensitivity, source_kind, confidence,
+                time_block_start, time_block_end, source_message_ref,
+                risk, sensitivity, source_kind, confidence,
                 privacy_class, created_at, updated_at, expires_at,
                 tombstoned_at, tombstone_reason
          FROM state_assets WHERE asset_id = ?1",
@@ -3514,7 +3561,7 @@ fn state_observation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<State
 
 fn state_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateAsset> {
     let version = row.get::<_, i64>(2)?;
-    let confidence = row.get::<_, f64>(10)?;
+    let confidence = row.get::<_, f64>(12)?;
     Ok(StateAsset {
         asset_id: row.get(0)?,
         kind: parse_asset_kind_sql(&row.get::<_, String>(1)?)?,
@@ -3522,18 +3569,20 @@ fn state_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateAsset>
         title: row.get(3)?,
         status: parse_task_status_sql(&row.get::<_, String>(4)?)?,
         due_at: parse_optional_time_sql(row.get::<_, Option<String>>(5)?)?,
-        source_message_ref: row.get(6)?,
-        risk: parse_risk_sql(&row.get::<_, String>(7)?)?,
-        sensitivity: parse_sensitivity_sql(&row.get::<_, String>(8)?)?,
-        source_kind: parse_source_kind_sql(&row.get::<_, String>(9)?)?,
+        time_block_start: row.get(6)?,
+        time_block_end: row.get(7)?,
+        source_message_ref: row.get(8)?,
+        risk: parse_risk_sql(&row.get::<_, String>(9)?)?,
+        sensitivity: parse_sensitivity_sql(&row.get::<_, String>(10)?)?,
+        source_kind: parse_source_kind_sql(&row.get::<_, String>(11)?)?,
         confidence: confidence as f32,
-        privacy_class: parse_privacy_sql(&row.get::<_, String>(11)?)?,
-        created_at: parse_time_sql(row.get::<_, String>(12)?)?,
-        updated_at: parse_time_sql(row.get::<_, String>(13)?)?,
-        expires_at: parse_time_sql(row.get::<_, String>(14)?)?,
-        tombstoned_at: parse_optional_time_sql(row.get::<_, Option<String>>(15)?)?,
+        privacy_class: parse_privacy_sql(&row.get::<_, String>(13)?)?,
+        created_at: parse_time_sql(row.get::<_, String>(14)?)?,
+        updated_at: parse_time_sql(row.get::<_, String>(15)?)?,
+        expires_at: parse_time_sql(row.get::<_, String>(16)?)?,
+        tombstoned_at: parse_optional_time_sql(row.get::<_, Option<String>>(17)?)?,
         tombstone_reason: row
-            .get::<_, Option<String>>(16)?
+            .get::<_, Option<String>>(18)?
             .map(|value| parse_mutation_kind_sql(&value))
             .transpose()?,
     })
@@ -5440,7 +5489,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert!(request_digest_column_exists);
     }
 
@@ -5481,7 +5530,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert_eq!(
             tables,
             [
@@ -5528,7 +5577,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert_eq!(
             tables,
             [
@@ -5577,7 +5626,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert_eq!(
             tables,
             [
@@ -5632,7 +5681,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert_eq!(stored_operation, operation_id);
     }
 
@@ -5669,8 +5718,66 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert_eq!(table_exists, 1);
+    }
+
+    #[test]
+    fn schema_v7_adds_lossless_daily_task_time_block_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v7.db");
+        {
+            let store = StateStore::new(&path).unwrap();
+            let conn = store.lock_connection().unwrap();
+            conn.execute("ALTER TABLE state_assets DROP COLUMN time_block_start", [])
+                .unwrap();
+            conn.execute("ALTER TABLE state_assets DROP COLUMN time_block_end", [])
+                .unwrap();
+            conn.execute(
+                "ALTER TABLE state_asset_versions DROP COLUMN time_block_start",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "ALTER TABLE state_asset_versions DROP COLUMN time_block_end",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let restarted = StateStore::new(&path).unwrap();
+        let conn = restarted.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let asset_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('state_assets')
+                 WHERE name IN ('time_block_start', 'time_block_end')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let version_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('state_asset_versions')
+                 WHERE name IN ('time_block_start', 'time_block_end')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "8");
+        assert_eq!(asset_columns, 2);
+        assert_eq!(version_columns, 2);
     }
 
     #[test]

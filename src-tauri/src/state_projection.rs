@@ -9,7 +9,7 @@ use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerPurpose,
 };
 use crate::AppState;
-use openlife_core::life_model::{DailyGoal, LifeModel};
+use openlife_core::life_model::{DailyGoal, LifeModel, TimeBlock};
 use openlife_core::state_store::{
     DailyTaskStatus, LegacyDailyTaskShadowCandidate, LegacyDailyTaskShadowReceipt,
     LegacyStateHistoryShadowCandidate, LegacyStateHistoryShadowReceipt, StateProjectionStatus,
@@ -40,7 +40,7 @@ pub(crate) fn projected_daily_goal(asset: &openlife_core::state_store::StateAsse
         DailyTaskStatus::Tombstoned => "tombstoned",
     };
     let digest = openlife_core::persistence_outbox::metadata_digest(&format!(
-        "{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}",
         asset.asset_id,
         asset.version,
         status,
@@ -48,12 +48,21 @@ pub(crate) fn projected_daily_goal(asset: &openlife_core::state_store::StateAsse
             .due_at
             .map(|value| value.to_rfc3339())
             .unwrap_or_default(),
+        asset.time_block_start.as_deref().unwrap_or_default(),
+        asset.time_block_end.as_deref().unwrap_or_default(),
         asset.title,
     ));
     DailyGoal {
         name: asset.title.clone(),
         done: asset.status == DailyTaskStatus::Completed,
-        time_block: None,
+        time_block: asset
+            .time_block_start
+            .as_ref()
+            .zip(asset.time_block_end.as_ref())
+            .map(|(start, end)| TimeBlock {
+                start: start.clone(),
+                end: end.clone(),
+            }),
         due_at: asset.due_at.map(|value| value.to_rfc3339()),
         operation_id: Some(asset.asset_id.clone()),
         operation_digest: Some(format!("{STATE_ASSET_PROJECTION_DIGEST_PREFIX}{digest}")),
