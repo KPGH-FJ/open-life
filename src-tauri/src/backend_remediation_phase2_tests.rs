@@ -2794,6 +2794,62 @@ async fn cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact() 
 
     release_hanging_request.notify_waiters();
     let _ = tokio::time::timeout(Duration::from_secs(1), provider_server).await;
+
+    let next_turn_provider_requests =
+        configure_live_provider_eval_state_with_captured_local_http_provider(
+            &state,
+            "next turn uses a fresh provider proof scope",
+        )
+        .await;
+    let next_turn = crate::main_chat_send::send_message_with_state(
+        "phase2-provider-proof-scope-next-turn".into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: "Reply with the configured provider response.".into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("next turn completes with a fresh provider proof scope");
+    assert_eq!(
+        next_turn.reply,
+        "next turn uses a fresh provider proof scope"
+    );
+    assert_eq!(
+        next_turn_provider_requests
+            .lock()
+            .expect("read next-turn provider request capture")
+            .len(),
+        1
+    );
+    let next_task_session_id = next_turn
+        .agent_ingress
+        .as_ref()
+        .and_then(|decision| decision.agent_task_session_id.as_deref())
+        .expect("next turn owns one canonical task session");
+    let next_turn_provider_events =
+        crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+            &state,
+            next_task_session_id.to_string(),
+            None,
+            Some(100),
+        )
+        .await
+        .expect("list next-turn provider facts")
+        .into_iter()
+        .filter(|event| event.event_type.starts_with("provider."))
+        .collect::<Vec<_>>();
+    assert!(
+        !next_turn_provider_events.is_empty(),
+        "the next turn must persist its own provider lifecycle"
+    );
+    assert!(
+        next_turn_provider_events
+            .iter()
+            .all(|event| !started_ids.contains(&event.object_id)),
+        "a fresh turn must not inherit provider receipts from the cancelled turn"
+    );
 }
 
 #[tokio::test]
