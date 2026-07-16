@@ -563,6 +563,7 @@ pub struct MemoryRollbackReport {
     pub projection_error_digest: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct MemoryLifecycleStore {
     conn: Arc<Mutex<Connection>>,
 }
@@ -2127,6 +2128,32 @@ fn lifecycle_retrieval_state_from_row(
 }
 
 impl MemoryLifecycleAcceptanceInput {
+    pub fn from_memory_proposal_with_terminal_origin(
+        proposal: &AgentProposal,
+        content: String,
+        task_session_id: &str,
+        run_id: &str,
+        canonical_user_message_ref: &str,
+        canonical_user_message_digest: &str,
+    ) -> Result<Self> {
+        let mut input = Self::from_memory_proposal(proposal, content)?;
+        if task_session_id.trim().is_empty()
+            || run_id.trim().is_empty()
+            || canonical_user_message_ref.trim().is_empty()
+            || canonical_user_message_digest.trim().is_empty()
+        {
+            anyhow::bail!("terminal owner Memory origin is incomplete");
+        }
+        input.source_task_session_id = Some(task_session_id.to_string());
+        input.source_run_id = Some(run_id.to_string());
+        input.evidence_ids = vec![
+            proposal.id.clone(),
+            canonical_user_message_ref.to_string(),
+            canonical_user_message_digest.to_string(),
+        ];
+        Ok(input)
+    }
+
     pub fn from_memory_proposal(proposal: &AgentProposal, content: String) -> Result<Self> {
         let reviewed_content = proposal
             .after

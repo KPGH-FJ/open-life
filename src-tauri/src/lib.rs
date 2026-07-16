@@ -72,6 +72,7 @@ pub(crate) mod secret_store;
 pub mod state;
 pub(crate) mod state_projection;
 pub mod storage;
+pub(crate) mod terminal_owner_write_gateway;
 pub(crate) mod tool_gateway_resources;
 pub(crate) mod workspace_file_resolver;
 

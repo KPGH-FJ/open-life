@@ -2875,6 +2875,56 @@ async fn accept_proposal_with_state_and_confirmation(
             proposal.proposal_type
         ));
     }
+    let terminal_owner_origin = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .terminal_owner_origin_binding(&proposal_id)
+            .map_err(|error| error.to_string())?
+    };
+    if let Some(origin) = terminal_owner_origin.as_ref() {
+        let epoch_state = {
+            let event_store = state
+                .main_chat_agent_event_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                .lock()
+                .await;
+            let epoch = event_store
+                .terminal_owner_epoch(origin.task_session_id())
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "terminal_owner_epoch_missing".to_string())?;
+            if epoch.run_id() != origin.run_id() {
+                return Err("terminal_owner_epoch_run_mismatch".to_string());
+            }
+            epoch.state()
+        };
+        if matches!(
+            epoch_state,
+            crate::main_chat_event_stream::TerminalOwnerSealState::Open
+                | crate::main_chat_event_stream::TerminalOwnerSealState::Sealing
+        ) {
+            let reason_code = match epoch_state {
+                crate::main_chat_event_stream::TerminalOwnerSealState::Open => "origin_turn_open",
+                crate::main_chat_event_stream::TerminalOwnerSealState::Sealing => {
+                    "origin_turn_sealing"
+                }
+                crate::main_chat_event_stream::TerminalOwnerSealState::Sealed => unreachable!(),
+            };
+            return Ok(serde_json::json!({
+                "success": false,
+                "status": "deferred",
+                "reasonCode": reason_code,
+                "proposalId": proposal_id,
+                "dispatchState": "unclaimed",
+                "durableWriteExecuted": false,
+            }));
+        }
+    }
     let dispatch_claim_id = {
         let store = state
             .proposal_store
@@ -2939,6 +2989,68 @@ async fn accept_proposal_with_state_and_confirmation(
             ));
         }
     };
+    if terminal_owner_origin.is_some() && proposal.proposal_type == ProposalType::MemoryWrite {
+        let event_store = {
+            state
+                .main_chat_agent_event_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                .lock()
+                .await
+                .clone()
+        };
+        let task_store = {
+            state
+                .main_chat_agent_session_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+                .lock()
+                .await
+                .clone()
+        };
+        let proposal_store = {
+            state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(proposal_store_missing)?
+                .lock()
+                .await
+                .clone()
+        };
+        let memory_store = {
+            state
+                .memory_lifecycle_store
+                .as_ref()
+                .ok_or_else(memory_lifecycle_store_missing)?
+                .lock()
+                .await
+                .clone()
+        };
+        let transition = crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::new(
+            &event_store,
+            &task_store,
+            &proposal_store,
+            &memory_store,
+        )
+        .apply_claimed_review_acceptance(review_acceptance)
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok(serde_json::json!({
+            "success": true,
+            "effect_status": "confirmed",
+            "proposal_projection_status": "confirmed",
+            "proposalId": proposal.id,
+            "terminalOwnerTransition": {
+                "beforeOwnerRevision": transition.before_owner_revision,
+                "afterOwnerRevision": transition.after_owner_revision,
+                "beforeOwnerDigest": transition.before_owner_digest,
+                "afterOwnerDigest": transition.after_owner_digest,
+                "localTransitionReceiptRef": transition.local_transition_receipt_ref,
+                "localTransitionReceiptDigest": transition.local_transition_receipt_digest,
+                "successorEventId": transition.successor_event_id,
+            },
+        }));
+    }
     let (result, artifact_materialization) = if proposal.proposal_type
         == ProposalType::ExternalWriteAction
     {
@@ -3178,45 +3290,6 @@ fn proposal_type_resolves_main_chat_review_blocker(proposal_type: ProposalType) 
     )
 }
 
-fn collect_main_chat_task_session_ids_from_proposal(proposal: &AgentProposal) -> Vec<String> {
-    let mut ids = Vec::new();
-    if let Some(task_session_id) = proposal
-        .after
-        .get("originatingTaskSessionId")
-        .or_else(|| proposal.after.get("originating_task_session_id"))
-        .and_then(Value::as_str)
-    {
-        push_main_chat_task_session_id(&mut ids, task_session_id);
-    }
-    if let Some(source_detail) = proposal.source_detail.as_deref() {
-        for segment in source_detail.split(';') {
-            if let Some(task_session_id) =
-                segment.trim().strip_prefix("main_chat_agent_task_session:")
-            {
-                push_main_chat_task_session_id(&mut ids, task_session_id);
-            } else {
-                push_main_chat_task_session_id(&mut ids, segment.trim());
-            }
-        }
-    }
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-fn push_main_chat_task_session_id(ids: &mut Vec<String>, value: &str) {
-    let trimmed = value.trim();
-    let historical_id = trimmed.starts_with("mainchat_task_")
-        && !trimmed
-            .chars()
-            .any(|ch| ch.is_control() || ch.is_whitespace());
-    let current_uuid =
-        uuid::Uuid::parse_str(trimmed).is_ok_and(|parsed| parsed.get_version_num() == 4);
-    if historical_id || current_uuid {
-        ids.push(trimmed.to_string());
-    }
-}
-
 async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -3224,10 +3297,19 @@ async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     if !proposal_type_resolves_main_chat_review_blocker(proposal.proposal_type) {
         return Vec::new();
     }
-    let task_session_ids = collect_main_chat_task_session_ids_from_proposal(proposal);
-    if task_session_ids.is_empty() {
+    let origin = match state.proposal_store.as_ref() {
+        Some(store) => store
+            .lock()
+            .await
+            .terminal_owner_origin_binding(&proposal.id)
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let Some(origin) = origin else {
         return Vec::new();
-    }
+    };
+    let task_session_ids = vec![origin.task_session_id().to_string()];
     let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
         return Vec::new();
     };

@@ -54,6 +54,52 @@ pub struct ArtifactEffectRecord {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalOwnerOriginBinding {
+    proposal_id: String,
+    task_session_id: String,
+    run_id: String,
+    epoch_id: String,
+    epoch_generation: u64,
+    admission_id: String,
+    canonical_user_message_ref: String,
+    canonical_user_message_digest: String,
+}
+
+impl TerminalOwnerOriginBinding {
+    pub fn proposal_id(&self) -> &str {
+        &self.proposal_id
+    }
+
+    pub fn task_session_id(&self) -> &str {
+        &self.task_session_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
+    }
+
+    pub fn epoch_generation(&self) -> u64 {
+        self.epoch_generation
+    }
+
+    pub fn admission_id(&self) -> &str {
+        &self.admission_id
+    }
+
+    pub fn canonical_user_message_ref(&self) -> &str {
+        &self.canonical_user_message_ref
+    }
+
+    pub fn canonical_user_message_digest(&self) -> &str {
+        &self.canonical_user_message_digest
+    }
+}
+
 #[derive(Clone)]
 pub struct ProposalStore {
     conn: Arc<Mutex<Connection>>,
@@ -188,7 +234,24 @@ impl ProposalStore {
              ON artifact_effects(state, updated_at, proposal_id)",
             [],
         )?;
-        crate::sqlite_migration::record_schema_version(&tx, "proposal_store", 7)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS proposal_terminal_owner_origins (
+                proposal_id TEXT PRIMARY KEY,
+                task_session_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                epoch_id TEXT NOT NULL,
+                epoch_generation INTEGER NOT NULL CHECK(epoch_generation > 0),
+                admission_id TEXT NOT NULL,
+                canonical_user_message_ref TEXT NOT NULL,
+                canonical_user_message_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(epoch_id, proposal_id),
+                FOREIGN KEY(proposal_id) REFERENCES proposals(id)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS idx_proposal_terminal_owner_origin_task
+             ON proposal_terminal_owner_origins(task_session_id, run_id, epoch_generation);",
+        )?;
+        crate::sqlite_migration::record_schema_version(&tx, "proposal_store", 8)?;
         tx.commit()?;
         Ok(())
     }
@@ -302,6 +365,222 @@ impl ProposalStore {
         )?;
         tx.commit()?;
         Ok((proposal.clone(), true))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_or_reuse_active_review_proposal_with_terminal_origin(
+        &self,
+        proposal: &AgentProposal,
+        review_idempotency_key: &str,
+        task_session_id: &str,
+        run_id: &str,
+        epoch_id: &str,
+        epoch_generation: u64,
+        admission_id: &str,
+        canonical_user_message_ref: &str,
+        canonical_user_message_digest: &str,
+    ) -> Result<(AgentProposal, bool)> {
+        let review_idempotency_key = review_idempotency_key.trim();
+        if review_idempotency_key.is_empty()
+            || review_idempotency_key.len() > 512
+            || task_session_id.trim().is_empty()
+            || run_id.trim().is_empty()
+            || epoch_id.trim().is_empty()
+            || epoch_generation == 0
+            || admission_id.trim().is_empty()
+            || canonical_user_message_ref.trim().is_empty()
+            || canonical_user_message_digest.trim().is_empty()
+        {
+            anyhow::bail!("terminal owner review origin is invalid");
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, run_id, proposal_type, source, source_detail, base_hash,
+                        affected_path, before_json, after_json, reason, confidence,
+                        risk_level, status, created_at, resolved_at, expires_at
+                 FROM proposals
+                 WHERE review_idempotency_key = ?1
+                   AND status IN ('pending', 'postponed', 'edited')
+                 LIMIT 1",
+                [review_idempotency_key],
+                Self::row_to_proposal,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let origin = terminal_owner_origin_binding_from_conn(&tx, &existing.id)?
+                .context("terminal owner proposal lost its immutable origin")?;
+            if origin.task_session_id != task_session_id
+                || origin.run_id != run_id
+                || origin.epoch_id != epoch_id
+                || origin.epoch_generation != epoch_generation
+                || origin.admission_id != admission_id
+                || origin.canonical_user_message_ref != canonical_user_message_ref
+                || origin.canonical_user_message_digest != canonical_user_message_digest
+            {
+                anyhow::bail!("terminal owner proposal origin replay mismatch");
+            }
+            tx.commit()?;
+            return Ok((existing, false));
+        }
+
+        tx.execute(
+            "INSERT INTO proposals (
+                id, run_id, proposal_type, source, source_detail, base_hash,
+                affected_path, before_json, after_json, reason, confidence,
+                risk_level, status, created_at, resolved_at, expires_at,
+                review_idempotency_key
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17
+             )",
+            params![
+                proposal.id,
+                proposal.run_id.as_ref(),
+                proposal.proposal_type.to_string(),
+                proposal.source,
+                proposal.source_detail.as_ref(),
+                proposal.base_hash.as_ref(),
+                proposal.affected_path,
+                proposal
+                    .before
+                    .as_ref()
+                    .map(|before| serde_json::to_string(before).unwrap_or_default()),
+                serde_json::to_string(&proposal.after).unwrap_or_default(),
+                proposal.reason,
+                proposal.confidence,
+                proposal.risk_level.to_string(),
+                proposal.status.to_string(),
+                proposal.created_at.to_rfc3339(),
+                proposal.resolved_at.map(|time| time.to_rfc3339()),
+                proposal.expires_at.map(|time| time.to_rfc3339()),
+                review_idempotency_key,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO proposal_terminal_owner_origins (
+                proposal_id, task_session_id, run_id, epoch_id, epoch_generation,
+                admission_id, canonical_user_message_ref,
+                canonical_user_message_digest, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                proposal.id,
+                task_session_id,
+                run_id,
+                epoch_id,
+                i64::try_from(epoch_generation)?,
+                admission_id,
+                canonical_user_message_ref,
+                canonical_user_message_digest,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok((proposal.clone(), true))
+    }
+
+    pub fn terminal_owner_origin_binding(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<TerminalOwnerOriginBinding>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        terminal_owner_origin_binding_from_conn(&conn, proposal_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_existing_review_proposal_terminal_origin(
+        &self,
+        proposal_id: &str,
+        task_session_id: &str,
+        run_id: &str,
+        epoch_id: &str,
+        epoch_generation: u64,
+        admission_id: &str,
+        canonical_user_message_ref: &str,
+        canonical_user_message_digest: &str,
+    ) -> Result<AgentProposal> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = terminal_owner_origin_binding_from_conn(&tx, proposal_id)? {
+            if existing.task_session_id != task_session_id
+                || existing.run_id != run_id
+                || existing.epoch_id != epoch_id
+                || existing.epoch_generation != epoch_generation
+                || existing.admission_id != admission_id
+                || existing.canonical_user_message_ref != canonical_user_message_ref
+                || existing.canonical_user_message_digest != canonical_user_message_digest
+            {
+                anyhow::bail!("terminal owner proposal origin rebind forbidden");
+            }
+            let proposal = tx
+                .query_row(
+                    "SELECT id, run_id, proposal_type, source, source_detail, base_hash,
+                            affected_path, before_json, after_json, reason, confidence,
+                            risk_level, status, created_at, resolved_at, expires_at
+                     FROM proposals WHERE id = ?1",
+                    [proposal_id],
+                    Self::row_to_proposal,
+                )
+                .optional()?
+                .context("terminal owner proposal missing")?;
+            tx.commit()?;
+            return Ok(proposal);
+        }
+        let mut proposal = tx
+            .query_row(
+                "SELECT id, run_id, proposal_type, source, source_detail, base_hash,
+                        affected_path, before_json, after_json, reason, confidence,
+                        risk_level, status, created_at, resolved_at, expires_at
+                 FROM proposals
+                 WHERE id = ?1
+                   AND status IN ('pending', 'postponed', 'edited')
+                   AND dispatch_state = 'unclaimed'",
+                [proposal_id],
+                Self::row_to_proposal,
+            )
+            .optional()?
+            .context("terminal owner proposal is not bindable")?;
+        proposal.run_id = None;
+        proposal.source_detail = None;
+        if let Some(after) = proposal.after.as_object_mut() {
+            after.remove("originatingTaskSessionId");
+            after.remove("originating_task_session_id");
+        }
+        tx.execute(
+            "UPDATE proposals SET run_id = NULL, source_detail = NULL, after_json = ?2
+             WHERE id = ?1 AND dispatch_state = 'unclaimed'",
+            params![proposal_id, serde_json::to_string(&proposal.after)?],
+        )?;
+        tx.execute(
+            "INSERT INTO proposal_terminal_owner_origins (
+                proposal_id, task_session_id, run_id, epoch_id, epoch_generation,
+                admission_id, canonical_user_message_ref,
+                canonical_user_message_digest, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                proposal_id,
+                task_session_id,
+                run_id,
+                epoch_id,
+                i64::try_from(epoch_generation)?,
+                admission_id,
+                canonical_user_message_ref,
+                canonical_user_message_digest,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(proposal)
     }
 
     pub(crate) fn update_active_review_proposal(
@@ -1039,6 +1318,56 @@ impl ProposalStore {
             .map_err(Into::into)
     }
 
+    pub fn dispatch_claim_id(&self, proposal_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.query_row(
+            "SELECT dispatch_claim_id FROM proposals WHERE id = ?1",
+            [proposal_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(Into::into)
+    }
+
+    pub fn list_terminal_owner_reconciliation_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(AgentProposal, String, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut statement = conn.prepare(
+            "SELECT proposal.id, proposal.run_id, proposal.proposal_type,
+                    proposal.source, proposal.source_detail, proposal.base_hash,
+                    proposal.affected_path, proposal.before_json, proposal.after_json,
+                    proposal.reason, proposal.confidence, proposal.risk_level,
+                    proposal.status, proposal.created_at, proposal.resolved_at,
+                    proposal.expires_at, proposal.dispatch_claim_id,
+                    proposal.dispatch_state
+             FROM proposals proposal
+             INNER JOIN proposal_terminal_owner_origins origin
+                ON origin.proposal_id = proposal.id
+             WHERE proposal.dispatch_claim_id IS NOT NULL
+               AND proposal.dispatch_state IN ('claimed', 'confirmed_projection_pending')
+             ORDER BY proposal.dispatch_claimed_at ASC, proposal.id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit.clamp(1, 250))?], |row| {
+            Ok((
+                Self::row_to_proposal(row)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, String>(17)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Reload the exact Proposal snapshot only while the supplied acceptance
     /// dispatch claim is the canonical owner. This is the mechanical bridge
     /// used by ReviewWorkflow to issue a non-serializable acceptance proof;
@@ -1059,7 +1388,8 @@ impl ProposalStore {
                     risk_level, status, created_at, resolved_at, expires_at,
                     dispatch_snapshot_digest
              FROM proposals
-             WHERE id = ?1 AND dispatch_claim_id = ?2 AND dispatch_state = 'claimed'
+             WHERE id = ?1 AND dispatch_claim_id = ?2
+               AND dispatch_state IN ('claimed', 'confirmed_projection_pending')
                AND dispatch_snapshot_digest IS NOT NULL",
         )?;
         statement
@@ -1469,6 +1799,57 @@ impl ProposalStore {
             expires_at,
         })
     }
+}
+
+fn terminal_owner_origin_binding_from_conn(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Option<TerminalOwnerOriginBinding>> {
+    let row = conn
+        .query_row(
+            "SELECT proposal_id, task_session_id, run_id, epoch_id,
+                    epoch_generation, admission_id, canonical_user_message_ref,
+                    canonical_user_message_digest
+             FROM proposal_terminal_owner_origins WHERE proposal_id = ?1",
+            [proposal_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        proposal_id,
+        task_session_id,
+        run_id,
+        epoch_id,
+        epoch_generation,
+        admission_id,
+        canonical_user_message_ref,
+        canonical_user_message_digest,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TerminalOwnerOriginBinding {
+        proposal_id,
+        task_session_id,
+        run_id,
+        epoch_id,
+        epoch_generation: u64::try_from(epoch_generation)
+            .context("terminal owner epoch generation is negative")?,
+        admission_id,
+        canonical_user_message_ref,
+        canonical_user_message_digest,
+    }))
 }
 
 #[cfg(test)]

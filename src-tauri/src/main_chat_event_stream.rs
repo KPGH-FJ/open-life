@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use openlife_core::agent::main_chat_runtime_contract::{
@@ -55,6 +55,106 @@ pub(crate) struct MainChatTurnLifecycleSnapshot {
     pub(crate) latest_sequence: u64,
     pub(crate) bound_run_id: Option<String>,
     pub(crate) lifecycle_event: Option<MainChatAgentDurableEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalOwnerSealState {
+    Open,
+    Sealing,
+    Sealed,
+}
+
+impl TerminalOwnerSealState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Sealing => "sealing",
+            Self::Sealed => "sealed",
+        }
+    }
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "open" => Ok(Self::Open),
+            "sealing" => Ok(Self::Sealing),
+            "sealed" => Ok(Self::Sealed),
+            _ => anyhow::bail!("terminal_owner_epoch_state_invalid"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalOwnerEpoch {
+    epoch_id: String,
+    task_session_id: String,
+    run_id: String,
+    generation: u64,
+    state: TerminalOwnerSealState,
+    canonical_user_message_ref: String,
+    canonical_user_message_digest: String,
+    final_event_id: Option<String>,
+    final_event_payload_digest: Option<String>,
+    replayed: bool,
+    review_origin: Option<openlife_core::agent::TerminalOwnerReviewOriginProof>,
+}
+
+impl TerminalOwnerEpoch {
+    pub(crate) fn epoch_id(&self) -> &str {
+        &self.epoch_id
+    }
+
+    pub(crate) fn task_session_id(&self) -> &str {
+        &self.task_session_id
+    }
+
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn state(&self) -> TerminalOwnerSealState {
+        self.state
+    }
+
+    pub(crate) fn canonical_user_message_ref(&self) -> &str {
+        &self.canonical_user_message_ref
+    }
+
+    pub(crate) fn canonical_user_message_digest(&self) -> &str {
+        &self.canonical_user_message_digest
+    }
+
+    pub(crate) fn final_event_id(&self) -> Option<&str> {
+        self.final_event_id.as_deref()
+    }
+
+    pub(crate) fn final_event_payload_digest(&self) -> Option<&str> {
+        self.final_event_payload_digest.as_deref()
+    }
+
+    pub(crate) fn replayed(&self) -> bool {
+        self.replayed
+    }
+
+    pub(crate) fn review_origin_proof(
+        &self,
+    ) -> Option<openlife_core::agent::TerminalOwnerReviewOriginProof> {
+        self.review_origin.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MainChatTerminalFinalizationInput {
+    pub(crate) task_session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) epoch_generation: u64,
+    pub(crate) delivery_id: String,
+    pub(crate) expected_task_owner_revision: u64,
+    pub(crate) expected_task_owner_digest: String,
+    pub(crate) status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,9 +400,16 @@ impl MainChatAgentRuntimeEventInput {
     }
 }
 
+#[derive(Clone)]
 pub struct MainChatAgentEventStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     digest_key: Arc<MainChatEventDigestKey>,
+}
+
+#[cfg(test)]
+fn terminal_final_seal_failpoints() -> &'static Mutex<std::collections::HashSet<String>> {
+    static FAILPOINTS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    FAILPOINTS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -541,9 +648,9 @@ impl MainChatAgentEventStore {
             std::fs::create_dir_all(parent)?;
         }
         let store = Self {
-            conn: Mutex::new(Connection::open(&db_path).with_context(|| {
-                format!("failed to open main chat agent event db at {:?}", db_path)
-            })?),
+            conn: Arc::new(Mutex::new(Connection::open(&db_path).with_context(
+                || format!("failed to open main chat agent event db at {:?}", db_path),
+            )?)),
             digest_key: Arc::new(digest_key),
         };
         store.configure_connection()?;
@@ -553,10 +660,10 @@ impl MainChatAgentEventStore {
 
     pub(crate) fn new_in_memory() -> Result<Self> {
         let store = Self {
-            conn: Mutex::new(
+            conn: Arc::new(Mutex::new(
                 Connection::open_in_memory()
                     .context("failed to open in-memory main chat agent event db")?,
-            ),
+            )),
             digest_key: Arc::new(MainChatEventDigestKey::random()?),
         };
         store.configure_connection()?;
@@ -584,6 +691,388 @@ impl MainChatAgentEventStore {
         )?;
         transaction.rollback()?;
         Ok(())
+    }
+
+    pub(crate) fn open_terminal_owner_epoch_from_admission(
+        &self,
+        admission: openlife_core::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission,
+    ) -> Result<TerminalOwnerEpoch> {
+        admission.validate()?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = select_terminal_owner_epoch(&tx, admission.task_session_id())?;
+        if let Some(mut existing) = existing {
+            let stored_admission_id = tx.query_row(
+                "SELECT admission_id FROM terminal_owner_epochs WHERE epoch_id = ?1",
+                [&existing.epoch_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            if existing.run_id != admission.run_id()
+                || stored_admission_id != admission.admission_id()
+                || existing.canonical_user_message_ref != admission.canonical_user_message_ref()
+                || existing.canonical_user_message_digest
+                    != admission.canonical_user_message_digest()
+            {
+                anyhow::bail!("terminal_owner_epoch_admission_conflict");
+            }
+            existing.replayed = true;
+            existing.review_origin = Some(
+                openlife_core::agent::TerminalOwnerReviewOriginProof::from_epoch_admission(
+                    &admission,
+                    &existing.epoch_id,
+                    existing.generation,
+                )?,
+            );
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let epoch_id = format!("terminal-epoch:{}", uuid::Uuid::new_v4());
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO terminal_owner_epochs (
+                epoch_id, task_session_id, run_id, generation, state, admission_id,
+                canonical_user_message_ref, canonical_user_message_digest,
+                canonical_store_identity, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 1, 'open', ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                epoch_id,
+                admission.task_session_id(),
+                admission.run_id(),
+                admission.admission_id(),
+                admission.canonical_user_message_ref(),
+                admission.canonical_user_message_digest(),
+                admission.canonical_store_identity(),
+                now,
+            ],
+        )?;
+        let review_origin =
+            openlife_core::agent::TerminalOwnerReviewOriginProof::from_epoch_admission(
+                &admission, &epoch_id, 1,
+            )?;
+        tx.commit()?;
+        Ok(TerminalOwnerEpoch {
+            epoch_id,
+            task_session_id: admission.task_session_id().to_string(),
+            run_id: admission.run_id().to_string(),
+            generation: 1,
+            state: TerminalOwnerSealState::Open,
+            canonical_user_message_ref: admission.canonical_user_message_ref().to_string(),
+            canonical_user_message_digest: admission.canonical_user_message_digest().to_string(),
+            final_event_id: None,
+            final_event_payload_digest: None,
+            replayed: false,
+            review_origin: Some(review_origin),
+        })
+    }
+
+    pub(crate) fn terminal_owner_epoch(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<TerminalOwnerEpoch>> {
+        let conn = self.lock_conn()?;
+        select_terminal_owner_epoch(&conn, task_session_id)
+    }
+
+    pub(crate) fn begin_terminal_owner_seal(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        generation: u64,
+    ) -> Result<TerminalOwnerEpoch> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut epoch = select_terminal_owner_epoch(&tx, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != run_id || epoch.generation != generation {
+            anyhow::bail!("terminal_owner_epoch_identity_mismatch");
+        }
+        match epoch.state {
+            TerminalOwnerSealState::Open => {
+                let changed = tx.execute(
+                    "UPDATE terminal_owner_epochs
+                     SET state = 'sealing', updated_at = ?4
+                     WHERE task_session_id = ?1 AND run_id = ?2
+                       AND generation = ?3 AND state = 'open'",
+                    params![
+                        task_session_id,
+                        run_id,
+                        i64::try_from(generation)?,
+                        Utc::now().to_rfc3339(),
+                    ],
+                )?;
+                if changed != 1 {
+                    anyhow::bail!("terminal_owner_epoch_seal_cas_lost");
+                }
+                epoch.state = TerminalOwnerSealState::Sealing;
+            }
+            TerminalOwnerSealState::Sealing | TerminalOwnerSealState::Sealed => {}
+        }
+        tx.commit()?;
+        Ok(epoch)
+    }
+
+    pub(crate) fn stage_terminal_final_payload(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        generation: u64,
+        delivery_id: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        let payload_json = serde_json::to_string(payload)?;
+        let payload_digest = metadata_safe_digest(&payload_json);
+        let conn = self.lock_conn()?;
+        let epoch = select_terminal_owner_epoch(&conn, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != run_id
+            || epoch.generation != generation
+            || epoch.state != TerminalOwnerSealState::Sealing
+        {
+            anyhow::bail!("terminal_owner_final_payload_not_sealing");
+        }
+        let changed = conn.execute(
+            "INSERT INTO terminal_owner_final_payloads (
+                epoch_id, delivery_id, payload_json, payload_digest, staged_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(epoch_id) DO UPDATE SET
+                delivery_id = excluded.delivery_id,
+                payload_json = excluded.payload_json,
+                payload_digest = excluded.payload_digest,
+                staged_at = excluded.staged_at
+             WHERE terminal_owner_final_payloads.delivery_id = excluded.delivery_id
+               AND terminal_owner_final_payloads.payload_digest = excluded.payload_digest",
+            params![
+                epoch.epoch_id,
+                delivery_id,
+                payload_json,
+                payload_digest,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_final_payload_identity_conflict");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_terminal_final_and_seal(
+        &self,
+        input: MainChatTerminalFinalizationInput,
+    ) -> Result<MainChatAgentDurableEvent> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_task_sequence_domain(&tx, &input.task_session_id)?;
+        validate_task_run_binding(&tx, &input.task_session_id)?;
+        bind_task_run(&tx, &input.task_session_id, &input.run_id)?;
+        if event_scope_hidden(&tx, "task", &input.task_session_id)?
+            || event_scope_hidden(&tx, "run", &input.run_id)?
+        {
+            anyhow::bail!("main_chat_event_canonical_source_tombstoned");
+        }
+        let epoch = select_terminal_owner_epoch(&tx, &input.task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != input.run_id || epoch.generation != input.epoch_generation {
+            anyhow::bail!("terminal_owner_epoch_identity_mismatch");
+        }
+        if epoch.state == TerminalOwnerSealState::Sealed {
+            let event_id = epoch
+                .final_event_id
+                .as_deref()
+                .context("terminal_owner_sealed_final_missing")?;
+            let event = select_event_by_id(&tx, event_id)?
+                .context("terminal_owner_sealed_event_missing")?;
+            tx.commit()?;
+            return Ok(event);
+        }
+        if epoch.state != TerminalOwnerSealState::Sealing {
+            anyhow::bail!("terminal_owner_epoch_not_sealing");
+        }
+        let staged_payload = tx
+            .query_row(
+                "SELECT delivery_id, payload_json FROM terminal_owner_final_payloads
+                 WHERE epoch_id = ?1",
+                [&epoch.epoch_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let mut payload = if let Some((delivery_id, payload_json)) = staged_payload {
+            if delivery_id != input.delivery_id {
+                anyhow::bail!("terminal_owner_final_payload_identity_mismatch");
+            }
+            serde_json::from_str::<Value>(&payload_json)?
+        } else {
+            json!({
+                "deliveryId": input.delivery_id,
+                "taskSessionId": input.task_session_id,
+                "runId": input.run_id,
+                "status": if input.status == "waiting_permission" {
+                    "completed_with_pending_items"
+                } else {
+                    input.status.as_str()
+                },
+                "bodyStored": false,
+                "runtimeOwner": "openlife_turn_runtime",
+            })
+        };
+        let payload_object = payload
+            .as_object_mut()
+            .context("terminal_owner_final_payload_not_object")?;
+        payload_object.insert(
+            "taskOwnerRevision".into(),
+            json!(input.expected_task_owner_revision),
+        );
+        payload_object.insert(
+            "taskOwnerDigest".into(),
+            json!(input.expected_task_owner_digest),
+        );
+        let event = append_event_in_transaction(
+            &tx,
+            MainChatAgentEventDraft {
+                task_session_id: input.task_session_id.clone(),
+                run_id: input.run_id.clone(),
+                event_type: "final_delivery.created".into(),
+                object_type: "final_delivery".into(),
+                object_id: input.delivery_id,
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.final_delivery_owner".into(),
+                payload,
+                backfilled: false,
+            },
+            &self.digest_key,
+        )?;
+        #[cfg(test)]
+        if terminal_final_seal_failpoints()
+            .lock()
+            .map_err(|error| anyhow::anyhow!("terminal seal failpoint mutex: {error}"))?
+            .contains(&input.task_session_id)
+        {
+            anyhow::bail!("injected_failure_after_final_insert_before_sealed_epoch_cas");
+        }
+        let changed = tx.execute(
+            "UPDATE terminal_owner_epochs
+             SET state = 'sealed', final_event_id = ?4,
+                 final_event_payload_digest = ?5,
+                 expected_task_owner_revision = ?6,
+                 expected_task_owner_digest = ?7,
+                 updated_at = ?8
+             WHERE task_session_id = ?1 AND run_id = ?2
+               AND generation = ?3 AND state = 'sealing'",
+            params![
+                input.task_session_id,
+                input.run_id,
+                i64::try_from(input.epoch_generation)?,
+                event.event_id,
+                event.payload_digest,
+                i64::try_from(input.expected_task_owner_revision)?,
+                input.expected_task_owner_digest,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_epoch_sealed_cas_lost");
+        }
+        tx.commit()?;
+        Ok(event)
+    }
+
+    pub(crate) fn append_terminal_owner_successor(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        proposal_id: &str,
+        receipt: &openlife_core::agent::main_chat_agent_v1::VerifiedTerminalOwnerTransitionReceipt,
+    ) -> Result<MainChatAgentDurableEvent> {
+        if receipt.owner_kind() != "agent_task_session"
+            || receipt.owner_id() != task_session_id
+            || receipt.proposal_id() != proposal_id
+        {
+            anyhow::bail!("terminal_owner_successor_receipt_identity_mismatch");
+        }
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_task_sequence_domain(&tx, task_session_id)?;
+        validate_task_run_binding(&tx, task_session_id)?;
+        bind_task_run(&tx, task_session_id, run_id)?;
+        if event_scope_hidden(&tx, "task", task_session_id)?
+            || event_scope_hidden(&tx, "run", run_id)?
+        {
+            anyhow::bail!("main_chat_event_canonical_source_tombstoned");
+        }
+        let epoch = select_terminal_owner_epoch(&tx, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != run_id || epoch.state != TerminalOwnerSealState::Sealed {
+            anyhow::bail!("terminal_owner_successor_requires_sealed_epoch");
+        }
+        let final_event_id = epoch
+            .final_event_id
+            .as_deref()
+            .context("terminal_owner_sealed_final_missing")?;
+        let final_event = select_event_by_id(&tx, final_event_id)?
+            .context("terminal_owner_sealed_event_missing")?;
+        if final_event
+            .payload
+            .get("taskOwnerRevision")
+            .and_then(Value::as_u64)
+            != Some(receipt.before_revision())
+            || final_event
+                .payload
+                .get("taskOwnerDigest")
+                .and_then(Value::as_str)
+                != Some(receipt.before_digest())
+        {
+            anyhow::bail!("terminal_owner_successor_final_owner_mismatch");
+        }
+        let event = append_event_in_transaction(
+            &tx,
+            MainChatAgentEventDraft {
+                task_session_id: task_session_id.to_string(),
+                run_id: run_id.to_string(),
+                event_type: "terminal_owner.successor_confirmed".into(),
+                object_type: "terminal_owner_successor".into(),
+                object_id: format!("successor:{proposal_id}"),
+                created_at: Utc::now(),
+                source: "terminal_owner_write_gateway.review_successor".into(),
+                payload: json!({
+                    "causeKind": "proposal_review_acceptance",
+                    "causeRef": proposal_id,
+                    "finalEventId": final_event_id,
+                    "ownerKind": receipt.owner_kind(),
+                    "ownerId": receipt.owner_id(),
+                    "beforeOwnerRevision": receipt.before_revision(),
+                    "afterOwnerRevision": receipt.after_revision(),
+                    "beforeOwnerDigest": receipt.before_digest(),
+                    "afterOwnerDigest": receipt.after_digest(),
+                    "localTransitionReceiptRef": receipt.receipt_ref(),
+                    "localTransitionReceiptDigest": receipt.receipt_digest(),
+                }),
+                backfilled: false,
+            },
+            &self.digest_key,
+        )?;
+        tx.commit()?;
+        Ok(event)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_fail_after_final_insert_before_sealed_epoch_cas_for_test(
+        &self,
+        task_session_id: &str,
+    ) -> Result<()> {
+        terminal_final_seal_failpoints()
+            .lock()
+            .map_err(|error| anyhow::anyhow!("terminal seal failpoint mutex: {error}"))?
+            .insert(task_session_id.to_string());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_fail_after_final_insert_before_sealed_epoch_cas_for_test(
+        &self,
+        task_session_id: &str,
+    ) {
+        if let Ok(mut failpoints) = terminal_final_seal_failpoints().lock() {
+            failpoints.remove(task_session_id);
+        }
     }
 
     pub(crate) fn reconciliation_attestation_public_key(&self) -> Result<[u8; 32]> {
@@ -1254,6 +1743,33 @@ impl MainChatAgentEventStore {
                 run_id TEXT NOT NULL
             )",
             [],
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS terminal_owner_epochs (
+                epoch_id TEXT PRIMARY KEY,
+                task_session_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL UNIQUE,
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                state TEXT NOT NULL CHECK(state IN ('open', 'sealing', 'sealed')),
+                admission_id TEXT NOT NULL UNIQUE,
+                canonical_user_message_ref TEXT NOT NULL,
+                canonical_user_message_digest TEXT NOT NULL,
+                canonical_store_identity TEXT NOT NULL,
+                final_event_id TEXT,
+                final_event_payload_digest TEXT,
+                expected_task_owner_revision INTEGER,
+                expected_task_owner_digest TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS terminal_owner_final_payloads (
+                epoch_id TEXT PRIMARY KEY,
+                delivery_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                staged_at TEXT NOT NULL,
+                FOREIGN KEY(epoch_id) REFERENCES terminal_owner_epochs(epoch_id)
+             ) WITHOUT ROWID;",
         )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS main_chat_agent_events (
@@ -6798,6 +7314,25 @@ const EFFECT_COMMITTED_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::required("projectionStatus", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::required("replayed", PayloadValueSchema::Bool),
 ];
+const TERMINAL_OWNER_SUCCESSOR_FIELDS: &[PayloadFieldSchema] = &[
+    PayloadFieldSchema::required("causeKind", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("causeRef", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("finalEventId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("ownerKind", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("ownerId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("beforeOwnerRevision", PayloadValueSchema::Count),
+    PayloadFieldSchema::required("afterOwnerRevision", PayloadValueSchema::Count),
+    PayloadFieldSchema::required("beforeOwnerDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::required("afterOwnerDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::required(
+        "localTransitionReceiptRef",
+        PayloadValueSchema::MetadataString,
+    ),
+    PayloadFieldSchema::required(
+        "localTransitionReceiptDigest",
+        PayloadValueSchema::MetadataString,
+    ),
+];
 const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("deliveryId", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskSessionId", PayloadValueSchema::MetadataString),
@@ -6823,6 +7358,7 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("runtimeOwner", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskOwnerStatus", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskOwnerDigestVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional("taskOwnerRevision", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("taskOwnerDigest", PayloadValueSchema::OpaqueDigest),
     PayloadFieldSchema::optional("runOwnerStatus", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("runOwnerRevision", PayloadValueSchema::Count),
@@ -7168,6 +7704,12 @@ fn durable_event_payload_schema(
             fields: EFFECT_COMMITTED_FIELDS,
             reject_unknown_fields: true,
             expected_status: Some("committed"),
+        },
+        "terminal_owner.successor_confirmed" => DurableEventPayloadSchema {
+            object_type: "terminal_owner_successor",
+            fields: TERMINAL_OWNER_SUCCESSOR_FIELDS,
+            reject_unknown_fields: true,
+            expected_status: None,
         },
         "final_delivery.created" => DurableEventPayloadSchema {
             object_type: "final_delivery",
@@ -8357,6 +8899,61 @@ fn select_event_by_id(
         )
         .optional()?;
     Ok(event)
+}
+
+fn select_terminal_owner_epoch(
+    conn: &Connection,
+    task_session_id: &str,
+) -> Result<Option<TerminalOwnerEpoch>> {
+    let row = conn
+        .query_row(
+            "SELECT epoch_id, task_session_id, run_id, generation, state,
+                    canonical_user_message_ref, canonical_user_message_digest,
+                    final_event_id, final_event_payload_digest
+             FROM terminal_owner_epochs WHERE task_session_id = ?1",
+            [task_session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        epoch_id,
+        task_session_id,
+        run_id,
+        generation,
+        state,
+        canonical_user_message_ref,
+        canonical_user_message_digest,
+        final_event_id,
+        final_event_payload_digest,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TerminalOwnerEpoch {
+        epoch_id,
+        task_session_id,
+        run_id,
+        generation: u64::try_from(generation).context("terminal owner epoch generation invalid")?,
+        state: TerminalOwnerSealState::from_str(&state)?,
+        canonical_user_message_ref,
+        canonical_user_message_digest,
+        final_event_id,
+        final_event_payload_digest,
+        replayed: false,
+        review_origin: None,
+    }))
 }
 
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<MainChatAgentDurableEvent> {
@@ -9804,7 +10401,7 @@ fn bounded_label(value: &str, max_chars: usize) -> String {
 /// Production registry shared by append-time schema lookup and coverage tests.
 /// Adding an event requires one authority update; a test-only source map cannot
 /// silently drift from the executable decoder.
-const DURABLE_EVENT_REGISTRY: [(&str, &str); 49] = [
+const DURABLE_EVENT_REGISTRY: [(&str, &str); 50] = [
     ("turn_started", "turn"),
     ("cancel_requested", "turn"),
     ("local_aborted", "turn"),
@@ -9851,6 +10448,10 @@ const DURABLE_EVENT_REGISTRY: [(&str, &str); 49] = [
     ("memory.materialized", "memory"),
     ("memory.rolled_back", "memory"),
     ("effect_committed", "state_effect"),
+    (
+        "terminal_owner.successor_confirmed",
+        "terminal_owner_successor",
+    ),
     ("final_delivery.created", "final_delivery"),
     ("diagnostic.created", "diagnostic"),
     ("task.updated", "task"),

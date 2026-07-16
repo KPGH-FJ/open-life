@@ -3560,12 +3560,13 @@ pub struct PreDispatchPersistenceFailure {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone)]
 pub struct AgentTaskSessionStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     receipt_key: Arc<AgentRunReceiptKey>,
-    transient_user_goals: Mutex<HashMap<String, String>>,
-    transient_session_content: Mutex<HashMap<String, TransientTaskSessionContent>>,
-    canonical_memory_store: Mutex<Option<crate::memory::MemoryStore>>,
+    transient_user_goals: Arc<Mutex<HashMap<String, String>>>,
+    transient_session_content: Arc<Mutex<HashMap<String, TransientTaskSessionContent>>>,
+    canonical_memory_store: Arc<Mutex<Option<crate::memory::MemoryStore>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3581,6 +3582,141 @@ impl AgentTaskSessionCanonicalOwnerReceipt {
 
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskSessionCanonicalOwnerHead {
+    revision: u64,
+    digest: String,
+}
+
+impl AgentTaskSessionCanonicalOwnerHead {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalOwnerEpochAdmissionAuthority {
+    VerifiedByTaskSessionStore,
+}
+
+/// Non-serializable, store-issued authority proving that one active canonical
+/// user-message commit is bound to the exact TaskSession/run owner.
+#[derive(Debug, Clone)]
+pub struct TerminalOwnerEpochAdmission {
+    admission_id: String,
+    task_session_id: String,
+    run_id: String,
+    canonical_user_message_ref: String,
+    canonical_user_message_digest: String,
+    canonical_store_identity: String,
+    replayed: bool,
+    authority: TerminalOwnerEpochAdmissionAuthority,
+}
+
+impl TerminalOwnerEpochAdmission {
+    pub fn admission_id(&self) -> &str {
+        &self.admission_id
+    }
+
+    pub fn task_session_id(&self) -> &str {
+        &self.task_session_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn canonical_user_message_ref(&self) -> &str {
+        &self.canonical_user_message_ref
+    }
+
+    pub fn canonical_user_message_digest(&self) -> &str {
+        &self.canonical_user_message_digest
+    }
+
+    pub fn canonical_store_identity(&self) -> &str {
+        &self.canonical_store_identity
+    }
+
+    pub fn replayed(&self) -> bool {
+        self.replayed
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.authority != TerminalOwnerEpochAdmissionAuthority::VerifiedByTaskSessionStore
+            || self.admission_id.trim().is_empty()
+            || self.task_session_id.trim().is_empty()
+            || self.run_id.trim().is_empty()
+            || self.canonical_user_message_ref.trim().is_empty()
+            || self.canonical_user_message_digest.trim().is_empty()
+            || self.canonical_store_identity.trim().is_empty()
+        {
+            anyhow::bail!("terminal_origin_admission_authority_invalid");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTerminalOwnerTransitionReceipt {
+    receipt_ref: String,
+    receipt_digest: String,
+    proposal_id: String,
+    dispatch_claim_id: String,
+    owner_kind: String,
+    owner_id: String,
+    before_revision: u64,
+    after_revision: u64,
+    before_digest: String,
+    after_digest: String,
+}
+
+impl VerifiedTerminalOwnerTransitionReceipt {
+    pub fn receipt_ref(&self) -> &str {
+        &self.receipt_ref
+    }
+
+    pub fn receipt_digest(&self) -> &str {
+        &self.receipt_digest
+    }
+
+    pub fn proposal_id(&self) -> &str {
+        &self.proposal_id
+    }
+
+    pub fn dispatch_claim_id(&self) -> &str {
+        &self.dispatch_claim_id
+    }
+
+    pub fn owner_kind(&self) -> &str {
+        &self.owner_kind
+    }
+
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    pub fn before_revision(&self) -> u64 {
+        self.before_revision
+    }
+
+    pub fn after_revision(&self) -> u64 {
+        self.after_revision
+    }
+
+    pub fn before_digest(&self) -> &str {
+        &self.before_digest
+    }
+
+    pub fn after_digest(&self) -> &str {
+        &self.after_digest
     }
 }
 
@@ -3620,11 +3756,11 @@ impl AgentTaskSessionStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             receipt_key: Arc::new(receipt_key),
-            transient_user_goals: Mutex::new(HashMap::new()),
-            transient_session_content: Mutex::new(HashMap::new()),
-            canonical_memory_store: Mutex::new(None),
+            transient_user_goals: Arc::new(Mutex::new(HashMap::new())),
+            transient_session_content: Arc::new(Mutex::new(HashMap::new())),
+            canonical_memory_store: Arc::new(Mutex::new(None)),
         };
         store.init_tables()?;
         Ok(store)
@@ -3643,14 +3779,14 @@ impl AgentTaskSessionStore {
 
     pub fn new_in_memory_with_receipt_key(receipt_key: AgentRunReceiptKey) -> Result<Self> {
         let store = Self {
-            conn: Mutex::new(
+            conn: Arc::new(Mutex::new(
                 Connection::open_in_memory()
                     .context("failed to open in-memory main chat agent db")?,
-            ),
+            )),
             receipt_key: Arc::new(receipt_key),
-            transient_user_goals: Mutex::new(HashMap::new()),
-            transient_session_content: Mutex::new(HashMap::new()),
-            canonical_memory_store: Mutex::new(None),
+            transient_user_goals: Arc::new(Mutex::new(HashMap::new())),
+            transient_session_content: Arc::new(Mutex::new(HashMap::new())),
+            canonical_memory_store: Arc::new(Mutex::new(None)),
         };
         store
             .conn
@@ -3692,11 +3828,11 @@ impl AgentTaskSessionStore {
         }
         Self::validate_current_payload_versions(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             receipt_key: Arc::new(receipt_key),
-            transient_user_goals: Mutex::new(HashMap::new()),
-            transient_session_content: Mutex::new(HashMap::new()),
-            canonical_memory_store: Mutex::new(None),
+            transient_user_goals: Arc::new(Mutex::new(HashMap::new())),
+            transient_session_content: Arc::new(Mutex::new(HashMap::new())),
+            canonical_memory_store: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -3913,6 +4049,41 @@ impl AgentTaskSessionStore {
                 value TEXT NOT NULL
              ) WITHOUT ROWID",
             [],
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_task_session_owner_heads (
+                task_session_id TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                FOREIGN KEY(task_session_id) REFERENCES agent_task_sessions(id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS terminal_owner_epoch_admissions (
+                admission_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE,
+                task_session_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                canonical_user_message_ref TEXT NOT NULL,
+                canonical_user_message_digest TEXT NOT NULL,
+                canonical_store_identity TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(task_session_id) REFERENCES agent_task_sessions(id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS terminal_owner_transition_receipts (
+                receipt_ref TEXT PRIMARY KEY,
+                receipt_digest TEXT NOT NULL,
+                proposal_id TEXT NOT NULL,
+                dispatch_claim_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL CHECK(owner_kind = 'agent_task_session'),
+                owner_id TEXT NOT NULL,
+                before_revision INTEGER NOT NULL CHECK(before_revision > 0),
+                after_revision INTEGER NOT NULL CHECK(after_revision = before_revision + 1),
+                before_digest TEXT NOT NULL,
+                after_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(proposal_id, dispatch_claim_id),
+                FOREIGN KEY(owner_id) REFERENCES agent_task_sessions(id)
+             ) WITHOUT ROWID;
+             INSERT OR IGNORE INTO agent_task_session_owner_heads(task_session_id, revision)
+             SELECT id, 1 FROM agent_task_sessions;",
         )?;
         Self::validate_receipt_key_binding(&conn, self.receipt_key.as_ref(), true)?;
         let legacy_user_goals = {
@@ -4186,8 +4357,9 @@ impl AgentTaskSessionStore {
             &session.context_snapshot_refs,
             is_canonical_context_snapshot_ref,
         )?;
-        let conn = self.lock_conn()?;
-        conn.execute(
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO agent_task_sessions (
                 id, chat_session_id, user_goal, selected_strategy, status,
                 current_plan_summary, action_queue_ids_json, pending_blockers_json,
@@ -4211,6 +4383,12 @@ impl AgentTaskSessionStore {
                 TASK_SESSION_PAYLOAD_VERSION,
             ],
         )?;
+        tx.execute(
+            "INSERT INTO agent_task_session_owner_heads(task_session_id, revision)
+             VALUES (?1, 1)",
+            [&session.id],
+        )?;
+        tx.commit()?;
         drop(conn);
         self.transient_user_goals
             .lock()
@@ -4263,12 +4441,18 @@ impl AgentTaskSessionStore {
     ) -> Result<()> {
         let expected_receipt = self.user_goal_receipt(task_session_id, observed_body);
         let conn = self.lock_conn()?;
-        let (stored_receipt, chat_session_id) = conn
+        let (stored_receipt, chat_session_id, existing_ref) = conn
             .query_row(
-                "SELECT user_goal, chat_session_id FROM agent_task_sessions
+                "SELECT user_goal, chat_session_id, user_goal_ref FROM agent_task_sessions
                  WHERE id = ?1 AND user_goal_minimized_version = 1",
                 [task_session_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .context("main_chat_task_session_missing_for_canonical_user_message")?;
@@ -4290,16 +4474,29 @@ impl AgentTaskSessionStore {
         if canonical_message.role != "user" || canonical_message.content != observed_body {
             anyhow::bail!("main_chat_task_session_canonical_user_message_mismatch");
         }
-        let conn = self.lock_conn()?;
-        let changed = conn.execute(
+        if existing_ref.as_deref() == Some(canonical_ref) {
+            return Ok(());
+        }
+        if existing_ref.is_some() {
+            anyhow::bail!("main_chat_task_session_canonical_user_message_conflict");
+        }
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE agent_task_sessions SET user_goal_ref = ?2
              WHERE id = ?1 AND user_goal = ?3 AND user_goal_minimized_version = 1
-               AND (user_goal_ref IS NULL OR user_goal_ref = ?2)",
+               AND user_goal_ref IS NULL",
             params![task_session_id, canonical_ref, expected_receipt],
         )?;
         if changed != 1 {
             anyhow::bail!("main_chat_task_session_canonical_user_message_conflict");
         }
+        tx.execute(
+            "UPDATE agent_task_session_owner_heads
+             SET revision = revision + 1 WHERE task_session_id = ?1",
+            [task_session_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -4431,56 +4628,451 @@ impl AgentTaskSessionStore {
         &self,
         id: &str,
     ) -> Result<Option<AgentTaskSessionCanonicalOwnerReceipt>> {
-        let persisted = {
-            let conn = self.lock_conn()?;
-            let mut stmt = conn.prepare(
-                "SELECT id, chat_session_id, user_goal, selected_strategy, status,
-                        current_plan_summary, action_queue_ids_json, pending_blockers_json,
-                        context_snapshot_refs_json, created_at, updated_at, final_summary,
-                        user_goal_ref, user_goal_minimized_version, payload_minimized_version
-                 FROM agent_task_sessions
-                 WHERE id = ?1",
-            )?;
-            stmt.query_row([id], row_to_persisted_agent_task_session)
-                .optional()?
-        };
-        let Some(persisted) = persisted else {
+        let conn = self.lock_conn()?;
+        canonical_task_session_owner_receipt_from_conn(&conn, id)
+    }
+
+    pub fn canonical_owner_head(
+        &self,
+        id: &str,
+    ) -> Result<Option<AgentTaskSessionCanonicalOwnerHead>> {
+        let revision = self
+            .lock_conn()?
+            .query_row(
+                "SELECT revision FROM agent_task_session_owner_heads
+                 WHERE task_session_id = ?1",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(revision) = revision else {
             return Ok(None);
         };
-        let session = &persisted.session;
-        let owner = serde_json::json!({
-            "ownerKind": "agent_task_session",
-            "ownerVersion": TASK_SESSION_CANONICAL_OWNER_VERSION,
-            "identity": {
-                "id": session.id.as_str(),
-                "chatSessionId": session.chat_session_id.as_str(),
-            },
-            "route": {
-                "selectedStrategy": persisted.selected_strategy_value.as_str(),
-            },
-            "lifecycle": {
-                "status": persisted.status_value.as_str(),
-                "createdAt": persisted.created_at_value.as_str(),
-                "updatedAt": persisted.updated_at_value.as_str(),
-            },
-            "canonicalInput": {
-                "userGoalRef": persisted.user_goal_ref.as_deref(),
-                "userGoalReceipt": persisted.user_goal_receipt.as_str(),
-                "minimizedVersion": persisted.user_goal_minimized_version,
-            },
-            "durableMetadata": {
-                "currentPlanSummaryReceipt": persisted.current_plan_summary_receipt.as_deref(),
-                "actionQueueRefs": &session.action_queue_ids,
-                "pendingBlockerRefs": &session.pending_blockers,
-                "contextSnapshotRefs": &session.context_snapshot_refs,
-                "finalSummaryReceipt": persisted.final_summary_receipt.as_deref(),
-                "payloadMinimizedVersion": persisted.payload_minimized_version,
-            },
-        });
-        Ok(Some(AgentTaskSessionCanonicalOwnerReceipt {
-            version: TASK_SESSION_CANONICAL_OWNER_VERSION,
-            digest: crate::agent::metadata_safe::metadata_safe_value_digest(&owner).1,
+        let revision =
+            u64::try_from(revision).context("task session owner revision is negative")?;
+        let receipt = self
+            .canonical_owner_receipt(id)?
+            .context("task session owner head lost its canonical owner")?;
+        Ok(Some(AgentTaskSessionCanonicalOwnerHead {
+            revision,
+            digest: receipt.digest,
         }))
+    }
+
+    pub fn issue_terminal_owner_epoch_admission(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        canonical_message: CanonicalConversationMessageCommit,
+    ) -> Result<TerminalOwnerEpochAdmission> {
+        let receipt = canonical_message.receipt();
+        let proof = canonical_message.proof();
+        if receipt.operation_id != run_id {
+            anyhow::bail!("terminal_origin_operation_mismatch");
+        }
+
+        let existing = self
+            .lock_conn()?
+            .query_row(
+                "SELECT admission_id, task_session_id, run_id,
+                        canonical_user_message_ref, canonical_user_message_digest,
+                        canonical_store_identity
+                 FROM terminal_owner_epoch_admissions
+                 WHERE operation_id = ?1",
+                [&receipt.operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((
+            admission_id,
+            existing_task,
+            existing_run,
+            canonical_ref,
+            canonical_digest,
+            store_identity,
+        )) = existing
+        {
+            if existing_task != task_session_id {
+                anyhow::bail!("terminal_origin_commit_owner_rebind_forbidden");
+            }
+            if existing_run != run_id
+                || canonical_ref != receipt.canonical_ref
+                || canonical_digest != receipt.content_digest
+                || store_identity != proof.canonical_store_identity()
+            {
+                anyhow::bail!("terminal_origin_admission_replay_mismatch");
+            }
+            return Ok(TerminalOwnerEpochAdmission {
+                admission_id,
+                task_session_id: existing_task,
+                run_id: existing_run,
+                canonical_user_message_ref: canonical_ref,
+                canonical_user_message_digest: canonical_digest,
+                canonical_store_identity: store_identity,
+                replayed: true,
+                authority: TerminalOwnerEpochAdmissionAuthority::VerifiedByTaskSessionStore,
+            });
+        }
+
+        if task_session_id != receipt.operation_id {
+            anyhow::bail!("terminal_origin_task_owner_mismatch");
+        }
+        let task = self
+            .load_session(task_session_id)?
+            .context("terminal_origin_task_owner_missing")?;
+        if task.id != task_session_id {
+            anyhow::bail!("terminal_origin_task_owner_mismatch");
+        }
+        if task.chat_session_id != receipt.session_id {
+            anyhow::bail!("terminal_origin_session_mismatch");
+        }
+        let memory_store = self
+            .canonical_memory_store
+            .lock()
+            .map_err(|err| anyhow::anyhow!("mutex poison: {err}"))?
+            .clone()
+            .context("terminal_origin_canonical_memory_store_unbound")?;
+        if proof.canonical_store_identity() != memory_store.canonical_store_identity() {
+            anyhow::bail!("terminal_origin_canonical_store_identity_mismatch");
+        }
+        let active = memory_store
+            .load_active_conversation_message_by_ref(&receipt.canonical_ref)
+            .map_err(|_| anyhow::anyhow!("terminal_origin_canonical_message_inactive"))?
+            .context("terminal_origin_canonical_message_inactive")?;
+        if active.role != "user"
+            || active.content != task.user_goal
+            || proof.canonical_ref() != receipt.canonical_ref
+            || proof.content_digest() != receipt.content_digest
+            || proof.session_id() != receipt.session_id
+            || proof.role() != "user"
+        {
+            anyhow::bail!("terminal_origin_canonical_message_inactive");
+        }
+        let bound_ref = self
+            .lock_conn()?
+            .query_row(
+                "SELECT user_goal_ref FROM agent_task_sessions WHERE id = ?1",
+                [task_session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        if bound_ref.as_deref() != Some(receipt.canonical_ref.as_str()) {
+            anyhow::bail!("terminal_origin_task_owner_mismatch");
+        }
+
+        let admission_id = format!("terminal-admission:{}", uuid::Uuid::new_v4());
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO terminal_owner_epoch_admissions (
+                admission_id, operation_id, task_session_id, run_id,
+                canonical_user_message_ref, canonical_user_message_digest,
+                canonical_store_identity, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                admission_id,
+                receipt.operation_id,
+                task_session_id,
+                run_id,
+                receipt.canonical_ref,
+                receipt.content_digest,
+                proof.canonical_store_identity(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(TerminalOwnerEpochAdmission {
+            admission_id,
+            task_session_id: task_session_id.to_string(),
+            run_id: run_id.to_string(),
+            canonical_user_message_ref: receipt.canonical_ref.clone(),
+            canonical_user_message_digest: receipt.content_digest.clone(),
+            canonical_store_identity: proof.canonical_store_identity().to_string(),
+            replayed: false,
+            authority: TerminalOwnerEpochAdmissionAuthority::VerifiedByTaskSessionStore,
+        })
+    }
+
+    pub fn apply_terminal_owner_review_transition(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+        task_session_id: &str,
+        expected_revision: u64,
+        expected_digest: &str,
+    ) -> Result<VerifiedTerminalOwnerTransitionReceipt> {
+        if let Some(existing) =
+            self.terminal_owner_transition_receipt_for_claim(proposal_id, dispatch_claim_id)?
+        {
+            if existing.owner_id != task_session_id
+                || existing.before_revision != expected_revision
+                || existing.before_digest != expected_digest
+            {
+                anyhow::bail!("terminal_owner_transition_replay_identity_mismatch");
+            }
+            return Ok(existing);
+        }
+
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let revision_raw = tx
+            .query_row(
+                "SELECT revision FROM agent_task_session_owner_heads
+                 WHERE task_session_id = ?1",
+                [task_session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .context("terminal_owner_task_head_missing")?;
+        let before_revision =
+            u64::try_from(revision_raw).context("terminal_owner_task_revision_invalid")?;
+        let before_receipt = canonical_task_session_owner_receipt_from_conn(&tx, task_session_id)?
+            .context("terminal_owner_task_missing")?;
+        if before_revision != expected_revision || before_receipt.digest != expected_digest {
+            anyhow::bail!("terminal_owner_task_head_conflict");
+        }
+
+        let (status, blockers_json) = tx
+            .query_row(
+                "SELECT status, pending_blockers_json FROM agent_task_sessions WHERE id = ?1",
+                [task_session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .context("terminal_owner_task_missing")?;
+        if status != AgentTaskSessionStatus::WaitingPermission.as_str() {
+            anyhow::bail!("terminal_owner_task_not_waiting_permission");
+        }
+        let mut blockers = serde_json::from_str::<Vec<String>>(&blockers_json)
+            .context("terminal_owner_task_blockers_invalid")?;
+        let proposal_blocker = format!("proposal:{proposal_id}");
+        let before_len = blockers.len();
+        blockers.retain(|blocker| blocker != &proposal_blocker);
+        if blockers.len() == before_len {
+            anyhow::bail!("terminal_owner_proposal_blocker_missing");
+        }
+        if !blockers.is_empty() {
+            anyhow::bail!("terminal_owner_other_blockers_pending");
+        }
+
+        const FINAL_SUMMARY: &str = "Accepted Review proposal resolved the Main Chat task blocker.";
+        let final_summary_receipt = session_body_receipt(
+            self.receipt_key.as_ref(),
+            task_session_id,
+            "final_summary",
+            FINAL_SUMMARY,
+        );
+        let changed = tx.execute(
+            "UPDATE agent_task_sessions
+             SET status = 'completed', pending_blockers_json = ?2,
+                 updated_at = ?3, final_summary = ?4
+             WHERE id = ?1 AND status = 'waiting_permission'",
+            params![
+                task_session_id,
+                serde_json::to_string(&blockers)?,
+                Utc::now().to_rfc3339(),
+                final_summary_receipt,
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_task_transition_cas_lost");
+        }
+        let after_revision = before_revision
+            .checked_add(1)
+            .context("terminal_owner_task_revision_exhausted")?;
+        let owner_head_changed = tx.execute(
+            "UPDATE agent_task_session_owner_heads SET revision = ?2
+             WHERE task_session_id = ?1 AND revision = ?3",
+            params![
+                task_session_id,
+                i64::try_from(after_revision)?,
+                i64::try_from(before_revision)?
+            ],
+        )?;
+        if owner_head_changed != 1 {
+            anyhow::bail!("terminal_owner_task_head_cas_lost");
+        }
+        let after_receipt = canonical_task_session_owner_receipt_from_conn(&tx, task_session_id)?
+            .context("terminal_owner_task_missing_after_transition")?;
+        if after_receipt.digest == before_receipt.digest {
+            anyhow::bail!("terminal_owner_task_digest_unchanged");
+        }
+        let receipt_ref = format!("terminal-transition:{proposal_id}:{dispatch_claim_id}");
+        let receipt_material = format!(
+            "proposal\0{proposal_id}\0claim\0{dispatch_claim_id}\0owner\0{task_session_id}\0before\0{before_revision}\0{}\0after\0{after_revision}\0{}",
+            before_receipt.digest, after_receipt.digest
+        );
+        let receipt_digest = self
+            .receipt_key
+            .sign("terminal_owner_transition_receipt", &receipt_material);
+        let created_at = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO terminal_owner_transition_receipts (
+                receipt_ref, receipt_digest, proposal_id, dispatch_claim_id,
+                owner_kind, owner_id, before_revision, after_revision,
+                before_digest, after_digest, created_at
+             ) VALUES (?1, ?2, ?3, ?4, 'agent_task_session', ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                receipt_ref,
+                receipt_digest,
+                proposal_id,
+                dispatch_claim_id,
+                task_session_id,
+                i64::try_from(before_revision)?,
+                i64::try_from(after_revision)?,
+                before_receipt.digest,
+                after_receipt.digest,
+                created_at,
+            ],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        let mut transient_content = self
+            .transient_session_content
+            .lock()
+            .map_err(|err| anyhow::anyhow!("mutex poison: {err}"))?;
+        let transient_session = transient_content
+            .entry(task_session_id.to_string())
+            .or_default();
+        transient_session.pending_blockers = blockers;
+        transient_session.final_summary = Some(FINAL_SUMMARY.into());
+        drop(transient_content);
+
+        self.verify_terminal_owner_transition_receipt_value(
+            VerifiedTerminalOwnerTransitionReceipt {
+                receipt_ref,
+                receipt_digest,
+                proposal_id: proposal_id.to_string(),
+                dispatch_claim_id: dispatch_claim_id.to_string(),
+                owner_kind: "agent_task_session".into(),
+                owner_id: task_session_id.to_string(),
+                before_revision,
+                after_revision,
+                before_digest: before_receipt.digest,
+                after_digest: after_receipt.digest,
+            },
+        )
+    }
+
+    pub fn terminal_owner_transition_receipt_for_claim(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+    ) -> Result<Option<VerifiedTerminalOwnerTransitionReceipt>> {
+        let receipt_ref = self
+            .lock_conn()?
+            .query_row(
+                "SELECT receipt_ref FROM terminal_owner_transition_receipts
+                 WHERE proposal_id = ?1 AND dispatch_claim_id = ?2",
+                params![proposal_id, dispatch_claim_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match receipt_ref {
+            Some(receipt_ref) => self.verified_terminal_owner_transition_receipt(&receipt_ref),
+            None => Ok(None),
+        }
+    }
+
+    pub fn verified_terminal_owner_transition_receipt(
+        &self,
+        receipt_ref: &str,
+    ) -> Result<Option<VerifiedTerminalOwnerTransitionReceipt>> {
+        let receipt = self
+            .lock_conn()?
+            .query_row(
+                "SELECT receipt_ref, receipt_digest, proposal_id, dispatch_claim_id,
+                        owner_kind, owner_id, before_revision, after_revision,
+                        before_digest, after_digest
+                 FROM terminal_owner_transition_receipts WHERE receipt_ref = ?1",
+                [receipt_ref],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            receipt_ref,
+            receipt_digest,
+            proposal_id,
+            dispatch_claim_id,
+            owner_kind,
+            owner_id,
+            before_revision,
+            after_revision,
+            before_digest,
+            after_digest,
+        )) = receipt
+        else {
+            return Ok(None);
+        };
+        let before_revision =
+            u64::try_from(before_revision).context("terminal_owner_receipt_before_revision")?;
+        let after_revision =
+            u64::try_from(after_revision).context("terminal_owner_receipt_after_revision")?;
+        self.verify_terminal_owner_transition_receipt_value(
+            VerifiedTerminalOwnerTransitionReceipt {
+                receipt_ref,
+                receipt_digest,
+                proposal_id,
+                dispatch_claim_id,
+                owner_kind,
+                owner_id,
+                before_revision,
+                after_revision,
+                before_digest,
+                after_digest,
+            },
+        )
+        .map(Some)
+    }
+
+    fn verify_terminal_owner_transition_receipt_value(
+        &self,
+        receipt: VerifiedTerminalOwnerTransitionReceipt,
+    ) -> Result<VerifiedTerminalOwnerTransitionReceipt> {
+        if receipt.owner_kind != "agent_task_session"
+            || receipt.after_revision != receipt.before_revision + 1
+        {
+            anyhow::bail!("terminal_owner_transition_receipt_invalid");
+        }
+        let material = format!(
+            "proposal\0{}\0claim\0{}\0owner\0{}\0before\0{}\0{}\0after\0{}\0{}",
+            receipt.proposal_id,
+            receipt.dispatch_claim_id,
+            receipt.owner_id,
+            receipt.before_revision,
+            receipt.before_digest,
+            receipt.after_revision,
+            receipt.after_digest,
+        );
+        if !self.receipt_key.verify(
+            "terminal_owner_transition_receipt",
+            &material,
+            &receipt.receipt_digest,
+        ) {
+            anyhow::bail!("terminal_owner_transition_receipt_signature_invalid");
+        }
+        Ok(receipt)
     }
 
     pub fn list_sessions(
@@ -4669,6 +5261,11 @@ impl AgentTaskSessionStore {
         if changed != 1 {
             anyhow::bail!("pre_dispatch_persistence_failure_task_projection_failed");
         }
+        tx.execute(
+            "UPDATE agent_task_session_owner_heads
+             SET revision = revision + 1 WHERE task_session_id = ?1",
+            [task_session_id],
+        )?;
         tx.commit()?;
         let mut transient = self
             .transient_session_content
@@ -4790,8 +5387,9 @@ impl AgentTaskSessionStore {
         let persisted_final_summary = final_summary
             .as_deref()
             .map(|body| session_body_receipt(self.receipt_key.as_ref(), id, "final_summary", body));
-        let conn = self.lock_conn()?;
-        conn.execute(
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "UPDATE agent_task_sessions
              SET status = ?2, updated_at = ?3, final_summary = COALESCE(?4, final_summary)
              WHERE id = ?1",
@@ -4802,6 +5400,12 @@ impl AgentTaskSessionStore {
                 persisted_final_summary
             ],
         )?;
+        tx.execute(
+            "UPDATE agent_task_session_owner_heads
+             SET revision = revision + 1 WHERE task_session_id = ?1",
+            [id],
+        )?;
+        tx.commit()?;
         drop(conn);
         if let Some(final_summary) = final_summary {
             let mut transient = self
@@ -4868,8 +5472,9 @@ impl AgentTaskSessionStore {
             is_canonical_context_snapshot_ref,
         )?;
         let now = Utc::now();
-        let conn = self.lock_conn()?;
-        conn.execute(
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "UPDATE agent_task_sessions
              SET current_plan_summary = COALESCE(?2, current_plan_summary),
                  action_queue_ids_json = ?3,
@@ -4890,6 +5495,12 @@ impl AgentTaskSessionStore {
                 TASK_SESSION_PAYLOAD_VERSION,
             ],
         )?;
+        tx.execute(
+            "UPDATE agent_task_session_owner_heads
+             SET revision = revision + 1 WHERE task_session_id = ?1",
+            [&session.id],
+        )?;
+        tx.commit()?;
         drop(conn);
         self.transient_session_content
             .lock()
@@ -5000,6 +5611,61 @@ impl AgentTaskSessionStore {
             .lock()
             .map_err(|err| anyhow::anyhow!("mutex poison: {}", err))
     }
+}
+
+fn canonical_task_session_owner_receipt_from_conn(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<AgentTaskSessionCanonicalOwnerReceipt>> {
+    let persisted = {
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_session_id, user_goal, selected_strategy, status,
+                    current_plan_summary, action_queue_ids_json, pending_blockers_json,
+                    context_snapshot_refs_json, created_at, updated_at, final_summary,
+                    user_goal_ref, user_goal_minimized_version, payload_minimized_version
+             FROM agent_task_sessions
+             WHERE id = ?1",
+        )?;
+        stmt.query_row([id], row_to_persisted_agent_task_session)
+            .optional()?
+    };
+    let Some(persisted) = persisted else {
+        return Ok(None);
+    };
+    let session = &persisted.session;
+    let owner = serde_json::json!({
+        "ownerKind": "agent_task_session",
+        "ownerVersion": TASK_SESSION_CANONICAL_OWNER_VERSION,
+        "identity": {
+            "id": session.id.as_str(),
+            "chatSessionId": session.chat_session_id.as_str(),
+        },
+        "route": {
+            "selectedStrategy": persisted.selected_strategy_value.as_str(),
+        },
+        "lifecycle": {
+            "status": persisted.status_value.as_str(),
+            "createdAt": persisted.created_at_value.as_str(),
+            "updatedAt": persisted.updated_at_value.as_str(),
+        },
+        "canonicalInput": {
+            "userGoalRef": persisted.user_goal_ref.as_deref(),
+            "userGoalReceipt": persisted.user_goal_receipt.as_str(),
+            "minimizedVersion": persisted.user_goal_minimized_version,
+        },
+        "durableMetadata": {
+            "currentPlanSummaryReceipt": persisted.current_plan_summary_receipt.as_deref(),
+            "actionQueueRefs": &session.action_queue_ids,
+            "pendingBlockerRefs": &session.pending_blockers,
+            "contextSnapshotRefs": &session.context_snapshot_refs,
+            "finalSummaryReceipt": persisted.final_summary_receipt.as_deref(),
+            "payloadMinimizedVersion": persisted.payload_minimized_version,
+        },
+    });
+    Ok(Some(AgentTaskSessionCanonicalOwnerReceipt {
+        version: TASK_SESSION_CANONICAL_OWNER_VERSION,
+        digest: crate::agent::metadata_safe::metadata_safe_value_digest(&owner).1,
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

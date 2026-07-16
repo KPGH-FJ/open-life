@@ -227,7 +227,9 @@ pub use proposal_outcome::{
     evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
-pub use proposal_store::{ArtifactEffectRecord, ArtifactEffectState, ProposalStore};
+pub use proposal_store::{
+    ArtifactEffectRecord, ArtifactEffectState, ProposalStore, TerminalOwnerOriginBinding,
+};
 pub use provider_privacy_boundary::{
     build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
 };
@@ -249,6 +251,7 @@ pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
     DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     MaterializedReviewAcceptanceSnapshot, ReviewWorkflow, ReviewWorkflowOutcome,
+    TerminalOwnerReviewOriginProof,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{

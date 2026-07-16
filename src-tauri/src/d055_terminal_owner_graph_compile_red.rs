@@ -371,7 +371,7 @@ fn assert_memory_review_converged(
     }
 }
 
-fn run_memory_crash_reconciliation_contract(
+async fn run_memory_crash_reconciliation_contract(
     label: &str,
     crash_point: TerminalOwnerCrashPoint,
     memory_committed_before_crash: bool,
@@ -424,6 +424,7 @@ fn run_memory_crash_reconciliation_contract(
         .expect("install exact cross-store crash point");
     let error = gateway
         .apply_claimed_review_acceptance(acceptance)
+        .await
         .expect_err("the selected boundary must interrupt convergence");
     assert_eq!(
         error.to_string(),
@@ -558,6 +559,7 @@ fn run_memory_crash_reconciliation_contract(
     .with_execution_capture_for_test(capture.clone());
     let reconciled = reopened_gateway
         .reconcile_pending_terminal_owner_successors(32)
+        .await
         .expect("reconcile the exact durable boundary after restart");
     assert_eq!(
         reconciled.successors_confirmed,
@@ -584,6 +586,7 @@ fn run_memory_crash_reconciliation_contract(
 
     let replay = reopened_gateway
         .reconcile_pending_terminal_owner_successors(32)
+        .await
         .expect("reconciliation replay remains idempotent");
     assert_eq!(replay.successors_confirmed, 0);
     assert_eq!(replay.proposals_projected, 0);
@@ -604,7 +607,8 @@ async fn d055_target_reopen_after_claim_before_effect_executes_each_stage_once()
             false,
             false,
             false,
-        );
+        )
+        .await;
     })
     .await
     .expect("claim-before-effect crash scenario exceeded its outer timeout");
@@ -620,7 +624,8 @@ async fn d055_target_reopen_after_memory_before_task_does_not_repeat_memory() {
             false,
             false,
             false,
-        );
+        )
+        .await;
     })
     .await
     .expect("memory-before-task crash scenario exceeded its outer timeout");
@@ -636,7 +641,8 @@ async fn d055_target_reopen_after_task_receipt_before_proposal_checkpoint_does_n
             true,
             false,
             false,
-        );
+        )
+        .await;
     })
     .await
     .expect("task-before-proposal-checkpoint scenario exceeded its outer timeout");
@@ -652,7 +658,8 @@ async fn d055_target_reopen_after_proposal_checkpoint_before_successor_adds_one_
             true,
             true,
             false,
-        );
+        )
+        .await;
     })
     .await
     .expect("proposal-checkpoint-before-successor scenario exceeded its outer timeout");
@@ -668,7 +675,8 @@ async fn d055_target_reopen_after_successor_before_projection_does_not_duplicate
             true,
             true,
             true,
-        );
+        )
+        .await;
     })
     .await
     .expect("successor-before-projection scenario exceeded its outer timeout");
@@ -966,6 +974,7 @@ async fn d055_target_unknown_external_dispatch_capture_is_not_called_by_restart_
         .with_external_dispatch_adapter(Arc::new(dispatch.clone()));
         let error = gateway
             .apply_claimed_review_acceptance(acceptance)
+            .await
             .expect_err("unqueryable remote result remains typed unknown");
         assert_eq!(
             error.to_string(),
@@ -1058,6 +1067,7 @@ async fn d055_target_unknown_external_dispatch_capture_is_not_called_by_restart_
         for pass in 0..2 {
             let report = reopened_gateway
                 .reconcile_pending_terminal_owner_successors(32)
+                .await
                 .expect("unknown reconciliation remains read-only toward the adapter");
             assert_eq!(report.unknown_external_effects_retried, 0, "pass={pass}");
             assert_eq!(report.successors_confirmed, 0, "pass={pass}");
@@ -1286,6 +1296,7 @@ async fn d055_target_file_backed_successor_uses_verified_owner_local_receipt() {
             .expect("ReviewWorkflow issues non-Serde verified acceptance authority");
         let transition = gateway
             .apply_claimed_review_acceptance(verified_acceptance)
+            .await
             .expect("post-seal review acceptance commits one legal successor");
         assert_eq!(transition.before_owner_revision, owner_at_final.revision());
         assert_eq!(
@@ -1580,6 +1591,7 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
             .expect("install the cross-SQLite crash failpoint");
         let error = gateway
             .apply_claimed_review_acceptance(acceptance)
+            .await
             .expect_err("simulate crash after owner commit but before successor confirmation");
         assert_eq!(
             error.to_string(),
@@ -1672,6 +1684,7 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
         );
         let reconciled = reopened_gateway
             .reconcile_pending_terminal_owner_successors(32)
+            .await
             .expect("reconcile owner-local receipts into EventStore successors");
         assert_eq!(reconciled.successors_confirmed, 1);
         assert_eq!(reconciled.canonical_effects_executed, 0);
@@ -1679,6 +1692,7 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
         assert_eq!(reconciled.unknown_external_effects_retried, 0);
         let replay = reopened_gateway
             .reconcile_pending_terminal_owner_successors(32)
+            .await
             .expect("reconciliation replay is idempotent");
         assert_eq!(replay.successors_confirmed, 0);
         assert_eq!(replay.canonical_effects_executed, 0);

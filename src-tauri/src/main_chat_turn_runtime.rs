@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use openlife_core::agent::main_chat_agent_v1::{
-    AgentIngressDecision, MainChatAgentStrategy, PolicyRouteKind,
+    AgentIngressDecision, AgentTaskSessionStatus, MainChatAgentStrategy, PolicyRouteKind,
 };
 use openlife_core::llm::{ChatMessage, ProviderInvocationReceipt};
 use serde::{Deserialize, Serialize};
@@ -1392,6 +1392,36 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         {
             return Err("turn_operation_policy_task_identity_mismatch".into());
         }
+        let terminal_epoch = {
+            let admission = {
+                let store = self
+                    .state
+                    .main_chat_agent_session_store
+                    .as_ref()
+                    .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+                    .lock()
+                    .await;
+                store
+                    .issue_terminal_owner_epoch_admission(
+                        &task_session_id,
+                        &operation_id,
+                        canonical_user_message.clone(),
+                    )
+                    .map_err(|error| {
+                        format!("issue terminal owner epoch admission failed: {error}")
+                    })?
+            };
+            let event_store = self
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                .lock()
+                .await;
+            event_store
+                .open_terminal_owner_epoch_from_admission(admission)
+                .map_err(|error| format!("open terminal owner epoch failed: {error}"))?
+        };
         pause_main_chat_before_cancellation_registration_for_test(&session_id).await;
         let cancellation_registry = {
             self.state
@@ -1909,6 +1939,29 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             &durable_events,
             durable_event_count,
         )?;
+        if !terminal.proposals.is_empty() {
+            let origin = terminal_epoch
+                .review_origin_proof()
+                .ok_or_else(|| "terminal owner review origin unavailable".to_string())?;
+            let proposal_store = self
+                .state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| "proposal_store_unavailable".to_string())?
+                .lock()
+                .await;
+            let workflow = openlife_core::agent::ReviewWorkflow::new(&proposal_store);
+            for proposal_ref in &terminal.proposals {
+                let proposal_id = proposal_ref
+                    .strip_prefix("proposal:")
+                    .unwrap_or(proposal_ref);
+                workflow
+                    .bind_staged_proposal_to_terminal_owner_origin(proposal_id, &origin)
+                    .map_err(|error| {
+                        format!("bind terminal owner review origin failed: {error}")
+                    })?;
+            }
+        }
         let final_event = persist_openlife_turn_final_delivery_receipt(
             self.state,
             &session_id,
@@ -1917,6 +1970,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             &terminal,
             &task_session_id,
             &canonical_run_id,
+            terminal_epoch.generation(),
             kernel_event_count,
             durable_event_count,
         )
@@ -4217,11 +4271,24 @@ async fn persist_openlife_turn_final_delivery_receipt(
     terminal: &OpenLifeTurnTerminal,
     task_session_id: &str,
     run_id: &str,
+    terminal_epoch_generation: u64,
     kernel_event_count: usize,
     durable_event_count: usize,
 ) -> Result<MainChatAgentDurableEvent, String> {
     // The D055 linearization boundary begins before any mutable owner head is
-    // read. A future durable epoch must already be SEALING at this point.
+    // read. The durable epoch is already SEALING before the test barrier or
+    // any canonical owner snapshot is observed.
+    {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .begin_terminal_owner_seal(task_session_id, run_id, terminal_epoch_generation)
+            .map_err(|error| format!("begin terminal owner seal failed: {error}"))?;
+    }
     #[cfg(test)]
     pause_main_chat_at_terminal_sealing_for_test(task_session_id).await;
     let assistant_message = ChatMessage {
@@ -4260,7 +4327,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .list_for_session(task_session_id)
             .map_err(|error| format!("list canonical final actions failed: {error}"))?
     };
-    let (task_owner, task_owner_receipt, transcript_owners) = {
+    let (task_owner, task_owner_receipt, task_owner_head, transcript_owners) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -4275,10 +4342,17 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .canonical_owner_receipt(task_session_id)
             .map_err(|error| format!("receipt canonical final task failed: {error}"))?
             .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
+        let task_head = sessions
+            .canonical_owner_head(task_session_id)
+            .map_err(|error| format!("load canonical final task head failed: {error}"))?
+            .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
+        if task_head.digest() != task_receipt.digest() {
+            return Err("turn_final_task_owner_head_receipt_mismatch".into());
+        }
         let transcript = sessions
             .list_transcript_entries(task_session_id)
             .map_err(|error| format!("list canonical final transcript failed: {error}"))?;
-        (task, task_receipt, transcript)
+        (task, task_receipt, task_head, transcript)
     };
     let (run_owner, run_owner_revision) = {
         let runs = state
@@ -4456,6 +4530,10 @@ async fn persist_openlife_turn_final_delivery_receipt(
             serde_json::json!(task_owner_receipt.digest()),
         ),
         (
+            "taskOwnerRevision",
+            serde_json::json!(task_owner_head.revision()),
+        ),
+        (
             "runOwnerStatus",
             serde_json::json!(run_owner.status.to_string()),
         ),
@@ -4485,17 +4563,34 @@ async fn persist_openlife_turn_final_delivery_receipt(
         payload_object.insert(field.into(), value);
     }
 
-    crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
-        state,
-        task_session_id,
-        run_id,
-        "final_delivery.created",
-        "final_delivery",
-        terminal.final_delivery.delivery_id.clone(),
-        "openlife_turn_runtime.final_delivery_owner",
-        final_receipt_payload,
-    )
-    .await
+    let event_store = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+        .lock()
+        .await;
+    event_store
+        .stage_terminal_final_payload(
+            task_session_id,
+            run_id,
+            terminal_epoch_generation,
+            &terminal.final_delivery.delivery_id,
+            &final_receipt_payload,
+        )
+        .map_err(|error| format!("stage terminal final payload failed: {error}"))?;
+    event_store
+        .append_terminal_final_and_seal(
+            crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                task_session_id: task_session_id.to_string(),
+                run_id: run_id.to_string(),
+                epoch_generation: terminal_epoch_generation,
+                delivery_id: terminal.final_delivery.delivery_id.clone(),
+                expected_task_owner_revision: task_owner_head.revision(),
+                expected_task_owner_digest: task_owner_head.digest().to_string(),
+                status: terminal.status.clone(),
+            },
+        )
+        .map_err(|error| format!("append terminal final and seal failed: {error}"))
 }
 
 fn canonical_final_owner_digest(
@@ -4919,21 +5014,63 @@ async fn recover_openlife_turn_from_durable_final(
     {
         return Err("turn_operation_final_receipt_identity_mismatch".into());
     }
-    let recovered_event_window_after = final_event.sequence.saturating_sub(250);
-    let durable_events = state
-        .main_chat_agent_event_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
-        .lock()
-        .await
-        .list(operation_id, recovered_event_window_after, 250)
-        .map_err(|error| format!("list recovered durable turn facts failed: {error}"))?;
-    if durable_events.last().map(|event| event.event_id.as_str())
-        != Some(final_event.event_id.as_str())
-    {
+    let (durable_events, terminal_successor) = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let post_final_events = event_store
+            .list(operation_id, final_event.sequence, 2)
+            .map_err(|error| format!("list post-final durable facts failed: {error}"))?;
+        let terminal_successor = match post_final_events.as_slice() {
+            [] => None,
+            [successor]
+                if successor.event_type == "terminal_owner.successor_confirmed"
+                    && successor.sequence == final_event.sequence.saturating_add(1) =>
+            {
+                Some(successor.clone())
+            }
+            _ => {
+                return Err(
+                    "turn_operation_final_reconciliation_required:bounded_event_window_missing_final"
+                        .into(),
+                );
+            }
+        };
+        // Keep enough pre-final context for the normal recovery checks while
+        // reserving one slot for the only legal post-final successor.
+        let recovered_event_window_after = final_event.sequence.saturating_sub(248);
+        let durable_events = event_store
+            .list(operation_id, recovered_event_window_after, 250)
+            .map_err(|error| format!("list recovered durable turn facts failed: {error}"))?;
+        let expected_last_event_id = terminal_successor
+            .as_ref()
+            .map(|event| event.event_id.as_str())
+            .unwrap_or(final_event.event_id.as_str());
+        if durable_events.last().map(|event| event.event_id.as_str())
+            != Some(expected_last_event_id)
+            || !durable_events
+                .iter()
+                .any(|event| event.event_id == final_event.event_id)
+        {
+            return Err(
+                "turn_operation_final_reconciliation_required:bounded_event_window_missing_final"
+                    .into(),
+            );
+        }
+        (durable_events, terminal_successor)
+    };
+    if terminal_successor.as_ref().is_some_and(|successor| {
+        successor.task_session_id != operation_id
+            || successor.run_id != operation_id
+            || successor.object_type != "terminal_owner_successor"
+            || successor.source != "terminal_owner_write_gateway.review_successor"
+    }) {
         return Err(
-            "turn_operation_final_reconciliation_required:bounded_event_window_missing_final"
-                .into(),
+            "turn_operation_final_reconciliation_required:terminal_successor_identity_mismatch"
+                .to_string(),
         );
     }
     let action_queue_refs = final_event_string_array(&final_event, "actionQueueRefs")?;
@@ -4977,6 +5114,72 @@ async fn recover_openlife_turn_from_durable_final(
             .ok_or_else(|| {
                 "turn_operation_final_reconciliation_required:task_missing".to_string()
             })?;
+        if let Some(successor) = terminal_successor.as_ref() {
+            let cause_ref = final_event_string(successor, "causeRef")?;
+            let before_revision = final_event_count(successor, "beforeOwnerRevision")? as u64;
+            let after_revision = final_event_count(successor, "afterOwnerRevision")? as u64;
+            let before_digest = final_event_string(successor, "beforeOwnerDigest")?;
+            let after_digest = final_event_string(successor, "afterOwnerDigest")?;
+            let transition_receipt_ref =
+                final_event_string(successor, "localTransitionReceiptRef")?;
+            let transition_receipt_digest =
+                final_event_string(successor, "localTransitionReceiptDigest")?;
+            let final_owner_revision = final_event_count(&final_event, "taskOwnerRevision")? as u64;
+            let final_owner_digest =
+                final_payload_task_owner_digest(&final_event.payload, receipt.version())?;
+            if final_event_string(successor, "causeKind")? != "proposal_review_acceptance"
+                || final_event_string(successor, "finalEventId")? != final_event.event_id
+                || final_event_string(successor, "ownerKind")? != "agent_task_session"
+                || final_event_string(successor, "ownerId")? != operation_id
+                || before_revision != final_owner_revision
+                || before_digest != final_owner_digest
+                || after_revision != before_revision.saturating_add(1)
+            {
+                return Err(
+                    "turn_operation_final_reconciliation_required:terminal_successor_binding_mismatch"
+                        .to_string(),
+                );
+            }
+            let verified_transition = sessions
+                .verified_terminal_owner_transition_receipt(transition_receipt_ref)
+                .map_err(|error| {
+                    format!(
+                        "turn_operation_final_reconciliation_required:terminal_successor_receipt_invalid:{error}"
+                    )
+                })?
+                .ok_or_else(|| {
+                    "turn_operation_final_reconciliation_required:terminal_successor_receipt_missing"
+                        .to_string()
+                })?;
+            let owner_head = sessions
+                .canonical_owner_head(operation_id)
+                .map_err(|error| {
+                    format!(
+                        "turn_operation_final_reconciliation_required:terminal_successor_owner_head_invalid:{error}"
+                    )
+                })?
+                .ok_or_else(|| {
+                    "turn_operation_final_reconciliation_required:task_missing".to_string()
+                })?;
+            if verified_transition.receipt_digest() != transition_receipt_digest
+                || verified_transition.proposal_id() != cause_ref
+                || verified_transition.owner_kind() != "agent_task_session"
+                || verified_transition.owner_id() != operation_id
+                || verified_transition.before_revision() != before_revision
+                || verified_transition.after_revision() != after_revision
+                || verified_transition.before_digest() != before_digest
+                || verified_transition.after_digest() != after_digest
+                || owner_head.revision() != after_revision
+                || owner_head.digest() != after_digest
+                || receipt.digest() != after_digest
+                || task.status != AgentTaskSessionStatus::Completed
+            {
+                return Err(
+                    "turn_operation_final_reconciliation_required:terminal_successor_receipt_mismatch"
+                        .to_string(),
+                );
+            }
+        }
         (task, receipt)
     };
     let (run, run_owner_revision) = {
@@ -5009,8 +5212,13 @@ async fn recover_openlife_turn_from_durable_final(
     let recorded_task_owner_digest =
         final_payload_task_owner_digest(&final_event.payload, task_owner_receipt.version())?;
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run)?;
-    if final_event_string(&final_event, "taskOwnerStatus")? != task.status.as_str()
-        || recorded_task_owner_digest != task_owner_receipt.digest()
+    let task_owner_matches_terminal_fact = if terminal_successor.is_some() {
+        true
+    } else {
+        final_event_string(&final_event, "taskOwnerStatus")? == task.status.as_str()
+            && recorded_task_owner_digest == task_owner_receipt.digest()
+    };
+    if !task_owner_matches_terminal_fact
         || final_event_string(&final_event, "runOwnerStatus")? != run.status.to_string()
         || final_event_count(&final_event, "runOwnerRevision")? as u64 != run_owner_revision
         || final_event_string(&final_event, "runOwnerDigest")? != run_owner_digest

@@ -1,4 +1,4 @@
-use crate::agent::proposal_store::ProposalStore;
+use crate::agent::proposal_store::{ProposalStore, TerminalOwnerOriginBinding};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
 use crate::agent::{CanonicalWriteAdmission, CanonicalWriteAdmissionRequest};
 use anyhow::{anyhow, Result};
@@ -186,6 +186,91 @@ impl ReviewWorkflowOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalOwnerReviewOriginAuthority {
+    BoundToVerifiedEpochAdmission,
+}
+
+/// Non-serializable authority tying a Review item to the exact terminal epoch
+/// opened from a TaskSession-verified canonical user-message admission.
+#[derive(Debug, Clone)]
+pub struct TerminalOwnerReviewOriginProof {
+    task_session_id: String,
+    run_id: String,
+    epoch_id: String,
+    epoch_generation: u64,
+    admission_id: String,
+    canonical_user_message_ref: String,
+    canonical_user_message_digest: String,
+    authority: TerminalOwnerReviewOriginAuthority,
+}
+
+impl TerminalOwnerReviewOriginProof {
+    pub fn from_epoch_admission(
+        admission: &crate::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission,
+        epoch_id: &str,
+        epoch_generation: u64,
+    ) -> Result<Self> {
+        admission.validate()?;
+        if epoch_id.trim().is_empty() || epoch_generation == 0 {
+            anyhow::bail!("terminal owner epoch origin is invalid");
+        }
+        Ok(Self {
+            task_session_id: admission.task_session_id().to_string(),
+            run_id: admission.run_id().to_string(),
+            epoch_id: epoch_id.to_string(),
+            epoch_generation,
+            admission_id: admission.admission_id().to_string(),
+            canonical_user_message_ref: admission.canonical_user_message_ref().to_string(),
+            canonical_user_message_digest: admission.canonical_user_message_digest().to_string(),
+            authority: TerminalOwnerReviewOriginAuthority::BoundToVerifiedEpochAdmission,
+        })
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.authority != TerminalOwnerReviewOriginAuthority::BoundToVerifiedEpochAdmission
+            || self.task_session_id.trim().is_empty()
+            || self.run_id.trim().is_empty()
+            || self.epoch_id.trim().is_empty()
+            || self.epoch_generation == 0
+            || self.admission_id.trim().is_empty()
+            || self.canonical_user_message_ref.trim().is_empty()
+            || self.canonical_user_message_digest.trim().is_empty()
+        {
+            anyhow::bail!("terminal owner review origin authority is invalid");
+        }
+        Ok(())
+    }
+
+    pub fn task_session_id(&self) -> &str {
+        &self.task_session_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
+    }
+
+    pub fn epoch_generation(&self) -> u64 {
+        self.epoch_generation
+    }
+
+    pub fn admission_id(&self) -> &str {
+        &self.admission_id
+    }
+
+    pub fn canonical_user_message_ref(&self) -> &str {
+        &self.canonical_user_message_ref
+    }
+
+    pub fn canonical_user_message_digest(&self) -> &str {
+        &self.canonical_user_message_digest
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReviewAcceptanceAuthorityProof {
     ClaimedByReviewWorkflow,
 }
@@ -202,6 +287,7 @@ pub struct ClaimedReviewAcceptanceSnapshot {
     proposal: AgentProposal,
     proposal_snapshot_digest: String,
     dispatch_claim_digest: String,
+    terminal_owner_origin: Option<TerminalOwnerOriginBinding>,
     authority_proof: ReviewAcceptanceAuthorityProof,
 }
 
@@ -221,7 +307,7 @@ pub struct MaterializedReviewAcceptanceSnapshot {
 }
 
 impl MaterializedReviewAcceptanceSnapshot {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.authority_proof
             != MaterializedReviewAcceptanceAuthorityProof::ReloadedFromCanonicalReviewWorkflow
         {
@@ -235,21 +321,21 @@ impl MaterializedReviewAcceptanceSnapshot {
         Ok(())
     }
 
-    pub(crate) fn proposal(&self) -> &AgentProposal {
+    pub fn proposal(&self) -> &AgentProposal {
         &self.proposal
     }
 
-    pub(crate) fn proposal_snapshot_digest(&self) -> &str {
+    pub fn proposal_snapshot_digest(&self) -> &str {
         &self.proposal_snapshot_digest
     }
 
-    pub(crate) fn dispatch_claim_digest(&self) -> &str {
+    pub fn dispatch_claim_digest(&self) -> &str {
         &self.dispatch_claim_digest
     }
 }
 
 impl ClaimedReviewAcceptanceSnapshot {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.authority_proof != ReviewAcceptanceAuthorityProof::ClaimedByReviewWorkflow {
             anyhow::bail!("review acceptance authority proof is unavailable");
         }
@@ -269,16 +355,20 @@ impl ClaimedReviewAcceptanceSnapshot {
         Ok(())
     }
 
-    pub(crate) fn proposal(&self) -> &AgentProposal {
+    pub fn proposal(&self) -> &AgentProposal {
         &self.proposal
     }
 
-    pub(crate) fn proposal_snapshot_digest(&self) -> &str {
+    pub fn proposal_snapshot_digest(&self) -> &str {
         &self.proposal_snapshot_digest
     }
 
-    pub(crate) fn dispatch_claim_digest(&self) -> &str {
+    pub fn dispatch_claim_digest(&self) -> &str {
         &self.dispatch_claim_digest
+    }
+
+    pub fn terminal_owner_origin(&self) -> Option<&TerminalOwnerOriginBinding> {
+        self.terminal_owner_origin.as_ref()
     }
 }
 
@@ -289,6 +379,75 @@ pub struct ReviewWorkflow<'a> {
 impl<'a> ReviewWorkflow<'a> {
     pub fn new(proposal_store: &'a ProposalStore) -> Self {
         Self { proposal_store }
+    }
+
+    pub fn submit_with_terminal_owner_origin(
+        &self,
+        mut request: DurableWriteRequest,
+        origin: TerminalOwnerReviewOriginProof,
+    ) -> Result<ReviewWorkflowOutcome> {
+        origin.validate()?;
+        validate_pending_wording(&request)?;
+        if request.requires_approval {
+            request.proposal.status = ProposalStatus::Pending;
+            request.proposal.resolved_at = None;
+        }
+        if request.existing_proposal_id.is_some() {
+            anyhow::bail!("terminal owner review does not permit caller-selected replacement");
+        }
+        request.proposal.run_id = None;
+        request.proposal.source_detail = None;
+        if let Some(after) = request.proposal.after.as_object_mut() {
+            after.remove("originatingTaskSessionId");
+            after.remove("originating_task_session_id");
+        }
+        let proposal = request.proposal.clone();
+        let (proposal, created) = self
+            .proposal_store
+            .create_or_reuse_active_review_proposal_with_terminal_origin(
+                &proposal,
+                &request.idempotency_key,
+                origin.task_session_id(),
+                origin.run_id(),
+                origin.epoch_id(),
+                origin.epoch_generation(),
+                origin.admission_id(),
+                origin.canonical_user_message_ref(),
+                origin.canonical_user_message_digest(),
+            )?;
+        Ok(outcome(
+            request,
+            proposal,
+            if created {
+                DurableWriteDecisionKind::CreatePendingProposal
+            } else {
+                DurableWriteDecisionKind::ReusePendingProposal
+            },
+            if created {
+                "created_pending_review_proposal"
+            } else {
+                "reused_pending_review_proposal"
+            },
+        ))
+    }
+
+    pub fn bind_staged_proposal_to_terminal_owner_origin(
+        &self,
+        proposal_id: &str,
+        origin: &TerminalOwnerReviewOriginProof,
+    ) -> Result<AgentProposal> {
+        origin.validate()?;
+        self.proposal_store
+            .bind_existing_review_proposal_terminal_origin(
+                proposal_id,
+                origin.task_session_id(),
+                origin.run_id(),
+                origin.epoch_id(),
+                origin.epoch_generation(),
+                origin.admission_id(),
+                origin.canonical_user_message_ref(),
+                origin.canonical_user_message_digest(),
+            )
     }
 
     /// Consume one exact PolicyRouter grant after a successful canonical read
@@ -434,6 +593,9 @@ impl<'a> ReviewWorkflow<'a> {
         let snapshot = ClaimedReviewAcceptanceSnapshot {
             proposal_snapshot_digest: persisted_snapshot_digest,
             dispatch_claim_digest: format!("sha256:{}", sha256_hex(dispatch_claim_id.as_bytes())),
+            terminal_owner_origin: self
+                .proposal_store
+                .terminal_owner_origin_binding(proposal_id)?,
             proposal,
             authority_proof: ReviewAcceptanceAuthorityProof::ClaimedByReviewWorkflow,
         };
