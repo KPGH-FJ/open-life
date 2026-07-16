@@ -3,6 +3,7 @@ use crate::tool_manifest::{ToolManifest, ToolSource};
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use serde_json::Value;
+use std::sync::{Arc, LazyLock};
 
 use super::helpers::{
     canonical_tool_source, configured_web_search_endpoint, ensure_external_write_content_size,
@@ -30,6 +31,159 @@ use crate::network_client::{
 };
 use crate::tool_execution_receipt::{ToolActionEffect, ToolExecutionReceiptTracker};
 use ring::digest::{digest, SHA256};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// The canonical MCP audit writer is single-owner and serializes SQLite
+// transactions. Mirror that authority at the async boundary so concurrent
+// tool completions wait without occupying an unbounded number of Tokio
+// blocking workers. The owned permit moves into the worker: cancelling the
+// caller cannot release the bound while a detached durable commit is running.
+static MCP_AUDIT_DURABLE_WRITE_BLOCKING_GATE: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
+
+type McpAuditWriteFailureReporter = Arc<dyn Fn(&str) + Send + Sync>;
+
+struct McpAuditBlockingWorkerStartGuard {
+    failure_reporter: Option<McpAuditWriteFailureReporter>,
+    failure_reported: Arc<AtomicBool>,
+    worker_started: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl McpAuditBlockingWorkerStartGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for McpAuditBlockingWorkerStartGuard {
+    fn drop(&mut self) {
+        if self.armed && !self.worker_started.load(Ordering::Acquire) {
+            report_mcp_audit_write_failure_once(
+                self.failure_reporter.as_ref(),
+                self.failure_reported.as_ref(),
+                "mcp_audit_blocking_worker_start_unknown_after_caller_cancelled",
+            );
+        }
+    }
+}
+
+fn report_mcp_audit_write_failure_once(
+    reporter: Option<&McpAuditWriteFailureReporter>,
+    reported: &AtomicBool,
+    detail: &str,
+) {
+    if reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        if let Some(reporter) = reporter {
+            // Reporting is diagnostic containment, never the canonical
+            // operation outcome. Preserve the original durable-write failure
+            // even if an injected/custom observer panics.
+            let _ = catch_unwind(AssertUnwindSafe(|| reporter(detail)));
+        }
+    }
+}
+
+async fn run_bounded_mcp_audit_write<T>(
+    gate: Arc<tokio::sync::Semaphore>,
+    failure_reporter: Option<McpAuditWriteFailureReporter>,
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
+    let failure_reported = Arc::new(AtomicBool::new(false));
+    let permit = match gate.acquire_owned().await {
+        Ok(permit) => permit,
+        Err(error) => {
+            let detail = format!("mcp_audit_blocking_gate_closed:{error}");
+            report_mcp_audit_write_failure_once(
+                failure_reporter.as_ref(),
+                failure_reported.as_ref(),
+                &detail,
+            );
+            anyhow::bail!(detail);
+        }
+    };
+    let worker_started = Arc::new(AtomicBool::new(false));
+    let mut worker_start_guard = McpAuditBlockingWorkerStartGuard {
+        failure_reporter: failure_reporter.clone(),
+        failure_reported: Arc::clone(&failure_reported),
+        worker_started: Arc::clone(&worker_started),
+        armed: true,
+    };
+    let worker_failure_reporter = failure_reporter.clone();
+    let worker_failure_reported = Arc::clone(&failure_reported);
+    let blocking_worker_started = Arc::clone(&worker_started);
+    let worker_result = tokio::task::spawn_blocking(move || {
+        blocking_worker_started.store(true, Ordering::Release);
+        let _permit = permit;
+        match catch_unwind(AssertUnwindSafe(operation)) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                let detail = format!("mcp_audit_durable_write_failed:{error}");
+                report_mcp_audit_write_failure_once(
+                    worker_failure_reporter.as_ref(),
+                    worker_failure_reported.as_ref(),
+                    &detail,
+                );
+                Err(error)
+            }
+            Err(payload) => {
+                report_mcp_audit_write_failure_once(
+                    worker_failure_reporter.as_ref(),
+                    worker_failure_reported.as_ref(),
+                    "mcp_audit_blocking_worker_panicked",
+                );
+                resume_unwind(payload)
+            }
+        }
+    })
+    .await;
+    worker_start_guard.disarm();
+
+    match worker_result {
+        Ok(result) => result,
+        Err(error) => {
+            let detail = format!("mcp_audit_blocking_worker_failed:{error}");
+            report_mcp_audit_write_failure_once(
+                failure_reporter.as_ref(),
+                failure_reported.as_ref(),
+                &detail,
+            );
+            anyhow::bail!(detail);
+        }
+    }
+}
+
+async fn insert_tool_audit_log_durably(
+    store: &dyn crate::mcp_audit::McpAuditDurableWriter,
+    tool_name: &str,
+    arguments: &Value,
+    result: &str,
+    success: bool,
+    pii_found: bool,
+) -> Result<i64> {
+    let operation_store = store.clone_owned_writer();
+    let failure_store = Arc::clone(&operation_store);
+    let failure_reporter: McpAuditWriteFailureReporter = Arc::new(move |detail| {
+        failure_store.report_runtime_failure("mcp_audit_runtime_durable_write_failed", detail);
+    });
+    let tool_name = tool_name.to_string();
+    let arguments = arguments.clone();
+    let result = result.to_string();
+    run_bounded_mcp_audit_write(
+        MCP_AUDIT_DURABLE_WRITE_BLOCKING_GATE.clone(),
+        Some(failure_reporter),
+        move || {
+            operation_store.insert_log_durably(&tool_name, &arguments, &result, success, pii_found)
+        },
+    )
+    .await
+}
 
 struct NetworkPolicyBlockedInput<'a> {
     request: &'a AgentActionRequest,
@@ -1042,9 +1196,15 @@ impl super::ActionExecutor {
             .await
         {
             Ok(r) => {
-                if let Err(e) =
-                    ctx.audit_store
-                        .insert_log(&manifest.name, &args, &r, true, pii_found)
+                if let Err(e) = insert_tool_audit_log_durably(
+                    ctx.audit_store,
+                    &manifest.name,
+                    &args,
+                    &r,
+                    true,
+                    pii_found,
+                )
+                .await
                 {
                     eprintln!("[warn] audit log write failed: {}", e);
                 }
@@ -1055,13 +1215,16 @@ impl super::ActionExecutor {
                 }
             }
             Err(e) => {
-                if let Err(log_err) = ctx.audit_store.insert_log(
+                if let Err(log_err) = insert_tool_audit_log_durably(
+                    ctx.audit_store,
                     &manifest.name,
                     &args,
                     &e.to_string(),
                     false,
                     pii_found,
-                ) {
+                )
+                .await
+                {
                     eprintln!("[warn] audit log write failed: {}", log_err);
                 }
                 ToolCallInternalResult {
@@ -2141,6 +2304,7 @@ fn manifest_risk_level(manifest: &ToolManifest) -> RiskLevel {
 mod bound_content_receipt_tests {
     use super::*;
     use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};
+    use crate::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
     use crate::tool_manifest::{ToolIdempotencyContract, ToolSource};
 
     fn manifest() -> ToolManifest {
@@ -2168,6 +2332,336 @@ mod bound_content_receipt_tests {
             source_run_id: Some(run_id.into()),
             step_index: 1,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_write_blocking_seam_returns_only_after_durable_row_is_visible() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = McpAuditStore::with_key_materials(
+            directory.path().join("mcp_audit.db"),
+            vec![AuditKeyMaterial {
+                config: AuditKeyConfig {
+                    mode: KeyMode::Keychain,
+                    salt_b64: None,
+                    env_var: None,
+                    key_ref: Some(
+                        "keychain://com.openlife.desktop/mcp-audit-key-store-blocking-seam-epoch-1"
+                            .into(),
+                    ),
+                    epoch: 1,
+                    created_at: "2026-07-14T00:00:00Z".into(),
+                },
+                key: [0xA7; 32],
+            }],
+        )
+        .unwrap();
+        let arguments = serde_json::json!({"requestId": "blocking-seam-test"});
+
+        let row_id = insert_tool_audit_log_durably(
+            &store,
+            "blocking.seam",
+            &arguments,
+            "durable-result",
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let rows = store.list_logs(10).unwrap();
+
+        assert_eq!(row_id, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool_name, "blocking.seam");
+        let source = include_str!("tool_executor.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod bound_content_receipt_tests")
+            .next()
+            .expect("production ToolExecutor source");
+        assert_eq!(
+            production.matches("insert_tool_audit_log_durably(").count(),
+            3,
+            "one helper definition plus success/error awaited call sites must remain"
+        );
+        let call_tool = production
+            .split("pub(crate) async fn call_tool_internal(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn build_blocked_action_observation(")
+                    .next()
+            })
+            .expect("bounded ToolExecutor call surface");
+        assert_eq!(
+            call_tool.matches("insert_tool_audit_log_durably(").count(),
+            2
+        );
+        assert_eq!(
+            call_tool
+                .matches(")\n                .await\n                {")
+                .count(),
+            2,
+            "success and failure audit commits must both await the durable result"
+        );
+        assert!(!production.contains("ctx.audit_store.insert_log("));
+        assert!(production.contains("tokio::task::spawn_blocking(move ||"));
+        assert!(production.contains(".acquire_owned()"));
+        assert!(production.contains("tokio::sync::Semaphore::new(1)"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_write_blocking_worker_panic_is_an_error_and_releases_the_bound() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let failure_reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_reports = Arc::clone(&failure_reports);
+        let reporter: McpAuditWriteFailureReporter = Arc::new(move |detail| {
+            captured_reports
+                .lock()
+                .expect("capture blocking-worker failure report")
+                .push(detail.to_string());
+        });
+        let error = run_bounded_mcp_audit_write(gate.clone(), Some(reporter), || -> Result<()> {
+            panic!("injected audit blocking worker panic");
+        })
+        .await
+        .expect_err("a panicked durable worker must never return success");
+        assert!(
+            error
+                .to_string()
+                .contains("mcp_audit_blocking_worker_failed"),
+            "JoinError must retain a typed fail-closed boundary: {error}"
+        );
+        assert_eq!(
+            failure_reports
+                .lock()
+                .expect("read blocking-worker failure reports")
+                .as_slice(),
+            ["mcp_audit_blocking_worker_panicked"],
+            "the worker must degrade persistence exactly once before its panic becomes JoinError"
+        );
+
+        let recovered = run_bounded_mcp_audit_write(gate, None, || Ok::<_, anyhow::Error>(7_u8))
+            .await
+            .expect("panic drops the owned permit so a later reconciled attempt can run");
+        assert_eq!(recovered, 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_failure_reporter_panic_cannot_replace_the_durable_write_error() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let reporter: McpAuditWriteFailureReporter = Arc::new(|_detail| {
+            panic!("injected audit failure observer panic");
+        });
+
+        let error = run_bounded_mcp_audit_write(gate.clone(), Some(reporter), || -> Result<()> {
+            anyhow::bail!("injected canonical audit commit failure")
+        })
+        .await
+        .expect_err("observer panic must not turn a failed audit commit into success or unwind");
+        assert!(
+            error
+                .to_string()
+                .contains("injected canonical audit commit failure"),
+            "the original durable-write failure must survive observer containment: {error}"
+        );
+
+        let recovered = run_bounded_mcp_audit_write(gate, None, || Ok::<_, anyhow::Error>(9_u8))
+            .await
+            .expect("observer containment must release the bounded writer permit");
+        assert_eq!(recovered, 9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_caller_cannot_release_owned_permit_or_report_worker_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let active_workers = Arc::new(AtomicUsize::new(0));
+        let max_active_workers = Arc::new(AtomicUsize::new(0));
+        let detached_operation_failures = Arc::new(AtomicUsize::new(0));
+        let detached_failure_reports = Arc::new(AtomicUsize::new(0));
+        let cancelled_caller_successes = Arc::new(AtomicUsize::new(0));
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+
+        let first_gate = gate.clone();
+        let first_active = active_workers.clone();
+        let first_max = max_active_workers.clone();
+        let first_failures = detached_operation_failures.clone();
+        let first_failure_reports = detached_failure_reports.clone();
+        let first_reporter: McpAuditWriteFailureReporter = Arc::new(move |_detail| {
+            first_failure_reports.fetch_add(1, Ordering::AcqRel);
+        });
+        let first_caller_successes = cancelled_caller_successes.clone();
+        let first_caller = tokio::spawn(async move {
+            let result = run_bounded_mcp_audit_write(
+                first_gate,
+                Some(first_reporter),
+                move || -> Result<&'static str> {
+                    let active = first_active.fetch_add(1, Ordering::AcqRel) + 1;
+                    first_max.fetch_max(active, Ordering::AcqRel);
+                    let _ = first_started_tx.send(());
+                    release_first_rx
+                        .recv()
+                        .expect("release first blocking audit worker");
+                    first_failures.fetch_add(1, Ordering::AcqRel);
+                    first_active.fetch_sub(1, Ordering::AcqRel);
+                    anyhow::bail!("injected detached durable audit failure")
+                },
+            )
+            .await;
+            if result.is_ok() {
+                first_caller_successes.fetch_add(1, Ordering::AcqRel);
+            }
+            result
+        });
+        first_started_rx
+            .await
+            .expect("first worker acquires the sole permit");
+        first_caller.abort();
+        let cancelled = first_caller
+            .await
+            .expect_err("aborted caller future must remain cancelled");
+        assert!(cancelled.is_cancelled());
+
+        let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
+        let second_active = active_workers.clone();
+        let second_max = max_active_workers.clone();
+        let second_caller = tokio::spawn(run_bounded_mcp_audit_write(
+            gate,
+            None,
+            move || -> Result<&'static str> {
+                let active = second_active.fetch_add(1, Ordering::AcqRel) + 1;
+                second_max.fetch_max(active, Ordering::AcqRel);
+                let _ = second_started_tx.send(());
+                second_active.fetch_sub(1, Ordering::AcqRel);
+                Ok("second-durable")
+            },
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut second_started_rx)
+                .await
+                .is_err(),
+            "without the worker-owned permit, the second blocking operation would start while the cancelled caller's detached worker is still active"
+        );
+        assert_eq!(active_workers.load(Ordering::Acquire), 1);
+        assert_eq!(max_active_workers.load(Ordering::Acquire), 1);
+        assert_eq!(cancelled_caller_successes.load(Ordering::Acquire), 0);
+
+        release_first_tx
+            .send(())
+            .expect("release detached first blocking worker");
+        tokio::time::timeout(Duration::from_secs(2), &mut second_started_rx)
+            .await
+            .expect("second worker starts after the detached first worker releases its permit")
+            .expect("second worker start signal");
+        let second_result = second_caller.await.unwrap().unwrap();
+
+        assert_eq!(second_result, "second-durable");
+        assert_eq!(detached_operation_failures.load(Ordering::Acquire), 1);
+        assert_eq!(
+            detached_failure_reports.load(Ordering::Acquire),
+            1,
+            "a detached worker failure must degrade persistence even though its caller future was cancelled"
+        );
+        assert_eq!(cancelled_caller_successes.load(Ordering::Acquire), 0);
+        assert_eq!(max_active_workers.load(Ordering::Acquire), 1);
+        assert_eq!(active_workers.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn cancelled_before_blocking_worker_start_reports_fail_closed_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build bounded blocking-pool runtime");
+        runtime.block_on(async {
+            let gate = Arc::new(tokio::sync::Semaphore::new(1));
+            let failure_reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured_reports = Arc::clone(&failure_reports);
+            let reporter: McpAuditWriteFailureReporter = Arc::new(move |detail| {
+                captured_reports
+                    .lock()
+                    .expect("capture pre-start cancellation failure")
+                    .push(detail.to_string());
+            });
+            let operation_starts = Arc::new(AtomicUsize::new(0));
+            let operation_completions = Arc::new(AtomicUsize::new(0));
+            let (blocker_started_tx, blocker_started_rx) = tokio::sync::oneshot::channel();
+            let (release_blocker_tx, release_blocker_rx) = std::sync::mpsc::channel();
+            let pool_blocker = tokio::task::spawn_blocking(move || {
+                let _ = blocker_started_tx.send(());
+                release_blocker_rx
+                    .recv()
+                    .expect("release sole blocking-pool worker");
+            });
+            blocker_started_rx
+                .await
+                .expect("sole blocking worker is occupied");
+
+            let caller_gate = Arc::clone(&gate);
+            let caller_starts = Arc::clone(&operation_starts);
+            let caller_completions = Arc::clone(&operation_completions);
+            let caller = tokio::spawn(run_bounded_mcp_audit_write(
+                caller_gate,
+                Some(reporter),
+                move || -> Result<()> {
+                    caller_starts.fetch_add(1, Ordering::AcqRel);
+                    caller_completions.fetch_add(1, Ordering::AcqRel);
+                    Ok(())
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while gate.available_permits() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("audit operation acquires its permit before blocking-pool admission");
+            assert_eq!(operation_starts.load(Ordering::Acquire), 0);
+
+            caller.abort();
+            let cancelled = caller
+                .await
+                .expect_err("queued audit caller must observe cancellation");
+            assert!(cancelled.is_cancelled());
+            assert_eq!(
+                failure_reports
+                    .lock()
+                    .expect("read pre-start cancellation reports")
+                    .as_slice(),
+                ["mcp_audit_blocking_worker_start_unknown_after_caller_cancelled"],
+                "dropping the async seam before worker start must degrade persistence exactly once"
+            );
+            assert_eq!(gate.available_permits(), 0);
+
+            release_blocker_tx
+                .send(())
+                .expect("release sole blocking-pool worker");
+            pool_blocker.await.expect("join blocking-pool owner");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while operation_completions.load(Ordering::Acquire) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("detached queued audit operation eventually executes");
+            assert_eq!(operation_starts.load(Ordering::Acquire), 1);
+            assert_eq!(
+                failure_reports
+                    .lock()
+                    .expect("read final pre-start cancellation reports")
+                    .len(),
+                1,
+                "the later successful detached worker must not double-report the already unknown pre-start boundary"
+            );
+            assert_eq!(gate.available_permits(), 1);
+        });
     }
 
     #[test]

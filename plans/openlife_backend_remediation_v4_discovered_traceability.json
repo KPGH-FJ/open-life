@@ -292,7 +292,7 @@
     ,{"id":"BR4-D052","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["baseline-source:AppState-proposal_engine-product-field","baseline-source:bootstrap-registers-ProposalEngine-generators","baseline-source:ordinary-main-chat-finalizer-calls-generate_from_run","baseline-source:shipped-agent-replay-calls-generate_from_run","independent-review:active-docs-incorrectly-claim-zero-consumer"],"failing_test":[],"positive":["source_map:baseline-state-bootstrap-main-chat-finalizer-and-replay-consumers-recorded","active_docs:ProposalEngine-history-corrected-to-product-wired-PolicyRouter-bypass","test_defined:ordinary-chat-finalization-never-creates-post-hoc-proposals"],"counterfactual":["counterexample:D30-is-open-D051-and-cannot-be-replacement-credit"],"deletion_or_absence":["inventory:core-posthoc-engine-and-seven-former-consumers-expected-absent","source_scan:current-product-ProposalEngine-and-generator-symbols-absent","test_defined:production-wide-ProposalEngine-consumer-absence-guard"],"capability_non_regression":[],"live_boundary":["new-single-system-absence-guard-cargo-pending","ordinary-zero-posthoc-runtime-evidence-pending","explicit-low-risk-and-sensitive-review-runtime-evidence-pending","inferred-memory-nonregression-is-tracked-by-open-D053","post-fix-independent-rereview-pending"]},"independent_review":{"reviewer":"d049_postfix_review","decision":"request-changes-addressed-in-docs-and-inventory-rereview-pending","evidence_refs":["source-audit:ProposalEngine-had-shipped-consumers","source-audit:capability-non-regression-empty"]}}
     ,{"id":"BR4-D053","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"not_started","verification_state":"none","closure_state":"open","evidence":{"reproduction":["source_trace:run_memory_governance_turn-short-circuits-normal-answer","source_trace:materialize-kernel-memory-governance-submits-one-proposal-per-candidate","source_trace:implicit-proposal-reason-claims-user-requested","source_trace:no-canonical-fact-key-dedup-before-staging"],"failing_test":[],"positive":[],"counterfactual":[],"deletion_or_absence":[],"capability_non_regression":[],"live_boundary":["MEM-04-current-behavior-fails-nonblocking-and-batch-contract","typed-deferred-ReviewBatch-not-implemented","proposal-fatigue-baseline-rerun-required"]},"independent_review":{"reviewer":null,"decision":"pending","evidence_refs":[]}}
     ,{"id":"BR4-D054","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"implemented","verification_state":"complete","closure_state":"independently_verified","evidence":{"reproduction":["source_trace:unknown-transcript-kind-falls-back-to-Error-before-owner-digest","counterexample:future_error-and-error-produce-the-same-typed-transcript-and-owner-digest","source_trace:unknown-action-certainty-falls-back-to-DispatchedUnknown-before-owner-digest","counterexample:future_certainty-and-dispatched_unknown-produce-the-same-typed-action-and-owner-digest","source_trace:current-schema-reopen-rewrites-unknown-action-certainty-to-dispatched_unknown","source_trace:unknown-task-strategy-and-status-materialize-as-DirectAnswer-and-Running"],"failing_test":["red_baseline:seven-Core-persisted-enum-corruption-tests-failed-before-bb1348f","red_baseline:two-Tauri-durable-final-recovery-tests-failed-before-bb1348f"],"positive":["gate:openlife-core-D054-9-of-9-2026-07-13","gate:openlife-tauri-D054-durable-final-recovery-2-of-2-2026-07-13","gate:openlife-tauri-main_chat_runtime_module-29-of-29-2026-07-13","gate:cargo-check-openlife-tauri-tests-2026-07-13","static:cargo-fmt-and-git-diff-check-2026-07-13"],"counterfactual":["test:unknown-task-strategy-and-status-fail-before-typed-materialization","test:unknown-transcript-kind-and-action-certainty-cannot-alias-legal-owner-digests","test:mixed-legacy-transcript-enum-migration-rolls-back-the-whole-transaction","test:transcript-and-action-corruption-after-final-do-not-redispatch-provider-tool-or-second-final"],"deletion_or_absence":["source_scan:four-lossy-persisted-enum-wildcard-fallbacks-absent","source_scan:current-schema-unknown-action-certainty-rewrite-absent"],"capability_non_regression":["test:all-legal-historical-task-transcript-enum-values-remain-compatible","test:all-legal-action-replay-certainty-values-remain-compatible","gate:openlife-tauri-main_chat_runtime_module-29-of-29-2026-07-13"],"live_boundary":["external-live-not-required:persisted-local-canonical-corruption-slice","localhost-provider-is-only-a-no-redispatch-observer-and-receives-zero-external-live-credit","neighbor-persisted-JSON-fallbacks-are-out-of-scope-and-remain-unverified"]},"independent_review":{"reviewer":"d054_strict_enum_review","decision":"accepted","evidence_refs":["review:716a0a8-and-1555141-are-tests-only-real-RED","review:bb1348f-is-one-to-one-strict-parser-root-fix","review:mixed-migration-transaction-rolls-back","review:two-durable-final-recovery-counterfactuals-do-not-redispatch","integrated_rerun:eleven-focused-tests-plus-runtime-module-and-cargo-check-green"]}}
-    ,{"id":"BR4-D055","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"not_started","verification_state":"none","closure_state":"open","evidence":{"reproduction":["source_trace:finalizer-snapshots-Action-Task-Transcript-Run-and-ToolEvent-under-separate-guards-then-appends-final","source_trace:recovery-reads-final-and-current-owners-without-one-epoch","source_trace:proposal-accept-reconciles-Run-Task-Action-and-Transcript-through-interleavable-writers","counterexample:authorized-post-final-proposal-successor-is-reported-as-owner-drift"],"failing_test":["test_defined:proposal_accept_during_final_seal_cannot_commit_stale_owner_graph","test_defined:recovery_holds_final_epoch_against_authorized_post_terminal_successor"],"positive":[],"counterfactual":["test_defined:unproven-post-final-drift-remains-rejected-without-redispatch","test_defined:sealed-final-and-proven-review-successor-both-recover","test_defined:sealing-origin-defers-proposal-before-effect"],"deletion_or_absence":["deletion_required:split-owner-snapshot-then-final-append","deletion_required:product-direct-owner-writers-outside-one-gateway","deletion_required:historical-recovery-by-current-head-equality-only"],"capability_non_regression":["test_defined:post-final-proposal-accept-remains-supported-as-proven-successor","test_defined:normal-buffered-and-streaming-final-recovery-remain-idempotent"],"live_boundary":["barrier-tests-not-yet-implemented","coordinator-and-durable-seal-not-implemented","writer-cutover-not-started","second-uncoordinated-reread-is-not-closure","cross-process-writer-lease-remains-required-if-release-allows-second-writer"]},"independent_review":{"reviewer":"d055_terminal_owner_fence","decision":"root-cause-confirmed-architecture-fix-required","evidence_refs":["writer-map:Action-Task-Transcript-Run-ToolEvent-and-proposal-reconciliation","source-audit:persist-and-recovery-lock-await-boundaries","design-boundary:no-store-guard-across-external-await"]}}
+    ,{"id":"BR4-D055","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"not_started","verification_state":"none","closure_state":"open","evidence":{"reproduction":["source_trace:finalizer-snapshots-Action-Task-Transcript-Run-and-ToolEvent-under-separate-guards-then-appends-final","source_trace:recovery-reads-final-and-current-owners-without-one-epoch","source_trace:proposal-accept-reconciles-Run-Task-Action-and-Transcript-through-interleavable-writers","counterexample:authorized-post-final-proposal-successor-is-reported-as-owner-drift","base_red:443b322-tool_gateway_product_paths_use_one_resource_snapshot_authority-detects-scheduled_execution-memory_store-lock","source_hit:scheduler_runner.rs-scheduled-final-delivery-direct-memory_store-lock"],"failing_test":["test_defined:proposal_accept_during_final_seal_cannot_commit_stale_owner_graph","test_defined:recovery_holds_final_epoch_against_authorized_post_terminal_successor","base_and_candidate_red:tool_gateway_product_paths_use_one_resource_snapshot_authority-scheduled_execution-still-owns-duplicate-AppState-lock-sequence-memory_store.lock"],"positive":[],"counterfactual":["test_defined:unproven-post-final-drift-remains-rejected-without-redispatch","test_defined:sealed-final-and-proven-review-successor-both-recover","test_defined:sealing-origin-defers-proposal-before-effect"],"deletion_or_absence":["deletion_required:split-owner-snapshot-then-final-append","deletion_required:product-direct-owner-writers-outside-one-gateway","deletion_required:historical-recovery-by-current-head-equality-only"],"capability_non_regression":["test_defined:post-final-proposal-accept-remains-supported-as-proven-successor","test_defined:normal-buffered-and-streaming-final-recovery-remain-idempotent"],"live_boundary":["barrier-tests-not-yet-implemented","coordinator-and-durable-seal-not-implemented","writer-cutover-not-started","second-uncoordinated-reread-is-not-closure","cross-process-writer-lease-remains-required-if-release-allows-second-writer"]},"independent_review":{"reviewer":"d055_terminal_owner_fence","decision":"root-cause-confirmed-architecture-fix-required","evidence_refs":["writer-map:Action-Task-Transcript-Run-ToolEvent-and-proposal-reconciliation","source-audit:persist-and-recovery-lock-await-boundaries","design-boundary:no-store-guard-across-external-await"]}}
     ,{"id":"BR4-D056","current_severity":"P2","triage_state":"root_cause_confirmed","implementation_state":"implemented","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["gate_failure:D044-through-D053-fingerprints-did-not-match-canonical-Rust-algorithm","gate_failure:D052-legitimate-classification-rejected-by-incomplete-allowlist","gate_failure:D047-referenced-nonexistent-frozen-P0-05","evidence_error:exact-filter-invocation-executed-zero-tests"],"failing_test":["red_gate:phase0-discovered-findings-addendum-rejected-invalid-fingerprint-taxonomy-and-reference"],"positive":["gate:phase0-discovered-findings-addendum-1-of-1-2026-07-13","source_proof:D044-through-D053-first-bodies-unchanged-and-effective-fingerprints-corrected-by-append-only-record","source_proof:BR4-C001-append-only-invalid-reference-correction","static:jq-json-and-diff-check","gate:append-only-script-positive-and-three-negative-counterfactuals","source_proof:CI-full-history-and-base-prefix-step-wired"],"counterfactual":["guard:trusted-prefix-body-rewrite-or-unbound-invalid-fingerprint-fails","gate_defined:unknown-classification-fails","gate_defined:missing-frozen-reference-requires-append-only-correction"],"deletion_or_absence":["metadata_correction:D044-through-D053-derived-fingerprints-only","source_fix:single-explicit-classification-allowlist","source_fix:append-only-definition-correction-contract"],"capability_non_regression":["not_applicable:evidence-gate-only-no-product-behavior-change"],"live_boundary":["external-GitHub-Actions-execution-pending"]},"independent_review":{"reviewer":"registry_fingerprint_forensics","decision":"root-cause-confirmed-first-bodies-intact","evidence_refs":["session-forensics:first-successful-D044-through-D053-additions","algorithm-audit:Rust-canonical-json-without-trailing-newline"]}},
     {
       "id": "BR4-D057",
@@ -424,8 +424,8 @@
       "id": "BR4-D064",
       "current_severity": "P0",
       "triage_state": "root_cause_confirmed",
-      "implementation_state": "not_started",
-      "verification_state": "none",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
       "closure_state": "open",
       "evidence": {
         "reproduction": ["source_trace:global-keychain-service-account-prefix-plus-numeric-epoch", "source_trace:create_mcp_audit_key_material-uses-epoch-reference-and-replacement-set_password", "source_trace:profile-and-custom-data-directories-share-secret-namespace", "source_trace:McpAuditStore-has-no-writable-owner-lease-and-opens-new-connections-per-operation"],
@@ -434,16 +434,103 @@
         "counterfactual": ["numeric-epoch-ordering-remains-deterministic-with-store-bound-random-reference-identity", "genuine-empty-first-boot-creates-one-reference-only-after-no-create-slot-reservation", "present-valid-keyring-may-enter-verified-read-only-recovery-without-creating-or-guessing-a-key", "existing-SqliteSlotOwnerLease-acquire-cannot-be-reused-blindly-before-BR4-D057-state-proof-because-it-can-create-an-absent-database"],
         "deletion_or_absence": ["deletion_required:global-epoch-only-new-key-reference", "deletion_required:replacement-write-for-new-audit-secret", "deletion_required:lease-free-writable-McpAuditStore", "deletion_required:per-operation-detached-writable-Connection-open", "absence_required:database-or-lock-file-duplicates-canonical-key-reference-list", "absence_required:missing-keyring-triggers-reference-guessing-keychain-enumeration-or-read-only-claim", "absence_required:legacy-global-reference-is-overwritten-or-auto-deleted"],
         "capability_non_regression": ["normal-audit-write-query-export-cleanup-and-restart-remain-available-for-one-valid-owner", "distinct-release-development-QA-and-custom-data-dir-stores-remain-independent", "valid-historical-ciphertext-remains-readable-after-versioned-migration"],
-        "live_boundary": ["source-confirmed-global-reference-collision-and-lease-gap", "same-second-cross-profile-and-two-process-dynamic-RED-pending", "missing-keyring-plus-nonempty-database-required-state-is-exactly-Unavailable", "BR4-D057-strict-loader-state-and-decrypt-proof-is-a-design-prerequisite-not-closure-credit", "no-production-fix-implemented"]
+        "live_boundary": ["baseline-source-confirmed-global-reference-collision-and-lease-gap", "same-second-cross-profile-and-two-process-dynamic-proof-is-local-only", "missing-keyring-plus-nonempty-database-required-state-is-exactly-Unavailable", "BR4-D057-strict-loader-state-and-decrypt-proof-is-a-design-prerequisite-not-closure-credit", "local-production-fix-implemented-but-external-closure-evidence-remains-open"]
       },
-      "independent_review": {"reviewer":"d063_d064_independent_inventory","decision":"root-cause-confirmed-global-secret-identity-and-writer-ownership-gap","evidence_refs":["source-map:storage-secret-store-bootstrap-settings-mcp-audit-sqlite-lease", "counterfactual:two-stores-same-epoch", "boundary:keyring-json-sole-reference-authority", "dependency:BR4-D057-state-proof-before-BR4-D064-activation"]}
+      "independent_review": {"reviewer":"d063_d064_independent_inventory","decision":"root-cause-confirmed-global-secret-identity-and-writer-ownership-gap","evidence_refs":["source-map:storage-secret-store-bootstrap-settings-mcp-audit-sqlite-lease", "counterfactual:two-stores-same-epoch", "boundary:keyring-json-sole-reference-authority", "dependency:BR4-D057-state-proof-before-BR4-D064-activation"]},
+      "revision_history": [
+        {
+          "diff_hash": "e7a7cdeb04bf196e54772ace00b2d35ebde0557cfbe3cb19d2e7c424521365bc",
+          "decision": "request_changes",
+          "preserved_as_rejected": true,
+          "reason_codes": [
+            "post_begin_rotation_errors_did_not_all_monotonically_degrade_both_persistence_owners",
+            "ordinary_persistent_insert_log_performance_evidence_missing"
+          ]
+        }
+      ],
+      "revision_evidence": {
+        "post_begin_boundary": [
+          "test:d064_post_begin_rotation_failures_fail_closed_with_typed_durable_outcome",
+          "test:d064_prepared_not_committed_exact_abort_is_the_only_healthy_post_begin_error",
+          "outcomes:unknown-or-database_committed",
+          "exception:not_committed-plus-exact-abort-only",
+          "admission:both-McpAuditKeyReferenceStore-and-McpAuditStore-unavailable-before-return",
+          "counterfactual:sealed-coordinator-blocks-later-effects-and-retained-writer-is-poisoned"
+        ],
+        "persistent_insert_log_benchmark": {
+          "test": "d064_persistent_product_insert_log_latency_and_throughput_budget",
+          "sample_count_per_run": 256,
+          "warmup_count": 16,
+          "storage": "real-tempdir-persistent-SQLite-through-sealed-product-bootstrap-owner",
+          "sample": "frozen-bounded-network-tool-receipt",
+          "sample_source": "src-tauri/src/backend_remediation_d064_tests.rs::d064_persistent_product_insert_log_latency_and_throughput_budget fixed arguments/result literals",
+          "calculation_method": {
+            "latency": "sort 256 per-call Instant durations after 16 excluded warmups; P50 index=(256-1)*50/100 and P95 index=(256-1)*95/100 using integer floor",
+            "throughput": "256 divided by one wall-clock Instant spanning only the measured insert_log loop",
+            "frozen_baseline": "component-wise median of the three consecutive raw runs for P50, P95 and throughput",
+            "execution": "explicit isolated gate: cargo test -p openlife-tauri d064_persistent_product_insert_log_latency_and_throughput_budget -- --ignored --nocapture --test-threads=1; parallel unit-test I/O is excluded from ordinary-path baseline credit"
+          },
+          "baseline_runs": [
+            {"p50_us":1118.834,"p95_us":1463.208,"throughput_per_sec":641.348},
+            {"p50_us":1090.292,"p95_us":1404.083,"throughput_per_sec":887.360},
+            {"p50_us":1115.291,"p95_us":1389.625,"throughput_per_sec":878.439}
+          ],
+          "frozen_median_baseline": {"p50_us":1115.291,"p95_us":1404.083,"throughput_per_sec":878.439},
+          "budgets": {"p50_us":5000.0,"p95_us":7500.0,"throughput_per_sec":200.0,"max_baseline_latency_multiplier":4.0,"min_baseline_throughput_ratio":0.25},
+          "post_freeze_validation": {"p50_us":1183.667,"p95_us":1508.209,"throughput_per_sec":823.840},
+          "final_revision_validation": {"p50_us":1016.834,"p95_us":1284.917,"throughput_per_sec":962.486,"readable_rows":272,"decision":"passed-all-absolute-and-relative-frozen-budget-conjuncts"},
+          "parallel_contention_observation": {"p50_us":1410.042,"p95_us":9331.792,"throughput_per_sec":356.900,"credit":"non-baseline stress observation retained; its cause was not inferred from the parallel suite alone and frozen budgets were not weakened"},
+          "controlled_shared_io_concurrency_observation": {"workers":4,"inserts_per_worker":32,"shared_io":"repeated bounded 64KiB same-directory write plus sync_data","pressure_sync_count":366,"p50_us":44363.209,"p95_us":56310.791,"throughput_per_sec":91.480,"durable_readable_rows":128,"credit":"non-baseline stress observation"},
+          "final_revision_controlled_shared_io_observation": {"workers":4,"inserts_per_worker":32,"pressure_sync_count":396,"p50_us":52888.541,"p95_us":69694.583,"throughput_per_sec":73.296,"durable_readable_rows":128,"credit":"non-baseline stress observation retained without weakening ordinary-path budgets"},
+          "budget_decision": "PASS requires readable row count plus all absolute limits and all relative-baseline limits; the post-freeze run passed every conjunct",
+          "bounded_spawn_blocking_required": true,
+          "decision_history": [
+            {"decision":"bounded_spawn_blocking_not_required","basis":"ordinary isolated path was inside budget","status":"superseded-after-controlled-shared-io-concurrency-observation"},
+            {"decision":"bounded_spawn_blocking_required","basis":"the async ToolExecutor call site could synchronously occupy a runtime worker for the controlled P95 56.311ms observation","status":"implemented-and-focused-tests-passed"}
+          ],
+          "bounded_spawn_blocking_implementation": "ToolExecutor success and failure audit commits acquire one owned process-wide Semaphore permit, move it into spawn_blocking, await the JoinHandle and inner insert_log result, and never buffer or fire-and-forget; worker error/panic and pre-start caller cancellation report exactly once through the bootstrapped McpAuditStore observer into the monotonic PersistenceCoordinator",
+          "bounded_spawn_blocking_counterfactuals": [
+            "audit_write_blocking_seam_returns_only_after_durable_row_is_visible: both product call sites await and no direct ctx.audit_store.insert_log remains",
+            "audit_write_blocking_worker_panic_is_an_error_and_releases_the_bound: worker panic reports persistence degradation exactly once before JoinError, JoinError cannot return success, and later reconciled work can acquire the permit",
+            "cancelled_caller_cannot_release_owned_permit_or_report_worker_success: aborting the caller leaves the worker-owned permit active, a barrier proves the second worker cannot start, max active remains one, the detached worker error still reports degradation, and the cancelled caller records zero success",
+            "cancelled_before_blocking_worker_start_reports_fail_closed_exactly_once: a one-thread saturated blocking pool proves an acquired-permit queued worker has not started; cancelling its caller reports unknown exactly once, the detached worker later executes, and no double report or early permit release occurs",
+            "d064_single_owner_real_sqlite_write_and_restart_positive_control: the real bootstrapped store observer degrades only McpAuditStore, a sealed coordinator blocks every later effect, and an in-process health upgrade is rejected"
+          ]
+        },
+        "test_fixture_isolation": {
+          "original_parallel_red": "secret_store filter: 19 passed, 1 failed, 2 ignored; timestamp-derived legacy refs collided while two separate MemorySecretStore fixtures correctly contended on one real OS slot lease",
+          "isolated_control": "failing exact test: 1 passed; full serial filter: 20 passed, 0 failed, 2 ignored",
+          "root_fix": "the only two legacy helper tests now use distinct thread-local fixed epoch injections 6590 and 6591; product epoch generation and global reservation behavior are unchanged",
+          "post_fix_parallel": "three consecutive default-parallel secret_store runs: each 20 passed, 0 failed, 2 ignored"
+        },
+        "final_local_gate_summary": {
+          "d064_correctness": "14 passed, 0 failed, 1 performance test intentionally ignored",
+          "d064_serial_performance": "1 passed, 0 failed, forced with --ignored --test-threads=1",
+          "blocking_seam_counterfactuals": "5 passed: durable visibility, panic/JoinError, reporter-panic containment preserving the original error, caller cancellation after worker start, caller cancellation before worker start",
+          "canonical_writer_revision": "3 passed: a real pre-rotation Main Chat ToolGateway snapshot commits exactly one row under the new epoch after successful rotation; a real Tokio cancellation Drop reporter degrades the coordinator without blocking_lock or duplicate reason replacement; four pre-captured writers racing a governed rotation produce one monotonic old-to-new epoch cutover and every post-rotation commit uses the new epoch",
+          "secret_store": "three consecutive default-parallel runs each 20 passed, 0 failed, 2 intentionally ignored; serial control 20 passed, 0 failed, 2 ignored",
+          "prepared_database_verifier": "1 passed",
+          "bootstrap_continuity_matrix": "1 passed",
+          "compilation": "cargo check openlife-core --lib debug and release plus openlife-tauri --tests passed",
+          "static": "cargo fmt --check, git diff --check, jq empty passed; normal/build feature trees contain only openlife-core default and no test-utils",
+          "closure": "partial local evidence only; credit-boundary RED items below remain open"
+        },
+        "credit_boundary": [
+          "local-debug-test-evidence-only",
+          "no-Windows-keychain-credit",
+          "no-power-loss-credit",
+          "existing-store-rotation-restart-reconciliation-remains-RED",
+          "fresh-attempted-database-missing-reconciliation-remains-RED",
+          "D057-legacy-cutover-remains-RED"
+        ]
+      }
     },
     {
       "id": "BR4-D065",
       "current_severity": "P1",
       "triage_state": "root_cause_confirmed",
-      "implementation_state": "not_started",
-      "verification_state": "none",
+      "implementation_state": "in_progress",
+      "verification_state": "partial",
       "closure_state": "open",
       "evidence": {
         "reproduction": [
@@ -488,8 +575,8 @@
       "id": "BR4-D066",
       "current_severity": "P1",
       "triage_state": "root_cause_confirmed",
-      "implementation_state": "not_started",
-      "verification_state": "none",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
       "closure_state": "open",
       "evidence": {
         "reproduction": [
@@ -502,14 +589,20 @@
           "test_defined:D066-captured-gateway-writes-new-epoch-after-rotation-barrier",
           "test_defined:D066-main-chat-agent-loop-and-scheduler-share-one-active-key-authority"
         ],
-        "positive": [],
+        "positive": [
+          "test:d064_pre_rotation_tool_gateway_snapshot_commits_once_with_rotated_epoch-real-product-snapshot-then-successful-rotation-then-one-new-epoch-row",
+          "test:d064_canonical_reporter_degrades_once_from_tokio_prestart_cancel_drop-no-runtime-blocking-lock-and-first-reason-remains-authoritative",
+          "test:d064_rotation_race_has_one_monotonic_epoch_cutover_for_captured_writers-four-pre-captured-writers-race-a-governed-rotation-with-no-old-epoch-after-first-new-epoch-and-post-rotation-use-of-new-epoch",
+          "test:real_app_state_snapshot_commit_cancel_paths_complete_10000_barrier_interleavings",
+          "test:hanging_mcp_transport_keeps_app_state_locks_live_and_cancel_terminates_it"
+        ],
         "counterfactual": [
           "test_defined:pre-cutover-row-may-use-old-epoch-and-remains-readable",
           "test_defined:key-reference-save-failure-leaves-all-writers-on-old-epoch"
         ],
         "deletion_or_absence": [
-          "deletion_required:by-value-product-McpAuditStore-snapshot",
-          "deletion_required:lock-then-clone-active-key-authority",
+          "absence_proven:by-value-product-McpAuditStore-snapshot",
+          "absence_proven:lock-then-clone-active-key-authority",
           "deletion_required:rotation-rollback-through-mutable-authority-clone"
         ],
         "capability_non_regression": [
@@ -518,7 +611,8 @@
         "live_boundary": [
           "separate-from-D057-narrow-bootstrap-GREEN-gate",
           "blocks-P1-16-key-rotation-and-final-audit-authority-closure",
-          "shared-key-authority-handle-and-rotation-barrier-not-implemented"
+          "local-product-writer-resolver-and-rotation-interleaving-implemented",
+          "external-live-main-chat-agent-loop-and-scheduler-capability-credit-remains-open"
         ]
       },
       "independent_review": {
@@ -540,16 +634,19 @@
       "closure_state": "open",
       "evidence": {
         "reproduction": [
-          "source_trace:tool-success-audit-insert-error-is-only-eprintln",
-          "source_trace:tool-failure-audit-insert-error-is-only-eprintln",
+          "source_trace:tool-success-audit-insert-error-still-ends-in-warning-after-coordinator-degradation",
+          "source_trace:tool-failure-audit-insert-error-still-ends-in-warning-after-coordinator-degradation",
           "source_trace:tool-receipt-has-no-audit-persistence-disposition",
-          "counterexample:runtime-audit-failure-leaves-PersistenceCoordinator-healthy"
+          "baseline-counterexample:runtime-audit-failure-left-PersistenceCoordinator-healthy-before-D064-blocking-seam-revision"
         ],
         "failing_test": [
           "test_defined:D067-tool-success-plus-audit-failure-preserves-effect-and-degrades-persistence",
           "test_defined:D067-tool-failure-plus-audit-failure-preserves-both-outcomes"
         ],
-        "positive": [],
+        "positive": [
+          "partial:test-audit-write-worker-error-panic-and-prestart-cancellation-report-degradation-exactly-once",
+          "partial:test-real-bootstrap-observer-monotonically-degrades-McpAuditStore-and-blocks-later-effects"
+        ],
         "counterfactual": [
           "test_defined:audit-failure-never-retries-non-idempotent-tool",
           "test_defined:normal-tool-terminal-writes-exactly-one-minimized-audit-row"
@@ -557,7 +654,7 @@
         "deletion_or_absence": [
           "deletion_required:audit-write-error-warning-and-continue",
           "deletion_required:tool-terminal-without-audit-disposition",
-          "deletion_required:healthy-future-effect-admission-after-audit-store-failure"
+          "deletion_verified:healthy-future-effect-admission-after-observed-audit-store-failure"
         ],
         "capability_non_regression": [
           "test_defined:confirmed-tool-output-remains-available-with-explicit-audit-degraded-state",
@@ -566,7 +663,8 @@
         "live_boundary": [
           "separate-from-D057-bootstrap-key-authority-root-cause",
           "blocks-ToolGateway-truth-consistency-and-Phase7-final-GREEN",
-          "runtime-audit-failure-injection-and-existing-receipt-deepening-not-implemented"
+          "runtime-audit-failure-propagation-is-partially-implemented-through-D064-blocking-seam",
+          "tool-terminal-receipt-audit-disposition-and-no-retry-product-tests-remain-not-implemented"
         ]
       },
       "independent_review": {

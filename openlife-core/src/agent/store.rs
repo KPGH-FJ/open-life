@@ -110,7 +110,7 @@ where
             observed_slot.display()
         );
     }
-    owner_lease.bind_opened_database_identity()?;
+    owner_lease.bind_opened_database_identity(&conn)?;
     Ok((conn, observed_slot, owner_lease))
 }
 
@@ -2398,7 +2398,10 @@ impl AgentRunStore {
             receipt_key.derive_for_canonical_database_slot(&canonical_db_path)?;
         let store = Self {
             conn: Arc::new(
-                crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease),
+                crate::sqlite_migration::IdentityBoundSqliteConnection::writable(
+                    conn,
+                    owner_lease,
+                )?,
             ),
             receipt_key: Arc::new(store_scoped_receipt_key),
         };
@@ -2462,7 +2465,7 @@ impl AgentRunStore {
                 crate::sqlite_migration::IdentityBoundSqliteConnection::read_only(
                     conn,
                     identity_guard,
-                ),
+                )?,
             ),
             receipt_key: Arc::new(store_scoped_receipt_key),
         })

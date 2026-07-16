@@ -7,22 +7,17 @@ use tokio::sync::Mutex;
 fn isolated_eval_mcp_audit_store(
     path: std::path::PathBuf,
 ) -> openlife_core::mcp_audit::McpAuditStore {
-    let key_ref = format!("eval:mcp-audit:{}", uuid::Uuid::new_v4());
-    openlife_core::mcp_audit::McpAuditStore::with_key_materials(
-        path,
-        vec![openlife_core::mcp_audit::AuditKeyMaterial {
-            config: openlife_core::mcp_audit::AuditKeyConfig {
-                mode: openlife_core::mcp_audit::KeyMode::Keychain,
-                salt_b64: None,
-                env_var: None,
-                key_ref: Some(key_ref),
-                epoch: 1,
-                created_at: chrono::Utc::now().to_rfc3339(),
-            },
-            key: rand::random(),
-        }],
-    )
-    .expect("isolated eval audit key material")
+    #[cfg(any(test, debug_assertions))]
+    {
+        return openlife_core::mcp_audit::McpAuditStore::isolated_runtime_evaluation(path);
+    }
+    #[cfg(not(any(test, debug_assertions)))]
+    {
+        let _ = path;
+        openlife_core::mcp_audit::McpAuditStore::unavailable_sentinel(
+            "writable MCP audit eval state is disabled in ordinary release builds",
+        )
+    }
 }
 
 #[cfg(test)]
@@ -36,6 +31,8 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
     let config = AppConfig::default();
     let base =
         std::env::temp_dir().join(format!("openlife-main-chat-eval-{}", uuid::Uuid::new_v4()));
+    #[cfg(any(test, debug_assertions))]
+    std::fs::create_dir_all(&base).expect("create canonical isolated Main Chat eval root");
     let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
     let agent_run_receipt_key = loop {
         if let Ok(key) =

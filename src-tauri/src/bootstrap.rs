@@ -5,16 +5,23 @@ use crate::a2a_sidecar;
 use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigestKey};
 use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::{
-    hydrate_config_secrets, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, hydrate_or_create_store_bound_mcp_audit_keys,
-    KeyringSecretStore, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
+    hydrate_config_secrets, hydrate_existing_mcp_audit_key_materials,
+    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
+    next_store_bound_mcp_audit_epoch, plan_store_bound_mcp_audit_key_material,
+    recover_pending_mcp_audit_secret, KeyringSecretStore, McpAuditPendingSecretRecovery,
+    SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
     MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::AppState;
 use crate::storage::{
+    activate_fresh_mcp_audit_store_from_reference_receipt,
+    activate_mcp_audit_store_from_reference_receipt, authorize_fresh_mcp_audit_database_recovery,
+    install_mcp_audit_active_reference_after_bootstrap,
     load_mcp_audit_key_reference_state_from_path, privacy_policy_path,
-    save_mcp_audit_key_reference_document_to_path, McpAuditKeyReferenceDocument,
-    McpAuditKeyReferenceLoadState,
+    remove_mcp_audit_key_reference_exact_commit_aware,
+    save_mcp_audit_key_reference_document_commit_aware, McpAuditDatabaseTransitionState,
+    McpAuditKeyReferenceDocument, McpAuditKeyReferenceLoadState, McpAuditReferenceOrigin,
+    McpAuditReferencePhase, McpAuditSecretState,
 };
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
@@ -28,11 +35,14 @@ use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
-use openlife_core::mcp_audit::McpAuditStore;
+use openlife_core::mcp_audit::{
+    AuditKeyMaterial, McpAuditFreshDatabaseCreationCapability, McpAuditStore,
+};
 use openlife_core::memory::MemoryStore;
 use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
+use openlife_core::sqlite_migration::SqliteSlotOwnerReservation;
 use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
 use std::path::{Path, PathBuf};
@@ -54,6 +64,46 @@ const STARTUP_PREPARED_TOOL_RECONCILIATION_BATCH: usize = 200;
 const STARTUP_PREPARED_TOOL_RECONCILIATION_PASSES: usize = 50;
 const STARTUP_TOOL_QUEUE_RECONCILIATION_OUTBOX_BATCH: usize = 200;
 const STARTUP_TOOL_QUEUE_RECONCILIATION_OUTBOX_PASSES: usize = 50;
+
+#[cfg(test)]
+std::thread_local! {
+    static FIXED_MCP_AUDIT_STORE_IDENTITY: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct FixedMcpAuditStoreIdentityGuard {
+    previous: Option<String>,
+}
+
+#[cfg(test)]
+impl Drop for FixedMcpAuditStoreIdentityGuard {
+    fn drop(&mut self) {
+        FIXED_MCP_AUDIT_STORE_IDENTITY.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+/// Fix only the random store-identity source while preserving the complete
+/// product bootstrap path. Thread-local scope prevents parallel-test leakage.
+#[cfg(test)]
+pub(crate) fn inject_fixed_mcp_audit_store_identity_for_test(
+    identity: uuid::Uuid,
+) -> FixedMcpAuditStoreIdentityGuard {
+    assert_eq!(identity.get_version_num(), 4, "D064 requires a real UUIDv4");
+    let previous =
+        FIXED_MCP_AUDIT_STORE_IDENTITY.with(|slot| slot.replace(Some(identity.to_string())));
+    FixedMcpAuditStoreIdentityGuard { previous }
+}
+
+fn new_mcp_audit_store_identity() -> String {
+    #[cfg(test)]
+    if let Some(identity) = FIXED_MCP_AUDIT_STORE_IDENTITY.with(|slot| slot.borrow().clone()) {
+        return identity;
+    }
+    uuid::Uuid::new_v4().to_string()
+}
 
 pub(crate) fn apply_tool_queue_reconciliation_projection(
     queue: &ActionQueueStore,
@@ -947,6 +997,267 @@ fn unavailable_mcp_audit_authority(
     McpAuditStore::unavailable_sentinel(detail)
 }
 
+enum McpAuditDatabaseActivationAuthority {
+    Existing(SqliteSlotOwnerReservation),
+    Fresh(McpAuditFreshDatabaseCreationCapability),
+}
+
+fn activate_and_seal_prepared_mcp_audit_store(
+    database_path: &Path,
+    key_reference_path: &Path,
+    mut document: McpAuditKeyReferenceDocument,
+    prepared_receipt: crate::storage::McpAuditReferenceReceipt,
+    materials: Vec<AuditKeyMaterial>,
+    activation: McpAuditDatabaseActivationAuthority,
+) -> anyhow::Result<McpAuditStore> {
+    if document.phase() != McpAuditReferencePhase::Prepared
+        || document.secret_state() != McpAuditSecretState::Verified
+        || document.database_state() != McpAuditDatabaseTransitionState::Attempted
+    {
+        anyhow::bail!("mcp_audit_prepared_reference_not_sealed_for_activation");
+    }
+    let mut store = match activation {
+        McpAuditDatabaseActivationAuthority::Existing(reservation) => {
+            activate_mcp_audit_store_from_reference_receipt(
+                database_path,
+                materials,
+                reservation,
+                &prepared_receipt,
+            )?
+        }
+        McpAuditDatabaseActivationAuthority::Fresh(capability) => {
+            activate_fresh_mcp_audit_store_from_reference_receipt(
+                database_path,
+                materials,
+                capability,
+                &prepared_receipt,
+            )?
+        }
+    };
+    document.mark_active().map_err(anyhow::Error::msg)?;
+    let active_permit = store.authorize_reference_transition(&prepared_receipt, &document)?;
+    let active_receipt =
+        save_mcp_audit_key_reference_document_commit_aware(key_reference_path, active_permit)?;
+    install_mcp_audit_active_reference_after_bootstrap(&mut store, &active_receipt)?;
+    Ok(store)
+}
+
+fn initialize_fresh_mcp_audit_store(
+    database_path: &Path,
+    key_reference_path: &Path,
+    canonical_slot_digest: &str,
+    capability: McpAuditFreshDatabaseCreationCapability,
+    secret_store: &dyn SecretStore,
+) -> anyhow::Result<McpAuditStore> {
+    let store_identity = new_mcp_audit_store_identity();
+    let plan = plan_store_bound_mcp_audit_key_material(
+        next_store_bound_mcp_audit_epoch(0),
+        &store_identity,
+    )?;
+    // Lock and prove exact credential absence before Prepared is published.
+    // The typed reservation remains held through the eventual set/post-read.
+    let secret_reservation = plan.reserve_create_only(secret_store)?;
+    let material = plan.material();
+    let document = McpAuditKeyReferenceDocument::prepared(
+        store_identity,
+        canonical_slot_digest.to_string(),
+        vec![material.config.clone()],
+        None,
+        material.config.epoch,
+        McpAuditReferenceOrigin::FreshCreate,
+        plan.expected_digest().to_string(),
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    // Durable Pending is the crash owner before the first keychain set.
+    let pending_permit = capability.authorize_initial_reference_publish(&document)?;
+    let pending_receipt =
+        save_mcp_audit_key_reference_document_commit_aware(key_reference_path, pending_permit)?;
+    let secret_permit = capability.authorize_pending_secret_effect(
+        &pending_receipt,
+        &material.config,
+        plan.expected_digest(),
+    )?;
+    plan.execute(secret_store, secret_permit, secret_reservation)?;
+
+    let mut document = document;
+    document
+        .mark_secret_verified()
+        .map_err(anyhow::Error::msg)?;
+    let verified_permit = capability.authorize_reference_transition(&pending_receipt, &document)?;
+    let verified_receipt =
+        save_mcp_audit_key_reference_document_commit_aware(key_reference_path, verified_permit)?;
+    document
+        .mark_database_attempted()
+        .map_err(anyhow::Error::msg)?;
+    let attempted_permit =
+        capability.authorize_reference_transition(&verified_receipt, &document)?;
+    let attempted_receipt =
+        save_mcp_audit_key_reference_document_commit_aware(key_reference_path, attempted_permit)?;
+    activate_and_seal_prepared_mcp_audit_store(
+        database_path,
+        key_reference_path,
+        document,
+        attempted_receipt,
+        vec![material],
+        McpAuditDatabaseActivationAuthority::Fresh(capability),
+    )
+}
+
+enum McpAuditPreparedRecoveryOutcome {
+    Activated(McpAuditStore),
+    RolledBackFresh(SqliteSlotOwnerReservation),
+}
+
+fn validate_prepared_mcp_audit_database_continuity(
+    origin: McpAuditReferenceOrigin,
+    database_state: McpAuditDatabaseTransitionState,
+    existing_database_len: Option<u64>,
+) -> Result<(), &'static str> {
+    match (origin, database_state, existing_database_len) {
+        (
+            McpAuditReferenceOrigin::FreshCreate,
+            McpAuditDatabaseTransitionState::NotAttempted,
+            None,
+        )
+        | (
+            McpAuditReferenceOrigin::FreshCreate,
+            McpAuditDatabaseTransitionState::Attempted,
+            Some(1..),
+        )
+        | (
+            McpAuditReferenceOrigin::ExistingStoreRotation
+            | McpAuditReferenceOrigin::LegacyMigration,
+            _,
+            Some(1..),
+        ) => Ok(()),
+        (_, McpAuditDatabaseTransitionState::Attempted, None) => {
+            Err("mcp_audit_attempted_reference_database_missing")
+        }
+        (_, _, Some(0)) => Err("mcp_audit_prepared_reference_database_empty"),
+        (McpAuditReferenceOrigin::FreshCreate, _, Some(_)) => {
+            Err("mcp_audit_fresh_not_attempted_database_appeared")
+        }
+        (_, _, None) => Err("mcp_audit_existing_origin_database_missing"),
+    }
+}
+
+fn recover_prepared_mcp_audit_store(
+    database_path: &Path,
+    key_reference_path: &Path,
+    existing_database_len: Option<u64>,
+    reservation: SqliteSlotOwnerReservation,
+    mut receipt: crate::storage::McpAuditReferenceReceipt,
+    secret_store: &dyn SecretStore,
+) -> anyhow::Result<McpAuditPreparedRecoveryOutcome> {
+    let mut document = receipt.document().clone();
+    if document.phase() != McpAuditReferencePhase::Prepared {
+        anyhow::bail!("mcp_audit_prepared_recovery_requires_prepared_reference");
+    }
+    validate_prepared_mcp_audit_database_continuity(
+        document.origin(),
+        document.database_state(),
+        existing_database_len,
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    if document.origin() != McpAuditReferenceOrigin::FreshCreate {
+        anyhow::bail!("mcp_audit_existing_recovery_authenticated_manifest_capability_required");
+    }
+
+    let pending_config = document
+        .keys()
+        .last()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("mcp_audit_pending_key_config_missing"))?;
+    let expected_digest = document
+        .pending_secret_digest()
+        .ok_or_else(|| anyhow::anyhow!("mcp_audit_pending_secret_digest_missing"))?;
+    let mut materials = hydrate_existing_mcp_audit_key_materials(
+        &document.keys()[..document.keys().len().saturating_sub(1)],
+        secret_store,
+    )?;
+    let pending_material =
+        match recover_pending_mcp_audit_secret(&pending_config, expected_digest, secret_store)? {
+            McpAuditPendingSecretRecovery::Exact(material) => material,
+            McpAuditPendingSecretRecovery::Missing
+                if document.origin() == McpAuditReferenceOrigin::FreshCreate
+                    && document.database_state()
+                        == McpAuditDatabaseTransitionState::NotAttempted
+                    && existing_database_len.is_none() =>
+            {
+                let rollback =
+                    McpAuditStore::authorize_fresh_reference_rollback(reservation, &receipt)?;
+                let permit = rollback.authorize_reference_delete()?;
+                let reservation = remove_mcp_audit_key_reference_exact_commit_aware(permit)?;
+                return Ok(McpAuditPreparedRecoveryOutcome::RolledBackFresh(
+                    reservation,
+                ));
+            }
+            McpAuditPendingSecretRecovery::Missing => {
+                anyhow::bail!("mcp_audit_pending_secret_missing_for_nonrollback_state");
+            }
+        };
+    materials.push(pending_material);
+
+    let activation = if document.origin() == McpAuditReferenceOrigin::FreshCreate
+        && document.database_state() == McpAuditDatabaseTransitionState::NotAttempted
+        && existing_database_len.is_none()
+    {
+        McpAuditDatabaseActivationAuthority::Fresh(authorize_fresh_mcp_audit_database_recovery(
+            database_path,
+            &materials,
+            reservation,
+            &receipt,
+        )?)
+    } else {
+        McpAuditDatabaseActivationAuthority::Existing(reservation)
+    };
+
+    if document.secret_state() == McpAuditSecretState::Pending {
+        document
+            .mark_secret_verified()
+            .map_err(anyhow::Error::msg)?;
+        let permit = match &activation {
+            McpAuditDatabaseActivationAuthority::Fresh(capability) => {
+                capability.authorize_reference_transition(&receipt, &document)?
+            }
+            McpAuditDatabaseActivationAuthority::Existing(_) => {
+                anyhow::bail!(
+                    "mcp_audit_existing_recovery_authenticated_manifest_capability_required"
+                )
+            }
+        };
+        receipt = save_mcp_audit_key_reference_document_commit_aware(key_reference_path, permit)?;
+    }
+    if document.database_state() == McpAuditDatabaseTransitionState::NotAttempted {
+        document
+            .mark_database_attempted()
+            .map_err(anyhow::Error::msg)?;
+        let permit = match &activation {
+            McpAuditDatabaseActivationAuthority::Fresh(capability) => {
+                capability.authorize_reference_transition(&receipt, &document)?
+            }
+            McpAuditDatabaseActivationAuthority::Existing(_) => {
+                anyhow::bail!(
+                    "mcp_audit_existing_recovery_authenticated_manifest_capability_required"
+                )
+            }
+        };
+        receipt = save_mcp_audit_key_reference_document_commit_aware(key_reference_path, permit)?;
+    }
+    Ok(McpAuditPreparedRecoveryOutcome::Activated(
+        activate_and_seal_prepared_mcp_audit_store(
+            database_path,
+            key_reference_path,
+            document,
+            receipt,
+            materials,
+            activation,
+        )?,
+    ))
+}
+
 fn initialize_mcp_audit_authority(
     data_dir: &Path,
     secret_store: &dyn SecretStore,
@@ -956,9 +1267,8 @@ fn initialize_mcp_audit_authority(
     let database_path = data_dir.join("mcp_audit.db");
     let key_reference_path = data_dir.join("mcp_audit_keys.json");
 
-    // The OS owner slot is intentionally the first mutating action in this
-    // authority graph. Reservation creates only the lock sidecar; it never
-    // creates SQLite or secret/key-reference state.
+    // Reserve before inspecting either canonical surface. The reservation is
+    // no-create: it mutates only the owner-lock sidecar.
     let reservation = match McpAuditStore::reserve_writable_owner(&database_path) {
         Ok(reservation) => reservation,
         Err(error) => {
@@ -970,120 +1280,133 @@ fn initialize_mcp_audit_authority(
             );
         }
     };
-
-    let (mut document, document_requires_save) =
-        match load_mcp_audit_key_reference_state_from_path(&key_reference_path) {
-            McpAuditKeyReferenceLoadState::Versioned(document) => (document, false),
-            McpAuditKeyReferenceLoadState::Legacy(configs) => {
-                (McpAuditKeyReferenceDocument::new(configs), true)
-            }
-            McpAuditKeyReferenceLoadState::Missing => {
-                let existing_len = match reservation.existing_database_len() {
-                    Ok(existing_len) => existing_len,
-                    Err(error) => {
-                        return unavailable_mcp_audit_authority(
-                            persistence,
-                            startup_warnings,
-                            "mcp_audit_existing_database_identity_failed",
-                            &error.to_string(),
-                        );
-                    }
-                };
-                if existing_len.is_some_and(|length| length > 0) {
-                    return unavailable_mcp_audit_authority(
-                        persistence,
-                        startup_warnings,
-                        "mcp_audit_key_reference_missing_for_nonempty_database",
-                        "a non-empty canonical MCP audit database has no key-reference document",
-                    );
-                }
-                (McpAuditKeyReferenceDocument::new(Vec::new()), true)
-            }
-            McpAuditKeyReferenceLoadState::Invalid(error) => {
-                return unavailable_mcp_audit_authority(
-                    persistence,
-                    startup_warnings,
-                    "mcp_audit_key_reference_invalid",
-                    &error,
-                );
-            }
-            McpAuditKeyReferenceLoadState::Unreadable(error) => {
-                return unavailable_mcp_audit_authority(
-                    persistence,
-                    startup_warnings,
-                    "mcp_audit_key_reference_unreadable",
-                    &error,
-                );
-            }
-        };
-
-    let hydration = match hydrate_or_create_store_bound_mcp_audit_keys(
-        document.keys.clone(),
-        &document.store_identity,
-        secret_store,
-    ) {
-        Ok(hydration) => hydration,
+    let existing_database_len = match reservation.existing_database_len() {
+        Ok(length) => length,
         Err(error) => {
             return unavailable_mcp_audit_authority(
                 persistence,
                 startup_warnings,
-                "mcp_audit_key_hydration_failed",
+                "mcp_audit_existing_database_identity_failed",
                 &error.to_string(),
             );
         }
     };
-    document.keys = hydration.configs.clone();
-
-    if document_requires_save || hydration.config_changed {
-        if let Err(save_error) =
-            save_mcp_audit_key_reference_document_to_path(&key_reference_path, &document)
-        {
-            let rollback_error = hydration.rollback_created_secret(secret_store).err();
-            let detail = match rollback_error {
-                Some(rollback_error) => format!(
-                    "key-reference save failed: {save_error}; new secret rollback also failed: {rollback_error}"
-                ),
-                None => format!("key-reference save failed: {save_error}"),
-            };
+    let canonical_slot_digest = match reservation.canonical_slot_digest() {
+        Ok(digest) => digest,
+        Err(error) => {
             return unavailable_mcp_audit_authority(
                 persistence,
                 startup_warnings,
-                "mcp_audit_key_reference_persistence_failed",
-                &detail,
+                "mcp_audit_canonical_slot_digest_failed",
+                &error.to_string(),
             );
         }
+    };
+
+    let initialization = (|| -> anyhow::Result<McpAuditStore> {
+        match load_mcp_audit_key_reference_state_from_path(&key_reference_path) {
+            McpAuditKeyReferenceLoadState::Versioned(receipt) => {
+                if receipt.document().canonical_slot_digest() != canonical_slot_digest {
+                    anyhow::bail!("mcp_audit_key_reference_slot_mismatch");
+                }
+                match receipt.document().phase() {
+                    McpAuditReferencePhase::Active => {
+                        match existing_database_len {
+                            Some(length) if length > 0 => {}
+                            Some(_) => anyhow::bail!("mcp_audit_active_reference_database_empty"),
+                            None => anyhow::bail!("mcp_audit_active_reference_database_missing"),
+                        }
+                        let materials = hydrate_existing_mcp_audit_key_materials(
+                            receipt.document().keys(),
+                            secret_store,
+                        )?;
+                        activate_mcp_audit_store_from_reference_receipt(
+                            &database_path,
+                            materials,
+                            reservation,
+                            &receipt,
+                        )
+                    }
+                    McpAuditReferencePhase::Prepared => {
+                        match recover_prepared_mcp_audit_store(
+                            &database_path,
+                            &key_reference_path,
+                            existing_database_len,
+                            reservation,
+                            receipt,
+                            secret_store,
+                        )? {
+                            McpAuditPreparedRecoveryOutcome::Activated(store) => Ok(store),
+                            McpAuditPreparedRecoveryOutcome::RolledBackFresh(reservation) => {
+                                let capability = McpAuditStore::authorize_fresh_database_creation(
+                                    reservation,
+                                    &key_reference_path,
+                                )?;
+                                initialize_fresh_mcp_audit_store(
+                                    &database_path,
+                                    &key_reference_path,
+                                    &canonical_slot_digest,
+                                    capability,
+                                    secret_store,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            McpAuditKeyReferenceLoadState::Legacy(receipt) => {
+                match existing_database_len {
+                    Some(length) if length > 0 => {}
+                    Some(_) => anyhow::bail!("mcp_audit_legacy_reference_database_empty"),
+                    None => anyhow::bail!("mcp_audit_legacy_reference_database_missing"),
+                }
+                // The Core receipt seals exact legacy bytes+inode, but no
+                // shipped D057 offline verifier can yet consume the retained
+                // owner reservation and mint an effect-capable cutover proof.
+                // Fail before reference, credential-store, or SQLite effects.
+                let _exact_legacy_receipt = receipt;
+                let _retained_owner_reservation = reservation;
+                anyhow::bail!("mcp_audit_legacy_authority_cutover_proof_required")
+            }
+            McpAuditKeyReferenceLoadState::Missing => {
+                if existing_database_len.is_some() {
+                    anyhow::bail!("mcp_audit_missing_reference_database_not_absent");
+                }
+                let capability = McpAuditStore::authorize_fresh_database_creation(
+                    reservation,
+                    &key_reference_path,
+                )?;
+                initialize_fresh_mcp_audit_store(
+                    &database_path,
+                    &key_reference_path,
+                    &canonical_slot_digest,
+                    capability,
+                    secret_store,
+                )
+            }
+            McpAuditKeyReferenceLoadState::Invalid(error) => {
+                anyhow::bail!("mcp_audit_key_reference_invalid:{error}");
+            }
+            McpAuditKeyReferenceLoadState::Unreadable(error) => {
+                anyhow::bail!("mcp_audit_key_reference_unreadable:{error}");
+            }
+        }
+    })();
+
+    match initialization {
+        Ok(store) => {
+            persistence.register_read_write("McpAuditKeyReferenceStore");
+            persistence.register_read_write("McpAuditStore");
+            store
+        }
+        Err(error) => unavailable_mcp_audit_authority(
+            persistence,
+            startup_warnings,
+            "mcp_audit_authority_initialization_failed",
+            &error.to_string(),
+        ),
     }
-    persistence.register_read_write("McpAuditKeyReferenceStore");
-
-    let materials = hydration.materials;
-    let initialized = init_store(
-        || {
-            McpAuditStore::with_key_materials_and_reservation(
-                &database_path,
-                materials.clone(),
-                reservation,
-            )
-            .map_err(|error| error.to_string())
-        },
-        || {
-            McpAuditStore::open_read_only_existing_with_key_materials(
-                &database_path,
-                materials.clone(),
-            )
-            .map_err(|error| error.to_string())
-        },
-        || Err("MCP audit recovery database is not a canonical store-bound authority".into()),
-        "McpAuditStore",
-        startup_warnings,
-        persistence,
-    );
-    required_store_or_unavailable(initialized, "McpAuditStore", startup_warnings, || {
-        Ok(McpAuditStore::unavailable_sentinel(
-            "canonical and verified read-only audit store open failed",
-        ))
-    })
 }
-
 fn init_memory_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -2366,8 +2689,9 @@ fn bootstrap_with_secret_store(
     };
     let privacy_engine = PrivacyEngine::with_policy(privacy_policy);
     let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
-    let mcp_audit_store =
+    let mut mcp_audit_store =
         initialize_mcp_audit_authority(&data_dir, secret_store, &startup_warnings, &persistence);
+    mcp_audit_store.install_runtime_failure_observer(persistence.clone());
 
     let hot_cache: SharedHotCache = {
         let initial_cache = match life_model_manager.load() {
@@ -2670,6 +2994,40 @@ mod tests {
     use openlife_core::agent::{
         EvidenceQuery, HeuristicQuery, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     };
+
+    #[test]
+    fn mcp_audit_origin_database_continuity_matrix_is_fail_closed() {
+        use McpAuditDatabaseTransitionState::{Attempted, NotAttempted};
+        use McpAuditReferenceOrigin::{ExistingStoreRotation, FreshCreate, LegacyMigration};
+
+        for (origin, state, database_len, allowed) in [
+            (FreshCreate, NotAttempted, None, true),
+            (FreshCreate, NotAttempted, Some(0), false),
+            (FreshCreate, NotAttempted, Some(1), false),
+            (FreshCreate, Attempted, None, false),
+            (FreshCreate, Attempted, Some(0), false),
+            (FreshCreate, Attempted, Some(1), true),
+            (ExistingStoreRotation, NotAttempted, None, false),
+            (ExistingStoreRotation, NotAttempted, Some(0), false),
+            (ExistingStoreRotation, NotAttempted, Some(1), true),
+            (ExistingStoreRotation, Attempted, None, false),
+            (ExistingStoreRotation, Attempted, Some(0), false),
+            (ExistingStoreRotation, Attempted, Some(1), true),
+            (LegacyMigration, NotAttempted, None, false),
+            (LegacyMigration, NotAttempted, Some(0), false),
+            (LegacyMigration, NotAttempted, Some(1), true),
+            (LegacyMigration, Attempted, None, false),
+            (LegacyMigration, Attempted, Some(0), false),
+            (LegacyMigration, Attempted, Some(1), true),
+        ] {
+            assert_eq!(
+                validate_prepared_mcp_audit_database_continuity(origin, state, database_len,)
+                    .is_ok(),
+                allowed,
+                "unexpected matrix result for {origin:?}/{state:?}/{database_len:?}"
+            );
+        }
+    }
 
     #[test]
     fn future_legacy_schedule_is_staged_once_through_review_workflow() {

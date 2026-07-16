@@ -138,6 +138,12 @@ impl Default for PersistenceCoordinator {
     }
 }
 
+impl openlife_core::mcp_audit::McpAuditRuntimeFailureObserver for PersistenceCoordinator {
+    fn mark_mcp_audit_store_unavailable(&self, reason_code: &'static str, detail: &str) {
+        self.register_unavailable("McpAuditStore", reason_code, detail);
+    }
+}
+
 impl PersistenceCoordinator {
     pub fn new() -> Self {
         Self {

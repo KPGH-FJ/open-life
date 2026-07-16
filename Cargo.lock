@@ -1389,6 +1389,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3112,10 +3122,12 @@ dependencies = [
  "chrono",
  "criterion",
  "dirs 5.0.1",
+ "fs2",
  "futures",
  "libc",
  "log",
  "ndarray",
+ "parking_lot",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
@@ -3131,6 +3143,9 @@ dependencies = [
  "tract-onnx",
  "unicode-normalization",
  "uuid",
+ "winapi-util",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -3143,6 +3158,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
+ "fs2",
  "futures",
  "keyring",
  "log",
@@ -3164,6 +3180,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

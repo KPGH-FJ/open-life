@@ -408,7 +408,7 @@ where
             observed_slot.display()
         );
     }
-    owner_lease.bind_opened_database_identity()?;
+    owner_lease.bind_opened_database_identity(&conn)?;
     Ok((conn, observed_slot, owner_lease))
 }
 
@@ -420,14 +420,11 @@ fn configure_authenticated_task_store_connection<F>(
 where
     F: FnOnce(),
 {
-    let conn = connection.lock()?;
-    after_preflight_before_configure();
-    // The preflight can be arbitrarily slow and the pathname can change after
-    // it authenticates. Revalidate the retained database and owner-lock file
-    // identities while the identity-bound connection guard is still held and
-    // immediately before the first mutating PRAGMA.
-    connection.validate_identity()?;
-    configure_connection(&conn)
+    connection
+        .with_checked_operation_after_preflight(after_preflight_before_configure, |conn| {
+            configure_connection(conn)
+        })
+        .map_err(anyhow::Error::new)
 }
 
 fn crosscheck_task_store_owner_envelope_after_sqlite_open(
@@ -487,14 +484,16 @@ fn configure_preauthenticated_task_store_connection<F>(
 where
     F: FnOnce(),
 {
-    let conn = connection.lock()?;
-    after_preflight_before_configure();
-    // Keep the identity and internal-authority cross-check immediately adjacent
-    // to the first mutating PRAGMA. SQLite has been opened only after the
-    // external envelope authenticated the exact slot and inodes.
-    connection.validate_identity()?;
-    crosscheck_task_store_owner_envelope_after_sqlite_open(&conn, database_slot, envelope)?;
-    configure_connection(&conn)
+    connection
+        .with_checked_operation_after_preflight(after_preflight_before_configure, |conn| {
+            // Keep the identity and internal-authority cross-check immediately
+            // adjacent to the first mutating PRAGMA. The checked seam has just
+            // revalidated the retained SQLite handle and external owner using
+            // this same connection guard.
+            crosscheck_task_store_owner_envelope_after_sqlite_open(conn, database_slot, envelope)?;
+            configure_connection(conn)
+        })
+        .map_err(anyhow::Error::new)
 }
 
 fn task_store_sidecar_family_present(expected_slot: &Path) -> Result<bool> {
@@ -1716,10 +1715,10 @@ impl TaskStore {
                 observed_slot.display()
             );
         }
-        owner_lease.bind_opened_database_identity()?;
+        owner_lease.bind_opened_database_identity(&conn)?;
         let persistent_owner_lease = owner_lease.clone();
         let connection =
-            crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease);
+            crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease)?;
         configure_preauthenticated_task_store_connection(
             &connection,
             &database_slot,
@@ -1800,7 +1799,7 @@ impl TaskStore {
             conn: crate::sqlite_migration::IdentityBoundSqliteConnection::read_only(
                 conn,
                 identity_guard,
-            ),
+            )?,
             mutation_authority: TaskStoreMutationAuthority::ReadOnlyObservation,
             writer_owner_generation_id: uuid::Uuid::nil(),
             owner_lock_identity_material: None,
@@ -12374,6 +12373,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn production_task_store_configuration_completes_and_sets_required_pragmas() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("single-lock-configure.sqlite");
+        let authority_key = TaskStoreAuthorityKey::from_key_material(&[0x7a; 32]).unwrap();
+
+        let store = TaskStore::new_with_authority_key(&path, &authority_key)
+            .expect("the production TaskStore configure path must complete without re-locking");
+        let conn = store.lock_connection().unwrap();
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        let secure_delete: i64 = conn
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(secure_delete, 1);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_configure_revalidates_after_hook_before_any_pragma_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("production-configure-race.sqlite");
+        let alias = directory
+            .path()
+            .join("production-configure-race.alias.sqlite");
+        let authority_key = TaskStoreAuthorityKey::from_key_material(&[0x7d; 32]).unwrap();
+        drop(TaskStore::new_with_authority_key(&path, &authority_key).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; PRAGMA secure_delete=OFF;",
+            )
+            .unwrap();
+        }
+        let before = sqlite_family_states(&path);
+
+        let error = TaskStore::new_with_authority_key_and_open_hooks(
+            &path,
+            &authority_key,
+            || {},
+            || std::fs::hard_link(&path, &alias).unwrap(),
+        )
+        .err()
+        .expect("post-preflight identity drift must fail before the first mutating PRAGMA")
+        .to_string();
+
+        assert!(
+            error.contains("scheduled_task_store_database_link_count_invalid"),
+            "{error}"
+        );
+        std::fs::remove_file(&alias).unwrap();
+        assert_file_states_unchanged(&before);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn sidecar_replacement_after_preflight_fails_before_configure_and_poison_is_sticky() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("preflight-sidecar-race.sqlite");
@@ -12401,7 +12462,8 @@ mod tests {
         )
         .unwrap();
         let connection =
-            crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease);
+            crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease)
+                .unwrap();
         let before = sqlite_family_states(&path);
         let error = configure_authenticated_task_store_connection(&connection, || {
             std::fs::rename(&lock_path, &displaced_lock).unwrap();
@@ -12456,7 +12518,8 @@ mod tests {
         )
         .unwrap();
         let connection =
-            crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease);
+            crate::sqlite_migration::IdentityBoundSqliteConnection::writable(conn, owner_lease)
+                .unwrap();
         let before = sqlite_family_states(&path);
         let error = configure_authenticated_task_store_connection(&connection, || {
             std::fs::hard_link(&path, &alias).unwrap()

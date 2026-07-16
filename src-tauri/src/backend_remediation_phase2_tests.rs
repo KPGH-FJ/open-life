@@ -662,6 +662,7 @@ async fn real_app_state_snapshot_commit_cancel_paths_complete_10000_barrier_inte
                     .shared
                     .audit_store
                     .list_logs(1)
+                    .await
                     .expect("read real MCP audit store through owned snapshot");
                 snapshot
                     .agent_run_store
@@ -895,6 +896,7 @@ async fn hanging_provider_keeps_tool_registries_and_canonical_stores_live_until_
             .shared
             .audit_store
             .list_logs(1)
+            .await
             .expect("audit store read during provider await");
         read_snapshot
             .governed
@@ -1090,6 +1092,7 @@ for line in sys.stdin:
             .shared
             .audit_store
             .list_logs(1)
+            .await
             .expect("audit store stays live during MCP read");
         snapshot
             .governed

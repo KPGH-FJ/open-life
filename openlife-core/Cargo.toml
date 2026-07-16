@@ -33,6 +33,13 @@ ring = "0.17"
 log = "0.4"
 unicode-normalization = "0.1"
 libc = "0.2"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+fs2 = "0.4"
+zeroize = "1.8"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

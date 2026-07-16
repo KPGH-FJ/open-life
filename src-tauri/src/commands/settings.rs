@@ -11,7 +11,10 @@ use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
+#[cfg(test)]
+use std::{collections::HashMap, path::PathBuf};
 use tauri::State;
 
 use crate::danger_action_confirmation::{
@@ -26,21 +29,250 @@ use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_store_bound_mcp_audit_key_material, stage_config_secrets, KeyringSecretStore,
-    SecretStore,
+    next_store_bound_mcp_audit_epoch, plan_store_bound_mcp_audit_key_material,
+    stage_config_secrets, KeyringSecretStore, SecretStore,
 };
 use crate::storage::{
-    app_data_dir, load_mcp_audit_key_reference_state_from_path, mcp_audit_keyring_path,
-    privacy_policy_path, save_mcp_audit_key_reference_document_to_path,
-    save_privacy_policy_to_path, McpAuditKeyReferenceLoadState,
+    app_data_dir, commit_mcp_audit_rotation_from_reference_receipt,
+    install_mcp_audit_active_reference_after_rotation,
+    load_mcp_audit_key_reference_state_from_path, mcp_audit_keyring_path, privacy_policy_path,
+    save_mcp_audit_key_reference_document_commit_aware, save_privacy_policy_to_path,
+    McpAuditKeyReferenceLoadState, McpAuditReferencePhase, McpAuditReferenceWriteError,
 };
 use crate::AppState;
 use crate::{life_model_write_gateway, memory_gateway};
+use openlife_core::atomic_file::AtomicWriteCommitState;
 
 static GOVERNED_DATA_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 pub(crate) static CONFIG_WRITE_COORDINATOR: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpAuditRotationPostBeginStage {
+    PendingPrecommit,
+    PendingWrite,
+    PendingReference,
+    PendingSecret,
+    VerifiedConstruction,
+    VerifiedReference,
+    AttemptedConstruction,
+    AttemptedReference,
+    DatabaseAuthority,
+    ActiveConstruction,
+    ActivePermit,
+    ActiveReference,
+    LiveInstall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpAuditRotationDurableOutcome {
+    Unknown,
+    DatabaseCommitted,
+}
+
+impl McpAuditRotationDurableOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::DatabaseCommitted => "database_committed",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct McpAuditRotationPostBeginFailure {
+    stage: McpAuditRotationPostBeginStage,
+    durable_outcome: McpAuditRotationDurableOutcome,
+    detail: String,
+}
+
+#[derive(Debug)]
+enum McpAuditRotationPostBeginOutcome {
+    Completed,
+    SafelyAbortedNotCommitted { detail: String },
+    Unsafe(McpAuditRotationPostBeginFailure),
+}
+
+impl McpAuditRotationPostBeginOutcome {
+    fn unsafe_failure(
+        stage: McpAuditRotationPostBeginStage,
+        database_committed: bool,
+        detail: impl std::fmt::Display,
+    ) -> Self {
+        Self::Unsafe(McpAuditRotationPostBeginFailure {
+            stage,
+            durable_outcome: if database_committed {
+                McpAuditRotationDurableOutcome::DatabaseCommitted
+            } else {
+                McpAuditRotationDurableOutcome::Unknown
+            },
+            detail: detail.to_string(),
+        })
+    }
+}
+
+fn register_mcp_audit_rotation_unavailable(state: &AppState, reason_code: &str, detail: &str) {
+    state.persistence_coordinator.register_unavailable(
+        "McpAuditKeyReferenceStore",
+        reason_code,
+        detail,
+    );
+    state
+        .persistence_coordinator
+        .register_unavailable("McpAuditStore", reason_code, detail);
+}
+
+fn finalize_mcp_audit_rotation_post_begin(
+    state: &AppState,
+    outcome: McpAuditRotationPostBeginOutcome,
+) -> Result<(), AppError> {
+    match outcome {
+        McpAuditRotationPostBeginOutcome::Completed => Ok(()),
+        McpAuditRotationPostBeginOutcome::SafelyAbortedNotCommitted { detail } => {
+            Err(AppError::db(format!(
+                "MCP audit rotation Prepared reference was mechanically not committed and the exact in-memory generation abort succeeded; outcome=not_committed_aborted: {detail}"
+            )))
+        }
+        McpAuditRotationPostBeginOutcome::Unsafe(failure) => {
+            let reason_code = match failure.durable_outcome {
+                McpAuditRotationDurableOutcome::Unknown => {
+                    "mcp_audit_rotation_post_begin_outcome_unknown"
+                }
+                McpAuditRotationDurableOutcome::DatabaseCommitted => {
+                    "mcp_audit_rotation_database_committed_incomplete"
+                }
+            };
+            let detail = format!(
+                "MCP audit rotation failed after exclusive transition begin; stage={:?}; outcome={}; restart reconciliation is required: {}",
+                failure.stage,
+                failure.durable_outcome.as_str(),
+                failure.detail
+            );
+            register_mcp_audit_rotation_unavailable(state, reason_code, &detail);
+            Err(AppError::db(detail))
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpAuditRotationFaultKind {
+    ReferenceDrift,
+    ReferenceWriteNotCommitted,
+    ReturnError,
+}
+
+#[cfg(test)]
+static MCP_AUDIT_ROTATION_FAULTS: LazyLock<
+    std::sync::Mutex<HashMap<PathBuf, (McpAuditRotationPostBeginStage, McpAuditRotationFaultKind)>>,
+> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) struct McpAuditRotationFaultGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for McpAuditRotationFaultGuard {
+    fn drop(&mut self) {
+        MCP_AUDIT_ROTATION_FAULTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.path);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn inject_mcp_audit_rotation_fault_for_test(
+    path: PathBuf,
+    stage: McpAuditRotationPostBeginStage,
+    kind: McpAuditRotationFaultKind,
+) -> McpAuditRotationFaultGuard {
+    let previous = MCP_AUDIT_ROTATION_FAULTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.clone(), (stage, kind));
+    assert!(
+        previous.is_none(),
+        "MCP audit rotation fault already installed for {}",
+        path.display()
+    );
+    McpAuditRotationFaultGuard { path }
+}
+
+#[cfg(test)]
+fn take_mcp_audit_rotation_fault(
+    path: &Path,
+    stage: McpAuditRotationPostBeginStage,
+) -> Option<McpAuditRotationFaultKind> {
+    {
+        let mut faults = MCP_AUDIT_ROTATION_FAULTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match faults.get(path).copied() {
+            Some((configured_stage, _)) if configured_stage == stage => {
+                faults.remove(path).map(|(_, kind)| kind)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+fn maybe_inject_mcp_audit_rotation_fault(
+    path: &Path,
+    stage: McpAuditRotationPostBeginStage,
+) -> anyhow::Result<()> {
+    match take_mcp_audit_rotation_fault(path, stage) {
+        Some(McpAuditRotationFaultKind::ReferenceDrift) => {
+            std::fs::write(
+                path,
+                format!("{{\"injectedRotationReferenceDrift\":\"{stage:?}\"}}"),
+            )?;
+            Ok(())
+        }
+        Some(McpAuditRotationFaultKind::ReturnError) => {
+            anyhow::bail!("injected_mcp_audit_rotation_failure:{stage:?}")
+        }
+        Some(McpAuditRotationFaultKind::ReferenceWriteNotCommitted) => {
+            anyhow::bail!("reference-write NotCommitted fault used outside the write edge")
+        }
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+fn inject_mcp_audit_rotation_not_committed_write(
+    path: &Path,
+    stage: McpAuditRotationPostBeginStage,
+) -> Option<McpAuditReferenceWriteError> {
+    matches!(
+        take_mcp_audit_rotation_fault(path, stage),
+        Some(McpAuditRotationFaultKind::ReferenceWriteNotCommitted)
+    )
+    .then(|| {
+        McpAuditReferenceWriteError::precommit_rejected(
+            "injected_mcp_audit_rotation_reference_write_not_committed",
+        )
+    })
+}
+
+#[cfg(not(test))]
+fn inject_mcp_audit_rotation_not_committed_write(
+    _path: &Path,
+    _stage: McpAuditRotationPostBeginStage,
+) -> Option<McpAuditReferenceWriteError> {
+    None
+}
+
+#[cfg(not(test))]
+fn maybe_inject_mcp_audit_rotation_fault(
+    _path: &Path,
+    _stage: McpAuditRotationPostBeginStage,
+) -> anyhow::Result<()> {
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1585,10 +1817,78 @@ pub async fn rotate_mcp_audit_key(
     )
     .await?;
     let key_reference_path = mcp_audit_keyring_path();
-    let mut key_reference_document = match load_mcp_audit_key_reference_state_from_path(
+    rotate_mcp_audit_key_after_confirmation(
         &key_reference_path,
-    ) {
-        McpAuditKeyReferenceLoadState::Versioned(document) => document,
+        Arc::new(KeyringSecretStore),
+        state.inner(),
+    )
+    .await
+}
+
+/// The sole post-confirmation product rotation path. Keeping the canonical
+/// reference path and secret-store dependency explicit lets counterfactual
+/// tests exercise the real state machine without manufacturing a WebView.
+pub(crate) async fn rotate_mcp_audit_key_after_confirmation(
+    key_reference_path: &Path,
+    secret_store: Arc<dyn SecretStore>,
+    state: &Arc<AppState>,
+) -> Result<(), AppError> {
+    let key_reference_path = key_reference_path.to_path_buf();
+    let state_for_worker = Arc::clone(state);
+    #[cfg(test)]
+    let fixed_epoch = crate::secret_store::fixed_mcp_audit_epoch_for_test();
+    #[cfg(not(test))]
+    let fixed_epoch = None;
+    match tokio::task::spawn_blocking(move || {
+        rotate_mcp_audit_key_blocking(
+            &key_reference_path,
+            secret_store.as_ref(),
+            &state_for_worker,
+            fixed_epoch,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let detail = format!(
+                "MCP audit rotation worker terminated; outcome is unknown and restart reconciliation is required: {error}"
+            );
+            register_mcp_audit_rotation_unavailable(
+                state,
+                "mcp_audit_rotation_worker_outcome_unknown",
+                &detail,
+            );
+            Err(AppError::db(detail))
+        }
+    }
+}
+
+fn rotate_mcp_audit_key_blocking(
+    key_reference_path: &Path,
+    secret_store: &dyn SecretStore,
+    state: &Arc<AppState>,
+    fixed_epoch: Option<u64>,
+) -> Result<(), AppError> {
+    // The complete synchronous reference/keychain/SQLite transition runs on
+    // one blocking worker. No Tokio executor thread is blocked, and no guard
+    // crosses an await. Lock order is runtime owner -> secret-reference owner.
+    let mut store = state.mcp_audit_store.blocking_lock();
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let active_receipt = match load_mcp_audit_key_reference_state_from_path(key_reference_path) {
+        McpAuditKeyReferenceLoadState::Versioned(receipt)
+            if receipt.document().phase() == McpAuditReferencePhase::Active =>
+        {
+            receipt
+        }
+        McpAuditKeyReferenceLoadState::Versioned(_) => {
+            return Err(AppError::db(
+                "MCP audit key reference is prepared but not active; restart reconciliation is required before another rotation",
+            ));
+        }
         McpAuditKeyReferenceLoadState::Missing => {
             return Err(AppError::db(
                 "MCP audit key reference document is missing; rotation is unavailable",
@@ -1610,13 +1910,14 @@ pub async fn rotate_mcp_audit_key(
             )));
         }
     };
-    let mut store = state.mcp_audit_store.lock().await;
+    store.validate_writable_owner().map_err(AppError::from)?;
+    let mut key_reference_document = active_receipt.document().clone();
     let store_configs_match_document = store.key_configs().len()
-        == key_reference_document.keys.len()
+        == key_reference_document.keys().len()
         && store
             .key_configs()
             .iter()
-            .zip(&key_reference_document.keys)
+            .zip(key_reference_document.keys())
             .all(|(active, durable)| {
                 active.epoch == durable.epoch
                     && active.mode == durable.mode
@@ -1627,30 +1928,253 @@ pub async fn rotate_mcp_audit_key(
             "MCP audit in-memory key authority differs from the durable reference document",
         ));
     }
-    let timestamp_epoch = chrono::Utc::now().timestamp().max(0) as u64;
-    let epoch = timestamp_epoch.max(store.key_config().epoch.saturating_add(1));
-    let secret_store = KeyringSecretStore;
-    let material = create_store_bound_mcp_audit_key_material(
-        epoch,
-        &key_reference_document.store_identity,
-        &secret_store,
-    )
-    .map_err(AppError::from)?;
-    let secret_ref = material.config.key_ref.clone().unwrap_or_default();
-    let snapshot = store.clone();
-    if let Err(error) = store.rotate_key_material(material) {
-        let _ = secret_store.delete(&secret_ref);
-        return Err(AppError::from(error));
-    }
-    key_reference_document.keys = store.key_configs().to_vec();
-    if let Err(error) =
-        save_mcp_audit_key_reference_document_to_path(&key_reference_path, &key_reference_document)
-    {
-        *store = snapshot;
-        let _ = secret_store.delete(&secret_ref);
-        return Err(error);
-    }
-    Ok(())
+    let epoch =
+        fixed_epoch.unwrap_or_else(|| next_store_bound_mcp_audit_epoch(store.key_config().epoch));
+    let plan =
+        plan_store_bound_mcp_audit_key_material(epoch, key_reference_document.store_identity())
+            .map_err(AppError::from)?;
+    let secret_reservation = plan.reserve_create_only(secret_store).map_err(|error| {
+        AppError::db(format!(
+            "MCP audit secret reference is not create-only before rotation preparation: {error}"
+        ))
+    })?;
+    // Native confirmation and blocking-worker scheduling are both temporal
+    // boundaries. Recheck the process-wide effect gate after acquiring the
+    // runtime and secret-reference owners, immediately before Prepared can be
+    // published. A degraded process drops both guards without mutation.
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let material = plan.material();
+    key_reference_document
+        .prepare_rotation(material.config.clone(), plan.expected_digest().to_string())
+        .map_err(AppError::db)?;
+    let prepared_transition_id = key_reference_document
+        .prepared_transition_id()
+        .map_err(AppError::db)?
+        .to_string();
+
+    // Acquire the exclusive runtime transition before Pending can become
+    // visible. Once Pending is published, every failure is restart-reconciled
+    // and the live writer remains poisoned rather than pretending rollback.
+    let mut rotation_transition = store
+        .begin_store_bound_key_rotation(&material, &prepared_transition_id)
+        .map_err(AppError::from)?;
+    let mut database_committed = false;
+
+    // This labeled block is the sole post-begin outcome boundary. Every error
+    // after the exclusive transition exists exits through the typed outcome
+    // below. The only healthy exception is a mechanically NotCommitted first
+    // reference write followed by an exact generation abort.
+    let outcome = 'post_begin: {
+        macro_rules! post_begin_try {
+            ($stage:expr, $operation:expr) => {
+                match $operation {
+                    Ok(value) => value,
+                    Err(error) => {
+                        break 'post_begin McpAuditRotationPostBeginOutcome::unsafe_failure(
+                            $stage,
+                            database_committed,
+                            error,
+                        )
+                    }
+                }
+            };
+        }
+        let prepared_permit = post_begin_try!(
+            McpAuditRotationPostBeginStage::PendingReference,
+            rotation_transition
+                .authorize_reference_transition(&active_receipt, &key_reference_document)
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::PendingPrecommit,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::PendingPrecommit,
+            )
+        );
+        let prepared_write = match inject_mcp_audit_rotation_not_committed_write(
+            key_reference_path,
+            McpAuditRotationPostBeginStage::PendingWrite,
+        ) {
+            Some(error) => Err(error),
+            None => save_mcp_audit_key_reference_document_commit_aware(
+                key_reference_path,
+                prepared_permit,
+            ),
+        };
+        let prepared_receipt = match prepared_write {
+            Ok(receipt) => receipt,
+            Err(error) if error.commit_state() == AtomicWriteCommitState::NotCommitted => {
+                match store
+                    .abort_store_bound_key_rotation_not_committed(&mut rotation_transition)
+                {
+                    Ok(()) => {
+                        break 'post_begin McpAuditRotationPostBeginOutcome::SafelyAbortedNotCommitted {
+                            detail: error.to_string(),
+                        }
+                    }
+                    Err(abort_error) => {
+                        break 'post_begin McpAuditRotationPostBeginOutcome::unsafe_failure(
+                            McpAuditRotationPostBeginStage::PendingReference,
+                            database_committed,
+                            format!(
+                                "Prepared reference was NotCommitted but exact generation abort failed: {error}; {abort_error}"
+                            ),
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                break 'post_begin McpAuditRotationPostBeginOutcome::unsafe_failure(
+                    McpAuditRotationPostBeginStage::PendingReference,
+                    database_committed,
+                    error,
+                )
+            }
+        };
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::PendingReference,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::PendingReference,
+            )
+        );
+
+        let secret_permit = post_begin_try!(
+            McpAuditRotationPostBeginStage::PendingSecret,
+            rotation_transition.authorize_pending_secret_effect(
+                &prepared_receipt,
+                &material.config,
+                plan.expected_digest(),
+            )
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::PendingSecret,
+            plan.execute(secret_store, secret_permit, secret_reservation)
+        );
+
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::VerifiedConstruction,
+            key_reference_document
+                .mark_secret_verified()
+                .map_err(anyhow::Error::msg)
+        );
+        let verified_permit = post_begin_try!(
+            McpAuditRotationPostBeginStage::VerifiedReference,
+            rotation_transition
+                .authorize_reference_transition(&prepared_receipt, &key_reference_document)
+        );
+        let verified_receipt = post_begin_try!(
+            McpAuditRotationPostBeginStage::VerifiedReference,
+            save_mcp_audit_key_reference_document_commit_aware(key_reference_path, verified_permit,)
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::VerifiedReference,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::VerifiedReference,
+            )
+        );
+
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::AttemptedConstruction,
+            key_reference_document
+                .mark_database_attempted()
+                .map_err(anyhow::Error::msg)
+        );
+        let attempted_permit = post_begin_try!(
+            McpAuditRotationPostBeginStage::AttemptedReference,
+            rotation_transition
+                .authorize_reference_transition(&verified_receipt, &key_reference_document)
+        );
+        let attempted_receipt = post_begin_try!(
+            McpAuditRotationPostBeginStage::AttemptedReference,
+            save_mcp_audit_key_reference_document_commit_aware(
+                key_reference_path,
+                attempted_permit,
+            )
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::AttemptedReference,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::AttemptedReference,
+            )
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::DatabaseAuthority,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::DatabaseAuthority,
+            )
+        );
+
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::DatabaseAuthority,
+            commit_mcp_audit_rotation_from_reference_receipt(
+                &mut store,
+                &attempted_receipt,
+                material,
+                &mut rotation_transition,
+            )
+        );
+        database_committed = true;
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::ActiveConstruction,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::ActiveConstruction,
+            )
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::ActiveConstruction,
+            key_reference_document
+                .mark_active()
+                .map_err(anyhow::Error::msg)
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::ActivePermit,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::ActivePermit,
+            )
+        );
+        let active_permit = post_begin_try!(
+            McpAuditRotationPostBeginStage::ActivePermit,
+            rotation_transition
+                .authorize_reference_transition(&attempted_receipt, &key_reference_document)
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::ActiveReference,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::ActiveReference,
+            )
+        );
+        let active_receipt = post_begin_try!(
+            McpAuditRotationPostBeginStage::ActiveReference,
+            save_mcp_audit_key_reference_document_commit_aware(key_reference_path, active_permit,)
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::LiveInstall,
+            maybe_inject_mcp_audit_rotation_fault(
+                key_reference_path,
+                McpAuditRotationPostBeginStage::LiveInstall,
+            )
+        );
+        post_begin_try!(
+            McpAuditRotationPostBeginStage::LiveInstall,
+            install_mcp_audit_active_reference_after_rotation(
+                &mut store,
+                &active_receipt,
+                &mut rotation_transition,
+            )
+        );
+        McpAuditRotationPostBeginOutcome::Completed
+    };
+    finalize_mcp_audit_rotation_post_begin(state, outcome)
 }
 
 #[tauri::command]

@@ -5404,7 +5404,7 @@ where
             observed_slot.display()
         );
     }
-    owner_lease.bind_opened_database_identity()?;
+    owner_lease.bind_opened_database_identity(&conn)?;
     Ok((conn, observed_slot, owner_lease))
 }
 
@@ -12499,6 +12499,20 @@ fn runtime_eval_local_only_hs_packet(
     }
 }
 
+fn runtime_eval_mcp_audit_store(path: std::path::PathBuf) -> crate::mcp_audit::McpAuditStore {
+    #[cfg(any(test, feature = "test-utils", debug_assertions))]
+    {
+        return crate::mcp_audit::McpAuditStore::isolated_runtime_evaluation(path);
+    }
+    #[cfg(not(any(test, feature = "test-utils", debug_assertions)))]
+    {
+        let _ = path;
+        crate::mcp_audit::McpAuditStore::unavailable_sentinel(
+            "writable MCP audit runtime evaluation is disabled in ordinary release builds",
+        )
+    }
+}
+
 fn runtime_eval_formal_executor_observation(
     case: &MainChatRuntimeEvalCase,
     action_type: &str,
@@ -12517,7 +12531,7 @@ fn runtime_eval_formal_executor_observation(
         crate::tool_permissions::ToolPermissionStore::new_in_memory().map_err(|err| {
             runtime_eval_failure(case, "executor_permission_store_failed", &err.to_string())
         })?;
-    let audit_store = crate::mcp_audit::McpAuditStore::new(temp_root.join("mcp_audit.sqlite"));
+    let audit_store = runtime_eval_mcp_audit_store(temp_root.join("mcp_audit.sqlite"));
     let privacy_engine = crate::privacy::PrivacyEngine::new();
     let memory_store = crate::memory::MemoryStore::new_in_memory().map_err(|err| {
         runtime_eval_failure(case, "executor_memory_store_failed", &err.to_string())
@@ -12995,7 +13009,7 @@ fn runtime_eval_multi_step_agent_loop_observation(
         crate::tool_permissions::ToolPermissionStore::new_in_memory().map_err(|err| {
             runtime_eval_failure(case, "agent_loop_permission_store_failed", &err.to_string())
         })?;
-    let audit_store = crate::mcp_audit::McpAuditStore::new(temp_root.join("mcp_audit.sqlite"));
+    let audit_store = runtime_eval_mcp_audit_store(temp_root.join("mcp_audit.sqlite"));
     let privacy_engine = crate::privacy::PrivacyEngine::new();
     let memory_store = crate::memory::MemoryStore::new_in_memory().map_err(|err| {
         runtime_eval_failure(case, "agent_loop_memory_store_failed", &err.to_string())

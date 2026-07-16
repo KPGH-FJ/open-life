@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use openlife_core::config::AppConfig;
-use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
+use openlife_core::mcp_audit::{
+    AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditPendingSecretEffectPermit, McpAuditStore,
+};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 const SERVICE: &str = "com.openlife.desktop";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
@@ -117,7 +121,7 @@ fn hydrate_bound_provider_secret(config: &AppConfig, encoded: &str) -> Result<St
     Ok(envelope.api_key)
 }
 
-pub(crate) trait SecretStore {
+pub(crate) trait SecretStore: Send + Sync {
     fn get(&self, secret_ref: &str) -> Result<Option<String>>;
     fn set(&self, secret_ref: &str, value: &str) -> Result<()>;
     fn delete(&self, secret_ref: &str) -> Result<()>;
@@ -536,20 +540,157 @@ pub(crate) fn stage_config_secrets(
     Ok(SecretWriteRollback { previous_values })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpAuditSecretCreateCommitState {
+    NotCommitted,
+    VisibleOrExistenceUnknown,
+}
+
+#[derive(Debug)]
+pub(crate) struct McpAuditSecretCreateError {
+    commit_state: McpAuditSecretCreateCommitState,
+    secret_ref: String,
+    detail: String,
+}
+
+impl McpAuditSecretCreateError {
+    #[cfg(test)]
+    pub(crate) fn commit_state(&self) -> McpAuditSecretCreateCommitState {
+        self.commit_state
+    }
+}
+
+impl std::fmt::Display for McpAuditSecretCreateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "mcp_audit_secret_create_{:?}:ref={}:{}",
+            self.commit_state, self.secret_ref, self.detail
+        )
+    }
+}
+
+impl std::error::Error for McpAuditSecretCreateError {}
+
+#[cfg(test)]
+pub(crate) struct McpAuditCreatedSecretReceipt {
+    secret_ref: String,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for McpAuditCreatedSecretReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpAuditCreatedSecretReceipt")
+            .field("secret_ref", &self.secret_ref)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct McpAuditCreatedKeyMaterial {
+    pub(crate) material: AuditKeyMaterial,
+}
+
+pub(crate) struct McpAuditSecretCreationPlan {
+    config: AuditKeyConfig,
+    key: Zeroizing<[u8; 32]>,
+    encoded_key: Zeroizing<String>,
+    expected_digest: String,
+}
+
+/// Typed create-only ownership for one exact MCP-audit credential reference.
+///
+/// The reservation is acquired before a Prepared reference can become
+/// durable and is retained through the credential get/set/post-read sequence.
+/// This prevents two independently reserved SQLite stores from publishing
+/// competing canonical references for the same OS credential account.
+pub(crate) struct McpAuditSecretReferenceReservation {
+    secret_ref: String,
+    _owner: openlife_core::sqlite_migration::SqliteSlotOwnerReservation,
+}
+
+impl std::fmt::Debug for McpAuditSecretReferenceReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpAuditSecretReferenceReservation")
+            .field("secret_ref", &self.secret_ref)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for McpAuditSecretCreationPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpAuditSecretCreationPlan")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpAuditSecretCreationPlan {
+    pub(crate) fn material(&self) -> AuditKeyMaterial {
+        AuditKeyMaterial {
+            config: self.config.clone(),
+            key: *self.key,
+        }
+    }
+
+    pub(crate) fn expected_digest(&self) -> &str {
+        &self.expected_digest
+    }
+
+    pub(crate) fn reserve_create_only(
+        &self,
+        store: &dyn SecretStore,
+    ) -> std::result::Result<McpAuditSecretReferenceReservation, McpAuditSecretCreateError> {
+        let secret_ref = self
+            .config
+            .key_ref
+            .as_deref()
+            .expect("MCP audit secret plans always carry a key reference");
+        reserve_new_mcp_audit_secret(secret_ref, store)
+    }
+
+    pub(crate) fn execute(
+        &self,
+        store: &dyn SecretStore,
+        permit: McpAuditPendingSecretEffectPermit<'_>,
+        reservation: McpAuditSecretReferenceReservation,
+    ) -> std::result::Result<(), McpAuditSecretCreateError> {
+        let secret_ref = self
+            .config
+            .key_ref
+            .as_deref()
+            .expect("MCP audit secret plans always carry a key reference");
+        permit
+            .validate_at_effect_edge(self.config.epoch, secret_ref, &self.expected_digest)
+            .map_err(|error| McpAuditSecretCreateError {
+                commit_state: McpAuditSecretCreateCommitState::NotCommitted,
+                secret_ref: secret_ref.to_string(),
+                detail: format!("mcp_audit_secret_effect_authority_rejected:{error}"),
+            })?;
+        write_new_mcp_audit_secret_with_reservation(
+            secret_ref,
+            &self.encoded_key,
+            store,
+            reservation,
+        )
+    }
+}
+
+fn mcp_audit_secret_value_digest(encoded_key: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"openlife-mcp-audit-secret-value-v1\0");
+    digest.update(encoded_key.as_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[cfg(test)]
 pub(crate) struct McpAuditKeyHydration {
     pub(crate) configs: Vec<AuditKeyConfig>,
     pub(crate) materials: Vec<AuditKeyMaterial>,
     pub(crate) config_changed: bool,
-    pub(crate) created_secret_ref: Option<String>,
-}
-
-impl McpAuditKeyHydration {
-    pub(crate) fn rollback_created_secret(&self, store: &dyn SecretStore) -> Result<()> {
-        if let Some(secret_ref) = self.created_secret_ref.as_deref() {
-            store.delete(secret_ref)?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -557,10 +698,9 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
     mut configs: Vec<AuditKeyConfig>,
     store: &dyn SecretStore,
 ) -> Result<McpAuditKeyHydration> {
-    configs.sort_by_key(|config| config.epoch);
     for pair in configs.windows(2) {
-        if pair[0].epoch == pair[1].epoch {
-            anyhow::bail!("duplicate MCP audit key epoch");
+        if pair[0].epoch >= pair[1].epoch {
+            anyhow::bail!("MCP audit key epochs must be strictly increasing");
         }
     }
     let mut materials = Vec::new();
@@ -594,48 +734,76 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
         Some(config) => config.mode != KeyMode::Keychain,
         None => true,
     };
-    let mut created_secret_ref = None;
     if needs_keychain_epoch {
         let epoch = next_audit_epoch(latest_epoch);
-        let material = create_legacy_test_mcp_audit_key_material(epoch, store)?;
-        created_secret_ref = material.config.key_ref.clone();
-        configs.push(material.config.clone());
-        materials.push(material);
+        let created = create_legacy_test_mcp_audit_key_material(epoch, store)?;
+        configs.push(created.material.config.clone());
+        materials.push(created.material);
     }
 
     Ok(McpAuditKeyHydration {
         configs,
         materials,
         config_changed: needs_keychain_epoch,
-        created_secret_ref,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn hydrate_or_create_store_bound_mcp_audit_keys(
     mut configs: Vec<AuditKeyConfig>,
     store_identity: &str,
     store: &dyn SecretStore,
 ) -> Result<McpAuditKeyHydration> {
     let store_identity = parse_random_mcp_audit_store_identity(store_identity)?;
-    configs.sort_by_key(|config| config.epoch);
+    let mut materials = hydrate_existing_mcp_audit_key_materials(&configs, store)?;
+    let store_identity = store_identity.simple().to_string();
+    let active_is_store_bound = configs.last().is_some_and(|config| {
+        let expected_reference = format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{store_identity}-epoch-{}",
+            config.epoch
+        );
+        config.mode == KeyMode::Keychain
+            && config.key_ref.as_deref() == Some(expected_reference.as_str())
+    });
+    if !active_is_store_bound {
+        let latest_epoch = configs.last().map_or(0, |config| config.epoch);
+        let epoch = next_audit_epoch(latest_epoch);
+        let created = create_store_bound_mcp_audit_key_material(epoch, &store_identity, store)?;
+        configs.push(created.material.config.clone());
+        materials.push(created.material);
+    }
+    Ok(McpAuditKeyHydration {
+        configs,
+        materials,
+        config_changed: !active_is_store_bound,
+    })
+}
+
+pub(crate) fn hydrate_existing_mcp_audit_key_materials(
+    configs: &[AuditKeyConfig],
+    store: &dyn SecretStore,
+) -> Result<Vec<AuditKeyMaterial>> {
     for pair in configs.windows(2) {
-        if pair[0].epoch == pair[1].epoch {
-            anyhow::bail!("duplicate MCP audit key epoch");
+        if pair[0].epoch >= pair[1].epoch {
+            anyhow::bail!("MCP audit key epochs must be strictly increasing");
         }
     }
-    let mut materials = Vec::with_capacity(configs.len().saturating_add(1));
-    for config in &configs {
+    let mut materials = Vec::with_capacity(configs.len());
+    for config in configs {
         if config.mode == KeyMode::Keychain {
             let secret_ref = config.key_ref.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("MCP audit keychain config has no secret reference")
             })?;
-            let encoded = store
-                .get(secret_ref)?
-                .ok_or_else(|| anyhow::anyhow!("MCP audit keychain reference has no credential"))?;
-            let decoded = general_purpose::STANDARD
-                .decode(encoded)
-                .context("decode MCP audit key material")?;
+            let encoded = Zeroizing::new(store.get(secret_ref)?.ok_or_else(|| {
+                anyhow::anyhow!("MCP audit keychain reference has no credential")
+            })?);
+            let decoded = Zeroizing::new(
+                general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .context("decode MCP audit key material")?,
+            );
             let key: [u8; 32] = decoded
+                .as_slice()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("MCP audit key must contain exactly 32 bytes"))?;
             materials.push(AuditKeyMaterial {
@@ -648,67 +816,61 @@ pub(crate) fn hydrate_or_create_store_bound_mcp_audit_keys(
             )?);
         }
     }
-
-    let store_identity = store_identity.simple().to_string();
-    let active_is_store_bound = configs.last().is_some_and(|config| {
-        let expected_reference = format!(
-            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{store_identity}-epoch-{}",
-            config.epoch
-        );
-        config.mode == KeyMode::Keychain
-            && config.key_ref.as_deref() == Some(expected_reference.as_str())
-    });
-    let mut created_secret_ref = None;
-    if !active_is_store_bound {
-        let latest_epoch = configs.last().map_or(0, |config| config.epoch);
-        let epoch = next_audit_epoch(latest_epoch);
-        let material = create_store_bound_mcp_audit_key_material(epoch, &store_identity, store)?;
-        created_secret_ref = material.config.key_ref.clone();
-        configs.push(material.config.clone());
-        materials.push(material);
-    }
-    Ok(McpAuditKeyHydration {
-        configs,
-        materials,
-        config_changed: !active_is_store_bound,
-        created_secret_ref,
-    })
+    Ok(materials)
 }
 
 #[cfg(test)]
 fn create_legacy_test_mcp_audit_key_material(
     epoch: u64,
     store: &dyn SecretStore,
-) -> Result<AuditKeyMaterial> {
+) -> Result<McpAuditCreatedKeyMaterial> {
     let secret_ref = format!("{MCP_AUDIT_KEY_REF_PREFIX}{epoch}");
     let key = rand::random::<[u8; 32]>();
     write_new_mcp_audit_secret(&secret_ref, &general_purpose::STANDARD.encode(key), store)?;
-    Ok(AuditKeyMaterial {
-        config: AuditKeyConfig {
-            mode: KeyMode::Keychain,
-            salt_b64: None,
-            env_var: None,
-            key_ref: Some(secret_ref),
-            epoch,
-            created_at: chrono::Utc::now().to_rfc3339(),
+    Ok(McpAuditCreatedKeyMaterial {
+        material: AuditKeyMaterial {
+            config: AuditKeyConfig {
+                mode: KeyMode::Keychain,
+                salt_b64: None,
+                env_var: None,
+                key_ref: Some(secret_ref),
+                epoch,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+            key,
         },
-        key,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn create_store_bound_mcp_audit_key_material(
     epoch: u64,
     store_identity: &str,
     store: &dyn SecretStore,
-) -> Result<AuditKeyMaterial> {
+) -> Result<McpAuditCreatedKeyMaterial> {
+    let plan = plan_store_bound_mcp_audit_key_material(epoch, store_identity)?;
+    let material = plan.material();
+    let secret_ref = plan
+        .config
+        .key_ref
+        .as_deref()
+        .expect("store-bound test plan has key ref");
+    write_new_mcp_audit_secret(secret_ref, &plan.encoded_key, store)?;
+    Ok(McpAuditCreatedKeyMaterial { material })
+}
+
+pub(crate) fn plan_store_bound_mcp_audit_key_material(
+    epoch: u64,
+    store_identity: &str,
+) -> Result<McpAuditSecretCreationPlan> {
     let store_identity = parse_random_mcp_audit_store_identity(store_identity)?;
     let secret_ref = format!(
         "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-{epoch}",
         store_identity.simple()
     );
-    let key = rand::random::<[u8; 32]>();
-    write_new_mcp_audit_secret(&secret_ref, &general_purpose::STANDARD.encode(key), store)?;
-    Ok(AuditKeyMaterial {
+    let key = Zeroizing::new(rand::random::<[u8; 32]>());
+    let encoded_key = Zeroizing::new(general_purpose::STANDARD.encode(*key));
+    Ok(McpAuditSecretCreationPlan {
         config: AuditKeyConfig {
             mode: KeyMode::Keychain,
             salt_b64: None,
@@ -718,22 +880,222 @@ pub(crate) fn create_store_bound_mcp_audit_key_material(
             created_at: chrono::Utc::now().to_rfc3339(),
         },
         key,
+        expected_digest: mcp_audit_secret_value_digest(&encoded_key),
+        encoded_key,
     })
 }
 
-/// Single product primitive for persisting newly generated MCP audit key
-/// material. Creation is fail-if-present; the canonical store owner lease
-/// serializes this read-before-create boundary for one store, while store-bound
-/// random identities keep different stores in disjoint keychain namespaces.
-pub(crate) fn write_new_mcp_audit_secret(
+pub(crate) fn next_store_bound_mcp_audit_epoch(previous: u64) -> u64 {
+    next_audit_epoch(previous)
+}
+
+pub(crate) enum McpAuditPendingSecretRecovery {
+    Exact(AuditKeyMaterial),
+    Missing,
+}
+
+impl std::fmt::Debug for McpAuditPendingSecretRecovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact(material) => formatter
+                .debug_tuple("Exact")
+                .field(&material.config)
+                .finish(),
+            Self::Missing => formatter.write_str("Missing"),
+        }
+    }
+}
+
+pub(crate) fn recover_pending_mcp_audit_secret(
+    config: &AuditKeyConfig,
+    expected_digest: &str,
+    store: &dyn SecretStore,
+) -> Result<McpAuditPendingSecretRecovery> {
+    if config.mode != KeyMode::Keychain {
+        anyhow::bail!("mcp_audit_pending_secret_not_keychain");
+    }
+    let secret_ref = config
+        .key_ref
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("mcp_audit_pending_secret_reference_missing"))?;
+    let encoded = match store.get(secret_ref) {
+        Ok(Some(encoded)) => Zeroizing::new(encoded),
+        Ok(None) => return Ok(McpAuditPendingSecretRecovery::Missing),
+        Err(error) => {
+            let _ = error;
+            anyhow::bail!("mcp_audit_pending_secret_visibility_unknown:ref={secret_ref}");
+        }
+    };
+    if mcp_audit_secret_value_digest(&encoded) != expected_digest {
+        anyhow::bail!("mcp_audit_pending_secret_digest_mismatch:ref={secret_ref}");
+    }
+    let decoded = Zeroizing::new(
+        general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .context("decode pending MCP audit key material")?,
+    );
+    let key: [u8; 32] = decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pending MCP audit key must contain exactly 32 bytes"))?;
+    Ok(McpAuditPendingSecretRecovery::Exact(AuditKeyMaterial {
+        config: config.clone(),
+        key,
+    }))
+}
+
+/// Test-only composition of reservation plus credential effect. Product paths
+/// reserve before publishing Prepared and call the reserved effect directly.
+#[cfg(test)]
+fn write_new_mcp_audit_secret(
     secret_ref: &str,
     encoded_key: &str,
     store: &dyn SecretStore,
-) -> Result<()> {
-    if store.get(secret_ref)?.is_some() {
-        anyhow::bail!("mcp_audit_secret_reference_already_exists:{secret_ref}");
+) -> std::result::Result<McpAuditCreatedSecretReceipt, McpAuditSecretCreateError> {
+    let reservation = reserve_new_mcp_audit_secret(secret_ref, store)?;
+    write_new_mcp_audit_secret_with_reservation(secret_ref, encoded_key, store, reservation)?;
+    Ok(McpAuditCreatedSecretReceipt {
+        secret_ref: secret_ref.to_string(),
+    })
+}
+
+fn reserve_new_mcp_audit_secret(
+    secret_ref: &str,
+    store: &dyn SecretStore,
+) -> std::result::Result<McpAuditSecretReferenceReservation, McpAuditSecretCreateError> {
+    let create_error = |commit_state, detail: String| McpAuditSecretCreateError {
+        commit_state,
+        secret_ref: secret_ref.to_string(),
+        detail,
+    };
+    let owner = reserve_global_mcp_audit_secret_reference(secret_ref).map_err(|error| {
+        create_error(
+            McpAuditSecretCreateCommitState::NotCommitted,
+            format!("reservation_failed:{error}"),
+        )
+    })?;
+    match store.get(secret_ref) {
+        Ok(Some(_)) => {
+            return Err(create_error(
+                McpAuditSecretCreateCommitState::NotCommitted,
+                "reference_already_exists".into(),
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = error;
+            return Err(create_error(
+                McpAuditSecretCreateCommitState::VisibleOrExistenceUnknown,
+                "precreate_existence_unknown".into(),
+            ));
+        }
     }
-    store.set(secret_ref, encoded_key)
+    Ok(McpAuditSecretReferenceReservation {
+        secret_ref: secret_ref.to_string(),
+        _owner: owner,
+    })
+}
+
+fn write_new_mcp_audit_secret_with_reservation(
+    secret_ref: &str,
+    encoded_key: &str,
+    store: &dyn SecretStore,
+    reservation: McpAuditSecretReferenceReservation,
+) -> std::result::Result<(), McpAuditSecretCreateError> {
+    let create_error = |commit_state, detail: String| McpAuditSecretCreateError {
+        commit_state,
+        secret_ref: secret_ref.to_string(),
+        detail,
+    };
+    if reservation.secret_ref != secret_ref {
+        return Err(create_error(
+            McpAuditSecretCreateCommitState::NotCommitted,
+            "reservation_reference_mismatch".into(),
+        ));
+    }
+    if let Err(error) = store.set(secret_ref, encoded_key) {
+        let _ = error;
+        return Err(create_error(
+            McpAuditSecretCreateCommitState::VisibleOrExistenceUnknown,
+            "set_outcome_unknown".into(),
+        ));
+    }
+    match store.get(secret_ref) {
+        Ok(Some(observed)) => {
+            let observed = Zeroizing::new(observed);
+            if observed.as_str() == encoded_key {
+                Ok(())
+            } else {
+                Err(create_error(
+                    McpAuditSecretCreateCommitState::VisibleOrExistenceUnknown,
+                    "postcreate_value_mismatch".into(),
+                ))
+            }
+        }
+        Ok(None) => Err(create_error(
+            McpAuditSecretCreateCommitState::VisibleOrExistenceUnknown,
+            "postcreate_visibility_missing".into(),
+        )),
+        Err(error) => {
+            let _ = error;
+            Err(create_error(
+                McpAuditSecretCreateCommitState::VisibleOrExistenceUnknown,
+                "postcreate_visibility_unknown".into(),
+            ))
+        }
+    }
+}
+
+fn mcp_audit_secret_reference_lock_root() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(path) = std::env::var("OPENLIFE_TEST_MCP_AUDIT_SECRET_LOCK_ROOT") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return std::path::PathBuf::from(trimmed);
+            }
+        }
+        return std::env::temp_dir().join(format!(
+            "openlife-mcp-audit-secret-ref-locks-v1-test-{}",
+            std::process::id()
+        ));
+    }
+    #[cfg(not(test))]
+    {
+        dirs::data_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("ai.openlife.secret-ref-locks-v1")
+    }
+}
+
+fn reserve_global_mcp_audit_secret_reference(
+    secret_ref: &str,
+) -> Result<openlife_core::sqlite_migration::SqliteSlotOwnerReservation> {
+    // Validate before hashing so arbitrary caller-controlled strings cannot
+    // consume the global lock namespace.
+    let _ = keyring_account_for_secret_ref(secret_ref)?;
+    let root = mcp_audit_secret_reference_lock_root();
+    std::fs::create_dir_all(&root).context("create MCP audit secret reservation root")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .context("restrict MCP audit secret reservation root")?;
+    }
+    let digest = format!("{:x}", Sha256::digest(secret_ref.as_bytes()));
+    let synthetic_slot = root.join(format!("{digest}.secret-slot"));
+    let canonical_slot = openlife_core::sqlite_migration::canonical_sqlite_slot(
+        &synthetic_slot,
+        "mcp_audit_secret_ref",
+    )?;
+    let reservation = openlife_core::sqlite_migration::SqliteSlotOwnerLease::reserve_no_create(
+        &canonical_slot,
+        "mcp_audit_secret_ref",
+    )?;
+    if reservation.existing_database_len()?.is_some() {
+        anyhow::bail!("mcp_audit_secret_reservation_slot_contaminated");
+    }
+    Ok(reservation)
 }
 
 #[cfg(test)]
@@ -764,9 +1126,14 @@ pub(crate) fn inject_fixed_mcp_audit_epoch_for_test(epoch: u64) -> FixedMcpAudit
     FixedMcpAuditEpochGuard { previous }
 }
 
+#[cfg(test)]
+pub(crate) fn fixed_mcp_audit_epoch_for_test() -> Option<u64> {
+    FIXED_MCP_AUDIT_EPOCH.with(|slot| *slot.borrow())
+}
+
 fn next_audit_epoch(previous: u64) -> u64 {
     #[cfg(test)]
-    if let Some(epoch) = FIXED_MCP_AUDIT_EPOCH.with(|slot| *slot.borrow()) {
+    if let Some(epoch) = fixed_mcp_audit_epoch_for_test() {
         return epoch.max(previous.saturating_add(1));
     }
     let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
@@ -797,6 +1164,59 @@ mod tests {
 
     struct FailingSearchSecretStore {
         values: Mutex<HashMap<String, String>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AmbiguousPostCreateRead {
+        Error,
+        Missing,
+        Mismatch,
+    }
+
+    struct AmbiguousCreateSecretStore {
+        mode: AmbiguousPostCreateRead,
+        value: Mutex<Option<String>>,
+        gets: Mutex<usize>,
+        deletes: Mutex<usize>,
+    }
+
+    impl AmbiguousCreateSecretStore {
+        fn new(mode: AmbiguousPostCreateRead) -> Self {
+            Self {
+                mode,
+                value: Mutex::new(None),
+                gets: Mutex::new(0),
+                deletes: Mutex::new(0),
+            }
+        }
+    }
+
+    impl SecretStore for AmbiguousCreateSecretStore {
+        fn get(&self, _secret_ref: &str) -> Result<Option<String>> {
+            let mut gets = self.gets.lock().unwrap();
+            *gets += 1;
+            if *gets == 1 {
+                return Ok(None);
+            }
+            match self.mode {
+                AmbiguousPostCreateRead::Error => {
+                    anyhow::bail!("SUPER_SECRET_SHOULD_NOT_LEAK")
+                }
+                AmbiguousPostCreateRead::Missing => Ok(None),
+                AmbiguousPostCreateRead::Mismatch => Ok(Some("different-value".into())),
+            }
+        }
+
+        fn set(&self, _secret_ref: &str, value: &str) -> Result<()> {
+            *self.value.lock().unwrap() = Some(value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, _secret_ref: &str) -> Result<()> {
+            *self.deletes.lock().unwrap() += 1;
+            *self.value.lock().unwrap() = None;
+            Ok(())
+        }
     }
 
     #[derive(Default)]
@@ -858,6 +1278,255 @@ mod tests {
             self.values.lock().unwrap().remove(secret_ref);
             Ok(())
         }
+    }
+
+    #[test]
+    fn mcp_audit_secret_plan_and_receipt_debug_never_expose_key_or_digest() {
+        let identity = uuid::Uuid::new_v4();
+        let plan = plan_store_bound_mcp_audit_key_material(77, &identity.to_string()).unwrap();
+        let raw = plan.encoded_key.to_string();
+        let digest = plan.expected_digest().to_string();
+        let plan_debug = format!("{plan:?}");
+        assert!(!plan_debug.contains(&raw));
+        assert!(!plan_debug.contains(&digest));
+
+        let store = MemorySecretStore::default();
+        let secret_ref = plan.config.key_ref.as_deref().unwrap();
+        let receipt = write_new_mcp_audit_secret(secret_ref, &plan.encoded_key, &store).unwrap();
+        let receipt_debug = format!("{receipt:?}");
+        assert!(!receipt_debug.contains(&raw));
+        assert!(!receipt_debug.contains(&digest));
+    }
+
+    #[test]
+    fn pending_secret_recovery_requires_the_exact_domain_separated_digest() {
+        let identity = uuid::Uuid::new_v4();
+        let plan = plan_store_bound_mcp_audit_key_material(78, &identity.to_string()).unwrap();
+        let material = plan.material();
+        let digest = plan.expected_digest().to_string();
+        let store = MemorySecretStore::default();
+        let secret_ref = plan.config.key_ref.as_deref().unwrap();
+        write_new_mcp_audit_secret(secret_ref, &plan.encoded_key, &store).unwrap();
+
+        match recover_pending_mcp_audit_secret(&material.config, &digest, &store).unwrap() {
+            McpAuditPendingSecretRecovery::Exact(recovered) => {
+                assert_eq!(recovered.key, material.key)
+            }
+            McpAuditPendingSecretRecovery::Missing => panic!("exact secret must recover"),
+        }
+        assert!(recover_pending_mcp_audit_secret(
+            &material.config,
+            &format!("sha256:{}", "00".repeat(32)),
+            &store,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mcp_audit_pending_secret_digest_mismatch"));
+        store
+            .delete(material.config.key_ref.as_deref().unwrap())
+            .unwrap();
+        assert!(matches!(
+            recover_pending_mcp_audit_secret(&material.config, &digest, &store).unwrap(),
+            McpAuditPendingSecretRecovery::Missing
+        ));
+    }
+
+    #[test]
+    fn ambiguous_postcreate_reads_never_trigger_blind_secret_deletion() {
+        let secret_ref = format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-79",
+            uuid::Uuid::new_v4().simple()
+        );
+        let encoded = general_purpose::STANDARD.encode([0x79; 32]);
+        for mode in [
+            AmbiguousPostCreateRead::Error,
+            AmbiguousPostCreateRead::Missing,
+            AmbiguousPostCreateRead::Mismatch,
+        ] {
+            let store = AmbiguousCreateSecretStore::new(mode);
+            let error = write_new_mcp_audit_secret(&secret_ref, &encoded, &store).unwrap_err();
+            assert_eq!(
+                error.commit_state(),
+                McpAuditSecretCreateCommitState::VisibleOrExistenceUnknown
+            );
+            assert_eq!(
+                store.value.lock().unwrap().as_deref(),
+                Some(encoded.as_str())
+            );
+            assert_eq!(*store.deletes.lock().unwrap(), 0);
+            let rendered = error.to_string();
+            assert!(!rendered.contains(&encoded));
+            assert!(!rendered.contains("SUPER_SECRET_SHOULD_NOT_LEAK"));
+        }
+    }
+
+    struct ProcessFileSecretStore {
+        secret_path: std::path::PathBuf,
+        entered_path: Option<std::path::PathBuf>,
+        release_path: Option<std::path::PathBuf>,
+    }
+
+    impl SecretStore for ProcessFileSecretStore {
+        fn get(&self, _secret_ref: &str) -> Result<Option<String>> {
+            match std::fs::read_to_string(&self.secret_path) {
+                Ok(value) => Ok(Some(value)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        fn set(&self, _secret_ref: &str, value: &str) -> Result<()> {
+            std::fs::write(&self.secret_path, value)?;
+            if let (Some(entered), Some(release)) =
+                (self.entered_path.as_ref(), self.release_path.as_ref())
+            {
+                std::fs::write(entered, b"entered")?;
+                for _ in 0..1_000 {
+                    if release.exists() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                anyhow::bail!("timed out waiting for cross-process secret release barrier");
+            }
+            Ok(())
+        }
+
+        fn delete(&self, _secret_ref: &str) -> Result<()> {
+            match std::fs::remove_file(&self.secret_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess worker for cross-process MCP audit secret reservation proof"]
+    fn mcp_audit_secret_child_worker() {
+        if std::env::var("OPENLIFE_MCP_SECRET_CHILD_WORKER").as_deref() != Ok("1") {
+            return;
+        }
+        let secret_path = std::path::PathBuf::from(
+            std::env::var("OPENLIFE_MCP_SECRET_CHILD_SECRET_PATH").unwrap(),
+        );
+        let result_path = std::path::PathBuf::from(
+            std::env::var("OPENLIFE_MCP_SECRET_CHILD_RESULT_PATH").unwrap(),
+        );
+        let entered_path = std::env::var("OPENLIFE_MCP_SECRET_CHILD_ENTERED_PATH")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let release_path = std::env::var("OPENLIFE_MCP_SECRET_CHILD_RELEASE_PATH")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let store = ProcessFileSecretStore {
+            secret_path,
+            entered_path,
+            release_path,
+        };
+        let secret_ref = std::env::var("OPENLIFE_MCP_SECRET_CHILD_REF").unwrap();
+        let value = std::env::var("OPENLIFE_MCP_SECRET_CHILD_VALUE").unwrap();
+        let outcome = write_new_mcp_audit_secret(&secret_ref, &value, &store)
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|error| format!("err:{error}"));
+        std::fs::write(result_path, outcome).unwrap();
+    }
+
+    fn wait_for_path(path: &std::path::Path) {
+        for _ in 0..1_000 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    fn wait_for_child(mut child: std::process::Child) -> std::process::ExitStatus {
+        for _ in 0..1_000 {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = child.kill();
+        panic!("timed out waiting for MCP audit secret child process");
+    }
+
+    #[test]
+    fn store_bound_secret_create_only_is_serialized_across_processes() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_root = directory.path().join("shared-lock-root");
+        let secret_path = directory.path().join("credential-value");
+        let entered_path = directory.path().join("k1-entered");
+        let release_path = directory.path().join("release-k1");
+        let first_result = directory.path().join("k1-result");
+        let second_result = directory.path().join("k2-result");
+        let identity = uuid::Uuid::new_v4();
+        let secret_ref = format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-501",
+            identity.simple()
+        );
+        let test_binary = std::env::current_exe().unwrap();
+        let worker_name = "secret_store::tests::mcp_audit_secret_child_worker";
+        let child_base = |result_path: &std::path::Path, value: &str| {
+            let mut command = std::process::Command::new(&test_binary);
+            command
+                .arg("--exact")
+                .arg(worker_name)
+                .arg("--ignored")
+                .arg("--nocapture")
+                .env("OPENLIFE_MCP_SECRET_CHILD_WORKER", "1")
+                .env("OPENLIFE_TEST_MCP_AUDIT_SECRET_LOCK_ROOT", &lock_root)
+                .env("OPENLIFE_MCP_SECRET_CHILD_SECRET_PATH", &secret_path)
+                .env("OPENLIFE_MCP_SECRET_CHILD_RESULT_PATH", result_path)
+                .env("OPENLIFE_MCP_SECRET_CHILD_REF", &secret_ref)
+                .env("OPENLIFE_MCP_SECRET_CHILD_VALUE", value)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            command
+        };
+
+        let mut first_command = child_base(&first_result, "K1-stable-bytes");
+        first_command
+            .env("OPENLIFE_MCP_SECRET_CHILD_ENTERED_PATH", &entered_path)
+            .env("OPENLIFE_MCP_SECRET_CHILD_RELEASE_PATH", &release_path);
+        let first = first_command.spawn().unwrap();
+        wait_for_path(&entered_path);
+
+        let second = child_base(&second_result, "K2-must-not-overwrite")
+            .spawn()
+            .unwrap();
+        assert!(wait_for_child(second).success());
+        std::fs::write(&release_path, b"release").unwrap();
+        assert!(wait_for_child(first).success());
+
+        assert_eq!(std::fs::read_to_string(&first_result).unwrap(), "ok");
+        let second_outcome = std::fs::read_to_string(&second_result).unwrap();
+        assert!(
+            second_outcome.contains("sqlite_slot_owner_lease_unavailable"),
+            "{second_outcome}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret_path).unwrap(),
+            "K1-stable-bytes"
+        );
+        let lock_entries = std::fs::read_dir(&lock_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(lock_entries.len(), 1);
+        assert!(lock_entries[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".secret-slot.openlife-owner.lock"));
+        assert!(!lock_root.join("credential-value").exists());
+        assert!(!lock_entries[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(&identity.simple().to_string()));
     }
 
     #[test]
@@ -1002,6 +1671,7 @@ mod tests {
 
     #[test]
     fn mcp_audit_key_is_random_keychain_material_and_restart_hydrates_same_epoch() {
+        let _epoch = inject_fixed_mcp_audit_epoch_for_test(6_590);
         let store = MemorySecretStore::default();
         let first = hydrate_or_create_mcp_audit_keys(Vec::new(), &store).unwrap();
         assert!(first.config_changed);
@@ -1049,13 +1719,84 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_store_bound_secret_creation_is_globally_create_only() {
+        let store = std::sync::Arc::new(MemorySecretStore::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let identity = uuid::Uuid::new_v4();
+        let secret_ref = format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-77",
+            identity.simple()
+        );
+        let mut handles = Vec::new();
+        for value in ["first-secret", "second-secret"] {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            let secret_ref = secret_ref.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                write_new_mcp_audit_secret(&secret_ref, value, store.as_ref())
+                    .map(|_| value.to_string())
+            }));
+        }
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("secret creation thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(outcomes.iter().filter(|result| result.is_err()).count(), 1);
+        let winning_value = outcomes
+            .iter()
+            .find_map(|result| result.as_ref().ok())
+            .expect("one winner");
+        assert_eq!(
+            store.get(&secret_ref).unwrap().as_deref(),
+            Some(winning_value.as_str())
+        );
+    }
+
+    #[test]
     fn legacy_audit_epoch_is_kept_for_reads_but_new_writes_use_keychain_epoch() {
+        let _epoch = inject_fixed_mcp_audit_epoch_for_test(6_591);
         let store = MemorySecretStore::default();
         let legacy = AuditKeyConfig::default();
         let hydrated = hydrate_or_create_mcp_audit_keys(vec![legacy], &store).unwrap();
         assert_eq!(hydrated.materials.len(), 2);
         assert_eq!(hydrated.configs.last().unwrap().mode, KeyMode::Keychain);
         assert!(hydrated.configs[1].epoch > hydrated.configs[0].epoch);
+    }
+
+    #[test]
+    fn store_bound_hydration_rejects_nonmonotonic_epochs_without_normalizing() {
+        let store = MemorySecretStore::default();
+        let identity = uuid::Uuid::new_v4();
+        let configs = [12u64, 11u64]
+            .into_iter()
+            .map(|epoch| AuditKeyConfig {
+                mode: KeyMode::Keychain,
+                salt_b64: None,
+                env_var: None,
+                key_ref: Some(format!(
+                    "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-{epoch}",
+                    identity.simple()
+                )),
+                epoch,
+                created_at: "2026-07-13T00:00:00Z".into(),
+            })
+            .collect::<Vec<_>>();
+
+        let error = match hydrate_or_create_store_bound_mcp_audit_keys(
+            configs,
+            &identity.to_string(),
+            &store,
+        ) {
+            Ok(_) => panic!("nonmonotonic epochs must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("epochs must be strictly increasing"));
+        assert!(store.values.lock().unwrap().is_empty());
     }
 
     #[test]

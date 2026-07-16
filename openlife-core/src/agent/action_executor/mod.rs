@@ -13,7 +13,7 @@ use crate::agent::{
     CanonicalWriteAdmission, DurableWriteRequest, ReviewWorkflow, ReviewWorkflowOutcome,
 };
 use crate::mcp::McpRegistry;
-use crate::mcp_audit::McpAuditStore;
+use crate::mcp_audit::McpAuditDurableWriter;
 use crate::privacy::PrivacyEngine;
 use crate::tool_execution_receipt::{
     ToolActionEffect, ToolExecutionReceipt, ToolExecutionReceiptTracker,
@@ -473,7 +473,7 @@ pub(crate) async fn observe_first_tool_started_transition(
 pub struct ActionExecutionContext<'a> {
     pub registry: &'a McpRegistry,
     pub permission_store: &'a ToolPermissionStore,
-    pub audit_store: &'a McpAuditStore,
+    pub audit_store: &'a dyn McpAuditDurableWriter,
     pub privacy_engine: &'a PrivacyEngine,
     pub safe_paths: &'a [String],
     pub life_model: Option<&'a crate::life_model::LifeModel>,
@@ -536,7 +536,7 @@ impl<'a> ActionExecutionContext<'a> {
     pub fn new(
         registry: &'a McpRegistry,
         permission_store: &'a ToolPermissionStore,
-        audit_store: &'a McpAuditStore,
+        audit_store: &'a dyn McpAuditDurableWriter,
         privacy_engine: &'a PrivacyEngine,
         safe_paths: &'a [String],
     ) -> Self {

@@ -41,6 +41,7 @@ sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 ring = "0.17"
+zeroize = "1.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # open: cross-platform URL/file opening (used for mailto: links)
 open = "5.3"
@@ -60,6 +61,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 [dev-dependencies]
 tauri = { version = "2.5", features = ["test"] }
 tempfile = "3.14"
+fs2 = "0.4"
 openlife-core = { path = "../openlife-core", features = ["test-utils"] }
 
 [[bin]]

@@ -10,7 +10,7 @@
 //! 1. `config` (copy only non-secret typed fields),
 //! 2. `tool_permission_store`,
 //! 3. `mcp_registry`,
-//! 4. `mcp_audit_store`,
+//! 4. canonical `mcp_audit_store` writer handle (Arc clone; no store guard),
 //! 5. `privacy_engine`,
 //! 6. `memory_store` for governed product execution,
 //! 7. `memory_lifecycle_store` retrieval authority where available,
@@ -27,12 +27,71 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+/// Product audit writer resolver. Cloning this handle copies only an `Arc`;
+/// the active keyring and authority generation remain owned by the canonical
+/// `AppState` store. The outer Tokio mutex is acquired only by the bounded
+/// blocking audit commit, never across provider/tool/network awaits.
+#[derive(Clone)]
+pub(crate) struct CanonicalMcpAuditWriter {
+    store: Arc<tokio::sync::Mutex<openlife_core::mcp_audit::McpAuditStore>>,
+    persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
+}
+
+impl CanonicalMcpAuditWriter {
+    fn new(
+        store: Arc<tokio::sync::Mutex<openlife_core::mcp_audit::McpAuditStore>>,
+        persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
+    ) -> Self {
+        Self {
+            store,
+            persistence_coordinator,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn list_logs(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<openlife_core::mcp_audit::McpLogEntry>> {
+        self.store.lock().await.list_logs(limit)
+    }
+}
+
+impl openlife_core::mcp_audit::McpAuditDurableWriter for CanonicalMcpAuditWriter {
+    fn clone_owned_writer(&self) -> Arc<dyn openlife_core::mcp_audit::McpAuditDurableWriter> {
+        Arc::new(self.clone())
+    }
+
+    fn insert_log_durably(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        result: &str,
+        success: bool,
+        pii_found: bool,
+    ) -> anyhow::Result<i64> {
+        self.store
+            .blocking_lock()
+            .insert_log(tool_name, arguments, result, success, pii_found)
+    }
+
+    fn report_runtime_failure(&self, reason_code: &'static str, detail: &str) {
+        // Reporters can run in a Tokio worker (closed gate) or a cancelled
+        // future's Drop path before spawn_blocking starts. They therefore
+        // cannot use `blocking_lock`. The coordinator is the shipped,
+        // process-wide observer authority and its registration is synchronous,
+        // infallible, and monotonic after seal.
+        self.persistence_coordinator
+            .register_unavailable("McpAuditStore", reason_code, detail);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SharedToolGatewayResources {
     pub(crate) safe_paths: Vec<String>,
     pub(crate) permission_store: openlife_core::tool_permissions::ToolPermissionStore,
     pub(crate) registry: openlife_core::mcp::McpRegistry,
-    pub(crate) audit_store: openlife_core::mcp_audit::McpAuditStore,
+    pub(crate) audit_store: CanonicalMcpAuditWriter,
     pub(crate) privacy_engine: openlife_core::privacy::PrivacyEngine,
 }
 
@@ -116,7 +175,10 @@ async fn capture_shared_after_config(
 ) -> SharedToolGatewayResources {
     let permission_store = { state.tool_permission_store.lock().await.clone() };
     let registry = { state.mcp_registry.lock().await.clone() };
-    let audit_store = { state.mcp_audit_store.lock().await.clone() };
+    let audit_store = CanonicalMcpAuditWriter::new(
+        Arc::clone(&state.mcp_audit_store),
+        Arc::clone(&state.persistence_coordinator),
+    );
     let privacy_engine = { state.privacy_engine.lock().await.clone() };
     SharedToolGatewayResources {
         safe_paths,
