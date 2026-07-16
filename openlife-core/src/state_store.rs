@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 4;
+const STATE_STORE_SCHEMA_VERSION: i64 = 5;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
@@ -25,6 +25,10 @@ const MAX_OBSERVATION_DIMENSION_CHARS: usize = 32;
 const MAX_OBSERVATION_UNIT_CHARS: usize = 16;
 const MAX_SOURCE_MESSAGE_REF_CHARS: usize = 256;
 const MAX_RESOURCE_TASK_BATCH_ITEMS: usize = 8;
+const MAX_LEGACY_DAILY_TASK_SHADOW_ITEMS: usize = 512;
+const MAX_LEGACY_DAILY_TASK_SHADOW_EVIDENCE: usize = 32;
+const MAX_LEGACY_TIME_BLOCK_CHARS: usize = 64;
+const MAX_LEGACY_OPERATION_REF_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,6 +255,43 @@ pub struct StateBatchExecutionReceipt {
     pub assets: Vec<StateBatchAssetReceipt>,
     pub committed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    pub replayed: bool,
+}
+
+/// Lossless, non-product-visible migration candidate for one unmarked legacy
+/// YAML daily goal. These rows remain shadow evidence until a later authority
+/// cutover; `list_daily_tasks` never returns them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyDailyTaskShadowCandidate {
+    pub source_ordinal: u32,
+    pub title: String,
+    pub completed: bool,
+    pub time_block_start: Option<String>,
+    pub time_block_end: Option<String>,
+    pub due_at: Option<DateTime<Utc>>,
+    pub legacy_operation_id: Option<String>,
+    pub legacy_operation_digest: Option<String>,
+}
+
+/// Metadata-only proof that a legacy YAML daily-task snapshot was normalized,
+/// persisted, read back, and restored after a destructive rehearsal without
+/// changing product read or write authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyDailyTaskShadowReceipt {
+    pub schema: String,
+    pub receipt_id: String,
+    pub run_id: String,
+    pub source_asset_digest: String,
+    pub candidate_digest: String,
+    pub repeated_read_digest: String,
+    pub restored_digest: String,
+    pub item_count: usize,
+    pub deterministic: bool,
+    pub parity: bool,
+    pub rollback_rehearsed: bool,
+    pub committed_at: DateTime<Utc>,
     pub replayed: bool,
 }
 
@@ -851,6 +892,45 @@ impl StateStore {
                 committed_at TEXT NOT NULL,
                 FOREIGN KEY(observation_id) REFERENCES state_observations(observation_id),
                 FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_legacy_daily_task_shadow_current (
+                singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
+                receipt_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL UNIQUE,
+                source_asset_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                repeated_read_digest TEXT NOT NULL,
+                restored_digest TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 512),
+                deterministic INTEGER NOT NULL CHECK(deterministic IN (0, 1)),
+                parity INTEGER NOT NULL CHECK(parity IN (0, 1)),
+                rollback_rehearsed INTEGER NOT NULL CHECK(rollback_rehearsed IN (0, 1)),
+                committed_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS state_legacy_daily_task_shadow_items (
+                run_id TEXT NOT NULL,
+                source_ordinal INTEGER NOT NULL CHECK(source_ordinal >= 0 AND source_ordinal < 512),
+                title TEXT NOT NULL,
+                completed INTEGER NOT NULL CHECK(completed IN (0, 1)),
+                time_block_start TEXT,
+                time_block_end TEXT,
+                due_at TEXT,
+                legacy_operation_id TEXT,
+                legacy_operation_digest TEXT,
+                PRIMARY KEY(run_id, source_ordinal),
+                FOREIGN KEY(run_id) REFERENCES state_legacy_daily_task_shadow_current(run_id)
+                    ON DELETE CASCADE
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_legacy_daily_task_shadow_evidence (
+                run_id TEXT PRIMARY KEY,
+                receipt_id TEXT NOT NULL UNIQUE,
+                source_asset_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                repeated_read_digest TEXT NOT NULL,
+                restored_digest TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 512),
+                succeeded INTEGER NOT NULL CHECK(succeeded IN (0, 1)),
+                committed_at TEXT NOT NULL
              ) WITHOUT ROWID;",
         )?;
         let existing_version = tx
@@ -874,23 +954,29 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '4'
+                     SET value = '5'
                      WHERE key = 'schema_version';",
                 )?;
             }
             Some("2") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '4' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("3") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '4' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
-            Some("4") => {}
+            Some("4") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("5") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         tx.commit()?;
@@ -902,6 +988,173 @@ impl StateStore {
         command: CreateDailyTaskCommand,
     ) -> Result<StateExecutionReceipt> {
         self.create_daily_task_guarded(command, || Result::<()>::Ok(()))
+    }
+
+    pub fn reconcile_legacy_daily_task_shadow(
+        &self,
+        source_asset_digest: String,
+        candidates: Vec<LegacyDailyTaskShadowCandidate>,
+        observed_at: DateTime<Utc>,
+    ) -> Result<LegacyDailyTaskShadowReceipt> {
+        self.reconcile_legacy_daily_task_shadow_guarded(
+            source_asset_digest,
+            candidates,
+            observed_at,
+            || Result::<()>::Ok(()),
+        )
+    }
+
+    pub fn reconcile_legacy_daily_task_shadow_guarded<F>(
+        &self,
+        source_asset_digest: String,
+        candidates: Vec<LegacyDailyTaskShadowCandidate>,
+        observed_at: DateTime<Utc>,
+        before_commit: F,
+    ) -> Result<LegacyDailyTaskShadowReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        if !is_sha256_digest(&source_asset_digest) {
+            anyhow::bail!("state_legacy_shadow_source_digest_invalid");
+        }
+        let candidates = prepare_legacy_daily_task_shadow(candidates)?;
+        let candidate_digest = legacy_daily_task_shadow_digest(&candidates)?;
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some(existing) = legacy_daily_task_shadow_receipt(&tx, true)? {
+            if existing.source_asset_digest == source_asset_digest {
+                if existing.candidate_digest != candidate_digest {
+                    anyhow::bail!("state_legacy_shadow_source_digest_collision");
+                }
+                let persisted = load_legacy_daily_task_shadow_candidates(&tx)?;
+                let persisted_digest = legacy_daily_task_shadow_digest(&persisted)?;
+                if persisted_digest != existing.candidate_digest
+                    || existing.item_count != persisted.len()
+                    || existing.repeated_read_digest != existing.candidate_digest
+                    || existing.restored_digest != existing.candidate_digest
+                    || !existing.deterministic
+                    || !existing.parity
+                    || !existing.rollback_rehearsed
+                {
+                    anyhow::bail!("state_legacy_shadow_existing_evidence_inconsistent");
+                }
+                tx.rollback()?;
+                return Ok(existing);
+            }
+        }
+
+        tx.execute("DELETE FROM state_legacy_daily_task_shadow_current", [])?;
+        let receipt_id = format!("state_legacy_shadow_receipt:{}", Uuid::new_v4());
+        let run_id = Uuid::new_v4().hyphenated().to_string();
+        tx.execute(
+            "INSERT INTO state_legacy_daily_task_shadow_current (
+                 singleton_key, receipt_id, run_id, source_asset_digest,
+                 candidate_digest, repeated_read_digest, restored_digest,
+                 item_count, deterministic, parity, rollback_rehearsed, committed_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?4, ?4, ?5, 0, 0, 0, ?6)",
+            params![
+                receipt_id,
+                run_id,
+                source_asset_digest,
+                candidate_digest,
+                i64::try_from(candidates.len())?,
+                observed_at.to_rfc3339(),
+            ],
+        )?;
+        for candidate in &candidates {
+            insert_legacy_daily_task_shadow_candidate(&tx, &run_id, candidate)?;
+        }
+
+        let persisted = load_legacy_daily_task_shadow_candidates(&tx)?;
+        let repeated_read_digest = legacy_daily_task_shadow_digest(&persisted)?;
+        if persisted != candidates || repeated_read_digest != candidate_digest {
+            anyhow::bail!("state_legacy_shadow_digest_parity_failed");
+        }
+
+        // Rehearse a destructive recovery against the exact staged rows. The
+        // whole method is one IMMEDIATE transaction: any restore or injected
+        // failure rolls back to the previously verified shadow snapshot.
+        tx.execute(
+            "DELETE FROM state_legacy_daily_task_shadow_items WHERE run_id = ?1",
+            [&run_id],
+        )?;
+        let deleted_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM state_legacy_daily_task_shadow_items WHERE run_id = ?1",
+            [&run_id],
+            |row| row.get(0),
+        )?;
+        if deleted_count != 0 {
+            anyhow::bail!("state_legacy_shadow_rollback_delete_failed");
+        }
+        for candidate in &persisted {
+            insert_legacy_daily_task_shadow_candidate(&tx, &run_id, candidate)?;
+        }
+        let restored = load_legacy_daily_task_shadow_candidates(&tx)?;
+        let restored_digest = legacy_daily_task_shadow_digest(&restored)?;
+        if restored != candidates || restored_digest != candidate_digest {
+            anyhow::bail!("state_legacy_shadow_rollback_restore_failed");
+        }
+
+        before_commit()?;
+        tx.execute(
+            "UPDATE state_legacy_daily_task_shadow_current
+             SET repeated_read_digest = ?2,
+                 restored_digest = ?3,
+                 deterministic = 1,
+                 parity = 1,
+                 rollback_rehearsed = 1
+             WHERE run_id = ?1",
+            params![run_id, repeated_read_digest, restored_digest],
+        )?;
+        tx.execute(
+            "INSERT INTO state_legacy_daily_task_shadow_evidence (
+                 run_id, receipt_id, source_asset_digest, candidate_digest,
+                 repeated_read_digest, restored_digest, item_count, succeeded,
+                 committed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+            params![
+                run_id,
+                receipt_id,
+                source_asset_digest,
+                candidate_digest,
+                repeated_read_digest,
+                restored_digest,
+                i64::try_from(candidates.len())?,
+                observed_at.to_rfc3339(),
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM state_legacy_daily_task_shadow_evidence
+             WHERE run_id != ?1
+               AND run_id NOT IN (
+                   SELECT run_id FROM state_legacy_daily_task_shadow_evidence
+                   WHERE run_id != ?1
+                   ORDER BY committed_at DESC, run_id DESC
+                   LIMIT ?2
+               )",
+            params![
+                run_id,
+                i64::try_from(MAX_LEGACY_DAILY_TASK_SHADOW_EVIDENCE.saturating_sub(1))?
+            ],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.legacy_daily_task_shadow_receipt(false)?
+            .context("state_legacy_shadow_receipt_missing_after_commit")
+    }
+
+    pub fn list_legacy_daily_task_shadow(&self) -> Result<Vec<LegacyDailyTaskShadowCandidate>> {
+        let conn = self.lock_connection()?;
+        load_legacy_daily_task_shadow_candidates(&conn)
+    }
+
+    pub fn legacy_daily_task_shadow_receipt(
+        &self,
+        replayed: bool,
+    ) -> Result<Option<LegacyDailyTaskShadowReceipt>> {
+        let conn = self.lock_connection()?;
+        legacy_daily_task_shadow_receipt(&conn, replayed)
     }
 
     pub fn create_state_observation(
@@ -2735,6 +2988,193 @@ fn state_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateAsset>
     })
 }
 
+fn prepare_legacy_daily_task_shadow(
+    candidates: Vec<LegacyDailyTaskShadowCandidate>,
+) -> Result<Vec<LegacyDailyTaskShadowCandidate>> {
+    if candidates.len() > MAX_LEGACY_DAILY_TASK_SHADOW_ITEMS {
+        anyhow::bail!("state_legacy_shadow_item_limit_exceeded");
+    }
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, mut candidate)| {
+            if usize::try_from(candidate.source_ordinal)? != ordinal {
+                anyhow::bail!("state_legacy_shadow_ordinal_not_contiguous");
+            }
+            if candidate.title.trim().is_empty()
+                || candidate.title.chars().count() > MAX_TASK_TITLE_CHARS
+                || candidate.title.chars().any(char::is_control)
+            {
+                anyhow::bail!("state_legacy_shadow_title_invalid");
+            }
+            candidate.time_block_start = normalize_legacy_shadow_optional(
+                "time_block_start",
+                candidate.time_block_start,
+                MAX_LEGACY_TIME_BLOCK_CHARS,
+            )?;
+            candidate.time_block_end = normalize_legacy_shadow_optional(
+                "time_block_end",
+                candidate.time_block_end,
+                MAX_LEGACY_TIME_BLOCK_CHARS,
+            )?;
+            if candidate.time_block_start.is_some() != candidate.time_block_end.is_some() {
+                anyhow::bail!("state_legacy_shadow_time_block_incomplete");
+            }
+            candidate.legacy_operation_id = normalize_legacy_shadow_optional(
+                "operation_id",
+                candidate.legacy_operation_id,
+                MAX_LEGACY_OPERATION_REF_CHARS,
+            )?;
+            candidate.legacy_operation_digest = normalize_legacy_shadow_optional(
+                "operation_digest",
+                candidate.legacy_operation_digest,
+                MAX_LEGACY_OPERATION_REF_CHARS,
+            )?;
+            Ok(candidate)
+        })
+        .collect()
+}
+
+fn normalize_legacy_shadow_optional(
+    label: &str,
+    value: Option<String>,
+    max_chars: usize,
+) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            if value.trim().is_empty()
+                || value.chars().count() > max_chars
+                || value.chars().any(char::is_control)
+            {
+                anyhow::bail!("state_legacy_shadow_{label}_invalid");
+            }
+            Ok(value)
+        })
+        .transpose()
+}
+
+fn legacy_daily_task_shadow_digest(
+    candidates: &[LegacyDailyTaskShadowCandidate],
+) -> Result<String> {
+    digest_json(&serde_json::to_value(candidates)?)
+}
+
+fn insert_legacy_daily_task_shadow_candidate(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    candidate: &LegacyDailyTaskShadowCandidate,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO state_legacy_daily_task_shadow_items (
+             run_id, source_ordinal, title, completed, time_block_start,
+             time_block_end, due_at, legacy_operation_id,
+             legacy_operation_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            run_id,
+            i64::from(candidate.source_ordinal),
+            candidate.title,
+            i64::from(candidate.completed),
+            candidate.time_block_start,
+            candidate.time_block_end,
+            candidate.due_at.map(|value| value.to_rfc3339()),
+            candidate.legacy_operation_id,
+            candidate.legacy_operation_digest,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_legacy_daily_task_shadow_candidates(
+    conn: &Connection,
+) -> Result<Vec<LegacyDailyTaskShadowCandidate>> {
+    let mut statement = conn.prepare(
+        "SELECT source_ordinal, title, completed, time_block_start,
+                time_block_end, due_at, legacy_operation_id,
+                legacy_operation_digest
+         FROM state_legacy_daily_task_shadow_items
+         ORDER BY source_ordinal ASC",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            let ordinal = row.get::<_, i64>(0)?;
+            Ok(LegacyDailyTaskShadowCandidate {
+                source_ordinal: u32::try_from(ordinal).map_err(sql_conversion_error)?,
+                title: row.get(1)?,
+                completed: row.get::<_, i64>(2)? != 0,
+                time_block_start: row.get(3)?,
+                time_block_end: row.get(4)?,
+                due_at: parse_optional_time_sql(row.get::<_, Option<String>>(5)?)?,
+                legacy_operation_id: row.get(6)?,
+                legacy_operation_digest: row.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn legacy_daily_task_shadow_receipt(
+    conn: &Connection,
+    replayed: bool,
+) -> Result<Option<LegacyDailyTaskShadowReceipt>> {
+    conn.query_row(
+        "SELECT receipt_id, run_id, source_asset_digest, candidate_digest,
+                repeated_read_digest, restored_digest, item_count,
+                deterministic, parity, rollback_rehearsed, committed_at
+         FROM state_legacy_daily_task_shadow_current WHERE singleton_key = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(
+        |(
+            receipt_id,
+            run_id,
+            source_asset_digest,
+            candidate_digest,
+            repeated_read_digest,
+            restored_digest,
+            item_count,
+            deterministic,
+            parity,
+            rollback_rehearsed,
+            committed_at,
+        )| {
+            Ok(LegacyDailyTaskShadowReceipt {
+                schema: "openlife.state-legacy-daily-task-shadow-receipt.v1".into(),
+                receipt_id,
+                run_id,
+                source_asset_digest,
+                candidate_digest,
+                repeated_read_digest,
+                restored_digest,
+                item_count: usize::try_from(item_count)
+                    .context("state_legacy_shadow_item_count_invalid")?,
+                deterministic: deterministic != 0,
+                parity: parity != 0,
+                rollback_rehearsed: rollback_rehearsed != 0,
+                committed_at: parse_time(&committed_at)?,
+                replayed,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(StdDuration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -4136,7 +4576,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         assert!(request_digest_column_exists);
     }
 
@@ -4177,7 +4617,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         assert_eq!(
             tables,
             [
@@ -4224,13 +4664,61 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         assert_eq!(
             tables,
             [
                 "state_observation_operations",
                 "state_observation_versions",
                 "state_observations"
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_v4_adds_legacy_daily_task_shadow_tables_before_advancing_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v4.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE state_store_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO state_store_metadata (key, value)
+                 VALUES ('schema_version', '4');",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::new(&path).unwrap();
+        let conn = store.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tables = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name LIKE 'state_legacy_daily_task_shadow_%'
+                 ORDER BY name ASC",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(version, "5");
+        assert_eq!(
+            tables,
+            [
+                "state_legacy_daily_task_shadow_current",
+                "state_legacy_daily_task_shadow_evidence",
+                "state_legacy_daily_task_shadow_items"
             ]
         );
     }
@@ -4283,5 +4771,196 @@ mod tests {
             .observation_receipt_for_operation(&operation_id, false)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn legacy_daily_task_shadow_is_deterministic_replayable_and_rollback_rehearsed() {
+        let store = StateStore::new_in_memory().unwrap();
+        let observed_at = at(9);
+        let candidates = vec![
+            LegacyDailyTaskShadowCandidate {
+                source_ordinal: 0,
+                title: "检查路演设备".into(),
+                completed: false,
+                time_block_start: Some("09:00".into()),
+                time_block_end: Some("10:00".into()),
+                due_at: None,
+                legacy_operation_id: None,
+                legacy_operation_digest: None,
+            },
+            LegacyDailyTaskShadowCandidate {
+                source_ordinal: 1,
+                title: "确认演示数据".into(),
+                completed: true,
+                time_block_start: None,
+                time_block_end: None,
+                due_at: Some(at(17)),
+                legacy_operation_id: Some("legacy-operation".into()),
+                legacy_operation_digest: Some(
+                    digest_json(&serde_json::json!({
+                        "legacy": true
+                    }))
+                    .unwrap(),
+                ),
+            },
+        ];
+
+        let first = store
+            .reconcile_legacy_daily_task_shadow(
+                digest_json(&serde_json::json!({"model": "v1"})).unwrap(),
+                candidates.clone(),
+                observed_at,
+            )
+            .unwrap();
+        let replay = store
+            .reconcile_legacy_daily_task_shadow(
+                digest_json(&serde_json::json!({"model": "v1"})).unwrap(),
+                candidates,
+                observed_at + Duration::minutes(5),
+            )
+            .unwrap();
+
+        assert!(first.parity);
+        assert!(first.deterministic);
+        assert!(first.rollback_rehearsed);
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.receipt_id, replay.receipt_id);
+        assert_eq!(first.candidate_digest, first.repeated_read_digest);
+        assert_eq!(first.candidate_digest, first.restored_digest);
+        assert_eq!(
+            store.list_legacy_daily_task_shadow().unwrap(),
+            vec![
+                LegacyDailyTaskShadowCandidate {
+                    source_ordinal: 0,
+                    title: "检查路演设备".into(),
+                    completed: false,
+                    time_block_start: Some("09:00".into()),
+                    time_block_end: Some("10:00".into()),
+                    due_at: None,
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                },
+                LegacyDailyTaskShadowCandidate {
+                    source_ordinal: 1,
+                    title: "确认演示数据".into(),
+                    completed: true,
+                    time_block_start: None,
+                    time_block_end: None,
+                    due_at: Some(at(17)),
+                    legacy_operation_id: Some("legacy-operation".into()),
+                    legacy_operation_digest: Some(
+                        digest_json(&serde_json::json!({
+                            "legacy": true
+                        }))
+                        .unwrap()
+                    ),
+                },
+            ]
+        );
+
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert!(!encoded.contains("检查路演设备"));
+        assert!(!encoded.contains("确认演示数据"));
+        assert!(!encoded.contains("legacy-operation"));
+    }
+
+    #[test]
+    fn legacy_daily_task_shadow_fault_keeps_previous_verified_snapshot() {
+        let store = StateStore::new_in_memory().unwrap();
+        let original = vec![LegacyDailyTaskShadowCandidate {
+            source_ordinal: 0,
+            title: "原始迁移任务".into(),
+            completed: false,
+            time_block_start: None,
+            time_block_end: None,
+            due_at: None,
+            legacy_operation_id: None,
+            legacy_operation_digest: None,
+        }];
+        store
+            .reconcile_legacy_daily_task_shadow(
+                digest_json(&serde_json::json!({"model": "original"})).unwrap(),
+                original.clone(),
+                at(9),
+            )
+            .unwrap();
+
+        let error = store
+            .reconcile_legacy_daily_task_shadow_guarded(
+                digest_json(&serde_json::json!({"model": "replacement"})).unwrap(),
+                vec![LegacyDailyTaskShadowCandidate {
+                    source_ordinal: 0,
+                    title: "不应留下的迁移任务".into(),
+                    completed: false,
+                    time_block_start: None,
+                    time_block_end: None,
+                    due_at: None,
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                }],
+                at(10),
+                || anyhow::bail!("legacy_shadow_injected_commit_failure"),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("legacy_shadow_injected_commit_failure"));
+        assert_eq!(store.list_legacy_daily_task_shadow().unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_daily_task_shadow_keeps_one_body_snapshot_and_bounded_metadata_evidence() {
+        let store = StateStore::new_in_memory().unwrap();
+        for index in 0..40 {
+            store
+                .reconcile_legacy_daily_task_shadow(
+                    digest_json(&serde_json::json!({"legacySnapshot": index})).unwrap(),
+                    vec![LegacyDailyTaskShadowCandidate {
+                        source_ordinal: 0,
+                        title: format!("迁移任务 {index}"),
+                        completed: false,
+                        time_block_start: None,
+                        time_block_end: None,
+                        due_at: None,
+                        legacy_operation_id: None,
+                        legacy_operation_digest: None,
+                    }],
+                    at(9) + Duration::minutes(index),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(store.list_legacy_daily_task_shadow().unwrap().len(), 1);
+        assert_eq!(
+            store.list_legacy_daily_task_shadow().unwrap()[0].title,
+            "迁移任务 39"
+        );
+        let current_run_id = store
+            .legacy_daily_task_shadow_receipt(false)
+            .unwrap()
+            .unwrap()
+            .run_id;
+        let conn = store.lock_connection().unwrap();
+        let evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM state_legacy_daily_task_shadow_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            evidence_count,
+            i64::try_from(MAX_LEGACY_DAILY_TASK_SHADOW_EVIDENCE).unwrap()
+        );
+        let current_evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM state_legacy_daily_task_shadow_evidence WHERE run_id = ?1",
+                [current_run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_evidence_count, 1);
     }
 }

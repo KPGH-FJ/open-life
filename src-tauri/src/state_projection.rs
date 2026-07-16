@@ -9,8 +9,11 @@ use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerPurpose,
 };
 use crate::AppState;
-use openlife_core::life_model::DailyGoal;
-use openlife_core::state_store::{DailyTaskStatus, StateProjectionStatus};
+use openlife_core::life_model::{DailyGoal, LifeModel};
+use openlife_core::state_store::{
+    DailyTaskStatus, LegacyDailyTaskShadowCandidate, LegacyDailyTaskShadowReceipt,
+    StateProjectionStatus, StateStore,
+};
 use std::sync::Arc;
 
 const STATE_ASSET_PROJECTION_DIGEST_PREFIX: &str = "state-asset-v1:";
@@ -54,6 +57,64 @@ pub(crate) fn projected_daily_goal(asset: &openlife_core::state_store::StateAsse
         operation_id: Some(asset.asset_id.clone()),
         operation_digest: Some(format!("{STATE_ASSET_PROJECTION_DIGEST_PREFIX}{digest}")),
     }
+}
+
+pub(crate) fn legacy_yaml_daily_task_shadow_candidates(
+    model: &LifeModel,
+) -> Result<Vec<LegacyDailyTaskShadowCandidate>, String> {
+    model
+        .goals
+        .daily
+        .iter()
+        .filter(|goal| !is_state_store_projected_daily_goal(goal))
+        .enumerate()
+        .map(|(ordinal, goal)| {
+            let due_at = goal
+                .due_at
+                .as_deref()
+                .map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .map(|value| value.with_timezone(&chrono::Utc))
+                        .map_err(|_| format!("legacy_daily_task_due_at_invalid:ordinal={ordinal}"))
+                })
+                .transpose()?;
+            Ok(LegacyDailyTaskShadowCandidate {
+                source_ordinal: u32::try_from(ordinal)
+                    .map_err(|_| "legacy_daily_task_ordinal_overflow".to_string())?,
+                title: goal.name.clone(),
+                completed: goal.done,
+                time_block_start: goal.time_block.as_ref().map(|block| block.start.clone()),
+                time_block_end: goal.time_block.as_ref().map(|block| block.end.clone()),
+                due_at,
+                legacy_operation_id: goal.operation_id.clone(),
+                legacy_operation_digest: goal.operation_digest.clone(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn legacy_yaml_daily_task_source_digest(model: &LifeModel) -> Result<String, String> {
+    let legacy_goals = model
+        .goals
+        .daily
+        .iter()
+        .filter(|goal| !is_state_store_projected_daily_goal(goal))
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_string(&legacy_goals)
+        .map_err(|error| format!("legacy_daily_task_source_encode_failed:{error}"))?;
+    Ok(openlife_core::persistence_outbox::metadata_digest(&encoded))
+}
+
+pub(crate) fn reconcile_legacy_yaml_daily_task_shadow(
+    store: &StateStore,
+    model: &LifeModel,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<LegacyDailyTaskShadowReceipt, String> {
+    let source_asset_digest = legacy_yaml_daily_task_source_digest(model)?;
+    let candidates = legacy_yaml_daily_task_shadow_candidates(model)?;
+    store
+        .reconcile_legacy_daily_task_shadow(source_asset_digest, candidates, observed_at)
+        .map_err(|error| format!("legacy_daily_task_shadow_reconciliation_failed:{error}"))
 }
 
 pub(crate) async fn reconcile_state_store_lifemodel_projection(
@@ -146,5 +207,97 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
             }
             Err(format!("state compatibility projection failed: {error}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::life_model::{LifeModel, TimeBlock};
+
+    #[test]
+    fn legacy_yaml_shadow_candidates_are_lossless_and_exclude_statestore_projection() {
+        let mut model = LifeModel::default_model();
+        model.goals.daily = vec![
+            DailyGoal {
+                name: "旧任务".into(),
+                done: true,
+                time_block: Some(TimeBlock {
+                    start: "09:00".into(),
+                    end: "10:00".into(),
+                }),
+                due_at: Some("2026-07-15T17:00:00Z".into()),
+                operation_id: Some("legacy-operation".into()),
+                operation_digest: Some("legacy-digest".into()),
+            },
+            DailyGoal {
+                name: "StateStore 投影".into(),
+                done: false,
+                time_block: None,
+                due_at: None,
+                operation_id: Some(uuid::Uuid::new_v4().hyphenated().to_string()),
+                operation_digest: Some(format!(
+                    "{STATE_ASSET_PROJECTION_DIGEST_PREFIX}{}",
+                    openlife_core::persistence_outbox::metadata_digest("canonical")
+                )),
+            },
+        ];
+
+        let candidates = legacy_yaml_daily_task_shadow_candidates(&model).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_ordinal, 0);
+        assert_eq!(candidates[0].title, "旧任务");
+        assert!(candidates[0].completed);
+        assert_eq!(candidates[0].time_block_start.as_deref(), Some("09:00"));
+        assert_eq!(candidates[0].time_block_end.as_deref(), Some("10:00"));
+        assert_eq!(
+            candidates[0].due_at.unwrap().to_rfc3339(),
+            "2026-07-15T17:00:00+00:00"
+        );
+        assert_eq!(
+            candidates[0].legacy_operation_id.as_deref(),
+            Some("legacy-operation")
+        );
+        assert_eq!(
+            candidates[0].legacy_operation_digest.as_deref(),
+            Some("legacy-digest")
+        );
+    }
+
+    #[test]
+    fn legacy_yaml_shadow_candidate_rejects_invalid_due_time_without_partial_guess() {
+        let mut model = LifeModel::default_model();
+        model.goals.daily.push(DailyGoal {
+            name: "无法无损迁移".into(),
+            done: false,
+            time_block: None,
+            due_at: Some("tomorrow-ish".into()),
+            operation_id: None,
+            operation_digest: None,
+        });
+
+        let error = legacy_yaml_daily_task_shadow_candidates(&model).unwrap_err();
+        assert!(error.contains("legacy_daily_task_due_at_invalid"));
+    }
+
+    #[test]
+    fn legacy_yaml_shadow_digest_is_scoped_to_the_daily_task_asset_category() {
+        let mut model = LifeModel::default_model();
+        model.goals.daily.push(DailyGoal {
+            name: "同一个迁移任务".into(),
+            done: false,
+            time_block: None,
+            due_at: None,
+            operation_id: None,
+            operation_digest: None,
+        });
+        let first = legacy_yaml_daily_task_source_digest(&model).unwrap();
+        model.identity.name = "无关身份变化".into();
+        let after_unrelated_change = legacy_yaml_daily_task_source_digest(&model).unwrap();
+        assert_eq!(first, after_unrelated_change);
+
+        model.goals.daily[0].done = true;
+        let after_daily_task_change = legacy_yaml_daily_task_source_digest(&model).unwrap();
+        assert_ne!(first, after_daily_task_change);
     }
 }

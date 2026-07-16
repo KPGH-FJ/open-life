@@ -2563,6 +2563,35 @@ fn bootstrap_with_secret_store(
         match openlife_core::state_store::StateStore::new(&store_path) {
             Ok(store) => {
                 persistence.register_read_write("StateStore");
+                if persistence.bootstrap_mutations_safe() {
+                    let shadow_result = life_model_manager
+                        .load()
+                        .map_err(|error| {
+                            format!(
+                                "LifeModel could not be loaded for legacy daily-task shadow reconciliation: {error}"
+                            )
+                        })
+                        .and_then(|model| {
+                            crate::state_projection::reconcile_legacy_yaml_daily_task_shadow(
+                                &store,
+                                &model,
+                                chrono::Utc::now(),
+                            )
+                        });
+                    if let Err(error) = shadow_result {
+                        // Existing unmarked YAML remains the read-only
+                        // migration owner. Do not manufacture parity or switch
+                        // authority when a row cannot be staged losslessly.
+                        startup_warnings.borrow_mut().push(format!(
+                            "legacy daily-task StateStore shadow parity remains blocked: {error}"
+                        ));
+                    }
+                } else {
+                    startup_warnings.borrow_mut().push(
+                        "legacy daily-task StateStore shadow reconciliation skipped because canonical bootstrap mutations are unsafe"
+                            .into(),
+                    );
+                }
                 Some(Arc::new(store))
             }
             Err(error) => {
@@ -3079,6 +3108,58 @@ mod tests {
         );
         assert!(projection.safe_mode.active);
         assert_eq!(projection.readiness.database_status, "degraded");
+    }
+
+    #[test]
+    fn bootstrap_stages_legacy_yaml_daily_tasks_without_switching_product_owner() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let manager = LifeModelManager::new(temp_dir.path().join("life-model").join("current"));
+        let mut model = openlife_core::life_model::LifeModel::default_model();
+        model
+            .goals
+            .daily
+            .push(openlife_core::life_model::DailyGoal {
+                name: "保留的旧 YAML 任务".into(),
+                done: false,
+                time_block: Some(openlife_core::life_model::TimeBlock {
+                    start: "09:00".into(),
+                    end: "10:00".into(),
+                }),
+                due_at: None,
+                operation_id: None,
+                operation_digest: None,
+            });
+        manager.save(&model).unwrap();
+
+        let result =
+            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+        let store = result.state.state_store.as_ref().expect("StateStore");
+        let receipt = store
+            .legacy_daily_task_shadow_receipt(false)
+            .unwrap()
+            .expect("legacy shadow receipt");
+
+        assert_eq!(receipt.item_count, 1);
+        assert!(receipt.deterministic);
+        assert!(receipt.parity);
+        assert!(receipt.rollback_rehearsed);
+        assert_eq!(receipt.candidate_digest, receipt.repeated_read_digest);
+        assert_eq!(receipt.candidate_digest, receipt.restored_digest);
+        assert_eq!(store.list_legacy_daily_task_shadow().unwrap().len(), 1);
+        assert!(
+            store.list_daily_tasks(false).unwrap().is_empty(),
+            "shadow migration rows must not become product task truth before cutover"
+        );
+        let persisted = result
+            .state
+            .life_model_manager
+            .blocking_lock()
+            .load()
+            .unwrap();
+        assert_eq!(persisted.goals.daily.len(), 1);
+        assert_eq!(persisted.goals.daily[0].name, "保留的旧 YAML 任务");
+        let encoded_receipt = serde_json::to_string(&receipt).unwrap();
+        assert!(!encoded_receipt.contains("保留的旧 YAML 任务"));
     }
 
     #[test]
