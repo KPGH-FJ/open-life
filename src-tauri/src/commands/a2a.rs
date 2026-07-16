@@ -294,6 +294,7 @@ async fn a2a_send_task_with_state(
         &resources.shared.privacy_engine,
         &resources.shared.safe_paths,
     )
+    .with_tool_audit_persistence_observer(resources.shared.persistence_coordinator.as_ref())
     .with_agent_run_store(&resources.agent_run_store)
     .with_a2a_outbound_authorization(&authorization);
     let execution = openlife_core::agent::ToolGateway::from_executor_config(

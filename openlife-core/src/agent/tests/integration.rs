@@ -139,6 +139,7 @@ fn test_action_parser_final_envelope() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -181,6 +182,7 @@ fn test_action_parser_actions_envelope() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -230,6 +232,7 @@ fn test_action_parser_direct_read_actions_keep_executor_input_shape() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -277,6 +280,7 @@ fn test_action_parser_legacy_tool_calls() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -319,6 +323,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -362,6 +367,7 @@ fn test_action_parser_no_json() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -404,6 +410,7 @@ fn test_action_parser_final_with_actions() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -493,6 +500,7 @@ fn test_max_tool_calls_stop_reason() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -537,6 +545,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -584,6 +593,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -654,6 +664,7 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1094,6 +1105,7 @@ async fn test_proposal_tool_bypass_permission_blocking() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1173,6 +1185,7 @@ async fn test_permission_check_tool() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1236,6 +1249,7 @@ async fn test_memory_propose_write_creates_proposal() {
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(

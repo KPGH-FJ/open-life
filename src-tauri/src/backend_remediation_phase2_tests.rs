@@ -469,6 +469,10 @@ fn tool_gateway_product_paths_use_one_resource_snapshot_authority() {
             source.contains("snapshot_tool_gateway_resources"),
             "{label} must use the single Tauri ToolGateway resource snapshot authority"
         );
+        assert!(
+            source.contains("with_tool_audit_persistence_observer"),
+            "{label} must report mandatory audit commit failure to PersistenceCoordinator"
+        );
         for forbidden_duplicate in [
             "tool_permission_store.lock()",
             "mcp_registry.lock()",
@@ -507,6 +511,30 @@ fn tool_gateway_product_paths_use_one_resource_snapshot_authority() {
         current: &std::path::Path,
         owners: &mut std::collections::BTreeSet<String>,
     ) {
+        fn before_inline_test_modules(source: &str) -> &str {
+            let marker = "#[cfg(test)]";
+            let mut offset = 0usize;
+            while let Some(relative) = source[offset..].find(marker) {
+                let index = offset + relative;
+                let after_attribute = &source[index + marker.len()..];
+                let trimmed = after_attribute.trim_start();
+                let Some(after_mod) = trimmed.strip_prefix("mod ") else {
+                    offset = index + marker.len();
+                    continue;
+                };
+                let name_len = after_mod
+                    .chars()
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                if after_mod[name_len..].trim_start().starts_with('{') {
+                    return &source[..index];
+                }
+                offset = index + marker.len();
+            }
+            source
+        }
+
         for entry in std::fs::read_dir(current).expect("read Tauri source directory") {
             let entry = entry.expect("read Tauri source entry");
             let path = entry.path();
@@ -525,9 +553,7 @@ fn tool_gateway_product_paths_use_one_resource_snapshot_authority() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).expect("read Tauri Rust source");
-            let production = source
-                .split_once("#[cfg(test)]\nmod tests")
-                .map_or(source.as_str(), |(production, _)| production);
+            let production = before_inline_test_modules(&source);
             if production.contains("ActionExecutionContext::new(")
                 || production.contains("ActionExecutionContext {")
             {
@@ -550,6 +576,7 @@ fn tool_gateway_product_paths_use_one_resource_snapshot_authority() {
     let mut owners = std::collections::BTreeSet::new();
     collect_product_context_owners(manifest_root, &manifest_root.join("src"), &mut owners);
     let expected = [
+        "src/commands/a2a.rs",
         "src/lib.rs",
         "src/main_chat_kernel.rs",
         "src/main_chat_react_execution.rs",

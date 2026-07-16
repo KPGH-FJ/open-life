@@ -190,6 +190,9 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
         &resources.governed.shared.privacy_engine,
         &safe_paths,
     )
+    .with_tool_audit_persistence_observer(
+        resources.governed.shared.persistence_coordinator.as_ref(),
+    )
     .with_memory_store(&resources.governed.memory_store)
     .with_network_policy(&network_policy)
     .with_calendar_ics_paths(&calendar_ics_paths);

@@ -923,6 +923,14 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             privacy_engine,
             &safe_paths,
         )
+        .with_tool_audit_persistence_observer(
+            resources
+                .execution
+                .governed
+                .shared
+                .persistence_coordinator
+                .as_ref(),
+        )
         .with_life_model(life_model)
         .with_memory_store(&resources.execution.governed.memory_store)
         .with_calendar_ics_paths(&calendar_ics_paths)

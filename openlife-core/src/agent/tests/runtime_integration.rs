@@ -462,6 +462,7 @@ async fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         hs_runtime_packet: Some(&packet),
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1025,6 +1026,7 @@ async fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_execut
         hs_runtime_packet: Some(&packet),
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1170,6 +1172,7 @@ async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allo
         hs_runtime_packet: Some(&packet),
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(

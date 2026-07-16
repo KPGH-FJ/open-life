@@ -842,6 +842,9 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             &resources.governed.shared.privacy_engine,
             &safe_paths,
         )
+        .with_tool_audit_persistence_observer(
+            resources.governed.shared.persistence_coordinator.as_ref(),
+        )
         .with_memory_store(&resources.governed.memory_store)
         .with_agent_run_store(&resources.agent_run_store)
         .with_network_policy(&network_policy)

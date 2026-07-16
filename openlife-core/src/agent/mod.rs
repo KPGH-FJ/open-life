@@ -49,8 +49,9 @@ pub mod types;
 mod tests;
 
 pub use crate::tool_execution_receipt::{
-    ToolActionEffect, ToolDispatchKind, ToolEffectStatus, ToolExecutionOutcome,
-    ToolExecutionReceipt, ToolExecutionReceiptRegistration, ToolTransportStatus,
+    ToolActionEffect, ToolAuditPersistenceStatus, ToolDispatchKind, ToolEffectStatus,
+    ToolExecutionOutcome, ToolExecutionReceipt, ToolExecutionReceiptRegistration,
+    ToolTransportStatus,
 };
 pub use accepted_guidance::{
     build_lifemodel_version_read_model, create_accepted_guidance_from_maturation_candidate,
@@ -60,8 +61,9 @@ pub use accepted_guidance::{
 };
 pub use action_executor::{
     A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
-    ActionExecutorConfig, AgentActionRequest, DurableToolExecutionOwner, ToolDispatchAttempt,
-    ToolDispatchObserver, ToolStartedTransitionObserver,
+    ActionExecutorConfig, AgentActionRequest, DurableToolExecutionOwner,
+    ToolAuditPersistenceObserver, ToolDispatchAttempt, ToolDispatchObserver,
+    ToolStartedTransitionObserver,
 };
 pub use agent_loop::apply_react_guidance_to_config;
 pub use agent_loop::{

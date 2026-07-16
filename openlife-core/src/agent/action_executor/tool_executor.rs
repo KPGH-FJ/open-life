@@ -1044,46 +1044,49 @@ impl super::ActionExecutor {
         pii_found: bool,
         receipt_tracker: ToolExecutionReceiptTracker,
     ) -> ToolCallInternalResult {
-        match ctx
+        receipt_tracker.mark_audit_persistence_pending();
+        let result = match ctx
             .registry
             .execute_manifest_async_with_receipt_tracker(
                 manifest,
                 args.clone(),
-                receipt_tracker,
+                receipt_tracker.clone(),
                 ctx.tool_started_transition_observer,
             )
             .await
         {
-            Ok(r) => {
-                if let Err(e) =
-                    ctx.audit_store
-                        .insert_log(&manifest.name, &args, &r, true, pii_found)
-                {
-                    eprintln!("[warn] audit log write failed: {}", e);
-                }
-                ToolCallInternalResult {
-                    success: true,
-                    output: Some(r),
-                    error: None,
-                }
-            }
-            Err(e) => {
-                if let Err(log_err) = ctx.audit_store.insert_log(
-                    &manifest.name,
-                    &args,
-                    &e.to_string(),
-                    false,
-                    pii_found,
-                ) {
-                    eprintln!("[warn] audit log write failed: {}", log_err);
-                }
-                ToolCallInternalResult {
-                    success: false,
-                    output: None,
-                    error: Some(e.to_string()),
+            Ok(output) => ToolCallInternalResult {
+                success: true,
+                output: Some(output),
+                error: None,
+            },
+            Err(error) => ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(error.to_string()),
+            },
+        };
+        let audit_body = result
+            .output
+            .as_deref()
+            .or(result.error.as_deref())
+            .unwrap_or_default();
+        match ctx.audit_store.insert_log(
+            &manifest.name,
+            &args,
+            audit_body,
+            result.success,
+            pii_found,
+        ) {
+            Ok(_) => receipt_tracker.mark_audit_persistence_committed(),
+            Err(_) => {
+                receipt_tracker.mark_audit_persistence_failed();
+                if let Some(observer) = ctx.tool_audit_persistence_observer {
+                    observer.audit_persistence_failed(&receipt_tracker.snapshot());
                 }
             }
         }
+        result
     }
 
     pub fn build_blocked_action_observation(

@@ -1021,6 +1021,7 @@ impl AgentLoop {
             hs_runtime_packet,
             tool_dispatch_observer: action_ctx.tool_dispatch_observer,
             tool_started_transition_observer: action_ctx.tool_started_transition_observer,
+            tool_audit_persistence_observer: action_ctx.tool_audit_persistence_observer,
             a2a_outbound_authorization: action_ctx.a2a_outbound_authorization,
             canonical_write_admission: action_ctx.canonical_write_admission,
             action_bound_tool_permission: action_ctx.action_bound_tool_permission,
@@ -2413,6 +2414,7 @@ mod tests {
                 hs_runtime_packet: None,
                 tool_dispatch_observer: None,
                 tool_started_transition_observer: None,
+                tool_audit_persistence_observer: None,
                 a2a_outbound_authorization: None,
                 canonical_write_admission: Some(
                     &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,

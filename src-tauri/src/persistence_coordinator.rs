@@ -454,6 +454,21 @@ impl PersistenceCoordinator {
     }
 }
 
+impl openlife_core::agent::ToolAuditPersistenceObserver for PersistenceCoordinator {
+    fn audit_persistence_failed(&self, receipt: &openlife_core::agent::ToolExecutionReceipt) {
+        if receipt.audit_persistence_status
+            != openlife_core::agent::ToolAuditPersistenceStatus::Failed
+        {
+            return;
+        }
+        self.register_unavailable(
+            "McpAuditStore",
+            "runtime_audit_commit_failed",
+            &format!("tool_audit_commit_failed:receipt_id={}", receipt.receipt_id),
+        );
+    }
+}
+
 fn runtime_mode(
     stores: &[PersistenceStoreHealth],
     global_reason_codes: &[String],
@@ -740,6 +755,103 @@ mod tests {
         assert!(!snapshot.provider_dispatch_allowed);
         assert!(!snapshot.tool_dispatch_allowed);
         assert!(!snapshot.canonical_writes_allowed);
+    }
+
+    #[tokio::test]
+    async fn d067_audit_commit_failure_degrades_and_blocks_later_effects() {
+        use openlife_core::agent::ToolAuditPersistenceObserver;
+
+        let coordinator = PersistenceCoordinator::with_expected_stores(["McpAuditStore"]);
+        coordinator.register_read_write("McpAuditStore");
+        coordinator.seal();
+        assert!(coordinator.require_effects_allowed().is_ok());
+
+        let mut registry = openlife_core::mcp::McpRegistry::new();
+        registry.register_builtin(
+            openlife_core::tool_manifest::ToolManifest {
+                id: "d067.read".into(),
+                name: "d067.read".into(),
+                description: "D067 persistence failure fixture.".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                idempotency_contract:
+                    openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
+                tags: vec![],
+            },
+            Box::new(|_| Ok(serde_json::json!({"ok": true}).to_string())),
+        );
+        let permission_store =
+            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_store = openlife_core::mcp_audit::McpAuditStore::unavailable_sentinel(
+            "d067_injected_audit_failure",
+        );
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let owner_store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
+        let owner_run = openlife_core::agent::AgentRun::new_tool_execution_run("d067.read");
+        owner_store.create_run(&owner_run).unwrap();
+        let context = openlife_core::agent::ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &[],
+        )
+        .with_agent_run_store(&owner_store)
+        .with_tool_audit_persistence_observer(&coordinator);
+
+        let result = openlife_core::agent::ToolGateway::from_executor_config(Default::default())
+            .execute(
+                openlife_core::agent::AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "d067.read".into(),
+                    input: serde_json::json!({}),
+                    source_run_id: Some(owner_run.id),
+                    step_index: 0,
+                },
+                &context,
+            )
+            .await
+            .expect("tool outcome remains available after audit failure");
+
+        assert_eq!(
+            result.status,
+            openlife_core::agent::ActionExecutionStatus::Succeeded
+        );
+        assert_eq!(
+            result.execution_receipt.audit_persistence_status,
+            openlife_core::agent::ToolAuditPersistenceStatus::Failed
+        );
+        assert_eq!(
+            coordinator.snapshot().mode,
+            PersistenceRuntimeMode::UnavailableDegraded
+        );
+        assert!(coordinator.require_effects_allowed().is_err());
+        assert!(coordinator.snapshot().stores.iter().any(|health| {
+            health.store == "McpAuditStore"
+                && health.reason_code.as_deref() == Some("runtime_audit_commit_failed")
+        }));
+
+        let forged_non_failure =
+            openlife_core::agent::ToolExecutionReceipt::test_gateway_failed_before_dispatch(
+                None,
+                None,
+                "d067-non-failure-callback".into(),
+                openlife_core::agent::ToolActionEffect::ReadOnly,
+                openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
+            );
+        let fresh = PersistenceCoordinator::with_expected_stores(["McpAuditStore"]);
+        fresh.register_read_write("McpAuditStore");
+        fresh.seal();
+        fresh.audit_persistence_failed(&forged_non_failure);
+        assert_eq!(fresh.snapshot().mode, PersistenceRuntimeMode::ReadWrite);
     }
 
     #[tokio::test]

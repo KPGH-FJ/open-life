@@ -531,6 +531,7 @@ fn assert_product_tool_call_receipt_boundary(
         "transportStatus",
         "effectStatus",
         "outcome",
+        "auditPersistenceStatus",
         "verified",
     ]
     .into_iter()

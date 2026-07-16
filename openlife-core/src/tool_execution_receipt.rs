@@ -149,6 +149,41 @@ pub enum ToolExecutionOutcome {
     Unknown,
 }
 
+/// Durable audit persistence is a separate fact from the tool's transport,
+/// effect, and execution outcome. A failed audit commit must never erase an
+/// already-observed tool effect, while a pending commit must never be exposed
+/// as a mechanically terminal receipt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAuditPersistenceStatus {
+    /// This execution path does not use the MCP audit store. Pre-dispatch
+    /// blockers and gateway-owned internal reads remain in this state.
+    NotRequired,
+    /// A manifest-backed adapter is running or has returned, but the one audit
+    /// insert has not yet reached a definite result.
+    Pending,
+    /// The minimized audit receipt was durably inserted exactly once.
+    Committed,
+    /// The insert returned a definite failure.
+    Failed,
+    /// The runtime cannot prove whether the insert committed. Historical
+    /// receipts also deserialize to this fail-closed state.
+    #[default]
+    Unknown,
+}
+
+impl ToolAuditPersistenceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Pending => "pending",
+            Self::Committed => "committed",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Non-serializable provenance proving that this receipt came from the live
 /// ToolGateway tracker in the current process. Structural receipt fields are
 /// intentionally serializable for events and diagnostics, but deserializing
@@ -266,6 +301,8 @@ pub struct ToolExecutionReceipt {
     pub effect_status: ToolEffectStatus,
     #[serde(default)]
     pub execution_outcome: ToolExecutionOutcome,
+    #[serde(default)]
+    pub audit_persistence_status: ToolAuditPersistenceStatus,
     pub started_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,
     pub response_observed_at: Option<DateTime<Utc>>,
@@ -584,6 +621,9 @@ impl ToolExecutionReceipt {
         let Some(finished_at) = self.finished_at else {
             return Err("tool_receipt_terminal_finished_at_missing");
         };
+        if self.audit_persistence_status == ToolAuditPersistenceStatus::Pending {
+            return Err("tool_receipt_terminal_audit_persistence_pending");
+        }
         if uuid::Uuid::parse_str(&self.receipt_id).is_err() {
             return Err("tool_receipt_id_invalid");
         }
@@ -984,6 +1024,7 @@ impl ToolExecutionReceiptTracker {
                 transport_status: ToolTransportStatus::NotAttempted,
                 effect_status: ToolEffectStatus::NotAttempted,
                 execution_outcome: ToolExecutionOutcome::NotObserved,
+                audit_persistence_status: ToolAuditPersistenceStatus::NotRequired,
                 started_at: Utc::now(),
                 dispatched_at: None,
                 response_observed_at: None,
@@ -1196,6 +1237,34 @@ impl ToolExecutionReceiptTracker {
         }
     }
 
+    pub(crate) fn mark_audit_persistence_pending(&self) {
+        let mut receipt = self.lock();
+        if receipt.audit_persistence_status == ToolAuditPersistenceStatus::NotRequired {
+            receipt.audit_persistence_status = ToolAuditPersistenceStatus::Pending;
+        }
+    }
+
+    pub(crate) fn mark_audit_persistence_committed(&self) {
+        let mut receipt = self.lock();
+        if receipt.audit_persistence_status == ToolAuditPersistenceStatus::Pending {
+            receipt.audit_persistence_status = ToolAuditPersistenceStatus::Committed;
+        }
+    }
+
+    pub(crate) fn mark_audit_persistence_failed(&self) {
+        let mut receipt = self.lock();
+        if receipt.audit_persistence_status == ToolAuditPersistenceStatus::Pending {
+            receipt.audit_persistence_status = ToolAuditPersistenceStatus::Failed;
+        }
+    }
+
+    pub(crate) fn mark_audit_persistence_unknown_if_pending(&self) {
+        let mut receipt = self.lock();
+        if receipt.audit_persistence_status == ToolAuditPersistenceStatus::Pending {
+            receipt.audit_persistence_status = ToolAuditPersistenceStatus::Unknown;
+        }
+    }
+
     pub(crate) fn mark_local_aborted(&self) {
         let mut receipt = self.lock();
         if receipt.finished_at.is_some() {
@@ -1403,6 +1472,7 @@ mod tests {
             keys,
             vec![
                 "actionEffect",
+                "auditPersistenceStatus",
                 "dispatchAttemptCount",
                 "dispatchKind",
                 "dispatchObserved",
@@ -1420,6 +1490,47 @@ mod tests {
                 "transportStatus",
             ]
         );
+    }
+
+    #[test]
+    fn audit_persistence_settles_after_adapter_finish_without_rewriting_tool_facts() {
+        let tracker = ToolExecutionReceiptTracker::new(
+            Some("run-audit-settlement".into()),
+            Some("manifest-audit-settlement".into()),
+            "digest-audit-settlement".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        tracker.mark_audit_persistence_pending();
+        tracker.mark_local_dispatched();
+        tracker.mark_response_observed();
+        tracker.mark_execution_succeeded();
+        tracker.finish();
+        let adapter_finished = tracker.snapshot();
+        assert_eq!(
+            adapter_finished.audit_persistence_status,
+            ToolAuditPersistenceStatus::Pending
+        );
+        assert_eq!(
+            adapter_finished.mechanically_valid_terminal(),
+            Err("tool_receipt_terminal_audit_persistence_pending")
+        );
+
+        tracker.mark_audit_persistence_committed();
+        let terminal = tracker.snapshot();
+        assert_eq!(
+            terminal.audit_persistence_status,
+            ToolAuditPersistenceStatus::Committed
+        );
+        assert_eq!(terminal.transport_status, adapter_finished.transport_status);
+        assert_eq!(terminal.effect_status, adapter_finished.effect_status);
+        assert_eq!(
+            terminal.execution_outcome,
+            adapter_finished.execution_outcome
+        );
+        assert_eq!(terminal.finished_at, adapter_finished.finished_at);
+        assert!(terminal.mechanically_valid_terminal().is_ok());
+        assert!(terminal.proves_success());
     }
 
     #[test]

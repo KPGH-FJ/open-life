@@ -25,8 +25,8 @@ use openlife_core::llm::{
 };
 use openlife_core::scheduler::ProviderInvocationDurabilityProof;
 use openlife_core::tool_execution_receipt::{
-    ToolActionEffect, ToolDispatchKind, ToolEffectStatus, ToolExecutionOutcome,
-    ToolExecutionReceipt, ToolTransportStatus,
+    ToolActionEffect, ToolAuditPersistenceStatus, ToolDispatchKind, ToolEffectStatus,
+    ToolExecutionOutcome, ToolExecutionReceipt, ToolTransportStatus,
 };
 
 const DURABLE_EVENT_PAYLOAD_VERSION: i64 = 7;
@@ -290,6 +290,10 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserve
         &self,
         attempt: &openlife_core::agent::ToolDispatchAttempt,
     ) -> anyhow::Result<()> {
+        self.state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .map_err(anyhow::Error::msg)?;
         if attempt.source_run_id.as_deref() != Some(self.run_id.as_str()) {
             anyhow::bail!("tool_dispatch_prepared_run_identity_mismatch");
         }
@@ -1303,6 +1307,7 @@ impl MainChatAgentEventStore {
                 "transportStatus": transport_status,
                 "effectStatus": effect_status,
                 "executionOutcome": "unknown",
+                "auditPersistenceStatus": "unknown",
                 "startedAt": Value::Null,
                 "dispatchedAt": Value::Null,
                 "responseObservedAt": Value::Null,
@@ -2192,6 +2197,7 @@ impl MainChatAgentEventStore {
             "transportStatus": "not_attempted",
             "effectStatus": "not_attempted",
             "executionOutcome": receipt.execution_outcome.as_str(),
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "status": "not_dispatched",
             "startedAt": receipt.started_at,
             "dispatchedAt": Value::Null,
@@ -6837,6 +6843,7 @@ enum PayloadValueSchema {
     ToolTransportStatus,
     ToolEffectStatus,
     ToolExecutionOutcome,
+    ToolAuditPersistenceStatus,
     RedactedString,
     RedactedStringOrNull,
     ReasonCode,
@@ -7123,6 +7130,10 @@ const TOOL_RECEIPT_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::required("transportStatus", PayloadValueSchema::ToolTransportStatus),
     PayloadFieldSchema::required("effectStatus", PayloadValueSchema::ToolEffectStatus),
     PayloadFieldSchema::optional("executionOutcome", PayloadValueSchema::ToolExecutionOutcome),
+    PayloadFieldSchema::optional(
+        "auditPersistenceStatus",
+        PayloadValueSchema::ToolAuditPersistenceStatus,
+    ),
     PayloadFieldSchema::required("status", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("startedAt", PayloadValueSchema::TimestampOrNull),
     PayloadFieldSchema::optional("dispatchedAt", PayloadValueSchema::TimestampOrNull),
@@ -8191,6 +8202,11 @@ fn normalize_schema_field_value(
             bounded_enum_string(value, &["not_observed", "succeeded", "failed", "unknown"])
                 .ok_or_else(invalid)
         }
+        Schema::ToolAuditPersistenceStatus => bounded_enum_string(
+            value,
+            &["not_required", "pending", "committed", "failed", "unknown"],
+        )
+        .ok_or_else(invalid),
         Schema::RedactedString => bounded_redacted_string(value, digest_key).ok_or_else(invalid),
         Schema::RedactedStringOrNull => {
             if value.is_null() {
@@ -9415,6 +9431,7 @@ pub(crate) fn project_main_chat_tool_receipt(
             "transportStatus": receipt.transport_status.as_str(),
             "effectStatus": receipt.effect_status.as_str(),
             "executionOutcome": receipt.execution_outcome.as_str(),
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "startedAt": receipt.started_at,
             "dispatchedAt": receipt.dispatched_at,
             "responseObservedAt": receipt.response_observed_at,
@@ -9470,6 +9487,7 @@ pub(crate) fn main_chat_tool_started_event_input(
             "transportStatus": "dispatched",
             "effectStatus": "not_attempted",
             "executionOutcome": "not_observed",
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "status": "started",
             "startedAt": receipt.started_at,
             "dispatchedAt": dispatched_at,
@@ -9510,6 +9528,9 @@ pub(crate) fn main_chat_tool_dispatch_event_input(
         started_receipt.transport_status = ToolTransportStatus::Dispatched;
         started_receipt.execution_outcome = ToolExecutionOutcome::NotObserved;
         started_receipt.effect_status = ToolEffectStatus::NotAttempted;
+        if started_receipt.audit_persistence_status != ToolAuditPersistenceStatus::NotRequired {
+            started_receipt.audit_persistence_status = ToolAuditPersistenceStatus::Pending;
+        }
         started_receipt.response_observed_at = None;
         started_receipt.finished_at = None;
         return main_chat_tool_started_event_input(run_id, &started_receipt, source);
@@ -9557,6 +9578,7 @@ pub(crate) fn main_chat_tool_dispatch_event_input(
             "transportStatus": receipt.transport_status.as_str(),
             "effectStatus": receipt.effect_status.as_str(),
             "executionOutcome": receipt.execution_outcome.as_str(),
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "status": "dispatch_ambiguous",
             "startedAt": receipt.started_at,
             "dispatchedAt": Value::Null,
@@ -11208,7 +11230,91 @@ mod tests {
             "transportStatus": if status == "started" { "dispatched" } else { "local_aborted" },
             "effectStatus": if status == "started" { "not_attempted" } else { "unknown" },
             "executionOutcome": if status == "started" { "not_observed" } else { "unknown" },
+            "auditPersistenceStatus": if status == "started" { "pending" } else { "unknown" },
         })
+    }
+
+    #[tokio::test]
+    async fn d067_durable_tool_lifecycle_preserves_failed_audit_disposition() {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let mut registry = openlife_core::mcp::McpRegistry::new();
+        registry.register_builtin(
+            openlife_core::tool_manifest::ToolManifest {
+                id: "d067.event.read".into(),
+                name: "d067.event.read".into(),
+                description: "D067 durable event fixture.".into(),
+                parameters: json!({"type": "object"}),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                idempotency_contract:
+                    openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
+                tags: vec![],
+            },
+            Box::new(|_| Ok(json!({"ok": true}).to_string())),
+        );
+        let permission_store =
+            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_store = openlife_core::mcp_audit::McpAuditStore::unavailable_sentinel(
+            "d067_event_audit_failure",
+        );
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let owner_store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
+        let mut owner_run =
+            openlife_core::agent::AgentRun::new_tool_execution_run("d067.event.read");
+        owner_run.id = run_id.clone();
+        owner_store.create_run(&owner_run).unwrap();
+        let context = openlife_core::agent::ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &[],
+        )
+        .with_agent_run_store(&owner_store);
+        let result = openlife_core::agent::ToolGateway::from_executor_config(Default::default())
+            .execute(
+                openlife_core::agent::AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "d067.event.read".into(),
+                    input: json!({}),
+                    source_run_id: Some(run_id.clone()),
+                    step_index: 0,
+                },
+                &context,
+            )
+            .await
+            .expect("tool result remains available after audit failure");
+        assert_eq!(
+            result.execution_receipt.audit_persistence_status,
+            ToolAuditPersistenceStatus::Failed
+        );
+
+        let inputs = main_chat_tool_receipt_event_inputs(
+            &run_id,
+            &[result.execution_receipt],
+            "openlife_turn_runtime",
+        )
+        .expect("project typed lifecycle");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].event_type, "tool.started");
+        assert_eq!(inputs[0].payload["auditPersistenceStatus"], "pending");
+        assert_eq!(inputs[1].event_type, "tool.completed");
+        assert_eq!(inputs[1].payload["auditPersistenceStatus"], "failed");
+
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let durable =
+            append_main_chat_tool_receipt_event_batch_in_store(&store, &run_id, &run_id, inputs)
+                .expect("persist typed lifecycle atomically");
+        assert_eq!(durable.len(), 2);
+        assert_eq!(durable[0].payload["auditPersistenceStatus"], "pending");
+        assert_eq!(durable[1].payload["auditPersistenceStatus"], "failed");
     }
 
     #[test]

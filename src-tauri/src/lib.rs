@@ -594,7 +594,9 @@ async fn execute_tool_call(
         &resources.shared.privacy_engine,
         &safe_paths,
     );
-    let ctx = ctx.with_agent_run_store(&resources.agent_run_store);
+    let ctx = ctx
+        .with_tool_audit_persistence_observer(resources.shared.persistence_coordinator.as_ref())
+        .with_agent_run_store(&resources.agent_run_store);
 
     let request = openlife_core::agent::AgentActionRequest {
         action_type: "mcp_tool".to_string(),

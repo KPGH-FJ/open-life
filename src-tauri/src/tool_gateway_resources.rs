@@ -34,6 +34,7 @@ pub(crate) struct SharedToolGatewayResources {
     pub(crate) registry: openlife_core::mcp::McpRegistry,
     pub(crate) audit_store: openlife_core::mcp_audit::McpAuditStore,
     pub(crate) privacy_engine: openlife_core::privacy::PrivacyEngine,
+    pub(crate) persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
 }
 
 #[derive(Clone)]
@@ -124,6 +125,7 @@ async fn capture_shared_after_config(
         registry,
         audit_store,
         privacy_engine,
+        persistence_coordinator: Arc::clone(&state.persistence_coordinator),
     }
 }
 

@@ -201,6 +201,7 @@ pub struct ProductToolExecutionReceipt {
     transport_status: openlife_core::tool_execution_receipt::ToolTransportStatus,
     effect_status: openlife_core::tool_execution_receipt::ToolEffectStatus,
     outcome: openlife_core::tool_execution_receipt::ToolExecutionOutcome,
+    audit_persistence_status: openlife_core::tool_execution_receipt::ToolAuditPersistenceStatus,
     verified: bool,
 }
 
@@ -355,6 +356,7 @@ impl VerifiedProductToolCallProjection {
                 transport_status: receipt.transport_status,
                 effect_status: receipt.effect_status,
                 outcome: receipt.execution_outcome,
+                audit_persistence_status: receipt.audit_persistence_status,
                 verified: true,
             },
             status,
@@ -2829,6 +2831,8 @@ mod tests {
                 openlife_core::tool_execution_receipt::ToolTransportStatus::ResponseObserved,
             effect_status: openlife_core::tool_execution_receipt::ToolEffectStatus::NotAttempted,
             outcome: openlife_core::tool_execution_receipt::ToolExecutionOutcome::Succeeded,
+            audit_persistence_status:
+                openlife_core::tool_execution_receipt::ToolAuditPersistenceStatus::Committed,
             verified: true,
         };
         let output_receipt = ProductContentReceipt {

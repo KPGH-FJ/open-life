@@ -445,6 +445,14 @@ pub trait DurableToolExecutionOwner: Send + Sync {
     fn terminal(&self, result: &ActionExecutionResult) -> Result<()>;
 }
 
+/// Receives a metadata-only fact after the mandatory minimized audit insert
+/// fails. Product runtimes use this to degrade their existing persistence
+/// coordinator; the observer owns no tool payload and cannot rewrite the
+/// execution receipt's transport or effect truth.
+pub trait ToolAuditPersistenceObserver: Send + Sync {
+    fn audit_persistence_failed(&self, receipt: &ToolExecutionReceipt);
+}
+
 /// Project the immutable `tool.started` transition exactly once for a receipt.
 ///
 /// A concrete idempotent adapter may perform more than one wire attempt. An
@@ -487,6 +495,7 @@ pub struct ActionExecutionContext<'a> {
     pub hs_runtime_packet: Option<&'a crate::agent::RuntimeHSPacket>,
     pub tool_dispatch_observer: Option<&'a dyn ToolDispatchObserver>,
     pub tool_started_transition_observer: Option<&'a dyn ToolStartedTransitionObserver>,
+    pub tool_audit_persistence_observer: Option<&'a dyn ToolAuditPersistenceObserver>,
     pub a2a_outbound_authorization: Option<&'a A2AOutboundAuthorization>,
     /// Execution-owner authority that linearizes canonical mutations against
     /// cancellation. Proposal writes fail closed when this authority is absent.
@@ -557,6 +566,7 @@ impl<'a> ActionExecutionContext<'a> {
             hs_runtime_packet: None,
             tool_dispatch_observer: None,
             tool_started_transition_observer: None,
+            tool_audit_persistence_observer: None,
             a2a_outbound_authorization: None,
             canonical_write_admission: None,
             action_bound_tool_permission: None,
@@ -664,6 +674,14 @@ impl<'a> ActionExecutionContext<'a> {
         observer: &'a dyn ToolStartedTransitionObserver,
     ) -> Self {
         self.tool_started_transition_observer = Some(observer);
+        self
+    }
+
+    pub fn with_tool_audit_persistence_observer(
+        mut self,
+        observer: &'a dyn ToolAuditPersistenceObserver,
+    ) -> Self {
+        self.tool_audit_persistence_observer = Some(observer);
         self
     }
 

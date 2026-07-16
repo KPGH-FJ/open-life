@@ -384,6 +384,12 @@ export type ToolTransportStatus =
 
 export type ToolEffectStatus = "not_attempted" | "confirmed" | "unknown";
 export type ToolExecutionOutcome = "not_observed" | "succeeded" | "failed" | "unknown";
+export type ToolAuditPersistenceStatus =
+  | "not_required"
+  | "pending"
+  | "committed"
+  | "failed"
+  | "unknown";
 
 export interface ProductToolExecutionReceipt {
   receiptRef: string;
@@ -396,6 +402,7 @@ export interface ProductToolExecutionReceipt {
   transportStatus: ToolTransportStatus;
   effectStatus: ToolEffectStatus;
   outcome: ToolExecutionOutcome;
+  auditPersistenceStatus: ToolAuditPersistenceStatus;
   verified: boolean;
 }
 

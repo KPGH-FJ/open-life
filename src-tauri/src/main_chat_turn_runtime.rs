@@ -5389,6 +5389,8 @@ async fn recover_canonical_tool_facts(
             || terminal_event.payload["transportStatus"] != receipt.transport_status.as_str()
             || terminal_event.payload["effectStatus"] != receipt.effect_status.as_str()
             || terminal_event.payload["executionOutcome"] != receipt.execution_outcome.as_str()
+            || terminal_event.payload["auditPersistenceStatus"]
+                != receipt.audit_persistence_status.as_str()
             || terminal_event.payload["startedAt"] != serde_json::json!(receipt.started_at)
             || terminal_event.payload["dispatchedAt"] != serde_json::json!(receipt.dispatched_at)
             || terminal_event.payload["responseObservedAt"]
@@ -9241,6 +9243,7 @@ mod product_receipt_ipc_tests {
             keys,
             [
                 "actionEffect",
+                "auditPersistenceStatus",
                 "dispatchAttemptCount",
                 "dispatchKind",
                 "dispatchObserved",
