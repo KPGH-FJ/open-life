@@ -2290,46 +2290,65 @@ fn bootstrap_with_secret_store(
             }
         };
         let mut hydration = hydrate_existing_mcp_audit_keys(configs, secret_store)?;
-        McpAuditStore::preflight_existing_database_key_materials(
+        let payload_integrity_error = match McpAuditStore::preflight_existing_database_key_materials(
             &mcp_audit_db_path,
             &hydration.materials,
-        )?;
-        hydration.ensure_write_epoch(secret_store)?;
-        if hydration.config_changed {
-            if let Err(save_error) =
-                save_mcp_audit_keyring_to_path(&audit_keyring_path, &hydration.configs)
+        ) {
+            Ok(_) => None,
+            Err(error)
+                if openlife_core::mcp_audit::is_payload_integrity_failure(&error)
+                    && hydration.configs.last().is_some_and(|config| {
+                        config.mode == openlife_core::mcp_audit::KeyMode::Keychain
+                    }) =>
             {
-                match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
-                    McpAuditKeyringLoad::Present(observed) if observed == hydration.configs => {
-                        anyhow::bail!(
-                            "persist MCP audit key references reported failure after the intended reference file became observable; write-key activation is withheld for this startup: {save_error}"
-                        );
-                    }
-                    McpAuditKeyringLoad::Absent | McpAuditKeyringLoad::Present(_) => {
-                        let rollback_error = hydration.rollback_staged_secret(secret_store).err();
-                        return Err(match rollback_error {
-                            Some(rollback_error) => anyhow::anyhow!(
-                                "persist MCP audit key references failed: {save_error}; staged secret rollback also failed: {rollback_error}"
-                            ),
-                            None => anyhow::anyhow!(
-                                "persist MCP audit key references failed: {save_error}"
-                            ),
-                        });
-                    }
-                    McpAuditKeyringLoad::PresentInvalid { error }
-                    | McpAuditKeyringLoad::Unreadable { error } => {
-                        anyhow::bail!(
-                            "persist MCP audit key references failed and the final reference state is unknown; the staged secret is retained to avoid orphaning observable ciphertext authority: {save_error}; observe_error={error}"
-                        );
+                Some(error.to_string())
+            }
+            Err(error) => return Err(error),
+        };
+        if payload_integrity_error.is_none() {
+            hydration.ensure_write_epoch(secret_store)?;
+            if hydration.config_changed {
+                if let Err(save_error) =
+                    save_mcp_audit_keyring_to_path(&audit_keyring_path, &hydration.configs)
+                {
+                    match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
+                        McpAuditKeyringLoad::Present(observed) if observed == hydration.configs => {
+                            anyhow::bail!(
+                                "persist MCP audit key references reported failure after the intended reference file became observable; write-key activation is withheld for this startup: {save_error}"
+                            );
+                        }
+                        McpAuditKeyringLoad::Absent | McpAuditKeyringLoad::Present(_) => {
+                            let rollback_error =
+                                hydration.rollback_staged_secret(secret_store).err();
+                            return Err(match rollback_error {
+                                Some(rollback_error) => anyhow::anyhow!(
+                                    "persist MCP audit key references failed: {save_error}; staged secret rollback also failed: {rollback_error}"
+                                ),
+                                None => anyhow::anyhow!(
+                                    "persist MCP audit key references failed: {save_error}"
+                                ),
+                            });
+                        }
+                        McpAuditKeyringLoad::PresentInvalid { error }
+                        | McpAuditKeyringLoad::Unreadable { error } => {
+                            anyhow::bail!(
+                                "persist MCP audit key references failed and the final reference state is unknown; the staged secret is retained to avoid orphaning observable ciphertext authority: {save_error}; observe_error={error}"
+                            );
+                        }
                     }
                 }
             }
         }
-        Ok(hydration)
+        Ok((hydration, payload_integrity_error))
     })();
     let audit_key_hydration = match audit_key_hydration {
-        Ok(hydration) => {
+        Ok((hydration, payload_integrity_error)) => {
             persistence.register_read_write("McpAuditKeyReferenceStore");
+            if let Some(error) = payload_integrity_error {
+                startup_warnings.borrow_mut().push(format!(
+                    "MCP audit key references remain canonical, but audit payload integrity is invalid; the audit store is unavailable and all effects are disabled: {error}"
+                ));
+            }
             Some(hydration)
         }
         Err(error) => {
@@ -3024,6 +3043,21 @@ mod tests {
     }
 
     impl TestSecretStore {
+        fn mcp_secret_snapshot(&self) -> Vec<(String, String)> {
+            let mut values = self
+                .values
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(secret_ref, _)| {
+                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+                })
+                .map(|(secret_ref, value)| (secret_ref.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            values.sort_by(|left, right| left.0.cmp(&right.0));
+            values
+        }
+
         fn mcp_secret_refs(&self) -> Vec<String> {
             let mut refs = self
                 .values
@@ -3048,6 +3082,27 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    fn d068_database_family_bytes(
+        path: &std::path::Path,
+    ) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+        [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+            std::path::PathBuf::from(format!("{}-shm", path.display())),
+            std::path::PathBuf::from(format!("{}-journal", path.display())),
+        ]
+        .into_iter()
+        .map(|candidate| {
+            let bytes = match std::fs::read(&candidate) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("read {}: {error}", candidate.display()),
+            };
+            (candidate, bytes)
+        })
+        .collect()
     }
 
     impl SecretStore for TestSecretStore {
@@ -3170,6 +3225,148 @@ mod tests {
         assert!(result.state.startup_warnings.iter().any(|warning| {
             warning.contains("keyring is missing") && warning.contains("contains 1 rows")
         }));
+    }
+
+    #[tokio::test]
+    async fn d068_version_flip_keeps_key_authority_canonical_and_audit_unavailable() {
+        const PRIVATE_ARGUMENT: &str = "D068-BOOTSTRAP-RAW-HEALTH-ARGUMENT";
+        const PRIVATE_RESULT: &str = "D068-BOOTSTRAP-RAW-FINANCE-RESULT";
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let epoch = 68;
+        let key = [0x68; 32];
+        let config = d057_key_config(epoch);
+        secrets.preload_mcp_key(epoch, key);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &keyring_path,
+            std::slice::from_ref(&config),
+        )
+        .unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let store = McpAuditStore::with_key_materials(
+            &database_path,
+            vec![openlife_core::mcp_audit::AuditKeyMaterial { config, key }],
+        )
+        .unwrap();
+        let row_id = store
+            .d068_insert_legacy_payload_fixture_for_test(
+                "d068-bootstrap-version-flip",
+                &serde_json::json!({"health": PRIVATE_ARGUMENT}),
+                PRIVATE_RESULT,
+            )
+            .unwrap();
+        store
+            .d068_flip_payload_version_to_current_for_test(row_id)
+            .unwrap();
+        drop(store);
+        let keyring_before = std::fs::read(&keyring_path).unwrap();
+        let secrets_before = secrets.mcp_secret_snapshot();
+        let database_before = d068_database_family_bytes(&database_path);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let persistence = result.state.persistence_coordinator.snapshot();
+        let mode = |store: &str| {
+            persistence
+                .stores
+                .iter()
+                .find(|health| health.store == store)
+                .map(|health| health.mode)
+        };
+        let audit_error = result
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(10)
+            .unwrap_err();
+
+        assert_eq!(
+            mode("McpAuditKeyReferenceStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::ReadWriteCanonical)
+        );
+        assert_eq!(
+            mode("McpAuditStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+        );
+        assert!(!persistence.provider_dispatch_allowed);
+        assert!(!persistence.tool_dispatch_allowed);
+        assert!(audit_error.to_string().contains("unavailable"));
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert_eq!(secrets.mcp_secret_snapshot(), secrets_before);
+        assert_eq!(d068_database_family_bytes(&database_path), database_before);
+        let warnings = result.state.startup_warnings.join("\n");
+        assert!(warnings.contains("audit payload integrity is invalid"));
+        assert!(!warnings.contains(PRIVATE_ARGUMENT));
+        assert!(!warnings.contains(PRIVATE_RESULT));
+    }
+
+    #[tokio::test]
+    async fn d057_wrong_audit_key_remains_unavailable_after_payload_attribution_split() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let epoch = 69;
+        let correct_key = [0x69; 32];
+        let wrong_key = [0x96; 32];
+        let config = d057_key_config(epoch);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &keyring_path,
+            std::slice::from_ref(&config),
+        )
+        .unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let store = McpAuditStore::with_key_materials(
+            &database_path,
+            vec![openlife_core::mcp_audit::AuditKeyMaterial {
+                config,
+                key: correct_key,
+            }],
+        )
+        .unwrap();
+        store
+            .insert_log(
+                "d057-wrong-key",
+                &serde_json::json!({"bounded": true}),
+                "bounded",
+                true,
+                false,
+            )
+            .unwrap();
+        drop(store);
+        secrets.preload_mcp_key(epoch, wrong_key);
+        let keyring_before = std::fs::read(&keyring_path).unwrap();
+        let secrets_before = secrets.mcp_secret_snapshot();
+        let database_before = d068_database_family_bytes(&database_path);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let persistence = result.state.persistence_coordinator.snapshot();
+        let mode = |store: &str| {
+            persistence
+                .stores
+                .iter()
+                .find(|health| health.store == store)
+                .map(|health| health.mode)
+        };
+
+        assert_eq!(
+            mode("McpAuditKeyReferenceStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+        );
+        assert_eq!(
+            mode("McpAuditStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+        );
+        assert!(!persistence.provider_dispatch_allowed);
+        assert!(!persistence.tool_dispatch_allowed);
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert_eq!(secrets.mcp_secret_snapshot(), secrets_before);
+        assert_eq!(d068_database_family_bytes(&database_path), database_before);
+        assert!(result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("key material is unavailable")));
     }
 
     #[tokio::test]
