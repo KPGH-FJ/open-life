@@ -9,9 +9,6 @@ edition = "2021"
 rust-version = "1.75"
 default-run = "openlife-tauri"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(d055_compile_red)"] }
-
 [features]
 default = []
 dev-extensions = []

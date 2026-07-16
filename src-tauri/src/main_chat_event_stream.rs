@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openlife_core::agent::main_chat_runtime_contract::{
@@ -773,6 +775,103 @@ impl MainChatAgentEventStore {
         select_terminal_owner_epoch(&conn, task_session_id)
     }
 
+    pub(crate) fn terminal_owner_final_event(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<MainChatAgentDurableEvent>> {
+        let conn = self.lock_conn()?;
+        let Some(epoch) = select_terminal_owner_epoch(&conn, task_session_id)? else {
+            return Ok(None);
+        };
+        let Some(final_event_id) = epoch.final_event_id else {
+            return Ok(None);
+        };
+        select_event_by_id(&conn, &final_event_id)
+    }
+
+    pub(crate) fn open_terminal_owner_replay_epoch_from_admission(
+        &self,
+        admission: &crate::terminal_owner_write_gateway::TerminalOwnerReplayEpochAdmission,
+    ) -> Result<TerminalOwnerEpoch> {
+        admission.validate().map_err(anyhow::Error::msg)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut epoch = select_terminal_owner_epoch(&tx, admission.task_session_id())?
+            .context("terminal_owner_replay_epoch_missing")?;
+        if epoch.state != TerminalOwnerSealState::Sealed
+            || epoch.epoch_id != admission.prior_epoch_id()
+            || epoch.run_id != admission.run_id()
+            || epoch.generation != admission.prior_epoch_generation()
+            || epoch.final_event_id.as_deref() != Some(admission.prior_final_event_id())
+            || epoch.canonical_user_message_ref != admission.canonical_user_message_ref()
+            || epoch.canonical_user_message_digest != admission.canonical_user_message_digest()
+        {
+            anyhow::bail!("terminal_owner_replay_epoch_admission_conflict");
+        }
+        let next_generation = epoch
+            .generation
+            .checked_add(1)
+            .context("terminal_owner_replay_epoch_generation_exhausted")?;
+        let changed = tx.execute(
+            "UPDATE terminal_owner_epochs
+             SET generation = ?4, state = 'open', admission_id = ?5,
+                 final_event_id = NULL, final_event_payload_digest = NULL,
+                 expected_task_owner_revision = NULL,
+                 expected_task_owner_digest = NULL, updated_at = ?6
+             WHERE task_session_id = ?1 AND run_id = ?2
+               AND generation = ?3 AND state = 'sealed'
+               AND final_event_id = ?7",
+            params![
+                admission.task_session_id(),
+                admission.run_id(),
+                i64::try_from(admission.prior_epoch_generation())?,
+                i64::try_from(next_generation)?,
+                admission.admission_id(),
+                Utc::now().to_rfc3339(),
+                admission.prior_final_event_id(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_replay_epoch_open_cas_lost");
+        }
+        tx.execute(
+            "DELETE FROM terminal_owner_final_payloads WHERE epoch_id = ?1",
+            [epoch.epoch_id.as_str()],
+        )?;
+        bind_task_run(&tx, admission.task_session_id(), admission.run_id())?;
+        append_event_in_transaction(
+            &tx,
+            MainChatAgentEventDraft {
+                task_session_id: admission.task_session_id().to_string(),
+                run_id: admission.run_id().to_string(),
+                event_type: "turn_started".into(),
+                object_type: "turn".into(),
+                object_id: format!("replay:{}", admission.admission_id()),
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.replay_epoch".into(),
+                payload: json!({
+                    "status": "started",
+                    "requestId": admission.action_id(),
+                    "policyRoute": "governed_replay_successor",
+                    "selectedStrategy": "react_tool_execution",
+                    "replayCause": admission.cause().as_str(),
+                    "replayCauseRef": admission.cause_ref(),
+                    "rawUserTextStored": false,
+                }),
+                backfilled: false,
+            },
+            &self.digest_key,
+        )?;
+        tx.commit()?;
+        epoch.generation = next_generation;
+        epoch.state = TerminalOwnerSealState::Open;
+        epoch.final_event_id = None;
+        epoch.final_event_payload_digest = None;
+        epoch.replayed = true;
+        epoch.review_origin = None;
+        Ok(epoch)
+    }
+
     pub(crate) fn begin_terminal_owner_seal(
         &self,
         task_session_id: &str,
@@ -853,6 +952,23 @@ impl MainChatAgentEventStore {
             anyhow::bail!("terminal_owner_final_payload_identity_conflict");
         }
         Ok(())
+    }
+
+    pub(crate) fn terminal_owner_staged_final_delivery_id(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let Some(epoch) = select_terminal_owner_epoch(&conn, task_session_id)? else {
+            return Ok(None);
+        };
+        conn.query_row(
+            "SELECT delivery_id FROM terminal_owner_final_payloads WHERE epoch_id = ?1",
+            [epoch.epoch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub(crate) fn append_terminal_final_and_seal(
@@ -7423,6 +7539,9 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("durableEventCount", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("requiresProvider", PayloadValueSchema::Bool),
     PayloadFieldSchema::optional("requiresToolLoop", PayloadValueSchema::Bool),
+    PayloadFieldSchema::optional("replayEpochGeneration", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional("replayExecutionRef", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::optional("errorBodyStored", PayloadValueSchema::Bool),
 ];
 const DIAGNOSTIC_CREATED_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::required("gapId", PayloadValueSchema::MetadataString),
@@ -8259,6 +8378,8 @@ fn is_registered_event_reason_code(value: &str) -> bool {
             | "projection_delivery_failed"
             | "policy_blocked"
             | "permission_required"
+            | "replay_terminal_committed"
+            | "replay_terminal_error"
             | "unknown"
     )
 }
@@ -10478,6 +10599,36 @@ mod tests {
             durable_event_payload_schema("task.updated", DURABLE_EVENT_PAYLOAD_VERSION - 1)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn replay_final_receipt_metadata_remains_typed_and_readable() {
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let event = store
+            .append(MainChatAgentEventDraft {
+                task_session_id: "task-replay-final-schema".into(),
+                run_id: "run-replay-final-schema".into(),
+                event_type: "final_delivery.created".into(),
+                object_type: "final_delivery".into(),
+                object_id: "replay-delivery:task-replay-final-schema:2:execution-1".into(),
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.final_delivery_owner".into(),
+                payload: json!({
+                    "status": "failed",
+                    "reasonCode": "replay_terminal_error",
+                    "replayEpochGeneration": 2,
+                    "replayExecutionRef": "execution-1",
+                    "errorBodyStored": false,
+                }),
+                backfilled: false,
+            })
+            .unwrap();
+
+        assert_eq!(event.payload["reasonCode"], "replay_terminal_error");
+        assert_eq!(event.payload["replayEpochGeneration"], 2);
+        assert_eq!(event.payload["replayExecutionRef"], "execution-1");
+        assert_eq!(event.payload["errorBodyStored"], false);
+        assert!(event.payload.get(UNRECOGNIZED_FIELDS_RECEIPT).is_none());
     }
 
     #[test]

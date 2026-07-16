@@ -1,13 +1,11 @@
 //! D055 target-contract oracle.
 //!
-//! This module is compiled only by the explicit `d055_compile_red` command in
-//! the D055 RED matrix. It intentionally calls the future production
-//! terminal-owner APIs directly. The file itself must always exist; RED must
-//! come from the missing production seam or a broken invariant, never from an
-//! opaque integration harness or a missing test module.
+//! These tests now run in the normal library test target and call the
+//! production terminal-owner APIs directly. The file itself must always exist;
+//! failures must come from a broken invariant, never from an opaque integration
+//! harness or a missing test module.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use openlife_core::agent::main_chat_agent_v1::{
@@ -26,8 +24,7 @@ use openlife_core::memory::MemoryStore;
 // updating this compile oracle and the reviewed D055 matrix together.
 use crate::main_chat_event_stream::{MainChatTerminalFinalizationInput, TerminalOwnerSealState};
 use crate::terminal_owner_write_gateway::{
-    ExternalDispatchOutcome, PreparedTerminalOwnerExternalDispatch, TerminalOwnerCrashPoint,
-    TerminalOwnerExecutionCapture, TerminalOwnerExternalDispatchAdapter, TerminalOwnerWriteGateway,
+    TerminalOwnerCrashPoint, TerminalOwnerExecutionCapture, TerminalOwnerWriteGateway,
 };
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(45);
@@ -99,40 +96,6 @@ fn external_unknown_review_request() -> DurableWriteRequest {
         external_unknown_proposal(),
         "External effect requires Review Center approval and queryable reconciliation.",
     )
-}
-
-#[derive(Clone, Default)]
-struct RecordingUnknownExternalDispatch {
-    calls: Arc<AtomicUsize>,
-    proposal_ids: Arc<Mutex<Vec<String>>>,
-}
-
-impl RecordingUnknownExternalDispatch {
-    fn call_count(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    fn proposal_ids(&self) -> Vec<String> {
-        self.proposal_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl TerminalOwnerExternalDispatchAdapter for RecordingUnknownExternalDispatch {
-    async fn dispatch(
-        &self,
-        request: &PreparedTerminalOwnerExternalDispatch,
-    ) -> Result<ExternalDispatchOutcome, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.proposal_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(request.proposal_id().to_string());
-        Ok(ExternalDispatchOutcome::RemoteUnknown)
-    }
 }
 
 struct SealedReviewScenario {
@@ -964,24 +927,44 @@ async fn d055_target_unknown_external_dispatch_capture_is_not_called_by_restart_
         let acceptance = ReviewWorkflow::new(&proposal_store)
             .claimed_acceptance_snapshot(&proposal_id, &claim_id)
             .expect("claim yields non-Serde external acceptance authority");
-        let dispatch = RecordingUnknownExternalDispatch::default();
         let gateway = TerminalOwnerWriteGateway::new(
             &event_store,
             &task_store,
             &proposal_store,
             &memory_lifecycle_store,
-        )
-        .with_external_dispatch_adapter(Arc::new(dispatch.clone()));
+        );
         let error = gateway
             .apply_claimed_review_acceptance(acceptance)
             .await
-            .expect_err("unqueryable remote result remains typed unknown");
+            .expect_err("terminal owner cannot become a second external effect executor");
         assert_eq!(
             error.to_string(),
-            "terminal_owner_external_effect_remote_unknown"
+            "terminal_owner_external_effect_requires_artifact_materializer"
         );
-        assert_eq!(dispatch.call_count(), 1);
-        assert_eq!(dispatch.proposal_ids(), vec![proposal_id.clone()]);
+        assert_eq!(
+            proposal_store
+                .dispatch_state(&proposal_id)
+                .expect("read external state after fail-closed delegation")
+                .as_deref(),
+            Some("claimed")
+        );
+        assert!(proposal_store
+            .artifact_effect(&proposal_id)
+            .expect("read artifact intent before product materializer")
+            .is_none());
+        proposal_store
+            .prepare_artifact_effect(
+                &proposal_id,
+                &claim_id,
+                "sha256:d055-external-target",
+                "sha256:d055-external-content",
+                0,
+                "application/octet-stream",
+            )
+            .expect("ArtifactMaterializer persists intent before any external bytes");
+        assert!(proposal_store
+            .finish_artifact_unknown(&proposal_id, &claim_id, "artifact_remote_outcome_unknown",)
+            .expect("persist durable unknown artifact truth"));
         assert_eq!(
             proposal_store
                 .dispatch_claim_id(&proposal_id)
@@ -1062,8 +1045,7 @@ async fn d055_target_unknown_external_dispatch_capture_is_not_called_by_restart_
             &reopened_tasks,
             &reopened_proposals,
             &reopened_memory,
-        )
-        .with_external_dispatch_adapter(Arc::new(dispatch.clone()));
+        );
         for pass in 0..2 {
             let report = reopened_gateway
                 .reconcile_pending_terminal_owner_successors(32)
@@ -1072,8 +1054,6 @@ async fn d055_target_unknown_external_dispatch_capture_is_not_called_by_restart_
             assert_eq!(report.unknown_external_effects_retried, 0, "pass={pass}");
             assert_eq!(report.successors_confirmed, 0, "pass={pass}");
             assert_eq!(report.proposals_projected, 0, "pass={pass}");
-            assert_eq!(dispatch.call_count(), 1, "pass={pass}");
-            assert_eq!(dispatch.proposal_ids(), vec![proposal_id.clone()]);
         }
         assert_eq!(
             reopened_proposals

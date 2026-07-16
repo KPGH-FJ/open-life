@@ -50,6 +50,37 @@ async fn create_task_bound_agent_run_with_status_for_test(
     run_id
 }
 
+async fn create_terminal_owner_task_bound_agent_run_for_test(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+    chat_session_id: &str,
+    user_input: &str,
+    status: openlife_core::agent::AgentRunStatus,
+) -> String {
+    let mut run = openlife_core::agent::AgentRun::new_chat_run(chat_session_id, user_input);
+    run.id = task_session_id.to_string();
+    run.task_id = task_session_id.to_string();
+    run.status = status;
+    run.finished_at = matches!(
+        status,
+        openlife_core::agent::AgentRunStatus::Completed
+            | openlife_core::agent::AgentRunStatus::Failed
+            | openlife_core::agent::AgentRunStatus::Cancelled
+    )
+    .then(chrono::Utc::now);
+    let run_id = run.id.clone();
+    let store = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await;
+    store
+        .create_run(&run)
+        .expect("create terminal-owner task-bound AgentRun");
+    run_id
+}
+
 async fn replay_execution_envelope_for_test(
     state: &std::sync::Arc<crate::AppState>,
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
@@ -113,12 +144,12 @@ fn metadata_with_replay_envelope(
 
 fn bind_tool_permission_proposal_to_replay_for_test(
     proposal: &mut openlife_core::agent::AgentProposal,
-    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    _session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     envelope: &crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope,
 ) {
-    proposal.run_id = Some(envelope.run_id.clone());
+    proposal.run_id = None;
     proposal.source = openlife_core::agent::ProposalSource::ChatConversation;
-    proposal.source_detail = Some(format!("main_chat_agent_task_session:{}", session.id));
+    proposal.source_detail = None;
     let after = proposal
         .after
         .as_object_mut()
@@ -164,6 +195,188 @@ fn bind_tool_permission_proposal_to_replay_for_test(
             "directWritesExecuted": false,
         }),
     );
+}
+
+async fn bind_and_seal_tool_permission_terminal_origin_for_test(
+    state: &std::sync::Arc<crate::AppState>,
+    proposal_id: &str,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    run_id: &str,
+) {
+    let canonical_message = {
+        let memory_store = state.memory_store.lock().await;
+        memory_store
+            .save_message_idempotent_with_proof(
+                &session.chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: session.user_goal.clone(),
+                },
+                run_id,
+            )
+            .expect("commit canonical replay fixture user message")
+    };
+    let admission = {
+        let memory_store = state.memory_store.lock().await;
+        let task_store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        task_store
+            .bind_canonical_memory_store(&memory_store)
+            .expect("bind replay fixture canonical Conversation owner");
+        task_store
+            .bind_session_canonical_user_message(
+                &session.id,
+                &canonical_message.receipt().canonical_ref,
+                &session.user_goal,
+            )
+            .expect("bind replay fixture exact canonical user message");
+        task_store
+            .issue_terminal_owner_epoch_admission(&session.id, run_id, canonical_message)
+            .expect("issue replay fixture terminal owner admission")
+    };
+    let epoch = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("main chat event store")
+            .lock()
+            .await;
+        event_store
+            .open_terminal_owner_epoch_from_admission(admission)
+            .expect("open replay fixture terminal owner epoch")
+    };
+    {
+        let proposal_store = state.proposal_store.as_ref().expect("proposal store");
+        let proposal_store = proposal_store.lock().await;
+        let workflow = openlife_core::agent::ReviewWorkflow::new(&proposal_store);
+        workflow
+            .bind_staged_proposal_to_terminal_owner_origin(
+                proposal_id,
+                &epoch
+                    .review_origin_proof()
+                    .expect("replay fixture review origin proof"),
+            )
+            .expect("bind ToolPermission fixture to typed terminal origin");
+    }
+    let owner = {
+        let task_store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        task_store
+            .canonical_owner_head(&session.id)
+            .expect("load replay fixture task owner")
+            .expect("replay fixture task owner exists")
+    };
+    let event_store = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("main chat event store")
+        .lock()
+        .await;
+    event_store
+        .begin_terminal_owner_seal(&session.id, run_id, epoch.generation())
+        .expect("begin replay fixture terminal seal");
+    event_store
+        .append_terminal_final_and_seal(
+            crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                task_session_id: session.id.clone(),
+                run_id: run_id.to_string(),
+                epoch_generation: epoch.generation(),
+                delivery_id: format!("delivery:{}:{run_id}", session.id),
+                expected_task_owner_revision: owner.revision(),
+                expected_task_owner_digest: owner.digest().to_string(),
+                status: "waiting_permission".into(),
+            },
+        )
+        .expect("seal replay fixture terminal owner epoch");
+}
+
+async fn bind_and_seal_failed_replay_terminal_owner_for_test(
+    state: &std::sync::Arc<crate::AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    run_id: &str,
+) {
+    let canonical_message = {
+        let memory_store = state.memory_store.lock().await;
+        memory_store
+            .save_message_idempotent_with_proof(
+                &session.chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: session.user_goal.clone(),
+                },
+                run_id,
+            )
+            .expect("commit failed replay fixture canonical user message")
+    };
+    let admission = {
+        let memory_store = state.memory_store.lock().await;
+        let task_store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await;
+        task_store
+            .bind_canonical_memory_store(&memory_store)
+            .expect("bind failed replay fixture canonical Conversation owner");
+        task_store
+            .bind_session_canonical_user_message(
+                &session.id,
+                &canonical_message.receipt().canonical_ref,
+                &session.user_goal,
+            )
+            .expect("bind failed replay fixture canonical user message");
+        task_store
+            .issue_terminal_owner_epoch_admission(&session.id, run_id, canonical_message)
+            .expect("issue failed replay fixture terminal admission")
+    };
+    let epoch = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("main chat event store")
+        .lock()
+        .await
+        .open_terminal_owner_epoch_from_admission(admission)
+        .expect("open failed replay fixture terminal epoch");
+    let owner = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("task store")
+        .lock()
+        .await
+        .canonical_owner_head(&session.id)
+        .expect("load failed replay fixture task owner")
+        .expect("failed replay fixture task owner exists");
+    let event_store = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("main chat event store")
+        .lock()
+        .await;
+    event_store
+        .begin_terminal_owner_seal(&session.id, run_id, epoch.generation())
+        .expect("begin failed replay fixture terminal seal");
+    event_store
+        .append_terminal_final_and_seal(
+            crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                task_session_id: session.id.clone(),
+                run_id: run_id.to_string(),
+                epoch_generation: epoch.generation(),
+                delivery_id: format!("delivery:{}:{run_id}", session.id),
+                expected_task_owner_revision: owner.revision(),
+                expected_task_owner_digest: owner.digest().to_string(),
+                status: "failed".into(),
+            },
+        )
+        .expect("seal failed replay fixture terminal epoch");
 }
 
 fn project_test_read_receipt(
@@ -231,6 +444,7 @@ async fn create_failed_replay_task_for_test(
     state: &std::sync::Arc<crate::AppState>,
     chat_session_id: &str,
     user_goal: &str,
+    seal_terminal: bool,
 ) -> (
     openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
@@ -256,7 +470,7 @@ async fn create_failed_replay_task_for_test(
             })
             .expect("create replay fixture task")
     };
-    let run_id = create_task_bound_agent_run_with_status_for_test(
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
         state,
         &session.id,
         &session.chat_session_id,
@@ -314,25 +528,9 @@ async fn create_failed_replay_task_for_test(
             .fail_session(&session.id, "Fixture failed before dispatch.")
             .expect("mark replay fixture failed");
     }
-    crate::main_chat_event_stream::append_main_chat_agent_runtime_event_batch(
-        state,
-        &session.id,
-        &run_id,
-        vec![
-            crate::main_chat_event_stream::MainChatAgentRuntimeEventInput::new(
-                "failed",
-                "turn",
-                format!("fixture-terminal:{run_id}"),
-                "main_chat_task_control_tests",
-                serde_json::json!({
-                    "status": "failed",
-                    "kind": "tool_error",
-                }),
-            ),
-        ],
-    )
-    .await
-    .expect("persist replay fixture terminal receipt");
+    if seal_terminal {
+        bind_and_seal_failed_replay_terminal_owner_for_test(state, &session, &run_id).await;
+    }
     (session, failed, run_id)
 }
 
@@ -437,7 +635,7 @@ async fn retry_main_chat_action_claims_before_dispatch_and_confirms_one_executio
             })
             .expect("create replay task")
     };
-    let run_id = create_task_bound_agent_run_with_status_for_test(
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
         &state,
         &session.id,
         &session.chat_session_id,
@@ -516,22 +714,7 @@ async fn retry_main_chat_action_claims_before_dispatch_and_confirms_one_executio
             .fail_session(&session.id, "Fixture action failed before dispatch.")
             .expect("mark task failed");
     }
-    crate::main_chat_event_stream::append_main_chat_agent_runtime_event_batch(
-        &state,
-        &session.id,
-        &run_id,
-        vec![
-            crate::main_chat_event_stream::MainChatAgentRuntimeEventInput::new(
-                "failed",
-                "turn",
-                format!("fixture-terminal:{run_id}"),
-                "main_chat_task_control_tests",
-                serde_json::json!({"status": "failed"}),
-            ),
-        ],
-    )
-    .await
-    .expect("persist retry fixture terminal receipt");
+    bind_and_seal_failed_replay_terminal_owner_for_test(&state, &session, &run_id).await;
 
     crate::main_chat_task_controls::retry_main_chat_agent_action(
         session.id.clone(),
@@ -579,6 +762,99 @@ async fn retry_main_chat_action_claims_before_dispatch_and_confirms_one_executio
 }
 
 #[tokio::test]
+async fn replay_epoch_rejects_second_open_until_current_generation_is_sealed() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let (session, failed, _run_id) = create_failed_replay_task_for_test(
+        &state,
+        "replay-epoch-single-open-owner",
+        "Use mcp builtin_echo read-only now.",
+        true,
+    )
+    .await;
+
+    let admission =
+        crate::main_chat_turn_runtime::issue_terminal_owner_retry_epoch_admission_for_test(
+            &state, &session, &failed,
+        )
+        .await
+        .expect("sealed terminal owner issues one replay admission");
+    let opened = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .open_terminal_owner_replay_epoch_from_admission(&admission)
+        .expect("first replay admission opens the next generation");
+    assert_eq!(opened.generation(), 2);
+
+    let second_admission =
+        match crate::main_chat_turn_runtime::issue_terminal_owner_retry_epoch_admission_for_test(
+            &state, &session, &failed,
+        )
+        .await
+        {
+            Ok(_) => panic!("an OPEN replay generation cannot mint a second replay owner"),
+            Err(error) => error,
+        };
+    assert_eq!(
+        second_admission,
+        "terminal_owner_replay_requires_sealed_epoch"
+    );
+    let stale_admission = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .open_terminal_owner_replay_epoch_from_admission(&admission)
+        .expect_err("the same one-shot admission cannot reopen its prior sealed generation");
+    assert_eq!(
+        stale_admission.to_string(),
+        "terminal_owner_replay_epoch_admission_conflict"
+    );
+}
+
+#[tokio::test]
+async fn replay_admission_rejects_task_owner_drift_after_durable_final() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let (session, failed, _run_id) = create_failed_replay_task_for_test(
+        &state,
+        "replay-final-owner-drift",
+        "Use mcp builtin_echo read-only now.",
+        true,
+    )
+    .await;
+    {
+        let task_store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await;
+        task_store
+            .set_pending_blockers(
+                &session.id,
+                vec!["fixture:unauthorized-post-final-owner-drift".into()],
+            )
+            .expect("simulate an out-of-band post-final task-owner mutation");
+    }
+
+    let error =
+        match crate::main_chat_turn_runtime::issue_terminal_owner_retry_epoch_admission_for_test(
+            &state, &session, &failed,
+        )
+        .await
+        {
+            Ok(_) => {
+                panic!("replay must reject a task owner that no longer matches the durable final")
+            }
+            Err(error) => error,
+        };
+    assert_eq!(error, "terminal_owner_replay_task_owner_drift");
+}
+
+#[tokio::test]
 async fn expired_owner_reclaim_after_durable_prepared_cannot_reach_real_adapter() {
     use openlife_core::agent::main_chat_agent_v1::{ActionReplayClaimState, ExecutionQueueStatus};
     use openlife_core::tool_manifest::ToolSource;
@@ -594,6 +870,7 @@ async fn expired_owner_reclaim_after_durable_prepared_cannot_reach_real_adapter(
         &state,
         "replay-owner-generation-race",
         "Use mcp builtin_echo read-only now.",
+        true,
     )
     .await;
     let dispatch_count = std::sync::Arc::new(AtomicUsize::new(0));
@@ -732,6 +1009,7 @@ async fn registry_revocation_after_prepared_fails_before_dispatch_without_unknow
         &state,
         "replay-final-registry-revocation",
         "Use mcp builtin_echo read-only now.",
+        true,
     )
     .await;
     let dispatch_count = std::sync::Arc::new(AtomicUsize::new(0));
@@ -860,6 +1138,7 @@ async fn same_contract_registry_replacement_cannot_dispatch_stale_executor_snaps
         &state,
         "replay-registry-instance-replacement",
         "Use mcp builtin_echo read-only now.",
+        true,
     )
     .await;
     let stale_dispatches = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1019,6 +1298,7 @@ async fn startup_projects_prepared_replay_unknown_before_claim_recovery() {
         &state,
         "startup-prepared-replay-order",
         "Use mcp builtin_echo read-only now.",
+        true,
     )
     .await;
     let (claim, executing) = {
@@ -1171,11 +1451,30 @@ async fn durable_restart_projects_live_not_dispatched_once_before_safe_claim_rec
     );
     {
         let mut registry = first_state.mcp_registry.lock().await;
+        assert!(
+            registry
+                .list_manifests()
+                .iter()
+                .all(|manifest| manifest.id != "builtin_echo"),
+            "release bootstrap must not restore the development echo utility"
+        );
         let mut remote_manifest = registry
             .list_manifests()
             .into_iter()
-            .find(|manifest| manifest.id == "builtin_echo")
-            .expect("typed echo manifest for remote no-dispatch fixture");
+            .find(|manifest| manifest.id == "web.search")
+            .expect("release registry retains a typed read manifest for the restart fixture");
+        remote_manifest.id = "builtin_echo".into();
+        remote_manifest.name = "builtin_echo".into();
+        remote_manifest.description = "Test-only durable restart fixture".into();
+        remote_manifest.parameters = serde_json::json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"]
+        });
+        remote_manifest.permission_level = "low".into();
+        remote_manifest.risk_level = "low".into();
+        remote_manifest.capabilities = vec!["read".into()];
+        remote_manifest.action_type = "read".into();
         remote_manifest.source = openlife_core::tool_manifest::ToolSource::Mcp {
             server_name: "durable-live-not-dispatched-remote".into(),
         };
@@ -1190,6 +1489,7 @@ async fn durable_restart_projects_live_not_dispatched_once_before_safe_claim_rec
         &first_state,
         "durable-live-not-dispatched-restart",
         "Use mcp builtin_echo read-only now.",
+        true,
     )
     .await;
     let (claim, executing) = {
@@ -1495,6 +1795,179 @@ async fn durable_restart_projects_live_not_dispatched_once_before_safe_claim_rec
 }
 
 #[tokio::test]
+async fn startup_seals_open_replay_epoch_without_claim_or_dispatch() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ActionReplayClaimState, ActionReplayEffectCertainty, ExecutionQueueStatus,
+    };
+
+    #[derive(Default)]
+    struct OpenReplayRestartSecretStore {
+        values: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl crate::secret_store::SecretStore for OpenReplayRestartSecretStore {
+        fn get(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.values.lock().unwrap().get(secret_ref).cloned())
+        }
+
+        fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(secret_ref.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, secret_ref: &str) -> anyhow::Result<()> {
+            self.values.lock().unwrap().remove(secret_ref);
+            Ok(())
+        }
+    }
+
+    let directory = tempfile::tempdir().expect("temporary open replay restart state");
+    let secrets = OpenReplayRestartSecretStore::default();
+    let first = crate::bootstrap::bootstrap_with_secret_store_for_test(
+        directory.path().to_path_buf(),
+        &secrets,
+    );
+    let first_state = first.state;
+    {
+        let mut registry = first_state.mcp_registry.lock().await;
+        let mut remote_manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.id == "web.search")
+            .expect("release registry retains a typed read manifest for the replay fixture");
+        remote_manifest.id = "builtin_echo".into();
+        remote_manifest.name = "builtin_echo".into();
+        remote_manifest.description = "Test-only open replay restart fixture".into();
+        remote_manifest.parameters = serde_json::json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"]
+        });
+        remote_manifest.permission_level = "low".into();
+        remote_manifest.risk_level = "low".into();
+        remote_manifest.capabilities = vec!["read".into()];
+        remote_manifest.action_type = "read".into();
+        remote_manifest.source = openlife_core::tool_manifest::ToolSource::Mcp {
+            server_name: "open-replay-restart-fixture".into(),
+        };
+        registry.register_builtin(
+            remote_manifest,
+            Box::new(|_arguments| anyhow::bail!("open replay restart fixture must never dispatch")),
+        );
+    }
+    let (session, failed, run_id) = create_failed_replay_task_for_test(
+        &first_state,
+        "open-replay-generation-restart",
+        "Use mcp builtin_echo read-only now.",
+        true,
+    )
+    .await;
+    let admission =
+        crate::main_chat_turn_runtime::issue_terminal_owner_retry_epoch_admission_for_test(
+            &first_state,
+            &session,
+            &failed,
+        )
+        .await
+        .expect("sealed generation issues a typed replay admission");
+    let opened = first_state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .open_terminal_owner_replay_epoch_from_admission(&admission)
+        .expect("simulate crash after the next replay generation opens");
+    assert_eq!(opened.generation(), 2);
+    assert_eq!(
+        opened.state(),
+        crate::main_chat_event_stream::TerminalOwnerSealState::Open
+    );
+    drop(first_state);
+
+    let restarted = crate::bootstrap::bootstrap_with_secret_store_for_test(
+        directory.path().to_path_buf(),
+        &secrets,
+    );
+    assert_eq!(
+        crate::bootstrap::reconcile_startup_orphaned_main_chat_runs(&restarted.state)
+            .await
+            .expect("startup must seal the orphaned replay generation"),
+        1
+    );
+    let epoch = restarted
+        .state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .terminal_owner_epoch(&session.id)
+        .expect("reload terminal epoch")
+        .expect("terminal epoch exists");
+    assert_eq!(epoch.generation(), 2);
+    assert_eq!(
+        epoch.state(),
+        crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+    );
+    let final_event_id = epoch
+        .final_event_id()
+        .expect("sealed replay epoch records its exact final event")
+        .to_string();
+    let action = restarted
+        .state
+        .main_chat_action_queue_store
+        .as_ref()
+        .expect("action queue")
+        .lock()
+        .await
+        .load(&failed.id)
+        .expect("load replay action")
+        .expect("replay action exists");
+    assert_eq!(action.status, ExecutionQueueStatus::Failed);
+    assert_eq!(action.replay_claim, ActionReplayClaimState::Unclaimed);
+    assert_eq!(
+        action.replay_effect_certainty,
+        ActionReplayEffectCertainty::EffectNotAttempted
+    );
+    assert_eq!(action.attempts, 0);
+    assert!(action.replay_dispatch_started_at.is_none());
+    let events = restarted
+        .state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .list(&session.id, 0, 100)
+        .expect("list recovered replay events");
+    let final_event = events
+        .iter()
+        .find(|event| event.event_id == final_event_id)
+        .expect("recovered replay epoch final event");
+    assert_eq!(final_event.event_type, "final_delivery.created");
+    assert_eq!(final_event.run_id, run_id);
+    assert_eq!(
+        final_event.payload["replayEpochGeneration"],
+        serde_json::json!(2),
+        "unexpected recovered replay final payload: {}",
+        final_event.payload
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .max()
+            .expect("recovered replay event sequence"),
+        final_event.sequence,
+        "the recovered replay final must be the last durable event"
+    );
+}
+
+#[tokio::test]
 async fn multi_action_retry_preserves_remaining_failure_and_backend_target_until_all_complete() {
     use openlife_core::agent::main_chat_agent_v1::{
         AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy, ExecutionQueueStatus,
@@ -1511,6 +1984,7 @@ async fn multi_action_retry_preserves_remaining_failure_and_backend_target_until
         &state,
         "multi-action-retry",
         "Use mcp builtin_echo read-only now.",
+        false,
     )
     .await;
     let second_queued = {
@@ -1564,6 +2038,7 @@ async fn multi_action_retry_preserves_remaining_failure_and_backend_target_until
             .set_pending_blockers(&session.id, vec!["two_actions_failed".into()])
             .expect("seed aggregate blocker");
     }
+    bind_and_seal_failed_replay_terminal_owner_for_test(&state, &session, &run_id).await;
     let manifest = state
         .mcp_registry
         .lock()
@@ -1694,11 +2169,12 @@ async fn cancel_before_retry_registration_prevents_claim_and_tool_dispatch() {
             })
             .expect("create replay task")
     };
-    let run_id = create_task_bound_agent_run_for_test(
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
         &state,
         &session.id,
         &session.chat_session_id,
         &session.user_goal,
+        openlife_core::agent::AgentRunStatus::Failed,
     )
     .await;
     let queued = {
@@ -1751,22 +2227,7 @@ async fn cancel_before_retry_registration_prevents_claim_and_tool_dispatch() {
             .fail_session(&session.id, "Fixture action failed before dispatch.")
             .expect("mark task failed");
     }
-    crate::main_chat_event_stream::append_main_chat_agent_runtime_event_batch(
-        &state,
-        &session.id,
-        &run_id,
-        vec![
-            crate::main_chat_event_stream::MainChatAgentRuntimeEventInput::new(
-                "failed",
-                "turn",
-                format!("fixture-terminal:{run_id}"),
-                "main_chat_task_control_tests",
-                serde_json::json!({"status": "failed"}),
-            ),
-        ],
-    )
-    .await
-    .expect("persist cancellation fixture terminal receipt");
+    bind_and_seal_failed_replay_terminal_owner_for_test(&state, &session, &run_id).await;
 
     let cancellation_registry = {
         state
@@ -1786,7 +2247,10 @@ async fn cancel_before_retry_registration_prevents_claim_and_tool_dispatch() {
     )
     .await
     .expect_err("pre-registration cancellation must reject retry before claiming");
-    assert!(error.contains("main_chat_replay_locally_aborted:before_claim"));
+    assert!(
+        error.contains("main_chat_replay_locally_aborted:before_claim"),
+        "unexpected replay error: {error}"
+    );
 
     let persisted = {
         let queue = state
@@ -3018,6 +3482,7 @@ async fn cancellation_at_replay_commit_barrier_prevents_late_completion() {
         &state,
         "replay-commit-barrier",
         "Use mcp builtin_echo read-only now.",
+        true,
     )
     .await;
     let manifest = state
@@ -3233,6 +3698,7 @@ for line in sys.stdin:
         &state,
         "hanging-real-mcp-replay",
         "Use mcp hang_tool read-only now.",
+        true,
     )
     .await;
 
@@ -4395,7 +4861,7 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
             })
             .expect("create main chat task session")
     };
-    let run_id = create_task_bound_agent_run_with_status_for_test(
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
         &state,
         &session.id,
         &session.chat_session_id,
@@ -4490,12 +4956,20 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
             .record_action_queue_id(&session.id, &queued.id)
             .expect("record action id");
         store
-            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .set_pending_blockers(
+                &session.id,
+                vec![
+                    format!("proposal:{proposal_id}"),
+                    "tool_permission_required".into(),
+                ],
+            )
             .expect("set pending blocker");
         store
             .mark_waiting_permission(&session.id)
             .expect("mark waiting permission");
     }
+    bind_and_seal_tool_permission_terminal_origin_for_test(&state, &proposal_id, &session, &run_id)
+        .await;
 
     crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
         .await
@@ -4512,6 +4986,26 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
         .peek_action_bound(&proposal_id, &accepted_scope)
         .expect("peek action-bound grant before replay")
         .is_some());
+    let pre_resume_detail =
+        crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+            &session.id,
+            &state,
+        )
+        .await
+        .expect("load typed replay task detail before resume");
+    let permission_diagnostic =
+        crate::main_chat_task_controls::main_chat_pending_action_permission_diagnostic_for_test(
+            &state, &session, &queued,
+        )
+        .await
+        .expect("diagnose typed ToolPermission replay readiness");
+    assert!(
+        !pre_resume_detail
+            .continuity_diagnostics
+            .permission_scope_mismatch,
+        "typed ToolPermission replay scope must be mechanically ready ({permission_diagnostic}): {:?}",
+        pre_resume_detail.continuity_diagnostics
+    );
 
     let managed_state = app.state::<std::sync::Arc<crate::AppState>>();
     resume_main_chat_agent_task(session.id.clone(), managed_state)
@@ -4576,6 +5070,43 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
         .expect("peek consumed action-bound grant")
         .is_none());
     drop(permission_store);
+    {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("main chat event store")
+            .lock()
+            .await;
+        let epoch = event_store
+            .terminal_owner_epoch(&session.id)
+            .expect("load replay terminal epoch")
+            .expect("replay terminal epoch exists");
+        assert_eq!(
+            epoch.state(),
+            crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+        );
+        assert_eq!(
+            epoch.generation(),
+            2,
+            "one accepted permission replay must open exactly one successor generation"
+        );
+        let final_event = event_store
+            .terminal_owner_final_event(&session.id)
+            .expect("load replay terminal final")
+            .expect("replay terminal final exists");
+        assert_eq!(final_event.event_type, "final_delivery.created");
+        assert_eq!(
+            final_event.sequence,
+            event_store
+                .latest_sequence(&session.id)
+                .expect("load replay latest durable sequence"),
+            "replay final must remain the last durable event"
+        );
+        assert_eq!(
+            final_event.payload["taskOwnerStatus"],
+            serde_json::json!("completed")
+        );
+    }
     let second = resume_main_chat_agent_task(
         session.id.clone(),
         app.state::<std::sync::Arc<crate::AppState>>(),
@@ -4806,7 +5337,7 @@ async fn manifest_drift_after_snapshot_before_live_dispatch_fence_has_zero_dispa
             })
             .expect("create task")
     };
-    let run_id = create_task_bound_agent_run_with_status_for_test(
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
         &state,
         &session.id,
         &session.chat_session_id,
@@ -4892,12 +5423,20 @@ async fn manifest_drift_after_snapshot_before_live_dispatch_fence_has_zero_dispa
             .record_action_queue_id(&session.id, &queued.id)
             .expect("record action id");
         store
-            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .set_pending_blockers(
+                &session.id,
+                vec![
+                    format!("proposal:{proposal_id}"),
+                    "tool_permission_required".into(),
+                ],
+            )
             .expect("set blocker");
         store
             .mark_waiting_permission(&session.id)
             .expect("mark waiting permission");
     }
+    bind_and_seal_tool_permission_terminal_origin_for_test(&state, &proposal_id, &session, &run_id)
+        .await;
     crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
         .await
         .expect("accept exact permission");
@@ -5098,7 +5637,7 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
             })
             .expect("create main chat task session")
     };
-    let run_id = create_task_bound_agent_run_with_status_for_test(
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
         &state,
         &session.id,
         &session.chat_session_id,
@@ -5175,12 +5714,20 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
             .record_action_queue_id(&session.id, &queued.id)
             .expect("record action id");
         store
-            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .set_pending_blockers(
+                &session.id,
+                vec![
+                    format!("proposal:{proposal_id}"),
+                    "tool_permission_required".into(),
+                ],
+            )
             .expect("set pending blocker");
         store
             .mark_waiting_permission(&session.id)
             .expect("mark waiting permission");
     }
+    bind_and_seal_tool_permission_terminal_origin_for_test(&state, &proposal_id, &session, &run_id)
+        .await;
 
     crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
         .await
@@ -5223,8 +5770,10 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
             .allowed_controls
             .iter()
             .any(|control| control == "resume"),
-        "accepted native web ToolPermission task should expose resume control: {:?}",
-        pre_resume_detail.allowed_controls
+        "accepted native web ToolPermission task should expose resume control: controls={:?}, evidence={}",
+        pre_resume_detail.allowed_controls,
+        serde_json::to_string_pretty(&pre_resume_detail.evidence_view)
+            .expect("serialize native web pre-resume evidence")
     );
 
     let managed_state = app.state::<std::sync::Arc<crate::AppState>>();

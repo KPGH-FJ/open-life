@@ -153,7 +153,11 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
                 let proposals = proposals
                     .into_iter()
                     .filter(|proposal| {
-                        proposal.source_detail.as_deref() == Some(task_session_id)
+                        proposal_store
+                            .terminal_owner_origin_binding(&proposal.id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|origin| origin.task_session_id() == task_session_id)
                             || run_id
                                 .map(|run_id| proposal.run_id.as_deref() == Some(run_id))
                                 .unwrap_or(false)

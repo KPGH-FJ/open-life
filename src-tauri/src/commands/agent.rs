@@ -163,15 +163,11 @@ async fn delete_agent_run_after_confirmation_with_state(
     require_agent_run_effects_allowed(state)?;
     let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
     let causal_guard = causal_lock.lock().await;
-    let receipt = if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        require_agent_run_effects_allowed(state)?;
-        store
-            .delete_run_with_tombstone(run_id, reason)
-            .map_err(AppError::from)?
-    } else {
-        return Err(AppError::internal("AgentRun store not available"));
-    };
+    require_agent_run_effects_allowed(state)?;
+    let receipt =
+        crate::terminal_owner_write_gateway::delete_agent_run_with_tombstone(state, run_id, reason)
+            .await
+            .map_err(AppError::internal)?;
     drop(causal_guard);
     crate::memory_gateway::reconcile_agent_run_blocking_outbox_event_with_state(
         state,
@@ -200,17 +196,12 @@ pub(crate) async fn restore_agent_run_with_state(
     let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
     let causal_guard = causal_lock.lock().await;
     // 1. Restore the run in store
-    let restore_event_id;
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        require_agent_run_effects_allowed(state)?;
-        restore_event_id = store
-            .restore_run_with_receipt(run_id)
-            .map_err(AppError::from)?
+    require_agent_run_effects_allowed(state)?;
+    let restore_event_id =
+        crate::terminal_owner_write_gateway::restore_agent_run_with_receipt(state, run_id)
+            .await
+            .map_err(AppError::internal)?
             .event_id;
-    } else {
-        return Err(AppError::internal("AgentRun store not available"));
-    }
     drop(causal_guard);
     crate::memory_gateway::reconcile_agent_run_blocking_outbox_event_with_state(
         state,

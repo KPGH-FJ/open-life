@@ -1114,6 +1114,7 @@ fn lifecycle_projection_agrees(canonical: &str, projected: &str) -> bool {
         || matches!(
             (canonical, projected),
             ("completed_with_pending_items", "completed")
+                | ("completed_with_pending_items", "blocked")
                 | ("blocked", "blocked")
                 | ("cancelled", "cancelled")
                 | ("timed_out", "failed")
@@ -3014,6 +3015,114 @@ async fn main_chat_pending_action_permission_ready_for_resume(
     Ok(authorization)
 }
 
+#[cfg(test)]
+pub(crate) async fn main_chat_pending_action_permission_diagnostic_for_test(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+) -> Result<&'static str, String> {
+    use openlife_core::agent::main_chat_agent_v1::{ExecutionQueueStatus, MainChatAgentStrategy};
+
+    if session.selected_strategy != MainChatAgentStrategy::ReActToolExecution {
+        return Ok("strategy_not_react");
+    }
+    if action.status != ExecutionQueueStatus::PendingPermission {
+        return Ok("action_not_pending_permission");
+    }
+    if !openlife_core::agent::main_chat_agent_v1::typed_tool_receipt_allows_automatic_retry(action)
+    {
+        return Ok("typed_receipt_not_retryable");
+    }
+    let Some(envelope) =
+        crate::main_chat_turn_runtime::canonical_openlife_replay_envelope(session, action)
+    else {
+        return Ok("canonical_replay_envelope_missing");
+    };
+    let accepted_scope = match main_chat_pending_action_accepted_tool_permission_scope(
+        state, session, action, &envelope,
+    )
+    .await?
+    {
+        AcceptedToolPermissionScopeLookup::NotAccepted => return Ok("proposal_not_accepted"),
+        AcceptedToolPermissionScopeLookup::AcceptedInvalid => {
+            let proposal_ids = main_chat_action_proposal_ids(action);
+            if proposal_ids.len() != 1 {
+                return Ok("accepted_proposal_identity_not_unique");
+            }
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| "proposal_store_unavailable".to_string())?
+                .lock()
+                .await;
+            let proposal = proposal_store
+                .get_proposal(&proposal_ids[0])
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "accepted diagnostic proposal missing".to_string())?;
+            let Some(origin) = proposal_store
+                .terminal_owner_origin_binding(&proposal_ids[0])
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok("accepted_proposal_origin_missing");
+            };
+            return Ok(AcceptedToolPermissionScope::diagnose_invalid_for_test(
+                &proposal, &origin, session, action, &envelope,
+            ));
+        }
+        AcceptedToolPermissionScopeLookup::AcceptedValid(scope) => scope,
+    };
+    let plan = match build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)
+    {
+        Ok(plan) if plan.queue_action_type == action.action.action_type => plan,
+        Ok(_) => return Ok("current_plan_action_type_mismatch"),
+        Err(_) => return Ok("current_plan_unavailable"),
+    };
+    let (tool_name, source, risk_level, action_type) = {
+        let registry = state.mcp_registry.lock().await;
+        let resolution = resolve_main_chat_mcp_read_target(&registry, &plan);
+        if resolution.blocker_reason.is_some() {
+            return Ok("current_target_resolution_blocked");
+        }
+        let Some(manifest) = registry.list_manifests().into_iter().find(|manifest| {
+            manifest.id == envelope.manifest_id
+                && manifest.name == resolution.target
+                && manifest.execution_contract_digest() == envelope.manifest_contract_digest
+        }) else {
+            return Ok("current_manifest_identity_mismatch");
+        };
+        (
+            manifest.name.clone(),
+            openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest),
+            manifest.risk_level.clone(),
+            manifest.action_type.clone(),
+        )
+    };
+    let scope = &accepted_scope.scope;
+    if scope.tool_name != tool_name {
+        return Ok("scope_tool_name_mismatch");
+    }
+    if scope.source != source {
+        return Ok("scope_source_mismatch");
+    }
+    if scope.risk_level != risk_level {
+        return Ok("scope_risk_level_mismatch");
+    }
+    if scope.manifest_action_type != action_type {
+        return Ok("scope_manifest_action_type_mismatch");
+    }
+    let authorization = state
+        .tool_permission_store
+        .lock()
+        .await
+        .peek_action_bound(&accepted_scope.proposal_id, scope)
+        .map_err(|error| format!("peek diagnostic action-bound ToolPermission failed: {error}"))?;
+    Ok(if authorization.is_some() {
+        "ready"
+    } else {
+        "action_bound_grant_missing_or_consumed"
+    })
+}
+
 struct AcceptedToolPermissionScope {
     proposal_id: String,
     scope: openlife_core::tool_permissions::ActionBoundToolPermissionScope,
@@ -3028,11 +3137,11 @@ enum AcceptedToolPermissionScopeLookup {
 impl AcceptedToolPermissionScope {
     fn from_proposal(
         proposal: &openlife_core::agent::AgentProposal,
+        origin: &openlife_core::agent::TerminalOwnerOriginBinding,
         session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
         action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
         envelope: &DurableMainChatReplayExecutionEnvelope,
     ) -> Option<Self> {
-        let expected_source_detail = format!("main_chat_agent_task_session:{}", session.id);
         if proposal
             .after
             .get("permission_scope_kind")
@@ -3049,8 +3158,8 @@ impl AcceptedToolPermissionScope {
                 proposal.source,
                 openlife_core::agent::ProposalSource::ChatConversation
             )
-            || proposal.source_detail.as_deref() != Some(expected_source_detail.as_str())
-            || proposal.run_id.as_deref() != Some(envelope.run_id.as_str())
+            || origin.task_session_id() != session.id
+            || origin.run_id() != envelope.run_id
         {
             return None;
         }
@@ -3074,6 +3183,78 @@ impl AcceptedToolPermissionScope {
             proposal_id: proposal.id.clone(),
             scope,
         })
+    }
+
+    #[cfg(test)]
+    fn diagnose_invalid_for_test(
+        proposal: &openlife_core::agent::AgentProposal,
+        origin: &openlife_core::agent::TerminalOwnerOriginBinding,
+        session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+        action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+        envelope: &DurableMainChatReplayExecutionEnvelope,
+    ) -> &'static str {
+        if proposal
+            .after
+            .get("permission_scope_kind")
+            .or_else(|| proposal.after.get("permissionScopeKind"))
+            .and_then(serde_json::Value::as_str)
+            != Some("action_bound")
+        {
+            return "accepted_scope_kind_invalid";
+        }
+        if proposal
+            .after
+            .get("permission")
+            .or_else(|| proposal.after.get("policy"))
+            .and_then(serde_json::Value::as_str)
+            != Some("allow_once")
+        {
+            return "accepted_permission_policy_invalid";
+        }
+        if !matches!(
+            proposal.source,
+            openlife_core::agent::ProposalSource::ChatConversation
+        ) {
+            return "accepted_proposal_source_invalid";
+        }
+        if origin.task_session_id() != session.id {
+            return "accepted_origin_task_mismatch";
+        }
+        if origin.run_id() != envelope.run_id {
+            return "accepted_origin_run_mismatch";
+        }
+        let Ok(scope) =
+            openlife_core::tool_permissions::ActionBoundToolPermissionScope::from_proposal_after(
+                &proposal.after,
+            )
+        else {
+            return "accepted_scope_parse_failed";
+        };
+        if scope.queue_action_type != envelope.queue_action_type {
+            return "accepted_queue_action_type_mismatch";
+        }
+        if scope.requested_target != envelope.requested_target {
+            return "accepted_requested_target_mismatch";
+        }
+        if scope.resolved_target != envelope.resolved_target {
+            return "accepted_resolved_target_mismatch";
+        }
+        if scope.tool_name != envelope.manifest_name {
+            return "accepted_manifest_name_mismatch";
+        }
+        if scope.source != envelope.manifest_source {
+            return "accepted_manifest_source_mismatch";
+        }
+        if scope.input_hash != envelope.input_hash {
+            return "accepted_input_hash_mismatch";
+        }
+        if scope.input_length_bytes != envelope.input_length_bytes {
+            return "accepted_input_length_mismatch";
+        }
+        if !pending_action_identity_matches_envelope(&proposal.after, session, action, envelope) {
+            return "accepted_pending_action_identity_mismatch";
+        }
+        "accepted_proposal_binding_invalid_unknown"
     }
 }
 
@@ -3140,8 +3321,14 @@ async fn main_chat_pending_action_accepted_tool_permission_scope(
     if proposal.proposal_type != openlife_core::agent::ProposalType::ToolPermission {
         return Ok(AcceptedToolPermissionScopeLookup::AcceptedInvalid);
     }
+    let Some(origin) = proposal_store
+        .terminal_owner_origin_binding(proposal_id)
+        .map_err(|err| format!("load ToolPermission terminal origin for resume failed: {err}"))?
+    else {
+        return Ok(AcceptedToolPermissionScopeLookup::AcceptedInvalid);
+    };
     Ok(
-        AcceptedToolPermissionScope::from_proposal(&proposal, session, action, envelope)
+        AcceptedToolPermissionScope::from_proposal(&proposal, &origin, session, action, envelope)
             .map(AcceptedToolPermissionScopeLookup::AcceptedValid)
             .unwrap_or(AcceptedToolPermissionScopeLookup::AcceptedInvalid),
     )

@@ -296,12 +296,7 @@ fn review_batch_domain(proposal_type: ProposalType) -> ReviewBatchDomain {
 }
 
 fn review_batch_session_id(proposal: &AgentProposal) -> Option<String> {
-    for field in [
-        "originatingTaskSessionId",
-        "sourceTaskSessionId",
-        "taskSessionId",
-        "session_id",
-    ] {
+    for field in ["sourceTaskSessionId", "taskSessionId", "session_id"] {
         if let Some(value) = proposal
             .after
             .get(field)
@@ -315,14 +310,6 @@ fn review_batch_session_id(proposal: &AgentProposal) -> Option<String> {
     let source_detail = proposal.source_detail.as_deref()?.trim();
     if source_detail.is_empty() {
         return None;
-    }
-    if let Some(value) = source_detail.strip_prefix("main_chat_agent_task_session:") {
-        return value
-            .split(';')
-            .next()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
     }
     matches!(
         proposal.source,

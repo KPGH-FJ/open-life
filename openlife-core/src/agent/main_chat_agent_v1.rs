@@ -4808,6 +4808,7 @@ impl AgentTaskSessionStore {
         task_session_id: &str,
         expected_revision: u64,
         expected_digest: &str,
+        complete_when_unblocked: bool,
     ) -> Result<VerifiedTerminalOwnerTransitionReceipt> {
         if let Some(existing) =
             self.terminal_owner_transition_receipt_for_claim(proposal_id, dispatch_claim_id)?
@@ -4859,24 +4860,29 @@ impl AgentTaskSessionStore {
         if blockers.len() == before_len {
             anyhow::bail!("terminal_owner_proposal_blocker_missing");
         }
-        if !blockers.is_empty() {
-            anyhow::bail!("terminal_owner_other_blockers_pending");
-        }
-
         const FINAL_SUMMARY: &str = "Accepted Review proposal resolved the Main Chat task blocker.";
-        let final_summary_receipt = session_body_receipt(
-            self.receipt_key.as_ref(),
-            task_session_id,
-            "final_summary",
-            FINAL_SUMMARY,
-        );
+        let should_complete = blockers.is_empty() && complete_when_unblocked;
+        let next_status = if should_complete {
+            AgentTaskSessionStatus::Completed.as_str()
+        } else {
+            AgentTaskSessionStatus::WaitingPermission.as_str()
+        };
+        let final_summary_receipt = should_complete.then(|| {
+            session_body_receipt(
+                self.receipt_key.as_ref(),
+                task_session_id,
+                "final_summary",
+                FINAL_SUMMARY,
+            )
+        });
         let changed = tx.execute(
             "UPDATE agent_task_sessions
-             SET status = 'completed', pending_blockers_json = ?2,
-                 updated_at = ?3, final_summary = ?4
+             SET status = ?2, pending_blockers_json = ?3,
+                 updated_at = ?4, final_summary = ?5
              WHERE id = ?1 AND status = 'waiting_permission'",
             params![
                 task_session_id,
+                next_status,
                 serde_json::to_string(&blockers)?,
                 Utc::now().to_rfc3339(),
                 final_summary_receipt,
@@ -4943,7 +4949,7 @@ impl AgentTaskSessionStore {
             .entry(task_session_id.to_string())
             .or_default();
         transient_session.pending_blockers = blockers;
-        transient_session.final_summary = Some(FINAL_SUMMARY.into());
+        transient_session.final_summary = should_complete.then(|| FINAL_SUMMARY.into());
         drop(transient_content);
 
         self.verify_terminal_owner_transition_receipt_value(

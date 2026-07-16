@@ -45,6 +45,8 @@ pub struct BootstrapResult {
 
 const STARTUP_PROPOSAL_RECONCILIATION_BATCH: i64 = 200;
 const STARTUP_PROPOSAL_RECONCILIATION_SYNC_PASSES: usize = 5;
+const STARTUP_TERMINAL_OWNER_RECONCILIATION_BATCH: usize = 64;
+const STARTUP_TERMINAL_OWNER_RECONCILIATION_PASSES: usize = 8;
 const STARTUP_CANONICAL_OUTBOX_BATCH: usize = 500;
 const STARTUP_CANONICAL_OUTBOX_PASSES: usize = 20;
 const STARTUP_MAIN_CHAT_TASK_SCAN_BATCH: usize = 200;
@@ -300,6 +302,15 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
         };
         if run.task_id != task.id {
             return Err("startup_main_chat_agent_run_task_identity_mismatch".into());
+        }
+        if crate::main_chat_turn_runtime::reconcile_orphaned_openlife_replay_epoch_after_restart(
+            state, &task.id, &run.id,
+        )
+        .await?
+        {
+            verify_startup_terminal_projection(state, &run.id, &task.id).await?;
+            reconciled = reconciled.saturating_add(1);
+            continue;
         }
         let lifecycle = {
             let store_arc = state
@@ -750,6 +761,37 @@ pub(crate) async fn reconcile_startup_canonical_outboxes(
         }
     }
     Err("canonical projection reconciliation backlog exceeded startup bound".into())
+}
+
+/// Finish terminal-owner successors from durable ReviewWorkflow claims before
+/// the generic Proposal/AgentRun projection pass. This may complete a local
+/// Memory effect that was already claimed before a crash, but it never retries
+/// an external effect whose remote outcome is unknown.
+pub(crate) async fn reconcile_startup_terminal_owner_successors(
+    state: &Arc<AppState>,
+) -> Result<usize, String> {
+    if !state
+        .persistence_coordinator
+        .startup_reconciliation_mutations_safe()
+    {
+        return Err("startup_terminal_owner_reconciliation_mutations_unavailable".into());
+    }
+    let gateway =
+        crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::from_state(state).await?;
+    let mut reconciled = 0usize;
+    for _ in 0..STARTUP_TERMINAL_OWNER_RECONCILIATION_PASSES {
+        let report = gateway
+            .reconcile_pending_terminal_owner_successors(
+                STARTUP_TERMINAL_OWNER_RECONCILIATION_BATCH,
+            )
+            .await
+            .map_err(|error| format!("startup terminal-owner reconciliation failed: {error}"))?;
+        reconciled = reconciled.saturating_add(report.successors_confirmed);
+        if report.proposals_projected < STARTUP_TERMINAL_OWNER_RECONCILIATION_BATCH {
+            return Ok(reconciled);
+        }
+    }
+    Err("startup_terminal_owner_reconciliation_bound_exceeded".into())
 }
 
 /// Reconcile a bounded amount of already-confirmed Proposal truth before the
@@ -3449,6 +3491,82 @@ mod tests {
         );
         assert!(projection.safe_mode.active);
         assert_eq!(projection.readiness.database_status, "degraded");
+    }
+
+    #[tokio::test]
+    async fn startup_releases_external_claim_when_artifact_intent_was_never_prepared() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let result =
+            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+        let target_path = temp_dir.path().join("never-written.txt");
+        let proposal = openlife_core::agent::AgentProposal::new(
+            openlife_core::agent::ProposalType::ExternalWriteAction,
+            "filesystem.startup-orphan",
+            serde_json::json!({
+                "path": target_path,
+                "content": "must not be written by startup recovery",
+            }),
+            "Crash after claim and before ArtifactMaterializer prepared intent.",
+            1.0,
+            openlife_core::agent::RiskLevel::High,
+            openlife_core::agent::ProposalSource::ChatConversation,
+        );
+        let proposal_id = proposal.id.clone();
+        let claim_id = {
+            let store = result
+                .state
+                .proposal_store
+                .as_ref()
+                .expect("proposal store")
+                .lock()
+                .await;
+            store.create_proposal(&proposal).expect("create proposal");
+            store
+                .claim_dispatch(&proposal_id)
+                .expect("claim proposal")
+                .expect("one startup fixture claim")
+        };
+
+        assert!(!reconcile_startup_proposal_projections(&result.state)
+            .await
+            .expect("startup reconciliation proves the effect was not attempted"));
+        let store = result
+            .state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await;
+        assert_eq!(
+            store
+                .dispatch_state(&proposal_id)
+                .expect("read recovered dispatch state")
+                .as_deref(),
+            Some("failed_before_effect")
+        );
+        assert_eq!(
+            store
+                .dispatch_error_code(&proposal_id)
+                .expect("read recovery reason")
+                .as_deref(),
+            Some("startup_artifact_claim_without_prepared_intent")
+        );
+        assert!(store
+            .artifact_effect(&proposal_id)
+            .expect("read artifact intent")
+            .is_none());
+        assert_eq!(
+            store
+                .dispatch_claim_id(&proposal_id)
+                .expect("read preserved first claim")
+                .as_deref(),
+            Some(claim_id.as_str())
+        );
+        assert!(store
+            .claim_dispatch(&proposal_id)
+            .expect("a proven before-effect failure is retryable")
+            .is_some());
+        assert!(!target_path.exists());
     }
 
     #[test]

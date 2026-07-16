@@ -120,11 +120,7 @@ mod backend_remediation_phase2_tests;
 #[cfg(test)]
 mod d055_terminal_owner_graph_tests;
 
-// D055's target contract intentionally compiles only under an explicit
-// rustc cfg used by the focused RED command. It is not a Cargo feature and
-// cannot forward-enable openlife-core's broad test-utils authority surface.
-#[allow(unexpected_cfgs)]
-#[cfg(all(test, d055_compile_red))]
+#[cfg(test)]
 mod d055_terminal_owner_graph_compile_red;
 
 #[cfg(test)]
@@ -832,6 +828,19 @@ pub fn run() {
                     app_state_for_setup
                         .persistence_coordinator
                         .degrade_globally("startup_canonical_outbox_reconciliation_failed");
+                }
+            }
+            if app_state_for_setup
+                .persistence_coordinator
+                .startup_reconciliation_mutations_safe()
+            {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    bootstrap::reconcile_startup_terminal_owner_successors(&app_state_for_setup),
+                ) {
+                    log::error!("[setup] terminal-owner reconciliation degraded: {error}");
+                    app_state_for_setup
+                        .persistence_coordinator
+                        .degrade_globally("startup_terminal_owner_reconciliation_failed");
                 }
             }
             let proposal_backlog = if app_state_for_setup

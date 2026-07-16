@@ -108,7 +108,7 @@ async fn stage_network_consent(
         .as_ref()
         .ok_or_else(|| AppError::internal("Proposal store not available"))?;
     let permission_scope = provider_network_permission_scope(capability, decision, endpoint_digest);
-    let mut after = serde_json::json!({
+    let after = serde_json::json!({
         "permission_action": "grant",
         "permission_scope_kind": "network_policy",
         "permission": "allow_once",
@@ -139,14 +139,7 @@ async fn stage_network_consent(
         "auto_generated": true,
         "directWritesExecuted": false,
     });
-    if let Some(task_session_id) = originating_task_session_id {
-        if let Some(object) = after.as_object_mut() {
-            object.insert(
-                "originatingTaskSessionId".into(),
-                serde_json::Value::String(task_session_id.to_string()),
-            );
-        }
-    }
+    let _ = originating_task_session_id;
     let affected_path = format!("{}.{}", subject.affected_path_prefix, subject.target);
     let proposal_source = match submission_scope {
         NetworkConsentSubmissionScope::MainChatTurn(_) => ProposalSource::ChatConversation,

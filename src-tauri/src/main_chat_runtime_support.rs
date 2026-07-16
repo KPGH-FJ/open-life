@@ -167,16 +167,20 @@ pub(crate) async fn append_main_chat_agent_transcript(
     let Some(task_session_id) = task_session_id else {
         return Vec::new();
     };
-    let Some(ref store_arc) = state.main_chat_agent_session_store else {
+    if state.main_chat_agent_session_store.is_none() {
         return Vec::new();
-    };
-    let store = store_arc.lock().await;
-    match store.append_transcript_entry(ExecutionTranscriptEntryDraft {
-        session_id: task_session_id.to_string(),
-        kind,
-        summary: summary.into(),
-        metadata,
-    }) {
+    }
+    match crate::terminal_owner_write_gateway::append_task_transcript(
+        state,
+        ExecutionTranscriptEntryDraft {
+            session_id: task_session_id.to_string(),
+            kind,
+            summary: summary.into(),
+            metadata,
+        },
+    )
+    .await
+    {
         Ok(entry) => vec![entry],
         Err(err) => {
             log::warn!("[MainChatAgent] append transcript failed: {}", err);
@@ -224,15 +228,15 @@ pub(crate) async fn append_main_chat_direct_answer_contract_transcript(
         selected_skill_id,
     )
     .await?;
-    let store = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    store
-        .lock()
-        .await
-        .record_context_snapshot_ref(task_session_id, &compiled_context.context_snapshot_ref)
-        .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
+    crate::terminal_owner_write_gateway::write_task_session(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::RecordContextSnapshotRef(
+            compiled_context.context_snapshot_ref.clone(),
+        ),
+    )
+    .await
+    .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
     entries.extend(
         append_main_chat_agent_transcript(
             state,
@@ -267,13 +271,16 @@ pub(crate) async fn complete_main_chat_agent_turn_session(
     else {
         return Err("main_chat_task_session_id_missing_at_completion".into());
     };
-    let Some(ref store_arc) = state.main_chat_agent_session_store else {
+    if state.main_chat_agent_session_store.is_none() {
         return Err("main_chat_agent_session_store_unavailable_at_completion".into());
-    };
-    let store = store_arc.lock().await;
-    store
-        .complete_session(task_session_id, final_summary)
-        .map_err(|err| format!("complete Main Chat task session failed: {err}"))?;
+    }
+    crate::terminal_owner_write_gateway::write_task_session(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::Complete(final_summary.into()),
+    )
+    .await
+    .map_err(|err| format!("complete Main Chat task session failed: {err}"))?;
     Ok(())
 }
 
@@ -288,23 +295,25 @@ pub(crate) async fn enqueue_main_chat_agent_action(
         action_type.to_string(),
         description.to_string(),
     ));
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
-    let queue = queue_arc.lock().await;
-    let queued = queue
-        .enqueue(
-            task_session_id,
-            ExecutionAction::new(action_type.to_string(), description.to_string()),
-            policy,
-        )
-        .map_err(|err| format!("enqueue Main Chat action failed: {err}"))?;
-    drop(queue);
+    let queued = crate::terminal_owner_write_gateway::enqueue_action(
+        state,
+        task_session_id,
+        ExecutionAction::new(action_type.to_string(), description.to_string()),
+        policy,
+    )
+    .await
+    .map_err(|err| format!("enqueue Main Chat action failed: {err}"))?;
 
-    if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        if let Err(err) = store.record_action_queue_id(task_session_id, &queued.id) {
+    if state.main_chat_agent_session_store.is_some() {
+        if let Err(err) = crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::RecordActionQueueId(
+                queued.id.clone(),
+            ),
+        )
+        .await
+        {
             log::warn!("[MainChatAgent] record action id failed: {}", err);
         }
     }
@@ -679,7 +688,7 @@ async fn persist_main_chat_failure_terminal_receipt(
     } else {
         format!("terminal:{run_id}:{}", failure_kind.as_str())
     };
-    crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+    crate::terminal_owner_write_gateway::append_runtime_event(
         state,
         task_session_id,
         run_id,
@@ -737,15 +746,18 @@ pub(crate) async fn record_main_chat_post_commit_degradation(
         .main_chat_agent_session_store
         .as_ref()
         .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let task_session = store
-        .load_session(task_session_id)
-        .map_err(|error| format!("load task for post-commit degradation failed: {error}"))?
-        .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?;
     let source_ref = metadata_safe_failure_label(source_ref, 120);
-    let existing = store
-        .list_transcript_entries(task_session_id)
-        .map_err(|error| format!("load post-commit degradation transcript failed: {error}"))?;
+    let (task_lifecycle_status, existing) = {
+        let store = store_arc.lock().await;
+        let task_session = store
+            .load_session(task_session_id)
+            .map_err(|error| format!("load task for post-commit degradation failed: {error}"))?
+            .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?;
+        let existing = store
+            .list_transcript_entries(task_session_id)
+            .map_err(|error| format!("load post-commit degradation transcript failed: {error}"))?;
+        (task_session.status, existing)
+    };
     if let Some(entry) = existing.iter().rev().find(|entry| {
         string_from_failure_metadata(&entry.metadata, &["runId", "run_id"]).as_deref()
             == Some(run_id)
@@ -763,8 +775,9 @@ pub(crate) async fn record_main_chat_post_commit_degradation(
     }
 
     let error_digest = format!("sha256:{:x}", Sha256::digest(error.as_bytes()));
-    let entry = store
-        .append_transcript_entry(ExecutionTranscriptEntryDraft {
+    let entry = crate::terminal_owner_write_gateway::append_task_transcript(
+        state,
+        ExecutionTranscriptEntryDraft {
             session_id: task_session_id.to_string(),
             kind: ExecutionTranscriptEntryKind::Error,
             summary: "Canonical execution reached a terminal state, but durable event projection or terminal delivery failed."
@@ -776,8 +789,8 @@ pub(crate) async fn record_main_chat_post_commit_degradation(
                 "task_session_id": task_session_id,
                 "canonicalExecutionStatus": run_status.to_string(),
                 "canonical_execution_status": run_status.to_string(),
-                "taskLifecycleStatus": task_session.status.as_str(),
-                "task_lifecycle_status": task_session.status.as_str(),
+                "taskLifecycleStatus": task_lifecycle_status.as_str(),
+                "task_lifecycle_status": task_lifecycle_status.as_str(),
                 "persistenceStatus": "projection_degraded",
                 "persistence_status": "projection_degraded",
                 "finalDeliveryStatus": "failed",
@@ -790,7 +803,9 @@ pub(crate) async fn record_main_chat_post_commit_degradation(
                 "canonicalExecutionPreserved": true,
                 "safeReplay": "reconcile_projection_not_reexecute_effects",
             }),
-        })
+        },
+    )
+        .await
         .map_err(|error| format!("append post-commit degradation transcript failed: {error}"))?;
     Ok(entry.id)
 }
@@ -885,11 +900,13 @@ async fn finalize_agent_run_failure(
         .agent_run_store
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let mut run = store
-        .get_run(run_id)
-        .map_err(|err| format!("load AgentRun for failure finalizer failed: {err}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    let mut run = {
+        let store = store_arc.lock().await;
+        store
+            .get_run(run_id)
+            .map_err(|err| format!("load AgentRun for failure finalizer failed: {err}"))?
+            .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?
+    };
     if run.status == AgentRunStatus::Completed {
         return Ok(());
     }
@@ -908,8 +925,8 @@ async fn finalize_agent_run_failure(
             });
         }
     }
-    store
-        .update_run(&run)
+    crate::terminal_owner_write_gateway::update_agent_run(state, &run)
+        .await
         .map_err(|err| format!("update AgentRun failure finalizer failed: {err}"))
 }
 
@@ -926,11 +943,13 @@ async fn finalize_task_session_failure(
         .main_chat_agent_session_store
         .as_ref()
         .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let session = store
-        .load_session(task_session_id)
-        .map_err(|err| format!("load task session for failure finalizer failed: {err}"))?
-        .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?;
+    let session = {
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|err| format!("load task session for failure finalizer failed: {err}"))?
+            .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?
+    };
     if matches!(
         session.status,
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
@@ -946,37 +965,33 @@ async fn finalize_task_session_failure(
         return Ok(());
     }
 
-    match failure_kind {
+    let write = match failure_kind {
         MainChatTaskFailureKind::Cancelled => {
-            store
-                .cancel_session(task_session_id, safe_reason)
-                .map(|_| ())
-                .map_err(|err| format!("cancel task failure finalizer failed: {err}"))?;
+            crate::terminal_owner_write_gateway::TaskSessionWrite::Cancel(safe_reason.into())
         }
         MainChatTaskFailureKind::PolicyBlocker => {
             let mut blockers = session.pending_blockers.clone();
             blockers.push(safe_reason.to_string());
             blockers.sort();
             blockers.dedup();
-            store
-                .set_pending_blockers(task_session_id, blockers)
-                .map_err(|err| format!("set policy blocker finalizer failed: {err}"))?;
-            store
-                .block_session(task_session_id, safe_reason)
-                .map(|_| ())
-                .map_err(|err| format!("block task failure finalizer failed: {err}"))?;
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                blockers,
+                transition: crate::terminal_owner_write_gateway::TaskSessionTransition::Block(
+                    safe_reason.into(),
+                ),
+            }
         }
         MainChatTaskFailureKind::Timeout
         | MainChatTaskFailureKind::Interrupted
         | MainChatTaskFailureKind::ProviderError
         | MainChatTaskFailureKind::ToolError
         | MainChatTaskFailureKind::UnknownError => {
-            store
-                .fail_session(task_session_id, safe_reason)
-                .map(|_| ())
-                .map_err(|err| format!("fail task failure finalizer failed: {err}"))?;
+            crate::terminal_owner_write_gateway::TaskSessionWrite::Fail(safe_reason.into())
         }
-    }
+    };
+    crate::terminal_owner_write_gateway::write_task_session(state, task_session_id, write)
+        .await
+        .map_err(|err| format!("write task failure finalizer failed: {err}"))?;
     Ok(())
 }
 
@@ -1002,10 +1017,12 @@ async fn append_failure_finalizer_transcript(
         .main_chat_agent_session_store
         .as_ref()
         .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let existing = store
-        .list_transcript_entries(task_session_id)
-        .map_err(|err| format!("load transcript before failure finalizer failed: {err}"))?;
+    let existing = {
+        let store = store_arc.lock().await;
+        store
+            .list_transcript_entries(task_session_id)
+            .map_err(|err| format!("load transcript before failure finalizer failed: {err}"))?
+    };
     if let Some(entry) = existing.iter().rev().find(|entry| {
         string_from_failure_metadata(&entry.metadata, &["failureKind", "failure_kind"]).as_deref()
             == Some(input.failure_kind.as_str())
@@ -1060,14 +1077,17 @@ async fn append_failure_finalizer_transcript(
             "Main Chat task failed with an unknown governed runtime error."
         }
     };
-    let entry = store
-        .append_transcript_entry(ExecutionTranscriptEntryDraft {
+    let entry = crate::terminal_owner_write_gateway::append_task_transcript(
+        input.state,
+        ExecutionTranscriptEntryDraft {
             session_id: task_session_id.to_string(),
             kind: ExecutionTranscriptEntryKind::Error,
             summary: summary.to_string(),
             metadata,
-        })
-        .map_err(|err| format!("append failure finalizer transcript failed: {err}"))?;
+        },
+    )
+    .await
+    .map_err(|err| format!("append failure finalizer transcript failed: {err}"))?;
     Ok(Some(entry.id))
 }
 

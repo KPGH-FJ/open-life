@@ -552,14 +552,10 @@ impl ProposalStore {
             .context("terminal owner proposal is not bindable")?;
         proposal.run_id = None;
         proposal.source_detail = None;
-        if let Some(after) = proposal.after.as_object_mut() {
-            after.remove("originatingTaskSessionId");
-            after.remove("originating_task_session_id");
-        }
         tx.execute(
-            "UPDATE proposals SET run_id = NULL, source_detail = NULL, after_json = ?2
+            "UPDATE proposals SET run_id = NULL, source_detail = NULL
              WHERE id = ?1 AND dispatch_state = 'unclaimed'",
-            params![proposal_id, serde_json::to_string(&proposal.after)?],
+            [proposal_id],
         )?;
         tx.execute(
             "INSERT INTO proposal_terminal_owner_origins (
@@ -1353,7 +1349,13 @@ impl ProposalStore {
              INNER JOIN proposal_terminal_owner_origins origin
                 ON origin.proposal_id = proposal.id
              WHERE proposal.dispatch_claim_id IS NOT NULL
-               AND proposal.dispatch_state IN ('claimed', 'confirmed_projection_pending')
+               AND (
+                    proposal.dispatch_state = 'confirmed_projection_pending'
+                    OR (
+                        proposal.dispatch_state = 'claimed'
+                        AND proposal.proposal_type = 'memory_write'
+                    )
+               )
              ORDER BY proposal.dispatch_claimed_at ASC, proposal.id ASC
              LIMIT ?1",
         )?;
@@ -1363,6 +1365,37 @@ impl ProposalStore {
                 row.get::<_, String>(16)?,
                 row.get::<_, String>(17)?,
             ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Startup-only recovery input for an ExternalWriteAction whose dispatch
+    /// claim committed before ArtifactMaterializer persisted its prepared
+    /// intent. Since the product path always writes the artifact intent before
+    /// staging bytes, absence of that row proves the effect was not attempted.
+    pub fn list_claimed_external_writes_without_artifact_intent(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut statement = conn.prepare(
+            "SELECT proposal.id, proposal.dispatch_claim_id
+             FROM proposals proposal
+             LEFT JOIN artifact_effects artifact
+                ON artifact.proposal_id = proposal.id
+             WHERE proposal.proposal_type = 'external_write_action'
+               AND proposal.dispatch_state = 'claimed'
+               AND proposal.dispatch_claim_id IS NOT NULL
+               AND artifact.proposal_id IS NULL
+             ORDER BY proposal.dispatch_claimed_at ASC, proposal.id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit.clamp(1, 250))?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)

@@ -1,7 +1,7 @@
 # OpenLife BR4-D055 terminal-owner RED matrix
 
-> Status: executable RED-oracle contract; production implementation not started
-> Scope: tests, test-only barriers, and evidence commands only
+> Status: GREEN implementation and executable regression contract
+> Scope: production terminal-owner authority, restart reconciliation, and evidence commands
 > Authority: subordinate to `AGENTS.md`, the Phase7 single-system contract, and
 > `plans/openlife_backend_remediation_v4_discovered_findings.json`
 
@@ -12,10 +12,35 @@ caller-shaped receipt. The target is one durable terminalization epoch, one
 production terminal-owner write gateway, and owner-local transition receipts
 that remain verifiable after reopening the real file-backed stores.
 
-The contract names under the explicit `d055_compile_red` cfg are provisional.
-The invariants and stored facts in the tests are authoritative. A production
-implementation may rename an API only by updating this matrix and its compile
-oracle in the same reviewed change.
+The eleven target tests run in the normal library test target. The invariants
+and stored facts in the tests are authoritative. A production implementation
+may rename an API only by updating this matrix and its oracle in the same
+reviewed change.
+
+## Oracle amendment v2
+
+The original RED oracle asked `TerminalOwnerWriteGateway` to own an observable
+external-dispatch adapter. That shape was rejected during implementation
+because it would create a second external-effect authority beside the existing
+`ArtifactMaterializer`.
+
+The corrected oracle preserves the safety requirement without preserving the
+bad abstraction:
+
+- `ArtifactMaterializer` remains the sole external file-effect owner and
+  persists prepared/staged/confirmed/unknown truth.
+- `TerminalOwnerWriteGateway` fails closed if asked to execute a claimed
+  `ExternalWriteAction`; it may only consume confirmed durable effect truth and
+  advance the Task/successor/Proposal projections.
+- the D055 restart test persists a real artifact `unknown` record and proves
+  two terminal-owner reconciliation passes do not redispatch or create a
+  successor;
+- the product artifact restart test separately proves staged bytes recover
+  without blind redispatch.
+
+This is a versioned correction to the frozen test expectation, not a relaxation
+of the invariant. It removes a parallel execution route and strengthens the
+one-authority contract.
 
 ## Evidence separation
 
@@ -24,11 +49,11 @@ oracle in the same reviewed change.
 | D034 authority guard | GREEN, exactly one selected test | Proves D055 did not reintroduce a crate/feature-forgeable test authority surface. |
 | Normal buffered + streaming recovery | GREEN, exactly one selected test | One real local HTTP dispatch, one provider receipt, one final; both delivery modes recover without redispatch. Local HTTP is not external-provider credit. |
 | Unproven post-final drift | GREEN, exactly one selected test | Both recovery modes fail closed; no fake done event and no redispatch. |
-| Real sensitive-Memory accept at SEALING | RED, exactly one selected test | Real Main Chat kernel + ReviewWorkflow + ProposalStore path. Current code accepts during SEALING; target returns the exact typed defer before claim. |
-| Forged free-text origin | RED, exactly one selected test | Diagnostic counterexample only. `source_detail` and `after` must never gain TaskSession or successor authority. |
-| Writer deletion guard | RED, exactly one selected test | Deletion/absence evidence only; it does not claim source strings prove behavior. |
-| Terminal-origin minter deletion guard | RED, exactly one selected test | Full Rust production-source absence scan. It is deletion evidence only; dynamic negative cases prove authority behavior. |
-| Explicit target compile contract | RED at production API compilation | Eleven concrete tests use real file-backed Conversation, EventStore, TaskSessionStore, ProposalStore, and Memory lifecycle owners plus an observable external-dispatch adapter. RED must not be a missing test file or zero-test filter. |
+| Real sensitive-Memory accept at SEALING | GREEN, exactly one selected test | Real Main Chat kernel + ReviewWorkflow + ProposalStore path returns the exact typed defer before claim. |
+| Forged free-text origin | GREEN, exactly one selected test | Diagnostic counterexample only. `source_detail` and `after` cannot gain TaskSession or successor authority. |
+| Writer deletion guard | GREEN, exactly one selected test | Deletion/absence evidence only; it does not claim source strings prove behavior. |
+| Terminal-origin minter deletion guard | GREEN, exactly one selected test | Full Rust production-source absence scan. It is deletion evidence only; dynamic negative cases prove authority behavior. |
+| Explicit target contract | GREEN in the normal library test target | Eleven concrete tests use real file-backed Conversation, EventStore, TaskSessionStore, ProposalStore, and Memory lifecycle owners. External-effect truth comes from the ArtifactMaterializer-owned durable record rather than a second gateway executor. |
 
 ### Cross-store crash matrix
 
@@ -83,13 +108,12 @@ cargo test -p openlife-tauri \
 rg -n '^async fn d055_target_' \
   src-tauri/src/d055_terminal_owner_graph_compile_red.rs
 
-RUSTFLAGS='--cfg d055_compile_red --check-cfg=cfg(d055_compile_red)' \
-  cargo test -p openlife-tauri --lib d055_target --no-run
+cargo test -p openlife-tauri --lib d055_target -- --list
+cargo test -p openlife-tauri --lib d055_target -- --nocapture
 ```
 
-The compile command must currently fail on missing production terminal-owner
-types/methods while the test module file itself exists. It contains exactly
-eleven `d055_target_*` tests:
+The list command must report exactly eleven `d055_target_*` tests and the run
+command must execute all eleven successfully:
 
 1. file-backed canonical-message-bound origin acceptance and reopen-verifiable
    owner-local receipt;
@@ -105,8 +129,9 @@ eleven `d055_target_*` tests:
 8. operation/session/task mismatch, foreign canonical-store identity,
    tombstoned-message and owner rebind rejection; exact cloned/idempotent replay
    recovers the same admission/epoch and cannot mint another generation;
-9. observable external-dispatch `remote_unknown` with two restart reconciliation
-   passes and an exact adapter call count of one;
+9. a claimed ExternalWriteAction is rejected by the terminal-owner gateway,
+   ArtifactMaterializer-owned durable `unknown` truth is persisted, and two
+   restart reconciliation passes perform zero redispatch and create no successor;
 10. real EventStore final insert + SEALED-CAS transaction rollback failpoint;
 11. real sensitive-Memory runtime defer, post-seal exact-once acceptance, and
    buffered/streaming successor recovery.
@@ -150,18 +175,19 @@ eleven `d055_target_*` tests:
   resumes the original claim, reaches exactly one Memory owner, one Task owner
   transition, one successor, and one Proposal projection, then a second
   reconciliation changes nothing.
-- An observable external-dispatch adapter returns `remote_unknown` after one
-  actual call. Reopening all stores and running reconciliation twice leaves its
-  call count at one, its Proposal dispatch `unknown`, its Task blocked, and its
-  successor absent. Summary counters are supporting evidence, not the oracle.
+- TerminalOwnerWriteGateway cannot dispatch an ExternalWriteAction. The
+  ArtifactMaterializer-owned record persists `unknown`; reopening all stores
+  and running terminal-owner reconciliation twice leaves the Proposal dispatch
+  `unknown`, the Task blocked, and the successor absent. The separate
+  `artifact_restart_recovers_staged_bytes_without_blind_redispatch` product test
+  proves restart recovery stays within the sole artifact-effect authority.
 - The one successor fact binds Proposal id, immutable final event id,
   TaskSession owner id, before/after revision and digest, and the verified local
   receipt ref/digest. Unknown or unbound history remains rejected.
 - Normal test builds stay GREEN without a `src-tauri` `test-utils` feature or
   opaque integration harness.
-- Before GREEN, move the eleven named target tests from the custom cfg into
-  normal `#[cfg(test)]`, then prove the filter is non-zero and all eleven
-  execute:
+- The eleven named target tests remain in normal `#[cfg(test)]`; prove the
+  filter is non-zero and all eleven execute:
 
 ```sh
 cargo test -p openlife-tauri --lib d055_target -- --list

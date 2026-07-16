@@ -2458,8 +2458,12 @@ fn assert_mcp_tool_permission_proposal_action(
             proposal.source
         ));
     }
-    if proposal.source_detail.as_deref()
-        != Some(format!("main_chat_agent_task_session:{task_session_id}").as_str())
+    if proposal
+        .after
+        .get("pending_action_identity")
+        .and_then(|identity| identity.get("taskSessionId"))
+        .and_then(serde_json::Value::as_str)
+        != Some(task_session_id)
     {
         return Err("MCP permission proposal not linked to task session".into());
     }

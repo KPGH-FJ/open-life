@@ -570,14 +570,11 @@ async fn load_self_state_proposals(
         .unwrap_or_default()
         .into_iter()
         .filter(|proposal| {
-            proposal
-                .source_detail
-                .as_deref()
-                .is_some_and(|source_detail| {
-                    source_detail == task_session_id
-                        || source_detail
-                            == format!("main_chat_agent_task_session:{task_session_id}")
-                })
+            proposal_store
+                .terminal_owner_origin_binding(&proposal.id)
+                .ok()
+                .flatten()
+                .is_some_and(|origin| origin.task_session_id() == task_session_id)
                 || run_id
                     .map(|run_id| proposal.run_id.as_deref() == Some(run_id))
                     .unwrap_or(false)

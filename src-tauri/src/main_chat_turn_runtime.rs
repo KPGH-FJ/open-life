@@ -929,20 +929,14 @@ async fn fail_task_session_after_agent_run_create_failure(
     task_session_id: &str,
     create_error: &str,
 ) -> Result<(), String> {
-    let store_arc = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| {
-            format!(
-                "canonical AgentRun creation failed and task cleanup store is unavailable: {create_error}"
-            )
-        })?;
-    let store = store_arc.lock().await;
-    store
-        .fail_session(
-            task_session_id,
-            "Canonical AgentRun persistence failed before execution started.",
-        )
+    crate::terminal_owner_write_gateway::write_task_session(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::Fail(
+            "Canonical AgentRun persistence failed before execution started.".into(),
+        ),
+    )
+    .await
         .map_err(|cleanup_error| {
             format!(
                 "canonical AgentRun creation failed ({create_error}); task cleanup failed: {cleanup_error}"
@@ -1116,7 +1110,12 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             return Err("main_chat_replay_action_task_identity_mismatch".into());
         }
         let prepared = prepare_openlife_replay(self.state, &session, &action).await?;
-        let canonical_run_id = prepared.canonical_run_id.clone();
+        let PreparedOpenLifeReplay {
+            action_plan,
+            retry_proof,
+            canonical_run_id,
+            envelope,
+        } = prepared;
         let cancellation_registry = {
             self.state
                 .main_chat_runtime_state
@@ -1132,39 +1131,134 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                     "OpenLifeTurnRuntime refused a second replay owner for {task_session_id}: {error}"
                 )
             })?;
+        let replay_cause = match kind {
+            OpenLifeReplayKind::Retry => {
+                crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry
+            }
+            OpenLifeReplayKind::ResumeAfterPermission => {
+                crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission
+            }
+        };
+        let replay_admission =
+            crate::terminal_owner_write_gateway::issue_terminal_owner_replay_epoch_admission(
+                self.state,
+                &session,
+                &action,
+                &envelope,
+                replay_cause,
+                action_bound_permission.as_ref(),
+                retry_proof,
+            )
+            .await?;
+        let replay_epoch = self
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await
+            .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
+            .map_err(|error| format!("open terminal owner replay epoch failed: {error}"))?;
         if registration.token.is_cancelled() {
-            finalize_openlife_replay_cancellation(
+            let cancellation_result = finalize_openlife_replay_cancellation(
                 self.state,
                 &task_session_id,
                 &canonical_run_id,
                 &registration,
             )
-            .await?;
-            return Err("main_chat_replay_locally_aborted:before_claim".into());
+            .await;
+            let result: Result<OpenLifeReplayOutput, String> = match cancellation_result {
+                Ok(()) => Err("main_chat_replay_locally_aborted:before_claim".into()),
+                Err(error) => Err(error),
+            };
+            let seal_result = persist_openlife_replay_final_receipt(
+                self.state,
+                &session,
+                &canonical_run_id,
+                replay_epoch.generation(),
+                registration.execution_id(),
+                result.as_ref().err().map(String::as_str),
+            )
+            .await;
+            drop(registration);
+            return match (result, seal_result) {
+                (result, Ok(_)) => result,
+                (Ok(_), Err(seal_error)) => Err(format!(
+                    "terminal_owner_replay_finalization_failed:{seal_error}"
+                )),
+                (Err(error), Err(seal_error)) => Err(format!(
+                    "{error}; terminal_owner_replay_finalization_failed:{seal_error}"
+                )),
+            };
         }
-
-        let replay_claim = claim_openlife_replay(
+        let replay_claim = match claim_openlife_replay(
             self.state,
             &action,
             registration.execution_id(),
-            prepared.retry_proof,
+            replay_admission.into_retry_proof(),
         )
-        .await?;
+        .await
+        {
+            Ok(claim) => claim,
+            Err(error) => {
+                let seal_result = persist_openlife_replay_final_receipt(
+                    self.state,
+                    &session,
+                    &canonical_run_id,
+                    replay_epoch.generation(),
+                    registration.execution_id(),
+                    Some(&error),
+                )
+                .await;
+                drop(registration);
+                if let Err(seal_error) = seal_result {
+                    return Err(format!(
+                        "{error}; terminal_owner_replay_finalization_failed:{seal_error}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
         if registration.token.is_cancelled() {
-            finalize_openlife_replay_cancellation(
+            let cancellation_result = finalize_openlife_replay_cancellation(
                 self.state,
                 &task_session_id,
                 &canonical_run_id,
                 &registration,
             )
-            .await?;
-            return Err("main_chat_replay_locally_aborted:after_claim".into());
+            .await;
+            let result: Result<OpenLifeReplayOutput, String> = match cancellation_result {
+                Ok(()) => Err("main_chat_replay_locally_aborted:after_claim".into()),
+                Err(error) => Err(error),
+            };
+            let seal_result = persist_openlife_replay_final_receipt(
+                self.state,
+                &session,
+                &canonical_run_id,
+                replay_epoch.generation(),
+                registration.execution_id(),
+                result.as_ref().err().map(String::as_str),
+            )
+            .await;
+            drop(registration);
+            if let Err(seal_error) = seal_result {
+                return Err(format!(
+                    "{}; terminal_owner_replay_finalization_failed:{seal_error}",
+                    result
+                        .as_ref()
+                        .err()
+                        .map(String::as_str)
+                        .unwrap_or("main_chat_replay_locally_aborted")
+                ));
+            }
+            return result;
         }
 
         let claimed_action = load_openlife_replay_action(self.state, &action_id).await?;
         let replay_action = if kind == OpenLifeReplayKind::Retry {
             transition_claimed_openlife_replay(
                 self.state,
+                &task_session_id,
                 &action_id,
                 &replay_claim.claim_id,
                 claimed_action.status,
@@ -1217,7 +1311,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 &session,
                 &replay_action,
                 &replay_claim,
-                prepared.action_plan,
+                action_plan,
                 &canonical_run_id,
                 &registration,
                 action_bound_permission.as_ref(),
@@ -1232,40 +1326,66 @@ impl<'a> OpenLifeTurnRuntime<'a> {
 
         let result = match outcome {
             RuntimeReplayOutcome::Cancelled => {
-                finalize_openlife_replay_cancellation(
+                match finalize_openlife_replay_cancellation(
                     self.state,
                     &task_session_id,
                     &canonical_run_id,
                     &registration,
                 )
-                .await?;
-                Err(MAIN_CHAT_REPLAY_ABORT_DURING_TOOL_EXECUTION.into())
+                .await
+                {
+                    Ok(()) => Err(MAIN_CHAT_REPLAY_ABORT_DURING_TOOL_EXECUTION.into()),
+                    Err(error) => Err(error),
+                }
             }
             RuntimeReplayOutcome::Completed(result) => {
                 if registration.token.is_cancelled() {
-                    finalize_openlife_replay_cancellation(
+                    match finalize_openlife_replay_cancellation(
                         self.state,
                         &task_session_id,
                         &canonical_run_id,
                         &registration,
                     )
-                    .await?;
-                    Err("main_chat_replay_locally_aborted:after_execution".into())
+                    .await
+                    {
+                        Ok(()) => Err("main_chat_replay_locally_aborted:after_execution".into()),
+                        Err(error) => Err(error),
+                    }
                 } else {
-                    settle_openlife_replay_owner_exit(
+                    match settle_openlife_replay_owner_exit(
                         self.state,
                         &task_session_id,
                         &canonical_run_id,
                         &registration,
                         result.as_ref().err().map(String::as_str),
                     )
-                    .await?;
-                    result
+                    .await
+                    {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    }
                 }
             }
         };
+        let seal_result = persist_openlife_replay_final_receipt(
+            self.state,
+            &session,
+            &canonical_run_id,
+            replay_epoch.generation(),
+            registration.execution_id(),
+            result.as_ref().err().map(String::as_str),
+        )
+        .await;
         drop(registration);
-        result
+        match (result, seal_result) {
+            (result, Ok(_)) => result,
+            (Ok(_), Err(seal_error)) => Err(format!(
+                "terminal_owner_replay_finalization_failed:{seal_error}"
+            )),
+            (Err(error), Err(seal_error)) => Err(format!(
+                "{error}; terminal_owner_replay_finalization_failed:{seal_error}"
+            )),
+        }
     }
 
     /// Consume a cancel-before-registration tombstone as a short-lived
@@ -1466,7 +1586,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         };
         let provider_durability_scope =
             MainChatProviderDurabilityScope::issue(&task_session_id, &canonical_run_id)?;
-        if let Err(error) = crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+        if let Err(error) = crate::terminal_owner_write_gateway::append_runtime_event(
             self.state,
             &task_session_id,
             &canonical_run_id,
@@ -2000,6 +2120,7 @@ struct PreparedOpenLifeReplay {
     action_plan: crate::main_chat_react_tool_selection::MainChatReactActionPlan,
     retry_proof: openlife_core::agent::tool_gateway::ToolAutomaticRetryProof,
     canonical_run_id: String,
+    envelope: DurableMainChatReplayExecutionEnvelope,
 }
 
 pub(crate) fn canonical_openlife_replay_envelope(
@@ -2142,7 +2263,31 @@ async fn prepare_openlife_replay(
         action_plan,
         retry_proof,
         canonical_run_id,
+        envelope,
     })
+}
+
+#[cfg(test)]
+pub(crate) async fn issue_terminal_owner_retry_epoch_admission_for_test(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+) -> Result<crate::terminal_owner_write_gateway::TerminalOwnerReplayEpochAdmission, String> {
+    let PreparedOpenLifeReplay {
+        retry_proof,
+        envelope,
+        ..
+    } = prepare_openlife_replay(state, session, action).await?;
+    crate::terminal_owner_write_gateway::issue_terminal_owner_replay_epoch_admission(
+        state,
+        session,
+        action,
+        &envelope,
+        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry,
+        None,
+        retry_proof,
+    )
+    .await
 }
 
 /// Validate whether the current read model may advertise replay without
@@ -2164,24 +2309,22 @@ async fn claim_openlife_replay(
     owner_execution_id: &str,
     retry_proof: openlife_core::agent::tool_gateway::ToolAutomaticRetryProof,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::ActionReplayClaim, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .claim_replay_with_automatic_retry_proof(
-            &action.id,
-            action.status,
-            action.revision,
-            owner_execution_id,
-            retry_proof,
-        )
-        .map_err(|error| format!("claim canonical Main Chat replay failed: {error}"))
+    crate::terminal_owner_write_gateway::claim_action_replay(
+        state,
+        &action.session_id,
+        &action.id,
+        action.status,
+        action.revision,
+        owner_execution_id,
+        retry_proof,
+    )
+    .await
+    .map_err(|error| format!("claim canonical Main Chat replay failed: {error}"))
 }
 
 async fn transition_claimed_openlife_replay(
     state: &Arc<AppState>,
+    task_session_id: &str,
     action_id: &str,
     claim_id: &str,
     expected_status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
@@ -2189,21 +2332,18 @@ async fn transition_claimed_openlife_replay(
     status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
     metadata: Option<serde_json::Value>,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .transition_claimed_replay(
-            action_id,
-            claim_id,
-            expected_status,
-            expected_revision,
-            status,
-            metadata,
-        )
-        .map_err(|error| format!("transition canonical Main Chat replay failed: {error}"))
+    crate::terminal_owner_write_gateway::transition_claimed_action_replay(
+        state,
+        task_session_id,
+        action_id,
+        claim_id,
+        expected_status,
+        expected_revision,
+        status,
+        metadata,
+    )
+    .await
+    .map_err(|error| format!("transition canonical Main Chat replay failed: {error}"))
 }
 
 async fn fail_and_release_openlife_replay_before_dispatch(
@@ -2213,21 +2353,18 @@ async fn fail_and_release_openlife_replay_before_dispatch(
     safe_error: &str,
     metadata: serde_json::Value,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .fail_and_release_replay_claim_before_dispatch(
-            &action.id,
-            claim_id,
-            action.status,
-            action.revision,
-            safe_error,
-            Some(metadata),
-        )
-        .map_err(|error| format!("fail pre-dispatch canonical replay failed: {error}"))
+    crate::terminal_owner_write_gateway::fail_and_release_action_replay_before_dispatch(
+        state,
+        &action.session_id,
+        &action.id,
+        claim_id,
+        action.status,
+        action.revision,
+        safe_error,
+        Some(metadata),
+    )
+    .await
+    .map_err(|error| format!("fail pre-dispatch canonical replay failed: {error}"))
 }
 
 async fn fail_claimed_openlife_replay(
@@ -2237,21 +2374,18 @@ async fn fail_claimed_openlife_replay(
     safe_error: &str,
     metadata: serde_json::Value,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .fail_claimed_replay(
-            &action.id,
-            claim_id,
-            action.status,
-            action.revision,
-            safe_error,
-            Some(metadata),
-        )
-        .map_err(|error| format!("fail claimed canonical replay failed: {error}"))
+    crate::terminal_owner_write_gateway::fail_claimed_action_replay(
+        state,
+        &action.session_id,
+        &action.id,
+        claim_id,
+        action.status,
+        action.revision,
+        safe_error,
+        Some(metadata),
+    )
+    .await
+    .map_err(|error| format!("fail claimed canonical replay failed: {error}"))
 }
 
 async fn release_pending_openlife_replay_claim(
@@ -2259,18 +2393,15 @@ async fn release_pending_openlife_replay_claim(
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
     claim_id: &str,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .release_pending_permission_replay_claim_without_dispatch(
-            &action.id,
-            claim_id,
-            action.revision,
-        )
-        .map_err(|error| format!("release pending canonical replay claim failed: {error}"))
+    crate::terminal_owner_write_gateway::release_pending_action_replay_claim(
+        state,
+        &action.session_id,
+        &action.id,
+        claim_id,
+        action.revision,
+    )
+    .await
+    .map_err(|error| format!("release pending canonical replay claim failed: {error}"))
 }
 
 async fn begin_canonical_openlife_replay_run(
@@ -2282,11 +2413,15 @@ async fn begin_canonical_openlife_replay_run(
         .agent_run_store
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let mut run = store
-        .get_run(run_id)
-        .map_err(|error| format!("load canonical AgentRun before replay start failed: {error}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    let mut run = {
+        let store = store_arc.lock().await;
+        store
+            .get_run(run_id)
+            .map_err(|error| {
+                format!("load canonical AgentRun before replay start failed: {error}")
+            })?
+            .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?
+    };
     if run.task_id != task_session_id {
         return Err("canonical_replay_run_task_identity_mismatch".into());
     }
@@ -2308,8 +2443,8 @@ async fn begin_canonical_openlife_replay_run(
             tool_call_index: Some(run.tool_call_count),
             timestamp: chrono::Utc::now(),
         });
-    store
-        .update_run(&run)
+    crate::terminal_owner_write_gateway::update_agent_run(state, &run)
+        .await
         .map_err(|error| format!("start canonical AgentRun replay failed: {error}"))
 }
 
@@ -2325,11 +2460,13 @@ async fn set_canonical_openlife_replay_run_status(
         .agent_run_store
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let mut run = store
-        .get_run(run_id)
-        .map_err(|error| format!("load canonical AgentRun after replay failed: {error}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    let mut run = {
+        let store = store_arc.lock().await;
+        store
+            .get_run(run_id)
+            .map_err(|error| format!("load canonical AgentRun after replay failed: {error}"))?
+            .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?
+    };
     if run.task_id != task_session_id {
         return Err("canonical_replay_run_task_identity_mismatch".into());
     }
@@ -2355,8 +2492,8 @@ async fn set_canonical_openlife_replay_run_status(
             tool_call_index: Some(run.tool_call_count),
             timestamp: chrono::Utc::now(),
         });
-    store
-        .update_run(&run)
+    crate::terminal_owner_write_gateway::update_agent_run(state, &run)
+        .await
         .map_err(|error| format!("update canonical AgentRun replay status failed: {error}"))
 }
 
@@ -2484,7 +2621,7 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatReplayLifecycleObser
         // makes the exact claim unknown before any release pass. Once this
         // fence commits, the lease reaper can no longer classify the claim as
         // safe even though the physical adapter edge has not yet been observed.
-        {
+        let action_revision = {
             let queue_arc = self
                 .state
                 .main_chat_action_queue_store
@@ -2505,13 +2642,18 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatReplayLifecycleObser
             {
                 anyhow::bail!("replay_dispatch_preflight_claim_not_owned");
             }
-            queue.fence_replay_dispatch_commit(
-                &self.action_id,
-                &self.claim_id,
-                self.claim_owner_generation,
-                action.revision,
-            )?;
-        }
+            action.revision
+        };
+        crate::terminal_owner_write_gateway::fence_action_replay_dispatch(
+            &self.state,
+            &self.task_session_id,
+            &self.action_id,
+            &self.claim_id,
+            self.claim_owner_generation,
+            action_revision,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
 
         // Recheck after both durable commits. A replacement before this point
         // fails here. A replacement after this check still retires the shared
@@ -2543,7 +2685,7 @@ impl openlife_core::agent::ToolStartedTransitionObserver for MainChatReplayLifec
         // the attempt instead of releasing it as not attempted.
         self.edge_crossed
             .store(true, std::sync::atomic::Ordering::Release);
-        {
+        let action_revision = {
             let queue_arc = self
                 .state
                 .main_chat_action_queue_store
@@ -2558,12 +2700,17 @@ impl openlife_core::agent::ToolStartedTransitionObserver for MainChatReplayLifec
             {
                 anyhow::bail!("replay_dispatch_requires_executing");
             }
-            queue.record_replay_dispatch_started(
-                &self.action_id,
-                &self.claim_id,
-                action.revision,
-            )?;
-        }
+            action.revision
+        };
+        crate::terminal_owner_write_gateway::record_action_replay_dispatch_started(
+            &self.state,
+            &self.task_session_id,
+            &self.action_id,
+            &self.claim_id,
+            action_revision,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         openlife_core::agent::ToolStartedTransitionObserver::after_dispatch(
             &self.durable_lifecycle,
             receipt,
@@ -2698,6 +2845,416 @@ async fn settle_openlife_replay_owner_exit(
     Ok(())
 }
 
+async fn persist_openlife_replay_final_receipt(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    canonical_run_id: &str,
+    replay_epoch_generation: u64,
+    replay_execution_id: &str,
+    execution_error: Option<&str>,
+) -> Result<MainChatAgentDurableEvent, String> {
+    let task_session_id = session.id.as_str();
+    let _terminal_owner_fence =
+        crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(task_session_id)
+            .await;
+    let staged_delivery_id = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .begin_terminal_owner_seal(task_session_id, canonical_run_id, replay_epoch_generation)
+            .map_err(|error| format!("begin replay terminal owner seal failed: {error}"))?;
+        event_store
+            .terminal_owner_staged_final_delivery_id(task_session_id)
+            .map_err(|error| format!("load staged replay terminal final failed: {error}"))?
+    };
+
+    let actions = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?
+            .lock()
+            .await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("list replay final actions failed: {error}"))?
+    };
+    let (task_owner, task_owner_receipt, task_owner_head, transcripts) = {
+        let tasks = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let task_owner = tasks
+            .load_session(task_session_id)
+            .map_err(|error| format!("load replay final task failed: {error}"))?
+            .ok_or_else(|| "replay_final_task_owner_missing".to_string())?;
+        let receipt = tasks
+            .canonical_owner_receipt(task_session_id)
+            .map_err(|error| format!("receipt replay final task failed: {error}"))?
+            .ok_or_else(|| "replay_final_task_owner_missing".to_string())?;
+        let head = tasks
+            .canonical_owner_head(task_session_id)
+            .map_err(|error| format!("load replay final task head failed: {error}"))?
+            .ok_or_else(|| "replay_final_task_owner_missing".to_string())?;
+        if head.digest() != receipt.digest() {
+            return Err("replay_final_task_owner_head_receipt_mismatch".into());
+        }
+        let transcripts = tasks
+            .list_transcript_entries(task_session_id)
+            .map_err(|error| format!("list replay final transcripts failed: {error}"))?;
+        (task_owner, receipt, head, transcripts)
+    };
+    let (run_owner, run_owner_revision) = {
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let run = runs
+            .get_run(canonical_run_id)
+            .map_err(|error| format!("load replay final AgentRun failed: {error}"))?
+            .ok_or_else(|| "replay_final_agent_run_missing".to_string())?;
+        let revision = runs
+            .canonical_revision(canonical_run_id)
+            .map_err(|error| format!("load replay final AgentRun revision failed: {error}"))?;
+        (run, revision)
+    };
+    if task_owner.id != task_session_id
+        || task_owner.chat_session_id != session.chat_session_id
+        || run_owner.id != canonical_run_id
+        || run_owner.task_id != task_session_id
+        || run_owner.session_id.as_deref() != Some(session.chat_session_id.as_str())
+    {
+        return Err("replay_final_canonical_owner_graph_mismatch".into());
+    }
+
+    let action_queue_refs = actions
+        .iter()
+        .map(|action| action.id.clone())
+        .collect::<Vec<_>>();
+    let action_queue_owner_digests = actions
+        .iter()
+        .map(|action| canonical_final_owner_digest("action_queue", action))
+        .collect::<Result<Vec<_>, _>>()?;
+    let transcript_refs = transcripts
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    let transcript_owner_digests = transcripts
+        .iter()
+        .map(|entry| canonical_final_owner_digest("task_transcript", entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let completed_action_refs = actions
+        .iter()
+        .filter(|action| {
+            action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+        })
+        .map(|action| action.id.clone())
+        .collect::<Vec<_>>();
+    let blocker_refs = task_owner.pending_blockers.clone();
+    let final_status = if task_owner.status
+        == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    {
+        "completed_with_pending_items"
+    } else {
+        task_owner.status.as_str()
+    };
+    let existing_staged_final = staged_delivery_id.is_some();
+    let delivery_id = staged_delivery_id.unwrap_or_else(|| {
+        format!("replay-delivery:{task_session_id}:{replay_epoch_generation}:{replay_execution_id}")
+    });
+    let final_payload = serde_json::json!({
+        "deliveryId": delivery_id,
+        "taskSessionId": task_session_id,
+        "runId": canonical_run_id,
+        "status": final_status,
+        "reasonCode": if execution_error.is_some() {
+            "replay_terminal_error"
+        } else {
+            "replay_terminal_committed"
+        },
+        "completedActionCount": completed_action_refs.len(),
+        "blockerCount": blocker_refs.len(),
+        "pendingUserActionCount": blocker_refs.len(),
+        "transcriptCount": transcripts.len(),
+        "directWritesExecuted": false,
+        "bodyStored": false,
+        "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
+        "taskOwnerStatus": task_owner.status.as_str(),
+        "taskOwnerDigestVersion": task_owner_receipt.version(),
+        "taskOwnerRevision": task_owner_head.revision(),
+        "taskOwnerDigest": task_owner_receipt.digest(),
+        "runOwnerStatus": run_owner.status.to_string(),
+        "runOwnerRevision": run_owner_revision,
+        "runOwnerDigest": canonical_final_owner_digest("agent_run", &run_owner)?,
+        "toolInvoked": true,
+        "routePath": "openlife_turn_runtime_replay",
+        "strategyLabel": session.selected_strategy.as_str(),
+        "routeReasonCode": "governed_replay_successor",
+        "blockerRefs": blocker_refs,
+        "actionQueueRefs": action_queue_refs,
+        "actionQueueOwnerDigests": action_queue_owner_digests,
+        "transcriptRefs": transcript_refs,
+        "transcriptOwnerDigests": transcript_owner_digests,
+        "completedActionRefs": completed_action_refs,
+        "requiresProvider": false,
+        "requiresToolLoop": true,
+        "replayEpochGeneration": replay_epoch_generation,
+        "replayExecutionRef": replay_execution_id,
+        "errorBodyStored": false,
+    });
+    let event_store = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+        .lock()
+        .await;
+    if !existing_staged_final {
+        event_store
+            .stage_terminal_final_payload(
+                task_session_id,
+                canonical_run_id,
+                replay_epoch_generation,
+                &delivery_id,
+                &final_payload,
+            )
+            .map_err(|error| format!("stage replay terminal final payload failed: {error}"))?;
+    }
+    event_store
+        .append_terminal_final_and_seal(
+            crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                task_session_id: task_session_id.to_string(),
+                run_id: canonical_run_id.to_string(),
+                epoch_generation: replay_epoch_generation,
+                delivery_id,
+                expected_task_owner_revision: task_owner_head.revision(),
+                expected_task_owner_digest: task_owner_head.digest().to_string(),
+                status: final_status.to_string(),
+            },
+        )
+        .map_err(|error| format!("append replay terminal final failed: {error}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReplayProjection {
+    Completed,
+    WaitingPermission,
+    Failed,
+}
+
+pub(crate) async fn reconcile_orphaned_openlife_replay_epoch_after_restart(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    canonical_run_id: &str,
+) -> Result<bool, String> {
+    use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
+
+    let epoch = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .terminal_owner_epoch(task_session_id)
+            .map_err(|error| format!("load startup replay terminal epoch failed: {error}"))?
+    };
+    let Some(epoch) = epoch else {
+        return Ok(false);
+    };
+    if epoch.generation() <= 1
+        || epoch.state() == crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+    {
+        return Ok(false);
+    }
+    if epoch.run_id() != canonical_run_id {
+        return Err("startup_replay_terminal_epoch_run_mismatch".into());
+    }
+
+    let session = load_openlife_replay_session(state, task_session_id).await?;
+    let actions = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?
+            .lock()
+            .await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("load startup replay actions failed: {error}"))?
+    };
+    if actions
+        .iter()
+        .any(|action| action.session_id != task_session_id)
+    {
+        return Err("startup_replay_action_task_identity_mismatch".into());
+    }
+    let unresolved = actions
+        .iter()
+        .filter(|action| action.status != ExecutionQueueStatus::Completed)
+        .collect::<Vec<_>>();
+    let projection = if unresolved.is_empty() {
+        StartupReplayProjection::Completed
+    } else if unresolved
+        .iter()
+        .any(|action| action.status == ExecutionQueueStatus::PendingPermission)
+    {
+        StartupReplayProjection::WaitingPermission
+    } else {
+        StartupReplayProjection::Failed
+    };
+
+    let run = {
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+            .lock()
+            .await;
+        runs.get_run(canonical_run_id)
+            .map_err(|error| format!("load startup replay AgentRun failed: {error}"))?
+            .ok_or_else(|| format!("canonical_agent_run_missing:{canonical_run_id}"))?
+    };
+    if run.task_id != task_session_id {
+        return Err("startup_replay_run_task_identity_mismatch".into());
+    }
+    let coherent = match projection {
+        StartupReplayProjection::Completed => {
+            run.status == openlife_core::agent::AgentRunStatus::Completed
+                && session.status == AgentTaskSessionStatus::Completed
+        }
+        StartupReplayProjection::WaitingPermission => {
+            run.status == openlife_core::agent::AgentRunStatus::WaitingPermission
+                && session.status == AgentTaskSessionStatus::WaitingPermission
+        }
+        StartupReplayProjection::Failed => {
+            run.status == openlife_core::agent::AgentRunStatus::Failed
+                && matches!(
+                    session.status,
+                    AgentTaskSessionStatus::Failed | AgentTaskSessionStatus::Blocked
+                )
+        }
+    };
+    let active = run.status == openlife_core::agent::AgentRunStatus::Running
+        || session.status == AgentTaskSessionStatus::Running;
+    let mut failure_receipt_persisted = false;
+
+    if epoch.state() == crate::main_chat_event_stream::TerminalOwnerSealState::Open {
+        if !coherent {
+            if !active {
+                return Err(format!(
+                    "startup_replay_terminal_projection_conflict:run={}:task={}",
+                    run.status,
+                    session.status.as_str()
+                ));
+            }
+            match projection {
+                StartupReplayProjection::Completed => {
+                    crate::terminal_owner_write_gateway::write_task_session(
+                        state,
+                        task_session_id,
+                        crate::terminal_owner_write_gateway::TaskSessionWrite::Complete(
+                            "Recovered completed replay projections after process restart.".into(),
+                        ),
+                    )
+                    .await?;
+                    let mut projected_run = run.clone();
+                    projected_run.status = openlife_core::agent::AgentRunStatus::Completed;
+                    projected_run.finished_at = Some(chrono::Utc::now());
+                    projected_run.error = None;
+                    crate::terminal_owner_write_gateway::update_agent_run(state, &projected_run)
+                        .await?;
+                }
+                StartupReplayProjection::WaitingPermission => {
+                    let mut blockers = unresolved
+                        .iter()
+                        .map(|action| format!("action:{}:{}", action.id, action.status.as_str()))
+                        .collect::<Vec<_>>();
+                    blockers.sort();
+                    blockers.dedup();
+                    crate::terminal_owner_write_gateway::write_task_session(
+                        state,
+                        task_session_id,
+                        crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                            blockers,
+                            transition: crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
+                        },
+                    )
+                    .await?;
+                    let mut projected_run = run.clone();
+                    projected_run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+                    projected_run.finished_at = None;
+                    projected_run.error = None;
+                    crate::terminal_owner_write_gateway::update_agent_run(state, &projected_run)
+                        .await?;
+                }
+                StartupReplayProjection::Failed => {
+                    finalize_main_chat_task_failure(
+                        state,
+                        Some(canonical_run_id),
+                        Some(task_session_id),
+                        MainChatTaskFailureKind::UnknownError,
+                        "The previous OpenLife process ended before the replay generation produced a durable final.",
+                        "bootstrap.orphan_open_replay_epoch",
+                    )
+                    .await?;
+                    failure_receipt_persisted = true;
+                }
+            }
+        }
+        if projection == StartupReplayProjection::Failed && !failure_receipt_persisted {
+            crate::terminal_owner_write_gateway::append_runtime_event(
+                state,
+                task_session_id,
+                canonical_run_id,
+                "failed",
+                "turn",
+                format!(
+                    "startup-replay-terminal:{task_session_id}:{}",
+                    epoch.generation()
+                ),
+                "bootstrap.orphan_open_replay_epoch",
+                serde_json::json!({
+                    "status": "failed",
+                    "kind": "unknown_error",
+                    "replayEpochGeneration": epoch.generation(),
+                    "effectObserved": false,
+                    "durableCommitAllowedAfterFailure": false,
+                }),
+            )
+            .await?;
+        }
+    } else if !coherent {
+        return Err(format!(
+            "startup_replay_sealing_projection_conflict:run={}:task={}",
+            run.status,
+            session.status.as_str()
+        ));
+    }
+
+    let execution_error = (projection == StartupReplayProjection::Failed)
+        .then_some("startup_orphan_open_replay_epoch");
+    persist_openlife_replay_final_receipt(
+        state,
+        &session,
+        canonical_run_id,
+        epoch.generation(),
+        &format!("startup-replay-recovery:{}", epoch.generation()),
+        execution_error,
+    )
+    .await?;
+    Ok(true)
+}
+
 struct OpenLifeReplayAggregateProjection {
     task_completed: bool,
     remaining_action_count: usize,
@@ -2738,11 +3295,15 @@ async fn project_openlife_replay_success_aggregate(
         .main_chat_agent_session_store
         .as_ref()
         .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let session = store
-        .load_session(task_session_id)
-        .map_err(|error| format!("reload task for aggregate replay projection failed: {error}"))?
-        .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?;
+    let session = {
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|error| {
+                format!("reload task for aggregate replay projection failed: {error}")
+            })?
+            .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?
+    };
     let mut blockers = if task_completed {
         Vec::new()
     } else {
@@ -2754,51 +3315,32 @@ async fn project_openlife_replay_success_aggregate(
     blockers.sort();
     blockers.dedup();
 
-    let commit_permit = execution_epoch
-        .begin_canonical_commit("task_session", task_session_id)
-        .map_err(|rejection| {
-            format!("aggregate replay projection rejected after cancellation: {rejection:?}")
-        })?;
-    let task_projection = (|| -> Result<(), String> {
-        store
-            .set_pending_blockers(task_session_id, blockers.clone())
-            .map_err(|error| format!("set aggregate replay blockers failed: {error}"))?;
-        if task_completed {
-            store
-                .complete_session(task_session_id, "All governed replay actions completed.")
-                .map_err(|error| format!("complete aggregate replay task failed: {error}"))?;
-        } else if has_pending_permission {
-            store
-                .mark_waiting_permission(task_session_id)
-                .map_err(|error| {
-                    format!("mark aggregate replay permission wait failed: {error}")
-                })?;
-        } else if has_failed {
-            store
-                .fail_session(
-                    task_session_id,
-                    "A governed replay action completed, but another action remains failed.",
-                )
-                .map_err(|error| format!("mark aggregate replay task failed: {error}"))?;
-        } else {
-            store
-                .block_session(
-                    task_session_id,
-                    "A governed replay action completed, but required actions remain unresolved.",
-                )
-                .map_err(|error| format!("block aggregate replay task failed: {error}"))?;
-        }
-        Ok(())
-    })();
-    match task_projection {
-        Ok(()) => commit_permit.finish_committed(),
-        Err(error) => {
-            commit_permit.finish_failed();
-            return Err(error);
-        }
-    }
-    drop(store);
-
+    let transition = if task_completed {
+        crate::terminal_owner_write_gateway::TaskSessionTransition::Complete(
+            "All governed replay actions completed.".into(),
+        )
+    } else if has_pending_permission {
+        crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission
+    } else if has_failed {
+        crate::terminal_owner_write_gateway::TaskSessionTransition::Fail(
+            "A governed replay action completed, but another action remains failed.".into(),
+        )
+    } else {
+        crate::terminal_owner_write_gateway::TaskSessionTransition::Block(
+            "A governed replay action completed, but required actions remain unresolved.".into(),
+        )
+    };
+    crate::terminal_owner_write_gateway::write_task_session_with_commit_admission(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+            blockers: blockers.clone(),
+            transition,
+        },
+        execution_epoch,
+    )
+    .await
+    .map_err(|error| format!("aggregate replay projection failed: {error}"))?;
     let (run_status, run_phase, run_message) = if task_completed {
         (
             openlife_core::agent::AgentRunStatus::Completed,
@@ -2878,6 +3420,7 @@ async fn execute_openlife_replay(
 
     let executing = transition_claimed_openlife_replay(
         state,
+        task_session_id,
         action_id,
         &replay_claim.claim_id,
         action.status,
@@ -2895,25 +3438,23 @@ async fn execute_openlife_replay(
     )
     .await?;
 
-    let task_preparation = async {
-        let store_arc = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        if matches!(
-            session.status,
-            AgentTaskSessionStatus::WaitingPermission
-                | AgentTaskSessionStatus::Blocked
-                | AgentTaskSessionStatus::Failed
-        ) {
-            store
-                .resume_session(task_session_id)
-                .map_err(|error| format!("resume task before replay failed: {error}"))?;
-        }
-        Ok::<(), String>(())
-    }
-    .await;
+    let task_preparation = if matches!(
+        session.status,
+        AgentTaskSessionStatus::WaitingPermission
+            | AgentTaskSessionStatus::Blocked
+            | AgentTaskSessionStatus::Failed
+    ) {
+        crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::Resume,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("resume task before replay failed: {error}"))
+    } else {
+        Ok(())
+    };
     if let Err(error) = task_preparation {
         fail_and_release_openlife_replay_before_dispatch(
             state,
@@ -3124,33 +3665,17 @@ async fn execute_openlife_replay(
                     serde_json::json!(ActionReplayEffectCertainty::Confirmed),
                 );
             }
-            {
-                let queue_arc = state
-                    .main_chat_action_queue_store
-                    .as_ref()
-                    .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-                let queue = queue_arc.lock().await;
-                let commit_permit = execution_epoch
-                    .begin_canonical_commit("action_queue", action_id)
-                    .map_err(|rejection| {
-                        format!("complete replay rejected after cancellation: {rejection:?}")
-                    })?;
-                let completion = queue
-                    .complete_claimed_replay(
-                        action_id,
-                        &replay_claim.claim_id,
-                        current.revision,
-                        Some(retry_metadata.clone()),
-                    )
-                    .map_err(|error| format!("complete replay effect failed: {error}"));
-                match completion {
-                    Ok(_) => commit_permit.finish_committed(),
-                    Err(error) => {
-                        commit_permit.finish_failed();
-                        return Err(error);
-                    }
-                }
-            }
+            crate::terminal_owner_write_gateway::complete_claimed_action_replay_with_commit_admission(
+                state,
+                task_session_id,
+                action_id,
+                &replay_claim.claim_id,
+                current.revision,
+                Some(retry_metadata.clone()),
+                &execution_epoch,
+            )
+            .await
+            .map_err(|error| format!("complete replay effect failed: {error}"))?;
             let aggregate = project_openlife_replay_success_aggregate(
                 state,
                 task_session_id,
@@ -3200,6 +3725,7 @@ async fn execute_openlife_replay(
             }
             let pending = transition_claimed_openlife_replay(
                 state,
+                task_session_id,
                 action_id,
                 &replay_claim.claim_id,
                 current.status,
@@ -3213,19 +3739,16 @@ async fn execute_openlife_replay(
                 .blocker_reason
                 .clone()
                 .unwrap_or_else(|| "tool_permission_required".into());
-            {
-                let store_arc = state
-                    .main_chat_agent_session_store
-                    .as_ref()
-                    .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-                let store = store_arc.lock().await;
-                store
-                    .set_pending_blockers(task_session_id, vec![blocker.clone()])
-                    .map_err(|error| format!("set replay permission blocker failed: {error}"))?;
-                store
-                    .mark_waiting_permission(task_session_id)
-                    .map_err(|error| format!("mark replay permission pending failed: {error}"))?;
-            }
+            crate::terminal_owner_write_gateway::write_task_session(
+                state,
+                task_session_id,
+                crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                    blockers: vec![blocker.clone()],
+                    transition: crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
+                },
+            )
+            .await
+            .map_err(|error| format!("project replay permission task state failed: {error}"))?;
             set_canonical_openlife_replay_run_status(
                 state,
                 task_session_id,
@@ -4275,6 +4798,9 @@ async fn persist_openlife_turn_final_delivery_receipt(
     kernel_event_count: usize,
     durable_event_count: usize,
 ) -> Result<MainChatAgentDurableEvent, String> {
+    let _terminal_owner_fence =
+        crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(task_session_id)
+            .await;
     // The D055 linearization boundary begins before any mutable owner head is
     // read. The durable epoch is already SEALING before the test barrier or
     // any canonical owner snapshot is observed.
@@ -5095,7 +5621,7 @@ async fn recover_openlife_turn_from_durable_final(
     let durable_change_rollback_states =
         final_event_string_array(&final_event, "durableChangeRollbackStates")?;
 
-    let (task, task_owner_receipt) = {
+    let (task, task_owner_receipt, recorded_task_owner_digest) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -5114,6 +5640,8 @@ async fn recover_openlife_turn_from_durable_final(
             .ok_or_else(|| {
                 "turn_operation_final_reconciliation_required:task_missing".to_string()
             })?;
+        let recorded_task_owner_digest =
+            final_payload_task_owner_digest(&final_event.payload, receipt.version())?.to_string();
         if let Some(successor) = terminal_successor.as_ref() {
             let cause_ref = final_event_string(successor, "causeRef")?;
             let before_revision = final_event_count(successor, "beforeOwnerRevision")? as u64;
@@ -5125,14 +5653,12 @@ async fn recover_openlife_turn_from_durable_final(
             let transition_receipt_digest =
                 final_event_string(successor, "localTransitionReceiptDigest")?;
             let final_owner_revision = final_event_count(&final_event, "taskOwnerRevision")? as u64;
-            let final_owner_digest =
-                final_payload_task_owner_digest(&final_event.payload, receipt.version())?;
             if final_event_string(successor, "causeKind")? != "proposal_review_acceptance"
                 || final_event_string(successor, "finalEventId")? != final_event.event_id
                 || final_event_string(successor, "ownerKind")? != "agent_task_session"
                 || final_event_string(successor, "ownerId")? != operation_id
                 || before_revision != final_owner_revision
-                || before_digest != final_owner_digest
+                || before_digest != recorded_task_owner_digest
                 || after_revision != before_revision.saturating_add(1)
             {
                 return Err(
@@ -5180,7 +5706,7 @@ async fn recover_openlife_turn_from_durable_final(
                 );
             }
         }
-        (task, receipt)
+        (task, receipt, recorded_task_owner_digest)
     };
     let (run, run_owner_revision) = {
         let runs = state
@@ -5209,8 +5735,6 @@ async fn recover_openlife_turn_from_durable_final(
     {
         return Err("turn_operation_final_reconciliation_required:owner_graph_mismatch".into());
     }
-    let recorded_task_owner_digest =
-        final_payload_task_owner_digest(&final_event.payload, task_owner_receipt.version())?;
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run)?;
     let task_owner_matches_terminal_fact = if terminal_successor.is_some() {
         true

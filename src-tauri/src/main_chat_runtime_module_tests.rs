@@ -1173,18 +1173,31 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         runtime_product_source,
         "async fn recover_openlife_turn_from_durable_final(",
     );
+    let replay_final_receipt_persistence = extract_rust_function_body(
+        runtime_product_source,
+        "async fn persist_openlife_replay_final_receipt(",
+    );
+    let final_append_owner = extract_rust_function_body(
+        &event_store,
+        "pub(crate) fn append_terminal_final_and_seal(",
+    );
     const FINAL_OWNER_SOURCE: &str = "openlife_turn_runtime.final_delivery_owner";
     assert_eq!(
         runtime_product_source.matches(FINAL_OWNER_SOURCE).count(),
-        2,
-        "production TurnRuntime must contain exactly one final append owner and one recovery authentication use"
+        1,
+        "production TurnRuntime must contain exactly one final-owner authentication use"
     );
     assert_eq!(
         final_receipt_persistence
-            .matches(FINAL_OWNER_SOURCE)
+            .matches(".append_terminal_final_and_seal(")
             .count(),
         1,
-        "ordinary FinalDelivery must have exactly one durable TurnRuntime append owner"
+        "ordinary FinalDelivery persistence must delegate exactly once to the atomic EventStore append owner"
+    );
+    assert_eq!(
+        final_append_owner.matches(FINAL_OWNER_SOURCE).count(),
+        1,
+        "the atomic EventStore transaction must assign exactly one durable FinalDelivery owner"
     );
     assert_eq!(
         final_receipt_recovery.matches(FINAL_OWNER_SOURCE).count(),
@@ -1196,8 +1209,8 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         runtime_product_source
             .matches(TASK_OWNER_RECEIPT_CALL)
             .count(),
-        2,
-        "production TurnRuntime must obtain the versioned Task owner receipt once for persistence and once for recovery"
+        3,
+        "production TurnRuntime must obtain the versioned Task owner receipt once for ordinary persistence, once for ordinary recovery, and once for replay finalization"
     );
     assert_eq!(
         final_receipt_persistence
@@ -1210,6 +1223,13 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
             .matches(TASK_OWNER_RECEIPT_CALL)
             .count(),
         1
+    );
+    assert_eq!(
+        replay_final_receipt_persistence
+            .matches(TASK_OWNER_RECEIPT_CALL)
+            .count(),
+        1,
+        "replay finalization must bind its own terminal epoch to one versioned Task owner receipt"
     );
     assert_eq!(
         final_receipt_persistence

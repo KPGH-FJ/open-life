@@ -2118,8 +2118,8 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
     }
     let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
     assert!(
-        bootstrap.contains("reconcile_lifemodel_file_mutations_with_state"),
-        "Phase5 startup must reconcile the canonical LifeModel file journal before product use"
+        bootstrap.contains("reconcile_startup_lifemodel_file_mutations_with_state"),
+        "Phase5 startup must use the bootstrap-only admission to reconcile the canonical LifeModel file journal before product use"
     );
     for (path, start, end) in [
         (

@@ -397,10 +397,6 @@ impl<'a> ReviewWorkflow<'a> {
         }
         request.proposal.run_id = None;
         request.proposal.source_detail = None;
-        if let Some(after) = request.proposal.after.as_object_mut() {
-            after.remove("originatingTaskSessionId");
-            after.remove("originating_task_session_id");
-        }
         let proposal = request.proposal.clone();
         let (proposal, created) = self
             .proposal_store

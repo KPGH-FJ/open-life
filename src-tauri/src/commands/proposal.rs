@@ -327,14 +327,17 @@ async fn reconcile_agent_runs_for_proposal(
         }
     }
 
-    let store = store.lock().await;
     let mut reconciled = 0_usize;
     for linked_run in linked_runs {
-        let Some(mut run) = store
-            .get_run(&linked_run.id)
-            .map_err(|error| error.to_string())?
-        else {
-            continue;
+        let mut run = {
+            let store = store.lock().await;
+            let Some(run) = store
+                .get_run(&linked_run.id)
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            run
         };
         if run.status != openlife_core::agent::AgentRunStatus::WaitingPermission {
             continue;
@@ -365,12 +368,36 @@ async fn reconcile_agent_runs_for_proposal(
         } else {
             LinkedAgentRunReviewOutcome::Materialized
         };
+        let unresolved_action_count =
+            if let Some(action_queue_store) = state.main_chat_action_queue_store.as_ref() {
+                action_queue_store
+                    .lock()
+                    .await
+                    .list_for_session(&run.task_id)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|action| {
+                        action.status
+                        != openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+                    })
+                    .count()
+            } else {
+                0
+            };
         match run_outcome {
-            LinkedAgentRunReviewOutcome::Materialized => {
+            LinkedAgentRunReviewOutcome::Materialized if unresolved_action_count == 0 => {
                 run.status = openlife_core::agent::AgentRunStatus::Completed;
                 run.finished_at = Some(chrono::Utc::now());
                 run.output_preview =
                     Some("All linked Proposal effects materialized through ReviewWorkflow.".into());
+                run.error = None;
+            }
+            LinkedAgentRunReviewOutcome::Materialized => {
+                run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+                run.finished_at = None;
+                run.output_preview = Some(format!(
+                    "Review effect materialized; {unresolved_action_count} governed action(s) remain unresolved."
+                ));
                 run.error = None;
             }
             LinkedAgentRunReviewOutcome::Rejected => {
@@ -386,7 +413,12 @@ async fn reconcile_agent_runs_for_proposal(
                     Some("One or more linked Proposals remain in Review Center.".into());
             }
         }
-        store.update_run(&run).map_err(|error| error.to_string())?;
+        crate::terminal_owner_write_gateway::update_agent_run_after_review_reconciliation(
+            state,
+            &proposal.id,
+            &run,
+        )
+        .await?;
         reconciled += 1;
     }
     Ok(reconciled)
@@ -634,6 +666,45 @@ async fn reconcile_artifact_effects_with_state(
     Ok((reconciled, backlog_may_remain))
 }
 
+async fn release_startup_artifact_claims_proven_before_effect(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<(usize, bool), String> {
+    let bounded_limit = limit.clamp(1, 200);
+    let claims = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .list_claimed_external_writes_without_artifact_intent(bounded_limit as usize)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+    };
+    let backlog_may_remain = claims.len() == bounded_limit as usize;
+    let mut released = 0usize;
+    for (proposal_id, claim_id) in claims {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        if store
+            .mark_dispatch_failed_before_effect(
+                &proposal_id,
+                &claim_id,
+                "startup_artifact_claim_without_prepared_intent",
+            )
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+        {
+            released += 1;
+        }
+    }
+    Ok((released, backlog_may_remain))
+}
+
 pub(crate) async fn reconcile_durable_proposal_projections_with_state(
     state: &Arc<AppState>,
     limit: i64,
@@ -665,8 +736,18 @@ async fn reconcile_durable_proposal_projections_inner(
 ) -> Result<ProposalReconciliationReport, String> {
     require_proposal_reconciliation_admission(state, admission)?;
     let bounded_limit = limit.clamp(1, 200);
-    let (artifact_effects_reconciled, artifact_backlog_may_remain) =
+    let (orphaned_claims_released, orphaned_claim_backlog_may_remain) =
+        if matches!(admission, ProposalReconciliationAdmission::StartupInternal) {
+            release_startup_artifact_claims_proven_before_effect(state, bounded_limit).await?
+        } else {
+            (0, false)
+        };
+    let (reconciled_artifact_effects, artifact_effect_backlog_may_remain) =
         reconcile_artifact_effects_with_state(state, bounded_limit).await?;
+    let artifact_effects_reconciled =
+        orphaned_claims_released.saturating_add(reconciled_artifact_effects);
+    let artifact_backlog_may_remain =
+        orphaned_claim_backlog_may_remain || artifact_effect_backlog_may_remain;
     let confirmed_projection_pending = {
         let store = state
             .proposal_store
@@ -2886,6 +2967,7 @@ async fn accept_proposal_with_state_and_confirmation(
             .terminal_owner_origin_binding(&proposal_id)
             .map_err(|error| error.to_string())?
     };
+    let mut terminal_owner_fence = None;
     if let Some(origin) = terminal_owner_origin.as_ref() {
         let epoch_state = {
             let event_store = state
@@ -2924,6 +3006,26 @@ async fn accept_proposal_with_state_and_confirmation(
                 "durableWriteExecuted": false,
             }));
         }
+        terminal_owner_fence = Some(
+            crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(
+                origin.task_session_id(),
+            )
+            .await,
+        );
+        let sealed_epoch = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await
+            .terminal_owner_epoch(origin.task_session_id())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "terminal_owner_epoch_missing".to_string())?;
+        if sealed_epoch.run_id() != origin.run_id()
+            || sealed_epoch.state() != crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+        {
+            return Err("terminal_owner_epoch_changed_before_review_claim".to_string());
+        }
     }
     let dispatch_claim_id = {
         let store = state
@@ -2939,6 +3041,7 @@ async fn accept_proposal_with_state_and_confirmation(
                 "该 Proposal 已由另一个请求领取执行；请先检查执行结果，禁止重复副作用。".to_string()
             })?
     };
+    let terminal_owner_fence_guard = terminal_owner_fence;
     if let Some(expected_digest) = expected_native_confirmation_digest {
         // The native grant is bound to the exact Proposal snapshot. Reload only
         // after winning the dispatch claim: edits that raced before the claim are
@@ -2990,51 +3093,11 @@ async fn accept_proposal_with_state_and_confirmation(
         }
     };
     if terminal_owner_origin.is_some() && proposal.proposal_type == ProposalType::MemoryWrite {
-        let event_store = {
-            state
-                .main_chat_agent_event_store
-                .as_ref()
-                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
-                .lock()
-                .await
-                .clone()
-        };
-        let task_store = {
-            state
-                .main_chat_agent_session_store
-                .as_ref()
-                .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
-                .lock()
-                .await
-                .clone()
-        };
-        let proposal_store = {
-            state
-                .proposal_store
-                .as_ref()
-                .ok_or_else(proposal_store_missing)?
-                .lock()
-                .await
-                .clone()
-        };
-        let memory_store = {
-            state
-                .memory_lifecycle_store
-                .as_ref()
-                .ok_or_else(memory_lifecycle_store_missing)?
-                .lock()
-                .await
-                .clone()
-        };
-        let transition = crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::new(
-            &event_store,
-            &task_store,
-            &proposal_store,
-            &memory_store,
-        )
-        .apply_claimed_review_acceptance(review_acceptance)
-        .await
-        .map_err(|error| error.to_string())?;
+        let transition = terminal_owner_write_gateway_from_state(state)
+            .await?
+            .apply_claimed_review_acceptance(review_acceptance)
+            .await
+            .map_err(|error| error.to_string())?;
         return Ok(serde_json::json!({
             "success": true,
             "effect_status": "confirmed",
@@ -3154,35 +3217,81 @@ async fn accept_proposal_with_state_and_confirmation(
     };
     proposal.accept();
     canonicalize_proposal_affected_path(&mut proposal);
+    let mut terminal_owner_transition_response = None;
+    let mut main_chat_task_sync = Vec::new();
     let proposal_projected = if effect_receipt_persisted {
-        match project_confirmed_effect_projection_only(state, &proposal, &dispatch_claim_id).await {
-            Ok(projected) => {
-                proposal = projected;
-                true
+        if let Some(origin) = terminal_owner_origin.as_ref() {
+            match terminal_owner_write_gateway_from_state(state)
+                .await?
+                .apply_claimed_review_acceptance(review_acceptance)
+                .await
+            {
+                Ok(transition) => {
+                    terminal_owner_transition_response = Some(serde_json::json!({
+                        "beforeOwnerRevision": transition.before_owner_revision,
+                        "afterOwnerRevision": transition.after_owner_revision,
+                        "beforeOwnerDigest": transition.before_owner_digest,
+                        "afterOwnerDigest": transition.after_owner_digest,
+                        "localTransitionReceiptRef": transition.local_transition_receipt_ref,
+                        "localTransitionReceiptDigest": transition.local_transition_receipt_digest,
+                        "successorEventId": transition.successor_event_id,
+                    }));
+                    proposal = get_proposal_with_state(state, &proposal_id).await?;
+                    if let Some(task_store) = state.main_chat_agent_session_store.as_ref() {
+                        if let Ok(Some(session)) = task_store
+                            .lock()
+                            .await
+                            .load_session(origin.task_session_id())
+                        {
+                            main_chat_task_sync.push(serde_json::json!({
+                                "taskSessionId": origin.task_session_id(),
+                                "proposalBlockerCleared": true,
+                                "remainingBlockerCount": session.pending_blockers.len(),
+                                "taskCompletedAfterProposalAccept": session.status
+                                    == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed,
+                            }));
+                        }
+                    }
+                    true
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "Effect 已确认，但 terminal-owner successor 投影失败并等待 reconciliation: {}",
+                        error
+                    ));
+                    false
+                }
             }
-            Err(error) => {
-                warnings.push(format!(
-                    "Effect 已确认，但 Proposal status 投影失败并等待 reconciliation: {}",
-                    error
-                ));
-                false
+        } else {
+            match project_confirmed_effect_projection_only(state, &proposal, &dispatch_claim_id)
+                .await
+            {
+                Ok(projected) => {
+                    proposal = projected;
+                    true
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "Effect 已确认，但 Proposal status 投影失败并等待 reconciliation: {}",
+                        error
+                    ));
+                    false
+                }
             }
         }
     } else {
         false
     };
     let dispatch_projection_confirmed = proposal_projected;
-    let main_chat_task_sync = if proposal_projected {
+    if proposal_projected {
         record_maturation_proposal_outcome_evidence_with_state(
             state,
             &proposal,
             MaturationProposalOutcome::Accepted,
         )
         .await;
-        sync_main_chat_task_blockers_after_review_proposal_accept(state, &proposal).await
-    } else {
-        Vec::new()
-    };
+    }
+    drop(terminal_owner_fence_guard);
     if let Err(error) = reconcile_agent_runs_for_proposal(
         state,
         &proposal,
@@ -3224,6 +3333,9 @@ async fn accept_proposal_with_state_and_confirmation(
     }
     if !main_chat_task_sync.is_empty() {
         response["mainChatTaskSync"] = serde_json::Value::Array(main_chat_task_sync);
+    }
+    if let Some(transition) = terminal_owner_transition_response {
+        response["terminalOwnerTransition"] = transition;
     }
     if proposal.proposal_type == ProposalType::MemoryWrite {
         let decision = memory_gateway::memory_gateway_decision_for_proposal(
@@ -3290,6 +3402,12 @@ fn proposal_type_resolves_main_chat_review_blocker(proposal_type: ProposalType) 
     )
 }
 
+async fn terminal_owner_write_gateway_from_state(
+    state: &Arc<AppState>,
+) -> Result<crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway, String> {
+    crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::from_state(state).await
+}
+
 async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -3309,132 +3427,73 @@ async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     let Some(origin) = origin else {
         return Vec::new();
     };
-    let task_session_ids = vec![origin.task_session_id().to_string()];
-    let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
-        return Vec::new();
-    };
-    let proposal_blocker = format!("proposal:{}", proposal.id);
-    let mut sync_reports = Vec::new();
-
-    for task_session_id in task_session_ids {
-        let Some((before_status, remaining_blockers)) = ({
-            let store = store_arc.lock().await;
-            let Ok(Some(session)) = store.load_session(&task_session_id) else {
-                continue;
-            };
-            let before_status = session.status;
-            let before_blockers = session.pending_blockers.clone();
-            let mut remaining_blockers = before_blockers.clone();
-            remaining_blockers.retain(|blocker| blocker != &proposal_blocker);
-            if remaining_blockers.len() == before_blockers.len() {
-                continue;
-            }
-            if let Err(err) =
-                store.set_pending_blockers(&task_session_id, remaining_blockers.clone())
-            {
-                log::warn!(
-                    "[proposal] failed to clear Main Chat proposal blocker for {}: {}",
-                    task_session_id,
-                    err
-                );
-                continue;
-            }
-            Some((before_status, remaining_blockers))
-        }) else {
-            continue;
+    let _fence = crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(
+        origin.task_session_id(),
+    )
+    .await;
+    let materialized_acceptance = {
+        let Some(proposal_store) = state.proposal_store.as_ref() else {
+            return Vec::new();
         };
-
-        let has_pending_permission_action =
-            main_chat_task_has_pending_permission_action(state, &task_session_id).await;
-        let completed = if remaining_blockers.is_empty()
-            && !has_pending_permission_action
-            && before_status
-                == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        let proposal_store = proposal_store.lock().await;
+        match openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+            .materialized_acceptance_snapshot(&proposal.id)
         {
-            let store = store_arc.lock().await;
-            match store.resume_session(&task_session_id) {
-                Ok(_) => match store.complete_session(
-                    &task_session_id,
-                    "Accepted Review proposal resolved the Main Chat task blocker.",
-                ) {
-                    Ok(_) => true,
-                    Err(err) => {
-                        log::warn!(
-                            "[proposal] failed to complete unblocked Main Chat task {}: {}",
-                            task_session_id,
-                            err
-                        );
-                        false
-                    }
-                },
-                Err(err) => {
-                    log::warn!(
-                        "[proposal] failed to resume unblocked Main Chat task {}: {}",
-                        task_session_id,
-                        err
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        {
-            let store = store_arc.lock().await;
-            if let Err(err) = store.append_transcript_entry(
-                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryDraft {
-                    session_id: task_session_id.clone(),
-                    kind: openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
-                    summary: "Accepted Review proposal resolved a Main Chat proposal blocker."
-                        .into(),
-                    metadata: serde_json::json!({
-                        "proposalId": proposal.id,
-                        "proposalType": proposal.proposal_type,
-                        "proposalBlockerCleared": true,
-                        "remainingBlockerCount": remaining_blockers.len(),
-                        "taskCompletedAfterProposalAccept": completed,
-                        "directWritesExecuted": false,
-                    }),
-                },
-            ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
                 log::warn!(
-                    "[proposal] failed to append Main Chat proposal accept sync transcript for {}: {}",
-                    task_session_id,
-                    err
+                    "[proposal] terminal owner materialized acceptance unavailable for {}: {}",
+                    proposal.id,
+                    error
                 );
+                return Vec::new();
             }
         }
-
-        let sync_report = serde_json::json!({
-            "taskSessionId": task_session_id,
-            "proposalBlockerCleared": true,
-            "remainingBlockerCount": remaining_blockers.len(),
-            "taskCompletedAfterProposalAccept": completed,
-        });
-        sync_reports.push(sync_report);
-    }
-
-    sync_reports
-}
-
-async fn main_chat_task_has_pending_permission_action(
-    state: &Arc<AppState>,
-    task_session_id: &str,
-) -> bool {
-    let Some(queue_arc) = state.main_chat_action_queue_store.as_ref() else {
-        return false;
     };
-    let queue = queue_arc.lock().await;
-    queue
-        .list_for_session(task_session_id)
-        .map(|actions| {
-            actions.iter().any(|action| {
-                action.status
-                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-            })
-        })
-        .unwrap_or(false)
+    let gateway = match terminal_owner_write_gateway_from_state(state).await {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            log::warn!(
+                "[proposal] terminal owner gateway unavailable for {}: {}",
+                proposal.id,
+                error
+            );
+            return Vec::new();
+        }
+    };
+    if let Err(error) = gateway
+        .apply_materialized_review_successor(materialized_acceptance)
+        .await
+    {
+        log::warn!(
+            "[proposal] terminal owner successor reconciliation failed for {}: {}",
+            proposal.id,
+            error
+        );
+        return Vec::new();
+    }
+    let Some(store) = state.main_chat_agent_session_store.as_ref() else {
+        return Vec::new();
+    };
+    let session = match store.lock().await.load_session(origin.task_session_id()) {
+        Ok(Some(session)) => session,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            log::warn!(
+                "[proposal] terminal owner task projection unavailable for {}: {}",
+                proposal.id,
+                error
+            );
+            return Vec::new();
+        }
+    };
+    vec![serde_json::json!({
+        "taskSessionId": origin.task_session_id(),
+        "proposalBlockerCleared": true,
+        "remainingBlockerCount": session.pending_blockers.len(),
+        "taskCompletedAfterProposalAccept": session.status
+            == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed,
+    })]
 }
 
 pub(crate) async fn reject_proposal_with_state(
@@ -7237,7 +7296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_reconciliation_completes_task_before_consuming_waiting_agent_run_marker() {
+    async fn startup_reconciliation_does_not_treat_legacy_task_strings_as_terminal_authority() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let task_session_id = uuid::Uuid::new_v4().to_string();
@@ -7309,9 +7368,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             task.status,
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
         );
-        assert!(task.pending_blockers.is_empty());
+        assert_eq!(
+            task.pending_blockers,
+            vec![format!("proposal:{proposal_id}")],
+            "source_detail and after payload strings cannot authorize a post-final TaskSession write"
+        );
         assert_eq!(
             state
                 .agent_run_store

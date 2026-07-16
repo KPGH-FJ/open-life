@@ -60,16 +60,9 @@ pub(crate) async fn finalize_chat_agent_run(
     agent_run.finished_at = Some(chrono::Utc::now());
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
 
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    {
-        let store = store_arc.lock().await;
-        store.update_run(agent_run).map_err(|err| {
-            format!("update canonical AgentRun during finalization failed: {err}")
-        })?;
-    }
+    crate::terminal_owner_write_gateway::update_agent_run(state, agent_run)
+        .await
+        .map_err(|err| format!("update canonical AgentRun during finalization failed: {err}"))?;
 
     // Proposal creation is intentionally absent from terminalization. Typed
     // PolicyDecision/ReviewWorkflow paths must stage proposals before this

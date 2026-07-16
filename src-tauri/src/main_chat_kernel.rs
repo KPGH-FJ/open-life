@@ -54,8 +54,8 @@ use crate::main_chat_context_loader::{
     sanitize_main_chat_selected_skill_id,
 };
 use crate::main_chat_event_stream::{
-    append_main_chat_agent_runtime_event, append_main_chat_provider_receipt_events,
-    materialize_optional_main_chat_agent_events, MainChatAgentDurableEvent,
+    append_main_chat_provider_receipt_events, materialize_optional_main_chat_agent_events,
+    MainChatAgentDurableEvent,
 };
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, main_chat_provider_endpoint_kind, preview_text,
@@ -2566,7 +2566,7 @@ where
     let mut durable_events = Vec::new();
     if let Some(receipt) = outcome.receipt.as_ref() {
         durable_events.push(
-            append_main_chat_agent_runtime_event(
+            crate::terminal_owner_write_gateway::append_runtime_event(
                 state,
                 task_session_id,
                 canonical_run_id,
@@ -2960,7 +2960,7 @@ where
     let mut durable_events = Vec::with_capacity(receipt.assets.len());
     for asset in &receipt.assets {
         durable_events.push(
-            append_main_chat_agent_runtime_event(
+            crate::terminal_owner_write_gateway::append_runtime_event(
                 state,
                 task_session_id,
                 canonical_run_id,
@@ -3471,15 +3471,15 @@ async fn append_main_chat_kernel_plan_execute_contract_transcript(
         selected_skill_id,
     )
     .await?;
-    let store = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    store
-        .lock()
-        .await
-        .record_context_snapshot_ref(task_session_id, &compiled_context.context_snapshot_ref)
-        .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
+    crate::terminal_owner_write_gateway::write_task_session(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::RecordContextSnapshotRef(
+            compiled_context.context_snapshot_ref.clone(),
+        ),
+    )
+    .await
+    .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
     entries.extend(
         append_main_chat_agent_transcript(
             state,
@@ -6759,15 +6759,15 @@ async fn build_successful_kernel_command_surface_result(
         .as_ref()
         .map(|metadata| metadata.context_snapshot_ref.as_str())
     {
-        let store = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-        store
-            .lock()
-            .await
-            .record_context_snapshot_ref(task_session_id, context_snapshot_ref)
-            .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
+        crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::RecordContextSnapshotRef(
+                context_snapshot_ref.to_string(),
+            ),
+        )
+        .await
+        .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
     }
     let mut generation_metadata = serde_json::json!({
         "hsPacketSelected": hs_metadata
@@ -7062,15 +7062,19 @@ async fn build_successful_kernel_command_surface_result(
             .agent_run_store
             .as_ref()
             .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        let mut canonical_run = store
-            .get_run(&agent_run.id)
-            .map_err(|error| format!("reload conditional proposal AgentRun failed: {error}"))?
-            .ok_or_else(|| "conditional proposal AgentRun missing".to_string())?;
+        let mut canonical_run = {
+            let store = store_arc.lock().await;
+            store
+                .get_run(&agent_run.id)
+                .map_err(|error| format!("reload conditional proposal AgentRun failed: {error}"))?
+                .ok_or_else(|| "conditional proposal AgentRun missing".to_string())?
+        };
         canonical_run.add_generated_proposal(&proposal.id);
-        store.update_run(&canonical_run).map_err(|error| {
-            format!("persist conditional proposal AgentRun reference failed: {error}")
-        })?;
+        crate::terminal_owner_write_gateway::update_agent_run(state, &canonical_run)
+            .await
+            .map_err(|error| {
+                format!("persist conditional proposal AgentRun reference failed: {error}")
+            })?;
         agent_run = canonical_run;
     }
     let pending_permission_blockers = tool_calls
@@ -7113,26 +7117,25 @@ async fn build_successful_kernel_command_surface_result(
         0
     };
     if !pending_read_tool_blockers.is_empty() {
-        if let Some(ref store_arc) = state.main_chat_agent_session_store {
-            let store = store_arc.lock().await;
-            if let Err(err) =
-                store.set_pending_blockers(task_session_id, pending_read_tool_blockers.clone())
-            {
-                log::warn!("[MainChatKernel] set read tool blockers failed: {}", err);
-            }
-            let transition_result = if !pending_permission_blockers.is_empty() {
-                store.mark_waiting_permission(task_session_id)
+        if state.main_chat_agent_session_store.is_some() {
+            let transition = if !pending_permission_blockers.is_empty() {
+                crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission
             } else {
-                store.block_session(
-                    task_session_id,
-                    "MainChatKernel read-only tool loop blocked.",
+                crate::terminal_owner_write_gateway::TaskSessionTransition::Block(
+                    "MainChatKernel read-only tool loop blocked.".into(),
                 )
             };
-            if let Err(err) = transition_result {
-                log::warn!(
-                    "[MainChatKernel] mark read tool blocked/waiting failed: {}",
-                    err
-                );
+            if let Err(err) = crate::terminal_owner_write_gateway::write_task_session(
+                state,
+                task_session_id,
+                crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                    blockers: pending_read_tool_blockers.clone(),
+                    transition,
+                },
+            )
+            .await
+            {
+                log::warn!("[MainChatKernel] set read tool state failed: {}", err);
             }
         }
     } else if pending_proposal_ids.is_empty() {
@@ -7148,21 +7151,24 @@ async fn build_successful_kernel_command_surface_result(
             },
         )
         .await?;
-    } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
+    } else if state.main_chat_agent_session_store.is_some() {
         let blockers = pending_proposal_ids
             .iter()
             .map(|proposal_id| format!("proposal:{proposal_id}"))
             .collect::<Vec<_>>();
-        if let Err(err) = store.set_pending_blockers(task_session_id, blockers) {
+        if let Err(err) = crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                blockers,
+                transition:
+                    crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
+            },
+        )
+        .await
+        {
             log::warn!(
-                "[MainChatKernel] set read follow-up proposal blockers failed: {}",
-                err
-            );
-        }
-        if let Err(err) = store.mark_waiting_permission(task_session_id) {
-            log::warn!(
-                "[MainChatKernel] mark read follow-up proposal waiting failed: {}",
+                "[MainChatKernel] set read follow-up proposal state failed: {}",
                 err
             );
         }
@@ -7642,7 +7648,6 @@ async fn create_kernel_write_proposal(
                     "assetKind": "knowledge_markdown",
                     "requestedChange": requested_change,
                     "source": "main_chat_kernel",
-                    "originatingTaskSessionId": task_session_id,
                     "sourceRunId": run_id,
                     "payloadSummary": outcome.payload_summary,
                     "proposedDiff": {
@@ -7660,7 +7665,6 @@ async fn create_kernel_write_proposal(
                 serde_json::json!({
                     "requestedChange": requested_change,
                     "source": "main_chat_kernel",
-                    "originatingTaskSessionId": task_session_id,
                     "sourceRunId": run_id,
                     "payloadSummary": outcome.payload_summary,
                     "directLifeModelWrite": false,
@@ -7705,7 +7709,6 @@ async fn create_kernel_write_proposal(
                     "generatedByProvider": outcome.governed_input.get("generatedByProvider").and_then(Value::as_bool).unwrap_or(false),
                     "providerMaySelectPath": false,
                     "source": "main_chat_kernel",
-                    "originatingTaskSessionId": task_session_id,
                     "sourceRunId": run_id,
                     "payloadSummary": outcome.payload_summary,
                     "directFileWrite": false,
@@ -8327,7 +8330,6 @@ async fn create_kernel_memory_governance_proposal(
                     "sourceEvidence": candidate.source_preview,
                     "impactPreview": memory_candidate_impact_preview(candidate),
                     "source": "main_chat_memory_governance",
-                    "originatingTaskSessionId": task_session_id,
                     "sourceRunId": run_id,
                     "directMemoryWrite": false,
                     "acceptedDurableTruthWritten": false,
@@ -8354,7 +8356,6 @@ async fn create_kernel_memory_governance_proposal(
                 "sourceEvidence": candidate.source_preview,
                 "impactPreview": memory_candidate_impact_preview(candidate),
                 "source": "main_chat_memory_governance",
-                "originatingTaskSessionId": task_session_id,
                 "sourceRunId": run_id,
                 "directLifeModelWrite": false,
                 "acceptedDurableTruthWritten": false,
@@ -8390,10 +8391,7 @@ async fn create_kernel_memory_governance_proposal(
         ProposalSource::MemoryGovernance,
     );
     proposal.run_id = Some(run_id.to_string());
-    proposal.source_detail = Some(format!(
-        "main_chat_agent_task_session:{task_session_id};candidate:{}",
-        candidate.candidate_id
-    ));
+    proposal.source_detail = Some(format!("candidate:{}", candidate.candidate_id));
     crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
         state,
         &mut proposal,
@@ -9014,20 +9012,24 @@ async fn build_kernel_write_outcome_command_surface_result(
             "MainChatKernel completed without a new pending write or duplicate durable effect.",
         )
         .await?;
-    } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        if let Err(err) = store.set_pending_blockers(task_session_id, pending_blockers.clone()) {
-            log::warn!("[MainChatKernel] set write blockers failed: {}", err);
-        }
+    } else if state.main_chat_agent_session_store.is_some() {
         let transition = if outcome.hard_blocked {
-            store.block_session(
-                task_session_id,
-                "MainChatKernel hard-blocked a write request.",
+            crate::terminal_owner_write_gateway::TaskSessionTransition::Block(
+                "MainChatKernel hard-blocked a write request.".into(),
             )
         } else {
-            store.mark_waiting_permission(task_session_id)
+            crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission
         };
-        if let Err(err) = transition {
+        if let Err(err) = crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                blockers: pending_blockers.clone(),
+                transition,
+            },
+        )
+        .await
+        {
             log::warn!(
                 "[MainChatKernel] mark write outcome session failed: {}",
                 err
@@ -9217,8 +9219,7 @@ async fn build_blocked_kernel_command_surface_result(
     let governed_strategy_blocker =
         main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation;
     let failure_kind = main_chat_failure_kind_from_kernel_result(&kernel_result);
-    if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
+    if state.main_chat_agent_session_store.is_some() {
         let session_blockers = if waiting_for_review {
             pending_proposal_ids
                 .iter()
@@ -9227,13 +9228,22 @@ async fn build_blocked_kernel_command_surface_result(
         } else {
             blockers.clone()
         };
-        if let Err(err) = store.set_pending_blockers(task_session_id, session_blockers) {
-            log::warn!("[MainChatKernel] set blockers failed: {}", err);
-        }
-        if waiting_for_user {
-            if let Err(err) = store.mark_waiting_permission(task_session_id) {
-                log::warn!("[MainChatKernel] mark session waiting failed: {}", err);
+        let write = if waiting_for_user {
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                blockers: session_blockers,
+                transition:
+                    crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
             }
+        } else {
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockers(
+                session_blockers,
+            )
+        };
+        if let Err(err) =
+            crate::terminal_owner_write_gateway::write_task_session(state, task_session_id, write)
+                .await
+        {
+            log::warn!("[MainChatKernel] set blocker state failed: {}", err);
         }
     }
     execution_transcript.extend(
@@ -9394,16 +9404,9 @@ async fn build_blocked_kernel_command_surface_result(
         );
     }
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
-    {
-        let store_arc = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        store
-            .update_run(&agent_run)
-            .map_err(|err| format!("update blocked canonical AgentRun failed: {err}"))?;
-    }
+    crate::terminal_owner_write_gateway::update_agent_run(state, &agent_run)
+        .await
+        .map_err(|err| format!("update blocked canonical AgentRun failed: {err}"))?;
     let preterminal_agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -9991,7 +9994,6 @@ async fn attach_kernel_tool_permission_proposal_identity(
         },
         "blocked_action": blocked_action,
         "pending_action_identity": pending_action_identity,
-        "originatingTaskSessionId": task_session_id,
         "auto_generated": true,
         "mainChatAgentV1": true,
         "strictManifestIdentity": true,
@@ -10012,7 +10014,6 @@ async fn attach_kernel_tool_permission_proposal_identity(
         openlife_core::agent::ProposalSource::ChatConversation,
     );
     proposal.run_id = Some(run_id.to_string());
-    proposal.source_detail = Some(format!("main_chat_agent_task_session:{task_session_id}"));
     let proposal_store_arc = state
         .proposal_store
         .as_ref()
@@ -10044,11 +10045,7 @@ async fn attach_kernel_tool_permission_proposal_identity(
                 format!("create exact kernel ToolPermission proposal failed: {error}")
             })?
     };
-    let expected_source_detail = format!("main_chat_agent_task_session:{task_session_id}");
-    if outcome.proposal.after != after
-        || outcome.proposal.run_id.as_deref() != Some(run_id)
-        || outcome.proposal.source_detail.as_deref() != Some(expected_source_detail.as_str())
-    {
+    if outcome.proposal.after != after || outcome.proposal.run_id.as_deref() != Some(run_id) {
         return Err("reused kernel ToolPermission Proposal provenance mismatch".into());
     }
     let proposal_id = outcome.proposal.id;
@@ -11999,16 +11996,20 @@ where
     )
     .await?;
     transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Completed, None).await?;
-    if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        if let Err(err) = store.update_plan_summary(
+    if state.main_chat_agent_session_store.is_some() {
+        if let Err(err) = crate::terminal_owner_write_gateway::write_task_session(
+            state,
             task_session_id,
-            Some(format!(
-                "PlanExecute draft {} has {} steps.",
-                plan_session.session_id,
-                plan_session.steps.len()
+            crate::terminal_owner_write_gateway::TaskSessionWrite::UpdatePlanSummary(Some(
+                format!(
+                    "PlanExecute draft {} has {} steps.",
+                    plan_session.session_id,
+                    plan_session.steps.len()
+                ),
             )),
-        ) {
+        )
+        .await
+        {
             log::warn!("[MainChatKernel] update plan summary failed: {}", err);
         }
     }
@@ -12182,17 +12183,20 @@ where
             "MainChatKernel PlanExecute draft completed without writes.",
         )
         .await?;
-    } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        if let Err(err) = store.set_pending_blockers(task_session_id, pending_blockers.clone()) {
+    } else if state.main_chat_agent_session_store.is_some() {
+        if let Err(err) = crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                blockers: pending_blockers.clone(),
+                transition:
+                    crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
+            },
+        )
+        .await
+        {
             log::warn!(
-                "[MainChatKernel] set PlanExecute publish blockers failed: {}",
-                err
-            );
-        }
-        if let Err(err) = store.mark_waiting_permission(task_session_id) {
-            log::warn!(
-                "[MainChatKernel] mark PlanExecute publish waiting failed: {}",
+                "[MainChatKernel] set PlanExecute publish state failed: {}",
                 err
             );
         }
