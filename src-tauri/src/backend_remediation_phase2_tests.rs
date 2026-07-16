@@ -109,6 +109,7 @@ fn d044_shipped_agent_action_replay_bypass_is_absent_and_task_controls_remain_ca
     let kernel = include_str!("main_chat_kernel.rs");
     let task_controls = include_str!("main_chat_task_controls.rs");
     let turn_runtime = include_str!("main_chat_turn_runtime.rs");
+    let terminal_owner_gateway = include_str!("terminal_owner_write_gateway.rs");
     let tool_gateway_resources = include_str!("tool_gateway_resources.rs");
     let frontend_tauri = include_str!("../../frontend/src/tauri.ts");
     let agent_run_detail = include_str!("../../frontend/src/pages/AgentRunDetail.tsx");
@@ -167,7 +168,7 @@ fn d044_shipped_agent_action_replay_bypass_is_absent_and_task_controls_remain_ca
     }
     for required in [
         "pub(crate) async fn run_replay(",
-        "claim_replay_with_automatic_retry_proof(",
+        "claim_openlife_replay(",
         ".try_register(&task_session_id)",
     ] {
         assert!(
@@ -175,9 +176,28 @@ fn d044_shipped_agent_action_replay_bypass_is_absent_and_task_controls_remain_ca
             "OpenLifeTurnRuntime replay authority lost required invariant: {required}"
         );
     }
+    assert!(
+        !turn_runtime.contains(".claim_replay_with_automatic_retry_proof("),
+        "OpenLifeTurnRuntime must not bypass the terminal-owner write gateway for replay claims"
+    );
+    for required in [
+        "pub(crate) async fn claim_action_replay(",
+        "acquire_open_turn_write_fence(state, task_session_id)",
+        ".claim_replay_with_automatic_retry_proof(",
+    ] {
+        assert!(
+            terminal_owner_gateway.contains(required),
+            "terminal-owner replay write authority lost required invariant: {required}"
+        );
+    }
     assert!(agent_run_detail.contains("retryMainChatAgentAction"));
     assert!(chat_page.contains("retryMainChatAgentAction"));
-    assert!(tool_call_card.contains("mailboxRoute"));
+    assert!(agent_run_detail.contains("mailboxRoute"));
+    assert!(chat_page.contains("mailboxLinkTarget"));
+    assert!(
+        !tool_call_card.contains("mailboxRoute"),
+        "ToolCallCard stays presentation-only; page-level task and review projections own navigation"
+    );
     let retired_generic_replay = ["permission", ".replay_action"].concat();
     assert!(
         !core_mcp.contains(&retired_generic_replay)
