@@ -1118,18 +1118,20 @@ Mechanical evidence on the implementation commit:
   StateStore warning.
 
 Remaining uncredited work is explicit: promote/import shadow candidates into
-canonical product task rows only after the required product/native scenario,
-switch the daily-task read owner with a deletion guard rather than a permanent
-merge, migrate legacy MemoryStore state history separately, and rerun native
-and independent review evidence. Roadshow release remains NO-GO.
+canonical product task rows only after lossless time-block preservation,
+atomic import/outbox, replay, and rollback evidence; switch the daily-task read
+owner with a deletion guard rather than a permanent merge; and rerun
+independent review evidence. Roadshow release remains NO-GO.
 
-## V3 legacy MemoryStore state-history shadow parity and data-restore rehearsal
+## V3 legacy MemoryStore state-history shadow, import, and read cutover
 
 Commit `e967c9a5913f8275591356afbc1e23380eb86893` adds the next StateStore
-authority-convergence prerequisite without switching the shipped history or
+shadow prerequisite. Commit `2d3c9a9ae8ed98a9049c59be23ed56cbf0b4266c`
+adds atomic canonical import, and commit
+`ec616b8dc5d298ac710d8f8d2dee5debced3130e` switches the shipped history and
 alert read owner.
 
-StateStore schema v6 records current typed observation history in the same
+StateStore schema v7 records current typed observation history in the same
 transaction as the observation/version/operation/outbox effect and backfills
 existing schema v5 observations before advancing the version. Separately,
 MemoryStore exposes a migration-only ordered source snapshot bound to its
@@ -1138,25 +1140,30 @@ maps every legacy field without guessing, stages one body-bearing shadow,
 rereads and hashes it, deletes and restores it in the same transaction, and
 keeps at most 32 metadata-only evidence records.
 
-Mechanical evidence on the implementation commit:
+Only the verified shadow can be imported. Canonical legacy rows, one
+metadata-only import receipt, and one outbox event commit atomically. Shipped
+history and alert commands require that receipt and read StateStore; a missing
+or inconsistent receipt fails closed without a MemoryStore fallback.
 
-- StateStore suite — 41/41 passed, including v5-to-v6 backfill, exact replay
-  with one history fact, lossless shadow parity, destructive restore, injected
-  rollback, operation-binding validation, and bounded evidence;
+Mechanical evidence on the implementation commits:
+
+- StateStore suite — 44/44 passed, including v5/v6-to-v7 migration, exact
+  observation replay, lossless shadow parity, canonical import/outbox
+  atomicity, import replay/source-drift rejection, fault rollback, and bounded
+  evidence;
 - focused MemoryStore tests — 2/2 passed for payload-bound source identity and
   the 50,000-row overflow boundary;
-- focused Tauri mapping tests — 3/3 passed;
-- real bootstrap shadow test — 1/1 passed while canonical StateStore legacy
-  history remains empty and MemoryStore remains the readable product owner;
+- focused Tauri state-history tests — 7/7 passed for mapping, bootstrap import,
+  receipt admission, canonical history/alert reads, and absence guard;
+- single-system authority suite — 33/33 passed;
 - `cargo check -p openlife-tauri --tests`, Rust format, diff checks, and Core
   Clippy completed; Clippy still reports the same 35 existing cross-module
   warnings and no StateStore warning.
 
-This is not canonical import or cutover. `get_state_history` and state alerts
-still read MemoryStore, the shadow has no product reader, and no legacy row is
-declared migrated or deleted. Daily-task cutover, state-history import/read
-cutover, independent review, and final backend capability freeze remain
-uncredited.
+Legacy MemoryStore rows remain physically present as bounded read-only
+migration/backout evidence, but are no longer a shipped read or write owner.
+Daily-task cutover, independent review, and final backend capability freeze
+remain uncredited.
 
 ## Default-feature bundle and native shell trial
 

@@ -101,11 +101,13 @@
     },
     {
       "id": "V3_STATESTORE",
-      "status": "daily_task_observation_legacy_daily_and_state_history_shadow_mechanical_verified_canonical_import_authority_cutover_and_independent_review_pending",
-      "completion_claim": "scoped_daily_task_typed_observation_and_both_legacy_shadow_gates_green_state_history_canonical_import_product_authority_cutovers_and_review_evidence_explicitly_pending",
-      "commit": "e967c9a5913f8275591356afbc1e23380eb86893",
+      "status": "daily_task_observation_and_state_history_import_read_cutover_mechanical_verified_daily_task_cutover_and_independent_review_pending",
+      "completion_claim": "scoped_daily_task_typed_observation_state_history_shadow_import_and_product_read_cutover_gates_green_daily_task_authority_cutover_and_review_evidence_explicitly_pending",
+      "commit": "ec616b8dc5d298ac710d8f8d2dee5debced3130e",
       "legacy_daily_shadow_commit": "d6ceb2f3232da5d5e1028d8264ed4cdd78910d59",
       "legacy_state_history_shadow_commit": "e967c9a5913f8275591356afbc1e23380eb86893",
+      "legacy_state_history_import_commit": "2d3c9a9ae8ed98a9049c59be23ed56cbf0b4266c",
+      "legacy_state_history_read_cutover_commit": "ec616b8dc5d298ac710d8f8d2dee5debced3130e",
       "typed_observation_commit": "99d53a81d7cf0ebc85bd104eda3c1f594094bd7a",
       "daily_task_commit": "65a0017a7c2bf1ecba5ecdeb7484ad77f5e29793",
       "evidence": "plans/openlife_roadshow_v3_statestore_evidence.md"
@@ -228,7 +230,7 @@
     "roadshow_release": "no_go"
   },
   "v3_results": {
-    "canonical_state_store": "passed_schema_v6_daily_task_typed_observation_history_asset_version_operation_receipt_outbox_and_bounded_legacy_shadow_owner",
+    "canonical_state_store": "passed_schema_v7_daily_task_typed_observation_imported_history_asset_version_operation_receipt_outbox_and_bounded_legacy_shadow_owner",
     "policy_authority": "passed_current_user_low_risk_explicit_nonserializable_grant",
     "daily_task_loop": "passed_create_list_complete_undo_expiry_and_restart",
     "operation_replay": "passed_task_and_observation_create_complete_undo_after_clock_version_and_tombstone_changes",
@@ -243,11 +245,11 @@
     "typed_state_observation": "passed_record_list_undo_expiry_restart_send_stream_zero_provider_tool_proposal",
     "legacy_import_parity_and_rollback": "passed_daily_task_category_shadow_staging_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_and_bounded_body_free_evidence",
     "legacy_state_history_shadow": "passed_profile_bound_bounded_source_snapshot_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_operation_binding_validation_and_bounded_metadata_only_evidence",
-    "legacy_daily_task_authority_cutover": "pending_product_scenario_and_native_trial_no_owner_switch_or_product_shadow_read_credit",
-    "legacy_state_history_migration": "shadow_verified_canonical_import_product_read_cutover_and_legacy_owner_deletion_pending",
+    "legacy_daily_task_authority_cutover": "pending_lossless_import_time_block_preservation_atomic_outbox_and_single_product_read_owner_no_shadow_read_credit",
+    "legacy_state_history_migration": "passed_atomic_canonical_import_single_outbox_exact_replay_fault_rollback_and_receipt_gated_product_history_alert_read_cutover_legacy_rows_retained_read_only_for_backout",
     "native_product_trial": "pending",
     "independent_read_only_review": "pending_not_run",
-    "single_system": "passed_32_of_32_current_authority_guards",
+    "single_system": "passed_33_of_33_current_authority_guards",
     "roadshow_release": "no_go"
   },
   "v4_results": {
