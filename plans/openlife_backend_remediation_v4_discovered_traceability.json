@@ -12,6 +12,1699 @@
     "open_p2_blocks_phase6_and_final_green": true,
     "frozen_finding_with_open_scope_expansion_is_not_effectively_closed": true
   },
+  "roadshow_backend_freeze_disposition": {
+    "schema_version": "openlife-roadshow-backend-freeze-phase-a-v1",
+    "status": "phase_a_preservation_and_registry_complete_phase_b_cleanup_complete",
+    "baseline": {
+      "roadshow_head_before_phase_a": "4c5c2d5b022a19dcda02c56aaed5809b89089159",
+      "slice_branch_tip_count": 22,
+      "original_slice_unique_commit_count": 70,
+      "post_preservation_slice_unique_commit_count": 72,
+      "pushed_ref_count": 27,
+      "pushed_ref_oid_verification": "27_of_27_exact",
+      "unpushed_commit_secret_scan": "178_of_178_added_line_scan_zero_real_secret_hits",
+      "dirty_wip_secret_scan": "d064_and_d068_added_line_scan_zero_real_secret_hits"
+    },
+    "workspace_cleanup_evidence": {
+      "measurement_basis": "fresh_du_kib_before_deletion_not_historical_estimate",
+      "deleted_target_kib": 72203716,
+      "deleted_target_paths": [
+        "/Users/tw/Desktop/open-life/target",
+        "/Users/tw/Desktop/open-life-backend-audit-convergence/target",
+        "/Users/tw/Desktop/open-life-backend-d064-red/target",
+        "/Users/tw/Desktop/open-life-backend-d065-green/target",
+        "/Users/tw/Desktop/open-life-backend-d068-codec/target"
+      ],
+      "associated_branch_push_gate": "all_associated_branch_tips_verified_remote_exact_oid_before_deletion",
+      "review_target_content_gate": "four_large_review_targets_confirmed_cargo_target_artifacts_only",
+      "preserved_paths": [
+        "/Users/tw/Desktop/open-life-roadshow/target",
+        "all_.env_files",
+        "frontend/test-results",
+        "ui_ux_screenshots",
+        "OpenLifeQA_diary_and_smoke_databases"
+      ],
+      "disk_available_before": "583MiB",
+      "disk_available_after": "68GiB",
+      "legacy_app_paths_found": [
+        "/Users/tw/Desktop/open-life-roadshow/target/debug/bundle/macos/OpenLife.app"
+      ],
+      "legacy_app_cleanup": "one_exact_path_unregistered_then_deleted_no_global_launchservices_reset",
+      "legacy_app_residual": "none_found_after_cleanup",
+      "post_cleanup_git_status": "all_non_roadshow_worktrees_clean_roadshow_contains_only_phase_a_registry_changes"
+    },
+    "authority_boundaries": {
+      "no_second_backlog": true,
+      "global_closure_never_inferred_from_roadshow_subset": true,
+      "quarantine_never_counts_as_capability_success": true,
+      "semantic_port_required_instead_of_blind_cherry_pick": true,
+      "d067_generic_tool_audit_dependency_verified_from_source": true
+    },
+    "preservation_commits": [
+      {
+        "commit": "89cfa28aaf8f296151845da4ce52fb73f7a4d4c8",
+        "branch": "codex/slice-d064-audit-owner-red",
+        "disposition": "preserved_wip_no_completion_claim"
+      },
+      {
+        "commit": "2d2b63bcbc0751ea5f2ff274228ab938d43792cb",
+        "branch": "codex/slice-d068-authenticated-codec",
+        "disposition": "preserved_wip_no_completion_claim"
+      },
+      {
+        "commit": "2f813338de05ae55cc6d51ed31240429d693d836",
+        "branch": "codex/wip-openlife-frontend-refactor",
+        "disposition": "preserved_roadshow_assets_outside_backend_implementation"
+      }
+    ],
+    "other_wip_lanes": [
+      {
+        "branch": "codex/audit-authority-convergence",
+        "head": "b5ea62cecd06809e8c0e150da50754b1aa3bcffb",
+        "disposition": "read_only_semantic_reference"
+      },
+      {
+        "branch": "codex/wip-openlife-backend-remediation-v4",
+        "head": "66823595e33f911048cf99ea570eecdc34b41298",
+        "disposition": "read_only_semantic_reference"
+      },
+      {
+        "branch": "codex/openlife-integration-checkpoint-20260713",
+        "head": "6704d6d1d56c26600b47f1bff68fe4ac743dbd96",
+        "disposition": "historical_integration_checkpoint"
+      },
+      {
+        "branch": "codex/wip-openlife-frontend-refactor",
+        "head": "2f813338de05ae55cc6d51ed31240429d693d836",
+        "disposition": "frontend_lane_not_backend_authority"
+      }
+    ],
+    "finding_dispositions": [
+      {
+        "id": "BR4-D001",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "closure_candidate"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D002",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D003",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D004",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Roadshow attachment retrieval is deterministic and vector-free; embedding/vector execution receives no roadshow credit."
+      },
+      {
+        "id": "BR4-D005",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D006",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D007",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D008",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "verified_subset_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D009",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Scheduler is outside the roadshow product route and must be unreachable in the default release capability."
+      },
+      {
+        "id": "BR4-D010",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "verified_subset_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D011",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "verified_subset_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D012",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D013",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D014",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D015",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D016",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D017",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D018",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D019",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D020",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "verified_subset_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D021",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "closure_candidate"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D022",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "closure_candidate"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D023",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "closure_candidate"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D024",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D025",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "closure_candidate"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D026",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "closure_candidate"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D027",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D028",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D029",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D030",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D031",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D032",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D033",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D034",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D035",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "MCP transport is outside the default roadshow release route; dev-only evidence cannot count as backend freeze credit."
+      },
+      {
+        "id": "BR4-D036",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D037",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D038",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D039",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D040",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D041",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D042",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Vector search is outside the frozen eleven journeys and must remain uninvoked."
+      },
+      {
+        "id": "BR4-D043",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "A2A is dev-extensions-only and excluded from the default release capability."
+      },
+      {
+        "id": "BR4-D044",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D045",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D046",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D047",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D048",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D049",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "baseline_dependency_not_reopened_by_phase_a",
+          "status": "current_evidence_preserved_cumulative_rerun_pending"
+        },
+        "product_disposition": "retain_current_product_semantics_no_blind_reimplementation",
+        "note": "Phase A preserves the current implementation and global evidence state; later cumulative gates may reopen it, but Phase A adds no duplicate route."
+      },
+      {
+        "id": "BR4-D050",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "verified_subsets_remaining_statestore_cutover"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D051",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "mechanically_verified_subset_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D052",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "mechanically_verified_absence_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D053",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "mechanically_verified_subset_global_open"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D054",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "complete",
+          "closure_state": "independently_verified"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "semantic_port_required"
+        },
+        "product_disposition": "semantic_port_before_backend_freeze",
+        "note": "Port the verified strict decoder semantics; the sibling branch global result does not prove the roadshow tree."
+      },
+      {
+        "id": "BR4-D055",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "red_contract_port_required_root_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Terminalization coordinates the existing OpenLifeTurnRuntime and may not become a second runtime."
+      },
+      {
+        "id": "BR4-D056",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+      "backend_roadshow_subset": {
+        "scope": "supporting_mechanical_gate",
+        "status": "phase_a_append_only_and_phase0_gates_passed"
+        },
+        "product_disposition": "retain_one_append_only_registry_gate",
+        "note": "Evidence integrity is supporting infrastructure; it cannot substitute for product behavior proof."
+      },
+      {
+        "id": "BR4-D057",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "strict_key_authority_root_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Startup and credential authority are core roadshow dependencies even when MCP and A2A execution are disabled."
+      },
+      {
+        "id": "BR4-D058",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "d062_corrected_tool_owner_contract_pending"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Old RED oracles are superseded by D062 and cannot be ported literally."
+      },
+      {
+        "id": "BR4-D059",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "strict_json_owner_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D060",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Plugin executable capability is dev-extensions-only; corrupt override state must not authorize release execution."
+      },
+      {
+        "id": "BR4-D061",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "strict_enum_timestamp_owner_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Required by the frozen backend capability and reliability contract."
+      },
+      {
+        "id": "BR4-D062",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "resource_tool_boundary_root_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Filesystem observation belongs inside ToolGateway bounded adapters; ResourceGateway owns imported attachment bytes, not tool execution."
+      },
+      {
+        "id": "BR4-D063",
+        "global_closure": {
+          "implementation_state": "in_progress",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Audit cleanup/list/export/rotation product commands remain dev-only; no page-local deletion authority is credited."
+      },
+      {
+        "id": "BR4-D064",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Legacy multi-profile rotation and additional-writer surfaces are quarantined; the default fresh-profile startup still requires D057 fail-closed key authority proof."
+      },
+      {
+        "id": "BR4-D065",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Product audit read surfaces are quarantined; unavailable audit truth may not be projected as healthy zero."
+      },
+      {
+        "id": "BR4-D066",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "quarantined_release_surface",
+          "status": "quarantine_gate_rerun_pending"
+        },
+        "product_disposition": "release_unreachable_no_roadshow_credit_global_finding_remains_open",
+        "note": "Rotation and Scheduler capture surfaces are quarantined; default ToolGateway runs must not exercise key rotation."
+      },
+      {
+        "id": "BR4-D067",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "generic_tool_audit_truth_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "McpAuditStore is used by generic ToolGateway execution, so this finding cannot be dismissed by disabling MCP."
+      },
+      {
+        "id": "BR4-D068",
+        "global_closure": {
+          "implementation_state": "not_started",
+          "verification_state": "none",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "authenticated_audit_envelope_fix_not_started"
+        },
+        "product_disposition": "finish_required_subset_without_claiming_global_closure",
+        "note": "Existing generic tool audit history can carry sensitive payloads; authenticated envelope truth is required before backend freeze."
+      }
+    ],
+    "historical_slice_commits": [
+      {
+        "commit": "7837d43da0f74415d06f11d2af2f399ea7694283",
+        "subject": "Fix hypothetical memory fact admission",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "8fd50bebf7baee7c84438f2f82615fd2930cf8b1",
+        "subject": "Harden clause-scoped memory admission",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "a84768ced7d57da2eb3bc94b038b745786e7f619",
+        "subject": "Fix durable task owner receipt binding",
+        "finding_ids": [
+          "BR4-D050"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "0793eedf7f59d050beb3dc3fd4bfd1b16a54d6c3",
+        "subject": "Version durable task owner receipts",
+        "finding_ids": [
+          "BR4-D050"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "723eed457f36ce3be3217f1ba00062a0b35647d7",
+        "subject": "wip(d051): archive unverified structured evidence draft",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "unsafe_or_unverified_draft",
+        "roadshow_action": "do_not_merge_use_only_for_source_comparison"
+      },
+      {
+        "commit": "0d16afc6f860aab4bb8bbbb23963bfe51bbf16f6",
+        "subject": "Fix durable task owner receipt binding",
+        "finding_ids": [
+          "BR4-D050"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "3c6f4d7f9fe8c6617f213c8b70cf900b6454e780",
+        "subject": "Version durable task owner receipts",
+        "finding_ids": [
+          "BR4-D050"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "716a0a8623951e74e6c68e42ef1d44077df41011",
+        "subject": "test: reproduce persisted enum owner collisions",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "15551419f1c63a746889ce6ae6365469bc8ba994",
+        "subject": "test: require atomic transcript enum migration",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "bb1348f4991e2ed9497581a6c4095cfccaea321c",
+        "subject": "Fail closed on corrupt persisted enums",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "94d2b4b08514cc2c6a89dcb924b7053d0ab4eaf5",
+        "subject": "test(d051): freeze structured evidence red matrix",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "1b2eecb59b87e0fb598cd1080008bd21911e13d5",
+        "subject": "test(d051): bind RED matrix to real runtime evidence",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "517e08b62d3fd5c8fdd14f00c06e4e066846956e",
+        "subject": "test(d051): bind RED evidence to canonical owners",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "f27b70881c8274f627dbb71eca1a569034db07a0",
+        "subject": "test(d051): isolate and authenticate RED evidence",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "543a1612185f7eff12dc001ffcdf7a829554d562",
+        "subject": "Harden backend remediation evidence registry",
+        "finding_ids": [
+          "BR4-D056"
+        ],
+      "disposition": "semantic_port_applied_gate_passed",
+      "roadshow_action": "retain_current_gate_and_rerun_at_backend_freeze"
+      },
+      {
+        "commit": "0227a9c9d5487a5de5746ced5a8c45fa63ac6bbd",
+        "subject": "test: reproduce persisted enum owner collisions",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "374e91fea1b004a9c81804d40b277db80e5bdd7e",
+        "subject": "test: require atomic transcript enum migration",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "2cfe969aa8c908d35ec331b432fc89f84466714c",
+        "subject": "Fail closed on corrupt persisted enums",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "08a7b5244a0869e364e0276e79fa8ae7a8cb56de",
+        "subject": "Close strict persisted enum remediation",
+        "finding_ids": [
+          "BR4-D054"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "2ed84e5f0ded94138f536b545ea150f3273e0be6",
+        "subject": "test: freeze D051 canonical evidence RED contract",
+        "finding_ids": [
+          "BR4-D051"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "acc3d5bd5a018f99112c780733ff62db637b37e0",
+        "subject": "chore(plans): register backend findings D057-D061",
+        "finding_ids": [
+          "BR4-D057",
+          "BR4-D058",
+          "BR4-D059",
+          "BR4-D060",
+          "BR4-D061"
+        ],
+        "disposition": "registry_semantics_applied",
+        "roadshow_action": "registry_append_only_no_product_code_credit"
+      },
+      {
+        "commit": "3efc617156c6071ece424667d82035f0323e80d3",
+        "subject": "chore(plans): register backend findings D057-D061",
+        "finding_ids": [
+          "BR4-D057",
+          "BR4-D058",
+          "BR4-D059",
+          "BR4-D060",
+          "BR4-D061"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "b8a5955f2d4a9602e5e0a800742af39b4cd9f1dc",
+        "subject": "chore(plans): correct D058 filesystem authority scope",
+        "finding_ids": [
+          "BR4-D058",
+          "BR4-D062"
+        ],
+        "disposition": "registry_semantics_applied",
+        "roadshow_action": "registry_append_only_no_product_code_credit"
+      },
+      {
+        "commit": "090d04667b50bbf2865e03fbfe2d8176a1f3761b",
+        "subject": "test: freeze D055 terminal owner graph contracts",
+        "finding_ids": [
+          "BR4-D055"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "049acf9c4435178612afae123b194c0774fa66dd",
+        "subject": "test: harden D055 real-store red oracle",
+        "finding_ids": [
+          "BR4-D055"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "51fae536deea958dfd8676f1fc05221552ad287b",
+        "subject": "test: cover D055 crash and origin boundaries",
+        "finding_ids": [
+          "BR4-D055"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "e6bd58a5deec6b866b16048bdddee95288b0c1f0",
+        "subject": "chore(plans): correct D058 filesystem authority scope",
+        "finding_ids": [
+          "BR4-D058",
+          "BR4-D062"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "698b4e6154b13e9268718822e0e1305abd40ebbe",
+        "subject": "docs(backend): register D063 and D064 findings",
+        "finding_ids": [
+          "BR4-D063",
+          "BR4-D064"
+        ],
+        "disposition": "registry_semantics_applied",
+        "roadshow_action": "registry_append_only_no_product_code_credit"
+      },
+      {
+        "commit": "04577512eb13d67d899f6ea90f4df6ee31515981",
+        "subject": "chore(plans): register MCP audit authority follow-ups",
+        "finding_ids": [
+          "BR4-D065",
+          "BR4-D066",
+          "BR4-D067"
+        ],
+        "disposition": "registry_semantics_applied",
+        "roadshow_action": "registry_append_only_no_product_code_credit"
+      },
+      {
+        "commit": "60db19960f27240bd8d1f202deb7dd888de87080",
+        "subject": "test: freeze D058 tool owner contract",
+        "finding_ids": [
+          "BR4-D058",
+          "BR4-D062"
+        ],
+        "disposition": "superseded_by_d062_scope_correction",
+        "roadshow_action": "rewrite_test_from_d062_contract_do_not_port_old_oracles"
+      },
+      {
+        "commit": "b2c506be15ad8066e58830ef28665525621581bf",
+        "subject": "test: strengthen D058 owner recovery contract",
+        "finding_ids": [
+          "BR4-D058",
+          "BR4-D062"
+        ],
+        "disposition": "superseded_by_d062_scope_correction",
+        "roadshow_action": "rewrite_test_from_d062_contract_do_not_port_old_oracles"
+      },
+      {
+        "commit": "c2d39522c6fc2cfde5d119563f7bbcf25c289853",
+        "subject": "test: harden D058 recovery oracles",
+        "finding_ids": [
+          "BR4-D058",
+          "BR4-D062"
+        ],
+        "disposition": "superseded_by_d062_scope_correction",
+        "roadshow_action": "rewrite_test_from_d062_contract_do_not_port_old_oracles"
+      },
+      {
+        "commit": "00a85f0757b3bc1d7c5938aa49b3af4a853af001",
+        "subject": "docs(backend): register D063 and D064 findings",
+        "finding_ids": [
+          "BR4-D063",
+          "BR4-D064"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "cd65a7a2edfc348daf93d670ac6b226024a2a833",
+        "subject": "test(phase0): repair executable evidence validation",
+        "finding_ids": [
+          "BR4-D056"
+        ],
+        "disposition": "current_equivalent",
+        "roadshow_action": "do_not_port_rerun_current_gate"
+      },
+      {
+        "commit": "3da584353dfe41225512d1a72c6d5612eb7ee8f6",
+        "subject": "chore(plans): register MCP audit authority follow-ups",
+        "finding_ids": [
+          "BR4-D065",
+          "BR4-D066",
+          "BR4-D067"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "ef07e2d26d5853eb879dd8dc2356b3805adef07d",
+        "subject": "docs(plans): register D068 audit payload binding blocker",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "registry_semantics_applied",
+        "roadshow_action": "registry_append_only_no_product_code_credit"
+      },
+      {
+        "commit": "e2aff2c6bfdd95b330bbc89c96fb500aaf91a876",
+        "subject": "test(d057): freeze audit key authority red matrix",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "6d9be7e5a232363c273310b2d7e8f785fb39290c",
+        "subject": "test(d057): harden audit recovery red oracles",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "ff2c12b55a3d16d6a2babdea9b37be55bd71df36",
+        "subject": "wip(d057): harden audit key bootstrap authority",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "unsafe_or_unverified_draft",
+        "roadshow_action": "do_not_merge_use_only_for_source_comparison"
+      },
+      {
+        "commit": "2f76fe1ee1ebd75e47d66ef6384b669642b3d80e",
+        "subject": "test(d057): freeze audit bootstrap review blockers",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "f6827ca75b0fac6d74f49c2bbfc3e705961eff98",
+        "subject": "test(d057): repair audit bootstrap red evidence",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "evidence_only_no_roadshow_credit",
+        "roadshow_action": "preserve_as_red_or_review_evidence_only"
+      },
+      {
+        "commit": "66823595e33f911048cf99ea570eecdc34b41298",
+        "subject": "docs(plans): register D068 audit payload binding blocker",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "9c753d392e5338e9a4104eb407f4175a705186e5",
+        "subject": "test(d068): freeze authenticated audit payload contract",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "b87b07a4b1e70d546b7a00e7400d226809e276f0",
+        "subject": "test(d068): harden authenticated audit payload contract",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "35a695f2bc62d11ec3554c6b425775bde5bc2109",
+        "subject": "test(d068): repair authenticated payload red oracles",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "e0d40f62e2e240ece67194dc86901088bde4c0a2",
+        "subject": "test(d057): freeze audit key authority red matrix",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "ca4daae8c0be306249090ae9d71656171472e879",
+        "subject": "test(d057): harden audit recovery red oracles",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "1ed4c9e8fbe5b8d8771ecdb06814eb6094930221",
+        "subject": "test(d057): correct pre-manifest epoch proof contract",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "semantic_port_required",
+        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+      },
+      {
+        "commit": "59300e277b8895d88f8ac0ba034e93c3ea510bbf",
+        "subject": "test(d065): freeze trusted MCP audit read contract",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "fd7b74ddad6304277a614ca256440b6af9760bc3",
+        "subject": "test(d065): complete audit read truth red contract",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "d158edc2e88a1b829790f4757991ce47e7be427f",
+        "subject": "test(d065): harden audit read red contract",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "8a37da58573ce3da78c4f0fceb7f29332956871c",
+        "subject": "test(d065): isolate composite audit read owners",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "bf91e3a1d857fa186f755a00d47255348ba7d71b",
+        "subject": "test(d064): freeze store-bound audit owner contract",
+        "finding_ids": [
+          "BR4-D064"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "86fd78fb6a29689bd456faa73f0b8b75b2ca5f94",
+        "subject": "test(d068): freeze authenticated audit payload contract",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "d38e1b941f3dbb305f45dc30c46f782b0a4c1791",
+        "subject": "test(d068): harden authenticated audit payload contract",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "64cca861b43d4484fd201b3bfa1cd2176a5065f7",
+        "subject": "test(d068): repair authenticated payload red oracles",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "bc38aec0ef110054750e121720e07332edc77f23",
+        "subject": "test(d057): correct pre-manifest epoch proof contract",
+        "finding_ids": [
+          "BR4-D057"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "8042d74a6818eccc478cee6f225c440884869a7e",
+        "subject": "test(d063): freeze governed audit cleanup contract",
+        "finding_ids": [
+          "BR4-D063"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "5cb29899977bc519d41ff3b2ff183006772d0cec",
+        "subject": "test(d063): repair governed audit cleanup red contract",
+        "finding_ids": [
+          "BR4-D063"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "4b11bcff2cd154023f373993e05434609648c896",
+        "subject": "test(d065): freeze trusted MCP audit read contract",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "11defe953a72bbc9d585e9c6f7b79fa7fb70e776",
+        "subject": "test(d065): complete audit read truth red contract",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "6b1c14262eea9ede418163f9a6211b00e7c778ee",
+        "subject": "test(d065): harden audit read red contract",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "787dff6d9aa755afb763f1575dc5586cd5e7c774",
+        "subject": "test(d065): isolate composite audit read owners",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "8702b70db51fb33376005e0d7a2a980a98a19012",
+        "subject": "test(d063): freeze governed audit cleanup contract",
+        "finding_ids": [
+          "BR4-D063"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "17914c9f47dedf2b0f4fcbd548b985a04580aedb",
+        "subject": "fix(d063): govern audit cleanup authority",
+        "finding_ids": [
+          "BR4-D063"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "d40aa460f105a5a32d60960d97f5845475c0f31f",
+        "subject": "feat(d065): expose bounded trusted audit projection",
+        "finding_ids": [
+          "BR4-D065"
+        ],
+        "disposition": "quarantine_reference_only",
+        "roadshow_action": "preserve_remote_reference_release_surface_remains_quarantined"
+      },
+      {
+        "commit": "69a4ab3447648758862745dbf5e1b42057d2bc62",
+        "subject": "test(d064): freeze store-bound audit owner contract",
+        "finding_ids": [
+          "BR4-D064"
+        ],
+        "disposition": "superseded_duplicate",
+        "roadshow_action": "do_not_cherry_pick"
+      },
+      {
+        "commit": "443b32255cc9c33ad011310b06e8654a695c83d7",
+        "subject": "fix(d064): bind audit keys to canonical writer",
+        "finding_ids": [
+          "BR4-D064"
+        ],
+        "disposition": "unsafe_or_unverified_draft",
+        "roadshow_action": "do_not_merge_use_only_for_source_comparison"
+      },
+      {
+        "commit": "a94dbe1b55a6f8b4ada3a51553595b5d14ae576c",
+        "subject": "feat(d068): add authenticated audit payload codec",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "unsafe_or_unverified_draft",
+        "roadshow_action": "do_not_merge_use_only_for_source_comparison"
+      },
+      {
+        "commit": "8f7a48485c71efc3a25f30d0ae4b881cfcdb4ddb",
+        "subject": "fix(d068): bind authenticated audit codec context",
+        "finding_ids": [
+          "BR4-D068"
+        ],
+        "disposition": "unsafe_or_unverified_draft",
+        "roadshow_action": "do_not_merge_use_only_for_source_comparison"
+      }
+    ]
+  },
   "entries": [
     {"id":"BR4-D001","current_severity":"P0","triage_state":"root_cause_confirmed","implementation_state":"implemented","verification_state":"complete","closure_state":"closure_candidate","evidence":{"reproduction":["source_snapshot:former-openlife-core/src/builder/engine.rs::generate_builder_phase","source_trace:former-generic-Skill-Runtime-provider-command-family"],"failing_test":["counterexample:captured-local-http-provider-must-see-zero-Builder-requests"],"positive":["test_run:openlife-core-builder-engine-no-provider-authority-1-of-1-2026-07-12","test_run:openlife-tauri-builder-deterministic-authority-1-of-1-2026-07-12","test_run:openlife-tauri-generic-skill-runtime-absence-1-of-1-2026-07-12","test_run:openlife-tauri-builder-command-no-self-authorization-1-of-1-2026-07-12","test_run:openlife-tauri-quick-builder-captured-provider-zero-requests-1-of-1-2026-07-12","independent_test:openlife-core-builder-48-of-48-2026-07-12","independent_test:openlife-tauri-builder-19-of-19-2026-07-12","independent_test:frontend-builder-review-bridge-86-of-86-2026-07-12"],"counterfactual":["test:Builder-review-candidate-flow-retains-finished-session-without-provider-dispatch","test:Builder-no-signal-completion-fails-closed-without-canonical-LifeModel-write","independent_test:forged-caller-string-and-serialized-ingress-cannot-rehydrate-cloud-authority-3-of-3"],"deletion_or_absence":["source_scan:BuilderEngine-has-no-Scheduler-or-PreparedProviderRequest","source_scan:generic-Skill-Runtime-commands-handler-and-frontend-bridge-absent","source_scan:Builder-created-explicit-user-input-cloud-authorization-absent","independent_call_graph:Builder-and-generic-Skill-second-provider-authorities-absent"],"capability_non_regression":["test:Quick-Builder-still-produces-review-pending-typed-candidates","test:generic-Skill-catalog-remains-bounded-Main-Chat-context-not-a-second-runtime","independent_test:skill-catalog-and-bounded-context-10-of-10"],"live_boundary":["scoped-closure-candidate-only","external-live-provider-credit-zero-and-not-required-for-zero-dispatch-slice","single-system-global-gate-remains-red-27-of-32"]},"independent_review":{"reviewer":"d001_postfix_independent_rereview","decision":"approve-scoped","evidence_refs":["source-trace:Builder-unit-struct-and-three-deterministic-modes","source-trace:generic-Skill-Runtime-product-surfaces-absent","test:captured-provider-zero-requests-with-typed-review-candidates","test:unforgeable-nonserde-provider-authority-fails-closed","boundary:five-unrelated-single-system-failures-remain"]}},
     {"id":"BR4-D002","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_snapshot:openlife-core/src/scheduler.rs::generate_prepared","source_trace:stream-seam-has-no-terminal-receipt"],"failing_test":[],"positive":["test_run:scheduler-tests-11-of-11","test_run:agent-loop-tests-18-of-18","test_run:layered-reasoner-tests-3-of-3","test_run:agent-runtime-tests-4-of-4"],"counterfactual":["test_run:scripted-runtime-eval-records-not-attempted"],"deletion_or_absence":["source_snapshot:generate_prepared-absent"],"capability_non_regression":["test_run:cargo-check-openlife-core"],"live_boundary":[]},"independent_review":{"reviewer":"provider_receipt_convergence","decision":"non-stream-converged-stream-open","evidence_refs":["consumer-map:four-core-consumers-use-execute_prepared"]}},
@@ -272,7 +1965,7 @@
         ]
       }
     },
-    {"id":"BR4-D035","current_severity":"P0","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:mcp-frame-flush-before-local-future-drop"],"failing_test":[],"positive":["test:openlife-core::mcp::tests::hung_mcp_call_is_bounded_by_transport_timeout","test:openlife-core::mcp::tests::caller_cancellation_poisons_transport_before_a_late_response_can_be_reused","gate:cargo-test-openlife-core-mcp-tests-11-of-11"],"counterfactual":["test:cancelled-or-timed-out-transport-rejects-next-request-before-late-frame"],"deletion_or_absence":["source_guard:McpInFlightRequest-drop-poisons-and-terminates-owned-stdio-session"],"capability_non_regression":["test:openlife-core::mcp::tests::async_stdio_transport_completes_handshake_list_and_call","test:openlife-core::mcp::tests::registry_requires_typed_contract_and_executes_matching_mcp_manifest"],"live_boundary":[]},"independent_review":{"reviewer":"cancel_commit_replay_design","decision":"confirmed-open-typed-remote-unknown-receipt-still-required","evidence_refs":["source-trace:sequential-mcp-session-reused-after-uncertain-response"]}},
+    {"id":"BR4-D035","current_severity":"P0","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:mcp-frame-flush-before-local-future-drop"],"failing_test":[],"positive":["test:openlife-core::mcp::tests::hung_mcp_call_is_bounded_by_transport_timeout","test:openlife-core::mcp::tests::caller_cancellation_poisons_transport_before_a_late_response_can_be_reused","gate:cargo-test-openlife-core-mcp-tests-11-of-11"],"counterfactual":["test:cancelled-or-timed-out-transport-rejects-next-request-before-late-frame"],"deletion_or_absence":["source_guard:McpInFlightRequest-drop-poisons-and-terminates-owned-stdio-session"],"capability_non_regression":["test:openlife-core::mcp::tests::async_stdio_transport_completes_handshake_list_and_call","test:openlife-core::mcp::tests::registry_requires_typed_contract_executes_mcp_and_issues_bound_content_receipt"],"live_boundary":[]},"independent_review":{"reviewer":"cancel_commit_replay_design","decision":"confirmed-open-typed-remote-unknown-receipt-still-required","evidence_refs":["source-trace:sequential-mcp-session-reused-after-uncertain-response"]}},
     {"id":"BR4-D036","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"implemented","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:run-evidence-view-omits-turn-event-store"],"failing_test":[],"positive":["test:durable-terminal-event-overrides-stale-projection-and-disables-controls","test:task-list-terminal-filter-uses-durable-lifecycle-not-stale-task-status","test:durable-interrupted-and-unknown-lifecycle-are-never-downgraded-to-cancelled","gate:src-tauri-main-chat-task-control-38-of-38-2026-07-11"],"counterfactual":["test:projected-terminal-without-durable-receipt-is-pending-not-completed","test:missing-canonical-agent-run-degrades-evidence-instead-of-borrowing-chat-history","test:active-task-without-terminal-receipt-only-allows-cancel-and-trace"],"deletion_or_absence":["source_proof:RunEvidenceView-consumes-TurnEventStore-lifecycle-snapshot"],"capability_non_regression":["test:main-chat-task-continuity-list-detail-and-refresh-are-evidence-backed"],"live_boundary":["post-fix-independent-rereview-pending"]},"independent_review":{"reviewer":"pending","decision":"post-fix-rereview-pending","evidence_refs":["pre-fix-source-trace:projection-lag-can-contradict-terminal-receipt"]}},
     {"id":"BR4-D037","current_severity":"P0","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:provider-start-precedes-AgentRun-create","source_trace:cancellation-run-id-random-fallback","independent-review:deterministic-read-tool-source-run-id-missing","independent-review:react-agent-loop-creates-second-random-run","independent-review:stream-start-and-fallback-final-allow-empty-or-unknown-identity","independent-review:late-cancel-can-conflict-with-completed-run"],"failing_test":[],"positive":["test:backend-remediation-phase2-11-of-11","test:main-chat-runtime-module-27-of-27","test:plan-execute-product-6-of-6","source-proof:send-and-stream-create-persisted-run-before-provider","source-proof:plan-execute-child-events-bind-source-run-task-and-provenance","source-proof:propagated-event-projection-failure-preserves-completed-run-truth"],"counterfactual":["test:failure-finalizer-rejects-unbound-synthetic-terminal","test:event-store-rejects-task-switching-run-id"],"deletion_or_absence":["source_scan:no-random-cancellation-run-fallback"],"capability_non_regression":["test:backend-remediation-phase2-11-of-11","test:main-chat-runtime-module-27-of-27"],"live_boundary":["tool-gateway-canonical-run-identity-open","exact-task-resolution-fail-closed-open","terminal-commit-cancel-linearization-open","stream-start-and-final-delivery-nonoptional-identity-open","agent-run-active-task-unique-write-constraint-open"]},"independent_review":{"reviewer":"run_identity_independent_review","decision":"request-changes-surface-identity-improved-real-tool-and-terminal-identity-open","evidence_refs":["source-audit:deterministic-read-tool-receives-none-source-run","source-audit:react-agent-loop-creates-second-random-tool-run","source-audit:kernel-task-fallback-can-select-different-task","source-audit:late-cancel-can-conflict-with-completed-run","source-audit:stream-start-and-fallback-final-use-empty-or-unknown-identity"]}},
     {"id":"BR4-D038","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"implemented","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:event-identity-includes-payload-digest","source_trace:durable-row-decode-falls-back-to-now-null-zero"],"failing_test":[],"positive":["test:immutable-identity-rejects-different-payload-without-advancing-sequence","test:immutable-identity-conflict-rolls-back-later-batch","test:concurrent-connections-cannot-commit-two-versions","test:external-insert-replace-update-delete-cannot-rewrite-immutable-event","test:legacy-v2-payload-scrub-migrates-in-immediate-transaction","gate:main-chat-event-stream-tests-22-of-22"],"counterfactual":["test:corrupted-sequence-is-error-not-zero","test:corrupted-timestamp-is-error-not-now","test:corrupted-payload-is-error-not-null","test:insert-or-replace-cannot-bypass-identity-registry","test:unsupported-payload-version-fails-closed"],"deletion_or_absence":["source_scan:no-row-to-event-Utc-now-fallback","source_scan:no-row-to-event-Value-null-fallback","source_guard:immutable-identity-excludes-payload-digest"],"capability_non_regression":["test:backend-remediation-phase2-11-of-11","test:plan-execute-product-6-of-6"],"live_boundary":["per-event-typed-payload-schema-open","low-entropy-digest-equivalence-leak-open","identity-semantics-version-open","event-envelope-derived-identifier-leak-open","legacy-event-id-current-derivation-validation-open"]},"independent_review":{"reviewer":"event_store_p2_review","decision":"request-changes-initial-index-bypass-fixed-residual-schema-and-metadata-risks-open","evidence_refs":["counterexample:insert-or-replace-bypassed-initial-partial-index","source-proof:identity-registry-and-before-insert-trigger-block-bypass","source-audit:typed-schema-digest-and-envelope-risks-remain"]}},
@@ -405,6 +2098,884 @@
         "evidence_refs": []
       }
     }
+    ,{
+      "id": "BR4-D054",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "complete",
+      "closure_state": "independently_verified",
+      "evidence": {
+        "reproduction": [
+          "source_trace:unknown-transcript-kind-falls-back-to-Error-before-owner-digest",
+          "counterexample:future_error-and-error-produce-the-same-typed-transcript-and-owner-digest",
+          "source_trace:unknown-action-certainty-falls-back-to-DispatchedUnknown-before-owner-digest",
+          "counterexample:future_certainty-and-dispatched_unknown-produce-the-same-typed-action-and-owner-digest",
+          "source_trace:current-schema-reopen-rewrites-unknown-action-certainty-to-dispatched_unknown",
+          "source_trace:unknown-task-strategy-and-status-materialize-as-DirectAnswer-and-Running"
+        ],
+        "failing_test": [
+          "red_baseline:seven-Core-persisted-enum-corruption-tests-failed-before-bb1348f",
+          "red_baseline:two-Tauri-durable-final-recovery-tests-failed-before-bb1348f"
+        ],
+        "positive": [
+          "gate:openlife-core-D054-9-of-9-2026-07-13",
+          "gate:openlife-tauri-D054-durable-final-recovery-2-of-2-2026-07-13",
+          "gate:openlife-tauri-main_chat_runtime_module-29-of-29-2026-07-13",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-13",
+          "static:cargo-fmt-and-git-diff-check-2026-07-13"
+        ],
+        "counterfactual": [
+          "test:unknown-task-strategy-and-status-fail-before-typed-materialization",
+          "test:unknown-transcript-kind-and-action-certainty-cannot-alias-legal-owner-digests",
+          "test:mixed-legacy-transcript-enum-migration-rolls-back-the-whole-transaction",
+          "test:transcript-and-action-corruption-after-final-do-not-redispatch-provider-tool-or-second-final"
+        ],
+        "deletion_or_absence": [
+          "source_scan:four-lossy-persisted-enum-wildcard-fallbacks-absent",
+          "source_scan:current-schema-unknown-action-certainty-rewrite-absent"
+        ],
+        "capability_non_regression": [
+          "test:all-legal-historical-task-transcript-enum-values-remain-compatible",
+          "test:all-legal-action-replay-certainty-values-remain-compatible",
+          "gate:openlife-tauri-main_chat_runtime_module-29-of-29-2026-07-13"
+        ],
+        "live_boundary": [
+          "external-live-not-required:persisted-local-canonical-corruption-slice",
+          "localhost-provider-is-only-a-no-redispatch-observer-and-receives-zero-external-live-credit",
+          "neighbor-persisted-JSON-fallbacks-are-out-of-scope-and-remain-unverified"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d054_strict_enum_review",
+        "decision": "accepted",
+        "evidence_refs": [
+          "review:716a0a8-and-1555141-are-tests-only-real-RED",
+          "review:bb1348f-is-one-to-one-strict-parser-root-fix",
+          "review:mixed-migration-transaction-rolls-back",
+          "review:two-durable-final-recovery-counterfactuals-do-not-redispatch",
+          "integrated_rerun:eleven-focused-tests-plus-runtime-module-and-cargo-check-green"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D055",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:finalizer-snapshots-Action-Task-Transcript-Run-and-ToolEvent-under-separate-guards-then-appends-final",
+          "source_trace:recovery-reads-final-and-current-owners-without-one-epoch",
+          "source_trace:proposal-accept-reconciles-Run-Task-Action-and-Transcript-through-interleavable-writers",
+          "counterexample:authorized-post-final-proposal-successor-is-reported-as-owner-drift"
+        ],
+        "failing_test": [
+          "test_defined:proposal_accept_during_final_seal_cannot_commit_stale_owner_graph",
+          "test_defined:recovery_holds_final_epoch_against_authorized_post_terminal_successor"
+        ],
+        "positive": [],
+        "counterfactual": [
+          "test_defined:unproven-post-final-drift-remains-rejected-without-redispatch",
+          "test_defined:sealed-final-and-proven-review-successor-both-recover",
+          "test_defined:sealing-origin-defers-proposal-before-effect"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:split-owner-snapshot-then-final-append",
+          "deletion_required:product-direct-owner-writers-outside-one-gateway",
+          "deletion_required:historical-recovery-by-current-head-equality-only"
+        ],
+        "capability_non_regression": [
+          "test_defined:post-final-proposal-accept-remains-supported-as-proven-successor",
+          "test_defined:normal-buffered-and-streaming-final-recovery-remain-idempotent"
+        ],
+        "live_boundary": [
+          "barrier-tests-not-yet-implemented",
+          "coordinator-and-durable-seal-not-implemented",
+          "writer-cutover-not-started",
+          "second-uncoordinated-reread-is-not-closure",
+          "cross-process-writer-lease-remains-required-if-release-allows-second-writer"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d055_terminal_owner_fence",
+        "decision": "root-cause-confirmed-architecture-fix-required",
+        "evidence_refs": [
+          "writer-map:Action-Task-Transcript-Run-ToolEvent-and-proposal-reconciliation",
+          "source-audit:persist-and-recovery-lock-await-boundaries",
+          "design-boundary:no-store-guard-across-external-await"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D056",
+      "current_severity": "P2",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "gate_failure:D044-through-D053-fingerprints-did-not-match-canonical-Rust-algorithm",
+          "gate_failure:D052-legitimate-classification-rejected-by-incomplete-allowlist",
+          "gate_failure:D047-referenced-nonexistent-frozen-P0-05",
+          "evidence_error:exact-filter-invocation-executed-zero-tests"
+        ],
+        "failing_test": [
+          "red_gate:phase0-discovered-findings-addendum-rejected-invalid-fingerprint-taxonomy-and-reference"
+        ],
+        "positive": [
+          "gate:phase0-discovered-findings-addendum-1-of-1-2026-07-13",
+          "source_proof:D044-through-D053-first-bodies-unchanged-and-effective-fingerprints-corrected-by-append-only-record",
+          "source_proof:BR4-C001-append-only-invalid-reference-correction",
+          "static:jq-json-and-diff-check",
+          "gate:append-only-script-positive-and-three-negative-counterfactuals",
+          "source_proof:CI-full-history-and-base-prefix-step-wired"
+        ],
+        "counterfactual": [
+          "guard:trusted-prefix-body-rewrite-or-unbound-invalid-fingerprint-fails",
+          "gate_defined:unknown-classification-fails",
+          "gate_defined:missing-frozen-reference-requires-append-only-correction"
+        ],
+        "deletion_or_absence": [
+          "metadata_correction:D044-through-D053-derived-fingerprints-only",
+          "source_fix:single-explicit-classification-allowlist",
+          "source_fix:append-only-definition-correction-contract"
+        ],
+        "capability_non_regression": [
+          "not_applicable:evidence-gate-only-no-product-behavior-change"
+        ],
+        "live_boundary": [
+          "external-GitHub-Actions-execution-pending"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "registry_fingerprint_forensics",
+        "decision": "root-cause-confirmed-first-bodies-intact",
+        "evidence_refs": [
+          "session-forensics:first-successful-D044-through-D053-additions",
+          "algorithm-audit:Rust-canonical-json-without-trailing-newline"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D057",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:storage-keyring-read-or-decode-failure-to-empty",
+          "source_trace:empty-keyring-hydration-creates-keychain-epoch",
+          "source_trace:bootstrap-overwrites-keyring-before-proving-audit-database-epoch-coverage",
+          "source_trace:missing-audit-epoch-decrypts-with-active-key-then-renders-decrypt-failed"
+        ],
+        "failing_test": [
+          "test_defined:malformed-audit-keyring-creates-no-secret-and-preserves-original-bytes",
+          "test_defined:missing-keyring-with-existing-audit-rows-fails-closed",
+          "test_defined:duplicate-audit-epoch-is-rejected-not-deduplicated"
+        ],
+        "positive": [
+          "working_contrast:malformed-main-chat-integrity-key-fails-closed-without-rotation",
+          "source_proof:genuine-empty-keyring-creates-random-keychain-material"
+        ],
+        "counterfactual": [
+          "test_defined:genuine-first-boot-creates-one-durable-key-and-reference",
+          "test_defined:valid-historical-keyring-keeps-old-epochs-readable",
+          "test_defined:key-reference-save-failure-never-activates-unpersisted-write-key"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:keyring-read-error-to-empty-vector",
+          "deletion_required:silent-epoch-deduplication",
+          "deletion_required:missing-epoch-active-key-fallback"
+        ],
+        "capability_non_regression": [
+          "test_defined:normal-MCP-audit-write-and-restart-remain-readable",
+          "test_defined:legal-legacy-read-only-key-migrates-to-keychain-epoch"
+        ],
+        "live_boundary": [
+          "source-confirmed-no-dynamic-RED-yet",
+          "historical-audit-row-decryptability-after-bootstrap-not-yet-fault-injected",
+          "no-production-fix-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_json_fallback_inventory",
+        "decision": "root-cause-confirmed-source-review",
+        "evidence_refs": [
+          "source-map:storage-secret-store-bootstrap-mcp-audit",
+          "working-contrast:integrity-key-fails-closed",
+          "boundary:first-boot-versus-existing-database"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D058",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "test_run:d051_failed_or_quoted_read_creates_zero_memory_proposals-1-executed-RED-turn_final_tool_terminal_owner_missing-at-08a7b52",
+          "test_run:main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read-1-executed-same-RED-at-08a7b52",
+          "source_trace:pre-gateway-blocker-to-non-runtime-receipt-to-excluded-regular-projection-to-final-missing-owner"
+        ],
+        "failing_test": [
+          "existing:d051_failed_or_quoted_read_creates_zero_memory_proposals",
+          "existing:main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read",
+          "superseded_by_D062:missing-file-pre-gateway-blocker-has-no-forged-tool-receipt-and-final-recovers",
+          "test_defined:quoted-file-real-gateway-receipt-has-one-terminal-and-zero-proposals",
+          "test_defined:runtime-issued-receipt-without-unique-terminal-fails-closed"
+        ],
+        "positive": [
+          "test_run:d051_not_useful_read_observation_never_creates_memory_proposal-PASS",
+          "test_run:d051_useful_proposal_body_and_evidence_are_bound_to_canonical_observation_receipt-PASS"
+        ],
+        "counterfactual": [
+          "caller-created-or-serde-receipt-cannot-gain-ToolEvent-admission",
+          "live-runtime-receipt-without-one-matching-terminal-cannot-recover",
+          "duplicate-or-conflicting-terminal-remains-rejected",
+          "pre-gateway-blocker-remains-visible-in-ActionQueue-and-final-blocker-truth"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:failed_before_dispatch-in-blocked_kernel-read-tool-execution-scope-corrected-by-D062",
+          "deletion_required:missing-receipt-fake-tool-owner-fallback",
+          "deletion_required:positional-owner-count-recovery-assumption",
+          "absence_required:pure-lexical-pre-gateway-blocker-has-no-synthetic-toolExecutionReceipt"
+        ],
+        "capability_non_regression": [
+          "missing-file-and-traversal-send-stream-return-structured-blocker-with-distinct-owner-contracts-per-D062",
+          "quoted-and-successful-reads-keep-ToolGateway-lifecycle",
+          "failed-and-quoted-reads-produce-zero-Proposal",
+          "durable-final-recovery-remains-idempotent"
+        ],
+        "live_boundary": [
+          "D062-supersedes-only-the-D058-missing-file-pre-gateway-hypothesis",
+          "quoted-case-not-directly-executed-because-combined-test-stops-at-missing-file-RED",
+          "no-production-fix-or-approved-D058-D062-RED-contract-implemented",
+          "D055-terminal-seal-does-not-create-a-missing-tool-owner",
+          "external-live-provider-credit-not-applicable"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d058_terminal_tool_owner_baseline",
+        "decision": "root-cause-confirmed-independent-finding",
+        "evidence_refs": [
+          "baseline-08a7b52-exact-RED",
+          "path-traversal-corroborating-RED",
+          "two-successful-read-controls-GREEN",
+          "source-map:resolver-kernel-action-queue-runtime-event-final-recovery"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D059",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:legacy-transcript-malformed-metadata-to-null-and-version-advance",
+          "source_trace:patch-before-after-malformed-to-none-or-null-before-immutable-identity",
+          "source_trace:proposal-present-before-malformed-to-absence-before-apply-and-digest",
+          "source_trace:memory-tags-malformed-to-empty-across-read-export-and-vector-rebuild",
+          "source_trace:memory-lifecycle-lineage-rollback-and-view-arrays-malformed-to-empty",
+          "source_trace:LifeState-ProposalStore-error-to-ok-zero-projection"
+        ],
+        "failing_test": [
+          "test_defined:mixed-valid-and-malformed-transcript-JSON-migration-rolls-back-whole-batch",
+          "test_defined:malformed-Patch-required-and-optional-JSON-fail-before-identity-or-reconciliation",
+          "test_defined:malformed-Proposal-before-fails-before-review-effect",
+          "test_defined:malformed-Memory-tags-fail-owner-read-export-and-rebuild",
+          "test_defined:malformed-MemoryLifecycle-lineage-and-rollback-fail-while-derived-view-degrades"
+        ],
+        "positive": [
+          "working_contrast:current-transcript-row-decoder-is-strict",
+          "working_contrast:LifeEvent-and-EvidenceStore-JSON-decoders-propagate-errors",
+          "working_contrast:MainChat-event-legacy-migration-rolls-back-on-invalid-JSON"
+        ],
+        "counterfactual": [
+          "corrupt-canonical-row-cannot-gain-owner-digest-or-effect",
+          "optional-SQL-NULL-remains-distinct-from-present-invalid-JSON",
+          "derived-vector-corruption-remains-rebuildable-without-being-promoted-to-canonical-failure",
+          "projection-error-cannot-be-displayed-as-ok-with-zero-items"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:five-owner-families-of-lossy-JSON-decode",
+          "deletion_required:legacy-transcript-null-rewrite",
+          "deletion_required:projection-store-error-to-healthy-empty"
+        ],
+        "capability_non_regression": [
+          "legal-historical-JSON-round-trips",
+          "normal-review-patch-memory-and-lifecycle-capabilities-remain-available",
+          "derived-vector-rebuild-behavior-remains-supported"
+        ],
+        "live_boundary": [
+          "source-confirmed-no-new-dynamic-RED-yet",
+          "syntax-or-type-corruption-only-valid-JSON-tamper-authentication-is-separate",
+          "VectorStore-is-derived-and-not-a-D059-blocker",
+          "no-production-fix-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_json_fallback_inventory",
+        "decision": "root-cause-confirmed-owner-bounded-source-map",
+        "evidence_refs": [
+          "source-map:transcript-patch-proposal-memory-lifecycle",
+          "downstream-map:proposal-apply-digest-and-LifeState",
+          "boundary:derived-vector-rebuild-not-canonical"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D060",
+      "current_severity": "P1",
+      "triage_state": "source_reproduced",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:PluginRegistry-new-load-enabled-overrides-unwrap-or-default",
+          "source_trace:manifest-enabled-default-restored-when-override-map-is-empty",
+          "source_trace:bootstrap-registers-read-write-after-manifest-reload-despite-lost-override-authority"
+        ],
+        "failing_test": [
+          "test_defined:disable-enabled-manifest-corrupt-override-restart-never-reenables",
+          "test_defined:unreadable-plugin-override-registers-unavailable-and-preserves-bytes"
+        ],
+        "positive": [
+          "source_proof:plugin-tools-and-skills-are-currently-inspectable-only-and-removed-from-executable-registries",
+          "test_existing:enable-override-persists-across-clean-registry-restart"
+        ],
+        "counterfactual": [
+          "missing-override-file-may-use-reviewed-manifest-default",
+          "present-invalid-or-unreadable-override-can-never-alias-missing",
+          "corrupt-override-registers-zero-executable-plugin-capability"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:override-load-error-to-empty-map",
+          "deletion_required:non-atomic-override-write",
+          "absence_required:read-write-product-status-after-override-authority-failure"
+        ],
+        "capability_non_regression": [
+          "valid-enable-and-disable-survive-restart",
+          "plugin-manifests-remain-inspectable",
+          "plugin-tool-and-skill-execution-remains-absent-until-reviewed-contract"
+        ],
+        "live_boundary": [
+          "product-permission-truth-impact-source-confirmed",
+          "actual-plugin-tool-side-effect-reachability-not-proven-and-current-source-says-unavailable",
+          "dynamic-RED-and-product-read-model-status-proof-pending",
+          "severity-remains-P1-suspected"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_json_fallback_inventory",
+        "decision": "suspected-product-authority-impact-executable-effect-unverified",
+        "evidence_refs": [
+          "source-map:plugin-override-loader-bootstrap-list",
+          "absence-boundary:no-plugin-ToolGateway-MCP-Skill-registration"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D061",
+      "current_severity": "P1",
+      "triage_state": "source_reproduced",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:PatchStore-unknown-operation-source-risk-status-to-legal-defaults-and-bad-applied-at-to-none",
+          "source_trace:ProposalStore-unknown-type-risk-to-legal-defaults-and-bad-resolved-expires-at-to-none",
+          "source_trace:MemoryLifecycle-status-to-candidate-materialization-to-not-required-and-bad-time-to-now"
+        ],
+        "failing_test": [
+          "test_defined:unknown-Patch-enums-and-malformed-applied-at-fail-before-typed-materialization",
+          "test_defined:unknown-Proposal-type-risk-and-malformed-optional-times-fail-before-review",
+          "test_defined:MemoryLifecycle-current-legacy-and-read-only-non-JSON-corruption-matrix"
+        ],
+        "positive": [
+          "source_proof:current-MemoryLifecycle-schema-has-CHECKs-for-several-enums",
+          "test_existing:MemoryLifecycle-malformed-risk-sensitivity-scope-category-rejected-on-current-schema"
+        ],
+        "counterfactual": [
+          "all-legal-historical-values-round-trip",
+          "conservative-untrusted-input-classification-is-not-reused-as-persisted-row-authority",
+          "current-schema-CHECK-does-not-claim-legacy-or-read-only-decoder-closure"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:Patch-and-Proposal-persisted-wildcard-defaults",
+          "deletion_required:persisted-optional-time-to-absence",
+          "deletion_required:MemoryLifecycle-persisted-time-to-now"
+        ],
+        "capability_non_regression": [
+          "legal-Patch-Proposal-and-MemoryLifecycle-records-remain-readable",
+          "current-schema-constraint-protection-remains-enforced"
+        ],
+        "live_boundary": [
+          "partial-source-map-only-full-non-JSON-persistence-audit-not-complete",
+          "MemoryLifecycle-enum-injection-is-constrained-on-current-schema-but-legacy-and-read-only-reachability-open",
+          "timestamp-corruption-is-directly-reachable",
+          "D054-and-D059-provide-zero-closure-credit",
+          "severity-remains-P1-suspected"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_json_fallback_inventory",
+        "decision": "suspected-adjacent-persisted-defaults-full-audit-required",
+        "evidence_refs": [
+          "source-map:Patch-Proposal-MemoryLifecycle",
+          "boundary:D054-owner-set-excluded",
+          "boundary:current-schema-CHECK-versus-legacy"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D062",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:Kernel-canonicalizes-workspace-file-before-ToolGateway",
+          "source_trace:missing-file-and-traversal-share-failed-before-dispatch-construction",
+          "source_trace:ToolGateway-execution-tools-own-metadata-and-read-after-admission",
+          "evidence_correction:D058-initial-test-contract-preserved-second-filesystem-executor"
+        ],
+        "failing_test": [
+          "test_defined:lexical-traversal-blocks-before-gateway-without-receipt-or-terminal",
+          "test_defined:missing-file-enters-gateway-and-owns-one-failed-receipt-and-tool-failed-terminal",
+          "test_defined:final-owner-bindings-match-actions-by-identity-not-position-or-count",
+          "test_defined:unknown-duplicate-or-conflicting-action-owner-binding-fails-closed"
+        ],
+        "positive": [
+          "source_proof:ToolGateway-already-owns-typed-tool-lifecycle-for-admitted-execution",
+          "capability_control:quoted-and-successful-workspace-read-have-real-tool-owner"
+        ],
+        "counterfactual": [
+          "lexical-policy-rejection-never-gains-a-synthetic-runtime-receipt",
+          "operating-system-file-not-found-can-never-be-reported-as-not-attempted",
+          "legacy-version-one-real-tool-final-remains-recoverable"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:filesystem-canonicalize-metadata-open-read-outside-ToolGateway",
+          "deletion_required:missing-file-pre-gateway-no-receipt-hypothesis",
+          "deletion_required:positional-tool-owner-zip-or-count-recovery"
+        ],
+        "capability_non_regression": [
+          "missing-file-and-traversal-both-return-truthful-structured-failures-with-distinct-authority",
+          "quoted-and-successful-file-read-remain-available",
+          "failed-and-quoted-reads-produce-zero-Proposal",
+          "durable-final-recovery-remains-idempotent"
+        ],
+        "live_boundary": [
+          "scope-correction-registered-before-production-change",
+          "D058-RED-tests-being-rewritten-to-D062-boundary",
+          "no-production-fix-implemented",
+          "external-live-provider-credit-not-applicable"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "root-architecture-audit",
+        "decision": "root-cause-confirmed-scope-correction-required",
+        "evidence_refs": [
+          "invariant:I05-all-product-tool-calls-through-ToolGateway",
+          "counterfactual:missing-file-requires-operating-system-observation",
+          "anti-hallucination:do-not-green-current-boundary"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D063",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "in_progress",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:McpPage-client-dialog-to-clearMcpAuditLogs",
+          "source_trace:clear_mcp_audit_logs-release-handler-to-public-clear_old_logs",
+          "source_trace:second-Settings-cleanup-route-requires-effects-gate-and-native-confirmation",
+          "source_trace:negative-days-produce-future-cutoff-and-delete-all-current-rows",
+          "counterexample:build-info-unavailable-McpPage-test-still-required-old-cleanup-button",
+          "counterexample:fixed-2020-2090-fixture-could-not-detect-cutoff-sign-or-one-day-error",
+          "counterexample:test-local-3650-constant-could-pass-without-production-domain-owner",
+          "counterexample:direct-cleanup-i64-test-call-would-not-compile-after-typed-domain-migration"
+        ],
+        "failing_test": [
+          "test_defined:AST-constrained-shipped-audit-handler-allowlist-and-bounded-domain-mutation-callgraph",
+          "test_defined:negative-zero-above-max-and-i64-max-retention-performs-zero-mutation",
+          "test_defined:shipped-command-binds-McpAuditRetentionDays-before-orchestration-with-AppError-mapping-allowed",
+          "test_defined:valid-one-and-3650-day-cutoffs-delete-before-boundary-only",
+          "test_defined:injected-orchestration-seam-validation-effects-and-confirmation-failures-perform-zero-mutation",
+          "future_required:concrete-Tauri-IPC-native-confirmation-database-rejection-performs-zero-audit-mutation",
+          "test_run:D063-Rust-initial-11-selected-3-controls-pass-8-target-RED-2026-07-13",
+          "test_run:D063-McpPage-initial-8-selected-7-surrounding-pass-1-target-RED-2026-07-13",
+          "test_run:D063-Rust-repaired-contract-first-16-selected-7-controls-pass-9-target-RED-2026-07-13",
+          "test_run:D063-Rust-repaired-contract-after-callgraph-fix-16-selected-7-controls-pass-9-target-RED-2026-07-13",
+          "test_run:D063-Rust-repaired-contract-final-16-selected-7-controls-pass-9-target-RED-2026-07-13",
+          "test_run:D063-Rust-syn-AST-renamed-method-callgraph-16-selected-7-controls-pass-9-target-RED-2026-07-13",
+          "test_run:D063-McpPage-repaired-contract-8-selected-5-surrounding-pass-3-target-RED-2026-07-13"
+        ],
+        "positive": [
+          "source_proof:production-command-calls-private-stable-orchestrate_mcp_audit_cleanup-seam",
+          "source_proof:Settings-cleanup-command-binds-real-PersistenceCoordinator-effects-gate-Rust-owned-confirmation-and-audit-store-ports",
+          "source_proof:injectable-orchestration-forwarder-is-cfg-test-only-and-absent-from-release",
+          "contract_proof:d063-cleanup-contract-adapter-v1-uses-inferred-TryInto-for-current-raw-and-target-typed-signatures",
+          "contract_proof:test-only-syn-AST-checks-current-bare-handler-identifiers-direct-unaliased-audit-imports-all-Rust-visibilities-and-code-expressions",
+          "contract_proof:bounded-flat-module-one-hop-inherent-method-and-explicit-UFCS-guard-derives-public-delete-entry-from-real-DELETE-SQL-owner",
+          "test_run:openlife-core-audit_store_export_and_cleanup-valid-one-day-inferred-TryInto-real-old-row-1-of-1",
+          "contract_proof:MCP_AUDIT_RETENTION_MAX_DAYS-has-one-production-domain-owner",
+          "test_run:D063-production-called-orchestrator-injected-port-order-and-zero-mutation-counters",
+          "test_run:D063-native-grant-authority-missing-wrong-scope-and-replay-fail-closed",
+          "test_run:D063-relative-now-one-and-3650-day-boundaries-pass"
+        ],
+        "counterfactual": [
+          "AST-string-and-comment-literals-cannot-create-callgraph-credit",
+          "AST-pub-pub-crate-pub-super-and-pub-in-cannot-pass-private-seam-guard",
+          "audit-use-rename-glob-module-alias-handler-path-alias-and-cfg-alternate-fail-closed",
+          "current-inherent-method-and-explicit-McpAuditStore-or-Self-UFCS-calls-remain-visible-after-function-or-method-rename",
+          "typed-validator-allows-outer-AppError-mapping-around-exactly-one-core-try-from-raw-call",
+          "list-and-export-audit-capabilities-remain-separate-from-deletion-authority",
+          "valid-one-and-3650-day-retention-remains-available-through-the-governed-route",
+          "relative-now-before-and-inside-boundary-rows-detect-now-plus-days-sign-and-one-day-off-by-one-errors",
+          "page-local-confirmation-can-never-mint-durable-write-authority",
+          "negative-zero-and-3651-day-retention-return-error-before-SQL-and-preserve-exact-real-SQLite-rows",
+          "i64-max-retention-returns-error-instead-of-panicking",
+          "retention-domain-is-bounded-to-1-through-production-owned-3650-days-without-removing-long-horizon-local-retention"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:clear_mcp_audit_logs-command-import-and-handler",
+          "deletion_required:frontend-clearMcpAuditLogs-and-McpPage-direct-call",
+          "deletion_required:public-second-clear_old_logs-mutation-entry",
+          "absence_required:release-callers-can-inject-cleanup-validation-effects-confirmation-or-mutation-ports",
+          "absence_required:client-only-confirmation-authorizes-audit-deletion",
+          "absence_required:unvalidated-retention-reaches-delete-SQL"
+        ],
+        "capability_non_regression": [
+          "bounded-audit-retention-cleanup-remains-available-after-native-confirmation",
+          "recent-audit-rows-remain-queryable",
+          "McpPage-audit-list-and-separate-governed-export-capabilities-remain-available"
+        ],
+        "live_boundary": [
+          "source-confirmed-second-shipped-deletion-authority",
+          "dynamic_RED:negative-zero-and-above-maximum-retention-currently-mutate-real-SQLite",
+          "dynamic_RED:i64-max-retention-currently-panics-before-typed-error",
+          "dynamic_RED:old-backend-command-public-second-mutation-frontend-wrapper-and-McpPage-direct-call-remain",
+          "test_boundary:orchestration-seam-counters-use-injected-ports-and-do-not-prove-real-PersistenceCoordinator-or-native-dialog",
+          "test_boundary:native-authority-unit-test-proves-scope-and-single-use-but-does-not-observe-audit-database",
+          "test_boundary:concrete-tauri-WebviewWindow-command-has-no-MockRuntime-IPC-credit",
+          "static_boundary:handler-guard-requires-current-bare-identifiers-and-direct-unaliased-imports-instead-of-claiming-general-Rust-name-resolution",
+          "static_boundary:mutation-guard-requires-flat-modules-and-covers-real-SQL-owner-plus-current-one-hop-inherent-method-or-explicit-Self-or-McpAuditStore-UFCS-without-deeper-trait-deref-alias-or-type-inference-credit",
+          "production-cleanup-green:not-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d063_repaired_independent_review",
+        "decision": "accepted-red-contract-production-still-red",
+        "evidence_refs": [
+          "accepted:direct-import-and-bare-handler-contract-fails-closed-on-rename-glob-module-alias-multisegment-path-and-cfg-alternates",
+          "accepted:bounded-real-SQL-owner-one-hop-method-and-explicit-Self-or-McpAuditStore-UFCS-guard-with-test-only-inline-modules-allowed",
+          "accepted:typed-validator-requires-one-core-try-from-raw-call-and-allows-outer-AppError-mapping",
+          "independent_rerun:cargo-test-openlife-tauri-d063-no-run-exit-0",
+          "independent_rerun:D063-Rust-16-selected-7-controls-pass-9-target-RED-945-filtered",
+          "boundary:no-concrete-Tauri-IPC-native-confirmation-database-rejection-credit",
+          "boundary:five-production-RED-classes-remain-and-implementation-in-progress-verification-partial-closure-open"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D064",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:global-keychain-service-account-prefix-plus-numeric-epoch",
+          "source_trace:create_mcp_audit_key_material-uses-epoch-reference-and-replacement-set_password",
+          "source_trace:profile-and-custom-data-directories-share-secret-namespace",
+          "source_trace:McpAuditStore-has-no-writable-owner-lease-and-opens-new-connections-per-operation"
+        ],
+        "failing_test": [
+          "test_defined:two-store-identities-same-epoch-create-distinct-secret-references-without-overwrite",
+          "test_defined:same-canonical-audit-slot-rejects-second-process-writer",
+          "test_defined:missing-keyring-plus-nonempty-database-is-Unavailable-with-zero-guessing-or-secret-creation",
+          "test_defined:key-reference-or-secret-activation-failure-leaves-all-three-authorities-unchanged",
+          "test_defined:legacy-and-new-reference-generations-restart-read-with-legacy-never-overwritten"
+        ],
+        "positive": [
+          "working_contrast:SqliteSlotOwnerLease-already-provides-cross-process-slot-ownership-for-other-stores",
+          "source_proof:mcp_audit_keys-json-already-persists-versioned-audit-key-configs",
+          "source_proof:valid-keychain-material-can-read-historical-epoch-ciphertext"
+        ],
+        "counterfactual": [
+          "numeric-epoch-ordering-remains-deterministic-with-store-bound-random-reference-identity",
+          "genuine-empty-first-boot-creates-one-reference-only-after-no-create-slot-reservation",
+          "present-valid-keyring-may-enter-verified-read-only-recovery-without-creating-or-guessing-a-key",
+          "existing-SqliteSlotOwnerLease-acquire-cannot-be-reused-blindly-before-BR4-D057-state-proof-because-it-can-create-an-absent-database"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:global-epoch-only-new-key-reference",
+          "deletion_required:replacement-write-for-new-audit-secret",
+          "deletion_required:lease-free-writable-McpAuditStore",
+          "deletion_required:per-operation-detached-writable-Connection-open",
+          "absence_required:database-or-lock-file-duplicates-canonical-key-reference-list",
+          "absence_required:missing-keyring-triggers-reference-guessing-keychain-enumeration-or-read-only-claim",
+          "absence_required:legacy-global-reference-is-overwritten-or-auto-deleted"
+        ],
+        "capability_non_regression": [
+          "normal-audit-write-query-export-cleanup-and-restart-remain-available-for-one-valid-owner",
+          "distinct-release-development-QA-and-custom-data-dir-stores-remain-independent",
+          "valid-historical-ciphertext-remains-readable-after-versioned-migration"
+        ],
+        "live_boundary": [
+          "source-confirmed-global-reference-collision-and-lease-gap",
+          "same-second-cross-profile-and-two-process-dynamic-RED-pending",
+          "missing-keyring-plus-nonempty-database-required-state-is-exactly-Unavailable",
+          "BR4-D057-strict-loader-state-and-decrypt-proof-is-a-design-prerequisite-not-closure-credit",
+          "no-production-fix-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d063_d064_independent_inventory",
+        "decision": "root-cause-confirmed-global-secret-identity-and-writer-ownership-gap",
+        "evidence_refs": [
+          "source-map:storage-secret-store-bootstrap-settings-mcp-audit-sqlite-lease",
+          "counterfactual:two-stores-same-epoch",
+          "boundary:keyring-json-sole-reference-authority",
+          "dependency:BR4-D057-state-proof-before-BR4-D064-activation"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D065",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:diagnostics-audit-gate-or-list-error-to-zero",
+          "source_trace:shipped-audit-list-bypasses-trusted-read",
+          "source_trace:per-row-decrypt-failure-to-success-placeholder",
+          "counterexample:key-reference-unavailable-audit-store-readable-can-return-data"
+        ],
+        "failing_test": [
+          "test_defined:D065-composite-trust-failure-projects-unknown-not-zero",
+          "test_defined:D065-list-and-decrypt-failure-fail-closed",
+          "test_defined:D065-unrelated-read-only-or-unavailable-store-does-not-pollute-exact-audit-owner-truth",
+          "test_defined:D065-either-single-canonical-read-only-audit-owner-projects-degraded-with-exact-readable-data",
+          "test_run:D065-Rust-34-selected-14-controls-pass-20-target-RED-2026-07-13"
+        ],
+        "positive": [
+          "test_run:D065-counterfactual-shipped-export-capability-controls-4-of-4-2026-07-13"
+        ],
+        "counterfactual": [
+          "test_defined:trusted-empty-audit-db-is-available-zero",
+          "test_defined:trusted-nonempty-audit-db-returns-exact-counts",
+          "test_defined:both-audit-owners-read-write-plus-unrelated-read-only-store-remains-available-and-exact-while-global-effects-are-independently-blocked",
+          "test_defined:both-audit-owners-read-write-plus-unrelated-unavailable-store-remains-available-and-exact-while-global-effects-are-independently-blocked",
+          "test_defined:read-only-key-reference-plus-read-write-audit-store-is-degraded-and-readable",
+          "test_defined:read-write-key-reference-plus-genuine-read-only-audit-store-is-degraded-and-readable-with-write-rejected"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:diagnostics-audit-error-to-zero",
+          "deletion_required:shipped-direct-audit-store-read",
+          "deletion_required:decrypt-failure-success-placeholder"
+        ],
+        "capability_non_regression": [
+          "test_defined:canonical-read-only-audit-store-with-complete-keyring-remains-readable",
+          "test_defined:unrelated-persistence-degradation-does-not-block-exact-audit-list-or-export"
+        ],
+        "live_boundary": [
+          "D057-GREEN-blocked-until-composite-audit-read-truth-is-proved-end-to-end",
+          "typed-audit-read-gateway-and-product-projection-not-implemented",
+          "red_contract_baseline:D065-Rust-26-selected-10-controls-pass-16-target-RED",
+          "red_contract_repair:D065-Rust-34-selected-14-controls-pass-20-target-RED",
+          "test_run:D065-UI-21-selected-16-surrounding-pass-5-target-RED-2026-07-13",
+          "zero_credit:D063-legacy-clear-route-test-is-one-surrounding-pass-and-not-a-D065-control"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_green_design_review",
+        "decision": "root-cause-confirmed-D057-GREEN-blocker",
+        "evidence_refs": [
+          "fixed-commit-source-trace:diagnostics-and-list-have-divergent-trust-semantics",
+          "fixed-commit-counterexample:key-reference-health-is-not-part-of-diagnostics-read-gate",
+          "fixed-commit-source-trace:PrivacyTab-renders-unavailable-as-zero"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D066",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:tool-gateway-resource-captures-McpAuditStore-by-value",
+          "source_trace:McpAuditStore-Clone-copies-active-key-epoch-and-keyring",
+          "source_trace:rotation-mutates-only-AppState-store",
+          "counterexample:pre-rotation-resource-writes-old-epoch-after-durable-cutover"
+        ],
+        "failing_test": [
+          "test_defined:D066-captured-gateway-writes-new-epoch-after-rotation-barrier",
+          "test_defined:D066-main-chat-agent-loop-and-scheduler-share-one-active-key-authority"
+        ],
+        "positive": [],
+        "counterfactual": [
+          "test_defined:pre-cutover-row-may-use-old-epoch-and-remains-readable",
+          "test_defined:key-reference-save-failure-leaves-all-writers-on-old-epoch"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:by-value-product-McpAuditStore-snapshot",
+          "deletion_required:lock-then-clone-active-key-authority",
+          "deletion_required:rotation-rollback-through-mutable-authority-clone"
+        ],
+        "capability_non_regression": [
+          "test_defined:normal-main-chat-agent-loop-and-scheduled-tool-audit-remain-available"
+        ],
+        "live_boundary": [
+          "separate-from-D057-narrow-bootstrap-GREEN-gate",
+          "blocks-P1-16-key-rotation-and-final-audit-authority-closure",
+          "shared-key-authority-handle-and-rotation-barrier-not-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_green_design_review",
+        "decision": "root-cause-confirmed-separate-P1-16-closure-blocker",
+        "evidence_refs": [
+          "fixed-commit-source-trace:resource-snapshot-clones-key-state",
+          "fixed-commit-source-trace:insert-uses-cloned-key-and-epoch",
+          "fixed-commit-counterexample:historical-key-retention-hides-stale-writer"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D067",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:tool-success-audit-insert-error-is-only-eprintln",
+          "source_trace:tool-failure-audit-insert-error-is-only-eprintln",
+          "source_trace:tool-receipt-has-no-audit-persistence-disposition",
+          "counterexample:runtime-audit-failure-leaves-PersistenceCoordinator-healthy"
+        ],
+        "failing_test": [
+          "test_defined:D067-tool-success-plus-audit-failure-preserves-effect-and-degrades-persistence",
+          "test_defined:D067-tool-failure-plus-audit-failure-preserves-both-outcomes"
+        ],
+        "positive": [],
+        "counterfactual": [
+          "test_defined:audit-failure-never-retries-non-idempotent-tool",
+          "test_defined:normal-tool-terminal-writes-exactly-one-minimized-audit-row"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:audit-write-error-warning-and-continue",
+          "deletion_required:tool-terminal-without-audit-disposition",
+          "deletion_required:healthy-future-effect-admission-after-audit-store-failure"
+        ],
+        "capability_non_regression": [
+          "test_defined:confirmed-tool-output-remains-available-with-explicit-audit-degraded-state",
+          "test_defined:pre-dispatch-blocker-keeps-zero-tool-and-audit-effects"
+        ],
+        "live_boundary": [
+          "separate-from-D057-bootstrap-key-authority-root-cause",
+          "blocks-ToolGateway-truth-consistency-and-Phase7-final-GREEN",
+          "runtime-audit-failure-injection-and-existing-receipt-deepening-not-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_green_design_review",
+        "decision": "root-cause-confirmed-final-truth-consistency-blocker",
+        "evidence_refs": [
+          "fixed-commit-source-trace:both-audit-errors-are-swallowed",
+          "fixed-commit-source-trace:ToolCallInternalResult-and-ToolExecutionReceipt-cannot-express-audit-failure",
+          "fixed-commit-counterexample:tool-success-can-be-permanently-unaudited"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D068",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:migrate-legacy-selects-only-plaintext-payload-version-less-than-one",
+          "source_trace:list-and-export-ignore-payload-version-and-receipt-schema",
+          "source_trace:AES-GCM-encrypt-and-decrypt-use-no-AAD-or-versioned-envelope",
+          "mechanical_counterexample:version-zero-legacy-row-flipped-to-one-skips-migration-and-returns-raw-sensitive-plaintext"
+        ],
+        "failing_test": [
+          "test_defined:D068-version-flip-cannot-skip-migration-or-return-raw-payload",
+          "test_defined:D068-auth-or-receipt-schema-failure-performs-zero-rewrite",
+          "test_defined:D068-list-and-export-reject-unbound-version-and-invalid-current-receipt"
+        ],
+        "positive": [
+          "source_proof:insert-log-already-materializes-minimized-argument-and-result-receipts",
+          "source_proof:legal-version-zero-payloads-already-have-a-legacy-migration-capability"
+        ],
+        "counterfactual": [
+          "test_defined:authenticated-current-minimized-receipts-remain-exactly-readable",
+          "test_defined:legal-legacy-rows-migrate-transactionally-and-remain-readable-after-restart",
+          "test_defined:wrong-kind-payloadStored-valueType-bytes-digest-version-or-unknown-fields-fail-closed"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:plaintext-version-as-sole-current-format-authority",
+          "deletion_required:AEAD-without-format-and-schema-binding",
+          "deletion_required:decrypt-and-return-without-strict-receipt-decoder",
+          "absence_required:zero-to-one-version-flip-exposes-raw-sensitive-plaintext",
+          "absence_required:failed-auth-schema-or-migration-rewrites-any-durable-byte"
+        ],
+        "capability_non_regression": [
+          "test_defined:normal-current-audit-list-and-export-remain-available-with-minimized-receipts",
+          "test_defined:legal-legacy-audit-history-remains-readable-after-bounded-migration",
+          "test_defined:empty-and-bounded-nonempty-trusted-audit-reads-preserve-D065-semantics"
+        ],
+        "live_boundary": [
+          "root-cause-confirmed-by-fixed-source-trace-and-mechanical-SQLite-counterexample",
+          "BR4-D057-key-authority-remains-separately-open-and-earns-zero-D068-credit",
+          "BR4-D065-trusted-read-projection-remains-separately-open-and-earns-zero-D068-credit",
+          "authenticated-envelope-strict-decoder-and-zero-rewrite-fault-injection-not-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_green_independent_review",
+        "decision": "root-cause-confirmed-separate-audit-payload-authentication-blocker",
+        "evidence_refs": [
+          "fixed-base-source-trace:migration-trusts-unauthenticated-version-column",
+          "fixed-base-source-trace:list-returns-arbitrary-decrypted-UTF8-as-current-receipt",
+          "mechanical-counterexample:version-flip-bypasses-minimization",
+          "boundary:D057-and-D065-remain-independent-open-findings"
+        ]
+      }
+    }
   ],
   "supplemental_scenarios": [
     {
@@ -440,6 +3011,141 @@
       "finding_ids": ["BR4-D053"],
       "kind": "nonblocking_inferred_memory_review_batch",
       "scenario": "An inferred stable memory turn completes its normal answer, stages at most one deduplicated deferred ReviewBatch for the conversation/domain, and leaves canonical Memory and HS unchanged; duplicate, sensitive, injected, unstable and low-confidence variants do not create proposal fatigue or unsafe writes.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-054",
+      "finding_ids": [
+        "BR4-D054"
+      ],
+      "kind": "persisted_enum_corruption_and_recovery",
+      "scenario": "Unknown persisted Task, Transcript and ActionQueue enum values fail before typed materialization or owner digest construction; corruption after a durable final is detected without provider, tool, canonical effect or second-final redispatch, while every legal historical value still round-trips.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-055",
+      "finding_ids": [
+        "BR4-D055"
+      ],
+      "kind": "terminal_owner_graph_linearization",
+      "scenario": "A real Proposal accept raced at the final sealing barrier cannot create a mixed owner graph, and a provenance-bound post-final review successor remains compatible with historical final recovery while unproven same-ID drift still fails closed without redispatch.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-056",
+      "finding_ids": [
+        "BR4-D056"
+      ],
+      "kind": "append_only_registry_integrity",
+      "scenario": "Changing a trusted-prefix discovered-finding body, supplying a new or unbound noncanonical fingerprint, using an unknown classification, or deleting or reordering an existing entry fails closed; a valid appended finding plus dynamic trace update passes without changing the frozen 35 findings or 40-scenario denominator.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-057",
+      "finding_ids": [
+        "BR4-D057"
+      ],
+      "kind": "audit_key_authority_corruption",
+      "scenario": "A malformed or unreadable MCP audit keyring, and a missing keyring beside an existing non-empty audit database, create no secret, rotate no epoch, overwrite no reference file and enter explicit unavailable or read-only state; a genuine first boot creates one durable key and every configured historical epoch remains readable.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-058",
+      "finding_ids": [
+        "BR4-D058"
+      ],
+      "kind": "pre_gateway_blocker_and_tool_terminal_owner",
+      "scenario": "Missing workspace files and traversal are pre-ToolGateway admission failures that return a structured blocker, failed ActionQueue state, zero Proposal and no synthetic ToolExecutionReceipt or ToolEvent owner; an existing quoted file enters real ToolGateway and owns exactly one terminal, while any runtime-issued receipt with an absent, duplicate or conflicting terminal fails closed.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-059",
+      "finding_ids": [
+        "BR4-D059"
+      ],
+      "kind": "canonical_json_corruption_and_projection_truth",
+      "scenario": "Malformed required or present-optional JSON in Transcript, Patch, Proposal, Memory or MemoryLifecycle fails before typed materialization, digest, effect or version advance; the original bytes and whole migration batch remain unchanged, while derived views expose degraded and rebuild rather than healthy empty truth.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-060",
+      "finding_ids": [
+        "BR4-D060"
+      ],
+      "kind": "plugin_enable_authority_corruption",
+      "scenario": "After a user disables a manifest-default-enabled plugin, malformed or unreadable enabled_overrides.json cannot alias a missing file or restore enabled state; the registry exposes unavailable, preserves the bytes, and registers no executable plugin tool or skill, while valid overrides still survive restart.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-061",
+      "finding_ids": [
+        "BR4-D061"
+      ],
+      "kind": "non_json_persisted_enum_and_timestamp_corruption",
+      "scenario": "Unknown persisted Patch, Proposal and MemoryLifecycle enums and present-invalid timestamps fail before typed materialization or owner digest across current, legacy and read-only paths; every legal historical value round-trips and neither D054 nor D059 evidence counts as closure.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-062",
+      "finding_ids": [
+        "BR4-D062"
+      ],
+      "kind": "filesystem_tool_admission_execution_and_owner_identity",
+      "scenario": "A lexical traversal is rejected before ToolGateway with a typed ActionQueue blocker and no receipt or terminal; a missing file reaches ToolGateway and owns one failed receipt plus one tool.failed terminal; quoted and successful reads keep real tool lifecycle, and final recovery matches every action-owner binding by stable identity while unknown, duplicate and conflicting bindings fail closed.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-063",
+      "finding_ids": [
+        "BR4-D063"
+      ],
+      "kind": "governed_mcp_audit_cleanup_single_authority",
+      "scenario": "The shipped product exposes exactly one MCP audit deletion authority: retention is typed and bounded to 1 through 3650 days before confirmation or SQL; degraded persistence, a missing, wrong-scope, invalid or replayed native grant, and negative, zero, above-maximum or arithmetic-extreme retention perform zero mutation and never panic; a valid bounded grant deletes old records only and preserves recent records, while the former command, frontend wrapper, McpPage direct call, client-only dialog and public second mutation remain absent and McpPage delegates retention management to Settings.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-064",
+      "finding_ids": [
+        "BR4-D064"
+      ],
+      "kind": "store_bound_mcp_audit_key_and_single_writer",
+      "scenario": "Two canonical audit stores creating a key in the same numeric epoch receive distinct store-bound create-only references, a second process cannot acquire the same writable database slot, and legacy references remain read-only; a missing keyring beside a non-empty database is exactly Unavailable with no secret creation, reference guessing, keychain enumeration or claimed read-only recovery, while present-valid verified keyrings retain restart readability after BR4-D057 state validation.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-065",
+      "finding_ids": [
+        "BR4-D065"
+      ],
+      "kind": "mcp_audit_composite_trusted_read_truth",
+      "scenario": "Only the exact McpAuditKeyReferenceStore and McpAuditStore owners determine audit-read status: either unavailable owner, list failure or decrypt failure returns typed unknown or unavailable from diagnostics and shipped reads and is never displayed as zero; either exact owner in ReadOnlyCanonical projects degraded while diagnostics, list and export remain exact and readable; an unrelated read-only or unavailable store may independently block global effects but cannot degrade, hide or block audit reads when both audit owners are ReadWriteCanonical; a genuine read-only audit-store handle rejects writes, only a trusted empty database earns available-zero truth, and normal trusted rows retain exact bounded read capability.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-066",
+      "finding_ids": [
+        "BR4-D066"
+      ],
+      "kind": "mcp_audit_rotation_single_write_key_authority",
+      "scenario": "A ToolGateway resource captured before key rotation writes the newly active epoch after the durable cutover barrier, every Main Chat, AgentLoop and Scheduler writer observes the same authority, historical rows remain readable, and a failed reference save leaves all writers on the old epoch without holding a guard across external await.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-067",
+      "finding_ids": [
+        "BR4-D067"
+      ],
+      "kind": "tool_terminal_audit_persistence_truth",
+      "scenario": "A real tool success followed by audit persistence failure executes exactly once, preserves confirmed effect truth, records audit failed or unknown and degrades later effect admission without retry; tool failure plus audit failure preserves both outcomes, while normal execution writes one minimized audit row and pre-dispatch blockers write none.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-068",
+      "finding_ids": [
+        "BR4-D068"
+      ],
+      "kind": "authenticated_mcp_audit_payload_envelope",
+      "scenario": "Payload version and minimized-receipt schema are cryptographically bound to each audit ciphertext: changing only payload_minimized_version from 0 to 1 cannot skip migration or expose raw sensitive arguments or result, any authentication or schema failure performs zero rewrite, legal current receipts and legacy migration remain readable, and neither BR4-D057 nor BR4-D065 earns closure credit.",
       "frozen_denominator_credit": false
     }
   ]

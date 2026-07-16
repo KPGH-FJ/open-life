@@ -10,6 +10,18 @@ const FROZEN_SCENARIO_SUITE_SHA256: &str =
 const FROZEN_FINDING_INVENTORY_SHA256: &str =
     "3126792be60df62df73ca9e574d8dc6726e2d18862495a31bda85104ca1095fe";
 const PHASE0_BASELINE_REVISION: &str = "1ca7613bcd25167cf173fa0a21e3baa908f21d94";
+const DISCOVERED_FINDING_IMMUTABLE_PREFIX_COUNT: usize = 53;
+const DISCOVERED_FINDING_IMMUTABLE_PREFIX_SHA256: &str =
+    "f1bd733a0faf7d50e89b67988dec078621c632dd0d1274e5a754d0010974eb12";
+const DISCOVERED_CORRECTION_IMMUTABLE_PREFIX_COUNT: usize = 2;
+const DISCOVERED_CORRECTION_IMMUTABLE_PREFIX_SHA256: &str =
+    "3aee333404641837363c230e5635ccfbec98956acda6ce3e8ff2ee705ee1b9d9";
+const DISCOVERED_FINDING_CLASSIFICATIONS: &[&str] = &[
+    "net_new_root_cause",
+    "frozen_finding_scope_expansion",
+    "evidence_gap",
+    "evidence_gap_and_scope_correction",
+];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -40,8 +52,8 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn discovered_finding_fingerprint(finding: &serde_json::Value) -> String {
-    let mut immutable = finding.clone();
+fn immutable_registry_record_fingerprint(record: &serde_json::Value) -> String {
+    let mut immutable = record.clone();
     immutable
         .as_object_mut()
         .expect("discovered finding object")
@@ -51,33 +63,46 @@ fn discovered_finding_fingerprint(finding: &serde_json::Value) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn assert_executable_test_reference(reference: &str) {
     let body = reference
         .strip_prefix("test:")
         .expect("test evidence prefix");
-    let (path, test_name) = body
+    let (path, test_names) = body
         .rsplit_once("::")
         .map_or((body, None), |(path, name)| (path, Some(name)));
     let source = read_repo_file(path);
-    let Some(test_name) = test_name else {
+    let Some(test_names) = test_names else {
         return;
     };
-    let sync_signature = format!("fn {test_name}(");
-    let async_signature = format!("async fn {test_name}(");
-    let offset = source
-        .find(&async_signature)
-        .or_else(|| source.find(&sync_signature))
-        .unwrap_or_else(|| panic!("test evidence does not resolve to a function: {reference}"));
-    let annotation_window = &source[offset.saturating_sub(500)..offset];
-    assert!(
-        annotation_window.contains("#[test]")
-            || annotation_window.contains("#[tokio::test]")
-            || annotation_window.contains("#[rstest]"),
-        "test evidence does not resolve to an annotated test: {reference}"
-    );
+    for test_name in test_names.split('+') {
+        let sync_signature = format!("fn {test_name}(");
+        let async_signature = format!("async fn {test_name}(");
+        let offset = source
+            .find(&async_signature)
+            .or_else(|| source.find(&sync_signature))
+            .unwrap_or_else(|| panic!("test evidence does not resolve to a function: {reference}"));
+        let annotation_window = &source[offset.saturating_sub(500)..offset];
+        assert!(
+            annotation_window.contains("#[test]")
+                || annotation_window.contains("#[tokio::test")
+                || annotation_window.contains("#[rstest"),
+            "test evidence does not resolve to an annotated test: {reference}"
+        );
+    }
 }
 
 fn assert_source_reference(reference: &str) {
+    if reference.starts_with("test:") {
+        assert_executable_test_reference(reference);
+        return;
+    }
     if let Some(body) = reference.strip_prefix("baseline-source:") {
         let path = body.split("::").next().expect("baseline source path");
         let object = format!("{PHASE0_BASELINE_REVISION}:{path}");
@@ -98,6 +123,37 @@ fn assert_source_reference(reference: &str) {
             repo_root().join(path).is_file(),
             "missing current fix: {reference}"
         );
+        return;
+    }
+    if let Some(body) = reference.strip_prefix("current-authority:") {
+        let (path, symbols) = body
+            .split_once("::")
+            .unwrap_or_else(|| panic!("current authority must identify symbols: {reference}"));
+        let source = read_repo_file(path);
+        for symbol in symbols.split('+').flat_map(|symbol| symbol.split('.')) {
+            assert!(
+                source.contains(symbol),
+                "current authority symbol is absent: {reference} ({symbol})"
+            );
+        }
+        return;
+    }
+    if let Some(body) = reference.strip_prefix("deleted-authority:") {
+        let (path, symbols) = body
+            .split_once("::")
+            .unwrap_or_else(|| panic!("deleted authority must identify symbols: {reference}"));
+        let path = repo_root().join(path);
+        if !path.is_file() {
+            return;
+        }
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read deleted-authority source {reference}: {error}"));
+        for symbol in symbols.split('+') {
+            assert!(
+                !source.contains(symbol),
+                "deleted authority symbol is still present: {reference} ({symbol})"
+            );
+        }
         return;
     }
     if let Some(body) = reference.strip_prefix("baseline-evidence:") {
@@ -343,6 +399,7 @@ fn backend_remediation_phase0_inventory_freezes_all_audit_findings() {
         "reproduced-phase3-pending",
         "reproduced-quality-gate-pending",
         "reproduced-test-architecture-pending",
+        "root-fix-focused-verification",
     ]);
     let traceability_ids = rows
         .iter()
@@ -772,10 +829,135 @@ fn backend_remediation_phase0_discovered_findings_addendum_is_additive_and_fail_
         .as_array()
         .expect("discovered findings array");
     assert!(
-        findings.len() >= 15,
-        "the independently discovered initial findings must remain registered"
+        findings.len() >= DISCOVERED_FINDING_IMMUTABLE_PREFIX_COUNT,
+        "the trusted discovered-finding prefix must remain present"
     );
+    let immutable_finding_prefix =
+        serde_json::Value::Array(findings[..DISCOVERED_FINDING_IMMUTABLE_PREFIX_COUNT].to_vec());
+    let immutable_finding_prefix = serde_json::to_vec(&canonical_json(&immutable_finding_prefix))
+        .expect("serialize immutable discovered-finding prefix");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(immutable_finding_prefix)),
+        DISCOVERED_FINDING_IMMUTABLE_PREFIX_SHA256,
+        "the first 53 discovered findings are a trusted immutable prefix; append findings or correction records instead of rewriting them"
+    );
+    let correction_target_ids = findings[..DISCOVERED_FINDING_IMMUTABLE_PREFIX_COUNT]
+        .iter()
+        .map(|finding| finding["id"].as_str().expect("trusted finding id"))
+        .collect::<BTreeSet<_>>();
+
+    let corrections = registry["definition_corrections"]
+        .as_array()
+        .expect("append-only definition corrections array");
+    assert!(
+        corrections.len() >= DISCOVERED_CORRECTION_IMMUTABLE_PREFIX_COUNT,
+        "the trusted definition-correction prefix must remain present"
+    );
+    let immutable_correction_prefix = serde_json::Value::Array(
+        corrections[..DISCOVERED_CORRECTION_IMMUTABLE_PREFIX_COUNT].to_vec(),
+    );
+    let immutable_correction_prefix =
+        serde_json::to_vec(&canonical_json(&immutable_correction_prefix))
+            .expect("serialize immutable definition-correction prefix");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(immutable_correction_prefix)),
+        DISCOVERED_CORRECTION_IMMUTABLE_PREFIX_SHA256,
+        "the first two definition corrections are a trusted immutable prefix; append a superseding correction instead of rewriting them"
+    );
+    let mut definition_corrections = BTreeMap::new();
+    for (index, correction) in corrections.iter().enumerate() {
+        let correction_id = correction["id"].as_str().expect("correction id");
+        assert_eq!(
+            correction_id,
+            format!("BR4-C{:03}", index + 1),
+            "definition correction ids are append-only and monotonic"
+        );
+        for field in ["recorded_at", "field", "operation", "reason"] {
+            assert!(
+                correction[field]
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "{correction_id} missing immutable field {field}"
+            );
+        }
+        assert!(correction["evidence"]
+            .as_array()
+            .is_some_and(|evidence| !evidence.is_empty()));
+        match correction["operation"].as_str().unwrap() {
+            "remove_invalid_reference" => {
+                assert_eq!(correction["field"], "related_frozen_findings");
+                assert!(correction["effective_value"].is_null());
+                let finding_id = correction["finding_id"]
+                    .as_str()
+                    .expect("corrected finding id");
+                assert!(
+                    correction_target_ids.contains(finding_id),
+                    "{correction_id} can only correct a finding in the trusted immutable prefix"
+                );
+                let invalid_value = correction["invalid_value"]
+                    .as_str()
+                    .expect("invalid related finding reference");
+                assert!(
+                    !frozen_ids.contains(invalid_value),
+                    "{correction_id} cannot remove a valid frozen finding reference"
+                );
+                let key = (
+                    finding_id.to_string(),
+                    "related_frozen_findings".to_string(),
+                    invalid_value.to_string(),
+                );
+                assert!(
+                    definition_corrections.insert(key, None).is_none(),
+                    "duplicate definition correction for {finding_id}:{invalid_value}"
+                );
+            }
+            "replace_invalid_derived_fingerprints" => {
+                assert_eq!(correction["field"], "immutable_fingerprint");
+                let replacements = correction["replacements"]
+                    .as_array()
+                    .filter(|replacements| !replacements.is_empty())
+                    .expect("non-empty fingerprint replacements");
+                for replacement in replacements {
+                    let finding_id = replacement["finding_id"]
+                        .as_str()
+                        .expect("fingerprint correction finding id");
+                    assert!(
+                        correction_target_ids.contains(finding_id),
+                        "{correction_id} can only correct a finding in the trusted immutable prefix"
+                    );
+                    let invalid_value = replacement["invalid_value"]
+                        .as_str()
+                        .expect("invalid stored fingerprint");
+                    let effective_value = replacement["effective_value"]
+                        .as_str()
+                        .expect("effective canonical fingerprint");
+                    assert!(is_lower_hex_sha256(invalid_value));
+                    assert!(is_lower_hex_sha256(effective_value));
+                    assert_ne!(invalid_value, effective_value);
+                    let key = (
+                        finding_id.to_string(),
+                        "immutable_fingerprint".to_string(),
+                        invalid_value.to_string(),
+                    );
+                    assert!(
+                        definition_corrections
+                            .insert(key, Some(effective_value.to_string()))
+                            .is_none(),
+                        "duplicate fingerprint correction for {finding_id}:{invalid_value}"
+                    );
+                }
+            }
+            operation => panic!("unsupported immutable correction operation: {operation}"),
+        }
+        assert_eq!(
+            correction["immutable_fingerprint"].as_str().unwrap(),
+            immutable_registry_record_fingerprint(correction),
+            "{correction_id} immutable correction changed; append a superseding correction"
+        );
+    }
+
     let mut discovered_ids = BTreeSet::new();
+    let mut used_definition_corrections = BTreeSet::new();
     for (index, finding) in findings.iter().enumerate() {
         let id = finding["id"].as_str().expect("discovered finding id");
         assert_eq!(
@@ -820,27 +1002,49 @@ fn backend_remediation_phase0_discovered_findings_addendum_is_additive_and_fail_
                 "{id} missing non-empty immutable array {field}"
             );
         }
-        assert!(finding["related_frozen_findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|related| related
-                .as_str()
-                .is_some_and(|related| frozen_ids.contains(related))));
-        assert!(matches!(
-            finding["classification"].as_str().unwrap(),
-            "net_new_root_cause" | "frozen_finding_scope_expansion" | "evidence_gap"
-        ));
+        for related in finding["related_frozen_findings"].as_array().unwrap() {
+            let related = related.as_str().expect("related frozen finding id");
+            if !frozen_ids.contains(related) {
+                let correction = (
+                    id.to_string(),
+                    "related_frozen_findings".to_string(),
+                    related.to_string(),
+                );
+                assert_eq!(
+                    definition_corrections.get(&correction),
+                    Some(&None),
+                    "{id} references missing frozen finding {related} without an exact append-only correction"
+                );
+                used_definition_corrections.insert(correction);
+            }
+        }
+        assert!(DISCOVERED_FINDING_CLASSIFICATIONS
+            .contains(&finding["classification"].as_str().unwrap()));
         assert!(matches!(
             finding["severity_at_discovery"].as_str().unwrap(),
             "P0" | "P1" | "P2"
         ));
-        assert_eq!(
-            finding["immutable_fingerprint"].as_str().unwrap(),
-            discovered_finding_fingerprint(finding),
-            "{id} immutable definition changed; append a superseding finding or update dynamic traceability instead"
-        );
+        let stored_fingerprint = finding["immutable_fingerprint"].as_str().unwrap();
+        let canonical_fingerprint = immutable_registry_record_fingerprint(finding);
+        if stored_fingerprint != canonical_fingerprint {
+            let correction = (
+                id.to_string(),
+                "immutable_fingerprint".to_string(),
+                stored_fingerprint.to_string(),
+            );
+            assert_eq!(
+                definition_corrections.get(&correction),
+                Some(&Some(canonical_fingerprint)),
+                "{id} fingerprint differs from its immutable body without an exact append-only correction"
+            );
+            used_definition_corrections.insert(correction);
+        }
     }
+    assert_eq!(
+        used_definition_corrections,
+        definition_corrections.keys().cloned().collect(),
+        "definition corrections must resolve an exact retained invalid value and its canonical effective value"
+    );
 
     let traceability: serde_json::Value = serde_json::from_str(&read_repo_file(
         "plans/openlife_backend_remediation_v4_discovered_traceability.json",

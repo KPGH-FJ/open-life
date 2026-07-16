@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -48,6 +50,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "openlife-rust"
+
+      - name: Verify backend remediation registry is append-only
+        env:
+          REGISTRY_BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: scripts/check-backend-remediation-registry-append-only.sh "$REGISTRY_BASE_REVISION"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
