@@ -1123,6 +1123,41 @@ switch the daily-task read owner with a deletion guard rather than a permanent
 merge, migrate legacy MemoryStore state history separately, and rerun native
 and independent review evidence. Roadshow release remains NO-GO.
 
+## V3 legacy MemoryStore state-history shadow parity and data-restore rehearsal
+
+Commit `e967c9a5913f8275591356afbc1e23380eb86893` adds the next StateStore
+authority-convergence prerequisite without switching the shipped history or
+alert read owner.
+
+StateStore schema v6 records current typed observation history in the same
+transaction as the observation/version/operation/outbox effect and backfills
+existing schema v5 observations before advancing the version. Separately,
+MemoryStore exposes a migration-only ordered source snapshot bound to its
+stable canonical store identity. Startup caps the source read at 50,000 rows,
+maps every legacy field without guessing, stages one body-bearing shadow,
+rereads and hashes it, deletes and restores it in the same transaction, and
+keeps at most 32 metadata-only evidence records.
+
+Mechanical evidence on the implementation commit:
+
+- StateStore suite — 41/41 passed, including v5-to-v6 backfill, exact replay
+  with one history fact, lossless shadow parity, destructive restore, injected
+  rollback, operation-binding validation, and bounded evidence;
+- focused MemoryStore tests — 2/2 passed for payload-bound source identity and
+  the 50,000-row overflow boundary;
+- focused Tauri mapping tests — 3/3 passed;
+- real bootstrap shadow test — 1/1 passed while canonical StateStore legacy
+  history remains empty and MemoryStore remains the readable product owner;
+- `cargo check -p openlife-tauri --tests`, Rust format, diff checks, and Core
+  Clippy completed; Clippy still reports the same 35 existing cross-module
+  warnings and no StateStore warning.
+
+This is not canonical import or cutover. `get_state_history` and state alerts
+still read MemoryStore, the shadow has no product reader, and no legacy row is
+declared migrated or deleted. Daily-task cutover, state-history import/read
+cutover, independent review, and final backend capability freeze remain
+uncredited.
+
 ## Default-feature bundle and native shell trial
 
 Commit `ea8a7b246e845f05fbe663cc96e5c5599715d2ae` removed two real blockers found

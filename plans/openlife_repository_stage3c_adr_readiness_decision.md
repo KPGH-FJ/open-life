@@ -185,8 +185,8 @@ It must not conclude any of the following:
 - `docs/decisions/README.md` created.
 - Active missing path records resolved.
 
-CodeRabbit external review is not part of Stage3C local validation because the
-local CodeRabbit auth status is not logged in.
+Independent external review is not part of the Stage3C local validation
+snapshot and receives no credit here.
 
 ## Stage3C Validation Snapshot
 

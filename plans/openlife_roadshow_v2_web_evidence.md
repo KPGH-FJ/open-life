@@ -96,7 +96,8 @@ The following results are intentionally not converted into green credit:
 - `cargo clippy -p openlife-core --lib --no-deps -- -D warnings` remained red
   with 35 existing errors; no new error pointed to `web_search.rs` or the V2 Web
   implementation;
-- CodeRabbit CLI was unavailable, so independent external review is pending.
+- an independent read-only source and evidence review was not run and remains
+  pending.
 
 ## Remaining V2 evidence
 

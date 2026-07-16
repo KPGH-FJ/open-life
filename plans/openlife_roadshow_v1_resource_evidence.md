@@ -68,9 +68,9 @@ The frontend tests mock Tauri IPC and are not native-picker product-trial credit
 
 The autonomous source/diff review found and fixed two counterexamples before
 this evidence was recorded: attachment text could still reach the old slash
-side-effect helper, and lost IPC responses could not be reconciled. CodeRabbit
-CLI was not installed, so the requested independent external code-review tool
-was not executed and is not credited.
+side-effect helper, and lost IPC responses could not be reconciled. A separate
+independent read-only source and evidence review was not run and is not
+credited.
 
 ## Remaining V1 evidence
 

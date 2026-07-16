@@ -101,9 +101,11 @@
     },
     {
       "id": "V3_STATESTORE",
-      "status": "daily_task_observation_and_legacy_daily_shadow_mechanical_verified_authority_cutover_native_trial_and_independent_review_pending",
-      "completion_claim": "scoped_daily_task_typed_observation_and_legacy_daily_shadow_gates_green_authority_cutover_legacy_state_history_native_product_and_review_evidence_explicitly_pending",
-      "commit": "d6ceb2f3232da5d5e1028d8264ed4cdd78910d59",
+      "status": "daily_task_observation_legacy_daily_and_state_history_shadow_mechanical_verified_canonical_import_authority_cutover_and_independent_review_pending",
+      "completion_claim": "scoped_daily_task_typed_observation_and_both_legacy_shadow_gates_green_state_history_canonical_import_product_authority_cutovers_and_review_evidence_explicitly_pending",
+      "commit": "e967c9a5913f8275591356afbc1e23380eb86893",
+      "legacy_daily_shadow_commit": "d6ceb2f3232da5d5e1028d8264ed4cdd78910d59",
+      "legacy_state_history_shadow_commit": "e967c9a5913f8275591356afbc1e23380eb86893",
       "typed_observation_commit": "99d53a81d7cf0ebc85bd104eda3c1f594094bd7a",
       "daily_task_commit": "65a0017a7c2bf1ecba5ecdeb7484ad77f5e29793",
       "evidence": "plans/openlife_roadshow_v3_statestore_evidence.md"
@@ -202,7 +204,7 @@
     "lost_response_reconciliation": "passed_import_status_receipt_and_same_id_detach_retry",
     "native_product_trial": "pending",
     "external_live_provider_attachment": "passed_twice_exact_frozen_pdf_docx_and_csv_xlsx_prompts_external_provider_backend_validated_both_selected_resource_citation_classes_zero_tool_proposal_or_write",
-    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "independent_read_only_review": "pending_not_run",
     "roadshow_release": "no_go"
   },
   "v2_results": {
@@ -219,14 +221,14 @@
     "generic_live_fetch": "blocked_current_mac_fake_ip_proxy_environment_without_ssrf_policy_relaxation",
     "external_live_cloud_provider": "passed_rc04_twice_and_cc01_twice_with_real_web_external_provider_and_backend_citation_validation_latest_additional_rc04_control_failed_closed_on_model_citation_noncompliance",
     "native_product_trial": "pending",
-    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "independent_read_only_review": "pending_not_run",
     "main_chat_kernel": "failed_60_of_68_passed_same_8_preexisting_red",
     "single_system": "failed_24_of_32_passed_same_8_preexisting_red",
     "clippy": "failed_with_35_existing_errors_no_new_v2_web_error",
     "roadshow_release": "no_go"
   },
   "v3_results": {
-    "canonical_state_store": "passed_schema_v5_daily_task_and_typed_observation_asset_version_operation_receipt_outbox_and_bounded_legacy_daily_shadow_owner",
+    "canonical_state_store": "passed_schema_v6_daily_task_typed_observation_history_asset_version_operation_receipt_outbox_and_bounded_legacy_shadow_owner",
     "policy_authority": "passed_current_user_low_risk_explicit_nonserializable_grant",
     "daily_task_loop": "passed_create_list_complete_undo_expiry_and_restart",
     "operation_replay": "passed_task_and_observation_create_complete_undo_after_clock_version_and_tombstone_changes",
@@ -240,10 +242,11 @@
     "frontend_projection": "passed_116_of_116_focused_tests_typecheck_and_format",
     "typed_state_observation": "passed_record_list_undo_expiry_restart_send_stream_zero_provider_tool_proposal",
     "legacy_import_parity_and_rollback": "passed_daily_task_category_shadow_staging_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_and_bounded_body_free_evidence",
+    "legacy_state_history_shadow": "passed_profile_bound_bounded_source_snapshot_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_operation_binding_validation_and_bounded_metadata_only_evidence",
     "legacy_daily_task_authority_cutover": "pending_product_scenario_and_native_trial_no_owner_switch_or_product_shadow_read_credit",
-    "legacy_state_history_migration": "pending",
+    "legacy_state_history_migration": "shadow_verified_canonical_import_product_read_cutover_and_legacy_owner_deletion_pending",
     "native_product_trial": "pending",
-    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "independent_read_only_review": "pending_not_run",
     "single_system": "passed_32_of_32_current_authority_guards",
     "roadshow_release": "no_go"
   },
@@ -261,7 +264,7 @@
     "missing_safe_root": "passed_structured_blocker_zero_proposals_zero_file_effect",
     "native_product_trial": "pending",
     "external_live_cloud_provider": "passed_twice_exact_rc06_and_rc07_prompts_external_provider_generated_bounded_artifacts_waited_for_review_and_materialized_once_after_acceptance",
-    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "independent_read_only_review": "pending_not_run",
     "single_system": "failed_25_of_32_passed_same_7_preexisting_red",
     "roadshow_release": "no_go"
   },
