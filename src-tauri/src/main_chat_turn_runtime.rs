@@ -5926,6 +5926,73 @@ mod turn_admission_tests {
         }
     }
 
+    fn rewrite_d054_final_payload_fixture(
+        event_path: &std::path::Path,
+        operation_id: &str,
+        mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) {
+        use sha2::Digest as _;
+
+        let conn = rusqlite::Connection::open(event_path)
+            .expect("open EventStore database for D054 owner fixture");
+        let delivery_id = format!("delivery:{operation_id}:{operation_id}");
+        let (event_id, payload_json): (String, String) = conn
+            .query_row(
+                "SELECT event_id, payload_json FROM main_chat_agent_events
+                 WHERE task_session_id = ?1 AND event_type = 'final_delivery.created'
+                   AND object_id = ?2",
+                rusqlite::params![operation_id, delivery_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load one durable final owner fixture");
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&payload_json).expect("parse final owner fixture");
+        mutate(payload.as_object_mut().expect("final payload object"));
+        let payload_json = serde_json::to_string(&payload).expect("serialize final owner fixture");
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(payload_json.as_bytes());
+        let payload_digest = format!(
+            "bytes:{} hash:sha256:{:x}",
+            payload_json.len(),
+            hasher.finalize()
+        );
+
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS guard_main_chat_event_update_v1;
+             DROP TRIGGER IF EXISTS guard_main_chat_event_identity_update_v1;",
+        )
+        .expect("open immutable owner fixture update window");
+        assert_eq!(
+            conn.execute(
+                "UPDATE main_chat_agent_events
+                 SET payload_json = ?2, payload_digest = ?3 WHERE event_id = ?1",
+                rusqlite::params![event_id, payload_json, payload_digest],
+            )
+            .expect("rewrite final owner fixture"),
+            1
+        );
+        assert_eq!(
+            conn.execute(
+                "UPDATE main_chat_agent_event_immutable_identities
+                 SET payload_digest = ?2 WHERE event_id = ?1",
+                rusqlite::params![event_id, payload_digest],
+            )
+            .expect("rewrite final immutable identity fixture"),
+            1
+        );
+    }
+
+    fn rewrite_d054_final_owner_digest_fixture(
+        event_path: &std::path::Path,
+        operation_id: &str,
+        owner_digest_field: &str,
+        owner_digest: &str,
+    ) {
+        rewrite_d054_final_payload_fixture(event_path, operation_id, |payload| {
+            payload.insert(owner_digest_field.into(), serde_json::json!([owner_digest]));
+        });
+    }
+
     fn d050_task_owner_receipt_payload(version: Option<serde_json::Value>) -> serde_json::Value {
         let mut payload = serde_json::json!({
             "taskOwnerDigest": format!("sha256:{}", "a".repeat(64)),
@@ -7588,6 +7655,262 @@ mod turn_admission_tests {
             1,
             "transcript drift must not redispatch the tool"
         );
+    }
+
+    #[tokio::test]
+    async fn transcript_enum_corruption_after_durable_final_requires_reconciliation_without_redispatch(
+    ) {
+        let directory = tempfile::tempdir().expect("create transcript enum store directory");
+        let paths = D050FileBackedStorePaths::new(directory.path());
+        let state = paths.open_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d054-transcript-enum-final-recovery";
+        let body = "Please read file `Cargo.toml`.";
+        let selected_strategy = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+            .decide(
+                session_id,
+                body,
+                None,
+                openlife_core::agent::AgentTaskKind::Conversation,
+            )
+            .selected_strategy;
+        let legal_error_id = {
+            let sessions = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("TaskSession owner")
+                .lock()
+                .await;
+            sessions
+                .create_session_with_id(
+                    operation_id.clone(),
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: session_id.into(),
+                        user_goal: body.into(),
+                        selected_strategy,
+                        current_plan_summary: None,
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .expect("seed operation-bound task before runtime admission");
+            sessions
+                .append_transcript_entry(
+                    openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryDraft {
+                        session_id: operation_id.clone(),
+                        kind: openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error,
+                        summary: "legal Error owner fixture".into(),
+                        metadata: serde_json::Value::Null,
+                    },
+                )
+                .expect("seed legal Error transcript owner")
+                .id
+        };
+
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after final containing a legal Error owner");
+        drop(state);
+        rewrite_d054_final_payload_fixture(&paths.event, &operation_id, |payload| {
+            let transcript_count = payload
+                .get("transcriptRefs")
+                .and_then(serde_json::Value::as_array)
+                .expect("final transcriptRefs array")
+                .len();
+            payload.insert(
+                "transcriptCount".into(),
+                serde_json::json!(transcript_count),
+            );
+        });
+        let state = paths.open_state();
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("legal Error owner must recover from the durable final baseline");
+
+        rusqlite::Connection::open(&paths.task_session)
+            .expect("open transcript database for unknown enum fixture")
+            .execute(
+                "UPDATE execution_transcript_entries SET kind = 'future_error' WHERE id = ?1",
+                [&legal_error_id],
+            )
+            .expect("replace only the raw Error discriminant with an unknown value");
+        let recovery = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await;
+        let events = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("EventStore owner")
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list events after corrupt transcript recovery");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "tool.completed")
+                .count(),
+            1,
+            "unknown transcript kind must never redispatch the tool"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "final_delivery.created")
+                .count(),
+            1,
+            "unknown transcript kind must never create a replacement final"
+        );
+        assert!(recovery.is_err());
+    }
+
+    #[tokio::test]
+    async fn action_enum_corruption_after_durable_final_requires_reconciliation_without_redispatch()
+    {
+        let directory = tempfile::tempdir().expect("create action enum store directory");
+        let paths = D050FileBackedStorePaths::new(directory.path());
+        let state = paths.open_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d054-action-enum-final-recovery";
+        let body = "Please read file `Cargo.toml`.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after file-backed final commit");
+        drop(state);
+
+        let action_id = {
+            let conn = rusqlite::Connection::open(&paths.action_queue)
+                .expect("open ActionQueue database for legal certainty fixture");
+            let action_id: String = conn
+                .query_row(
+                    "SELECT id FROM action_queue WHERE session_id = ?1",
+                    [&operation_id],
+                    |row| row.get(0),
+                )
+                .expect("load one canonical read action");
+            conn.execute(
+                "UPDATE action_queue SET replay_effect_certainty = 'dispatched_unknown'
+                 WHERE id = ?1",
+                [&action_id],
+            )
+            .expect("install legal dispatched_unknown owner fixture");
+            action_id
+        };
+        let legal_state = paths.open_state();
+        let legal_action_digest = {
+            let actions = legal_state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("ActionQueue owner")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("load legal dispatched_unknown owner");
+            assert_eq!(actions.len(), 1);
+            super::canonical_final_owner_digest("action_queue", &actions[0])
+                .expect("digest legal dispatched_unknown owner")
+        };
+        drop(legal_state);
+        rewrite_d054_final_owner_digest_fixture(
+            &paths.event,
+            &operation_id,
+            "actionQueueOwnerDigests",
+            &legal_action_digest,
+        );
+
+        let recovery_state = paths.open_state();
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &recovery_state,
+        )
+        .await
+        .expect("coherent legal dispatched_unknown fixture must recover before corruption");
+        rusqlite::Connection::open(&paths.action_queue)
+            .expect("open ActionQueue database for unknown enum fixture")
+            .execute(
+                "UPDATE action_queue SET replay_effect_certainty = 'future_certainty'
+                 WHERE id = ?1",
+                [&action_id],
+            )
+            .expect("replace only the raw certainty discriminant with an unknown value");
+        let recovery = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &recovery_state,
+        )
+        .await;
+        let events = recovery_state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("EventStore owner")
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list events after corrupt action recovery");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "tool.completed")
+                .count(),
+            1,
+            "unknown action certainty must never redispatch the tool"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "final_delivery.created")
+                .count(),
+            1,
+            "unknown action certainty must never create a replacement final"
+        );
+        assert!(recovery.is_err());
     }
 
     #[tokio::test]
