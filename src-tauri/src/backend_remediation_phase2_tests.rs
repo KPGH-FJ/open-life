@@ -2567,34 +2567,20 @@ async fn cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact() 
             }
         }
     });
-    {
-        let mut config = state.config.lock().await;
-        config.llm.provider = "openai".into();
-        config.llm.openai_base = provider_base.clone();
-        config.llm.chat_model = "gpt-two-stage-provider".into();
-        config.llm.openai_key = "test-key".into();
-        config.system.network_policy.enabled = true;
-        config.system.network_policy.default_decision = "allow".into();
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            provider_base,
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            false,
-        );
-    }
+    let mut provider_config = state.config.lock().await.clone();
+    provider_config.llm.provider = "openai".into();
+    provider_config.llm.openai_base = provider_base;
+    provider_config.llm.chat_model = "gpt-two-stage-provider".into();
+    provider_config.llm.openai_key = "test-key".into();
+    provider_config.prefer_local_model = false;
+    provider_config.system.network_policy.enabled = true;
+    provider_config.system.network_policy.default_decision = "allow".into();
+    state.replace_provider_runtime_config(provider_config).await;
 
     let events = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
     let captured = Arc::clone(&events);
     let state_for_turn = Arc::clone(&state);
-    let turn = tokio::spawn(async move {
+    let mut turn = tokio::spawn(async move {
         crate::main_chat_streaming::start_stream_message_with_state(
             "phase2-cancel-hanging-agent-loop".into(),
             vec![ChatMessage {
@@ -2613,13 +2599,42 @@ async fn cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact() 
         .await
     });
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let agent_loop_start_wait = tokio::time::timeout(Duration::from_secs(2), async {
         while !agent_loop_request_observed.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("AgentLoop provider request is dispatched after ranking completes");
+    .await;
+    if agent_loop_start_wait.is_err() {
+        let turn_finished = turn.is_finished();
+        let finished_turn_result = if turn_finished {
+            Some((&mut turn).await)
+        } else {
+            None
+        };
+        let observed_events = events
+            .lock()
+            .expect("read two-stage timeout events")
+            .iter()
+            .map(|(name, payload)| {
+                (
+                    name.clone(),
+                    payload
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<none>")
+                        .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let observed_request_ids = captured_request_ids
+            .lock()
+            .expect("read two-stage timeout provider ids")
+            .clone();
+        panic!(
+            "AgentLoop provider request was not dispatched after ranking completed: turn_finished={turn_finished}, turn_result={finished_turn_result:?}, provider_request_ids={observed_request_ids:?}, events={observed_events:?}"
+        );
+    }
 
     let (started_ids, completed_ids) = {
         let events = events.lock().expect("read two-stage events");
@@ -2698,9 +2713,24 @@ async fn cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact() 
     )
     .await
     .expect("list two-attempt cancellation facts");
-    assert!(durable_events.iter().any(|event| {
-        event.event_type == "provider.started" && event.object_id == started_ids[0]
-    }));
+    let durable_provider_facts = durable_events
+        .iter()
+        .filter(|event| event.event_type.starts_with("provider."))
+        .map(|event| {
+            (
+                event.sequence,
+                event.event_type.clone(),
+                event.object_id.clone(),
+                event.payload.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        durable_events.iter().any(|event| {
+            event.event_type == "provider.started" && event.object_id == started_ids[0]
+        }),
+        "completed ranking start is missing: {durable_provider_facts:?}"
+    );
     assert!(durable_events.iter().any(|event| {
         event.event_type == "provider.completed" && event.object_id == started_ids[0]
     }));

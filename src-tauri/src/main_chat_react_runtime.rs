@@ -465,23 +465,12 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             emit_progress,
         )
         .await;
-    let provider_receipt_collector = openlife_core::scheduler::ProviderReceiptCollector::default();
-    let agent_loop_scheduler = scheduler
-        .clone()
-        .with_provider_receipt_collector(provider_receipt_collector.clone());
-    // Keep a proof-reader handle that shares the same per-execution collector.
-    // The AgentLoop owns the scheduler value below, while proof projection must
-    // remain able to validate receipts emitted by that exact collector.
-    let agent_loop_proof_scheduler = agent_loop_scheduler.clone();
-    let collected_provider_receipts = || {
-        let mut receipts = tool_selection_ranking
-            .provider_receipt
-            .clone()
-            .into_iter()
-            .collect::<Vec<_>>();
-        receipts.extend(provider_receipt_collector.snapshot());
-        receipts
-    };
+    // OpenLifeTurnRuntime installs one fresh receipt collector on the captured
+    // provider generation. Ranking and AgentLoop must keep sharing that exact
+    // collector so a dropped kernel future does not also drop the only
+    // durability proof for an in-flight AgentLoop request.
+    let agent_loop_scheduler = scheduler.clone();
+    let collected_provider_receipts = || scheduler.provider_receipts_snapshot();
     let collected_provider_durability_proofs = || {
         collected_provider_receipts()
             .iter()
@@ -489,9 +478,6 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             .map(|receipt| {
                 scheduler
                     .provider_durability_proof_for_receipt(receipt)
-                    .or_else(|_| {
-                        agent_loop_proof_scheduler.provider_durability_proof_for_receipt(receipt)
-                    })
                     .map_err(|error| {
                         format!(
                             "provider_durability_proof_missing:{}:{error}",

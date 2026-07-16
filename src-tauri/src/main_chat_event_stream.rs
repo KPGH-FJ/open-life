@@ -419,6 +419,10 @@ impl MainChatAgentRuntimeEventInput {
         self.occurred_at = Some(occurred_at);
         self
     }
+
+    pub(crate) fn occurred_at(&self) -> Option<DateTime<Utc>> {
+        self.occurred_at
+    }
 }
 
 #[derive(Clone)]

@@ -1490,10 +1490,21 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         // Capture it before any task/run creation or test barrier can yield;
         // every route, adapter and projection below receives this value rather
         // than consulting mutable AppState again.
-        let provider_runtime = self.state.provider_runtime_snapshot().await;
+        let mut provider_runtime = self.state.provider_runtime_snapshot().await;
         if !provider_runtime.coherent {
             return Err("provider_runtime_generation_incoherent".into());
         }
+        // One turn owns one provider lifecycle proof scope. Every provider
+        // route beneath this runtime, including candidate ranking and
+        // AgentLoop generation, must share this fresh collector so
+        // cancellation can durably prove the exact completed/in-flight prefix
+        // without consulting another turn's adapter facts.
+        provider_runtime.scheduler = provider_runtime
+            .scheduler
+            .clone()
+            .with_provider_receipt_collector(
+                openlife_core::scheduler::ProviderReceiptCollector::default(),
+            );
         let mut main_chat_agent_turn = start_main_chat_agent_turn(
             &operation_id,
             &canonical_user_message,
@@ -4556,11 +4567,14 @@ async fn persist_main_chat_cancellation_events(
         .map_err(|error| error.to_string())?
         .into_iter()
         .enumerate()
-        .map(|(index, input)| OrderedRuntimeEvent {
-            occurred_at: cancel_observed_at,
-            kind_order: 0,
-            stable_id: format!("provider-receipt-{index:04}"),
-            input,
+        .map(|(index, input)| {
+            let occurred_at = input.occurred_at().unwrap_or(cancel_observed_at);
+            OrderedRuntimeEvent {
+                occurred_at,
+                kind_order: 0,
+                stable_id: format!("provider-receipt-{index:04}"),
+                input,
+            }
         })
         .collect::<Vec<_>>();
     if let Some(error_digest) = provider_proof_failure_digest {
@@ -4743,8 +4757,8 @@ async fn persist_main_chat_cancellation_events(
     ordered_events.sort_by(|left, right| {
         left.kind_order
             .cmp(&right.kind_order)
-            .then_with(|| left.stable_id.cmp(&right.stable_id))
             .then_with(|| left.occurred_at.cmp(&right.occurred_at))
+            .then_with(|| left.stable_id.cmp(&right.stable_id))
     });
     let events = ordered_events
         .into_iter()
