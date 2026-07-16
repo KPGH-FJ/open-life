@@ -198,3 +198,22 @@ The first command must list the eleven named tests; the second must report
 eleven passed.
 No fixture, static string, or another LLM review can replace the stored facts
 above.
+
+## Verified implementation evidence
+
+Roadshow implementation commit: `a8676e99ad1a22fc38a3b89ccbd75884816ae6d2`.
+
+Mechanical gates rerun on 2026-07-16:
+
+- D055 target discovery: exactly 11 tests.
+- D055 target execution: 11/11 passed.
+- Main Chat task controls: 51/51 passed.
+- Bootstrap tests: 23/23 passed.
+- Main Chat runtime module: 30/30 passed.
+- Single-system authority suite: 32/32 passed.
+- `cargo check -p openlife-tauri --tests`: passed.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+The implementation is mechanically verified for the backend roadshow subset.
+The broader finding remains open until an independent read-only reviewer
+re-traces the source and reruns the recorded gates.
