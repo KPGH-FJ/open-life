@@ -887,16 +887,16 @@
       {
         "id": "BR4-D057",
         "global_closure": {
-          "implementation_state": "not_started",
-          "verification_state": "none",
+          "implementation_state": "implemented",
+          "verification_state": "partial",
           "closure_state": "open"
         },
         "backend_roadshow_subset": {
           "scope": "required_backend_freeze_dependency",
-          "status": "strict_key_authority_root_fix_not_started"
+          "status": "strict_key_authority_root_fix_mechanically_verified_in_e37229b_independent_review_pending"
         },
         "product_disposition": "finish_required_subset_without_claiming_global_closure",
-        "note": "Startup and credential authority are core roadshow dependencies even when MCP and A2A execution are disabled."
+        "note": "Startup key-reference authority now fails closed and preserves first-boot capability. Global closure remains open for D064 writer identity, D065 trusted-read projection, D068 authenticated envelope and independent read-only review."
       },
       {
         "id": "BR4-D058",
@@ -2281,8 +2281,8 @@
       "id": "BR4-D057",
       "current_severity": "P0",
       "triage_state": "root_cause_confirmed",
-      "implementation_state": "not_started",
-      "verification_state": "none",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
       "closure_state": "open",
       "evidence": {
         "reproduction": [
@@ -2298,26 +2298,41 @@
         ],
         "positive": [
           "working_contrast:malformed-main-chat-integrity-key-fails-closed-without-rotation",
-          "source_proof:genuine-empty-keyring-creates-random-keychain-material"
+          "source_proof:genuine-empty-keyring-creates-random-keychain-material",
+          "gate:openlife-core-mcp-audit-9-of-9-2026-07-16",
+          "gate:openlife-tauri-D057-bootstrap-6-of-6-2026-07-16",
+          "gate:openlife-tauri-bootstrap-module-22-of-22-2026-07-16",
+          "gate:openlife-tauri-persistence-coordinator-11-of-11-2026-07-16",
+          "gate:openlife-tauri-lifemodel-write-gateway-7-of-7-2026-07-16",
+          "gate:openlife-tauri-backend-remediation-phase0-11-of-11-2026-07-16",
+          "gate:cargo-check-core-default-tauri-default-tauri-dev-extensions-and-tauri-tests-2026-07-16"
         ],
         "counterfactual": [
-          "test_defined:genuine-first-boot-creates-one-durable-key-and-reference",
-          "test_defined:valid-historical-keyring-keeps-old-epochs-readable",
-          "test_defined:key-reference-save-failure-never-activates-unpersisted-write-key"
+          "test:genuine-first-boot-creates-one-durable-key-reference-and-restart-reuses-it",
+          "test:existing-empty-database-remains-a-proven-first-boot",
+          "test:valid-historical-keychain-epochs-remain-readable-after-restart",
+          "test:pre-rename-reference-save-failure-rolls-back-staged-secret",
+          "test:post-rename-durability-error-withholds-activation-without-orphaning-reference",
+          "test:wrong-key-preflight-and-negative-epoch-preserve-canonical-database-bytes"
         ],
         "deletion_or_absence": [
-          "deletion_required:keyring-read-error-to-empty-vector",
-          "deletion_required:silent-epoch-deduplication",
-          "deletion_required:missing-epoch-active-key-fallback"
+          "source_scan:keyring-read-or-decode-error-to-empty-vector-absent",
+          "source_scan:persisted-epoch-sort-and-dedup-absent",
+          "source_scan:missing-epoch-active-key-fallback-absent",
+          "source_scan:decrypt-failed-placeholder-success-truth-absent",
+          "source_scan:legacy-deterministic-audit-constructors-absent-from-default-build"
         ],
         "capability_non_regression": [
-          "test_defined:normal-MCP-audit-write-and-restart-remain-readable",
-          "test_defined:legal-legacy-read-only-key-migrates-to-keychain-epoch"
+          "test:normal-MCP-audit-write-and-restart-remain-readable",
+          "test:legal-legacy-read-only-key-migrates-to-keychain-epoch",
+          "test:keychain-rotation-keeps-old-and-new-epoch-receipts-readable",
+          "gate:default-and-dev-extensions-builds-verified-separately"
         ],
         "live_boundary": [
-          "source-confirmed-no-dynamic-RED-yet",
-          "historical-audit-row-decryptability-after-bootstrap-not-yet-fault-injected",
-          "no-production-fix-implemented"
+          "external-live-not-required:local-startup-key-reference-and-SQLite-authority-slice",
+          "roadshow-credit-limited-to-fail-closed-startup-and-restart-capability",
+          "D064-D065-D068-remain-open-and-earn-zero-closure-credit",
+          "independent-read-only-implementation-review-pending"
         ]
       },
       "independent_review": {
@@ -2327,6 +2342,24 @@
           "source-map:storage-secret-store-bootstrap-mcp-audit",
           "working-contrast:integrity-key-fails-closed",
           "boundary:first-boot-versus-existing-database"
+        ]
+      },
+      "roadshow_root_fix": {
+        "status": "mechanically_verified_independent_review_pending",
+        "commit": "e37229bf739498571859856af0695a8edabb5bc3",
+        "neighbor_startup_admission_commit": "75472ff089457d71cae85f05111917bddd7ca33d",
+        "evidence": [
+          "typed-loader-distinguishes-absent-present-valid-present-invalid-and-unreadable",
+          "existing-database-epoch-coverage-and-ciphertext-authentication-preflight-before-write-open",
+          "missing-keyring-plus-nonempty-database-creates-zero-secret-and-zero-database-mutation",
+          "save-outcome-is-resolved-from-observed-reference-fact-before-secret-rollback",
+          "startup-proposal-and-lifemodel-reconciliation-use-bounded-internal-admission-with-provider-and-tool-effects-still-blocked"
+        ],
+        "anti_hallucination": [
+          "zero-test-filters-were-not-counted",
+          "full-cargo-check-with-test-utils-was-not-misreported-as-default-release-proof",
+          "atomic-write-return-error-was-not-assumed-to-mean-rename-did-not-commit",
+          "D057-roadshow-subset-was-not-misreported-as-D064-D065-D068-or-global-V4-closure"
         ]
       }
     }
