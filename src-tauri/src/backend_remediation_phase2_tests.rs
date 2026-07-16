@@ -3050,26 +3050,29 @@ async fn every_ordinary_kernel_builder_reuses_exactly_one_early_canonical_agent_
         }));
 
         if case_id == "write" {
-            let proposals = {
+            {
                 let proposal_store = state
                     .proposal_store
                     .as_ref()
                     .expect("proposal store")
                     .lock()
                     .await;
-                proposal_store
+                let proposals = proposal_store
                     .list_pending_proposals(100)
-                    .expect("list write builder proposals")
-            };
-            assert!(proposals
-                .iter()
-                .any(|proposal| proposal.run_id.as_deref() == Some(run_id)));
-            assert!(proposals.iter().all(|proposal| {
-                proposal
-                    .run_id
-                    .as_deref()
-                    .is_none_or(|source_run_id| source_run_id == run_id)
-            }));
+                    .expect("list write builder proposals");
+                assert!(
+                    !proposals.is_empty(),
+                    "write builder must stage a governed review item"
+                );
+                for proposal in proposals {
+                    let origin = proposal_store
+                        .terminal_owner_origin_binding(&proposal.id)
+                        .expect("load canonical proposal origin")
+                        .expect("write builder proposal has a terminal-owner origin");
+                    assert_eq!(origin.task_session_id(), task_session_id);
+                    assert_eq!(origin.run_id(), run_id);
+                }
+            }
         }
         if case_id == "plan" {
             let plan_event = durable_events
