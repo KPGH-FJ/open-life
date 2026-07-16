@@ -851,10 +851,10 @@
         },
         "backend_roadshow_subset": {
           "scope": "required_backend_freeze_dependency",
-          "status": "semantic_port_required"
+          "status": "semantic_port_verified_in_0cdc9cd"
         },
-        "product_disposition": "semantic_port_before_backend_freeze",
-        "note": "Port the verified strict decoder semantics; the sibling branch global result does not prove the roadshow tree."
+        "product_disposition": "retain_verified_strict_decoders_and_recovery_guards",
+        "note": "The strict decoder semantics were independently re-traced, adapted for TransientStateCommand, and verified in the roadshow tree without cherry-picking the sibling implementation."
       },
       {
         "id": "BR4-D055",
@@ -1123,8 +1123,8 @@
         "finding_ids": [
           "BR4-D054"
         ],
-        "disposition": "semantic_port_required",
-        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+        "disposition": "semantic_contract_applied",
+        "roadshow_action": "ported_and_verified_in_0cdc9cd_without_cherry_pick"
       },
       {
         "commit": "15551419f1c63a746889ce6ae6365469bc8ba994",
@@ -1132,8 +1132,8 @@
         "finding_ids": [
           "BR4-D054"
         ],
-        "disposition": "semantic_port_required",
-        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+        "disposition": "semantic_contract_applied",
+        "roadshow_action": "ported_and_verified_in_0cdc9cd_without_cherry_pick"
       },
       {
         "commit": "bb1348f4991e2ed9497581a6c4095cfccaea321c",
@@ -1141,8 +1141,8 @@
         "finding_ids": [
           "BR4-D054"
         ],
-        "disposition": "semantic_port_required",
-        "roadshow_action": "port_contract_and_root_behavior_without_cherry_pick"
+        "disposition": "semantic_root_fix_applied",
+        "roadshow_action": "ported_and_verified_in_0cdc9cd_without_cherry_pick"
       },
       {
         "commit": "94d2b4b08514cc2c6a89dcb924b7053d0ab4eaf5",
@@ -2155,6 +2155,23 @@
           "review:mixed-migration-transaction-rolls-back",
           "review:two-durable-final-recovery-counterfactuals-do-not-redispatch",
           "integrated_rerun:eleven-focused-tests-plus-runtime-module-and-cargo-check-green"
+        ]
+      },
+      "roadshow_semantic_port": {
+        "status": "verified",
+        "commit": "0cdc9cd75bb37ed1027a802b13aa14f8f1916107",
+        "evidence": [
+          "gate:openlife-core-session-content-minimization-13-of-13-2026-07-16",
+          "gate:openlife-core-action-queue-replay-66-of-66-2026-07-16",
+          "gate:openlife-tauri-enum-corruption-after-final-2-of-2-2026-07-16",
+          "gate:openlife-tauri-main-chat-runtime-module-30-of-30-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-16",
+          "static:cargo-fmt-git-diff-and-fallback-absence-scan-2026-07-16"
+        ],
+        "anti_hallucination": [
+          "zero-test-exact-filter-was-rejected-and-not-counted",
+          "task-session-owner-receipt-was-not-misused-as-transcript-owner-proof",
+          "current-roadshow-code-was-tested-directly-not-inferred-from-sibling-branch"
         ]
       }
     }
