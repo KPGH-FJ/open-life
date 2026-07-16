@@ -1041,16 +1041,16 @@
       {
         "id": "BR4-D068",
         "global_closure": {
-          "implementation_state": "not_started",
-          "verification_state": "none",
+          "implementation_state": "implemented",
+          "verification_state": "partial",
           "closure_state": "open"
         },
         "backend_roadshow_subset": {
           "scope": "required_backend_freeze_dependency",
-          "status": "authenticated_audit_envelope_fix_not_started"
+          "status": "mechanically_verified_global_open"
         },
         "product_disposition": "finish_required_subset_without_claiming_global_closure",
-        "note": "Existing generic tool audit history can carry sensitive payloads; authenticated envelope truth is required before backend freeze."
+        "note": "Authenticated version/schema binding, strict list/export decoding, transactional legacy migration and zero-rewrite product bootstrap failure are mechanically verified. D064 store identity, D065 trusted-read projection, D067 audit terminal disposition and independent implementation review remain separate."
       }
     ],
     "historical_slice_commits": [
@@ -2999,57 +2999,86 @@
       "id": "BR4-D068",
       "current_severity": "P0",
       "triage_state": "root_cause_confirmed",
-      "implementation_state": "not_started",
-      "verification_state": "none",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
       "closure_state": "open",
       "evidence": {
         "reproduction": [
           "source_trace:migrate-legacy-selects-only-plaintext-payload-version-less-than-one",
           "source_trace:list-and-export-ignore-payload-version-and-receipt-schema",
           "source_trace:AES-GCM-encrypt-and-decrypt-use-no-AAD-or-versioned-envelope",
-          "mechanical_counterexample:version-zero-legacy-row-flipped-to-one-skips-migration-and-returns-raw-sensitive-plaintext"
+          "mechanical_counterexample:version-zero-legacy-row-flipped-to-one-skips-migration-and-returns-raw-sensitive-plaintext",
+          "red_baseline:legacy-raw-ciphertext-promoted-to-the-actual-current-version-returned-raw-arguments-and-result-before-d05f42c",
+          "red_baseline:correctly-encrypted-current-UTF8-with-an-unknown-field-was-returned-without-strict-schema-validation-before-d05f42c"
         ],
         "failing_test": [
-          "test_defined:D068-version-flip-cannot-skip-migration-or-return-raw-payload",
-          "test_defined:D068-auth-or-receipt-schema-failure-performs-zero-rewrite",
-          "test_defined:D068-list-and-export-reject-unbound-version-and-invalid-current-receipt"
+          "red_test:d068_plaintext_version_flip_cannot_expose_legacy_sensitive_payload",
+          "red_test:d068_current_receipt_schema_rejects_unknown_fields_for_list_and_export"
         ],
         "positive": [
-          "source_proof:insert-log-already-materializes-minimized-argument-and-result-receipts",
-          "source_proof:legal-version-zero-payloads-already-have-a-legacy-migration-capability"
+          "commit:d05f42c-authenticate-audit-payload-receipts",
+          "gate:openlife-core-D068-6-of-6-2026-07-16",
+          "gate:openlife-core-mcp-audit-16-of-16-2026-07-16",
+          "gate:openlife-tauri-D068-bootstrap-1-of-1-2026-07-16",
+          "gate:openlife-tauri-bootstrap-module-24-of-24-2026-07-16",
+          "gate:openlife-core-ToolGateway-25-of-25-2026-07-16",
+          "gate:openlife-core-ActionExecutor-10-of-10-2026-07-16",
+          "gate:openlife-core-MCP-21-of-21-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-16",
+          "static:cargo-fmt-git-diff-and-old-decrypt-route-scan-2026-07-16"
         ],
         "counterfactual": [
-          "test_defined:authenticated-current-minimized-receipts-remain-exactly-readable",
-          "test_defined:legal-legacy-rows-migrate-transactionally-and-remain-readable-after-restart",
-          "test_defined:wrong-kind-payloadStored-valueType-bytes-digest-version-or-unknown-fields-fail-closed"
+          "test:actual-current-version-column-flip-fails-as-authenticated-format-binding-mismatch",
+          "test:current-receipts-remain-exactly-listable-and-exportable-with-no-raw-payload",
+          "test:legal-version-zero-and-version-one-history-migrates-to-authenticated-version-two",
+          "test:wrong-kind-payloadStored-valueType-bytes-digest-version-and-unknown-fields-fail-closed",
+          "test:arguments-or-result-bit-flip-and-role-column-swap-fail-list-and-export",
+          "test:corrupt-second-legacy-row-aborts-the-whole-migration-with-zero-rewrite",
+          "test:bootstrap-keeps-valid-key-reference-owner-canonical-while-marking-only-audit-store-unavailable",
+          "test:wrong-key-bootstrap-remains-key-authority-unavailable-and-is-not-misclassified-as-payload-integrity"
         ],
         "deletion_or_absence": [
-          "deletion_required:plaintext-version-as-sole-current-format-authority",
-          "deletion_required:AEAD-without-format-and-schema-binding",
-          "deletion_required:decrypt-and-return-without-strict-receipt-decoder",
-          "absence_required:zero-to-one-version-flip-exposes-raw-sensitive-plaintext",
-          "absence_required:failed-auth-schema-or-migration-rewrites-any-durable-byte"
+          "source_scan:plaintext-version-is-not-sufficient-to-authenticate-current-format",
+          "source_scan:current-AEAD-authenticates-payload-version-kind-and-key-epoch",
+          "source_scan:list-and-export-construct-product-DTOs-only-after-strict-receipt-decoding",
+          "absence:actual-current-version-flip-cannot-expose-legacy-raw-sensitive-plaintext",
+          "absence:failed-auth-schema-or-migration-rewrites-database-main-WAL-SHM-or-journal-bytes"
         ],
         "capability_non_regression": [
-          "test_defined:normal-current-audit-list-and-export-remain-available-with-minimized-receipts",
-          "test_defined:legal-legacy-audit-history-remains-readable-after-bounded-migration",
-          "test_defined:empty-and-bounded-nonempty-trusted-audit-reads-preserve-D065-semantics"
+          "test:normal-current-audit-list-and-export-remain-available-with-minimized-receipts",
+          "test:legal-legacy-audit-history-remains-readable-after-transactional-migration",
+          "test:keychain-rotation-keeps-old-and-new-authenticated-receipts-readable",
+          "gate:ToolGateway-ActionExecutor-and-MCP-adjacent-capabilities-remain-green"
         ],
         "live_boundary": [
-          "root-cause-confirmed-by-fixed-source-trace-and-mechanical-SQLite-counterexample",
+          "external-live-not-required:local-encrypted-SQLite-payload-integrity-slice",
+          "roadshow-backend-subset-mechanically-verified",
+          "independent-read-only-implementation-review-pending",
+          "BR4-D064-store-identity-and-single-writer-remains-open-and-earns-zero-D068-credit",
           "BR4-D057-key-authority-remains-separately-open-and-earns-zero-D068-credit",
           "BR4-D065-trusted-read-projection-remains-separately-open-and-earns-zero-D068-credit",
-          "authenticated-envelope-strict-decoder-and-zero-rewrite-fault-injection-not-implemented"
+          "BR4-D067-tool-terminal-audit-persistence-truth-remains-open-and-earns-zero-D068-credit"
         ]
       },
       "independent_review": {
-        "reviewer": "d057_green_independent_review",
-        "decision": "root-cause-confirmed-separate-audit-payload-authentication-blocker",
+        "reviewer": "pending_independent_readonly_reviewer",
+        "decision": "mechanical-gates-green-independent-readonly-review-pending",
         "evidence_refs": [
-          "fixed-base-source-trace:migration-trusts-unauthenticated-version-column",
-          "fixed-base-source-trace:list-returns-arbitrary-decrypted-UTF8-as-current-receipt",
-          "mechanical-counterexample:version-flip-bypasses-minimization",
-          "boundary:D057-and-D065-remain-independent-open-findings"
+          "commit:d05f42c",
+          "gate:D068-core-6-of-6",
+          "gate:D068-bootstrap-1-of-1",
+          "gate:mcp-audit-16-of-16",
+          "boundary:D064-D065-D067-remain-separate-open-findings"
+        ]
+      },
+      "roadshow_implementation": {
+        "status": "mechanically_verified_independent_review_pending",
+        "commit": "d05f42c804a62227bd84ea12e0988dde55f997b4",
+        "anti_hallucination": [
+          "the-attack-was-updated-from-historical-version-one-to-the-actual-current-version-two",
+          "key-reference-health-and-audit-payload-integrity-remain-separate-bootstrap-facts",
+          "wrong-key-failure-was-not-misclassified-as-a-payload-schema-failure",
+          "D064-D065-D067-and-global-V4-closure-were-not-claimed"
         ]
       }
     }
