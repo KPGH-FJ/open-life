@@ -305,6 +305,21 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   return safeInvoke("save_config", { config });
 }
 
+export interface CredentialRecoveryItem {
+  purpose: "agent_run_receipts" | "main_chat_events" | "action_queue" | "task_store";
+  status: "available" | "created" | "missing_existing_data" | "invalid" | "unavailable";
+}
+
+export interface CredentialRecoveryReport {
+  items: CredentialRecoveryItem[];
+  allRequiredCredentialsReady: boolean;
+  restartRequired: boolean;
+}
+
+export async function recoverRequiredCredentialAccess(): Promise<CredentialRecoveryReport> {
+  return safeInvoke<CredentialRecoveryReport>("recover_required_credential_access");
+}
+
 // DEPRECATED: use sendMessageV2 for full trace support
 export interface MainChatMessageOptions {
   operationId: string;

@@ -11,6 +11,8 @@ use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use tauri::State;
 
@@ -26,7 +28,10 @@ use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_mcp_audit_key_material, stage_config_secrets, KeyringSecretStore, SecretStore,
+    create_mcp_audit_key_material, hydrate_or_create_canonical_store_integrity_key,
+    hydrate_or_create_integrity_key, inspect_integrity_key_access, stage_config_secrets,
+    IntegrityKeyInspection, KeyringSecretStore, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
+    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::storage::{
     app_data_dir, mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
@@ -39,6 +44,119 @@ static GOVERNED_DATA_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 pub(crate) static CONFIG_WRITE_COORDINATOR: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+static CREDENTIAL_RECOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct CredentialRecoveryActivityGuard;
+
+impl Drop for CredentialRecoveryActivityGuard {
+    fn drop(&mut self) {
+        CREDENTIAL_RECOVERY_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRecoveryItem {
+    pub purpose: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRecoveryReport {
+    pub items: Vec<CredentialRecoveryItem>,
+    pub all_required_credentials_ready: bool,
+    pub restart_required: bool,
+}
+
+fn recover_one_required_credential(
+    data_dir: &Path,
+    store: &dyn SecretStore,
+    purpose: &str,
+    secret_ref: &'static str,
+    protected_files: &[&str],
+) -> CredentialRecoveryItem {
+    let status = match inspect_integrity_key_access(secret_ref, store) {
+        IntegrityKeyInspection::Available => "available",
+        IntegrityKeyInspection::Invalid => "invalid",
+        IntegrityKeyInspection::Unavailable => "unavailable",
+        IntegrityKeyInspection::Missing => {
+            if protected_files
+                .iter()
+                .any(|name| data_dir.join(name).exists())
+            {
+                "missing_existing_data"
+            } else {
+                let created = if secret_ref == TASK_STORE_AUTHORITY_KEY_REF {
+                    hydrate_or_create_canonical_store_integrity_key(
+                        secret_ref,
+                        &data_dir.join("tasks.db"),
+                        store,
+                    )
+                } else {
+                    hydrate_or_create_integrity_key(secret_ref, store)
+                };
+                if created.is_ok() {
+                    "created"
+                } else {
+                    "unavailable"
+                }
+            }
+        }
+    };
+    CredentialRecoveryItem {
+        purpose: purpose.into(),
+        status: status.into(),
+    }
+}
+
+fn recover_required_credential_access_with_store(
+    data_dir: &Path,
+    store: &dyn SecretStore,
+) -> CredentialRecoveryReport {
+    let items = vec![
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "agent_run_receipts",
+            AGENT_RUN_RECEIPT_KEY_REF,
+            &[
+                "agent_runs.db",
+                "life_events.db",
+                "main_chat_agent_sessions.db",
+            ],
+        ),
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "main_chat_events",
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            &["main_chat_agent_events.db"],
+        ),
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "action_queue",
+            ACTION_QUEUE_AUTHORITY_KEY_REF,
+            &["main_chat_action_queue.db"],
+        ),
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "task_store",
+            TASK_STORE_AUTHORITY_KEY_REF,
+            &["tasks.db"],
+        ),
+    ];
+    let all_required_credentials_ready = items
+        .iter()
+        .all(|item| matches!(item.status.as_str(), "available" | "created"));
+    CredentialRecoveryReport {
+        items,
+        all_required_credentials_ready,
+        restart_required: all_required_credentials_ready,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -715,6 +833,45 @@ fn resolved_provider_credential_version(submitted: &AppConfig, current: &AppConf
 
 async fn replace_runtime_provider_config(state: &Arc<AppState>, config: AppConfig) {
     state.replace_provider_runtime_config(config).await;
+}
+
+/// User-initiated recovery for OS credential ACL changes after an application
+/// update or development re-sign. Startup intentionally stays non-interactive
+/// and bounded; this command is the only product path that may let the OS show
+/// its credential authorization UI. It returns status only and never exposes
+/// key material to the webview.
+#[tauri::command]
+pub async fn recover_required_credential_access(
+    window: tauri::WebviewWindow,
+) -> Result<CredentialRecoveryReport, AppError> {
+    CREDENTIAL_RECOVERY_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| AppError::permission("credential recovery is already in progress"))?;
+    let _activity_guard = CredentialRecoveryActivityGuard;
+    require_native_danger_action_confirmation(
+        &window,
+        NativeDangerActionRequest {
+            action_type: "credential_store_recovery",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: 4,
+            arguments: &serde_json::json!({
+                "operation": "inspect_or_initialize_required_integrity_keys",
+                "existing_canonical_data_policy": "never_replace_missing_key",
+            }),
+            arguments_summary:
+                "检查四类内部完整性密钥；仅在没有对应 canonical 文件时初始化缺失密钥。",
+            scope_summary: "AgentRun、Main Chat 事件、ActionQueue 与 TaskStore 的系统凭据",
+            challenge_id: None,
+        },
+    )
+    .await?;
+    let data_dir = app_data_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        recover_required_credential_access_with_store(&data_dir, &KeyringSecretStore)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("credential recovery worker failed: {error}")))
 }
 
 #[tauri::command]
@@ -1638,6 +1795,8 @@ mod tests {
         ProviderNetworkAuthorization,
     };
     use openlife_core::llm::{provider_endpoint_is_official, ChatMessage};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
     const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
@@ -1645,6 +1804,110 @@ mod tests {
     const W84_IMPORT_PAYLOAD_MESSAGE_SECRET: &str = "W84_IMPORT_PAYLOAD_MESSAGE_SECRET";
     const W84_IMPORT_CURRENT_VECTOR_SECRET: &str = "W84_IMPORT_CURRENT_VECTOR_SECRET";
     const W84_IMPORT_PAYLOAD_VECTOR_SECRET: &str = "W84_IMPORT_PAYLOAD_VECTOR_SECRET";
+
+    #[derive(Default)]
+    struct RecoverySecretStore {
+        values: Mutex<HashMap<String, String>>,
+        writes: Mutex<usize>,
+    }
+
+    impl SecretStore for RecoverySecretStore {
+        fn get(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.values.lock().unwrap().get(secret_ref).cloned())
+        }
+
+        fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
+            *self.writes.lock().unwrap() += 1;
+            self.values
+                .lock()
+                .unwrap()
+                .insert(secret_ref.into(), value.into());
+            Ok(())
+        }
+
+        fn delete(&self, secret_ref: &str) -> anyhow::Result<()> {
+            self.values.lock().unwrap().remove(secret_ref);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn credential_recovery_creates_only_missing_keys_for_empty_canonical_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+
+        let report = recover_required_credential_access_with_store(directory.path(), &store);
+
+        assert!(report.all_required_credentials_ready);
+        assert!(report.restart_required);
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .map(|item| item.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["created", "created", "created", "created"]
+        );
+        assert_eq!(*store.writes.lock().unwrap(), 4);
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("keychain://"));
+        for value in store.values.lock().unwrap().values() {
+            assert!(!serialized.contains(value));
+        }
+    }
+
+    #[test]
+    fn credential_recovery_never_rotates_missing_keys_for_existing_canonical_data() {
+        let directory = tempfile::tempdir().unwrap();
+        for file_name in [
+            "agent_runs.db",
+            "main_chat_agent_events.db",
+            "main_chat_action_queue.db",
+            "tasks.db",
+        ] {
+            std::fs::write(directory.path().join(file_name), b"canonical-data-sentinel").unwrap();
+        }
+        let store = RecoverySecretStore::default();
+
+        let report = recover_required_credential_access_with_store(directory.path(), &store);
+
+        assert!(!report.all_required_credentials_ready);
+        assert!(!report.restart_required);
+        assert!(report
+            .items
+            .iter()
+            .all(|item| item.status == "missing_existing_data"));
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert!(store.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn credential_recovery_never_replaces_invalid_existing_key_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+        for secret_ref in [
+            AGENT_RUN_RECEIPT_KEY_REF,
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            ACTION_QUEUE_AUTHORITY_KEY_REF,
+            TASK_STORE_AUTHORITY_KEY_REF,
+        ] {
+            store.set(secret_ref, "not-base64").unwrap();
+        }
+        *store.writes.lock().unwrap() = 0;
+
+        let report = recover_required_credential_access_with_store(directory.path(), &store);
+
+        assert!(!report.all_required_credentials_ready);
+        assert!(!report.restart_required);
+        assert!(report.items.iter().all(|item| item.status == "invalid"));
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert!(store
+            .values
+            .lock()
+            .unwrap()
+            .values()
+            .all(|value| value == "not-base64"));
+    }
 
     #[test]
     fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {

@@ -200,7 +200,8 @@ use commands::router::get_model_router_status;
 use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
 use commands::settings::{
     export_all_data, get_config, get_danger_action_preflight, get_last_model_error,
-    get_privacy_policy, import_all_data, save_config, set_privacy_policy, test_llm_connection,
+    get_privacy_policy, import_all_data, recover_required_credential_access, save_config,
+    set_privacy_policy, test_llm_connection,
 };
 use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
@@ -924,6 +925,7 @@ pub fn run() {
             save_life_model,
             get_config,
             save_config,
+            recover_required_credential_access,
             get_agent_run,
             list_agent_runs,
             list_provider_transmission_history,

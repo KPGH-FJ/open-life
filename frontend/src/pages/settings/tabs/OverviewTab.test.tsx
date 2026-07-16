@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import OverviewTab from "./OverviewTab";
@@ -165,6 +165,37 @@ describe("OverviewTab", () => {
       </MemoryRouter>
     );
     expect(screen.getByText(/恢复控制台/)).toBeInTheDocument();
+  });
+
+  it("shows metadata-only credential recovery status and requires restart", async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "recover_required_credential_access") {
+        return {
+          items: [
+            { purpose: "agent_run_receipts", status: "available" },
+            { purpose: "main_chat_events", status: "available" },
+            { purpose: "action_queue", status: "available" },
+            { purpose: "task_store", status: "available" },
+          ],
+          allRequiredCredentialsReady: true,
+          restartRequired: true,
+        };
+      }
+      return mockInvoke(command);
+    });
+    render(
+      <MemoryRouter>
+        <OverviewTab {...baseProps} safeMode={true} />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "解锁或初始化系统密钥" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/系统密钥已可访问，请完全退出并重启/)).toBeInTheDocument()
+    );
+    expect(screen.getByText(/Agent 运行回执：可访问 \(available\)/)).toBeInTheDocument();
+    expect(screen.getByText(/前端不会读取或显示密钥/)).toBeInTheDocument();
   });
 
   it("shows core link ready text when diagnostics is ok", () => {

@@ -122,6 +122,14 @@ pub(crate) trait SecretStore {
     fn delete(&self, secret_ref: &str) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntegrityKeyInspection {
+    Available,
+    Missing,
+    Invalid,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct KeyringSecretStore;
 
@@ -253,6 +261,41 @@ pub(crate) fn hydrate_or_create_integrity_key(
     }
 
     create_random_integrity_key(secret_ref, store)
+}
+
+/// Inspect one internal integrity-key reference without creating, rotating, or
+/// returning key material. Product recovery may use this with the interactive
+/// credential store so macOS can re-authorize an updated signed application,
+/// while the frontend receives only this bounded state.
+pub(crate) fn inspect_integrity_key_access(
+    secret_ref: &'static str,
+    store: &dyn SecretStore,
+) -> IntegrityKeyInspection {
+    if !matches!(
+        secret_ref,
+        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
+            | ACTION_QUEUE_AUTHORITY_KEY_REF
+            | TASK_STORE_AUTHORITY_KEY_REF
+            | AGENT_RUN_RECEIPT_KEY_REF
+    ) {
+        return IntegrityKeyInspection::Invalid;
+    }
+
+    let encoded = match store.get(secret_ref) {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => return IntegrityKeyInspection::Missing,
+        Err(_) => return IntegrityKeyInspection::Unavailable,
+    };
+    let Ok(decoded) = general_purpose::STANDARD.decode(encoded) else {
+        return IntegrityKeyInspection::Invalid;
+    };
+    let Ok(key) = <Vec<u8> as TryInto<[u8; 32]>>::try_into(decoded) else {
+        return IntegrityKeyInspection::Invalid;
+    };
+    if key.iter().all(|byte| *byte == 0) {
+        return IntegrityKeyInspection::Invalid;
+    }
+    IntegrityKeyInspection::Available
 }
 
 fn create_random_integrity_key(
@@ -996,6 +1039,61 @@ mod tests {
         assert!(action_key.iter().any(|byte| *byte != 0));
         assert!(task_store_key.iter().any(|byte| *byte != 0));
         assert!(agent_run_key.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn integrity_key_inspection_is_metadata_only_and_never_creates_or_rotates() {
+        let store = MemorySecretStore::default();
+
+        assert_eq!(
+            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            IntegrityKeyInspection::Missing
+        );
+        assert!(store.get(AGENT_RUN_RECEIPT_KEY_REF).unwrap().is_none());
+
+        let original = hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap();
+        assert_eq!(
+            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            IntegrityKeyInspection::Available
+        );
+        assert_eq!(
+            hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap(),
+            original
+        );
+
+        store.set(AGENT_RUN_RECEIPT_KEY_REF, "not-base64").unwrap();
+        assert_eq!(
+            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            IntegrityKeyInspection::Invalid
+        );
+    }
+
+    #[test]
+    fn integrity_key_inspection_collapses_credential_errors_without_exposing_details() {
+        #[derive(Default)]
+        struct UnavailableSecretStore;
+
+        impl SecretStore for UnavailableSecretStore {
+            fn get(&self, _secret_ref: &str) -> Result<Option<String>> {
+                anyhow::bail!("sensitive platform error detail")
+            }
+
+            fn set(&self, _secret_ref: &str, _value: &str) -> Result<()> {
+                unreachable!("inspection must not write")
+            }
+
+            fn delete(&self, _secret_ref: &str) -> Result<()> {
+                unreachable!("inspection must not delete")
+            }
+        }
+
+        assert_eq!(
+            inspect_integrity_key_access(
+                MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+                &UnavailableSecretStore
+            ),
+            IntegrityKeyInspection::Unavailable
+        );
     }
 
     #[test]
