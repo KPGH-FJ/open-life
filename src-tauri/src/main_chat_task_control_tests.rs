@@ -1365,7 +1365,8 @@ async fn startup_projects_prepared_replay_unknown_before_claim_recovery() {
     )
     .with_replay_claim(&failed.id, &claim.claim_id, claim.owner_generation)
     .expect("bind exact replay claim generation to prepared observer");
-    openlife_core::agent::ToolDispatchObserver::before_dispatch(&observer, &attempt)
+    observer
+        .persist_prepared_fact_for_crash_fixture(&attempt)
         .await
         .expect("persist exact signed write-ahead prepared replay fact");
 
@@ -1561,7 +1562,8 @@ async fn durable_restart_projects_live_not_dispatched_once_before_safe_claim_rec
     )
     .with_replay_claim(&failed.id, &claim.claim_id, claim.owner_generation)
     .expect("bind exact replay claim generation to prepared observer");
-    openlife_core::agent::ToolDispatchObserver::before_dispatch(&observer, &attempt)
+    observer
+        .persist_prepared_fact_for_crash_fixture(&attempt)
         .await
         .expect("persist prepared fact before the simulated crash");
     let receipt = registration.settle_after_runtime_failure();

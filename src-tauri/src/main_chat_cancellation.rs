@@ -464,10 +464,6 @@ impl MainChatExecutionEpoch {
                 .clone()
         };
         for registration in registrations {
-            let receipt = registration.snapshot();
-            if receipt.finished_at.is_some() {
-                continue;
-            }
             registration.settle_after_local_abort();
         }
         self.snapshot()
@@ -489,9 +485,6 @@ impl MainChatExecutionEpoch {
                 .clone()
         };
         for registration in registrations {
-            if registration.snapshot().finished_at.is_some() {
-                continue;
-            }
             registration.settle_after_runtime_failure();
         }
         self.snapshot()

@@ -282,18 +282,11 @@ impl MainChatToolLifecycleObserver {
         });
         Ok(self)
     }
-}
 
-#[async_trait::async_trait]
-impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserver {
-    async fn before_dispatch(
+    async fn persist_prepared_fact(
         &self,
         attempt: &openlife_core::agent::ToolDispatchAttempt,
     ) -> anyhow::Result<()> {
-        self.state
-            .persistence_coordinator
-            .require_effects_allowed()
-            .map_err(anyhow::Error::msg)?;
         if attempt.source_run_id.as_deref() != Some(self.run_id.as_str()) {
             anyhow::bail!("tool_dispatch_prepared_run_identity_mismatch");
         }
@@ -358,6 +351,28 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserve
         .await
         .map(|_| ())
         .map_err(anyhow::Error::msg)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn persist_prepared_fact_for_crash_fixture(
+        &self,
+        attempt: &openlife_core::agent::ToolDispatchAttempt,
+    ) -> anyhow::Result<()> {
+        self.persist_prepared_fact(attempt).await
+    }
+}
+
+#[async_trait::async_trait]
+impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserver {
+    async fn before_dispatch(
+        &self,
+        attempt: &openlife_core::agent::ToolDispatchAttempt,
+    ) -> anyhow::Result<()> {
+        self.state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .map_err(anyhow::Error::msg)?;
+        self.persist_prepared_fact(attempt).await
     }
 }
 

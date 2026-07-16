@@ -857,6 +857,7 @@ impl ToolExecutionReceiptRegistration {
 
     pub fn settle_after_local_abort(&self) -> ToolExecutionReceipt {
         self.tracker.settle_after_local_abort();
+        self.tracker.mark_audit_persistence_unknown_if_pending();
         self.tracker.snapshot()
     }
 
@@ -866,6 +867,7 @@ impl ToolExecutionReceiptRegistration {
     /// remote dispatch without a response remains unknown.
     pub fn settle_after_runtime_failure(&self) -> ToolExecutionReceipt {
         self.tracker.settle_failed_terminal();
+        self.tracker.mark_audit_persistence_unknown_if_pending();
         self.tracker.snapshot()
     }
 
@@ -1531,6 +1533,36 @@ mod tests {
         assert_eq!(terminal.finished_at, adapter_finished.finished_at);
         assert!(terminal.mechanically_valid_terminal().is_ok());
         assert!(terminal.proves_success());
+    }
+
+    #[test]
+    fn runtime_finalizers_settle_pending_audit_as_unknown_not_invalid_terminal() {
+        for settle_after_runtime_failure in [false, true] {
+            let tracker = ToolExecutionReceiptTracker::new(
+                Some("run-audit-runtime-finalizer".into()),
+                Some("manifest-audit-runtime-finalizer".into()),
+                "digest-audit-runtime-finalizer".into(),
+                ToolActionEffect::ReadOnly,
+                ToolIdempotencyContract::Idempotent,
+            );
+            tracker.mark_local_dispatched();
+            tracker.mark_audit_persistence_pending();
+            tracker.mark_local_aborted();
+            tracker.finish();
+            let registration = ToolExecutionReceiptRegistration::new(tracker);
+
+            let receipt = if settle_after_runtime_failure {
+                registration.settle_after_runtime_failure()
+            } else {
+                registration.settle_after_local_abort()
+            };
+
+            assert_eq!(
+                receipt.audit_persistence_status,
+                ToolAuditPersistenceStatus::Unknown
+            );
+            assert!(receipt.mechanically_valid_terminal().is_ok());
+        }
     }
 
     #[test]
