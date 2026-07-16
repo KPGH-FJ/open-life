@@ -1946,7 +1946,10 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                         &execution_epoch,
                         &provider_durability_scope,
                         &provider_runtime.scheduler,
-                        MainChatKernelFailureObservation::ProviderAttemptStateInvalid { error },
+                        MainChatKernelFailureObservation::ProviderAttemptStateInvalid {
+                            error,
+                            kernel_events: event_sink.events(),
+                        },
                         observed_at,
                     )
                     .await?;
@@ -3925,6 +3928,7 @@ enum MainChatKernelFailureObservation<'a> {
     },
     ProviderAttemptStateInvalid {
         error: crate::main_chat_cancellation::MainChatProviderAttemptError,
+        kernel_events: &'a [crate::main_chat_kernel::MainChatKernelEvent],
     },
 }
 
@@ -3961,7 +3965,7 @@ impl MainChatKernelFailureObservation<'_> {
     fn degradation_detail(&self) -> String {
         match self {
             Self::Kernel { error_detail, .. } => (*error_detail).to_string(),
-            Self::ProviderAttemptStateInvalid { error } => error.to_string(),
+            Self::ProviderAttemptStateInvalid { error, .. } => error.to_string(),
         }
     }
 }
@@ -4112,7 +4116,30 @@ async fn terminalize_main_chat_kernel_failure(
                 }
             }
         }
-        MainChatKernelFailureObservation::ProviderAttemptStateInvalid { error } => {
+        MainChatKernelFailureObservation::ProviderAttemptStateInvalid {
+            error,
+            kernel_events,
+        } => {
+            if let Ok(lifecycle) = observed_provider_lifecycle_from_kernel_events(kernel_events) {
+                let proof_result = provider_scheduler
+                    .provider_durability_proofs_for_receipts(&lifecycle.terminal_receipts)
+                    .and_then(|mut proofs| {
+                        for start in &lifecycle.unresolved_starts {
+                            proofs.push(provider_scheduler.provider_durability_proof_for_start(
+                                &start.request_id,
+                                &start.provider,
+                                &start.model,
+                                start.started_at,
+                                &start.policy_evidence,
+                            )?);
+                        }
+                        Ok(proofs)
+                    });
+                if let Ok(proofs) = proof_result {
+                    durability_proofs = proofs;
+                    inputs.extend(observed_provider_adapter_event_inputs(&lifecycle)?);
+                }
+            }
             inputs.push(
                 MainChatAgentRuntimeEventInput::new(
                     "provider.receipt_state_failed",
@@ -6098,7 +6125,8 @@ pub(crate) fn finalize_openlife_turn_result(
     // ToolGateway receipts. Generation metadata and the mere presence of a
     // pending/blocked tool-call projection are not execution proof.
     let provider_invocation_status = result.provider_invocation_status;
-    let model_invoked = provider_invocation_status.observed_adapter_start();
+    let model_invoked = provider_invocation_status.observed_adapter_start()
+        || durable_provider_invocation_observed(durable_events, canonical_run_id);
     let tool_invoked = result.tool_calls.iter().any(|call| {
         call.execution_receipt.as_ref().is_some_and(|receipt| {
             !matches!(
@@ -6194,6 +6222,26 @@ fn durable_tool_invocation_observed(
             && matches!(
                 event.payload.get("transportStatus").and_then(Value::as_str),
                 Some("dispatched" | "response_observed" | "local_aborted" | "remote_unknown")
+            )
+    })
+}
+
+/// Provider state may fail closed after the adapter edge was already crossed.
+/// In that case the typed status remains `invalid`, while an exact durable
+/// provider-request lifecycle fact still proves that model invocation happened.
+fn durable_provider_invocation_observed(
+    events: &[MainChatAgentDurableEvent],
+    canonical_run_id: &str,
+) -> bool {
+    events.iter().any(|event| {
+        event.run_id == canonical_run_id
+            && event.object_type == "provider_request"
+            && matches!(
+                event.event_type.as_str(),
+                "provider.started"
+                    | "provider.completed"
+                    | "provider.failed"
+                    | "provider.remote_unknown"
             )
     })
 }
@@ -6661,7 +6709,8 @@ mod turn_admission_tests {
     use crate::main_chat_event_stream::MainChatAgentDurableEvent;
 
     use super::{
-        durable_tool_invocation_observed, fail_main_chat_once_after_durable_final_for_test,
+        durable_provider_invocation_observed, durable_tool_invocation_observed,
+        fail_main_chat_once_after_durable_final_for_test,
         fail_main_chat_once_after_message_commit_for_test,
         install_main_chat_pre_registration_barrier_for_test, validate_openlife_turn_admission,
         MainChatTurnStreamMode, OpenLifeTurnAdmissionError, OpenLifeTurnInput,
@@ -6682,6 +6731,55 @@ mod turn_admission_tests {
             payload: serde_json::json!({ "transportStatus": transport_status }),
             backfilled: false,
         }
+    }
+
+    fn durable_provider_event(event_type: &str) -> MainChatAgentDurableEvent {
+        MainChatAgentDurableEvent {
+            event_id: format!("event-{event_type}"),
+            task_session_id: "task-1".into(),
+            run_id: "run-1".into(),
+            sequence: 1,
+            event_type: event_type.into(),
+            object_type: "provider_request".into(),
+            object_id: "request-1".into(),
+            created_at: chrono::Utc::now(),
+            source: "provider_adapter".into(),
+            payload_digest: format!("sha256:{}", "b".repeat(64)),
+            payload: serde_json::json!({ "status": "started" }),
+            backfilled: false,
+        }
+    }
+
+    #[test]
+    fn durable_provider_lifecycle_preserves_invocation_truth_after_state_failure() {
+        for event_type in [
+            "provider.started",
+            "provider.completed",
+            "provider.failed",
+            "provider.remote_unknown",
+        ] {
+            assert!(
+                durable_provider_invocation_observed(
+                    &[durable_provider_event(event_type)],
+                    "run-1"
+                ),
+                "durable provider lifecycle event {event_type} must prove invocation"
+            );
+        }
+
+        let mut state_failure = durable_provider_event("provider.receipt_state_failed");
+        state_failure.object_type = "provider_attempt_state".into();
+        assert!(!durable_provider_invocation_observed(
+            &[state_failure],
+            "run-1"
+        ));
+
+        let mut wrong_owner = durable_provider_event("provider.started");
+        wrong_owner.run_id = "run-2".into();
+        assert!(!durable_provider_invocation_observed(
+            &[wrong_owner],
+            "run-1"
+        ));
     }
 
     #[test]
@@ -10027,6 +10125,7 @@ mod cancellation_projection_tests {
             &provider_scheduler,
             MainChatKernelFailureObservation::ProviderAttemptStateInvalid {
                 error: MainChatProviderAttemptError::MissingStart,
+                kernel_events: &[],
             },
             chrono::Utc::now(),
         )

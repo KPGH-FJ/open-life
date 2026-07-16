@@ -2273,6 +2273,11 @@ async fn conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_rec
     assert!(durable_events
         .iter()
         .any(|event| event.event_type == "provider.receipt_state_failed"));
+    assert!(durable_events.iter().any(|event| {
+        event.event_type == "provider.started"
+            && event.object_type == "provider_request"
+            && event.object_id == provider_request_id
+    }));
     assert!(durable_events
         .iter()
         .any(|event| event.event_type == "failed"));
