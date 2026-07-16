@@ -1,14 +1,14 @@
 # OpenLife Roadshow V3 StateStore Evidence
 
 Status: bounded daily tasks, the typed short-lived `/state` observation slice,
-legacy YAML daily-task shadow staging, and legacy MemoryStore state-history
-shadow staging/parity/data-restore, canonical import, and shipped history/alert
-read-owner cutover are mechanically verified through the existing StateStore
-and the one Main Chat TurnRuntime. Daily-task authority cutover, independent
-read-only review, and release evidence remain pending. Native packaging is
-outside the current backend-freeze slice and receives no credit here. This file
-does not claim ADR 0015, Phase7, the roadshow release, or global backend
-remediation is complete.
+legacy YAML daily-task shadow staging/parity/data-restore, atomic canonical
+import, and shipped daily-task read-owner cutover are mechanically verified.
+The parallel legacy MemoryStore state-history shadow/import/history-alert read
+cutover is also mechanically verified through the existing StateStore and the
+one Main Chat TurnRuntime. Independent read-only review and final backend
+freeze evidence remain pending. Native packaging is outside the current
+backend-freeze slice and receives no credit here. This file does not claim ADR
+0015, Phase7, the roadshow release, or global backend remediation is complete.
 
 ## Scope and commits
 
@@ -23,11 +23,16 @@ state-history shadow evidence and StateStore schema v6 are commit
 StateStore schema v7 are commit
 `2d3c9a9ae8ed98a9049c59be23ed56cbf0b4266c`. The shipped history/alert read
 cutover and old MemoryStore product-route deletion are commit
-`ec616b8dc5d298ac710d8f8d2dee5debced3130e`.
+`ec616b8dc5d298ac710d8f8d2dee5debced3130e`. Lossless canonical time-block
+support and StateStore schema v8 are commit
+`0bace9c95befb5bd0b8e8cd28efd5a0bef60b134`; atomic daily-task import,
+migration provenance, StateStore schema v9, shipped read cutover, and
+permanent-merge deletion are commit
+`411fe044a2dabd36aed86b2776235066fce21dec`.
 
 The current scoped implementation establishes these facts:
 
-- `StateStore` schema v7 is the one SQLite owner for bounded daily tasks and
+- `StateStore` schema v9 is the one SQLite owner for bounded daily tasks and
   typed short-lived observations, including versions, operation receipts,
   lifecycle state, and canonical outbox facts;
 - the exact command grammar is `/state <dimension> <numeric-value> <unit>`,
@@ -64,6 +69,31 @@ The current scoped implementation establishes these facts:
   injected failure restores the previously verified shadow snapshot;
 - the migration shadow keeps only one body-bearing current snapshot. Historical
   evidence is body-free and bounded to 32 digest/count/status records;
+- schema v8 adds canonical `time_block_start`/`time_block_end` fields to the
+  task and immutable version rows. Existing databases migrate by actual column
+  presence rather than trusting only the version marker, so an interrupted
+  partial migration cannot duplicate columns;
+- schema v9 rebuilds the task owner under foreign-key verification so imported
+  rows carry `legacy_lifemodel_migration` provenance rather than fabricated
+  current-user authorization. A real v8 fixture preserves its existing task
+  through the rebuild;
+- StateStore imports only the verified daily-task shadow. Canonical task rows,
+  immutable create versions, a references/digests-only import mapping, one
+  metadata-only import receipt, and one compatibility-projection outbox event
+  commit in the same transaction;
+- imported tasks use a documented seven-day migration retention window.
+  Legacy `due_at` outside that bounded transient-state window blocks cutover
+  instead of being truncated or silently reclassified as a long-term goal;
+- exact import replay reuses the receipt and immutable version-1 snapshot.
+  Injected failure leaves zero task, mapping, receipt, or outbox rows. A
+  changed legacy source after cutover fails closed;
+- shipped `get_daily_goals` validates the remaining YAML only as migration
+  integrity evidence, then requires `StateStore::get_product_daily_tasks`.
+  It no longer merges unmarked YAML with canonical tasks;
+- the compatibility projector consumes the same receipt-gated StateStore read,
+  removes the imported unmarked YAML source, and re-materializes canonical
+  task state including the exact time block. New unmarked YAML after cutover
+  degrades/fails instead of becoming a second product owner;
 - current typed observations also create one ordered StateStore history fact in
   the same transaction as the observation/version/operation/outbox effect.
   Exact replay creates no second history row, and schema v5 databases backfill
@@ -98,9 +128,9 @@ The current scoped implementation establishes these facts:
 - the product DTO `StateHistoryEntry` is owned by the StateStore module.
   MemoryStore consumes it only for bounded legacy migration reads, and its old
   state-history write helpers compile only under tests;
-- daily-task shadow rows remain excluded from `list_daily_tasks`, Main Chat,
-  the shipped command surface, and the YAML projector. Existing unmarked YAML
-  remains the read-only migration owner for that still-pending asset class;
+- daily-task shadow rows remain migration evidence only. Product task reads,
+  Main Chat lifecycle operations, and YAML compatibility projection consume
+  canonical StateStore assets after the verified import receipt exists;
 - Main Chat buffered send and stream both use `OpenLifeTurnRuntime` and
   `StateGateway`; the typed state journey invokes no Provider, Tool,
   ActionQueue effect, or Proposal;
@@ -118,15 +148,15 @@ Verified on 2026-07-16 in `/Users/tw/Desktop/open-life-roadshow`:
 
 | Gate | Result | Credit boundary |
 | --- | --- | --- |
-| `cargo test -p openlife-core state_store::tests -- --nocapture` | 44/44 passed | schema v1/v2/v3/v4/v5/v6-to-v7 migration, current observation history atomicity/backfill, canonical legacy import/outbox atomicity, import replay/source-drift/fault rollback, typed observation validation, global operation namespace, concurrency, CAS, cancellation, undo, expiry, restart, both shadow parity/restore paths, bounded migration evidence, minimal receipts |
+| `cargo test -p openlife-core state_store::tests -- --nocapture` | 49/49 passed | schema v1-v9 migration including real v8 task preservation/source-kind rebuild, lossless time blocks, both legacy shadow paths, both canonical imports, receipt/outbox atomicity, replay/source-drift/fault rollback, bounded retention, typed observations, global operation namespace, concurrency, CAS, cancellation, undo, expiry, restart, and minimal receipts |
 | focused MemoryStore state-history source tests | 2/2 passed | exact payload-bound replay/source snapshot and 50,000-row overflow fail-closed boundary |
-| `cargo test -p openlife-tauri legacy_yaml -- --nocapture` | 5/5 passed | lossless semantic mapping, invalid due-time fail-closed, per-category digest scope, legacy YAML read ownership, real bootstrap shadow reconciliation |
+| `cargo test -p openlife-tauri legacy_yaml -- --nocapture` plus exact shipped daily-goal owner test | 4/4 plus 1/1 passed | lossless semantic mapping, invalid due-time fail-closed, per-category digest scope, real bootstrap shadow/import, missing-receipt failure, canonical read, exact time-block projection, and post-cutover YAML drift rejection |
 | `cargo test -p openlife-tauri state_history_ -- --nocapture` | 7/7 passed | mapping validation, real bootstrap shadow/import, missing-receipt fail-closed behavior, history/alert StateStore reads, and product authority guard |
 | `cargo test -p openlife-core main_chat_agent_v1 -- --nocapture` | 144/144 passed | deterministic PolicyRouter and broader Main Chat authority/runtime regression |
 | exact typed state Tauri test | passed | buffered create, streamed list and undo, canonical receipt/event facts, zero Provider/Tool/Proposal/ActionQueue, tombstone truth |
 | `cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` | 30/30 passed | one runtime and deletion/authority absence guards |
-| `cargo test -p openlife-tauri main_chat_command_surface -- --nocapture` | 96/96 passed | send/stream product command surface and all current roadshow command journeys |
-| `cargo test -p openlife-tauri single_system -- --nocapture` | 33/33 passed | inventory, old-route absence, and StateStore-only shipped history read authority |
+| `cargo test -p openlife-tauri main_chat_command_surface -- --nocapture` | 97/97 passed | send/stream product command surface, atomic resource-task projection, and cross-process RC-05 task lifecycle after the new import contract |
+| `cargo test -p openlife-tauri single_system -- --nocapture` | 34/34 passed | inventory, old-route absence, and StateStore-only shipped daily-task/history read authorities |
 | `cargo check -p openlife-tauri --tests` | passed | all current Rust/Tauri test targets compile |
 | frontend typecheck and focused Tauri bridge tests | typecheck passed; 44/44 tests passed | deleted bridge leaves no type/mock/test drift |
 | frontend format, Rust format, diff, and JSON parse checks | passed | formatting, patch, and inventory syntax hygiene |
@@ -165,6 +195,17 @@ invocation.
 - an injected pre-commit failure leaves the previous verified shadow snapshot
   intact; the receipt contains no title, time block, due time, or legacy
   operation reference;
+- daily-task canonical import preserves title, completion, due time, time
+  block, and legacy operation references in the canonical owner while keeping
+  its receipt/outbox body-free;
+- an injected daily-task import failure leaves zero canonical tasks, mapping
+  rows, receipt, or outbox event; retry creates one import;
+- imported daily tasks carry migration provenance and a bounded seven-day
+  expiry. A due time outside that window blocks the import;
+- missing daily-task import receipt makes shipped reads fail closed. After
+  cutover, a new unmarked YAML goal is rejected rather than merged;
+- the exact canonical projector replaces the imported YAML source with one
+  StateStore-derived compatibility view and preserves the time block;
 - an exact current observation replay creates one StateStore history fact, and
   a v5 database with an existing typed observation backfills that fact before
   schema version v6 is committed;
@@ -189,10 +230,6 @@ invocation.
 
 The following remain explicitly red or uncredited:
 
-- unmarked legacy YAML daily tasks have completed bounded shadow staging,
-  read-back digest parity, and shadow-data restore rehearsal, but have not been
-  promoted into canonical product task rows and have not switched product read
-  authority away from YAML;
 - legacy MemoryStore state history has completed bounded shadow staging,
   profile-bound parity, atomic canonical import, outbox/receipt binding, and
   shipped history/alert read cutover. The physical legacy rows remain
@@ -204,5 +241,5 @@ The following remain explicitly red or uncredited:
   outside this backend-only slice.
 
 V3 is therefore
-`daily_task_observation_and_state_history_import_read_cutover_mechanical_verified_daily_task_cutover_and_review_pending`,
+`daily_task_and_state_history_import_read_cutover_mechanical_verified_independent_review_pending`,
 not fully complete, and the roadshow release remains NO-GO.

@@ -1060,7 +1060,8 @@ does not keep presenting an expired observation as active.
 Observation outbox facts intentionally have zero projection targets in this
 slice. `projectionStatus=applied` means that no derived projection was
 requested; it does not mean that YAML or HS was changed. Legacy state-history
-and YAML parity/cutover remain pending.
+and YAML parity/cutover were still pending at this checkpoint; later sections
+record their separate closure evidence.
 
 Mechanical evidence on the implementation commit:
 
@@ -1077,9 +1078,10 @@ Mechanical evidence on the implementation commit:
 
 The old `record_state` shipped handler, command, frontend bridge, MemoryGateway
 adapter, mock, and test route are absent. Native product execution,
-legacy state-history migration, daily-task authority cutover, independent
-review, healthy signing/Keychain, and final roadshow acceptance remain
-uncredited.
+legacy state-history migration, and daily-task authority cutover were not
+credited by this observation-only checkpoint. Their later sections do not add
+native product, independent review, healthy signing/Keychain, or final
+roadshow acceptance credit.
 
 ## V3 legacy daily-task shadow parity and data-restore rehearsal
 
@@ -1117,7 +1119,7 @@ Mechanical evidence on the implementation commit:
 - Core Clippy completed with the same 35 existing cross-module warnings and no
   StateStore warning.
 
-Remaining uncredited work is explicit: promote/import shadow candidates into
+Remaining uncredited work at this checkpoint was explicit: promote/import shadow candidates into
 canonical product task rows only after lossless time-block preservation,
 atomic import/outbox, replay, and rollback evidence; switch the daily-task read
 owner with a deletion guard rather than a permanent merge; and rerun
@@ -1162,8 +1164,56 @@ Mechanical evidence on the implementation commits:
 
 Legacy MemoryStore rows remain physically present as bounded read-only
 migration/backout evidence, but are no longer a shipped read or write owner.
-Daily-task cutover, independent review, and final backend capability freeze
-remain uncredited.
+Daily-task cutover is recorded in the following section. Independent review and
+final backend capability freeze remain uncredited.
+
+## V3 legacy daily-task canonical import and read cutover
+
+Commit `0bace9c95befb5bd0b8e8cd28efd5a0bef60b134` adds lossless canonical
+time-block storage and StateStore schema v8. Commit
+`411fe044a2dabd36aed86b2776235066fce21dec` adds StateStore schema v9, verified
+legacy daily-task import, migration provenance, receipt-gated shipped reads,
+and deletion of the permanent YAML/StateStore merge.
+
+The cutover does not fabricate current-user authorization for historical YAML.
+Imported rows carry `legacy_lifemodel_migration` provenance and a bounded
+seven-day retention window. A legacy due time beyond that window blocks the
+import rather than being truncated or silently promoted into a long-term goal.
+The canonical task and its immutable version keep the title, completion state,
+due time, and exact time block. Import mapping, receipt, and outbox keep only
+references, digests, ids, counts, lifecycle timestamps, and status.
+
+Only a deterministic/parity/rollback-rehearsed shadow can import. Task rows,
+version rows, mapping, one metadata-only receipt, and one compatibility outbox
+event commit in the same transaction. Exact replay reuses the import receipt;
+an injected pre-commit failure leaves zero canonical tasks, mapping rows,
+receipt, or outbox event. Source drift after cutover fails closed.
+
+Shipped `get_daily_goals` validates YAML only as migration integrity evidence,
+then reads `StateStore::get_product_daily_tasks`. It no longer merges legacy
+YAML and StateStore. The compatibility projector consumes the same canonical
+owner, removes the imported unmarked YAML source, and preserves the exact time
+block in the derived view. A new unmarked YAML task after cutover is an error,
+not a fallback product route.
+
+Mechanical evidence on the implementation commits:
+
+- StateStore suite — 49/49 passed, including real v8-to-v9 task preservation,
+  source-kind schema rebuild with foreign-key verification, lossless import,
+  bounded retention, atomic rollback, replay, source drift, and minimal receipt
+  checks;
+- focused legacy YAML/bootstrap and shipped read-owner tests — 5/5 passed;
+- Main Chat runtime module — 30/30 passed;
+- Main Chat command surface — 97/97 passed, including the atomic attachment
+  task batch and three-process RC-05 create/complete/undo journey;
+- single-system authority — 34/34 passed, including the StateStore-only
+  daily-task read-owner and permanent-merge absence guard;
+- `cargo check -p openlife-tauri --tests`, Rust format, JSON parse, and diff
+  checks passed.
+
+This closes the V3 daily-task authority cutover mechanically. It does not
+provide independent read-only review, native UI/product trial, or final backend
+freeze credit.
 
 ## Default-feature bundle and native shell trial
 

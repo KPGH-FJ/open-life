@@ -101,10 +101,12 @@
     },
     {
       "id": "V3_STATESTORE",
-      "status": "daily_task_observation_and_state_history_import_read_cutover_mechanical_verified_daily_task_cutover_and_independent_review_pending",
-      "completion_claim": "scoped_daily_task_typed_observation_state_history_shadow_import_and_product_read_cutover_gates_green_daily_task_authority_cutover_and_review_evidence_explicitly_pending",
-      "commit": "ec616b8dc5d298ac710d8f8d2dee5debced3130e",
+      "status": "daily_task_and_state_history_import_read_cutover_mechanical_verified_independent_review_pending",
+      "completion_claim": "scoped_daily_task_typed_observation_and_state_history_shadow_import_product_read_cutover_gates_green_independent_review_explicitly_pending",
+      "commit": "411fe044a2dabd36aed86b2776235066fce21dec",
       "legacy_daily_shadow_commit": "d6ceb2f3232da5d5e1028d8264ed4cdd78910d59",
+      "legacy_daily_time_block_commit": "0bace9c95befb5bd0b8e8cd28efd5a0bef60b134",
+      "legacy_daily_import_read_cutover_commit": "411fe044a2dabd36aed86b2776235066fce21dec",
       "legacy_state_history_shadow_commit": "e967c9a5913f8275591356afbc1e23380eb86893",
       "legacy_state_history_import_commit": "2d3c9a9ae8ed98a9049c59be23ed56cbf0b4266c",
       "legacy_state_history_read_cutover_commit": "ec616b8dc5d298ac710d8f8d2dee5debced3130e",
@@ -230,7 +232,7 @@
     "roadshow_release": "no_go"
   },
   "v3_results": {
-    "canonical_state_store": "passed_schema_v7_daily_task_typed_observation_imported_history_asset_version_operation_receipt_outbox_and_bounded_legacy_shadow_owner",
+    "canonical_state_store": "passed_schema_v9_daily_task_imported_daily_task_typed_observation_imported_history_asset_version_operation_receipt_outbox_and_bounded_legacy_shadow_owner",
     "policy_authority": "passed_current_user_low_risk_explicit_nonserializable_grant",
     "daily_task_loop": "passed_create_list_complete_undo_expiry_and_restart",
     "operation_replay": "passed_task_and_observation_create_complete_undo_after_clock_version_and_tombstone_changes",
@@ -238,18 +240,18 @@
     "transaction_atomicity": "passed_fault_injection_zero_partial_rows",
     "concurrency": "passed_task_and_observation_same_operation_single_winner_global_uuid_namespace_version_cas_and_projection_no_lost_update",
     "cancellation": "passed_task_and_observation_precommit_admission_failure_zero_effect_and_committed_receipt_read_only_recovery",
-    "projection_truth": "passed_daily_task_outbox_yaml_compatibility_cas_and_observation_zero_target_applied_without_yaml_claim",
+    "projection_truth": "passed_receipt_gated_daily_task_outbox_yaml_compatibility_cas_exact_time_block_and_observation_zero_target_applied_without_yaml_claim",
     "event_minimization": "passed_no_task_or_observation_body_in_durable_turn_events_or_receipts",
     "frontend_authority_deletion": "passed_no_chat_quick_write_shipped_goal_mutation_or_record_state_commands",
     "frontend_projection": "passed_116_of_116_focused_tests_typecheck_and_format",
     "typed_state_observation": "passed_record_list_undo_expiry_restart_send_stream_zero_provider_tool_proposal",
     "legacy_import_parity_and_rollback": "passed_daily_task_category_shadow_staging_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_and_bounded_body_free_evidence",
     "legacy_state_history_shadow": "passed_profile_bound_bounded_source_snapshot_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_operation_binding_validation_and_bounded_metadata_only_evidence",
-    "legacy_daily_task_authority_cutover": "pending_lossless_import_time_block_preservation_atomic_outbox_and_single_product_read_owner_no_shadow_read_credit",
+    "legacy_daily_task_authority_cutover": "passed_lossless_time_block_import_migration_provenance_seven_day_retention_atomic_single_outbox_exact_replay_fault_rollback_source_drift_rejection_and_receipt_gated_statestore_only_product_read",
     "legacy_state_history_migration": "passed_atomic_canonical_import_single_outbox_exact_replay_fault_rollback_and_receipt_gated_product_history_alert_read_cutover_legacy_rows_retained_read_only_for_backout",
     "native_product_trial": "pending",
     "independent_read_only_review": "pending_not_run",
-    "single_system": "passed_33_of_33_current_authority_guards",
+    "single_system": "passed_34_of_34_current_authority_guards",
     "roadshow_release": "no_go"
   },
   "v4_results": {
@@ -405,5 +407,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T19:46:41+08:00"
+  "last_updated_at": "2026-07-17T01:36:01+08:00"
 }
