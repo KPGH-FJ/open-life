@@ -1236,6 +1236,22 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
     use openlife_core::agent::main_chat_agent_v1::{
         AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntryKind,
     };
+    let task_linked_proposal_ids = if let Some(proposal_store) = state.proposal_store.as_ref() {
+        let proposal_store = proposal_store.lock().await;
+        proposals
+            .iter()
+            .filter_map(|proposal| {
+                proposal_store
+                    .terminal_owner_origin_binding(&proposal.id)
+                    .ok()
+                    .flatten()
+                    .filter(|origin| origin.task_session_id() == task_session_id)
+                    .map(|_| proposal.id.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        std::collections::BTreeSet::new()
+    };
 
     match scenario {
         MainChatCommandSurfaceEvalScenario::DirectProviderTrace => {
@@ -1733,10 +1749,8 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                         proposal.source,
                         openlife_core::agent::ProposalSource::ChatConversation
                             | openlife_core::agent::ProposalSource::MemoryGovernance
-                    ) && matches!(
-                        proposal.source_detail.as_deref(),
-                        Some(detail) if detail.contains(task_session_id)
-                    ) && proposal.affected_path == "knowledge_asset.AGENTS.md"
+                    ) && task_linked_proposal_ids.contains(&proposal.id)
+                        && proposal.affected_path == "knowledge_asset.AGENTS.md"
                 })
                 .ok_or_else(|| "knowledge asset edit proposal not linked to task".to_string())?;
             if proposal.proposal_type != openlife_core::agent::ProposalType::LifeModelUpdate
@@ -1792,10 +1806,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     proposal.source,
                     openlife_core::agent::ProposalSource::ChatConversation
                         | openlife_core::agent::ProposalSource::MemoryGovernance
-                ) && matches!(
-                    proposal.source_detail.as_deref(),
-                    Some(detail) if detail.contains(task_session_id)
-                )
+                ) && task_linked_proposal_ids.contains(&proposal.id)
             }) {
                 return Err("pending Mailbox proposal not linked to task".into());
             }

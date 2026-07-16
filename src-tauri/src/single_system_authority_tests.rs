@@ -2874,7 +2874,7 @@ fn single_system_d049_keyword_conversation_update_routes_stay_absent() {
     let auto_checkin_body = source_between(
         &command_surface,
         "async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_truth()",
-        "async fn main_chat_direct_answer_guard_blocks_false_memory_or_life_event_claims()",
+        "async fn inferred_memory_review_preserves_direct_answer_and_truthful_proposal_reason()",
     );
     assert!(
         auto_checkin_body.contains("implicit_life_event_ids.is_empty()")

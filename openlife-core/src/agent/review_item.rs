@@ -208,6 +208,7 @@ pub struct ReviewCenterBuildInput {
     pub safe_mode_reason: Option<String>,
     pub safe_paths: Vec<String>,
     pub materialization_overrides: BTreeMap<String, ReviewItemMaterializationStatus>,
+    pub terminal_owner_task_session_ids: BTreeMap<String, String>,
 }
 
 pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCenterViewModel {
@@ -234,7 +235,7 @@ pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCe
         items.push(item);
     }
 
-    let batches = build_review_batches(&input.proposals, &items);
+    let batches = build_review_batches(&input.proposals, &items, &input);
     ReviewCenterViewModel {
         batches,
         items,
@@ -242,11 +243,15 @@ pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCe
     }
 }
 
-fn build_review_batches(proposals: &[AgentProposal], items: &[ReviewItem]) -> Vec<ReviewBatch> {
+fn build_review_batches(
+    proposals: &[AgentProposal],
+    items: &[ReviewItem],
+    input: &ReviewCenterBuildInput,
+) -> Vec<ReviewBatch> {
     let mut groups: BTreeMap<(ReviewBatchDomain, String), ReviewBatch> = BTreeMap::new();
     for (proposal, item) in proposals.iter().zip(items) {
         let domain = review_batch_domain(proposal.proposal_type);
-        let session_id = review_batch_session_id(proposal);
+        let session_id = review_batch_session_id(proposal, input);
         let grouping_owner = session_id
             .clone()
             .unwrap_or_else(|| format!("proposal:{}", proposal.id));
@@ -295,27 +300,14 @@ fn review_batch_domain(proposal_type: ProposalType) -> ReviewBatchDomain {
     }
 }
 
-fn review_batch_session_id(proposal: &AgentProposal) -> Option<String> {
-    for field in ["sourceTaskSessionId", "taskSessionId", "session_id"] {
-        if let Some(value) = proposal
-            .after
-            .get(field)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(value.to_string());
-        }
-    }
-    let source_detail = proposal.source_detail.as_deref()?.trim();
-    if source_detail.is_empty() {
-        return None;
-    }
-    matches!(
-        proposal.source,
-        ProposalSource::ChatConversation | ProposalSource::MemoryGovernance
-    )
-    .then(|| source_detail.to_string())
+fn review_batch_session_id(
+    proposal: &AgentProposal,
+    input: &ReviewCenterBuildInput,
+) -> Option<String> {
+    input
+        .terminal_owner_task_session_ids
+        .get(&proposal.id)
+        .cloned()
 }
 
 fn product_risk_rank(risk: ProductRiskLevel) -> u8 {
@@ -335,7 +327,8 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
     let materialization_status = materialization_status_for(proposal, input);
     let evidence_refs = evidence_refs_for(proposal);
     let target_refs = target_refs_for(proposal);
-    let task_resume_relation = task_resume_relation_for(proposal, status, materialization_status);
+    let task_resume_relation =
+        task_resume_relation_for(proposal, status, materialization_status, input);
     let allowed_actions = allowed_actions_for(
         proposal,
         &item_id,
@@ -677,14 +670,11 @@ fn task_resume_relation_for(
     proposal: &AgentProposal,
     status: ReviewItemDecisionStatus,
     materialization_status: ReviewItemMaterializationStatus,
+    input: &ReviewCenterBuildInput,
 ) -> Option<ReviewItemTaskResumeRelation> {
-    if !matches!(proposal.source, ProposalSource::ChatConversation) {
-        return None;
-    }
-    let task_session_id = proposal
-        .source_detail
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())?
+    let task_session_id = input
+        .terminal_owner_task_session_ids
+        .get(&proposal.id)?
         .clone();
     let resume_requires_materialization = resume_requires_materialization(proposal.proposal_type);
     let materialization_allows_resume = !resume_requires_materialization
@@ -905,9 +895,14 @@ mod tests {
         proposal.source = ProposalSource::ChatConversation;
         proposal.source_detail = Some("task-session-1".into());
         proposal.status = ProposalStatus::Accepted;
+        let proposal_id = proposal.id.clone();
 
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![proposal],
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id,
+                "task-session-1".into(),
+            )]),
             ..Default::default()
         });
 
@@ -945,6 +940,7 @@ mod tests {
         proposal.source = ProposalSource::ChatConversation;
         proposal.source_detail = Some("task-session-1".into());
         proposal.status = ProposalStatus::Accepted;
+        let proposal_id = proposal.id.clone();
         let mut overrides = BTreeMap::new();
         overrides.insert(
             proposal.id.clone(),
@@ -954,6 +950,10 @@ mod tests {
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![proposal],
             materialization_overrides: overrides,
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id,
+                "task-session-1".into(),
+            )]),
             ..Default::default()
         });
 
@@ -981,9 +981,14 @@ mod tests {
         proposal.source = ProposalSource::ChatConversation;
         proposal.source_detail = Some("task-session-1".into());
         proposal.status = ProposalStatus::Accepted;
+        let proposal_id = proposal.id.clone();
 
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![proposal],
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id,
+                "task-session-1".into(),
+            )]),
             ..Default::default()
         });
 
@@ -1020,8 +1025,17 @@ mod tests {
         life_model.after = json!({ "originatingTaskSessionId": "task-1" });
 
         let memory_ids = vec![memory_one.id.clone(), memory_two.id.clone()];
+        let terminal_owner_task_session_ids = [
+            memory_one.id.clone(),
+            memory_two.id.clone(),
+            life_model.id.clone(),
+        ]
+        .into_iter()
+        .map(|proposal_id| (proposal_id, "task-1".into()))
+        .collect();
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![memory_one, memory_two, life_model],
+            terminal_owner_task_session_ids,
             ..Default::default()
         });
 
@@ -1037,12 +1051,45 @@ mod tests {
         assert_eq!(memory_batch.action_required_count, 2);
         assert_eq!(memory_batch.highest_risk, ProductRiskLevel::High);
         assert!(memory_batch.id.starts_with("review_batch:memory:sha256:"));
+        assert!(model.items[..2].iter().all(|item| {
+            item.task_resume_relation
+                .as_ref()
+                .is_some_and(|relation| relation.task_session_id == "task-1")
+        }));
         assert!(
             serde_json::to_value(memory_batch)
                 .unwrap()
                 .get("allowedActions")
                 .is_none(),
             "ReviewBatch must not become a second authorization surface"
+        );
+    }
+
+    #[test]
+    fn forged_source_detail_and_payload_cannot_create_task_relation_or_batch_owner() {
+        let mut proposal = proposal(ProposalType::MemoryWrite);
+        proposal.source = ProposalSource::ChatConversation;
+        proposal.source_detail = Some("forged-task".into());
+        proposal.after = json!({
+            "sourceTaskSessionId": "forged-task",
+            "taskSessionId": "forged-task",
+            "session_id": "forged-task"
+        });
+        proposal.status = ProposalStatus::Accepted;
+
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+
+        assert!(
+            model.items[0].task_resume_relation.is_none(),
+            "descriptive Proposal fields cannot mint a task resume authority"
+        );
+        assert_eq!(model.batches.len(), 1);
+        assert!(
+            model.batches[0].session_id.is_none(),
+            "descriptive Proposal fields cannot mint a ReviewBatch task owner"
         );
     }
 }

@@ -808,6 +808,30 @@ impl MainChatAgentEventStore {
         select_event_by_id(&conn, &final_event_id)
     }
 
+    pub(crate) fn terminal_owner_successor_head(
+        &self,
+        task_session_id: &str,
+    ) -> Result<(u64, String)> {
+        let conn = self.lock_conn()?;
+        let epoch = select_terminal_owner_epoch(&conn, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.state != TerminalOwnerSealState::Sealed {
+            anyhow::bail!("terminal_owner_successor_requires_sealed_epoch");
+        }
+        let final_event_id = epoch
+            .final_event_id
+            .as_deref()
+            .context("terminal_owner_sealed_final_missing")?;
+        let final_event = select_event_by_id(&conn, final_event_id)?
+            .context("terminal_owner_sealed_event_missing")?;
+        terminal_owner_successor_head_from_conn(
+            &conn,
+            task_session_id,
+            final_event_id,
+            &final_event,
+        )
+    }
+
     pub(crate) fn open_terminal_owner_replay_epoch_from_admission(
         &self,
         admission: &crate::terminal_owner_write_gateway::TerminalOwnerReplayEpochAdmission,
@@ -1144,18 +1168,65 @@ impl MainChatAgentEventStore {
             .context("terminal_owner_sealed_final_missing")?;
         let final_event = select_event_by_id(&tx, final_event_id)?
             .context("terminal_owner_sealed_event_missing")?;
-        if final_event
-            .payload
-            .get("taskOwnerRevision")
-            .and_then(Value::as_u64)
-            != Some(receipt.before_revision())
-            || final_event
-                .payload
-                .get("taskOwnerDigest")
-                .and_then(Value::as_str)
-                != Some(receipt.before_digest())
+        let successor_object_id = format!("successor:{proposal_id}");
+        let current_head = terminal_owner_successor_head_from_conn(
+            &tx,
+            task_session_id,
+            final_event_id,
+            &final_event,
+        )?;
+        if let Some(existing) = select_event_by_immutable_identity(
+            &tx,
+            task_session_id,
+            "terminal_owner.successor_confirmed",
+            &successor_object_id,
+        )? {
+            if existing.run_id != run_id
+                || existing.payload.get("ownerKind").and_then(Value::as_str)
+                    != Some("agent_task_session")
+                || existing.payload.get("ownerId").and_then(Value::as_str) != Some(task_session_id)
+                || existing.payload.get("causeRef").and_then(Value::as_str) != Some(proposal_id)
+                || existing.payload.get("finalEventId").and_then(Value::as_str)
+                    != Some(final_event_id)
+                || existing
+                    .payload
+                    .get("beforeOwnerRevision")
+                    .and_then(Value::as_u64)
+                    != Some(receipt.before_revision())
+                || existing
+                    .payload
+                    .get("afterOwnerRevision")
+                    .and_then(Value::as_u64)
+                    != Some(receipt.after_revision())
+                || existing
+                    .payload
+                    .get("beforeOwnerDigest")
+                    .and_then(Value::as_str)
+                    != Some(receipt.before_digest())
+                || existing
+                    .payload
+                    .get("afterOwnerDigest")
+                    .and_then(Value::as_str)
+                    != Some(receipt.after_digest())
+                || existing
+                    .payload
+                    .get("localTransitionReceiptRef")
+                    .and_then(Value::as_str)
+                    != Some(receipt.receipt_ref())
+                || existing
+                    .payload
+                    .get("localTransitionReceiptDigest")
+                    .and_then(Value::as_str)
+                    != Some(receipt.receipt_digest())
+            {
+                anyhow::bail!("terminal_owner_successor_replay_identity_mismatch");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        if current_head.0 != receipt.before_revision() || current_head.1 != receipt.before_digest()
         {
-            anyhow::bail!("terminal_owner_successor_final_owner_mismatch");
+            anyhow::bail!("terminal_owner_successor_head_mismatch");
         }
         let event = append_event_in_transaction(
             &tx,
@@ -1164,7 +1235,7 @@ impl MainChatAgentEventStore {
                 run_id: run_id.to_string(),
                 event_type: "terminal_owner.successor_confirmed".into(),
                 object_type: "terminal_owner_successor".into(),
-                object_id: format!("successor:{proposal_id}"),
+                object_id: successor_object_id,
                 created_at: Utc::now(),
                 source: "terminal_owner_write_gateway.review_successor".into(),
                 payload: json!({
@@ -8996,6 +9067,110 @@ fn select_latest_event_by_identity(
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn terminal_owner_successor_head_from_conn(
+    conn: &Connection,
+    task_session_id: &str,
+    final_event_id: &str,
+    final_event: &MainChatAgentDurableEvent,
+) -> Result<(u64, String)> {
+    let mut revision = final_event
+        .payload
+        .get("taskOwnerRevision")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_final_revision_missing"))?;
+    let mut digest = final_event
+        .payload
+        .get("taskOwnerDigest")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_final_digest_missing"))?
+        .to_string();
+    let mut statement = conn.prepare(
+        "SELECT event_id, task_session_id, run_id, sequence, event_type, object_type,
+                object_id, created_at, source, payload_digest, payload_json, backfilled,
+                payload_minimized_version
+         FROM main_chat_agent_events
+         WHERE task_session_id = ?1
+           AND event_type = 'terminal_owner.successor_confirmed'
+           AND NOT EXISTS (
+               SELECT 1 FROM main_chat_agent_event_fact_quarantine quarantine
+               WHERE quarantine.event_id = main_chat_agent_events.event_id
+           )
+         ORDER BY sequence ASC",
+    )?;
+    let successors = statement
+        .query_map([task_session_id], row_to_event)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for successor in successors {
+        let cause_ref = successor
+            .payload
+            .get("causeRef")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_cause_missing"))?;
+        let before_revision = successor
+            .payload
+            .get("beforeOwnerRevision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_before_revision_missing"))?;
+        let after_revision = successor
+            .payload
+            .get("afterOwnerRevision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_after_revision_missing"))?;
+        let before_digest = successor
+            .payload
+            .get("beforeOwnerDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_before_digest_missing"))?;
+        let after_digest = successor
+            .payload
+            .get("afterOwnerDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_after_digest_missing"))?;
+        let receipt_ref = successor
+            .payload
+            .get("localTransitionReceiptRef")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_receipt_ref_missing"))?;
+        let receipt_digest = successor
+            .payload
+            .get("localTransitionReceiptDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_receipt_digest_missing"))?;
+        let expected_after_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_revision_exhausted"))?;
+        if successor.run_id != final_event.run_id
+            || successor.object_type != "terminal_owner_successor"
+            || successor.object_id != format!("successor:{cause_ref}")
+            || successor
+                .payload
+                .get("finalEventId")
+                .and_then(Value::as_str)
+                != Some(final_event_id)
+            || successor.payload.get("ownerKind").and_then(Value::as_str)
+                != Some("agent_task_session")
+            || successor.payload.get("ownerId").and_then(Value::as_str) != Some(task_session_id)
+            || before_revision != revision
+            || before_digest != digest
+            || after_revision != expected_after_revision
+            || after_digest == before_digest
+            || !receipt_ref.starts_with("terminal-transition:")
+            || !receipt_digest.starts_with("hmac-sha256:")
+        {
+            anyhow::bail!("terminal_owner_successor_chain_invalid");
+        }
+        revision = after_revision;
+        digest = after_digest.to_string();
+    }
+    Ok((revision, digest))
 }
 
 fn validate_task_sequence_domain(conn: &Connection, task_session_id: &str) -> Result<()> {

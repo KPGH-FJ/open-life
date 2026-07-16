@@ -1197,19 +1197,27 @@ impl TerminalOwnerWriteGateway {
         if final_event.event_id != final_event_id {
             anyhow::bail!("terminal_owner_final_event_identity_mismatch");
         }
-        let before_revision = final_event
-            .payload
-            .get("taskOwnerRevision")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_revision_missing"))?;
-        let before_digest = final_event
-            .payload
-            .get("taskOwnerDigest")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_digest_missing"))?;
         let existing_receipt = self
             .task_store
             .terminal_owner_transition_receipt_for_claim(proposal_id, claim_id)?;
+        let (before_revision, before_digest) = if let Some(receipt) = existing_receipt.as_ref() {
+            (
+                receipt.before_revision(),
+                receipt.before_digest().to_string(),
+            )
+        } else {
+            let event_head = self
+                .event_store
+                .terminal_owner_successor_head(origin.task_session_id())?;
+            let task_head = self
+                .task_store
+                .canonical_owner_head(origin.task_session_id())?
+                .ok_or_else(|| anyhow::anyhow!("terminal_owner_task_head_missing"))?;
+            if task_head.revision() != event_head.0 || task_head.digest() != event_head.1.as_str() {
+                anyhow::bail!("terminal_owner_task_head_unproven_drift");
+            }
+            event_head
+        };
         let receipt = if let Some(receipt) = existing_receipt {
             receipt
         } else {
@@ -1223,7 +1231,7 @@ impl TerminalOwnerWriteGateway {
                 claim_id,
                 origin.task_session_id(),
                 before_revision,
-                before_digest,
+                &before_digest,
                 complete_when_unblocked,
             )?
         };

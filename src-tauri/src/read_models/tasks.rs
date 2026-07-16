@@ -144,8 +144,7 @@ async fn load_task_inputs(
                 }
             };
         let related_run_ids = related_run_ids_for(&summary.run_id, &detail);
-        let pending_review_item_refs =
-            review_refs_for_task(review_items, &summary.task_session_id, &related_run_ids);
+        let pending_review_item_refs = review_refs_for_task(review_items, &summary.task_session_id);
         let final_delivery_status = detail
             .final_delivery
             .as_ref()
@@ -238,28 +237,17 @@ fn related_run_ids_for(summary_run_id: &str, detail: &TaskDetail) -> Vec<String>
 fn review_refs_for_task(
     review_items: &[ReviewItem],
     task_session_id: &str,
-    related_run_ids: &[String],
 ) -> Vec<BackendEntityRef> {
-    let run_ids = related_run_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     let mut refs = Vec::new();
     for item in review_items {
         if item.status != ReviewItemDecisionStatus::Pending {
             continue;
         }
-        let task_match = item.source.source_detail.as_deref() == Some(task_session_id)
-            || item
-                .task_resume_relation
-                .as_ref()
-                .is_some_and(|relation| relation.task_session_id == task_session_id);
-        let run_match = item
-            .source
-            .run_id
-            .as_deref()
-            .is_some_and(|run_id| run_ids.contains(&run_id));
-        if task_match || run_match {
+        if item
+            .task_resume_relation
+            .as_ref()
+            .is_some_and(|relation| relation.task_session_id == task_session_id)
+        {
             refs.push(BackendEntityRef {
                 id: item.id.clone(),
                 kind: BackendEntityKind::ReviewItem,
@@ -298,5 +286,64 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
         message: message.into(),
         severity: ViewModelWarningSeverity::Warning,
         evidence_refs: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::review_refs_for_task;
+    use openlife_core::agent::{
+        build_review_center_view_model, AgentProposal, ProposalSource, ProposalType,
+        ReviewCenterBuildInput, RiskLevel,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn pending_chat_proposal() -> AgentProposal {
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.preference",
+            json!({ "value": "concise" }),
+            "Remember an explicit preference.",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        proposal.run_id = Some("forged-run".into());
+        proposal.source_detail = Some("forged-task".into());
+        proposal
+    }
+
+    #[test]
+    fn task_review_refs_ignore_descriptive_source_and_run_fields() {
+        let proposal = pending_chat_proposal();
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+
+        assert!(
+            review_refs_for_task(&model.items, "forged-task").is_empty(),
+            "TasksViewModel cannot infer review ownership from source_detail or run_id"
+        );
+    }
+
+    #[test]
+    fn task_review_refs_accept_only_canonical_terminal_origin_projection() {
+        let proposal = pending_chat_proposal();
+        let proposal_id = proposal.id.clone();
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id.clone(),
+                "canonical-task".into(),
+            )]),
+            ..Default::default()
+        });
+
+        let refs = review_refs_for_task(&model.items, "canonical-task");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, proposal_id);
+        assert!(review_refs_for_task(&model.items, "forged-task").is_empty());
     }
 }

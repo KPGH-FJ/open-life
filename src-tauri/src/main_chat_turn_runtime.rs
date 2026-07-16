@@ -2060,6 +2060,33 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             durable_event_count,
         )?;
         if !terminal.proposals.is_empty() {
+            let terminal_owner_proposal_ids = string_array_from_generation(
+                result.reasoning_trace.generation_result.as_ref(),
+                "terminalOwnerProposalIds",
+            )
+            .into_iter()
+            .map(|proposal_id| {
+                proposal_id
+                    .strip_prefix("proposal:")
+                    .unwrap_or(&proposal_id)
+                    .to_string()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+            let terminal_proposal_ids = terminal
+                .proposals
+                .iter()
+                .map(|proposal_ref| {
+                    proposal_ref
+                        .strip_prefix("proposal:")
+                        .unwrap_or(proposal_ref)
+                        .to_string()
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if !terminal_owner_proposal_ids.is_subset(&terminal_proposal_ids) {
+                return Err(
+                    "terminal owner proposal set is not a subset of terminal review items".into(),
+                );
+            }
             let origin = terminal_epoch
                 .review_origin_proof()
                 .ok_or_else(|| "terminal owner review origin unavailable".to_string())?;
@@ -2075,6 +2102,26 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 let proposal_id = proposal_ref
                     .strip_prefix("proposal:")
                     .unwrap_or(proposal_ref);
+                if let Some(existing_origin) = proposal_store
+                    .terminal_owner_origin_binding(proposal_id)
+                    .map_err(|error| format!("load terminal owner review origin failed: {error}"))?
+                {
+                    let belongs_to_current_task =
+                        existing_origin.task_session_id() == task_session_id;
+                    if !belongs_to_current_task {
+                        let created_for_current_turn =
+                            terminal_owner_proposal_ids.contains(proposal_id);
+                        let non_blocking_reuse = terminal.status == "completed_with_pending_items"
+                            && !created_for_current_turn;
+                        if non_blocking_reuse {
+                            continue;
+                        }
+                        return Err(
+                            "terminal owner proposal foreign binding cannot block or rebind the current task"
+                                .into(),
+                        );
+                    }
+                }
                 workflow
                     .bind_staged_proposal_to_terminal_owner_origin(proposal_id, &origin)
                     .map_err(|error| {

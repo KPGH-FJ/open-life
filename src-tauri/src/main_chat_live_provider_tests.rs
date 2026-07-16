@@ -1190,17 +1190,23 @@ async fn run_external_live_reviewed_artifact_scenario(
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
     );
 
-    let mut proposals = state
+    let proposal_store_arc = state
         .proposal_store
         .as_ref()
-        .expect("external live artifact ProposalStore")
-        .lock()
-        .await
+        .expect("external live artifact ProposalStore");
+    let proposal_store = proposal_store_arc.lock().await;
+    let mut proposals = proposal_store
         .list_all_proposals(20, 0)
         .expect("list external live artifact proposals")
         .into_iter()
-        .filter(|proposal| proposal.source_detail.as_deref() == Some(task_session_id))
+        .filter(|proposal| {
+            proposal_store
+                .terminal_owner_origin_binding(&proposal.id)
+                .expect("load external live artifact terminal owner origin")
+                .is_some_and(|origin| origin.task_session_id() == task_session_id)
+        })
         .collect::<Vec<_>>();
+    drop(proposal_store);
     proposals.sort_by(|left, right| left.affected_path.cmp(&right.affected_path));
     assert_eq!(proposals.len(), expected_files.len());
 
@@ -1577,17 +1583,23 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
         Some(false)
     );
 
-    let proposals = state
+    let proposal_store_arc = state
         .proposal_store
         .as_ref()
-        .expect("CC01 external live ProposalStore")
-        .lock()
-        .await
+        .expect("CC01 external live ProposalStore");
+    let proposal_store = proposal_store_arc.lock().await;
+    let proposals = proposal_store
         .list_all_proposals(20, 0)
         .expect("list CC01 external live proposals")
         .into_iter()
-        .filter(|proposal| proposal.source_detail.as_deref() == Some(task_session_id))
+        .filter(|proposal| {
+            proposal_store
+                .terminal_owner_origin_binding(&proposal.id)
+                .expect("load CC01 external live terminal owner origin")
+                .is_some_and(|origin| origin.task_session_id() == task_session_id)
+        })
         .collect::<Vec<_>>();
+    drop(proposal_store);
     assert_eq!(proposals.len(), 1);
     assert_eq!(
         proposals[0].proposal_type,

@@ -1887,21 +1887,34 @@ async fn ordinary_chat_finalization_never_creates_post_hoc_proposals() {
     );
 }
 
+async fn list_command_surface_proposals_for_task(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+) -> Vec<openlife_core::agent::AgentProposal> {
+    let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
+    let store = proposal_arc.lock().await;
+    store
+        .list_all_proposals(100, 0)
+        .expect("list command-surface proposals")
+        .into_iter()
+        .filter(|proposal| {
+            store
+                .terminal_owner_origin_binding(&proposal.id)
+                .expect("load canonical terminal owner origin")
+                .is_some_and(|origin| origin.task_session_id() == task_session_id)
+        })
+        .collect()
+}
+
 async fn find_command_surface_proposal_for_task(
     state: &std::sync::Arc<crate::AppState>,
     task_session_id: &str,
     proposal_type: openlife_core::agent::ProposalType,
 ) -> openlife_core::agent::AgentProposal {
-    list_command_surface_proposals(state)
+    list_command_surface_proposals_for_task(state, task_session_id)
         .await
         .into_iter()
-        .find(|proposal| {
-            proposal
-                .source_detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains(task_session_id))
-                && proposal.proposal_type == proposal_type
-        })
+        .find(|proposal| proposal.proposal_type == proposal_type)
         .expect("find task-linked proposal")
 }
 
@@ -3674,12 +3687,11 @@ async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_
         .contains("provider outage"));
 
     let task_session_id = task_session_id_from_response(&response);
-    let mut proposals = list_command_surface_proposals(&state)
+    let mut proposals = list_command_surface_proposals_for_task(&state, &task_session_id)
         .await
         .into_iter()
         .filter(|proposal| {
             proposal.proposal_type == openlife_core::agent::ProposalType::ExternalWriteAction
-                && proposal.source_detail.as_deref() == Some(task_session_id.as_str())
         })
         .collect::<Vec<_>>();
     proposals.sort_by(|left, right| left.affected_path.cmp(&right.affected_path));
@@ -3787,11 +3799,7 @@ async fn roadshow_rc06_exact_prompt_waits_for_review_then_saves_one_summary() {
         1
     );
     let task_session_id = task_session_id_from_response(&response);
-    let proposals = list_command_surface_proposals(&state)
-        .await
-        .into_iter()
-        .filter(|proposal| proposal.source_detail.as_deref() == Some(&task_session_id))
-        .collect::<Vec<_>>();
+    let proposals = list_command_surface_proposals_for_task(&state, &task_session_id).await;
     assert_eq!(proposals.len(), 1);
     let summary_path = safe_workspace.join("roadshow-summary.md");
     assert!(!summary_path.exists(), "Proposal is not file completion");
@@ -4767,6 +4775,68 @@ async fn inferred_memory_review_preserves_direct_answer_and_truthful_proposal_re
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
     );
     assert!(repeated_session.pending_blockers.is_empty());
+}
+
+#[tokio::test]
+async fn repeated_explicit_memory_review_reuses_without_rebinding_terminal_owner() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let prompt = "帮我记下来：空腹喝咖啡会心慌";
+
+    let first =
+        invoke_send_message_for_kernel_goal_3(state.clone(), "d069-explicit-memory-first", prompt)
+            .await;
+    let first_task_session_id = task_session_id_from_response(&first);
+    let first_ids = first["reasoning_trace"]["generation_result"]["memoryGovernance"]
+        ["memoryProposalIds"]
+        .as_array()
+        .expect("first explicit Memory proposal ids");
+    assert_eq!(first_ids.len(), 1);
+    let proposal_id = first_ids[0]
+        .as_str()
+        .expect("first explicit Memory proposal id")
+        .to_string();
+    assert_eq!(first["status"], "blocked");
+
+    let first_origin = {
+        let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
+        let store = proposal_arc.lock().await;
+        store
+            .terminal_owner_origin_binding(&proposal_id)
+            .expect("load first terminal owner origin")
+            .expect("first proposal has canonical terminal owner")
+    };
+    assert_eq!(first_origin.task_session_id(), first_task_session_id);
+
+    let repeated =
+        invoke_send_message_for_kernel_goal_3(state.clone(), "d069-explicit-memory-repeat", prompt)
+            .await;
+    let repeated_task_session_id = task_session_id_from_response(&repeated);
+    let repeated_ids = repeated["reasoning_trace"]["generation_result"]["memoryGovernance"]
+        ["memoryProposalIds"]
+        .as_array()
+        .expect("repeated explicit Memory proposal ids");
+    assert_eq!(repeated_ids.len(), 1);
+    assert_eq!(repeated_ids[0].as_str(), Some(proposal_id.as_str()));
+    assert_eq!(repeated["status"], "completed_with_pending_items");
+
+    let repeated_session = load_command_surface_session(&state, &repeated_task_session_id).await;
+    assert_eq!(
+        repeated_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(repeated_session.pending_blockers.is_empty());
+    assert_eq!(list_command_surface_proposals(&state).await.len(), 1);
+
+    let retained_origin = {
+        let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
+        let store = proposal_arc.lock().await;
+        store
+            .terminal_owner_origin_binding(&proposal_id)
+            .expect("reload retained terminal owner origin")
+            .expect("reused proposal retains its original terminal owner")
+    };
+    assert_eq!(retained_origin, first_origin);
+    assert_ne!(retained_origin.task_session_id(), repeated_task_session_id);
 }
 
 #[tokio::test]
@@ -5916,11 +5986,7 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
     assert_product_tool_call_receipt_boundary(&response, WEB_BODY_MARKER, "succeeded");
 
     let task_session_id = task_session_id_from_response(&response);
-    let proposals = list_command_surface_proposals(&state)
-        .await
-        .into_iter()
-        .filter(|proposal| proposal.source_detail.as_deref() == Some(&task_session_id))
-        .collect::<Vec<_>>();
+    let proposals = list_command_surface_proposals_for_task(&state, &task_session_id).await;
     assert_eq!(proposals.len(), 1, "CC01 stages only the artifact write");
     assert_eq!(
         proposals[0].proposal_type,
@@ -8437,21 +8503,12 @@ async fn send_message_command_surface_runs_governed_proposal_path() {
     assert!(!proposal_action.policy.requires_proposal);
     assert!(!proposal_action.policy.silent_write_allowed);
 
-    let proposals = {
-        let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
-        let proposal_store = proposal_arc.lock().await;
-        proposal_store
-            .list_pending_proposals(10)
-            .expect("list pending proposals")
-    };
+    let proposals = list_command_surface_proposals_for_task(&state, task_session_id).await;
     assert!(proposals.iter().any(|proposal| {
         matches!(
             proposal.source,
             openlife_core::agent::ProposalSource::ChatConversation
                 | openlife_core::agent::ProposalSource::MemoryGovernance
-        ) && matches!(
-            proposal.source_detail.as_deref(),
-            Some(detail) if detail.contains(task_session_id)
         )
     }));
 }
@@ -8541,21 +8598,12 @@ async fn start_stream_message_command_surface_runs_governed_proposal_path() {
     );
     assert!(!proposal_action.policy.silent_write_allowed);
 
-    let proposals = {
-        let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
-        let proposal_store = proposal_arc.lock().await;
-        proposal_store
-            .list_pending_proposals(10)
-            .expect("list stream pending proposals")
-    };
+    let proposals = list_command_surface_proposals_for_task(&state, task_session_id).await;
     assert!(proposals.iter().any(|proposal| {
         matches!(
             proposal.source,
             openlife_core::agent::ProposalSource::ChatConversation
                 | openlife_core::agent::ProposalSource::MemoryGovernance
-        ) && matches!(
-            proposal.source_detail.as_deref(),
-            Some(detail) if detail.contains(task_session_id)
         )
     }));
 }
@@ -9396,14 +9444,11 @@ async fn openlife_turn_runtime_terminal_models_blocker_and_proposal_without_fall
         .turn_terminal
         .as_ref()
         .expect("proposal terminal");
-    assert_eq!(proposal_result.status, "completed_with_pending_items");
+    assert_eq!(proposal_result.status, "blocked");
     assert_eq!(proposal_terminal.runtime_owner, "OpenLifeTurnRuntime");
-    assert_eq!(proposal_terminal.status, "completed_with_pending_items");
+    assert_eq!(proposal_terminal.status, "blocked");
     assert_eq!(proposal_terminal.state, "WriteOutcome");
-    assert_eq!(
-        proposal_terminal.final_delivery.status,
-        "completed_with_pending_items"
-    );
+    assert_eq!(proposal_terminal.final_delivery.status, "blocked");
     assert!(!proposal_terminal.proposals.is_empty());
     assert_ne!(proposal_terminal.final_delivery.status, "completed");
     assert!(proposal_terminal.final_delivery.proposal_count > 0);

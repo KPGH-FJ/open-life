@@ -6894,6 +6894,7 @@ async fn build_successful_kernel_command_surface_result(
     agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
     let mut pending_proposal_ids = Vec::new();
     let mut deferred_review_proposal_ids = Vec::new();
+    let mut terminal_owner_proposal_ids = Vec::new();
     let mut memory_governance_metadata = empty_memory_governance_metadata();
     if let Some(routing) = kernel_result.memory_governance.as_ref() {
         let materialized = materialize_kernel_memory_governance(
@@ -6909,12 +6910,19 @@ async fn build_successful_kernel_command_surface_result(
         )
         .await?;
         memory_governance_metadata = materialized.metadata;
+        terminal_owner_proposal_ids.extend(materialized.new_pending_proposal_ids.clone());
         if memory_governance_is_terminal_action {
-            pending_proposal_ids.extend(materialized.pending_proposal_ids.clone());
+            pending_proposal_ids.extend(materialized.new_pending_proposal_ids.clone());
+            deferred_review_proposal_ids.extend(materialized.reused_pending_proposal_ids.clone());
         } else {
-            deferred_review_proposal_ids.extend(materialized.pending_proposal_ids.clone());
+            deferred_review_proposal_ids.extend(materialized.new_pending_proposal_ids.clone());
+            deferred_review_proposal_ids.extend(materialized.reused_pending_proposal_ids.clone());
         }
-        for proposal_id in &materialized.pending_proposal_ids {
+        for proposal_id in materialized
+            .new_pending_proposal_ids
+            .iter()
+            .chain(materialized.reused_pending_proposal_ids.iter())
+        {
             agent_run.add_generated_proposal(proposal_id);
         }
         if memory_governance_is_terminal_action {
@@ -7036,6 +7044,7 @@ async fn build_successful_kernel_command_surface_result(
     )
     .await?
     {
+        terminal_owner_proposal_ids.push(proposal.id.clone());
         deferred_review_proposal_ids.push(proposal.id.clone());
         let proposal_metadata = serde_json::json!({
             "policyConditionalObservationReview": true,
@@ -7178,6 +7187,26 @@ async fn build_successful_kernel_command_surface_result(
     }
     let mut visible_proposal_ids = pending_proposal_ids.clone();
     visible_proposal_ids.extend(deferred_review_proposal_ids.clone());
+    if let Some(generation) = reasoning_trace.generation_result.as_mut() {
+        if let Some(object) = generation.as_object_mut() {
+            object.insert(
+                "proposalIds".into(),
+                serde_json::json!(visible_proposal_ids.clone()),
+            );
+            object.insert(
+                "terminalOwnerProposalIds".into(),
+                serde_json::json!(terminal_owner_proposal_ids.clone()),
+            );
+            object.insert(
+                "deferredReviewProposalIds".into(),
+                serde_json::json!(deferred_review_proposal_ids.clone()),
+            );
+            object.insert(
+                "pendingBlockerCount".into(),
+                serde_json::json!(pending_proposal_ids.len() + pending_read_tool_blockers.len()),
+            );
+        }
+    }
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
@@ -7208,6 +7237,7 @@ async fn build_successful_kernel_command_surface_result(
                 "agentLoopActionCount": if read_tool_loop_used { kernel_result.tool_calls.len() } else { 0 },
                 "agentLoopObservationCount": read_tool_loop_observation_count,
                 "proposalIds": visible_proposal_ids,
+                "terminalOwnerProposalIds": terminal_owner_proposal_ids,
                 "deferredReviewProposalIds": deferred_review_proposal_ids,
                 "memoryGovernance": memory_governance_metadata.clone(),
                 "directWritesExecuted": memory_governance_metadata
@@ -7462,8 +7492,14 @@ async fn stage_conditional_observation_memory_review(
 
 #[derive(Debug)]
 enum KernelWriteProposalAdmission {
-    Pending(openlife_core::agent::AgentProposal),
-    AlreadyCanonical { memory_id: String, fact_key: String },
+    Pending {
+        proposal: openlife_core::agent::AgentProposal,
+        created_for_turn: bool,
+    },
+    AlreadyCanonical {
+        memory_id: String,
+        fact_key: String,
+    },
 }
 
 async fn expand_generated_artifact_outcomes(
@@ -7791,14 +7827,21 @@ async fn create_kernel_write_proposal(
     }
     openlife_core::agent::ReviewWorkflow::new(&store)
         .submit_with_admission(request, execution_epoch)
-        .map(|outcome| KernelWriteProposalAdmission::Pending(outcome.proposal))
+        .map(|outcome| KernelWriteProposalAdmission::Pending {
+            created_for_turn: matches!(
+                outcome.decision.kind,
+                openlife_core::agent::DurableWriteDecisionKind::CreatePendingProposal
+            ),
+            proposal: outcome.proposal,
+        })
         .map_err(|err| format!("create kernel write proposal failed: {err}"))
 }
 
 #[derive(Clone)]
 struct MainChatMemoryGovernanceMaterialization {
     metadata: serde_json::Value,
-    pending_proposal_ids: Vec<String>,
+    new_pending_proposal_ids: Vec<String>,
+    reused_pending_proposal_ids: Vec<String>,
 }
 
 #[cfg(test)]
@@ -7867,7 +7910,8 @@ async fn materialize_kernel_memory_governance(
     let mut explicit_memory_receipts = Vec::new();
     let mut explicit_memory_rollback_receipts = Vec::new();
     let mut canonical_memory_noop_ids = Vec::new();
-    let mut pending_proposal_ids = Vec::new();
+    let mut new_pending_proposal_ids = Vec::new();
+    let mut reused_pending_proposal_ids = Vec::new();
     let mut blockers = routing.blockers.clone();
 
     if !routing.life_event_candidate_ids.is_empty() {
@@ -8156,8 +8200,11 @@ async fn materialize_kernel_memory_governance(
             execution_epoch,
         )
         .await?;
-        let proposal = match proposal_admission {
-            KernelMemoryGovernanceProposalAdmission::Pending(proposal) => proposal,
+        let (proposal, created_for_turn) = match proposal_admission {
+            KernelMemoryGovernanceProposalAdmission::Pending {
+                proposal,
+                created_for_turn,
+            } => (proposal, created_for_turn),
             KernelMemoryGovernanceProposalAdmission::AlreadyCanonical {
                 memory_id,
                 fact_key,
@@ -8208,7 +8255,11 @@ async fn materialize_kernel_memory_governance(
         } else {
             memory_proposal_ids.push(proposal.id.clone());
         }
-        pending_proposal_ids.push(proposal.id.clone());
+        if created_for_turn {
+            new_pending_proposal_ids.push(proposal.id.clone());
+        } else {
+            reused_pending_proposal_ids.push(proposal.id.clone());
+        }
         let proposal_metadata = serde_json::json!({
             "memoryGovernanceArtifact": true,
             "artifactType": if is_lifemodel { "life_model_proposal" } else { "memory_proposal" },
@@ -8222,6 +8273,11 @@ async fn materialize_kernel_memory_governance(
             "sourceEvidence": candidate.source_preview,
             "impactPreview": memory_candidate_impact_preview(candidate),
             "reviewStatus": proposal.status,
+            "reviewAdmissionDisposition": if created_for_turn {
+                "created_for_current_turn"
+            } else {
+                "reused_existing_pending_review"
+            },
             "kernelBackedProposalOnlyWrite": true,
             "directWritesExecuted": false,
             "directMemoryWrite": false,
@@ -8267,14 +8323,21 @@ async fn materialize_kernel_memory_governance(
 
     Ok(MainChatMemoryGovernanceMaterialization {
         metadata,
-        pending_proposal_ids,
+        new_pending_proposal_ids,
+        reused_pending_proposal_ids,
     })
 }
 
 #[derive(Debug)]
 enum KernelMemoryGovernanceProposalAdmission {
-    Pending(openlife_core::agent::AgentProposal),
-    AlreadyCanonical { memory_id: String, fact_key: String },
+    Pending {
+        proposal: openlife_core::agent::AgentProposal,
+        created_for_turn: bool,
+    },
+    AlreadyCanonical {
+        memory_id: String,
+        fact_key: String,
+    },
 }
 
 async fn create_kernel_memory_governance_proposal(
@@ -8421,7 +8484,13 @@ async fn create_kernel_memory_governance_proposal(
     }
     openlife_core::agent::ReviewWorkflow::new(&store)
         .submit_with_admission(request, execution_epoch)
-        .map(|outcome| KernelMemoryGovernanceProposalAdmission::Pending(outcome.proposal))
+        .map(|outcome| KernelMemoryGovernanceProposalAdmission::Pending {
+            created_for_turn: matches!(
+                outcome.decision.kind,
+                openlife_core::agent::DurableWriteDecisionKind::CreatePendingProposal
+            ),
+            proposal: outcome.proposal,
+        })
         .map_err(|err| format!("create memory governance proposal failed: {err}"))
 }
 
@@ -8832,6 +8901,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         .ok_or_else(|| "Main Chat kernel write outcome expansion was empty".to_string())?;
     let mut pending_blockers = Vec::new();
     let mut generated_proposals = Vec::new();
+    let mut terminal_owner_proposal_ids = Vec::new();
 
     if is_kernel_proposal_outcome(outcome.kind) {
         for (expanded_outcome, queued) in expanded_outcomes.iter().zip(&queued_actions) {
@@ -8848,10 +8918,16 @@ async fn build_kernel_write_outcome_command_surface_result(
             )
             .await?;
             match proposal_admission {
-                KernelWriteProposalAdmission::Pending(proposal) => {
+                KernelWriteProposalAdmission::Pending {
+                    proposal,
+                    created_for_turn,
+                } => {
                     generated_proposals.push(proposal.id.clone());
                     agent_run.add_generated_proposal(&proposal.id);
-                    pending_blockers.push(format!("proposal:{}", proposal.id));
+                    if created_for_turn {
+                        terminal_owner_proposal_ids.push(proposal.id.clone());
+                        pending_blockers.push(format!("proposal:{}", proposal.id));
+                    }
                     let proposal_metadata = serde_json::json!({
                         "kernelBackedProposalOnlyWrite": true,
                         "writeOutcomeKind": expanded_outcome.kind.as_str(),
@@ -8863,6 +8939,11 @@ async fn build_kernel_write_outcome_command_surface_result(
                         "sourceTaskSessionId": task_session_id,
                         "payloadSummary": expanded_outcome.payload_summary,
                         "reviewStatus": proposal.status,
+                        "reviewAdmissionDisposition": if created_for_turn {
+                            "created_for_current_turn"
+                        } else {
+                            "reused_existing_pending_review"
+                        },
                         "blockedWriteActionType": kernel_blocked_write_action_type(expanded_outcome.kind),
                         "directWritesExecuted": false,
                         "acceptedDurableTruthWritten": false,
@@ -9076,6 +9157,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         "toolCalled": !tool_calls.is_empty(),
         "writeOutcomeKind": outcome.kind.as_str(),
         "proposalIds": generated_proposals,
+        "terminalOwnerProposalIds": terminal_owner_proposal_ids.clone(),
         "pendingBlockerCount": pending_blockers.len(),
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
@@ -9129,6 +9211,7 @@ async fn build_kernel_write_outcome_command_surface_result(
                 "kernelBackedProposalOnlyWrite": true,
                 "writeOutcomeKind": outcome.kind.as_str(),
                 "proposalIds": agent_run.generated_proposals.clone(),
+                "terminalOwnerProposalIds": terminal_owner_proposal_ids,
                 "pendingBlockerCount": pending_blockers.len(),
                 "hardBlocked": outcome.hard_blocked,
             }),
@@ -17500,7 +17583,7 @@ mod tests {
         .await
         .expect("typed Memory proposal")
         {
-            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
             KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
                 panic!("fresh test fact must stage a pending proposal")
             }
@@ -17574,13 +17657,13 @@ mod tests {
         .unwrap();
 
         let first = match first {
-            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
             KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
                 panic!("first fact must stage review")
             }
         };
         let second = match second {
-            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
             KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
                 panic!("pending fact is not accepted canonical truth")
             }
@@ -17627,7 +17710,7 @@ mod tests {
         .await
         .unwrap()
         {
-            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
             KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
                 panic!("first fact must stage review")
             }
@@ -17667,7 +17750,7 @@ mod tests {
                 assert_eq!(memory_id, accepted.record.memory_id);
                 assert_eq!(fact_key, accepted.canonical_fact_key);
             }
-            KernelWriteProposalAdmission::Pending(_) => {
+            KernelWriteProposalAdmission::Pending { .. } => {
                 panic!("active canonical fact must suppress duplicate review")
             }
         }
@@ -17717,7 +17800,7 @@ mod tests {
         .await
         .unwrap()
         {
-            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
             KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
                 panic!("fresh test fact must stage a pending proposal")
             }
