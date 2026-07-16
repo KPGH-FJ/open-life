@@ -101,9 +101,10 @@
     },
     {
       "id": "V3_STATESTORE",
-      "status": "daily_task_and_typed_observation_mechanical_verified_migration_native_trial_and_independent_review_pending",
-      "completion_claim": "scoped_daily_task_and_typed_observation_mechanical_gates_green_legacy_parity_native_product_and_review_evidence_explicitly_pending",
-      "commit": "99d53a81d7cf0ebc85bd104eda3c1f594094bd7a",
+      "status": "daily_task_observation_and_legacy_daily_shadow_mechanical_verified_authority_cutover_native_trial_and_independent_review_pending",
+      "completion_claim": "scoped_daily_task_typed_observation_and_legacy_daily_shadow_gates_green_authority_cutover_legacy_state_history_native_product_and_review_evidence_explicitly_pending",
+      "commit": "d6ceb2f3232da5d5e1028d8264ed4cdd78910d59",
+      "typed_observation_commit": "99d53a81d7cf0ebc85bd104eda3c1f594094bd7a",
       "daily_task_commit": "65a0017a7c2bf1ecba5ecdeb7484ad77f5e29793",
       "evidence": "plans/openlife_roadshow_v3_statestore_evidence.md"
     },
@@ -225,7 +226,7 @@
     "roadshow_release": "no_go"
   },
   "v3_results": {
-    "canonical_state_store": "passed_schema_v4_daily_task_and_typed_observation_asset_version_operation_receipt_and_outbox_owner",
+    "canonical_state_store": "passed_schema_v5_daily_task_and_typed_observation_asset_version_operation_receipt_outbox_and_bounded_legacy_daily_shadow_owner",
     "policy_authority": "passed_current_user_low_risk_explicit_nonserializable_grant",
     "daily_task_loop": "passed_create_list_complete_undo_expiry_and_restart",
     "operation_replay": "passed_task_and_observation_create_complete_undo_after_clock_version_and_tombstone_changes",
@@ -238,7 +239,9 @@
     "frontend_authority_deletion": "passed_no_chat_quick_write_shipped_goal_mutation_or_record_state_commands",
     "frontend_projection": "passed_116_of_116_focused_tests_typecheck_and_format",
     "typed_state_observation": "passed_record_list_undo_expiry_restart_send_stream_zero_provider_tool_proposal",
-    "legacy_import_parity_and_rollback": "pending",
+    "legacy_import_parity_and_rollback": "passed_daily_task_category_shadow_staging_readback_digest_parity_destructive_data_restore_rehearsal_fault_rollback_and_bounded_body_free_evidence",
+    "legacy_daily_task_authority_cutover": "pending_product_scenario_and_native_trial_no_owner_switch_or_product_shadow_read_credit",
+    "legacy_state_history_migration": "pending",
     "native_product_trial": "pending",
     "independent_read_only_review": "pending_coderabbit_cli_unavailable",
     "single_system": "passed_32_of_32_current_authority_guards",

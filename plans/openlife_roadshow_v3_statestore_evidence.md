@@ -1,11 +1,12 @@
 # OpenLife Roadshow V3 StateStore Evidence
 
-Status: bounded daily tasks and the typed short-lived `/state` observation
-slice are mechanically verified through the canonical StateStore and the one
-Main Chat TurnRuntime. Legacy-data parity/cutover, native product trial,
-independent read-only review, and release evidence remain pending. This file
-does not claim ADR 0015, Phase7, the roadshow release, or global backend
-remediation is complete.
+Status: bounded daily tasks, the typed short-lived `/state` observation slice,
+and legacy YAML daily-task shadow staging/parity/data-restore rehearsal are
+mechanically verified through the existing StateStore and the one Main Chat
+TurnRuntime. Daily-task authority cutover, legacy state-history migration,
+native product trial, independent read-only review, and release evidence remain
+pending. This file does not claim ADR 0015, Phase7, the roadshow release, or
+global backend remediation is complete.
 
 ## Scope and commits
 
@@ -13,11 +14,12 @@ The daily-task base is commit
 `65a0017a7c2bf1ecba5ecdeb7484ad77f5e29793`. The typed observation extension
 and old-route deletion are commit
 `99d53a81d7cf0ebc85bd104eda3c1f594094bd7a` on
-`codex/roadshow-core-recovery`.
+`codex/roadshow-core-recovery`. Legacy daily-task migration shadow evidence is
+commit `d6ceb2f3232da5d5e1028d8264ed4cdd78910d59`.
 
 The current scoped implementation establishes these facts:
 
-- `StateStore` schema v4 is the one SQLite owner for bounded daily tasks and
+- `StateStore` schema v5 is the one SQLite owner for bounded daily tasks and
   typed short-lived observations, including versions, operation receipts,
   lifecycle state, and canonical outbox facts;
 - the exact command grammar is `/state <dimension> <numeric-value> <unit>`,
@@ -44,6 +46,20 @@ The current scoped implementation establishes these facts:
   projection work required”. This is not a claim that YAML or HS was updated;
 - daily tasks keep the existing outbox-driven YAML compatibility view. YAML is
   not a second product-write owner;
+- startup maps only unmarked legacy YAML daily goals into a bounded migration
+  shadow inside the existing StateStore database. The source digest covers
+  only that asset category, so unrelated identity/preference changes do not
+  invalidate daily-task evidence;
+- StateStore validates and normalizes each shadow candidate, persists it,
+  reads it back, recomputes the candidate digest, deletes the staged rows, and
+  restores them before committing a metadata-only receipt. Any mismatch or
+  injected failure restores the previously verified shadow snapshot;
+- the migration shadow keeps only one body-bearing current snapshot. Historical
+  evidence is body-free and bounded to 32 digest/count/status records;
+- shadow rows are excluded from `list_daily_tasks`, Main Chat, the shipped
+  command surface, and the YAML projector. Existing unmarked YAML remains the
+  read-only migration owner; no HS authority flag or product read owner was
+  switched in this slice;
 - Main Chat buffered send and stream both use `OpenLifeTurnRuntime` and
   `StateGateway`; the typed state journey invokes no Provider, Tool,
   ActionQueue effect, or Proposal;
@@ -60,7 +76,8 @@ Verified on 2026-07-15 in `/Users/tw/Desktop/open-life-roadshow`:
 
 | Gate | Result | Credit boundary |
 | --- | --- | --- |
-| `cargo test -p openlife-core state_store::tests -- --nocapture` | 32/32 passed | schema v1/v2/v3 migration, transaction/outbox atomicity, typed observation validation, replay/drift, global operation namespace, concurrency, CAS, cancellation, undo, expiry, restart, minimal receipts |
+| `cargo test -p openlife-core state_store::tests -- --nocapture` | 36/36 passed | schema v1/v2/v3/v4-to-v5 migration, transaction/outbox atomicity, typed observation validation, replay/drift, global operation namespace, concurrency, CAS, cancellation, undo, expiry, restart, shadow parity/restore/fault injection, bounded migration evidence, minimal receipts |
+| `cargo test -p openlife-tauri legacy_yaml -- --nocapture` | 5/5 passed | lossless semantic mapping, invalid due-time fail-closed, per-category digest scope, legacy YAML read ownership, real bootstrap shadow reconciliation |
 | `cargo test -p openlife-core main_chat_agent_v1 -- --nocapture` | 144/144 passed | deterministic PolicyRouter and broader Main Chat authority/runtime regression |
 | exact typed state Tauri test | passed | buffered create, streamed list and undo, canonical receipt/event facts, zero Provider/Tool/Proposal/ActionQueue, tombstone truth |
 | `cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` | 30/30 passed | one runtime and deletion/authority absence guards |
@@ -96,14 +113,27 @@ invocation.
 - an already committed replay performs no second write admission;
 - old `record_state` product strings are protected by shipped-handler,
   frontend-bridge, and implementation absence guards.
+- the same legacy daily-task snapshot reuses one receipt; a source digest bound
+  to different candidates fails as a collision rather than manufacturing new
+  parity evidence;
+- unrelated LifeModel categories do not change the legacy daily-task source
+  digest, while a daily-task status change does;
+- an injected pre-commit failure leaves the previous verified shadow snapshot
+  intact; the receipt contains no title, time block, due time, or legacy
+  operation reference;
+- static callsite scans show no product reader of the shadow tables and no
+  authority promotion/cutover call in this slice.
 
 ## Remaining V3 evidence
 
 The following remain explicitly red or uncredited:
 
-- legacy MemoryStore state history and unmarked YAML assets have not completed
-  per-asset import, digest parity, rollback rehearsal, or source-of-truth
-  cutover;
+- unmarked legacy YAML daily tasks have completed bounded shadow staging,
+  read-back digest parity, and shadow-data restore rehearsal, but have not been
+  promoted into canonical product task rows and have not switched product read
+  authority away from YAML;
+- legacy MemoryStore state history has not completed typed import, parity,
+  rollback rehearsal, or source-of-truth cutover;
 - the read-only legacy history/alert surfaces have not been replaced by a typed
   StateStore projection and must not be treated as proof that new observations
   were migrated;
@@ -116,5 +146,5 @@ The following remain explicitly red or uncredited:
   live product rounds, and final roadshow acceptance remain pending.
 
 V3 is therefore
-`daily_task_and_typed_observation_mechanical_verified_migration_native_trial_and_review_pending`,
+`daily_task_observation_and_legacy_daily_shadow_mechanical_verified_authority_cutover_native_trial_and_review_pending`,
 not fully complete, and the roadshow release remains NO-GO.

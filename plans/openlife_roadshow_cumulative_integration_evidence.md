@@ -1077,8 +1077,51 @@ Mechanical evidence on the implementation commit:
 
 The old `record_state` shipped handler, command, frontend bridge, MemoryGateway
 adapter, mock, and test route are absent. Native product execution,
-legacy-data parity/import/rollback rehearsal, independent review, healthy
-signing/Keychain, and final roadshow acceptance remain uncredited.
+legacy state-history migration, daily-task authority cutover, independent
+review, healthy signing/Keychain, and final roadshow acceptance remain
+uncredited.
+
+## V3 legacy daily-task shadow parity and data-restore rehearsal
+
+Commit `d6ceb2f3232da5d5e1028d8264ed4cdd78910d59` adds the next ADR 0013/0015
+migration prerequisite without switching daily-task product authority.
+
+At startup, only unmarked legacy YAML daily goals are mapped into a migration
+shadow inside the existing StateStore database. The source digest is scoped to
+that asset category; identity, preference, or other LifeModel changes do not
+invalidate daily-task evidence. StateStore persists the normalized candidates,
+reads them back, recomputes their digest, deletes the staged rows, restores
+them, and verifies the restored digest before committing one metadata-only
+receipt. An injected failure rolls the whole transaction back to the previous
+verified shadow snapshot.
+
+This is not LM-C cutover. Shadow rows are not returned by `list_daily_tasks`,
+are not consumed by Main Chat or any frontend/product command, and are not
+projected back to YAML. Existing unmarked YAML goals remain read-only migration
+input. The current shadow holds one body-bearing snapshot; historical evidence
+is body-free and bounded to 32 records. No `HSAssetOwner` promotion or product
+read-owner switch occurs.
+
+Mechanical evidence on the implementation commit:
+
+- StateStore suite — 36/36 passed, including schema v1/v2/v3/v4-to-v5,
+  exact replay, source/candidate collision rejection, read-back parity,
+  destructive delete/restore, injected rollback, and evidence bounds;
+- legacy YAML/Tauri startup filter — 5/5 passed, including semantic field
+  preservation, invalid due-time fail-closed behavior, per-category digest
+  isolation, legacy YAML read ownership, and real bootstrap staging;
+- Main Chat runtime module — 30/30 passed;
+- Main Chat command surface — 96/96 passed;
+- single-system authority guards — 32/32 passed;
+- `cargo check -p openlife-tauri --tests`, Rust format, and diff checks passed;
+- Core Clippy completed with the same 35 existing cross-module warnings and no
+  StateStore warning.
+
+Remaining uncredited work is explicit: promote/import shadow candidates into
+canonical product task rows only after the required product/native scenario,
+switch the daily-task read owner with a deletion guard rather than a permanent
+merge, migrate legacy MemoryStore state history separately, and rerun native
+and independent review evidence. Roadshow release remains NO-GO.
 
 ## Default-feature bundle and native shell trial
 
