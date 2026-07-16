@@ -2866,7 +2866,7 @@ async fn repeated_prompt_creates_independent_uuid_request_task_and_run_ids_acros
         role: "user".into(),
         content: "Explain the same idea twice without sharing execution state.".into(),
     };
-    let mut ids = Vec::new();
+    let mut turn_identities = Vec::new();
 
     for turn_index in 0..2 {
         let response = crate::main_chat_send::send_message_with_state(
@@ -2878,13 +2878,13 @@ async fn repeated_prompt_creates_independent_uuid_request_task_and_run_ids_acros
         .await
         .expect("buffered turn succeeds");
         let ingress = response.agent_ingress.expect("buffered ingress decision");
-        ids.push(ingress.request_id);
-        ids.push(
+        turn_identities.push((
+            ingress.request_id,
             ingress
                 .agent_task_session_id
                 .expect("buffered task session id"),
-        );
-        ids.push(response.run_id.expect("buffered run id"));
+            response.run_id.expect("buffered run id"),
+        ));
     }
 
     for turn_index in 0..2 {
@@ -2897,33 +2897,46 @@ async fn repeated_prompt_creates_independent_uuid_request_task_and_run_ids_acros
         )
         .await
         .expect("streaming turn succeeds");
-        ids.push(
+        turn_identities.push((
             response["agent_ingress"]["requestId"]
                 .as_str()
                 .expect("streaming request id")
                 .to_string(),
-        );
-        ids.push(
             response["agent_ingress"]["agentTaskSessionId"]
                 .as_str()
                 .expect("streaming task session id")
                 .to_string(),
-        );
-        ids.push(
             response["run_id"]
                 .as_str()
                 .expect("streaming run id")
                 .to_string(),
-        );
+        ));
     }
 
-    let unique_ids = ids.iter().collect::<std::collections::BTreeSet<_>>();
+    for (request_id, task_id, run_id) in &turn_identities {
+        assert_eq!(
+            request_id, task_id,
+            "one logical turn must keep one operation/request/task owner"
+        );
+        assert_eq!(
+            request_id, run_id,
+            "one logical turn must keep one operation/request/run owner"
+        );
+    }
+    let operation_ids = turn_identities
+        .iter()
+        .map(|(request_id, _, _)| request_id)
+        .collect::<Vec<_>>();
+    let unique_ids = operation_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         unique_ids.len(),
-        ids.len(),
-        "request, task, and run identities must not be shared across repeated turns"
+        operation_ids.len(),
+        "repeated buffered and streaming turns must not share execution state"
     );
-    for id in ids {
+    for id in operation_ids {
         let parsed = uuid::Uuid::parse_str(&id).expect("identity is a UUID");
         assert_eq!(parsed.get_version_num(), 4, "identity must be UUIDv4: {id}");
     }
