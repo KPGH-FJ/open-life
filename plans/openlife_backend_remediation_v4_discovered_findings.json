@@ -924,6 +924,102 @@
         "D057 or D065 completion credit reused as D068 closure"
       ],
       "immutable_fingerprint": "7f78be9990b20301fea9e5f7d69aed51893bd74468704153a6e0a51808b416ec"
+    },
+    {
+      "id": "BR4-D069",
+      "discovered_at": "2026-07-16T23:01:44+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "D055 introduced immutable Proposal origin bindings and one proven post-final successor, but did not distinguish a newly created current-turn review item from an idempotently reused pending Proposal, model more than one legal successor on the same TaskSession, or require product Review and Tasks projections to consume the canonical binding instead of descriptive Proposal fields.",
+      "title": "Proposal reuse and multi-review transitions conflate review identity with current task ownership",
+      "observed_symptom": "Repeating an explicit governed Memory request reused the existing pending Proposal but attempted to bind it to the new TaskSession and failed the turn; a newly created Proposal could leave TaskSession waiting while the final delivery claimed completed-with-pending-items; accepting two artifact Proposals for one task failed on the second transition because every successor was required to start from the original final head; Tasks and ReviewCenter could also infer task linkage from source_detail, payload or run strings.",
+      "root_cause_hypothesis": "ReviewWorkflow admission exposed the Proposal object without a current-turn-created versus reused disposition, while OpenLifeTurnRuntime and product projections treated every visible Proposal as a current task owner and the terminal owner graph modeled a single successor rather than a verified revision chain.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "src-tauri/src/main_chat_event_stream.rs",
+        "src-tauri/src/terminal_owner_write_gateway.rs",
+        "src-tauri/src/read_models/review_center.rs",
+        "src-tauri/src/read_models/tasks.rs",
+        "openlife-core/src/agent/review_item.rs",
+        "src-tauri/src/main_chat_command_surface_eval.rs"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I06",
+        "I08",
+        "I10",
+        "I12",
+        "I13",
+        "I17"
+      ],
+      "target_phase": "Phase 2, Phase 3, Phase 5 and Phase 6",
+      "owner_module": "ReviewWorkflow admission projection and terminal owner successor graph",
+      "acceptance": [
+        "Review admission records whether a pending Proposal was created for the current turn or reused from an existing canonical review",
+        "Only a newly created current-turn Proposal can block and own the current TaskSession; an idempotently reused Proposal retains its original terminal origin and is a nonblocking deferred review reference",
+        "TaskSession blocker state, pendingBlockerCount and terminal delivery status agree for every new and reused Proposal path",
+        "Multiple accepted Proposals for one task advance a contiguous revision and digest successor chain, while gaps, overflow, identity mismatch and unproven drift fail closed",
+        "TasksViewModel and ReviewCenter task relations and batch owners consume ProposalStore terminal origin bindings only; source_detail, payload task strings and run_id cannot mint ownership",
+        "Send, stream, restart and partial multi-artifact acceptance remain idempotent with one effect and one immutable successor per Proposal"
+      ],
+      "deletion_targets": [
+        "Rebinding one idempotently reused Proposal to a later TaskSession",
+        "Treating every visible Proposal as a current-turn blocker",
+        "Comparing every legal successor only with the original final owner head",
+        "Tasks or Review projections deriving task ownership from source_detail, payload or run strings",
+        "Terminal completion wording that contradicts TaskSession waiting-permission state"
+      ],
+      "immutable_fingerprint": "6e1acbc4e583e70f6103223fc4b9d8ac6649e216ae599d426d16c5c695ff3ef7"
+    },
+    {
+      "id": "BR4-D070",
+      "discovered_at": "2026-07-16T23:01:44+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-08",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "D067 added audit persistence truth to normal ToolGateway terminalization, but a runtime-dropped ToolGateway future can leave an already finished transport receipt at audit_persistence=pending, and the cancellation epoch previously skipped every finished registration instead of settling that remaining durability uncertainty.",
+      "title": "Runtime cancellation can leave a finished tool receipt with pending audit persistence",
+      "observed_symptom": "Cancelling a real hanging MCP replay after dispatch produced invalid_tool_execution_receipt:tool_receipt_terminal_audit_persistence_pending and then a secondary final-delivery schema failure instead of the stable local-abort result. Two restart fixtures also bypassed the new PersistenceCoordinator effect gate by calling the product before_dispatch observer while bootstrap was intentionally unsealed.",
+      "root_cause_hypothesis": "Tool transport completion and audit durability are separate terminal dimensions, but MainChatExecutionEpoch treated finished_at as proof that no registration finalization remained; test crash simulation also reused the product dispatch-admission entry instead of a test-only exact prepared-fact seam.",
+      "affected_surfaces": [
+        "openlife-core/src/tool_execution_receipt.rs::ToolExecutionReceiptRegistration",
+        "src-tauri/src/main_chat_cancellation.rs::MainChatExecutionEpoch",
+        "src-tauri/src/main_chat_event_stream.rs::MainChatToolLifecycleObserver",
+        "src-tauri/src/main_chat_task_control_tests.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I11",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2, Phase 4 and Phase 6",
+      "owner_module": "Tool receipt runtime finalizer and Main Chat cancellation epoch",
+      "acceptance": [
+        "Local abort and runtime-failure finalizers settle audit_persistence=pending to unknown without changing a committed or failed audit disposition",
+        "A finished transport receipt is still revisited when audit persistence remains pending, and the resulting terminal receipt is mechanically valid",
+        "A real hanging MCP replay aborts locally within one second, records remote or audit uncertainty truthfully, and performs no late durable commit",
+        "PersistenceCoordinator remains fail closed during release bootstrap; historical crash fixtures persist an exact prepared fact only through a cfg(test) seam and cannot dispatch a tool",
+        "Normal ToolGateway audit commit and failure paths retain their D067 semantics without retrying the tool"
+      ],
+      "deletion_targets": [
+        "Skipping all finished receipt registrations during cancellation finalization",
+        "Terminal tool receipts with audit_persistence pending",
+        "Crash fixtures calling the shipped before_dispatch admission while persistence is Initializing",
+        "Audit-pending validation errors masking the canonical local cancellation result"
+      ],
+      "immutable_fingerprint": "b515e32ffa41e43734b0375a0a20bc1d65e7af4a0101bc680619438362e7a905"
     }
   ]
 }

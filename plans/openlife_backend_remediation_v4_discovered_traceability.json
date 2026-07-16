@@ -1051,6 +1051,34 @@
         },
         "product_disposition": "finish_required_subset_without_claiming_global_closure",
         "note": "Authenticated version/schema binding, strict list/export decoding, transactional legacy migration and zero-rewrite product bootstrap failure are mechanically verified. D064 store identity, D065 trusted-read projection, D067 audit terminal disposition and independent implementation review remain separate."
+      },
+      {
+        "id": "BR4-D069",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "mechanically_verified_global_open"
+        },
+        "product_disposition": "retain_canonical_proposal_origin_and_successor_chain_without_claiming_global_closure",
+        "note": "Current-turn creation, idempotent review reuse, multi-Proposal successors and Tasks/ReviewCenter task linkage now use one canonical owner graph. Independent read-only review and global Phase7/V4 closure remain pending."
+      },
+      {
+        "id": "BR4-D070",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "mechanically_verified_global_open"
+        },
+        "product_disposition": "retain_fail_closed_tool_audit_cancellation_truth_without_claiming_global_closure",
+        "note": "Runtime cancellation now settles pending audit durability as unknown, preserves the canonical local-abort result, and keeps release bootstrap effect admission fail closed. Independent read-only review and global Phase7/V4 closure remain pending."
       }
     ],
     "historical_slice_commits": [
@@ -3124,6 +3152,168 @@
         ]
       }
     }
+    ,{
+      "id": "BR4-D069",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "red_baseline:repeated-explicit-memory-review-failed-terminal-owner-proposal-origin-rebind-forbidden",
+          "red_baseline:new-proposal-task-waited-while-terminal-claimed-completed-with-pending-items",
+          "red_baseline:second-artifact-accept-failed-because-successor-compared-only-with-original-final-head",
+          "source_trace:Tasks-and-ReviewCenter-derived-task-linkage-from-source_detail-payload-and-run-strings"
+        ],
+        "failing_test": [
+          "red_test:repeated_explicit_memory_review_reuses_without_rebinding_terminal_owner",
+          "red_test:roadshow_generated_artifacts_require_review_then_materialize_once_with_receipts",
+          "red_test:roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once",
+          "red_gate:main-chat-command-surface-had-six-proposal-owner-and-terminal-status-failures"
+        ],
+        "positive": [
+          "commit:4693d55-preserve-proposal-owner-graph-truth",
+          "gate:main-chat-command-surface-93-of-93-2026-07-16",
+          "gate:d055-target-11-of-11-2026-07-16",
+          "gate:main-chat-runtime-module-30-of-30-2026-07-16",
+          "gate:single-system-32-of-32-2026-07-16",
+          "gate:review-center-11-of-11-2026-07-16",
+          "gate:tasks-canonical-review-projection-2-of-2-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-16",
+          "gate:frontend-typecheck-and-format-check-2026-07-16"
+        ],
+        "counterfactual": [
+          "test:reused-pending-Proposal-retains-original-terminal-origin-and-new-task-has-zero-blockers",
+          "test:new-Proposal-blocks-current-task-and-terminal-delivery-reports-blocked",
+          "test:two-artifact-Proposals-chain-two-exact-successors-and-reopen-idempotently",
+          "test:unproven-post-final-owner-drift-stays-fail-closed-without-redispatch",
+          "test:forged-source-detail-and-payload-cannot-create-task-relation-or-batch-owner",
+          "test:Tasks-review-refs-ignore-descriptive-source-and-run-fields"
+        ],
+        "deletion_or_absence": [
+          "absence:Proposal-source_detail-as-task-owner-in-command-eval-tests-and-product-Tasks-projection",
+          "absence:run-id-as-Tasks-review-owner-fallback",
+          "absence:rebind-of-idempotently-reused-Proposal",
+          "absence:single-original-final-head-as-the-only-legal-successor-precondition",
+          "guard:D049-counterexample-scan-is-scoped-to-the-exact-function-not-neighboring-tests"
+        ],
+        "capability_non_regression": [
+          "test:explicit-and-inferred-Memory-review-remain-visible-without-duplicate-Proposal-fatigue",
+          "test:single-and-multi-artifact-review-acceptance-materialize-exactly-once",
+          "test:send-stream-provider-web-resource-and-cancellation-command-surface-remains-green",
+          "test:ReviewCenter-batching-remains-presentation-only-and-cannot-authorize-effects"
+        ],
+        "live_boundary": [
+          "external-live-not-required:local-canonical-review-owner-and-successor-slice",
+          "roadshow-backend-subset-mechanically-verified",
+          "independent-read-only-implementation-review-pending",
+          "external-live-provider-Web-and-final-roadshow-GREEN-remain-separate",
+          "Phase7-and-global-V4-GREEN-not-claimed"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "pending_independent_readonly_reviewer",
+        "decision": "mechanical-gates-green-independent-readonly-review-pending",
+        "evidence_refs": [
+          "commit:4693d55",
+          "gate:command-surface-93-of-93",
+          "gate:D055-11-of-11",
+          "gate:ReviewCenter-and-Tasks-canonical-origin-projection",
+          "boundary:reused-review-is-visible-but-does-not-own-the-later-task"
+        ]
+      },
+      "roadshow_implementation": {
+        "status": "mechanically_verified_independent_review_pending",
+        "commit": "4693d550b37ef6e2509f338a2fcf4bac3d4e2f5e",
+        "anti_hallucination": [
+          "created-for-current-turn-and-reused-existing-review-are-recorded-as-distinct-admission-dispositions",
+          "terminal-owner-Proposal-ids-are-validated-as-a-subset-of-visible-review-items",
+          "successor-replay-validates-the-entire-revision-chain-before-returning-an-existing-event",
+          "receipt-digest-prefix-was-verified-from-source-as-hmac-sha256-not-guessed-as-sha256",
+          "one-overbroad-string-guard-was-retraced-to-its-function-boundary-instead-of-waived",
+          "global-V4-Phase7-and-live-product-completion-were-not-claimed"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D070",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "red_baseline:hanging-real-MCP-cancel-returned-invalid-tool-receipt-audit-persistence-pending",
+          "red_baseline:secondary-final-delivery-status-schema-error-masked-local-abort",
+          "red_baseline:two-startup-crash-fixtures-called-shipped-before-dispatch-while-PersistenceCoordinator-was-Initializing"
+        ],
+        "failing_test": [
+          "red_test:hanging_real_mcp_replay_aborts_promptly_and_never_late_commits",
+          "red_test:startup_projects_prepared_replay_unknown_before_claim_recovery",
+          "red_test:durable_restart_projects_live_not_dispatched_once_before_safe_claim_recovery",
+          "red_test:runtime_finalizers_settle_pending_audit_as_unknown_not_invalid_terminal"
+        ],
+        "positive": [
+          "commit:9d531ce-settle-cancelled-tool-audit-truth",
+          "gate:tool-execution-receipt-19-of-19-2026-07-16",
+          "gate:ToolGateway-29-of-29-2026-07-16",
+          "gate:main-chat-task-controls-53-of-53-2026-07-16",
+          "gate:main-chat-command-surface-93-of-93-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-16",
+          "gate:frontend-typecheck-and-format-check-2026-07-16"
+        ],
+        "counterfactual": [
+          "test:finished-transport-with-pending-audit-is-revisited-and-settled-to-unknown",
+          "test:committed-or-failed-audit-disposition-is-not-rewritten-by-runtime-finalizer",
+          "test:hanging-real-MCP-cancels-within-one-second-and-never-late-commits",
+          "test:release-bootstrap-remains-Initializing-and-product-before-dispatch-remains-blocked",
+          "test:cfg-test-crash-fixture-persists-exact-prepared-fact-with-zero-tool-dispatch"
+        ],
+        "deletion_or_absence": [
+          "absence:cancellation-skip-for-every-finished-tool-registration",
+          "absence:terminal-receipt-with-audit-persistence-pending-after-runtime-finalization",
+          "absence:startup-crash-fixture-bypass-through-shipped-before-dispatch",
+          "absence:audit-pending-validation-error-masking-the-stable-local-abort-result"
+        ],
+        "capability_non_regression": [
+          "test:normal-audit-commit-and-audit-failure-retain-D067-separate-truth",
+          "test:completed-tool-receipts-are-not-erased-by-cancellation-settlement",
+          "test:startup-prepared-and-live-not-dispatched-recovery-remain-exactly-once",
+          "test:Task-Control-retry-resume-cancel-and-reconciliation-suite-remains-green"
+        ],
+        "live_boundary": [
+          "local-real-process-credit:hanging-MCP-subprocess-cancellation",
+          "roadshow-backend-subset-mechanically-verified",
+          "independent-read-only-implementation-review-pending",
+          "D067-global-independent-review-remains-separate",
+          "Phase7-and-global-V4-GREEN-not-claimed"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "pending_independent_readonly_reviewer",
+        "decision": "mechanical-gates-green-independent-readonly-review-pending",
+        "evidence_refs": [
+          "commit:9d531ce",
+          "gate:ToolReceipt-19-of-19",
+          "gate:TaskControls-53-of-53",
+          "test:hanging-real-MCP-local-abort",
+          "boundary:product-PersistenceCoordinator-admission-remains-fail-closed"
+        ]
+      },
+      "roadshow_implementation": {
+        "status": "mechanically_verified_independent_review_pending",
+        "commit": "9d531ce13a8b814fc3b2088d4eff1f34cb677950",
+        "anti_hallucination": [
+          "audit-unknown-does-not-claim-the-row-committed-or-failed",
+          "local-abort-does-not-claim-the-remote-MCP-process-stopped",
+          "the-test-fixture-seam-is-cfg-test-only-and-does-not-weaken-shipped-effect-admission",
+          "TaskControls-were-rerun-as-the-full-53-test-set-after-the-fix",
+          "global-D067-V4-Phase7-and-roadshow-GREEN-were-not-claimed"
+        ]
+      }
+    }
   ],
   "supplemental_scenarios": [
     {
@@ -3294,6 +3484,24 @@
       ],
       "kind": "authenticated_mcp_audit_payload_envelope",
       "scenario": "Payload version and minimized-receipt schema are cryptographically bound to each audit ciphertext: changing only payload_minimized_version from 0 to 1 cannot skip migration or expose raw sensitive arguments or result, any authentication or schema failure performs zero rewrite, legal current receipts and legacy migration remain readable, and neither BR4-D057 nor BR4-D065 earns closure credit.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-069",
+      "finding_ids": [
+        "BR4-D069"
+      ],
+      "kind": "proposal_reuse_terminal_owner_and_successor_chain",
+      "scenario": "A newly created Proposal owns and blocks only its current TaskSession, an idempotently reused pending Proposal retains its original immutable origin and is nonblocking for the later turn, two accepted Proposals advance one contiguous successor chain exactly once, and source_detail, payload or run strings cannot create Tasks or ReviewCenter ownership.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-070",
+      "finding_ids": [
+        "BR4-D070"
+      ],
+      "kind": "cancelled_tool_audit_terminalization",
+      "scenario": "Dropping a dispatched ToolGateway future settles any finished receipt with pending audit durability to unknown, preserves the canonical local-abort or remote-unknown transport fact, creates no late commit or retry, and keeps release-bootstrap product dispatch blocked while a cfg-test crash fixture can persist only the exact prepared fact.",
       "frozen_denominator_credit": false
     }
   ]
