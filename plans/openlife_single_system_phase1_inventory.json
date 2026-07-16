@@ -919,6 +919,17 @@
       "read_model_status": "implemented_fail_closed_canonical_owner"
     },
     {
+      "id": "v3_daily_task_read_owner",
+      "path": "src-tauri/src/commands/state.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Shipped daily-task reads require the verified StateStore legacy-import receipt and consume canonical StateStore assets only. Legacy YAML is validated as migration integrity evidence and is never merged as a product fallback.",
+      "concern": "daily_task_read_owner",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_statestore_product_read_owner",
+      "read_model_status": "implemented_fail_closed_canonical_owner"
+    },
+    {
       "id": "r0_life_state_projection",
       "path": "src-tauri/src/life_state_projection.rs",
       "phase": 6,

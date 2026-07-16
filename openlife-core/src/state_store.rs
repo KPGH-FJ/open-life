@@ -14,9 +14,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 8;
+const STATE_STORE_SCHEMA_VERSION: i64 = 9;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
+const LEGACY_DAILY_TASK_IMPORT_AGGREGATE_KIND: &str = "legacy_daily_task_import";
+const LEGACY_DAILY_TASK_IMPORT_AGGREGATE_ID: &str = "legacy_daily_tasks";
 const LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND: &str = "legacy_state_history_import";
 const LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_ID: &str = "legacy_state_history";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
@@ -121,6 +123,7 @@ impl StateSensitivity {
 #[serde(rename_all = "snake_case")]
 pub enum StateSourceKind {
     CurrentAuthenticatedUserMessage,
+    LegacyLifeModelMigration,
     SystemExpiry,
 }
 
@@ -128,6 +131,7 @@ impl StateSourceKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::CurrentAuthenticatedUserMessage => "current_authenticated_user_message",
+            Self::LegacyLifeModelMigration => "legacy_lifemodel_migration",
             Self::SystemExpiry => "system_expiry",
         }
     }
@@ -311,6 +315,25 @@ pub struct LegacyDailyTaskShadowReceipt {
     pub parity: bool,
     pub rollback_rehearsed: bool,
     pub committed_at: DateTime<Utc>,
+    pub replayed: bool,
+}
+
+/// Metadata-only receipt proving that the verified legacy daily-task shadow
+/// was imported into canonical StateStore task rows in the same transaction as
+/// its one compatibility-projection outbox fact. Task bodies remain owned by
+/// `state_assets`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyDailyTaskImportReceipt {
+    pub schema: String,
+    pub receipt_id: String,
+    pub source_asset_digest: String,
+    pub candidate_digest: String,
+    pub canonical_digest: String,
+    pub item_count: usize,
+    pub outbox_event_id: String,
+    pub committed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
     pub replayed: bool,
 }
 
@@ -828,6 +851,7 @@ impl StateStore {
     fn init_schema(&self) -> Result<()> {
         let conn = self.lock_connection()?;
         crate::persistence_outbox::init_schema(&conn)?;
+        migrate_state_assets_source_kind_contract(&conn)?;
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS state_store_metadata (
@@ -847,7 +871,9 @@ impl StateStore {
                 risk TEXT NOT NULL CHECK(risk IN ('low')),
                 sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal')),
                 source_kind TEXT NOT NULL CHECK(source_kind IN (
-                    'current_authenticated_user_message', 'system_expiry'
+                    'current_authenticated_user_message',
+                    'legacy_lifemodel_migration',
+                    'system_expiry'
                 )),
                 confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
                 privacy_class TEXT NOT NULL CHECK(privacy_class IN ('private')),
@@ -1106,6 +1132,26 @@ impl StateStore {
                 item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 512),
                 succeeded INTEGER NOT NULL CHECK(succeeded IN (0, 1)),
                 committed_at TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_legacy_daily_task_import_current (
+                singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
+                receipt_id TEXT NOT NULL UNIQUE,
+                source_asset_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                canonical_digest TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 512),
+                outbox_event_id TEXT NOT NULL UNIQUE,
+                committed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
+             );
+             CREATE TABLE IF NOT EXISTS state_legacy_daily_task_import_items (
+                source_ordinal INTEGER PRIMARY KEY CHECK(source_ordinal >= 0 AND source_ordinal < 512),
+                asset_id TEXT NOT NULL UNIQUE,
+                import_operation_id TEXT NOT NULL UNIQUE,
+                legacy_operation_id TEXT,
+                legacy_operation_digest TEXT,
+                FOREIGN KEY(asset_id) REFERENCES state_assets(asset_id)
              ) WITHOUT ROWID;",
         )?;
         let existing_version = tx
@@ -1117,7 +1163,7 @@ impl StateStore {
             .optional()?;
         let needs_observation_history_backfill = !matches!(
             existing_version.as_deref(),
-            None | Some("6") | Some("7") | Some("8")
+            None | Some("6") | Some("7") | Some("8") | Some("9")
         );
         if existing_version.is_some() {
             crate::sqlite_migration::ensure_column(
@@ -1154,47 +1200,53 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '8'
+                     SET value = '9'
                      WHERE key = 'schema_version';",
                 )?;
             }
             Some("2") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("3") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("4") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("5") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("6") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("7") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '8' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
-            Some("8") => {}
+            Some("8") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '9' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("9") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         if needs_observation_history_backfill {
@@ -1389,6 +1441,138 @@ impl StateStore {
     ) -> Result<Option<LegacyDailyTaskShadowReceipt>> {
         let conn = self.lock_connection()?;
         legacy_daily_task_shadow_receipt(&conn, replayed)
+    }
+
+    pub fn import_legacy_daily_task_shadow(
+        &self,
+        committed_at: DateTime<Utc>,
+    ) -> Result<LegacyDailyTaskImportReceipt> {
+        self.import_legacy_daily_task_shadow_guarded(committed_at, || Result::<()>::Ok(()))
+    }
+
+    pub fn import_legacy_daily_task_shadow_guarded<F>(
+        &self,
+        committed_at: DateTime<Utc>,
+        before_commit: F,
+    ) -> Result<LegacyDailyTaskImportReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let expires_at = committed_at
+            .checked_add_signed(Duration::days(7))
+            .context("state_legacy_daily_task_import_expiry_overflow")?;
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let shadow = legacy_daily_task_shadow_receipt(&tx, false)?
+            .context("state_legacy_daily_task_import_shadow_missing")?;
+        if !shadow.deterministic
+            || !shadow.parity
+            || !shadow.rollback_rehearsed
+            || shadow.candidate_digest != shadow.repeated_read_digest
+            || shadow.candidate_digest != shadow.restored_digest
+        {
+            anyhow::bail!("state_legacy_daily_task_import_shadow_unverified");
+        }
+        let candidates = load_legacy_daily_task_shadow_candidates(&tx)?;
+        let candidate_digest = legacy_daily_task_shadow_digest(&candidates)?;
+        if shadow.item_count != candidates.len() || shadow.candidate_digest != candidate_digest {
+            anyhow::bail!("state_legacy_daily_task_import_shadow_drift");
+        }
+        if candidates
+            .iter()
+            .any(|candidate| candidate.due_at.is_some_and(|due_at| due_at > expires_at))
+        {
+            anyhow::bail!("state_legacy_daily_task_import_due_at_outside_retention");
+        }
+
+        if let Some(existing) = legacy_daily_task_import_receipt(&tx, true)? {
+            if existing.source_asset_digest != shadow.source_asset_digest
+                || existing.candidate_digest != candidate_digest
+            {
+                anyhow::bail!("state_legacy_daily_task_import_source_changed_after_cutover");
+            }
+            let canonical = load_imported_legacy_daily_task_candidates(&tx)?;
+            let canonical_digest = legacy_daily_task_shadow_digest(&canonical)?;
+            if canonical != candidates
+                || canonical_digest != existing.canonical_digest
+                || existing.canonical_digest != existing.candidate_digest
+                || existing.item_count != canonical.len()
+            {
+                anyhow::bail!("state_legacy_daily_task_import_existing_canonical_inconsistent");
+            }
+            tx.rollback()?;
+            return Ok(existing);
+        }
+
+        let orphan_asset_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM state_assets
+             WHERE source_kind = 'legacy_lifemodel_migration'",
+            [],
+            |row| row.get(0),
+        )?;
+        let orphan_mapping_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM state_legacy_daily_task_import_items",
+            [],
+            |row| row.get(0),
+        )?;
+        if orphan_asset_count != 0 || orphan_mapping_count != 0 {
+            anyhow::bail!("state_legacy_daily_task_import_orphan_canonical_rows");
+        }
+
+        for candidate in &candidates {
+            insert_imported_legacy_daily_task(
+                &tx,
+                &shadow.source_asset_digest,
+                candidate,
+                committed_at,
+                expires_at,
+            )?;
+        }
+        let canonical = load_imported_legacy_daily_task_candidates(&tx)?;
+        let canonical_digest = legacy_daily_task_shadow_digest(&canonical)?;
+        if canonical != candidates || canonical_digest != candidate_digest {
+            anyhow::bail!("state_legacy_daily_task_import_canonical_parity_failed");
+        }
+
+        let outbox = crate::persistence_outbox::enqueue_mutation(
+            &tx,
+            LEGACY_DAILY_TASK_IMPORT_AGGREGATE_KIND,
+            LEGACY_DAILY_TASK_IMPORT_AGGREGATE_ID,
+            "import",
+            &candidate_digest,
+            PROJECTION_TARGETS,
+        )?;
+        let receipt_id = format!("state_legacy_daily_task_import_receipt:{}", Uuid::new_v4());
+        tx.execute(
+            "INSERT INTO state_legacy_daily_task_import_current (
+                 singleton_key, receipt_id, source_asset_digest, candidate_digest,
+                 canonical_digest, item_count, outbox_event_id, committed_at,
+                 expires_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                receipt_id,
+                shadow.source_asset_digest,
+                candidate_digest,
+                canonical_digest,
+                i64::try_from(candidates.len())?,
+                outbox.event_id,
+                committed_at.to_rfc3339(),
+                expires_at.to_rfc3339(),
+            ],
+        )?;
+        before_commit()?;
+        tx.commit()?;
+        drop(conn);
+        self.legacy_daily_task_import_receipt(false)?
+            .context("state_legacy_daily_task_import_receipt_missing_after_commit")
+    }
+
+    pub fn legacy_daily_task_import_receipt(
+        &self,
+        replayed: bool,
+    ) -> Result<Option<LegacyDailyTaskImportReceipt>> {
+        let conn = self.lock_connection()?;
+        legacy_daily_task_import_receipt(&conn, replayed)
     }
 
     pub fn reconcile_legacy_state_history_shadow(
@@ -2425,8 +2609,11 @@ impl StateStore {
              FROM state_assets assets
              LEFT JOIN state_resource_task_batch_items batch
                ON batch.asset_id = assets.asset_id
+             LEFT JOIN state_legacy_daily_task_import_items legacy
+               ON legacy.asset_id = assets.asset_id
              WHERE assets.kind = 'daily_task'
              ORDER BY assets.created_at ASC,
+                      legacy.source_ordinal ASC,
                       batch.operation_id ASC,
                       batch.ordinal ASC,
                       assets.asset_id ASC"
@@ -2441,8 +2628,11 @@ impl StateStore {
              FROM state_assets assets
              LEFT JOIN state_resource_task_batch_items batch
                ON batch.asset_id = assets.asset_id
+             LEFT JOIN state_legacy_daily_task_import_items legacy
+               ON legacy.asset_id = assets.asset_id
              WHERE assets.kind = 'daily_task' AND assets.status != 'tombstoned'
              ORDER BY assets.created_at ASC,
+                      legacy.source_ordinal ASC,
                       batch.operation_id ASC,
                       batch.ordinal ASC,
                       assets.asset_id ASC"
@@ -2451,6 +2641,18 @@ impl StateStore {
             .query_map([], state_asset_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn get_product_daily_tasks(&self) -> Result<Vec<StateAsset>> {
+        {
+            let conn = self.lock_connection()?;
+            let receipt = legacy_daily_task_import_receipt(&conn, false)?
+                .context("daily_task_product_owner_not_ready")?;
+            if receipt.candidate_digest != receipt.canonical_digest {
+                anyhow::bail!("daily_task_product_owner_receipt_inconsistent");
+            }
+        }
+        self.list_daily_tasks(false)
     }
 
     pub fn get_state_observation(&self, observation_id: &str) -> Result<Option<StateObservation>> {
@@ -3148,6 +3350,10 @@ fn ensure_operation_namespace_available(conn: &Connection, operation_id: &str) -
                 UNION ALL
                 SELECT 'state_observation' AS owner
                 FROM state_observation_operations WHERE operation_id = ?1
+                UNION ALL
+                SELECT 'legacy_daily_task_import' AS owner
+                FROM state_legacy_daily_task_import_items
+                WHERE import_operation_id = ?1
              ) LIMIT 1",
             [operation_id],
             |row| row.get::<_, String>(0),
@@ -3775,6 +3981,193 @@ fn legacy_daily_task_shadow_receipt(
     .transpose()
 }
 
+fn insert_imported_legacy_daily_task(
+    tx: &Transaction<'_>,
+    source_asset_digest: &str,
+    candidate: &LegacyDailyTaskShadowCandidate,
+    committed_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<()> {
+    let asset_id = Uuid::new_v4().hyphenated().to_string();
+    let import_operation_id = Uuid::new_v4().hyphenated().to_string();
+    ensure_operation_namespace_available(tx, &import_operation_id)?;
+    let source_message_ref = format!(
+        "lifemodel://legacy-daily-task/{}/{}",
+        source_asset_digest, candidate.source_ordinal
+    );
+    validate_bounded_ref("state_legacy_daily_task_source_ref", &source_message_ref)?;
+    let status = if candidate.completed {
+        DailyTaskStatus::Completed
+    } else {
+        DailyTaskStatus::Pending
+    };
+    let payload_digest = digest_json(&serde_json::json!({
+        "schema": "openlife.state-legacy-daily-task-import-item.v1",
+        "sourceAssetDigest": source_asset_digest,
+        "sourceOrdinal": candidate.source_ordinal,
+        "title": candidate.title,
+        "completed": candidate.completed,
+        "timeBlockStart": candidate.time_block_start,
+        "timeBlockEnd": candidate.time_block_end,
+        "dueAt": candidate.due_at.map(|value| value.to_rfc3339()),
+        "legacyOperationId": candidate.legacy_operation_id,
+        "legacyOperationDigest": candidate.legacy_operation_digest,
+        "expiresAt": expires_at.to_rfc3339(),
+    }))?;
+    tx.execute(
+        "INSERT INTO state_assets (
+            asset_id, kind, version, title, status, due_at,
+            time_block_start, time_block_end, source_message_ref, risk,
+            sensitivity, source_kind, confidence, privacy_class, created_at,
+            updated_at, expires_at, tombstoned_at, tombstone_reason
+         ) VALUES (?1, 'daily_task', 1, ?2, ?3, ?4, ?5, ?6, ?7, 'low',
+                   'internal', 'legacy_lifemodel_migration', 1.0, 'private',
+                   ?8, ?8, ?9, NULL, NULL)",
+        params![
+            asset_id,
+            candidate.title,
+            status.as_str(),
+            candidate.due_at.map(|value| value.to_rfc3339()),
+            candidate.time_block_start,
+            candidate.time_block_end,
+            source_message_ref,
+            committed_at.to_rfc3339(),
+            expires_at.to_rfc3339(),
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO state_asset_versions (
+            asset_id, version, operation_id, payload_digest, mutation_kind,
+            status, title, due_at, time_block_start, time_block_end,
+            source_message_ref, source_kind, created_at, expires_at,
+            tombstone_reason
+         ) VALUES (?1, 1, ?2, ?3, 'create', ?4, ?5, ?6, ?7, ?8, ?9,
+                   'legacy_lifemodel_migration', ?10, ?11, NULL)",
+        params![
+            asset_id,
+            import_operation_id,
+            payload_digest,
+            status.as_str(),
+            candidate.title,
+            candidate.due_at.map(|value| value.to_rfc3339()),
+            candidate.time_block_start,
+            candidate.time_block_end,
+            source_message_ref,
+            committed_at.to_rfc3339(),
+            expires_at.to_rfc3339(),
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO state_legacy_daily_task_import_items (
+            source_ordinal, asset_id, import_operation_id,
+            legacy_operation_id, legacy_operation_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            i64::from(candidate.source_ordinal),
+            asset_id,
+            import_operation_id,
+            candidate.legacy_operation_id,
+            candidate.legacy_operation_digest,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_imported_legacy_daily_task_candidates(
+    conn: &Connection,
+) -> Result<Vec<LegacyDailyTaskShadowCandidate>> {
+    let mut statement = conn.prepare(
+        "SELECT mapping.source_ordinal, versions.title, versions.status,
+                versions.time_block_start, versions.time_block_end,
+                versions.due_at, mapping.legacy_operation_id,
+                mapping.legacy_operation_digest
+         FROM state_legacy_daily_task_import_items mapping
+         JOIN state_assets assets ON assets.asset_id = mapping.asset_id
+         JOIN state_asset_versions versions
+           ON versions.asset_id = mapping.asset_id
+          AND versions.version = 1
+          AND versions.operation_id = mapping.import_operation_id
+         WHERE assets.source_kind = 'legacy_lifemodel_migration'
+           AND versions.source_kind = 'legacy_lifemodel_migration'
+         ORDER BY mapping.source_ordinal ASC",
+    )?;
+    let candidates = statement
+        .query_map([], |row| {
+            let source_ordinal = row.get::<_, i64>(0)?;
+            let status = parse_task_status_sql(&row.get::<_, String>(2)?)?;
+            if status == DailyTaskStatus::Tombstoned {
+                return Err(sql_conversion_error(
+                    "state_legacy_daily_task_import_initial_status_invalid",
+                ));
+            }
+            Ok(LegacyDailyTaskShadowCandidate {
+                source_ordinal: u32::try_from(source_ordinal).map_err(sql_conversion_error)?,
+                title: row.get(1)?,
+                completed: status == DailyTaskStatus::Completed,
+                time_block_start: row.get(3)?,
+                time_block_end: row.get(4)?,
+                due_at: parse_optional_time_sql(row.get::<_, Option<String>>(5)?)?,
+                legacy_operation_id: row.get(6)?,
+                legacy_operation_digest: row.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(candidates)
+}
+
+fn legacy_daily_task_import_receipt(
+    conn: &Connection,
+    replayed: bool,
+) -> Result<Option<LegacyDailyTaskImportReceipt>> {
+    conn.query_row(
+        "SELECT receipt_id, source_asset_digest, candidate_digest,
+                canonical_digest, item_count, outbox_event_id, committed_at,
+                expires_at
+         FROM state_legacy_daily_task_import_current WHERE singleton_key = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(
+        |(
+            receipt_id,
+            source_asset_digest,
+            candidate_digest,
+            canonical_digest,
+            item_count,
+            outbox_event_id,
+            committed_at,
+            expires_at,
+        )| {
+            Ok(LegacyDailyTaskImportReceipt {
+                schema: "openlife.state-legacy-daily-task-import-receipt.v1".into(),
+                receipt_id,
+                source_asset_digest,
+                candidate_digest,
+                canonical_digest,
+                item_count: usize::try_from(item_count)
+                    .context("state_legacy_daily_task_import_item_count_invalid")?,
+                outbox_event_id,
+                committed_at: parse_time(&committed_at)?,
+                expires_at: parse_time(&expires_at)?,
+                replayed,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn prepare_legacy_state_history_shadow(
     candidates: Vec<LegacyStateHistoryShadowCandidate>,
 ) -> Result<Vec<LegacyStateHistoryShadowCandidate>> {
@@ -4081,6 +4474,124 @@ fn legacy_state_history_import_receipt(
     .transpose()
 }
 
+fn migrate_state_assets_source_kind_contract(conn: &Connection) -> Result<()> {
+    let schema = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'state_assets'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    if schema.contains("'legacy_lifemodel_migration'") {
+        return Ok(());
+    }
+
+    let has_time_block_start = sqlite_table_has_column(conn, "state_assets", "time_block_start")?;
+    let has_time_block_end = sqlite_table_has_column(conn, "state_assets", "time_block_end")?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+    let migration = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE state_assets RENAME TO state_assets_pre_v9;
+             CREATE TABLE state_assets (
+                asset_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK(kind IN ('daily_task')),
+                version INTEGER NOT NULL CHECK(version > 0),
+                title TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'tombstoned')),
+                due_at TEXT,
+                time_block_start TEXT,
+                time_block_end TEXT,
+                source_message_ref TEXT NOT NULL,
+                risk TEXT NOT NULL CHECK(risk IN ('low')),
+                sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal')),
+                source_kind TEXT NOT NULL CHECK(source_kind IN (
+                    'current_authenticated_user_message',
+                    'legacy_lifemodel_migration',
+                    'system_expiry'
+                )),
+                confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                privacy_class TEXT NOT NULL CHECK(privacy_class IN ('private')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                tombstoned_at TEXT,
+                tombstone_reason TEXT CHECK(tombstone_reason IS NULL OR tombstone_reason IN ('undo', 'expire'))
+             );",
+        )?;
+        let time_block_start = if has_time_block_start {
+            "time_block_start"
+        } else {
+            "NULL"
+        };
+        let time_block_end = if has_time_block_end {
+            "time_block_end"
+        } else {
+            "NULL"
+        };
+        tx.execute(
+            &format!(
+                "INSERT INTO state_assets (
+                    asset_id, kind, version, title, status, due_at,
+                    time_block_start, time_block_end, source_message_ref,
+                    risk, sensitivity, source_kind, confidence, privacy_class,
+                    created_at, updated_at, expires_at, tombstoned_at,
+                    tombstone_reason
+                 )
+                 SELECT asset_id, kind, version, title, status, due_at,
+                        {time_block_start}, {time_block_end}, source_message_ref,
+                        risk, sensitivity, source_kind, confidence, privacy_class,
+                        created_at, updated_at, expires_at, tombstoned_at,
+                        tombstone_reason
+                 FROM state_assets_pre_v9"
+            ),
+            [],
+        )?;
+        tx.execute_batch(
+            "DROP TABLE state_assets_pre_v9;
+             CREATE INDEX idx_state_assets_daily_status_expiry
+             ON state_assets(kind, status, expires_at, updated_at);",
+        )?;
+        tx.commit()?;
+        Ok(())
+    })();
+    let restore = conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;");
+    migration?;
+    restore?;
+
+    let foreign_key_violation = conn
+        .query_row("PRAGMA foreign_key_check", [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .optional()?;
+    if let Some((table, row_id)) = foreign_key_violation {
+        anyhow::bail!("state_store_v9_foreign_key_violation:{table}:{row_id:?}");
+    }
+    Ok(())
+}
+
+fn sqlite_table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    if !table
+        .bytes()
+        .chain(column.bytes())
+        .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        anyhow::bail!("state_store_schema_identifier_invalid");
+    }
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(StdDuration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -4296,6 +4807,7 @@ fn parse_source_kind_sql(value: &str) -> rusqlite::Result<StateSourceKind> {
         "current_authenticated_user_message" => {
             Ok(StateSourceKind::CurrentAuthenticatedUserMessage)
         }
+        "legacy_lifemodel_migration" => Ok(StateSourceKind::LegacyLifeModelMigration),
         "system_expiry" => Ok(StateSourceKind::SystemExpiry),
         other => Err(sql_conversion_error(format!(
             "state_source_kind_invalid:{other}"
@@ -5489,7 +6001,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert!(request_digest_column_exists);
     }
 
@@ -5530,7 +6042,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert_eq!(
             tables,
             [
@@ -5577,7 +6089,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert_eq!(
             tables,
             [
@@ -5626,7 +6138,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert_eq!(
             tables,
             [
@@ -5681,7 +6193,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert_eq!(stored_operation, operation_id);
     }
 
@@ -5718,7 +6230,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert_eq!(table_exists, 1);
     }
 
@@ -5775,9 +6287,103 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
         assert_eq!(asset_columns, 2);
         assert_eq!(version_columns, 2);
+    }
+
+    #[test]
+    fn schema_v8_adds_daily_task_import_tables_and_migration_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v8.db");
+        let task_id;
+        {
+            let store = StateStore::new(&path).unwrap();
+            task_id = store
+                .create_daily_task(create_command(
+                    Uuid::new_v4().hyphenated().to_string(),
+                    "保留的 v8 任务",
+                ))
+                .unwrap()
+                .asset_id;
+            let conn = store.lock_connection().unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 PRAGMA legacy_alter_table=ON;
+                 BEGIN IMMEDIATE;
+                 DROP TABLE state_legacy_daily_task_import_items;
+                 DROP TABLE state_legacy_daily_task_import_current;
+                 ALTER TABLE state_assets RENAME TO state_assets_v9_fixture;
+                 CREATE TABLE state_assets (
+                    asset_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK(kind IN ('daily_task')),
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'tombstoned')),
+                    due_at TEXT,
+                    time_block_start TEXT,
+                    time_block_end TEXT,
+                    source_message_ref TEXT NOT NULL,
+                    risk TEXT NOT NULL CHECK(risk IN ('low')),
+                    sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal')),
+                    source_kind TEXT NOT NULL CHECK(source_kind IN (
+                        'current_authenticated_user_message', 'system_expiry'
+                    )),
+                    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                    privacy_class TEXT NOT NULL CHECK(privacy_class IN ('private')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    tombstoned_at TEXT,
+                    tombstone_reason TEXT CHECK(tombstone_reason IS NULL OR tombstone_reason IN ('undo', 'expire'))
+                 );
+                 INSERT INTO state_assets SELECT * FROM state_assets_v9_fixture;
+                 DROP TABLE state_assets_v9_fixture;
+                 CREATE INDEX idx_state_assets_daily_status_expiry
+                 ON state_assets(kind, status, expires_at, updated_at);
+                 UPDATE state_store_metadata
+                 SET value = '8' WHERE key = 'schema_version';
+                 COMMIT;
+                 PRAGMA legacy_alter_table=OFF;
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        }
+
+        let restarted = StateStore::new(&path).unwrap();
+        let conn = restarted.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let import_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name LIKE 'state_legacy_daily_task_import_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let asset_schema: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'state_assets'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "9");
+        assert_eq!(import_table_count, 2);
+        assert!(asset_schema.contains("'legacy_lifemodel_migration'"));
+        drop(conn);
+        assert_eq!(
+            restarted.get_asset(&task_id).unwrap().unwrap().title,
+            "保留的 v8 任务"
+        );
     }
 
     #[test]
@@ -6019,6 +6625,190 @@ mod tests {
             )
             .unwrap();
         assert_eq!(current_evidence_count, 1);
+    }
+
+    #[test]
+    fn legacy_daily_task_import_is_lossless_atomic_replayable_and_outbox_bound() {
+        let store = StateStore::new_in_memory().unwrap();
+        let source_digest = digest_json(&serde_json::json!({"model": "daily-v1"})).unwrap();
+        let legacy_operation_id = Uuid::new_v4().hyphenated().to_string();
+        let legacy_operation_digest =
+            digest_json(&serde_json::json!({"legacy": "daily-task"})).unwrap();
+        let candidates = vec![
+            LegacyDailyTaskShadowCandidate {
+                source_ordinal: 0,
+                title: "检查路演设备".into(),
+                completed: false,
+                time_block_start: Some("09:00".into()),
+                time_block_end: Some("10:00".into()),
+                due_at: None,
+                legacy_operation_id: None,
+                legacy_operation_digest: None,
+            },
+            LegacyDailyTaskShadowCandidate {
+                source_ordinal: 1,
+                title: "确认演示数据".into(),
+                completed: true,
+                time_block_start: None,
+                time_block_end: None,
+                due_at: Some(at(17)),
+                legacy_operation_id: Some(legacy_operation_id),
+                legacy_operation_digest: Some(legacy_operation_digest),
+            },
+        ];
+        store
+            .reconcile_legacy_daily_task_shadow(source_digest.clone(), candidates.clone(), at(9))
+            .unwrap();
+
+        let first = store.import_legacy_daily_task_shadow(at(10)).unwrap();
+        let replay = store.import_legacy_daily_task_shadow(at(11)).unwrap();
+        let tasks = store.get_product_daily_tasks().unwrap();
+
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.receipt_id, replay.receipt_id);
+        assert_eq!(first.source_asset_digest, source_digest);
+        assert_eq!(first.candidate_digest, first.canonical_digest);
+        assert_eq!(first.item_count, 2);
+        assert_eq!(first.expires_at, at(10) + Duration::days(7));
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks
+            .iter()
+            .all(|task| task.source_kind == StateSourceKind::LegacyLifeModelMigration));
+        let scheduled = tasks
+            .iter()
+            .find(|task| task.title == "检查路演设备")
+            .unwrap();
+        let completed = tasks
+            .iter()
+            .find(|task| task.title == "确认演示数据")
+            .unwrap();
+        assert_eq!(scheduled.time_block_start.as_deref(), Some("09:00"));
+        assert_eq!(scheduled.time_block_end.as_deref(), Some("10:00"));
+        assert_eq!(completed.status, DailyTaskStatus::Completed);
+
+        let event = crate::persistence_outbox::mutation_by_event_id(
+            &store.lock_connection().unwrap(),
+            &first.outbox_event_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            event.aggregate_kind,
+            LEGACY_DAILY_TASK_IMPORT_AGGREGATE_KIND
+        );
+        assert_eq!(event.aggregate_id, LEGACY_DAILY_TASK_IMPORT_AGGREGATE_ID);
+        assert_eq!(event.payload_digest, first.candidate_digest);
+
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert!(!encoded.contains("检查路演设备"));
+        assert!(!encoded.contains("确认演示数据"));
+    }
+
+    #[test]
+    fn legacy_daily_task_import_failure_rolls_back_and_source_drift_fails_closed() {
+        let store = StateStore::new_in_memory().unwrap();
+        let original = vec![LegacyDailyTaskShadowCandidate {
+            source_ordinal: 0,
+            title: "原始迁移任务".into(),
+            completed: false,
+            time_block_start: None,
+            time_block_end: None,
+            due_at: None,
+            legacy_operation_id: None,
+            legacy_operation_digest: None,
+        }];
+        store
+            .reconcile_legacy_daily_task_shadow(
+                digest_json(&serde_json::json!({"model": "original"})).unwrap(),
+                original,
+                at(9),
+            )
+            .unwrap();
+
+        let error = store
+            .import_legacy_daily_task_shadow_guarded(at(10), || {
+                anyhow::bail!("legacy_daily_task_import_injected_failure")
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("legacy_daily_task_import_injected_failure"));
+        assert!(store
+            .legacy_daily_task_import_receipt(false)
+            .unwrap()
+            .is_none());
+        assert!(store.list_daily_tasks(true).unwrap().is_empty());
+        {
+            let conn = store.lock_connection().unwrap();
+            let mapping_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM state_legacy_daily_task_import_items",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let outbox_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_outbox_events
+                     WHERE aggregate_kind = ?1",
+                    [LEGACY_DAILY_TASK_IMPORT_AGGREGATE_KIND],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(mapping_count, 0);
+            assert_eq!(outbox_count, 0);
+        }
+
+        store.import_legacy_daily_task_shadow(at(10)).unwrap();
+        store
+            .reconcile_legacy_daily_task_shadow(
+                digest_json(&serde_json::json!({"model": "changed"})).unwrap(),
+                vec![LegacyDailyTaskShadowCandidate {
+                    source_ordinal: 0,
+                    title: "切换后出现的新旧路线任务".into(),
+                    completed: false,
+                    time_block_start: None,
+                    time_block_end: None,
+                    due_at: None,
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                }],
+                at(11),
+            )
+            .unwrap();
+        let drift = store.import_legacy_daily_task_shadow(at(11)).unwrap_err();
+        assert!(drift
+            .to_string()
+            .contains("state_legacy_daily_task_import_source_changed_after_cutover"));
+        assert_eq!(store.get_product_daily_tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_daily_task_import_rejects_due_time_beyond_bounded_retention() {
+        let store = StateStore::new_in_memory().unwrap();
+        store
+            .reconcile_legacy_daily_task_shadow(
+                digest_json(&serde_json::json!({"model": "long-due"})).unwrap(),
+                vec![LegacyDailyTaskShadowCandidate {
+                    source_ordinal: 0,
+                    title: "不是短期 daily task".into(),
+                    completed: false,
+                    time_block_start: None,
+                    time_block_end: None,
+                    due_at: Some(at(10) + Duration::days(8)),
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                }],
+                at(9),
+            )
+            .unwrap();
+
+        let error = store.import_legacy_daily_task_shadow(at(10)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_legacy_daily_task_import_due_at_outside_retention"));
+        assert!(store.list_daily_tasks(true).unwrap().is_empty());
     }
 
     #[test]

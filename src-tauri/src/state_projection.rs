@@ -11,9 +11,9 @@ use crate::life_model_materializer_guard::{
 use crate::AppState;
 use openlife_core::life_model::{DailyGoal, LifeModel, TimeBlock};
 use openlife_core::state_store::{
-    DailyTaskStatus, LegacyDailyTaskShadowCandidate, LegacyDailyTaskShadowReceipt,
-    LegacyStateHistoryShadowCandidate, LegacyStateHistoryShadowReceipt, StateProjectionStatus,
-    StateStore,
+    DailyTaskStatus, LegacyDailyTaskImportReceipt, LegacyDailyTaskShadowCandidate,
+    LegacyDailyTaskShadowReceipt, LegacyStateHistoryShadowCandidate,
+    LegacyStateHistoryShadowReceipt, StateProjectionStatus, StateStore,
 };
 use std::sync::Arc;
 
@@ -115,6 +115,10 @@ pub(crate) fn legacy_yaml_daily_task_source_digest(model: &LifeModel) -> Result<
     Ok(openlife_core::persistence_outbox::metadata_digest(&encoded))
 }
 
+fn empty_legacy_yaml_daily_task_source_digest() -> String {
+    openlife_core::persistence_outbox::metadata_digest("[]")
+}
+
 pub(crate) fn reconcile_legacy_yaml_daily_task_shadow(
     store: &StateStore,
     model: &LifeModel,
@@ -125,6 +129,53 @@ pub(crate) fn reconcile_legacy_yaml_daily_task_shadow(
     store
         .reconcile_legacy_daily_task_shadow(source_asset_digest, candidates, observed_at)
         .map_err(|error| format!("legacy_daily_task_shadow_reconciliation_failed:{error}"))
+}
+
+pub(crate) fn reconcile_and_import_legacy_yaml_daily_tasks(
+    store: &StateStore,
+    model: &LifeModel,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<LegacyDailyTaskImportReceipt, String> {
+    let source_asset_digest = legacy_yaml_daily_task_source_digest(model)?;
+    if let Some(existing) = store
+        .legacy_daily_task_import_receipt(false)
+        .map_err(|error| format!("legacy_daily_task_import_receipt_load_failed:{error}"))?
+    {
+        if source_asset_digest == existing.source_asset_digest {
+            return store
+                .import_legacy_daily_task_shadow(observed_at)
+                .map_err(|error| format!("legacy_daily_task_import_replay_failed:{error}"));
+        }
+        if source_asset_digest == empty_legacy_yaml_daily_task_source_digest() {
+            return Ok(existing);
+        }
+        return Err("legacy_daily_task_source_changed_after_cutover".into());
+    }
+
+    reconcile_legacy_yaml_daily_task_shadow(store, model, observed_at)?;
+    store
+        .import_legacy_daily_task_shadow(observed_at)
+        .map_err(|error| format!("legacy_daily_task_canonical_import_failed:{error}"))
+}
+
+pub(crate) fn validate_legacy_yaml_daily_task_cutover_source(
+    store: &StateStore,
+    model: &LifeModel,
+) -> Result<LegacyDailyTaskImportReceipt, String> {
+    let receipt = store
+        .legacy_daily_task_import_receipt(false)
+        .map_err(|error| format!("legacy_daily_task_import_receipt_load_failed:{error}"))?
+        .ok_or_else(|| "daily_task_product_owner_not_ready".to_string())?;
+    let source_asset_digest = legacy_yaml_daily_task_source_digest(model)?;
+    if source_asset_digest != receipt.source_asset_digest
+        && source_asset_digest != empty_legacy_yaml_daily_task_source_digest()
+    {
+        return Err("legacy_daily_task_source_changed_after_cutover".into());
+    }
+    if receipt.candidate_digest != receipt.canonical_digest {
+        return Err("daily_task_product_owner_receipt_inconsistent".into());
+    }
+    Ok(receipt)
 }
 
 pub(crate) fn legacy_memory_state_history_shadow_candidates(
@@ -206,7 +257,7 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
     let mut projection_result = Err("state_projection_cas_retry_exhausted".to_string());
     for _ in 0..MAX_PROJECTION_CAS_ATTEMPTS {
         let assets = store
-            .list_daily_tasks(false)
+            .get_product_daily_tasks()
             .map_err(|error| format!("load canonical state assets failed: {error}"))?;
         let (mut model, expected_hash) = {
             let manager = state.life_model_manager.lock().await;
@@ -217,10 +268,8 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
                 .map_err(|error| format!("hash LifeModel compatibility view failed: {error}"))?;
             (model, expected_hash)
         };
-        model
-            .goals
-            .daily
-            .retain(|goal| !is_state_store_projected_daily_goal(goal));
+        validate_legacy_yaml_daily_task_cutover_source(store, &model)?;
+        model.goals.daily.clear();
         model
             .goals
             .daily

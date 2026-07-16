@@ -2464,6 +2464,48 @@ fn single_system_statestore_is_the_only_shipped_state_history_read_owner() {
 }
 
 #[test]
+fn single_system_statestore_is_the_only_shipped_daily_task_read_owner() {
+    let raw_source = read_repo_file("src-tauri/src/commands/state.rs");
+    let source = strip_cfg_test_module(&raw_source);
+    assert!(
+        source.contains(".get_product_daily_tasks("),
+        "shipped daily-task reads must consume the receipt-gated StateStore product read"
+    );
+    assert!(
+        source.contains("validate_legacy_yaml_daily_task_cutover_source"),
+        "shipped daily-task reads must fail closed on post-cutover legacy YAML drift"
+    );
+    for forbidden in [
+        ".list_daily_tasks(false)",
+        ".goals.daily.into_iter()",
+        ".filter(|goal| !crate::state_projection::is_state_store_projected_daily_goal(goal))",
+        "goals.extend(",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "shipped daily-task read must not retain YAML/StateStore merge or raw fallback: {forbidden}"
+        );
+    }
+
+    let bootstrap_raw = read_repo_file("src-tauri/src/bootstrap.rs");
+    let bootstrap = strip_cfg_test_module(&bootstrap_raw);
+    assert!(
+        bootstrap.contains("reconcile_and_import_legacy_yaml_daily_tasks"),
+        "startup must stage and atomically import the verified legacy daily-task source"
+    );
+    let projection_raw = read_repo_file("src-tauri/src/state_projection.rs");
+    let projection = strip_cfg_test_module(&projection_raw);
+    assert!(
+        projection.contains(".get_product_daily_tasks()"),
+        "LifeModel compatibility projection must consume receipt-gated canonical daily tasks"
+    );
+    assert!(
+        !projection.contains(".retain(|goal| !is_state_store_projected_daily_goal(goal))"),
+        "compatibility projection must not preserve a second unmarked YAML daily-task owner"
+    );
+}
+
+#[test]
 fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
     let expected = expected_count_map("direct_memory_lifemodel_write_surfaces");
     let needles = [

@@ -2670,26 +2670,26 @@ fn bootstrap_with_secret_store(
             Ok(store) => {
                 persistence.register_read_write("StateStore");
                 if persistence.bootstrap_mutations_safe() {
-                    let shadow_result = life_model_manager
+                    let daily_task_cutover_result = life_model_manager
                         .load()
                         .map_err(|error| {
                             format!(
-                                "LifeModel could not be loaded for legacy daily-task shadow reconciliation: {error}"
+                                "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
                             )
                         })
                         .and_then(|model| {
-                            crate::state_projection::reconcile_legacy_yaml_daily_task_shadow(
+                            crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
                                 &store,
                                 &model,
                                 chrono::Utc::now(),
                             )
                         });
-                    if let Err(error) = shadow_result {
-                        // Existing unmarked YAML remains the read-only
-                        // migration owner. Do not manufacture parity or switch
-                        // authority when a row cannot be staged losslessly.
+                    if let Err(error) = daily_task_cutover_result {
+                        // Shipped product reads require the import receipt and
+                        // fail closed. Never merge a partial StateStore view
+                        // with the legacy YAML source after a blocked cutover.
                         startup_warnings.borrow_mut().push(format!(
-                            "legacy daily-task StateStore shadow parity remains blocked: {error}"
+                            "legacy daily-task StateStore cutover remains blocked: {error}"
                         ));
                     }
                     let history_cutover_result = memory_store
@@ -3796,7 +3796,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_stages_legacy_yaml_daily_tasks_without_switching_product_owner() {
+    fn bootstrap_imports_verified_legacy_yaml_daily_tasks_into_statestore_owner() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let manager = LifeModelManager::new(temp_dir.path().join("life-model").join("current"));
         let mut model = openlife_core::life_model::LifeModel::default_model();
@@ -3823,6 +3823,10 @@ mod tests {
             .legacy_daily_task_shadow_receipt(false)
             .unwrap()
             .expect("legacy shadow receipt");
+        let import_receipt = store
+            .legacy_daily_task_import_receipt(false)
+            .unwrap()
+            .expect("legacy import receipt");
 
         assert_eq!(receipt.item_count, 1);
         assert!(receipt.deterministic);
@@ -3830,10 +3834,20 @@ mod tests {
         assert!(receipt.rollback_rehearsed);
         assert_eq!(receipt.candidate_digest, receipt.repeated_read_digest);
         assert_eq!(receipt.candidate_digest, receipt.restored_digest);
+        assert_eq!(import_receipt.item_count, 1);
+        assert_eq!(
+            import_receipt.candidate_digest,
+            import_receipt.canonical_digest
+        );
         assert_eq!(store.list_legacy_daily_task_shadow().unwrap().len(), 1);
-        assert!(
-            store.list_daily_tasks(false).unwrap().is_empty(),
-            "shadow migration rows must not become product task truth before cutover"
+        let tasks = store.get_product_daily_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "保留的旧 YAML 任务");
+        assert_eq!(tasks[0].time_block_start.as_deref(), Some("09:00"));
+        assert_eq!(tasks[0].time_block_end.as_deref(), Some("10:00"));
+        assert_eq!(
+            tasks[0].source_kind,
+            openlife_core::state_store::StateSourceKind::LegacyLifeModelMigration
         );
         let persisted = result
             .state
@@ -3844,7 +3858,9 @@ mod tests {
         assert_eq!(persisted.goals.daily.len(), 1);
         assert_eq!(persisted.goals.daily[0].name, "保留的旧 YAML 任务");
         let encoded_receipt = serde_json::to_string(&receipt).unwrap();
+        let encoded_import_receipt = serde_json::to_string(&import_receipt).unwrap();
         assert!(!encoded_receipt.contains("保留的旧 YAML 任务"));
+        assert!(!encoded_import_receipt.contains("保留的旧 YAML 任务"));
     }
 
     #[test]

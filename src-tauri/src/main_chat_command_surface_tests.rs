@@ -1205,6 +1205,20 @@ fn isolated_command_surface_state_with_bound_markdown_resource(
     state
 }
 
+fn initialize_isolated_daily_task_owner(state: &std::sync::Arc<crate::AppState>) {
+    let store = state
+        .state_store
+        .as_ref()
+        .expect("isolated command-surface StateStore");
+    let source_digest = openlife_core::persistence_outbox::metadata_digest("[]");
+    store
+        .reconcile_legacy_daily_task_shadow(source_digest, Vec::new(), chrono::Utc::now())
+        .expect("stage empty isolated legacy daily-task source");
+    store
+        .import_legacy_daily_task_shadow(chrono::Utc::now())
+        .expect("import empty isolated legacy daily-task source");
+}
+
 pub(crate) fn isolated_command_surface_state_with_resource_runtime(
 ) -> std::sync::Arc<crate::AppState> {
     let store = openlife_core::resource::ResourceStore::new_in_memory()
@@ -1220,6 +1234,7 @@ pub(crate) fn isolated_command_surface_state_with_resource_runtime(
     std::sync::Arc::get_mut(&mut state)
         .expect("isolated command-surface state must have one owner")
         .resource_runtime = Some(std::sync::Arc::new(runtime));
+    initialize_isolated_daily_task_owner(&state);
     state
 }
 
@@ -1302,6 +1317,7 @@ fn isolated_command_surface_state_with_persistent_main_chat(
         openlife_core::life_model::LifeModelManager::new(root.join("life-model").join("current")),
     ));
 
+    initialize_isolated_daily_task_owner(&state_arc);
     state_arc
 }
 

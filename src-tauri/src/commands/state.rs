@@ -128,21 +128,20 @@ pub(crate) async fn get_daily_goals_with_state(
             "restart_after_repairing_state_db",
         )
     })?;
-    let canonical = store.list_daily_tasks(false).map_err(AppError::from)?;
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
-    let mut goals = model
-        .goals
-        .daily
-        .into_iter()
-        .filter(|goal| !crate::state_projection::is_state_store_projected_daily_goal(goal))
-        .collect::<Vec<_>>();
-    goals.extend(
-        canonical
-            .iter()
-            .map(crate::state_projection::projected_daily_goal),
-    );
-    Ok(goals)
+    crate::state_projection::validate_legacy_yaml_daily_task_cutover_source(store, &model)
+        .map_err(|error| {
+            AppError::db_with_hint(
+                format!("daily task StateStore authority is degraded: {error}"),
+                "restart_after_repairing_state_db",
+            )
+        })?;
+    let canonical = store.get_product_daily_tasks().map_err(AppError::from)?;
+    Ok(canonical
+        .iter()
+        .map(crate::state_projection::projected_daily_goal)
+        .collect())
 }
 
 #[tauri::command]
@@ -282,7 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_yaml_daily_goal_remains_read_only_during_statestore_migration() {
+    async fn daily_goal_product_read_fails_closed_then_uses_imported_statestore_owner() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
 
@@ -293,7 +292,10 @@ mod tests {
             model.goals.daily.push(DailyGoal {
                 name: "Exercise".to_string(),
                 done: false,
-                time_block: None,
+                time_block: Some(openlife_core::life_model::TimeBlock {
+                    start: "09:00".into(),
+                    end: "10:00".into(),
+                }),
                 due_at: None,
                 operation_id: None,
                 operation_digest: None,
@@ -301,11 +303,68 @@ mod tests {
             manager.save(&model).unwrap();
         }
 
-        // Get daily goals
+        let blocked = get_daily_goals_with_state(&state).await.unwrap_err();
+        assert!(matches!(&blocked, AppError::Database { .. }));
+        assert!(blocked
+            .message()
+            .contains("daily_task_product_owner_not_ready"));
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+            state.state_store.as_ref().unwrap(),
+            &model,
+            chrono::Utc::now(),
+        )
+        .unwrap();
         let goals = get_daily_goals_with_state(&state).await.unwrap();
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].name, "Exercise");
         assert!(!goals[0].done);
+        assert_eq!(
+            goals[0]
+                .time_block
+                .as_ref()
+                .map(|block| block.start.as_str()),
+            Some("09:00")
+        );
+
+        crate::state_projection::reconcile_state_store_lifemodel_projection(&state)
+            .await
+            .unwrap();
+        let projected = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(projected.goals.daily.len(), 1);
+        assert!(
+            crate::state_projection::is_state_store_projected_daily_goal(&projected.goals.daily[0])
+        );
+        assert_eq!(
+            projected.goals.daily[0]
+                .time_block
+                .as_ref()
+                .map(|block| block.end.as_str()),
+            Some("10:00")
+        );
+        assert_eq!(
+            get_daily_goals_with_state(&state).await.unwrap()[0].name,
+            "Exercise"
+        );
+
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut drifted = manager.load().unwrap();
+            drifted.goals.daily.push(DailyGoal {
+                name: "切换后旧路线写入".into(),
+                done: false,
+                time_block: None,
+                due_at: None,
+                operation_id: None,
+                operation_digest: None,
+            });
+            manager.save(&drifted).unwrap();
+        }
+        let drift = get_daily_goals_with_state(&state).await.unwrap_err();
+        assert!(drift
+            .message()
+            .contains("legacy_daily_task_source_changed_after_cutover"));
     }
 
     #[test]

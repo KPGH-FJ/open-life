@@ -59,6 +59,7 @@ counted as product completion evidence.
 | `openlife-core/src/agent/main_chat_agent_productization_v1.rs` | `product-valid-rename` | `done` | Product-valid state snapshot contract moved to `openlife-core/src/agent/main_chat_runtime_contract.rs`; old productization shell was deleted. |
 | `src-tauri/src/legacy_write_convergence.rs` | `product-valid-rename` | `done` | Product guard moved to `src-tauri/src/life_model_materializer_guard.rs`; old legacy-write convergence shell and tests were deleted. |
 | `src-tauri/src/commands/state.rs` direct MemoryStore history/alert product read route | `product-valid-rename` | `done` | Shipped state-history and alert reads now require the StateStore canonical import receipt and consume `StateStore::get_product_state_history`; MemoryStore remains bounded migration evidence only and is not a product fallback. |
+| `src-tauri/src/commands/state.rs` permanent YAML/StateStore daily-task merge | `product-valid-rename` | `done` | Verified legacy YAML daily tasks are imported atomically into StateStore with migration provenance, bounded retention, one minimal receipt, and one outbox fact. Shipped reads require `StateStore::get_product_daily_tasks`; YAML is compatibility projection/integrity evidence only, and source drift fails closed instead of restoring a merge fallback. |
 | `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | `delete-now` | `done` | Old product settings preview UI was deleted. |
 | `frontend/src/pages/settings/multiStrategy/shared.tsx` | `delete-now` | `done` | Old product settings preview helper was deleted. |
 | `frontend/src/pages/ChatPage.tsx` legacy fallback state | `delete-now` | `done` | Product Chat no longer owns `legacyFallbackUsed` state, no longer consumes `legacy_fallback_used`, and no longer renders the legacy fallback notice. |
@@ -87,7 +88,7 @@ route cleanup.
 | `src-tauri/src/main_chat_memory_proposals.rs` | Product-valid pending memory proposal edit helper. |
 | `src-tauri/src/life_model_materializer_guard.rs` | Product guard for LifeModel materialization callers. |
 | `src-tauri/src/commands/state.rs` | Receipt-gated shipped state-history and alert read owner; fails closed when StateStore import/cutover is incomplete. |
-| `openlife-core/src/state_store.rs` | Canonical bounded task, typed observation, imported legacy state-history, receipt, and outbox owner. |
+| `openlife-core/src/state_store.rs` | Canonical bounded task, imported legacy daily-task, typed observation, imported legacy state-history, receipt, and outbox owner. |
 | `openlife-core/src/agent/main_chat_runtime_contract.rs` | Product runtime state snapshot contract. |
 | `openlife-core/src/agent/metadata_safe.rs` | Shared metadata-safe digest/preview helper. |
 | `frontend/src/tauri.ts` | Product bridge only. |
