@@ -1079,6 +1079,20 @@
         },
         "product_disposition": "retain_fail_closed_tool_audit_cancellation_truth_without_claiming_global_closure",
         "note": "Runtime cancellation now settles pending audit durability as unknown, preserves the canonical local-abort result, and keeps release bootstrap effect admission fail closed. Independent read-only review and global Phase7/V4 closure remain pending."
+      },
+      {
+        "id": "BR4-D071",
+        "global_closure": {
+          "implementation_state": "implemented",
+          "verification_state": "partial",
+          "closure_state": "open"
+        },
+        "backend_roadshow_subset": {
+          "scope": "required_backend_freeze_dependency",
+          "status": "focused_mechanical_gates_green_phase2_suite_still_red"
+        },
+        "product_disposition": "preserve_proven_provider_dispatch_while_provider_terminal_state_remains_unknown",
+        "note": "A proof-backed adapter start now survives later attempt-state corruption without converting invalid or unknown state into completion. Six unrelated Phase 2 failures and independent read-only review remain pending."
       }
     ],
     "historical_slice_commits": [
@@ -3314,6 +3328,79 @@
         ]
       }
     }
+    ,{
+      "id": "BR4-D071",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "red_test:conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_receipt_state-returned-model-invoked-false-after-provider-started",
+          "source_trace:ProviderInvocationState-Invalid-was-the-sole-final-model-invoked-authority",
+          "source_trace:invalid-state-terminalizer-persisted-only-provider-receipt-state-failed-and-erased-valid-start-prefix"
+        ],
+        "failing_test": [
+          "red_test:conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_receipt_state",
+          "red_assertion:a-receipt-state-failure-must-not-erase-the-already-observed-provider-dispatch"
+        ],
+        "positive": [
+          "commit:75bf026-preserve-provider-dispatch-truth-on-state-conflict",
+          "gate:conflicting-provider-attempt-metadata-focused-test-green-2026-07-16",
+          "gate:durable-provider-invocation-counterfactual-test-green-2026-07-16",
+          "gate:provider-attempt-invalid-shared-terminalizer-test-green-2026-07-16",
+          "gate:main-chat-runtime-module-30-of-30-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-2026-07-16",
+          "diagnostic:backend-remediation-phase2-21-of-27-2026-07-16"
+        ],
+        "counterfactual": [
+          "test:provider-receipt-state-failed-without-provider-request-lifecycle-does-not-prove-model-invocation",
+          "test:wrong-run-provider-start-does-not-prove-current-run-invocation",
+          "test:invalid-provider-state-remains-invalid-and-generation-provider-status-remains-unknown",
+          "test:no-provider-completed-event-is-created-by-the-metadata-conflict-path"
+        ],
+        "deletion_or_absence": [
+          "absence:invalid-provider-state-as-proof-of-no-dispatch",
+          "absence:provider-receipt-state-failure-used-as-positive-invocation-proof",
+          "absence:invented-provider-completion-after-metadata-conflict",
+          "absence:cross-run-provider-lifecycle-used-by-FinalDelivery"
+        ],
+        "capability_non_regression": [
+          "test:normal-started-completed-failed-and-remote-unknown-provider-lifecycle-still-proves-invocation",
+          "test:provider-attempt-invalid-without-start-still-uses-one-failed-terminal-and-model-invoked-false",
+          "test:ordinary-Main-Chat-single-runtime-source-map-remains-green"
+        ],
+        "live_boundary": [
+          "local-real-http-adapter-edge-credit-only",
+          "external-live-provider-credit-not-claimed",
+          "six-unrelated-Phase2-failures-remain-open",
+          "independent-read-only-implementation-review-pending",
+          "Phase7-global-V4-and-roadshow-GREEN-not-claimed"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "pending_independent_readonly_reviewer",
+        "decision": "focused-mechanical-gates-green-independent-readonly-review-pending",
+        "evidence_refs": [
+          "commit:75bf026",
+          "test:conflicting-provider-attempt-metadata",
+          "test:durable-provider-invocation-counterfactual",
+          "boundary:provider-status-remains-invalid-and-remote-unknown"
+        ]
+      },
+      "roadshow_implementation": {
+        "status": "focused_mechanically_verified_phase2_suite_still_red",
+        "commit": "75bf0264f7b97f80461f53fe0af4172a79625d69",
+        "anti_hallucination": [
+          "model-invoked-is-recovered-only-from-an-exact-same-run-provider-request-lifecycle-event",
+          "provider-receipt-state-failed-alone-does-not-count-as-dispatch",
+          "invalid-provider-state-was-not-relabeled-completed-failed-or-cancelled",
+          "no-provider-remote-unknown-terminal-was-invented-without-a-valid-cross-owner-contract",
+          "the-full-Phase2-suite-remains-red-at-21-of-27-and-global-completion-was-not-claimed"
+        ]
+      }
+    }
   ],
   "supplemental_scenarios": [
     {
@@ -3502,6 +3589,15 @@
       ],
       "kind": "cancelled_tool_audit_terminalization",
       "scenario": "Dropping a dispatched ToolGateway future settles any finished receipt with pending audit durability to unknown, preserves the canonical local-abort or remote-unknown transport fact, creates no late commit or retry, and keeps release-bootstrap product dispatch blocked while a cfg-test crash fixture can persist only the exact prepared fact.",
+      "frozen_denominator_credit": false
+    }
+    ,{
+      "id": "DISC-071",
+      "finding_ids": [
+        "BR4-D071"
+      ],
+      "kind": "provider_dispatch_truth_after_attempt_state_corruption",
+      "scenario": "A proof-backed provider start followed by conflicting attempt metadata fails the turn closed with invalid and remote-unknown state, preserves model_invoked=true and the exact durable start, and invents no provider completion; the same state failure without a proven start leaves model_invoked=false.",
       "frozen_denominator_credit": false
     }
   ]

@@ -1020,6 +1020,49 @@
         "Audit-pending validation errors masking the canonical local cancellation result"
       ],
       "immutable_fingerprint": "b515e32ffa41e43734b0375a0a20bc1d65e7af4a0101bc680619438362e7a905"
+    },
+    {
+      "id": "BR4-D071",
+      "discovered_at": "2026-07-16T23:17:22+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P0-01",
+        "P1-02",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen wire-truth, cancellation and inferred-runtime-fact findings require truthful provider reporting, but they did not cover a valid adapter start followed by conflicting attempt metadata: the runtime failed closed correctly, then recomputed model_invoked from the invalid aggregate state and erased the already observed dispatch.",
+      "title": "Provider attempt metadata conflict erases an already observed adapter dispatch",
+      "observed_symptom": "A provider request emitted a valid provider_started edge and remained in flight; injecting a conflicting model terminal correctly poisoned the attempt state and failed the turn with remote state unknown, but the final delivery returned model_invoked=false and omitted the proven provider start from durable lifecycle facts.",
+      "root_cause_hypothesis": "ProviderInvocationState::Invalid intentionally does not imply dispatch, but finalization used that aggregate enum as the sole invocation authority and the invalid-state terminalizer discarded valid earlier kernel lifecycle evidence instead of persisting only the proof-backed prefix.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_turn_runtime.rs::CancellationAwareMainChatEventSink",
+        "src-tauri/src/main_chat_turn_runtime.rs::terminalize_main_chat_kernel_failure",
+        "src-tauri/src/main_chat_turn_runtime.rs::finalize_openlife_turn_result",
+        "src-tauri/src/backend_remediation_phase2_tests.rs::conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_receipt_state"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 2 and Phase 6",
+      "owner_module": "OpenLifeTurnRuntime provider lifecycle terminalization and FinalDelivery projection",
+      "acceptance": [
+        "A valid adapter start that precedes provider-attempt state corruption is persisted only when the exact scheduler durability proof exists",
+        "The turn and provider attempt remain failed closed as invalid and remote unknown; no provider.completed or remote-cancel confirmation is invented",
+        "FinalDelivery model_invoked is true only from a typed invocation state or an exact same-run durable provider_request lifecycle fact",
+        "A receipt-state failure without a proven provider start leaves model_invoked false",
+        "Provider lifecycle facts, receipt-state failure and turn failure keep one canonical run identity and survive buffered and streamed projection"
+      ],
+      "deletion_targets": [
+        "Invalid provider aggregate state erasing an earlier proven adapter start",
+        "model_invoked derived only from ProviderInvocationState after state corruption",
+        "Provider receipt-state failure presented as proof that no provider dispatch occurred",
+        "Invented provider completion or remote cancellation confirmation after metadata conflict"
+      ],
+      "immutable_fingerprint": "6d84efd9513db4357554104d113a9c5aaf213bd4e45313481a873e4419e1c6ef"
     }
   ]
 }
