@@ -23,6 +23,7 @@ const KNOWLEDGE_NOTE_MAX_CONTENT_BYTES: usize = 256 * 1024;
 const KNOWLEDGE_NOTE_MAX_SOURCE_BYTES: usize = 128;
 const KNOWLEDGE_NOTE_MAX_TAGS: usize = 32;
 const KNOWLEDGE_NOTE_MAX_TAG_BYTES: usize = 128;
+const LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS: usize = 50_000;
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -2830,6 +2831,51 @@ impl MemoryStore {
         Ok(entries)
     }
 
+    /// Complete, ordered source snapshot for the bounded StateStore migration
+    /// seam. Product reads must not use this API after authority cutover.
+    pub fn list_legacy_state_history_migration_source(
+        &self,
+    ) -> Result<LegacyStateHistoryMigrationSnapshot> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut statement = conn.prepare(
+            "SELECT id, dimension_name, value, unit, recorded_at, note,
+                    operation_id, operation_digest
+             FROM state_history
+             ORDER BY id ASC
+             LIMIT ?1",
+        )?;
+        let records = statement
+            .query_map(
+                [i64::try_from(
+                    LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS.saturating_add(1),
+                )?],
+                |row| {
+                    Ok(LegacyStateHistorySourceRecord {
+                        id: row.get(0)?,
+                        dimension_name: row.get(1)?,
+                        value: row.get(2)?,
+                        unit: row.get(3)?,
+                        recorded_at: row.get(4)?,
+                        note: row.get(5)?,
+                        operation_id: row.get(6)?,
+                        operation_digest: row.get(7)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)?;
+        if records.len() > LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS {
+            anyhow::bail!("legacy_state_history_migration_row_limit_exceeded");
+        }
+        Ok(LegacyStateHistoryMigrationSnapshot {
+            source_store_identity: self.canonical_store_identity.to_string(),
+            records,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn save_memory_record(
         &self,
@@ -3805,6 +3851,33 @@ pub struct StateHistoryEntry {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LegacyStateHistorySourceRecord {
+    pub id: i64,
+    pub dimension_name: String,
+    pub value: f64,
+    pub unit: String,
+    pub recorded_at: String,
+    pub note: Option<String>,
+    pub operation_id: Option<String>,
+    pub operation_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LegacyStateHistoryMigrationSnapshot {
+    pub source_store_identity: String,
+    pub records: Vec<LegacyStateHistorySourceRecord>,
+}
+
+impl LegacyStateHistoryMigrationSnapshot {
+    pub fn validate_source_store_identity(&self) -> Result<()> {
+        if !is_canonical_memory_store_identity(&self.source_store_identity) {
+            anyhow::bail!("legacy_state_history_source_store_identity_invalid");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanonicalStateEntryWrite {
@@ -4550,6 +4623,25 @@ mod tests {
         assert_eq!(first.state_entry_id, replay.state_entry_id);
         assert_eq!(first.operation_digest, replay.operation_digest);
         assert_eq!(store.get_state_history("focus", 10).unwrap().len(), 1);
+        let migration_source = store.list_legacy_state_history_migration_source().unwrap();
+        assert_eq!(
+            migration_source.source_store_identity,
+            store.canonical_store_identity.as_ref()
+        );
+        assert_eq!(migration_source.records.len(), 1);
+        assert_eq!(migration_source.records[0].id, first.state_entry_id);
+        assert_eq!(
+            migration_source.records[0].operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+        assert_eq!(
+            migration_source.records[0].operation_digest.as_deref(),
+            Some(first.operation_digest.as_str())
+        );
+        assert_eq!(
+            migration_source.records[0].note.as_deref(),
+            Some("afternoon")
+        );
         assert!(store
             .record_state_entry_idempotent(
                 &operation_id,
@@ -4610,6 +4702,39 @@ mod tests {
                 "each LifeModel projection field must remain bound to the operation UUID"
             );
         }
+    }
+
+    #[test]
+    fn legacy_state_history_migration_source_fails_closed_above_bounded_limit() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        {
+            let mut conn = store.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut statement = tx
+                    .prepare(
+                        "INSERT INTO state_history (
+                            dimension_name, value, unit, recorded_at, note,
+                            operation_id, operation_digest
+                         ) VALUES ('focus', ?1, '/10', ?2, NULL, NULL, NULL)",
+                    )
+                    .unwrap();
+                let recorded_at = Utc::now().to_rfc3339();
+                for index in 0..=LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS {
+                    statement
+                        .execute(params![index as f64, &recorded_at])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        let error = store
+            .list_legacy_state_history_migration_source()
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("legacy_state_history_migration_row_limit_exceeded"));
     }
 
     #[test]

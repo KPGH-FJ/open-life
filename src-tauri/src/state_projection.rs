@@ -12,7 +12,8 @@ use crate::AppState;
 use openlife_core::life_model::{DailyGoal, LifeModel};
 use openlife_core::state_store::{
     DailyTaskStatus, LegacyDailyTaskShadowCandidate, LegacyDailyTaskShadowReceipt,
-    StateProjectionStatus, StateStore,
+    LegacyStateHistoryShadowCandidate, LegacyStateHistoryShadowReceipt, StateProjectionStatus,
+    StateStore,
 };
 use std::sync::Arc;
 
@@ -115,6 +116,61 @@ pub(crate) fn reconcile_legacy_yaml_daily_task_shadow(
     store
         .reconcile_legacy_daily_task_shadow(source_asset_digest, candidates, observed_at)
         .map_err(|error| format!("legacy_daily_task_shadow_reconciliation_failed:{error}"))
+}
+
+pub(crate) fn legacy_memory_state_history_shadow_candidates(
+    snapshot: &openlife_core::memory::LegacyStateHistoryMigrationSnapshot,
+) -> Result<Vec<LegacyStateHistoryShadowCandidate>, String> {
+    snapshot
+        .records
+        .iter()
+        .map(|record| {
+            let recorded_at = chrono::DateTime::parse_from_rfc3339(&record.recorded_at)
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .map_err(|_| {
+                    format!(
+                        "legacy_state_history_recorded_at_invalid:legacy_id={}",
+                        record.id
+                    )
+                })?;
+            Ok(LegacyStateHistoryShadowCandidate {
+                legacy_id: record.id,
+                dimension_name: record.dimension_name.clone(),
+                value: record.value,
+                unit: record.unit.clone(),
+                recorded_at,
+                note: record.note.clone(),
+                legacy_operation_id: record.operation_id.clone(),
+                legacy_operation_digest: record.operation_digest.clone(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn legacy_memory_state_history_source_digest(
+    snapshot: &openlife_core::memory::LegacyStateHistoryMigrationSnapshot,
+) -> Result<String, String> {
+    if snapshot.source_store_identity.trim().is_empty() {
+        return Err("legacy_state_history_source_store_identity_missing".into());
+    }
+    snapshot
+        .validate_source_store_identity()
+        .map_err(|error| error.to_string())?;
+    let encoded = serde_json::to_string(snapshot)
+        .map_err(|error| format!("legacy_state_history_source_encode_failed:{error}"))?;
+    Ok(openlife_core::persistence_outbox::metadata_digest(&encoded))
+}
+
+pub(crate) fn reconcile_legacy_memory_state_history_shadow(
+    store: &StateStore,
+    snapshot: &openlife_core::memory::LegacyStateHistoryMigrationSnapshot,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<LegacyStateHistoryShadowReceipt, String> {
+    let source_asset_digest = legacy_memory_state_history_source_digest(snapshot)?;
+    let candidates = legacy_memory_state_history_shadow_candidates(snapshot)?;
+    store
+        .reconcile_legacy_state_history_shadow(source_asset_digest, candidates, observed_at)
+        .map_err(|error| format!("legacy_state_history_shadow_reconciliation_failed:{error}"))
 }
 
 pub(crate) async fn reconcile_state_store_lifemodel_projection(
@@ -299,5 +355,91 @@ mod tests {
         model.goals.daily[0].done = true;
         let after_daily_task_change = legacy_yaml_daily_task_source_digest(&model).unwrap();
         assert_ne!(first, after_daily_task_change);
+    }
+
+    #[test]
+    fn legacy_memory_state_history_shadow_candidates_preserve_every_source_field() {
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let operation_digest =
+            openlife_core::persistence_outbox::metadata_digest("legacy-state-operation");
+        let snapshot = openlife_core::memory::LegacyStateHistoryMigrationSnapshot {
+            source_store_identity: "memory_store:v1:00000000-0000-4000-8000-000000000001".into(),
+            records: vec![openlife_core::memory::LegacyStateHistorySourceRecord {
+                id: 7,
+                dimension_name: "专注度".into(),
+                value: 8.5,
+                unit: "分".into(),
+                recorded_at: "2026-07-15T08:30:00Z".into(),
+                note: Some("路演前".into()),
+                operation_id: Some(operation_id.clone()),
+                operation_digest: Some(operation_digest.clone()),
+            }],
+        };
+
+        let candidates = legacy_memory_state_history_shadow_candidates(&snapshot).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].legacy_id, 7);
+        assert_eq!(candidates[0].dimension_name, "专注度");
+        assert_eq!(candidates[0].value, 8.5);
+        assert_eq!(candidates[0].unit, "分");
+        assert_eq!(
+            candidates[0].recorded_at.to_rfc3339(),
+            "2026-07-15T08:30:00+00:00"
+        );
+        assert_eq!(candidates[0].note.as_deref(), Some("路演前"));
+        assert_eq!(
+            candidates[0].legacy_operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+        assert_eq!(
+            candidates[0].legacy_operation_digest.as_deref(),
+            Some(operation_digest.as_str())
+        );
+        let first_digest = legacy_memory_state_history_source_digest(&snapshot).unwrap();
+        assert_eq!(
+            first_digest,
+            openlife_core::persistence_outbox::metadata_digest(
+                &serde_json::to_string(&snapshot).unwrap()
+            )
+        );
+
+        let mut other_store_snapshot = snapshot;
+        other_store_snapshot.source_store_identity =
+            "memory_store:v1:00000000-0000-4000-8000-000000000002".into();
+        assert_ne!(
+            legacy_memory_state_history_source_digest(&other_store_snapshot).unwrap(),
+            first_digest
+        );
+    }
+
+    #[test]
+    fn legacy_memory_state_history_shadow_rejects_invalid_timestamp_without_partial_guess() {
+        let snapshot = openlife_core::memory::LegacyStateHistoryMigrationSnapshot {
+            source_store_identity: "memory_store:v1:00000000-0000-4000-8000-000000000001".into(),
+            records: vec![openlife_core::memory::LegacyStateHistorySourceRecord {
+                id: 1,
+                dimension_name: "energy".into(),
+                value: 7.0,
+                unit: "/10".into(),
+                recorded_at: "yesterday-ish".into(),
+                note: None,
+                operation_id: None,
+                operation_digest: None,
+            }],
+        };
+
+        let error = legacy_memory_state_history_shadow_candidates(&snapshot).unwrap_err();
+        assert!(error.contains("legacy_state_history_recorded_at_invalid:legacy_id=1"));
+    }
+
+    #[test]
+    fn legacy_memory_state_history_shadow_rejects_missing_store_identity() {
+        let snapshot = openlife_core::memory::LegacyStateHistoryMigrationSnapshot {
+            source_store_identity: "   ".into(),
+            records: Vec::new(),
+        };
+
+        let error = legacy_memory_state_history_source_digest(&snapshot).unwrap_err();
+        assert_eq!(error, "legacy_state_history_source_store_identity_missing");
     }
 }

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 5;
+const STATE_STORE_SCHEMA_VERSION: i64 = 6;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
@@ -29,6 +29,11 @@ const MAX_LEGACY_DAILY_TASK_SHADOW_ITEMS: usize = 512;
 const MAX_LEGACY_DAILY_TASK_SHADOW_EVIDENCE: usize = 32;
 const MAX_LEGACY_TIME_BLOCK_CHARS: usize = 64;
 const MAX_LEGACY_OPERATION_REF_CHARS: usize = 256;
+const MAX_LEGACY_STATE_HISTORY_SHADOW_ITEMS: usize = 50_000;
+const MAX_LEGACY_STATE_HISTORY_SHADOW_EVIDENCE: usize = 32;
+const MAX_LEGACY_STATE_HISTORY_DIMENSION_CHARS: usize = 256;
+const MAX_LEGACY_STATE_HISTORY_UNIT_CHARS: usize = 64;
+const MAX_LEGACY_STATE_HISTORY_NOTE_CHARS: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,6 +285,43 @@ pub struct LegacyDailyTaskShadowCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyDailyTaskShadowReceipt {
+    pub schema: String,
+    pub receipt_id: String,
+    pub run_id: String,
+    pub source_asset_digest: String,
+    pub candidate_digest: String,
+    pub repeated_read_digest: String,
+    pub restored_digest: String,
+    pub item_count: usize,
+    pub deterministic: bool,
+    pub parity: bool,
+    pub rollback_rehearsed: bool,
+    pub committed_at: DateTime<Utc>,
+    pub replayed: bool,
+}
+
+/// Lossless migration candidate for one legacy MemoryStore state-history row.
+/// The current shadow is temporary migration evidence; historical evidence is
+/// metadata-only and never copies the dimension, value, unit, or note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyStateHistoryShadowCandidate {
+    pub legacy_id: i64,
+    pub dimension_name: String,
+    pub value: f64,
+    pub unit: String,
+    pub recorded_at: DateTime<Utc>,
+    pub note: Option<String>,
+    pub legacy_operation_id: Option<String>,
+    pub legacy_operation_digest: Option<String>,
+}
+
+/// Metadata-only proof that the complete legacy state-history snapshot was
+/// normalized, persisted, reread, destructively removed, and restored inside
+/// one StateStore transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyStateHistoryShadowReceipt {
     pub schema: String,
     pub receipt_id: String,
     pub run_id: String,
@@ -893,6 +935,93 @@ impl StateStore {
                 FOREIGN KEY(observation_id) REFERENCES state_observations(observation_id),
                 FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_observation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id TEXT,
+                operation_id TEXT UNIQUE,
+                dimension_name TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                note TEXT,
+                source_kind TEXT NOT NULL CHECK(source_kind IN (
+                    'current_authenticated_user_message', 'legacy_memory_store'
+                )),
+                source_ref TEXT NOT NULL,
+                source_digest TEXT NOT NULL,
+                legacy_id INTEGER,
+                legacy_operation_id TEXT,
+                legacy_operation_digest TEXT,
+                CHECK(
+                    (
+                        source_kind = 'current_authenticated_user_message'
+                        AND observation_id IS NOT NULL
+                        AND operation_id IS NOT NULL
+                        AND legacy_id IS NULL
+                        AND legacy_operation_id IS NULL
+                        AND legacy_operation_digest IS NULL
+                    )
+                    OR
+                    (
+                        source_kind = 'legacy_memory_store'
+                        AND observation_id IS NULL
+                        AND operation_id IS NULL
+                        AND legacy_id IS NOT NULL
+                        AND (
+                            (legacy_operation_id IS NULL AND legacy_operation_digest IS NULL)
+                            OR
+                            (legacy_operation_id IS NOT NULL AND legacy_operation_digest IS NOT NULL)
+                        )
+                    )
+                ),
+                FOREIGN KEY(observation_id) REFERENCES state_observations(observation_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_state_observation_history_dimension_time
+             ON state_observation_history(dimension_name, recorded_at DESC, id DESC);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_state_observation_history_legacy_source
+             ON state_observation_history(source_ref, legacy_id)
+             WHERE source_kind = 'legacy_memory_store';
+             CREATE TABLE IF NOT EXISTS state_legacy_history_shadow_current (
+                singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
+                receipt_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL UNIQUE,
+                source_asset_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                repeated_read_digest TEXT NOT NULL,
+                restored_digest TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 50000),
+                deterministic INTEGER NOT NULL CHECK(deterministic IN (0, 1)),
+                parity INTEGER NOT NULL CHECK(parity IN (0, 1)),
+                rollback_rehearsed INTEGER NOT NULL CHECK(rollback_rehearsed IN (0, 1)),
+                committed_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS state_legacy_history_shadow_items (
+                run_id TEXT NOT NULL,
+                source_ordinal INTEGER NOT NULL CHECK(source_ordinal >= 0 AND source_ordinal < 50000),
+                legacy_id INTEGER NOT NULL,
+                dimension_name TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                note TEXT,
+                legacy_operation_id TEXT,
+                legacy_operation_digest TEXT,
+                PRIMARY KEY(run_id, source_ordinal),
+                UNIQUE(run_id, legacy_id),
+                FOREIGN KEY(run_id) REFERENCES state_legacy_history_shadow_current(run_id)
+                    ON DELETE CASCADE
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_legacy_history_shadow_evidence (
+                run_id TEXT PRIMARY KEY,
+                receipt_id TEXT NOT NULL UNIQUE,
+                source_asset_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                repeated_read_digest TEXT NOT NULL,
+                restored_digest TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 50000),
+                succeeded INTEGER NOT NULL CHECK(succeeded IN (0, 1)),
+                committed_at TEXT NOT NULL
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS state_legacy_daily_task_shadow_current (
                 singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
                 receipt_id TEXT NOT NULL UNIQUE,
@@ -940,6 +1069,8 @@ impl StateStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
+        let needs_observation_history_backfill =
+            !matches!(existing_version.as_deref(), None | Some("6"));
         match existing_version.as_deref() {
             None => {
                 tx.execute(
@@ -954,30 +1085,52 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '5'
+                     SET value = '6'
                      WHERE key = 'schema_version';",
                 )?;
             }
             Some("2") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("3") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("4") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
-            Some("5") => {}
+            Some("5") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("6") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
+        }
+        if needs_observation_history_backfill {
+            tx.execute(
+                "INSERT OR IGNORE INTO state_observation_history (
+                    observation_id, operation_id, dimension_name, value, unit,
+                    recorded_at, note, source_kind, source_ref, source_digest,
+                    legacy_id, legacy_operation_id, legacy_operation_digest
+                 )
+                 SELECT observation_id, operation_id, dimension_name, value, unit,
+                        created_at, NULL, 'current_authenticated_user_message',
+                        source_message_ref, payload_digest, NULL, NULL, NULL
+                 FROM state_observation_versions
+                 WHERE mutation_kind = 'create'
+                 ORDER BY created_at ASC, observation_id ASC, version ASC",
+                [],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -1157,6 +1310,172 @@ impl StateStore {
         legacy_daily_task_shadow_receipt(&conn, replayed)
     }
 
+    pub fn reconcile_legacy_state_history_shadow(
+        &self,
+        source_asset_digest: String,
+        candidates: Vec<LegacyStateHistoryShadowCandidate>,
+        observed_at: DateTime<Utc>,
+    ) -> Result<LegacyStateHistoryShadowReceipt> {
+        self.reconcile_legacy_state_history_shadow_guarded(
+            source_asset_digest,
+            candidates,
+            observed_at,
+            || Result::<()>::Ok(()),
+        )
+    }
+
+    pub fn reconcile_legacy_state_history_shadow_guarded<F>(
+        &self,
+        source_asset_digest: String,
+        candidates: Vec<LegacyStateHistoryShadowCandidate>,
+        observed_at: DateTime<Utc>,
+        before_commit: F,
+    ) -> Result<LegacyStateHistoryShadowReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        if !is_sha256_digest(&source_asset_digest) {
+            anyhow::bail!("state_legacy_history_shadow_source_digest_invalid");
+        }
+        let candidates = prepare_legacy_state_history_shadow(candidates)?;
+        let candidate_digest = legacy_state_history_shadow_digest(&candidates)?;
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some(existing) = legacy_state_history_shadow_receipt(&tx, true)? {
+            if existing.source_asset_digest == source_asset_digest {
+                if existing.candidate_digest != candidate_digest {
+                    anyhow::bail!("state_legacy_history_shadow_source_digest_collision");
+                }
+                let persisted = load_legacy_state_history_shadow_candidates(&tx)?;
+                let persisted_digest = legacy_state_history_shadow_digest(&persisted)?;
+                if persisted_digest != existing.candidate_digest
+                    || existing.item_count != persisted.len()
+                    || existing.repeated_read_digest != existing.candidate_digest
+                    || existing.restored_digest != existing.candidate_digest
+                    || !existing.deterministic
+                    || !existing.parity
+                    || !existing.rollback_rehearsed
+                {
+                    anyhow::bail!("state_legacy_history_shadow_existing_evidence_inconsistent");
+                }
+                tx.rollback()?;
+                return Ok(existing);
+            }
+        }
+
+        tx.execute("DELETE FROM state_legacy_history_shadow_current", [])?;
+        let receipt_id = format!("state_legacy_history_shadow_receipt:{}", Uuid::new_v4());
+        let run_id = Uuid::new_v4().hyphenated().to_string();
+        tx.execute(
+            "INSERT INTO state_legacy_history_shadow_current (
+                 singleton_key, receipt_id, run_id, source_asset_digest,
+                 candidate_digest, repeated_read_digest, restored_digest,
+                 item_count, deterministic, parity, rollback_rehearsed, committed_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?4, ?4, ?5, 0, 0, 0, ?6)",
+            params![
+                receipt_id,
+                run_id,
+                source_asset_digest,
+                candidate_digest,
+                i64::try_from(candidates.len())?,
+                observed_at.to_rfc3339(),
+            ],
+        )?;
+        for (ordinal, candidate) in candidates.iter().enumerate() {
+            insert_legacy_state_history_shadow_candidate(&tx, &run_id, ordinal, candidate)?;
+        }
+
+        let persisted = load_legacy_state_history_shadow_candidates(&tx)?;
+        let repeated_read_digest = legacy_state_history_shadow_digest(&persisted)?;
+        if persisted != candidates || repeated_read_digest != candidate_digest {
+            anyhow::bail!("state_legacy_history_shadow_digest_parity_failed");
+        }
+
+        tx.execute(
+            "DELETE FROM state_legacy_history_shadow_items WHERE run_id = ?1",
+            [&run_id],
+        )?;
+        let deleted_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM state_legacy_history_shadow_items WHERE run_id = ?1",
+            [&run_id],
+            |row| row.get(0),
+        )?;
+        if deleted_count != 0 {
+            anyhow::bail!("state_legacy_history_shadow_rollback_delete_failed");
+        }
+        for (ordinal, candidate) in persisted.iter().enumerate() {
+            insert_legacy_state_history_shadow_candidate(&tx, &run_id, ordinal, candidate)?;
+        }
+        let restored = load_legacy_state_history_shadow_candidates(&tx)?;
+        let restored_digest = legacy_state_history_shadow_digest(&restored)?;
+        if restored != candidates || restored_digest != candidate_digest {
+            anyhow::bail!("state_legacy_history_shadow_rollback_restore_failed");
+        }
+
+        before_commit()?;
+        tx.execute(
+            "UPDATE state_legacy_history_shadow_current
+             SET repeated_read_digest = ?2,
+                 restored_digest = ?3,
+                 deterministic = 1,
+                 parity = 1,
+                 rollback_rehearsed = 1
+             WHERE run_id = ?1",
+            params![run_id, repeated_read_digest, restored_digest],
+        )?;
+        tx.execute(
+            "INSERT INTO state_legacy_history_shadow_evidence (
+                 run_id, receipt_id, source_asset_digest, candidate_digest,
+                 repeated_read_digest, restored_digest, item_count, succeeded,
+                 committed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+            params![
+                run_id,
+                receipt_id,
+                source_asset_digest,
+                candidate_digest,
+                repeated_read_digest,
+                restored_digest,
+                i64::try_from(candidates.len())?,
+                observed_at.to_rfc3339(),
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM state_legacy_history_shadow_evidence
+             WHERE run_id != ?1
+               AND run_id NOT IN (
+                   SELECT run_id FROM state_legacy_history_shadow_evidence
+                   WHERE run_id != ?1
+                   ORDER BY committed_at DESC, run_id DESC
+                   LIMIT ?2
+               )",
+            params![
+                run_id,
+                i64::try_from(MAX_LEGACY_STATE_HISTORY_SHADOW_EVIDENCE.saturating_sub(1))?
+            ],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.legacy_state_history_shadow_receipt(false)?
+            .context("state_legacy_history_shadow_receipt_missing_after_commit")
+    }
+
+    pub fn list_legacy_state_history_shadow(
+        &self,
+    ) -> Result<Vec<LegacyStateHistoryShadowCandidate>> {
+        let conn = self.lock_connection()?;
+        load_legacy_state_history_shadow_candidates(&conn)
+    }
+
+    pub fn legacy_state_history_shadow_receipt(
+        &self,
+        replayed: bool,
+    ) -> Result<Option<LegacyStateHistoryShadowReceipt>> {
+        let conn = self.lock_connection()?;
+        legacy_state_history_shadow_receipt(&conn, replayed)
+    }
+
     pub fn create_state_observation(
         &self,
         command: CreateStateObservationCommand,
@@ -1230,6 +1549,25 @@ impl StateStore {
                 prepared.source_kind.as_str(),
                 prepared.created_at.to_rfc3339(),
                 prepared.expires_at.to_rfc3339(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO state_observation_history (
+                observation_id, operation_id, dimension_name, value, unit,
+                recorded_at, note, source_kind, source_ref, source_digest,
+                legacy_id, legacy_operation_id, legacy_operation_digest
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL,
+                       'current_authenticated_user_message', ?7, ?8,
+                       NULL, NULL, NULL)",
+            params![
+                observation_id,
+                prepared.operation_id,
+                prepared.dimension_name,
+                prepared.value,
+                prepared.unit,
+                prepared.created_at.to_rfc3339(),
+                prepared.source_message_ref,
+                prepared.payload_digest,
             ],
         )?;
         let outbox = crate::persistence_outbox::enqueue_mutation(
@@ -1938,6 +2276,41 @@ impl StateStore {
             .query_map([], state_observation_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn get_state_history(
+        &self,
+        dimension_name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::StateHistoryEntry>> {
+        let dimension_name = dimension_name.trim();
+        if dimension_name.is_empty()
+            || dimension_name.chars().count() > MAX_LEGACY_STATE_HISTORY_DIMENSION_CHARS
+        {
+            anyhow::bail!("state_history_dimension_invalid");
+        }
+        let limit = i64::try_from(limit).context("state_history_limit_invalid")?;
+        let conn = self.lock_connection()?;
+        let mut statement = conn.prepare(
+            "SELECT id, dimension_name, value, unit, recorded_at, note
+             FROM state_observation_history
+             WHERE dimension_name = ?1
+             ORDER BY recorded_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![dimension_name, limit], |row| {
+            Ok(crate::memory::StateHistoryEntry {
+                id: row.get(0)?,
+                dimension_name: row.get(1)?,
+                value: row.get(2)?,
+                unit: row.get(3)?,
+                recorded_at: row.get(4)?,
+                note: row.get(5)?,
+            })
+        })?;
+        let mut entries = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.reverse();
+        Ok(entries)
     }
 
     fn latest_active_state_observation(
@@ -3175,6 +3548,194 @@ fn legacy_daily_task_shadow_receipt(
     .transpose()
 }
 
+fn prepare_legacy_state_history_shadow(
+    candidates: Vec<LegacyStateHistoryShadowCandidate>,
+) -> Result<Vec<LegacyStateHistoryShadowCandidate>> {
+    if candidates.len() > MAX_LEGACY_STATE_HISTORY_SHADOW_ITEMS {
+        anyhow::bail!("state_legacy_history_shadow_item_limit_exceeded");
+    }
+    let mut previous_id = None;
+    for candidate in &candidates {
+        if candidate.legacy_id <= 0
+            || previous_id.is_some_and(|previous| candidate.legacy_id <= previous)
+        {
+            anyhow::bail!("state_legacy_history_shadow_id_order_invalid");
+        }
+        previous_id = Some(candidate.legacy_id);
+        if candidate.dimension_name.trim().is_empty()
+            || candidate.dimension_name.chars().count() > MAX_LEGACY_STATE_HISTORY_DIMENSION_CHARS
+            || candidate.dimension_name.chars().any(char::is_control)
+        {
+            anyhow::bail!("state_legacy_history_shadow_dimension_invalid");
+        }
+        if !candidate.value.is_finite() {
+            anyhow::bail!("state_legacy_history_shadow_value_invalid");
+        }
+        if candidate.unit.trim().is_empty()
+            || candidate.unit.chars().count() > MAX_LEGACY_STATE_HISTORY_UNIT_CHARS
+            || candidate.unit.chars().any(char::is_control)
+        {
+            anyhow::bail!("state_legacy_history_shadow_unit_invalid");
+        }
+        if candidate.note.as_ref().is_some_and(|note| {
+            note.chars().count() > MAX_LEGACY_STATE_HISTORY_NOTE_CHARS || note.contains('\0')
+        }) {
+            anyhow::bail!("state_legacy_history_shadow_note_invalid");
+        }
+        for (label, value) in [
+            ("operation_id", candidate.legacy_operation_id.as_deref()),
+            (
+                "operation_digest",
+                candidate.legacy_operation_digest.as_deref(),
+            ),
+        ] {
+            if value.is_some_and(|value| {
+                value.trim().is_empty()
+                    || value.chars().count() > MAX_LEGACY_OPERATION_REF_CHARS
+                    || value.chars().any(char::is_control)
+            }) {
+                anyhow::bail!("state_legacy_history_shadow_{label}_invalid");
+            }
+        }
+        match (
+            candidate.legacy_operation_id.as_deref(),
+            candidate.legacy_operation_digest.as_deref(),
+        ) {
+            (Some(operation_id), Some(operation_digest)) => {
+                validate_uuid_v4("state_legacy_history_shadow_operation_id", operation_id)?;
+                if !is_sha256_digest(operation_digest) {
+                    anyhow::bail!("state_legacy_history_shadow_operation_digest_invalid");
+                }
+            }
+            (None, None) => {}
+            _ => anyhow::bail!("state_legacy_history_shadow_operation_binding_incomplete"),
+        }
+    }
+    Ok(candidates)
+}
+
+fn legacy_state_history_shadow_digest(
+    candidates: &[LegacyStateHistoryShadowCandidate],
+) -> Result<String> {
+    digest_json(&serde_json::to_value(candidates)?)
+}
+
+fn insert_legacy_state_history_shadow_candidate(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    ordinal: usize,
+    candidate: &LegacyStateHistoryShadowCandidate,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO state_legacy_history_shadow_items (
+             run_id, source_ordinal, legacy_id, dimension_name, value, unit,
+             recorded_at, note, legacy_operation_id, legacy_operation_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            run_id,
+            i64::try_from(ordinal)?,
+            candidate.legacy_id,
+            candidate.dimension_name,
+            candidate.value,
+            candidate.unit,
+            candidate.recorded_at.to_rfc3339(),
+            candidate.note,
+            candidate.legacy_operation_id,
+            candidate.legacy_operation_digest,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_legacy_state_history_shadow_candidates(
+    conn: &Connection,
+) -> Result<Vec<LegacyStateHistoryShadowCandidate>> {
+    let mut statement = conn.prepare(
+        "SELECT legacy_id, dimension_name, value, unit, recorded_at, note,
+                legacy_operation_id, legacy_operation_digest
+         FROM state_legacy_history_shadow_items
+         ORDER BY source_ordinal ASC",
+    )?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok(LegacyStateHistoryShadowCandidate {
+                legacy_id: row.get(0)?,
+                dimension_name: row.get(1)?,
+                value: row.get(2)?,
+                unit: row.get(3)?,
+                recorded_at: parse_time_sql(row.get::<_, String>(4)?)?,
+                note: row.get(5)?,
+                legacy_operation_id: row.get(6)?,
+                legacy_operation_digest: row.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::from)?;
+    Ok(candidates)
+}
+
+fn legacy_state_history_shadow_receipt(
+    conn: &Connection,
+    replayed: bool,
+) -> Result<Option<LegacyStateHistoryShadowReceipt>> {
+    conn.query_row(
+        "SELECT receipt_id, run_id, source_asset_digest, candidate_digest,
+                repeated_read_digest, restored_digest, item_count,
+                deterministic, parity, rollback_rehearsed, committed_at
+         FROM state_legacy_history_shadow_current WHERE singleton_key = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(
+        |(
+            receipt_id,
+            run_id,
+            source_asset_digest,
+            candidate_digest,
+            repeated_read_digest,
+            restored_digest,
+            item_count,
+            deterministic,
+            parity,
+            rollback_rehearsed,
+            committed_at,
+        )| {
+            Ok(LegacyStateHistoryShadowReceipt {
+                schema: "openlife.state-legacy-history-shadow-receipt.v1".into(),
+                receipt_id,
+                run_id,
+                source_asset_digest,
+                candidate_digest,
+                repeated_read_digest,
+                restored_digest,
+                item_count: usize::try_from(item_count)
+                    .context("state_legacy_history_shadow_item_count_invalid")?,
+                deterministic: deterministic != 0,
+                parity: parity != 0,
+                rollback_rehearsed: rollback_rehearsed != 0,
+                committed_at: parse_time(&committed_at)?,
+                replayed,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(StdDuration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -3988,6 +4549,13 @@ mod tests {
         assert_eq!(first.asset_kind, StateAssetKind::StateObservation);
         assert_eq!(first.asset_id, replay.asset_id);
         assert_eq!(store.list_state_observations(false).unwrap().len(), 1);
+        let history = store.get_state_history("专注度", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].dimension_name, "专注度");
+        assert_eq!(history[0].value, 8.0);
+        assert_eq!(history[0].unit, "分");
+        assert_eq!(history[0].recorded_at, at(9).to_rfc3339());
+        assert!(history[0].note.is_none());
         assert_eq!(first.projection_status, StateProjectionStatus::Applied);
         assert!(store
             .list_replayable_projection_deliveries(10)
@@ -4576,7 +5144,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         assert!(request_digest_column_exists);
     }
 
@@ -4617,7 +5185,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         assert_eq!(
             tables,
             [
@@ -4664,10 +5232,11 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         assert_eq!(
             tables,
             [
+                "state_observation_history",
                 "state_observation_operations",
                 "state_observation_versions",
                 "state_observations"
@@ -4712,7 +5281,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         assert_eq!(
             tables,
             [
@@ -4721,6 +5290,54 @@ mod tests {
                 "state_legacy_daily_task_shadow_items"
             ]
         );
+    }
+
+    #[test]
+    fn schema_v5_adds_and_backfills_canonical_observation_history_before_advancing_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v5.db");
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        {
+            let store = StateStore::new(&path).unwrap();
+            store
+                .create_state_observation(observation_command(
+                    operation_id.clone(),
+                    "专注度",
+                    8.0,
+                    "分",
+                ))
+                .unwrap();
+            let conn = store.lock_connection().unwrap();
+            conn.execute("DELETE FROM state_observation_history", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE state_store_metadata SET value = '5' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let restarted = StateStore::new(&path).unwrap();
+        let history = restarted.get_state_history("专注度", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value, 8.0);
+        let conn = restarted.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_operation: String = conn
+            .query_row(
+                "SELECT operation_id FROM state_observation_history",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "6");
+        assert_eq!(stored_operation, operation_id);
     }
 
     #[test]
@@ -4957,6 +5574,221 @@ mod tests {
         let current_evidence_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM state_legacy_daily_task_shadow_evidence WHERE run_id = ?1",
+                [current_run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_evidence_count, 1);
+    }
+
+    #[test]
+    fn legacy_state_history_shadow_is_lossless_replayable_and_rollback_rehearsed() {
+        let store = StateStore::new_in_memory().unwrap();
+        let candidates = vec![
+            LegacyStateHistoryShadowCandidate {
+                legacy_id: 1,
+                dimension_name: "专注度".into(),
+                value: 7.5,
+                unit: "分".into(),
+                recorded_at: at(8),
+                note: Some("路演前检查".into()),
+                legacy_operation_id: None,
+                legacy_operation_digest: None,
+            },
+            LegacyStateHistoryShadowCandidate {
+                legacy_id: 2,
+                dimension_name: "energy".into(),
+                value: 6.0,
+                unit: "/10".into(),
+                recorded_at: at(9),
+                note: None,
+                legacy_operation_id: Some(Uuid::new_v4().hyphenated().to_string()),
+                legacy_operation_digest: Some(
+                    digest_json(&serde_json::json!({"legacy": "state-history"})).unwrap(),
+                ),
+            },
+        ];
+        let source_digest =
+            digest_json(&serde_json::json!({"memoryStore": "state-history-v1"})).unwrap();
+
+        let first = store
+            .reconcile_legacy_state_history_shadow(
+                source_digest.clone(),
+                candidates.clone(),
+                at(10),
+            )
+            .unwrap();
+        let replay = store
+            .reconcile_legacy_state_history_shadow(
+                source_digest.clone(),
+                candidates.clone(),
+                at(11),
+            )
+            .unwrap();
+
+        assert!(first.deterministic);
+        assert!(first.parity);
+        assert!(first.rollback_rehearsed);
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.receipt_id, replay.receipt_id);
+        assert_eq!(first.candidate_digest, first.repeated_read_digest);
+        assert_eq!(first.candidate_digest, first.restored_digest);
+        assert_eq!(
+            store.list_legacy_state_history_shadow().unwrap(),
+            candidates
+        );
+        let encoded_receipt = serde_json::to_string(&first).unwrap();
+        for body in ["专注度", "路演前检查", "energy", "/10"] {
+            assert!(!encoded_receipt.contains(body));
+        }
+
+        let mut drifted = store.list_legacy_state_history_shadow().unwrap();
+        drifted[0].value = 9.0;
+        let error = store
+            .reconcile_legacy_state_history_shadow(source_digest, drifted, at(12))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_legacy_history_shadow_source_digest_collision"));
+    }
+
+    #[test]
+    fn legacy_state_history_shadow_fault_preserves_previous_verified_snapshot() {
+        let store = StateStore::new_in_memory().unwrap();
+        let original = vec![LegacyStateHistoryShadowCandidate {
+            legacy_id: 1,
+            dimension_name: "mood".into(),
+            value: 5.0,
+            unit: "/10".into(),
+            recorded_at: at(8),
+            note: Some("original".into()),
+            legacy_operation_id: None,
+            legacy_operation_digest: None,
+        }];
+        store
+            .reconcile_legacy_state_history_shadow(
+                digest_json(&serde_json::json!({"history": "original"})).unwrap(),
+                original.clone(),
+                at(9),
+            )
+            .unwrap();
+
+        let error = store
+            .reconcile_legacy_state_history_shadow_guarded(
+                digest_json(&serde_json::json!({"history": "replacement"})).unwrap(),
+                vec![LegacyStateHistoryShadowCandidate {
+                    legacy_id: 2,
+                    dimension_name: "mood".into(),
+                    value: 9.0,
+                    unit: "/10".into(),
+                    recorded_at: at(10),
+                    note: Some("replacement".into()),
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                }],
+                at(11),
+                || anyhow::bail!("legacy_history_shadow_injected_commit_failure"),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("legacy_history_shadow_injected_commit_failure"));
+        assert_eq!(store.list_legacy_state_history_shadow().unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_state_history_shadow_rejects_incomplete_or_invalid_operation_binding() {
+        let store = StateStore::new_in_memory().unwrap();
+        let source_digest =
+            digest_json(&serde_json::json!({"history": "operation-binding"})).unwrap();
+        let base = LegacyStateHistoryShadowCandidate {
+            legacy_id: 1,
+            dimension_name: "focus".into(),
+            value: 8.0,
+            unit: "/10".into(),
+            recorded_at: at(9),
+            note: None,
+            legacy_operation_id: None,
+            legacy_operation_digest: None,
+        };
+
+        let mut incomplete = base.clone();
+        incomplete.legacy_operation_id = Some(Uuid::new_v4().hyphenated().to_string());
+        let error = store
+            .reconcile_legacy_state_history_shadow(source_digest.clone(), vec![incomplete], at(10))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_legacy_history_shadow_operation_binding_incomplete"));
+
+        let mut invalid_digest = base;
+        invalid_digest.legacy_operation_id = Some(Uuid::new_v4().hyphenated().to_string());
+        invalid_digest.legacy_operation_digest = Some("not-a-digest".into());
+        let error = store
+            .reconcile_legacy_state_history_shadow(source_digest, vec![invalid_digest], at(10))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_legacy_history_shadow_operation_digest_invalid"));
+        assert!(store.list_legacy_state_history_shadow().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_state_history_shadow_keeps_one_body_snapshot_and_bounded_metadata_evidence() {
+        let store = StateStore::new_in_memory().unwrap();
+        for index in 0..40 {
+            store
+                .reconcile_legacy_state_history_shadow(
+                    digest_json(&serde_json::json!({"historySnapshot": index})).unwrap(),
+                    vec![LegacyStateHistoryShadowCandidate {
+                        legacy_id: i64::from(index) + 1,
+                        dimension_name: "focus".into(),
+                        value: f64::from(index),
+                        unit: "/10".into(),
+                        recorded_at: at(9) + Duration::minutes(i64::from(index)),
+                        note: Some(format!("snapshot {index}")),
+                        legacy_operation_id: None,
+                        legacy_operation_digest: None,
+                    }],
+                    at(9) + Duration::minutes(i64::from(index)),
+                )
+                .unwrap();
+        }
+
+        let current = store.list_legacy_state_history_shadow().unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].note.as_deref(), Some("snapshot 39"));
+        let current_run_id = store
+            .legacy_state_history_shadow_receipt(false)
+            .unwrap()
+            .unwrap()
+            .run_id;
+        let conn = store.lock_connection().unwrap();
+        let evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM state_legacy_history_shadow_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            evidence_count,
+            i64::try_from(MAX_LEGACY_STATE_HISTORY_SHADOW_EVIDENCE).unwrap()
+        );
+        let evidence_body_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('state_legacy_history_shadow_evidence')
+                 WHERE name IN ('dimension_name', 'value', 'unit', 'note')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence_body_columns, 0);
+        let current_evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM state_legacy_history_shadow_evidence WHERE run_id = ?1",
                 [current_run_id],
                 |row| row.get(0),
             )

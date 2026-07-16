@@ -2692,9 +2692,31 @@ fn bootstrap_with_secret_store(
                             "legacy daily-task StateStore shadow parity remains blocked: {error}"
                         ));
                     }
+                    let history_shadow_result = memory_store
+                        .list_legacy_state_history_migration_source()
+                        .map_err(|error| {
+                            format!(
+                                "MemoryStore state history could not be loaded for StateStore shadow reconciliation: {error}"
+                            )
+                        })
+                        .and_then(|snapshot| {
+                            crate::state_projection::reconcile_legacy_memory_state_history_shadow(
+                                &store,
+                                &snapshot,
+                                chrono::Utc::now(),
+                            )
+                        });
+                    if let Err(error) = history_shadow_result {
+                        // MemoryStore remains the read-only migration owner
+                        // until the complete source snapshot has deterministic
+                        // parity and rollback evidence.
+                        startup_warnings.borrow_mut().push(format!(
+                            "legacy state-history StateStore shadow parity remains blocked: {error}"
+                        ));
+                    }
                 } else {
                     startup_warnings.borrow_mut().push(
-                        "legacy daily-task StateStore shadow reconciliation skipped because canonical bootstrap mutations are unsafe"
+                        "legacy daily-task and state-history StateStore shadow reconciliation skipped because canonical bootstrap mutations are unsafe"
                             .into(),
                     );
                 }
@@ -3816,6 +3838,69 @@ mod tests {
         assert_eq!(persisted.goals.daily[0].name, "保留的旧 YAML 任务");
         let encoded_receipt = serde_json::to_string(&receipt).unwrap();
         assert!(!encoded_receipt.contains("保留的旧 YAML 任务"));
+    }
+
+    #[test]
+    fn bootstrap_stages_legacy_state_history_without_switching_product_owner() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        {
+            let memory =
+                openlife_core::memory::MemoryStore::new(temp_dir.path().join("memory.db")).unwrap();
+            memory
+                .record_state_entry_idempotent(
+                    &operation_id,
+                    "专注度",
+                    8.0,
+                    "分",
+                    Some("路演前"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let result =
+            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+        let store = result.state.state_store.as_ref().expect("StateStore");
+        let receipt = store
+            .legacy_state_history_shadow_receipt(false)
+            .unwrap()
+            .expect("legacy state-history shadow receipt");
+        let shadow = store.list_legacy_state_history_shadow().unwrap();
+
+        assert_eq!(receipt.item_count, 1);
+        assert!(receipt.deterministic);
+        assert!(receipt.parity);
+        assert!(receipt.rollback_rehearsed);
+        assert_eq!(receipt.candidate_digest, receipt.repeated_read_digest);
+        assert_eq!(receipt.candidate_digest, receipt.restored_digest);
+        assert_eq!(shadow.len(), 1);
+        assert_eq!(shadow[0].dimension_name, "专注度");
+        assert_eq!(shadow[0].value, 8.0);
+        assert_eq!(shadow[0].unit, "分");
+        assert_eq!(shadow[0].note.as_deref(), Some("路演前"));
+        assert_eq!(
+            shadow[0].legacy_operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+        assert!(
+            store.get_state_history("专注度", 10).unwrap().is_empty(),
+            "shadow rows must not become canonical StateStore history before cutover"
+        );
+        let legacy_history = result
+            .state
+            .memory_store
+            .blocking_lock()
+            .get_state_history("专注度", 10)
+            .unwrap();
+        assert_eq!(legacy_history.len(), 1);
+        assert_eq!(legacy_history[0].note.as_deref(), Some("路演前"));
+        let encoded_receipt = serde_json::to_string(&receipt).unwrap();
+        for body in ["专注度", "分", "路演前"] {
+            assert!(!encoded_receipt.contains(body));
+        }
     }
 
     #[test]
