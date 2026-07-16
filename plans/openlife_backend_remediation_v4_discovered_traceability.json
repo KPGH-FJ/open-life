@@ -1027,16 +1027,16 @@
       {
         "id": "BR4-D067",
         "global_closure": {
-          "implementation_state": "not_started",
-          "verification_state": "none",
+          "implementation_state": "implemented",
+          "verification_state": "partial",
           "closure_state": "open"
         },
         "backend_roadshow_subset": {
           "scope": "required_backend_freeze_dependency",
-          "status": "generic_tool_audit_truth_fix_not_started"
+          "status": "mechanically_verified_global_open"
         },
         "product_disposition": "finish_required_subset_without_claiming_global_closure",
-        "note": "McpAuditStore is used by generic ToolGateway execution, so this finding cannot be dismissed by disabling MCP."
+        "note": "Generic ToolGateway receipts now preserve tool/effect truth separately from audit persistence truth, audit failure degrades PersistenceCoordinator and blocks later effects, and the warning-and-continue route is absent. Independent read-only review and global Phase7/V4 closure remain pending."
       },
       {
         "id": "BR4-D068",
@@ -2951,8 +2951,8 @@
       "id": "BR4-D067",
       "current_severity": "P1",
       "triage_state": "root_cause_confirmed",
-      "implementation_state": "not_started",
-      "verification_state": "none",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
       "closure_state": "open",
       "evidence": {
         "reproduction": [
@@ -2962,36 +2962,78 @@
           "counterexample:runtime-audit-failure-leaves-PersistenceCoordinator-healthy"
         ],
         "failing_test": [
-          "test_defined:D067-tool-success-plus-audit-failure-preserves-effect-and-degrades-persistence",
-          "test_defined:D067-tool-failure-plus-audit-failure-preserves-both-outcomes"
+          "red_test:d067_tool_success_plus_audit_failure_preserves_effect_and_reports_failure_once",
+          "red_test:d067_tool_failure_plus_audit_failure_preserves_both_outcomes",
+          "red_test:d067_audit_commit_failure_degrades_and_blocks_later_effects",
+          "red_test:d067_degraded_audit_store_blocks_next_scheduler_effect_in_same_loop"
         ],
-        "positive": [],
+        "positive": [
+          "commit:5ad099d-preserve-tool-audit-persistence-truth",
+          "gate:openlife-core-D067-4-of-4-2026-07-16",
+          "gate:openlife-core-tool-execution-receipt-18-of-18-2026-07-16",
+          "gate:openlife-core-ToolGateway-29-of-29-2026-07-16",
+          "gate:openlife-tauri-D067-3-of-3-2026-07-16",
+          "gate:openlife-tauri-scheduler-runner-11-of-11-2026-07-16",
+          "gate:openlife-tauri-main-chat-event-store-86-of-86-2026-07-16",
+          "gate:openlife-tauri-main-chat-runtime-module-30-of-30-2026-07-16",
+          "gate:openlife-tauri-single-system-32-of-32-2026-07-16",
+          "gate:openlife-tauri-product-agent-dto-12-of-12-2026-07-16",
+          "gate:cargo-check-openlife-tauri-tests-clean-current-source-2026-07-16",
+          "gate:frontend-typecheck-and-format-check-2026-07-16",
+          "static:cargo-fmt-git-diff-and-warning-route-absence-2026-07-16"
+        ],
         "counterfactual": [
-          "test_defined:audit-failure-never-retries-non-idempotent-tool",
-          "test_defined:normal-tool-terminal-writes-exactly-one-minimized-audit-row"
+          "test:audit-failure-callback-occurs-once-with-no-tool-or-audit-retry",
+          "test:normal-tool-terminal-writes-exactly-one-minimized-audit-row",
+          "test:tool-success-remains-succeeded-while-audit-status-is-failed",
+          "test:tool-failure-remains-the-original-failure-while-audit-status-is-failed",
+          "test:durable-tool-started-pending-and-terminal-failed-share-one-receipt",
+          "test:fabricated-non-failure-observer-callback-cannot-degrade-coordinator",
+          "test:scheduler-next-tool-and-canonical-proposal-admission-fail-before-dispatch"
         ],
         "deletion_or_absence": [
-          "deletion_required:audit-write-error-warning-and-continue",
-          "deletion_required:tool-terminal-without-audit-disposition",
-          "deletion_required:healthy-future-effect-admission-after-audit-store-failure"
+          "absence:audit-write-error-warning-and-continue",
+          "absence:manifest-backed-tool-terminal-with-pending-audit-disposition",
+          "absence:healthy-future-effect-admission-after-observed-audit-store-failure",
+          "source_guard:all-explicit-product-ActionExecutionContext-owners-install-the-audit-persistence-observer",
+          "source_guard:no-second-audit-ledger-or-raw-tool-payload-copy-was-added"
         ],
         "capability_non_regression": [
-          "test_defined:confirmed-tool-output-remains-available-with-explicit-audit-degraded-state",
-          "test_defined:pre-dispatch-blocker-keeps-zero-tool-and-audit-effects"
+          "test:confirmed-tool-output-remains-available-with-explicit-audit-degraded-state",
+          "test:pre-dispatch-blocker-keeps-zero-new-tool-and-audit-effects",
+          "gate:ToolGateway-Scheduler-MainChat-runtime-event-and-product-DTO-adjacent-suites-remain-green",
+          "gate:frontend-backend-contract-adapter-typechecks-with-no-visual-UI-change"
         ],
         "live_boundary": [
           "separate-from-D057-bootstrap-key-authority-root-cause",
-          "blocks-ToolGateway-truth-consistency-and-Phase7-final-GREEN",
-          "runtime-audit-failure-injection-and-existing-receipt-deepening-not-implemented"
+          "separate-from-D064-audit-store-identity-and-D068-payload-integrity",
+          "external-live-not-required:local-tool-audit-persistence-truth-slice",
+          "roadshow-backend-subset-mechanically-verified",
+          "independent-read-only-implementation-review-pending",
+          "full-main-chat-command-surface-still-has-pre-existing-proposal-origin-and-task-linkage-failures",
+          "full-backend-remediation-phase2-still-has-separate-open-findings",
+          "Phase7-and-global-V4-GREEN-not-claimed"
         ]
       },
       "independent_review": {
-        "reviewer": "d057_green_design_review",
-        "decision": "root-cause-confirmed-final-truth-consistency-blocker",
+        "reviewer": "pending_independent_readonly_reviewer",
+        "decision": "mechanical-gates-green-independent-readonly-review-pending",
         "evidence_refs": [
-          "fixed-commit-source-trace:both-audit-errors-are-swallowed",
-          "fixed-commit-source-trace:ToolCallInternalResult-and-ToolExecutionReceipt-cannot-express-audit-failure",
-          "fixed-commit-counterexample:tool-success-can-be-permanently-unaudited"
+          "commit:5ad099d",
+          "gate:D067-core-4-of-4",
+          "gate:ToolGateway-29-of-29",
+          "gate:D067-tauri-3-of-3",
+          "boundary:proposal-state-and-global-V4-findings-remain-separate"
+        ]
+      },
+      "roadshow_implementation": {
+        "status": "mechanically_verified_independent_review_pending",
+        "commit": "5ad099d625b90a81005f7576ec6f8424d41398ab",
+        "anti_hallucination": [
+          "tool-outcome-and-audit-persistence-are-recorded-as-separate-facts",
+          "an-observed-audit-failure-is-not-reported-as-a-tool-failure-or-retried",
+          "a-local-observer-callback-does-not-claim-the-audit-write-was-remotely-cancelled-or-rolled-back",
+          "full-command-surface-full-phase2-Phase7-and-global-V4-GREEN-were-not-claimed"
         ]
       }
     }
