@@ -861,22 +861,29 @@ async fn missing_required_snapshot_stores_fail_before_tool_dispatch() {
     Arc::get_mut(&mut missing_proposal)
         .expect("isolated state has one owner")
         .proposal_store = None;
-    for error in [
-        crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_main_chat_read(
-            &missing_proposal,
-        )
-        .await
-        .err()
-        .expect("Main Chat read requires ProposalStore"),
+    crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_main_chat_read(
+        &missing_proposal,
+    )
+    .await
+    .expect("Main Chat read must not acquire ProposalStore");
+    crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_main_chat_execution(
+        &missing_proposal,
+    )
+    .await
+    .expect("Main Chat execution must not acquire ProposalStore");
+    crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_main_chat_agent_loop(
+        &missing_proposal,
+    )
+    .await
+    .expect("Main Chat AgentLoop must not acquire ProposalStore");
+    let scheduler_error =
         crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_scheduler(
             &missing_proposal,
         )
         .await
         .err()
-        .expect("scheduler requires ProposalStore"),
-    ] {
-        assert_eq!(error, "tool_gateway_proposal_store_unavailable");
-    }
+        .expect("scheduler requires ProposalStore");
+    assert_eq!(scheduler_error, "tool_gateway_proposal_store_unavailable");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
