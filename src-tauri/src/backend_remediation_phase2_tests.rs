@@ -92,13 +92,22 @@ fn b1_deleted_agent_run_raw_read_callers_are_exactly_allowlisted() {
     );
     visit_rust_sources(&manifest.join("src"), repository_root, &mut actual);
     let expected = std::collections::BTreeMap::from([
-        ("openlife-core/src/agent/store.rs".to_string(), 3usize),
+        // Store- and command-local hits are tombstone regression assertions.
+        // Product code has only two authorized raw-read owners: early
+        // canonical run admission prevents tombstone resurrection, and
+        // projection recovery reads the deleted aggregate without exposing it
+        // through a product list/detail surface.
+        ("openlife-core/src/agent/store.rs".to_string(), 5usize),
         ("src-tauri/src/commands/agent.rs".to_string(), 2usize),
+        (
+            "src-tauri/src/main_chat_turn_runtime.rs".to_string(),
+            1usize,
+        ),
         ("src-tauri/src/memory_gateway.rs".to_string(), 1usize),
     ]);
     assert_eq!(
         actual, expected,
-        "deleted AgentRun raw reads are limited to the store visibility adapter, projection recovery, and explicit regression assertions"
+        "deleted AgentRun raw reads are limited to canonical run admission, projection recovery, and explicit regression assertions"
     );
 }
 
