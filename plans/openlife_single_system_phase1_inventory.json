@@ -908,6 +908,17 @@
   ],
   "backend_readmodel_review_authority_surfaces": [
     {
+      "id": "v3_state_history_read_owner",
+      "path": "src-tauri/src/commands/state.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Shipped state-history and alert reads require the StateStore legacy-import receipt and consume canonical StateStore history. MemoryStore remains migration evidence only and is not a product fallback.",
+      "concern": "state_history_read_owner",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_statestore_product_read_owner",
+      "read_model_status": "implemented_fail_closed_canonical_owner"
+    },
+    {
       "id": "r0_life_state_projection",
       "path": "src-tauri/src/life_state_projection.rs",
       "phase": 6,

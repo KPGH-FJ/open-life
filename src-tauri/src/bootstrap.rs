@@ -2692,11 +2692,11 @@ fn bootstrap_with_secret_store(
                             "legacy daily-task StateStore shadow parity remains blocked: {error}"
                         ));
                     }
-                    let history_shadow_result = memory_store
+                    let history_cutover_result = memory_store
                         .list_legacy_state_history_migration_source()
                         .map_err(|error| {
                             format!(
-                                "MemoryStore state history could not be loaded for StateStore shadow reconciliation: {error}"
+                                "MemoryStore state history could not be loaded for StateStore cutover: {error}"
                             )
                         })
                         .and_then(|snapshot| {
@@ -2704,14 +2704,21 @@ fn bootstrap_with_secret_store(
                                 &store,
                                 &snapshot,
                                 chrono::Utc::now(),
-                            )
+                            )?;
+                            store
+                                .import_legacy_state_history_shadow(chrono::Utc::now())
+                                .map_err(|error| {
+                                    format!(
+                                        "legacy state-history canonical import failed: {error}"
+                                    )
+                                })
                         });
-                    if let Err(error) = history_shadow_result {
-                        // MemoryStore remains the read-only migration owner
-                        // until the complete source snapshot has deterministic
-                        // parity and rollback evidence.
+                    if let Err(error) = history_cutover_result {
+                        // Product reads fail closed on the absent import
+                        // receipt. MemoryStore remains migration evidence, not
+                        // a hidden product fallback.
                         startup_warnings.borrow_mut().push(format!(
-                            "legacy state-history StateStore shadow parity remains blocked: {error}"
+                            "legacy state-history StateStore cutover remains blocked: {error}"
                         ));
                     }
                 } else {
@@ -3841,24 +3848,32 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_stages_legacy_state_history_without_switching_product_owner() {
+    fn bootstrap_imports_verified_legacy_state_history_and_preserves_migration_source() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let operation_digest =
+            openlife_core::persistence_outbox::metadata_digest("bootstrap legacy state history");
+        let memory_path = temp_dir.path().join("memory.db");
         {
-            let memory =
-                openlife_core::memory::MemoryStore::new(temp_dir.path().join("memory.db")).unwrap();
-            memory
-                .record_state_entry_idempotent(
-                    &operation_id,
+            let memory = openlife_core::memory::MemoryStore::new(&memory_path).unwrap();
+            drop(memory);
+            let conn = rusqlite::Connection::open(&memory_path).unwrap();
+            conn.execute(
+                "INSERT INTO state_history (
+                    dimension_name, value, unit, recorded_at, note,
+                    operation_id, operation_digest
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
                     "专注度",
                     8.0,
                     "分",
-                    Some("路演前"),
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
+                    chrono::Utc::now().to_rfc3339(),
+                    "路演前",
+                    operation_id,
+                    operation_digest,
+                ],
+            )
+            .unwrap();
         }
 
         let result =
@@ -3868,6 +3883,10 @@ mod tests {
             .legacy_state_history_shadow_receipt(false)
             .unwrap()
             .expect("legacy state-history shadow receipt");
+        let import_receipt = store
+            .legacy_state_history_import_receipt(false)
+            .unwrap()
+            .expect("legacy state-history import receipt");
         let shadow = store.list_legacy_state_history_shadow().unwrap();
 
         assert_eq!(receipt.item_count, 1);
@@ -3885,10 +3904,15 @@ mod tests {
             shadow[0].legacy_operation_id.as_deref(),
             Some(operation_id.as_str())
         );
-        assert!(
-            store.get_state_history("专注度", 10).unwrap().is_empty(),
-            "shadow rows must not become canonical StateStore history before cutover"
+        assert_eq!(import_receipt.item_count, 1);
+        assert_eq!(
+            import_receipt.candidate_digest,
+            import_receipt.canonical_digest
         );
+        let canonical_history = store.get_product_state_history("专注度", 10).unwrap();
+        assert_eq!(canonical_history.len(), 1);
+        assert_eq!(canonical_history[0].value, 8.0);
+        assert_eq!(canonical_history[0].note.as_deref(), Some("路演前"));
         let legacy_history = result
             .state
             .memory_store
@@ -3897,7 +3921,7 @@ mod tests {
             .unwrap();
         assert_eq!(legacy_history.len(), 1);
         assert_eq!(legacy_history[0].note.as_deref(), Some("路演前"));
-        let encoded_receipt = serde_json::to_string(&receipt).unwrap();
+        let encoded_receipt = serde_json::to_string(&(receipt, import_receipt)).unwrap();
         for body in ["专注度", "分", "路演前"] {
             assert!(!encoded_receipt.contains(body));
         }

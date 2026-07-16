@@ -1,9 +1,45 @@
 use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::life_model::{AlertLevel, DailyGoal, StateAlert};
-use openlife_core::memory::StateHistoryEntry;
+use openlife_core::state_store::StateHistoryEntry;
 use std::sync::Arc;
 use tauri::State;
+
+fn canonical_state_store(
+    state: &Arc<AppState>,
+) -> Result<&openlife_core::state_store::StateStore, AppError> {
+    state
+        .state_store
+        .as_deref()
+        .ok_or_else(|| {
+            AppError::db_with_hint(
+                "StateStore is unavailable; state history truth is degraded and no temporary fallback is allowed.",
+                "restart_after_repairing_state_db",
+            )
+        })
+}
+
+fn state_history_error(error: anyhow::Error) -> AppError {
+    let message = error.to_string();
+    if message.contains("state_history_product_owner_") {
+        AppError::db_with_hint(
+            format!("State history canonical owner is unavailable: {message}"),
+            "restart_after_repairing_state_db",
+        )
+    } else {
+        AppError::from(error)
+    }
+}
+
+pub(crate) fn get_state_history_with_state(
+    state: &Arc<AppState>,
+    dimension_name: &str,
+    limit: usize,
+) -> Result<Vec<StateHistoryEntry>, AppError> {
+    canonical_state_store(state)?
+        .get_product_state_history(dimension_name, limit)
+        .map_err(state_history_error)
+}
 
 #[tauri::command]
 pub async fn get_state_history(
@@ -11,24 +47,21 @@ pub async fn get_state_history(
     limit: usize,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<StateHistoryEntry>, AppError> {
-    let store = state.memory_store.lock().await;
-    store
-        .get_state_history(&dimension_name, limit)
-        .map_err(AppError::from)
+    get_state_history_with_state(&state.inner().clone(), &dimension_name, limit)
 }
 
-#[tauri::command]
-pub async fn get_state_alerts(
-    state: State<'_, Arc<AppState>>,
+pub(crate) async fn get_state_alerts_with_state(
+    state: &Arc<AppState>,
 ) -> Result<Vec<StateAlert>, AppError> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
-    let store = state.memory_store.lock().await;
+    drop(manager);
+    let store = canonical_state_store(state)?;
     let mut alerts = Vec::new();
     for dim in &model.state.custom_dimensions {
         let entries = store
-            .get_state_history(&dim.name, (dim.alert_days.max(1) as usize) * 2)
-            .map_err(AppError::from)?;
+            .get_product_state_history(&dim.name, (dim.alert_days.max(1) as usize) * 2)
+            .map_err(state_history_error)?;
         if entries.len() < dim.alert_days.max(1) as usize {
             continue;
         }
@@ -77,6 +110,13 @@ pub async fn get_state_alerts(
         }
     }
     Ok(alerts)
+}
+
+#[tauri::command]
+pub async fn get_state_alerts(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<StateAlert>, AppError> {
+    get_state_alerts_with_state(&state.inner().clone()).await
 }
 
 pub(crate) async fn get_daily_goals_with_state(
@@ -266,5 +306,82 @@ mod tests {
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].name, "Exercise");
         assert!(!goals[0].done);
+    }
+
+    #[test]
+    fn state_history_product_read_fails_closed_without_import_receipt() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let error = get_state_history_with_state(&state, "focus", 10).unwrap_err();
+        assert!(matches!(&error, AppError::Database { .. }));
+        assert!(error
+            .message()
+            .contains("state_history_product_owner_not_ready"));
+    }
+
+    #[tokio::test]
+    async fn state_history_and_alerts_read_only_canonical_statestore_after_cutover() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let store = state.state_store.as_ref().unwrap();
+        store
+            .reconcile_legacy_state_history_shadow(
+                openlife_core::persistence_outbox::metadata_digest(
+                    "commands-state-history-cutover",
+                ),
+                vec![
+                    openlife_core::state_store::LegacyStateHistoryShadowCandidate {
+                        legacy_id: 1,
+                        dimension_name: "focus".into(),
+                        value: 3.0,
+                        unit: "/10".into(),
+                        recorded_at: chrono::Utc::now() - chrono::Duration::days(1),
+                        note: Some("legacy day one".into()),
+                        legacy_operation_id: None,
+                        legacy_operation_digest: None,
+                    },
+                    openlife_core::state_store::LegacyStateHistoryShadowCandidate {
+                        legacy_id: 2,
+                        dimension_name: "focus".into(),
+                        value: 4.0,
+                        unit: "/10".into(),
+                        recorded_at: chrono::Utc::now(),
+                        note: Some("legacy day two".into()),
+                        legacy_operation_id: None,
+                        legacy_operation_digest: None,
+                    },
+                ],
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        store
+            .import_legacy_state_history_shadow(chrono::Utc::now())
+            .unwrap();
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap_or_default();
+            model
+                .state
+                .custom_dimensions
+                .push(openlife_core::life_model::CustomStateDimension {
+                    name: "focus".into(),
+                    current_value: 4.0,
+                    unit: "/10".into(),
+                    min_threshold: Some(5.0),
+                    max_threshold: None,
+                    alert_days: 2,
+                });
+            manager.save(&model).unwrap();
+        }
+
+        let history = get_state_history_with_state(&state, "focus", 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].note.as_deref(), Some("legacy day one"));
+        assert_eq!(history[1].note.as_deref(), Some("legacy day two"));
+        let alerts = get_state_alerts_with_state(&state).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].dimension_name, "focus");
+        assert!(alerts[0].message.contains("连续 2 天低于阈值 5"));
     }
 }

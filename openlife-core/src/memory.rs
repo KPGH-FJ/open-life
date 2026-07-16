@@ -4,6 +4,7 @@ use crate::llm::ChatMessage;
 use crate::persistence_outbox::{
     self, CanonicalMutationReceipt, ProjectionDelivery, ProjectionSummary,
 };
+use crate::state_store::StateHistoryEntry;
 use crate::vectors::{
     CanonicalVectorOwnerRef, MemoryChunk, VectorRebuildSourceSnapshot, VECTOR_REBUILD_BATCH_LIMIT,
 };
@@ -2661,7 +2662,8 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn record_state_entry(
+    #[cfg(test)]
+    fn record_state_entry(
         &self,
         dimension_name: &str,
         value: f64,
@@ -2682,7 +2684,8 @@ impl MemoryStore {
             .state_entry_id)
     }
 
-    pub fn record_state_entry_idempotent(
+    #[cfg(test)]
+    fn record_state_entry_idempotent(
         &self,
         operation_id: &str,
         dimension_name: &str,
@@ -3839,16 +3842,6 @@ pub struct ChatSession {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct StateHistoryEntry {
-    pub id: i64,
-    pub dimension_name: String,
-    pub value: f64,
-    pub unit: String,
-    pub recorded_at: String,
-    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

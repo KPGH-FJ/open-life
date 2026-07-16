@@ -2444,6 +2444,26 @@ fn single_system_phase6_frontend_product_status_reads_life_state_projection() {
 }
 
 #[test]
+fn single_system_statestore_is_the_only_shipped_state_history_read_owner() {
+    let raw_source = read_repo_file("src-tauri/src/commands/state.rs");
+    let source = strip_cfg_test_module(&raw_source);
+    assert!(
+        source.contains(".get_product_state_history("),
+        "shipped state history and alerts must consume the receipt-gated StateStore product read"
+    );
+    for forbidden in [
+        "state.memory_store",
+        ".memory_store.lock()",
+        ".get_state_history(&dimension_name",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "shipped state history must not retain a MemoryStore fallback: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
     let expected = expected_count_map("direct_memory_lifemodel_write_surfaces");
     let needles = [

@@ -199,6 +199,16 @@ pub struct StateObservation {
     pub tombstone_reason: Option<StateMutationKind>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateHistoryEntry {
+    pub id: i64,
+    pub dimension_name: String,
+    pub value: f64,
+    pub unit: String,
+    pub recorded_at: String,
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateExecutionReceipt {
@@ -2430,11 +2440,11 @@ impl StateStore {
         Ok(rows)
     }
 
-    pub fn get_state_history(
+    pub(crate) fn get_state_history(
         &self,
         dimension_name: &str,
         limit: usize,
-    ) -> Result<Vec<crate::memory::StateHistoryEntry>> {
+    ) -> Result<Vec<StateHistoryEntry>> {
         let dimension_name = dimension_name.trim();
         if dimension_name.is_empty()
             || dimension_name.chars().count() > MAX_LEGACY_STATE_HISTORY_DIMENSION_CHARS
@@ -2451,7 +2461,7 @@ impl StateStore {
              LIMIT ?2",
         )?;
         let rows = statement.query_map(params![dimension_name, limit], |row| {
-            Ok(crate::memory::StateHistoryEntry {
+            Ok(StateHistoryEntry {
                 id: row.get(0)?,
                 dimension_name: row.get(1)?,
                 value: row.get(2)?,
@@ -2463,6 +2473,22 @@ impl StateStore {
         let mut entries = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         entries.reverse();
         Ok(entries)
+    }
+
+    pub fn get_product_state_history(
+        &self,
+        dimension_name: &str,
+        limit: usize,
+    ) -> Result<Vec<StateHistoryEntry>> {
+        {
+            let conn = self.lock_connection()?;
+            let receipt = legacy_state_history_import_receipt(&conn, false)?
+                .context("state_history_product_owner_not_ready")?;
+            if receipt.candidate_digest != receipt.canonical_digest {
+                anyhow::bail!("state_history_product_owner_receipt_inconsistent");
+            }
+        }
+        self.get_state_history(dimension_name, limit)
     }
 
     fn latest_active_state_observation(
