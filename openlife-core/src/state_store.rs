@@ -14,9 +14,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 6;
+const STATE_STORE_SCHEMA_VERSION: i64 = 7;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
+const LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND: &str = "legacy_state_history_import";
+const LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_ID: &str = "legacy_state_history";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
 const PROJECTION_TARGETS: &[&str] = &[LIFEMODEL_YAML_PROJECTION_TARGET];
 const OBSERVATION_PROJECTION_TARGETS: &[&str] = &[];
@@ -333,6 +335,23 @@ pub struct LegacyStateHistoryShadowReceipt {
     pub deterministic: bool,
     pub parity: bool,
     pub rollback_rehearsed: bool,
+    pub committed_at: DateTime<Utc>,
+    pub replayed: bool,
+}
+
+/// Metadata-only receipt proving that the verified legacy history shadow was
+/// imported into canonical StateStore history in the same transaction as its
+/// outbox fact. The body remains owned by `state_observation_history`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyStateHistoryImportReceipt {
+    pub schema: String,
+    pub receipt_id: String,
+    pub source_asset_digest: String,
+    pub candidate_digest: String,
+    pub canonical_digest: String,
+    pub item_count: usize,
+    pub outbox_event_id: String,
     pub committed_at: DateTime<Utc>,
     pub replayed: bool,
 }
@@ -1022,6 +1041,17 @@ impl StateStore {
                 succeeded INTEGER NOT NULL CHECK(succeeded IN (0, 1)),
                 committed_at TEXT NOT NULL
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_legacy_history_import_current (
+                singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
+                receipt_id TEXT NOT NULL UNIQUE,
+                source_asset_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                canonical_digest TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 50000),
+                outbox_event_id TEXT NOT NULL UNIQUE,
+                committed_at TEXT NOT NULL,
+                FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
+             );
              CREATE TABLE IF NOT EXISTS state_legacy_daily_task_shadow_current (
                 singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
                 receipt_id TEXT NOT NULL UNIQUE,
@@ -1070,7 +1100,7 @@ impl StateStore {
             )
             .optional()?;
         let needs_observation_history_backfill =
-            !matches!(existing_version.as_deref(), None | Some("6"));
+            !matches!(existing_version.as_deref(), None | Some("6") | Some("7"));
         match existing_version.as_deref() {
             None => {
                 tx.execute(
@@ -1085,35 +1115,41 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '6'
+                     SET value = '7'
                      WHERE key = 'schema_version';",
                 )?;
             }
             Some("2") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("3") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("4") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
             Some("5") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
-            Some("6") => {}
+            Some("6") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '7' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("7") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         if needs_observation_history_backfill {
@@ -1474,6 +1510,122 @@ impl StateStore {
     ) -> Result<Option<LegacyStateHistoryShadowReceipt>> {
         let conn = self.lock_connection()?;
         legacy_state_history_shadow_receipt(&conn, replayed)
+    }
+
+    pub fn import_legacy_state_history_shadow(
+        &self,
+        committed_at: DateTime<Utc>,
+    ) -> Result<LegacyStateHistoryImportReceipt> {
+        self.import_legacy_state_history_shadow_guarded(committed_at, || Result::<()>::Ok(()))
+    }
+
+    pub fn import_legacy_state_history_shadow_guarded<F>(
+        &self,
+        committed_at: DateTime<Utc>,
+        before_commit: F,
+    ) -> Result<LegacyStateHistoryImportReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let shadow = legacy_state_history_shadow_receipt(&tx, false)?
+            .context("state_legacy_history_import_shadow_missing")?;
+        if !shadow.deterministic
+            || !shadow.parity
+            || !shadow.rollback_rehearsed
+            || shadow.candidate_digest != shadow.repeated_read_digest
+            || shadow.candidate_digest != shadow.restored_digest
+        {
+            anyhow::bail!("state_legacy_history_import_shadow_unverified");
+        }
+        let candidates = load_legacy_state_history_shadow_candidates(&tx)?;
+        let candidate_digest = legacy_state_history_shadow_digest(&candidates)?;
+        if shadow.item_count != candidates.len() || shadow.candidate_digest != candidate_digest {
+            anyhow::bail!("state_legacy_history_import_shadow_drift");
+        }
+
+        if let Some(existing) = legacy_state_history_import_receipt(&tx, true)? {
+            if existing.source_asset_digest != shadow.source_asset_digest
+                || existing.candidate_digest != candidate_digest
+            {
+                anyhow::bail!("state_legacy_history_import_source_changed_after_cutover");
+            }
+            let canonical =
+                load_canonical_legacy_state_history_candidates(&tx, &shadow.source_asset_digest)?;
+            let canonical_digest = legacy_state_history_shadow_digest(&canonical)?;
+            if canonical != candidates
+                || canonical_digest != existing.canonical_digest
+                || existing.canonical_digest != existing.candidate_digest
+                || existing.item_count != canonical.len()
+            {
+                anyhow::bail!("state_legacy_history_import_existing_canonical_inconsistent");
+            }
+            tx.rollback()?;
+            return Ok(existing);
+        }
+
+        let orphan_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM state_observation_history
+             WHERE source_kind = 'legacy_memory_store'",
+            [],
+            |row| row.get(0),
+        )?;
+        if orphan_count != 0 {
+            anyhow::bail!("state_legacy_history_import_orphan_canonical_rows");
+        }
+
+        for candidate in &candidates {
+            insert_canonical_legacy_state_history_candidate(
+                &tx,
+                &shadow.source_asset_digest,
+                candidate,
+            )?;
+        }
+        let canonical =
+            load_canonical_legacy_state_history_candidates(&tx, &shadow.source_asset_digest)?;
+        let canonical_digest = legacy_state_history_shadow_digest(&canonical)?;
+        if canonical != candidates || canonical_digest != candidate_digest {
+            anyhow::bail!("state_legacy_history_import_canonical_parity_failed");
+        }
+
+        let outbox = crate::persistence_outbox::enqueue_mutation(
+            &tx,
+            LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND,
+            LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_ID,
+            "import",
+            &candidate_digest,
+            &[],
+        )?;
+        let receipt_id = format!("state_legacy_history_import_receipt:{}", Uuid::new_v4());
+        tx.execute(
+            "INSERT INTO state_legacy_history_import_current (
+                 singleton_key, receipt_id, source_asset_digest, candidate_digest,
+                 canonical_digest, item_count, outbox_event_id, committed_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                receipt_id,
+                shadow.source_asset_digest,
+                candidate_digest,
+                canonical_digest,
+                i64::try_from(candidates.len())?,
+                outbox.event_id,
+                committed_at.to_rfc3339(),
+            ],
+        )?;
+        before_commit()?;
+        tx.commit()?;
+        drop(conn);
+        self.legacy_state_history_import_receipt(false)?
+            .context("state_legacy_history_import_receipt_missing_after_commit")
+    }
+
+    pub fn legacy_state_history_import_receipt(
+        &self,
+        replayed: bool,
+    ) -> Result<Option<LegacyStateHistoryImportReceipt>> {
+        let conn = self.lock_connection()?;
+        legacy_state_history_import_receipt(&conn, replayed)
     }
 
     pub fn create_state_observation(
@@ -3736,6 +3888,124 @@ fn legacy_state_history_shadow_receipt(
     .transpose()
 }
 
+fn legacy_state_history_source_ref(source_asset_digest: &str) -> Result<String> {
+    if !is_sha256_digest(source_asset_digest) {
+        anyhow::bail!("state_legacy_history_import_source_digest_invalid");
+    }
+    Ok(format!(
+        "legacy_memory_store_snapshot:{source_asset_digest}"
+    ))
+}
+
+fn insert_canonical_legacy_state_history_candidate(
+    tx: &Transaction<'_>,
+    source_asset_digest: &str,
+    candidate: &LegacyStateHistoryShadowCandidate,
+) -> Result<()> {
+    let source_ref = legacy_state_history_source_ref(source_asset_digest)?;
+    let source_digest = legacy_state_history_shadow_digest(std::slice::from_ref(candidate))?;
+    tx.execute(
+        "INSERT INTO state_observation_history (
+             observation_id, operation_id, dimension_name, value, unit,
+             recorded_at, note, source_kind, source_ref, source_digest,
+             legacy_id, legacy_operation_id, legacy_operation_digest
+         ) VALUES (NULL, NULL, ?1, ?2, ?3, ?4, ?5,
+                   'legacy_memory_store', ?6, ?7, ?8, ?9, ?10)",
+        params![
+            candidate.dimension_name,
+            candidate.value,
+            candidate.unit,
+            candidate.recorded_at.to_rfc3339(),
+            candidate.note,
+            source_ref,
+            source_digest,
+            candidate.legacy_id,
+            candidate.legacy_operation_id,
+            candidate.legacy_operation_digest,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_canonical_legacy_state_history_candidates(
+    conn: &Connection,
+    source_asset_digest: &str,
+) -> Result<Vec<LegacyStateHistoryShadowCandidate>> {
+    let source_ref = legacy_state_history_source_ref(source_asset_digest)?;
+    let mut statement = conn.prepare(
+        "SELECT legacy_id, dimension_name, value, unit, recorded_at, note,
+                legacy_operation_id, legacy_operation_digest
+         FROM state_observation_history
+         WHERE source_kind = 'legacy_memory_store' AND source_ref = ?1
+         ORDER BY legacy_id ASC",
+    )?;
+    let candidates = statement
+        .query_map([source_ref], |row| {
+            Ok(LegacyStateHistoryShadowCandidate {
+                legacy_id: row.get(0)?,
+                dimension_name: row.get(1)?,
+                value: row.get(2)?,
+                unit: row.get(3)?,
+                recorded_at: parse_time_sql(row.get::<_, String>(4)?)?,
+                note: row.get(5)?,
+                legacy_operation_id: row.get(6)?,
+                legacy_operation_digest: row.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::from)?;
+    Ok(candidates)
+}
+
+fn legacy_state_history_import_receipt(
+    conn: &Connection,
+    replayed: bool,
+) -> Result<Option<LegacyStateHistoryImportReceipt>> {
+    conn.query_row(
+        "SELECT receipt_id, source_asset_digest, candidate_digest,
+                canonical_digest, item_count, outbox_event_id, committed_at
+         FROM state_legacy_history_import_current WHERE singleton_key = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(
+        |(
+            receipt_id,
+            source_asset_digest,
+            candidate_digest,
+            canonical_digest,
+            item_count,
+            outbox_event_id,
+            committed_at,
+        )| {
+            Ok(LegacyStateHistoryImportReceipt {
+                schema: "openlife.state-legacy-history-import-receipt.v1".into(),
+                receipt_id,
+                source_asset_digest,
+                candidate_digest,
+                canonical_digest,
+                item_count: usize::try_from(item_count)
+                    .context("state_legacy_history_import_item_count_invalid")?,
+                outbox_event_id,
+                committed_at: parse_time(&committed_at)?,
+                replayed,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(StdDuration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -5144,7 +5414,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert!(request_digest_column_exists);
     }
 
@@ -5185,7 +5455,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert_eq!(
             tables,
             [
@@ -5232,7 +5502,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert_eq!(
             tables,
             [
@@ -5281,7 +5551,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert_eq!(
             tables,
             [
@@ -5336,8 +5606,45 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert_eq!(stored_operation, operation_id);
+    }
+
+    #[test]
+    fn schema_v6_adds_legacy_history_import_receipt_before_advancing_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v6.db");
+        {
+            let store = StateStore::new(&path).unwrap();
+            let conn = store.lock_connection().unwrap();
+            conn.execute("DROP TABLE state_legacy_history_import_current", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE state_store_metadata SET value = '6' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let restarted = StateStore::new(&path).unwrap();
+        let conn = restarted.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'state_legacy_history_import_current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "7");
+        assert_eq!(table_exists, 1);
     }
 
     #[test]
@@ -5696,6 +6003,160 @@ mod tests {
             .to_string()
             .contains("legacy_history_shadow_injected_commit_failure"));
         assert_eq!(store.list_legacy_state_history_shadow().unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_state_history_import_is_atomic_replayable_and_outbox_bound() {
+        let store = StateStore::new_in_memory().unwrap();
+        let source_digest =
+            digest_json(&serde_json::json!({"memoryStore": "profile-a-history"})).unwrap();
+        let candidates = vec![
+            LegacyStateHistoryShadowCandidate {
+                legacy_id: 1,
+                dimension_name: "focus".into(),
+                value: 7.0,
+                unit: "/10".into(),
+                recorded_at: at(8),
+                note: Some("before roadshow".into()),
+                legacy_operation_id: None,
+                legacy_operation_digest: None,
+            },
+            LegacyStateHistoryShadowCandidate {
+                legacy_id: 2,
+                dimension_name: "focus".into(),
+                value: 8.0,
+                unit: "/10".into(),
+                recorded_at: at(9),
+                note: None,
+                legacy_operation_id: Some(Uuid::new_v4().hyphenated().to_string()),
+                legacy_operation_digest: Some(
+                    digest_json(&serde_json::json!({"legacy": "operation"})).unwrap(),
+                ),
+            },
+        ];
+        store
+            .reconcile_legacy_state_history_shadow(
+                source_digest.clone(),
+                candidates.clone(),
+                at(10),
+            )
+            .unwrap();
+
+        let first = store.import_legacy_state_history_shadow(at(11)).unwrap();
+        let replay = store.import_legacy_state_history_shadow(at(12)).unwrap();
+
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.receipt_id, replay.receipt_id);
+        assert_eq!(first.source_asset_digest, source_digest);
+        assert_eq!(first.candidate_digest, first.canonical_digest);
+        assert_eq!(first.item_count, candidates.len());
+        let history = store.get_state_history("focus", 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, 1);
+        assert_eq!(history[0].dimension_name, "focus");
+        assert_eq!(history[0].value, 7.0);
+        assert_eq!(history[0].unit, "/10");
+        assert_eq!(history[0].recorded_at, at(8).to_rfc3339());
+        assert_eq!(history[0].note.as_deref(), Some("before roadshow"));
+        assert_eq!(history[1].id, 2);
+        assert_eq!(history[1].dimension_name, "focus");
+        assert_eq!(history[1].value, 8.0);
+        assert_eq!(history[1].unit, "/10");
+        assert_eq!(history[1].recorded_at, at(9).to_rfc3339());
+        assert!(history[1].note.is_none());
+        let encoded_receipt = serde_json::to_string(&first).unwrap();
+        for body in ["focus", "before roadshow", "/10"] {
+            assert!(!encoded_receipt.contains(body));
+        }
+        let conn = store.lock_connection().unwrap();
+        let outbox_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_events
+                 WHERE aggregate_kind = ?1 AND aggregate_id = ?2",
+                params![
+                    LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND,
+                    LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_ID
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox_count, 1);
+        drop(conn);
+
+        store
+            .reconcile_legacy_state_history_shadow(
+                digest_json(&serde_json::json!({"memoryStore": "profile-b-history"})).unwrap(),
+                vec![LegacyStateHistoryShadowCandidate {
+                    legacy_id: 1,
+                    dimension_name: "focus".into(),
+                    value: 9.0,
+                    unit: "/10".into(),
+                    recorded_at: at(10),
+                    note: Some("drift".into()),
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                }],
+                at(13),
+            )
+            .unwrap();
+        let error = store
+            .import_legacy_state_history_shadow(at(14))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_legacy_history_import_source_changed_after_cutover"));
+        assert_eq!(store.get_state_history("focus", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn legacy_state_history_import_fault_leaves_zero_canonical_or_outbox_effect() {
+        let store = StateStore::new_in_memory().unwrap();
+        store
+            .reconcile_legacy_state_history_shadow(
+                digest_json(&serde_json::json!({"memoryStore": "fault-history"})).unwrap(),
+                vec![LegacyStateHistoryShadowCandidate {
+                    legacy_id: 1,
+                    dimension_name: "energy".into(),
+                    value: 6.0,
+                    unit: "/10".into(),
+                    recorded_at: at(9),
+                    note: Some("legacy".into()),
+                    legacy_operation_id: None,
+                    legacy_operation_digest: None,
+                }],
+                at(10),
+            )
+            .unwrap();
+
+        let error = store
+            .import_legacy_state_history_shadow_guarded(at(11), || {
+                anyhow::bail!("legacy_state_history_import_injected_failure")
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("legacy_state_history_import_injected_failure"));
+        assert!(store
+            .legacy_state_history_import_receipt(false)
+            .unwrap()
+            .is_none());
+        assert!(store.get_state_history("energy", 10).unwrap().is_empty());
+        let conn = store.lock_connection().unwrap();
+        let outbox_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_events
+                 WHERE aggregate_kind = ?1",
+                [LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox_count, 0);
+        drop(conn);
+
+        let recovered = store.import_legacy_state_history_shadow(at(12)).unwrap();
+        assert!(!recovered.replayed);
+        assert_eq!(store.get_state_history("energy", 10).unwrap().len(), 1);
     }
 
     #[test]
