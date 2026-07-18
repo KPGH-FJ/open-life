@@ -612,6 +612,24 @@ fn set_resource_limit(resource: ResourceLimitSelector, limit: u64) -> std::io::R
 mod tests {
     use super::*;
 
+    fn hanging_worker(timeout: Duration) -> ResourceParserProcess {
+        ResourceParserProcess::test_command(
+            std::env::current_exe().expect("current test executable"),
+            vec![
+                OsString::from("resource_gateway::tests::resource_parser_hanging_worker"),
+                OsString::from("--exact"),
+                OsString::from("--ignored"),
+            ],
+            timeout,
+        )
+    }
+
+    #[test]
+    #[ignore = "invoked only as the portable kill-and-reap child process"]
+    fn resource_parser_hanging_worker() {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
     fn small_request() -> ResourceExtractionRequest {
         ResourceExtractionRequest {
             filename: "roadshow.md".to_string(),
@@ -622,11 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_kills_and_reaps_a_hung_worker_under_one_second() {
-        let parser = ResourceParserProcess::test_command(
-            "/bin/sleep",
-            vec![OsString::from("60")],
-            Duration::from_secs(30),
-        );
+        let parser = hanging_worker(Duration::from_secs(30));
         let cancellation = ResourceImportCancellation::default();
         let cancelling = cancellation.clone();
         tokio::spawn(async move {
@@ -647,11 +661,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_kills_and_reaps_a_hung_worker() {
-        let parser = ResourceParserProcess::test_command(
-            "/bin/sleep",
-            vec![OsString::from("60")],
-            Duration::from_millis(80),
-        );
+        let parser = hanging_worker(Duration::from_millis(80));
         let error = parser
             .extract(small_request(), &ResourceImportCancellation::default())
             .await

@@ -19372,6 +19372,7 @@ mod action_queue_replay_claim_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn same_path_database_replacement_cannot_create_two_action_queue_owners() {
         let directory = tempfile::tempdir().expect("temp directory");
@@ -19414,6 +19415,36 @@ mod action_queue_replay_claim_tests {
         let replacement_owner = ActionQueueStore::new_with_authority_key(&slot, key)
             .expect("final owner drop releases the canonical slot lease");
         assert_eq!(replacement_owner.store_id().unwrap(), original_store_id);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_action_queue_owner_prevents_same_path_database_replacement() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let slot = directory.path().join("action-queue.sqlite");
+        let displaced = directory.path().join("action-queue-old.sqlite");
+        let key = ActionQueueAuthorityKey::from_key_material(&[0x37; 32]).unwrap();
+        let first = ActionQueueStore::new_with_authority_key(&slot, key.clone())
+            .expect("open first canonical owner");
+
+        let replacement_error = std::fs::rename(&slot, &displaced)
+            .expect_err("Windows must not replace a live SQLite database pathname");
+        assert!(
+            replacement_error.raw_os_error().is_some(),
+            "expected an OS-backed sharing violation: {replacement_error}"
+        );
+        let second_error = ActionQueueStore::new_with_authority_key(&slot, key.clone())
+            .err()
+            .expect("the live canonical slot must not create a second owner")
+            .to_string();
+        assert!(
+            second_error.contains("action_queue_store_sqlite_slot_owner_lease_unavailable"),
+            "{second_error}"
+        );
+
+        drop(first);
+        ActionQueueStore::new_with_authority_key(&slot, key)
+            .expect("final owner drop releases the canonical slot lease");
     }
 
     #[test]

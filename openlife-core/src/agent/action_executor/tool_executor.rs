@@ -2223,7 +2223,7 @@ mod bound_content_receipt_tests {
 
     #[test]
     fn bound_content_receipt_admission_has_one_private_mint_surface() {
-        let executor_source = include_str!("tool_executor.rs");
+        let executor_source = include_str!("tool_executor.rs").replace("\r\n", "\n");
         let production_source = executor_source
             .split("#[cfg(test)]\nmod bound_content_receipt_tests")
             .next()

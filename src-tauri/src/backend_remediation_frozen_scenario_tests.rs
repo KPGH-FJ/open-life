@@ -1338,7 +1338,7 @@ fn run_02_store_claim_is_only_a_lower_bound_for_the_frozen_product_scenario() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn run_02_product_accept_path_has_one_success_and_one_observed_file_effect() {
+async fn run_02_product_accept_path_has_one_dispatch_and_one_observed_file_effect() {
     assert_eq!(
         execution_for("RUN-02").mechanical_coverage,
         FrozenMechanicalCoverage::ProductDispatcherWithoutCountingAdapter,
@@ -1386,18 +1386,31 @@ async fn run_02_product_accept_path_has_one_success_and_one_observed_file_effect
             })
         })
         .collect::<Vec<_>>();
-    let mut successes = 0usize;
+    let mut accepted_responses = 0usize;
+    let mut dispatches = 0usize;
     let mut errors = Vec::new();
     for contender in contenders {
         match contender.await.expect("RUN-02 product contender joins") {
-            Ok(_) => successes += 1,
+            Ok(response) => {
+                accepted_responses += 1;
+                let operation = response
+                    .pointer("/patch_result/operation")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("RUN-02 accepted response operation");
+                match operation {
+                    "artifact_materialized" => dispatches += 1,
+                    "confirmed_effect_projection_reconciled" => {}
+                    other => panic!("unexpected RUN-02 accepted operation: {other}"),
+                }
+            }
             Err(error) => errors.push(error),
         }
     }
     assert_eq!(
-        successes, 1,
-        "only one product acceptor may own dispatch; errors={errors:#?}"
+        dispatches, 1,
+        "only one product acceptor may own dispatch; accepted_responses={accepted_responses}, errors={errors:#?}"
     );
+    assert!(accepted_responses >= 1);
     assert_eq!(
         std::fs::read_to_string(&effect_path).expect("RUN-02 observed file effect"),
         "one frozen product dispatch"

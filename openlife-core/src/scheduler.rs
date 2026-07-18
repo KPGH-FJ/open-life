@@ -4174,7 +4174,7 @@ mod tests {
 
     #[test]
     fn scheduled_scheduler_public_api_has_no_generic_or_streaming_bypass() {
-        let source = include_str!("scheduler.rs");
+        let source = include_str!("scheduler.rs").replace("\r\n", "\n");
         let start = source
             .find("impl ScheduledInferenceScheduler {")
             .expect("scheduled scheduler impl");

@@ -11649,6 +11649,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn same_path_database_replacement_cannot_create_two_agent_run_owners() {
         let dir = tempfile::tempdir().unwrap();
@@ -11699,6 +11700,38 @@ mod tests {
             AgentRunStore::existing_canonical_store_identity(&conn).unwrap()
         };
         assert_eq!(reopened_identity, original_identity);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_agent_run_owner_prevents_same_path_database_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let slot = directory.path().join("agent-runs.db");
+        let displaced = directory.path().join("agent-runs-old.db");
+        let key = AgentRunReceiptKey::from_bytes(
+            [0x3a; crate::agent::types::AGENT_RUN_RECEIPT_KEY_BYTES],
+        )
+        .unwrap();
+        let first = AgentRunStore::new_with_receipt_key(&slot, key.clone()).unwrap();
+
+        let replacement_error = std::fs::rename(&slot, &displaced)
+            .expect_err("Windows must not replace a live SQLite database pathname");
+        assert!(
+            replacement_error.raw_os_error().is_some(),
+            "expected an OS-backed sharing violation: {replacement_error}"
+        );
+        let second_error = AgentRunStore::new_with_receipt_key(&slot, key.clone())
+            .err()
+            .expect("the live canonical slot must not create a second AgentRun owner")
+            .to_string();
+        assert!(
+            second_error.contains("agent_run_store_sqlite_slot_owner_lease_unavailable"),
+            "{second_error}"
+        );
+
+        drop(first);
+        AgentRunStore::new_with_receipt_key(&slot, key)
+            .expect("final owner drop releases the AgentRun canonical slot lease");
     }
 
     #[tokio::test]

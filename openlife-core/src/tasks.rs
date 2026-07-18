@@ -8085,7 +8085,8 @@ mod tests {
 
     #[test]
     fn production_reconciliation_has_no_caller_constructible_resolution_or_evidence_lane() {
-        let production = include_str!("tasks.rs")
+        let source = include_str!("tasks.rs").replace("\r\n", "\n");
+        let production = source
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("production TaskStore source");
