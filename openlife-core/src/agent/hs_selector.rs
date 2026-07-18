@@ -170,6 +170,66 @@ pub struct RuntimeHSPacket {
     pub guidance_refs: Vec<SelectedGuidanceRef>,
     pub estimated_tokens: usize,
     pub audit: HSSelectionAudit,
+    /// Ephemeral capability issued by PolicyStore. It is intentionally omitted
+    /// from serialization; a deserialized packet cannot recreate cloud
+    /// authority from its public metadata.
+    #[serde(skip)]
+    pub provider_authorization: crate::llm::ProviderPolicyAuthorization,
+}
+
+impl RuntimeHSPacket {
+    pub fn provider_authorization(&self) -> &crate::llm::ProviderPolicyAuthorization {
+        &self.provider_authorization
+    }
+
+    pub fn provider_policy_provenance_refs(&self) -> Vec<crate::llm::ProviderPolicyProvenanceRef> {
+        let route_digest = crate::agent::metadata_safe::metadata_safe_text_digest(&format!(
+            "{}:{}:{:?}",
+            self.provider_authorization.decision_id(),
+            self.provider_authorization.policy_version(),
+            self.provider_authorization.data_route(),
+        ))
+        .1;
+        let route_kind = match self.provider_authorization.authority() {
+            crate::llm::ProviderPolicyAuthority::MainChatPolicyRouter => {
+                crate::llm::ProviderPolicyProvenanceKind::MainChatRouteDecision
+            }
+            crate::llm::ProviderPolicyAuthority::HsPolicyStore => {
+                crate::llm::ProviderPolicyProvenanceKind::HsRouteDecision
+            }
+            crate::llm::ProviderPolicyAuthority::ScheduledPolicy => {
+                crate::llm::ProviderPolicyProvenanceKind::ScheduledRouteDecision
+            }
+            crate::llm::ProviderPolicyAuthority::ExplicitProviderProbePolicy => {
+                crate::llm::ProviderPolicyProvenanceKind::ExplicitProviderProbeDecision
+            }
+            crate::llm::ProviderPolicyAuthority::LocalOnlyFailClosed => {
+                crate::llm::ProviderPolicyProvenanceKind::FailClosedRouteDecision
+            }
+        };
+        let mut refs = vec![crate::llm::ProviderPolicyProvenanceRef::new(
+            route_kind,
+            self.provider_authorization.decision_id(),
+            route_digest,
+        )];
+        refs.extend(self.selected_policies.iter().map(|policy| {
+            crate::llm::ProviderPolicyProvenanceRef::new(
+                crate::llm::ProviderPolicyProvenanceKind::HsPolicy,
+                &policy.policy_id,
+                &policy.digest,
+            )
+        }));
+        refs.extend(self.guidance_refs.iter().map(|guidance| {
+            crate::llm::ProviderPolicyProvenanceRef::new(
+                crate::llm::ProviderPolicyProvenanceKind::HsGuidance,
+                &guidance.guidance_id,
+                &guidance.guidance_digest,
+            )
+        }));
+        refs.sort();
+        refs.dedup();
+        refs
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,12 +294,12 @@ impl HSSelector {
             requested_route: ModelRoutePolicy::CloudAllowed,
             heuristic_effect: None,
         });
-        if context_policy.hard_boundary {
+        if context_policy.hard_boundary() {
             selected_policies.push(SelectedPolicyRef {
-                policy_id: context_policy.policy_id.clone(),
+                policy_id: context_policy.policy_id().to_string(),
                 reason: "sensitive_topic_route".into(),
-                route: Some(context_policy.route),
-                digest: digest_str(&context_policy.policy_id),
+                route: Some(context_policy.route()),
+                digest: digest_str(context_policy.policy_id()),
             });
         }
 
@@ -330,6 +390,11 @@ impl HSSelector {
             estimated_tokens,
             token_budget: input.token_budget,
         };
+        let provider_authorization =
+            crate::llm::ProviderPolicyAuthorization::from_hs_context_decision(
+                &context_policy,
+                audit.input_digest.clone(),
+            )?;
 
         Ok(RuntimeHSPacket {
             selected_policies,
@@ -337,6 +402,7 @@ impl HSSelector {
             guidance_refs,
             estimated_tokens,
             audit,
+            provider_authorization,
         })
     }
 }
@@ -346,7 +412,7 @@ pub fn build_runtime_hs_packet(
     heuristic_store: &HeuristicStore,
     input: RuntimeHSPacketBuildInput<'_>,
 ) -> Result<Option<RuntimeHSPacket>> {
-    let packet = HSSelector.select(
+    let mut packet = HSSelector.select(
         policy_store,
         heuristic_store,
         &HSSelectorInput {
@@ -361,12 +427,16 @@ pub fn build_runtime_hs_packet(
             agent_run_id: input.agent_run_id,
         },
     )?;
+    packet.provider_authorization = packet
+        .provider_authorization
+        .bind_hs_current_user_subject(&input.task.user_text)?;
 
-    if packet.selected_policies.is_empty() && packet.selected_heuristics.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(packet))
-    }
+    // The packet now carries the canonical provider-policy capability even
+    // when no optional heuristic or hard-boundary asset was selected. Dropping
+    // an otherwise-empty packet would discard the HS PolicyStore decision and
+    // force downstream runtimes either to self-authorize or silently lose
+    // cloud capability.
+    Ok(Some(packet))
 }
 
 pub fn behavior_checks_for_packet(packet: &RuntimeHSPacket) -> Vec<HSBehaviorCheckSummary> {

@@ -13,10 +13,14 @@ export default function DangerActionPreflightDetails({
 }: {
   view: DangerActionPreflightView;
 }) {
+  const affectedCount =
+    view.actionType === "data_import_overwrite" && view.affectedItemCount === 0
+      ? "未在预检阶段枚举（以已校验备份为准）"
+      : String(view.affectedItemCount);
   const rows = [
     ["风险等级", preflightStatus(view.riskTier)],
     ["写入 durable state", preflightValue(view.writesDurableState)],
-    ["影响数量", String(view.affectedItemCount)],
+    ["影响数量", affectedCount],
     ["id / scope digest", view.affectedItemDigest],
     ["external provider", preflightStatus(view.externalTransmission)],
     ["dry run", preflightValue(view.dryRunAvailable)],

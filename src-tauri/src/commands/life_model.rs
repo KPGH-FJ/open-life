@@ -7,13 +7,12 @@ use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
-use crate::{persist_life_model, AppState};
+use crate::{life_model_write_gateway, AppState};
 use openlife_core::agent::{AgentProposal, ProposalStatus};
 use openlife_core::life_model::patch::{LifeModelPatch, PatchStatus};
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
@@ -277,6 +276,10 @@ pub struct ManualLifeModelOverrideAuditReport {
 pub(crate) async fn get_life_model_with_state(
     state: &Arc<AppState>,
 ) -> Result<LifeModel, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("LifeModelFileStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let manager = state.life_model_manager.lock().await;
     manager.load().map_err(AppError::from)
 }
@@ -290,6 +293,13 @@ pub(crate) async fn get_life_model_current_view_with_state(
     state: &Arc<AppState>,
 ) -> Result<LifeModelCurrentView, AppError> {
     let model = get_life_model_with_state(state).await?;
+    get_life_model_current_view_for_model_with_state(state, &model).await
+}
+
+pub(crate) async fn get_life_model_current_view_for_model_with_state(
+    state: &Arc<AppState>,
+    model: &LifeModel,
+) -> Result<LifeModelCurrentView, AppError> {
     let current_value = model.preferences.communication_style.trim().to_string();
     let current_value = if current_value.is_empty() {
         None
@@ -378,18 +388,22 @@ pub(crate) async fn save_life_model_with_state(
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
+    let before_hash = hash_life_model(&before)?;
     let pre_change_snapshot_version = {
         let vm = state.version_manager.lock().await;
-        vm.snapshot(
-            &before,
-            "auto:pre-manual-lifemodel-override",
-            "Manual LifeModel editor save pre-change snapshot",
+        Some(
+            vm.ensure_projection_snapshot(
+                &before,
+                &format!("pre-change:manual:{before_hash}"),
+                "auto:pre-manual-lifemodel-override",
+                "Manual LifeModel editor save pre-change snapshot",
+            )
+            .map_err(AppError::from)?
+            .version,
         )
-        .ok()
-        .map(|snapshot| snapshot.version)
     };
-    let after = persist_life_model(
-        &state.clone(),
+    let after = life_model_write_gateway::persist_life_model_with_gateway_expected(
+        state,
         life_model,
         true,
         LifeModelMaterializerCallerContext::new(
@@ -397,6 +411,7 @@ pub(crate) async fn save_life_model_with_state(
             LifeModelMaterializerCallerKind::GovernedManualOverride,
             LifeModelMaterializerCallerPurpose::GovernedManualOverride,
         ),
+        Some(&before_hash),
     )
     .await
     .map_err(AppError::from)?;
@@ -498,10 +513,7 @@ pub(crate) fn evaluate_manual_lifemodel_override_audit(
 }
 
 fn hash_life_model(model: &LifeModel) -> Result<String, AppError> {
-    let bytes = serde_json::to_vec(model)?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    life_model_write_gateway::hash_life_model(model).map_err(AppError::from)
 }
 
 fn changed_life_model_sections(
@@ -534,7 +546,6 @@ mod tests {
     use openlife_core::agent::{
         AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
     };
-    use std::collections::HashMap;
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
@@ -542,12 +553,17 @@ mod tests {
             tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()),
         );
         Arc::new(AppState {
+            persistence_coordinator: Arc::new(
+                crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
+            ),
+            governed_data_import_journal: None,
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::LifeModelManager::new(
                     temp_dir.path().join("life-model").join("current"),
                 ),
             )),
+            life_model_write_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
@@ -581,7 +597,6 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
                     temp_dir.path().join("builder_sessions.json"),
@@ -645,16 +660,17 @@ mod tests {
                 openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
             )),
             hot_cache,
-            proposal_engine: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::ProposalEngine::new(),
-            )),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
-            scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            scheduled_task_store: Arc::new(
+                openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
+            ),
             runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            resource_runtime: None,
+            state_store: None,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -990,6 +1006,39 @@ mod tests {
             .await
             .unwrap()
             .is_effectively_empty());
+    }
+
+    #[tokio::test]
+    async fn required_pre_change_snapshot_failure_blocks_manual_canonical_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let original_state = test_app_state(&temp_dir);
+        let baseline = get_life_model_with_state(&original_state).await.unwrap();
+        let versions_path = temp_dir.path().join("versions-is-a-file");
+        std::fs::write(&versions_path, b"not a directory").unwrap();
+        let mut state_with_fault = (*original_state).clone();
+        state_with_fault.version_manager = Arc::new(tokio::sync::Mutex::new(
+            openlife_core::versioning::VersionManager::new(&versions_path),
+        ));
+        let state = Arc::new(state_with_fault);
+        let mut replacement = baseline.clone();
+        replacement.identity.name = "must-not-commit-without-snapshot".into();
+
+        let error = save_life_model_with_state(
+            replacement,
+            &state,
+            Some(GovernedManualLifeModelOverrideRequest::editor_save()),
+        )
+        .await
+        .expect_err("required pre-change snapshot failure must block overwrite");
+        assert!(error.message().contains("投影版本文件") || error.message().contains("directory"));
+        assert_eq!(
+            get_life_model_with_state(&state)
+                .await
+                .unwrap()
+                .identity
+                .name,
+            baseline.identity.name
+        );
     }
 
     #[tokio::test]

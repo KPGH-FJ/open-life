@@ -244,7 +244,7 @@ fn web_credential_snapshot(
         .to_ascii_lowercase()
         .as_str()
     {
-        "brave" => {
+        "brave" | "deepseek" => {
             let available = !config.system.search_provider_key.trim().is_empty();
             (
                 available,
@@ -268,7 +268,8 @@ fn web_credential_snapshot(
                 .into(),
             )
         }
-        _ => (true, "not_required".into()),
+        "" | "duckduckgo" => (true, "not_required".into()),
+        _ => (false, "unsupported_search_provider".into()),
     }
 }
 
@@ -413,7 +414,10 @@ fn tool_availability_fact_bindings(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn tool_fact_binding(
     key: &'static str,
     value_shape: &'static str,
@@ -629,4 +633,51 @@ pub(crate) fn classify_tool_availability_query(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_credential_snapshot;
+
+    #[test]
+    fn web_credential_truth_matches_the_exact_search_provider_contract() {
+        let mut config = openlife_core::config::AppConfig::default();
+
+        config.system.search_provider = "duckduckgo".into();
+        assert_eq!(
+            web_credential_snapshot(&config, true, false),
+            (true, "not_required".into())
+        );
+
+        config.system.search_provider = "brave".into();
+        assert_eq!(
+            web_credential_snapshot(&config, true, false),
+            (false, "missing_search_provider_key".into())
+        );
+
+        config.system.search_provider = "deepseek".into();
+        assert_eq!(
+            web_credential_snapshot(&config, true, false),
+            (false, "missing_search_provider_key".into())
+        );
+
+        config.system.search_provider = "searxng".into();
+        assert_eq!(
+            web_credential_snapshot(&config, true, false),
+            (false, "missing_searxng_url".into())
+        );
+
+        config.system.search_provider = "unimplemented-search".into();
+        assert_eq!(
+            web_credential_snapshot(&config, true, false),
+            (false, "unsupported_search_provider".into()),
+            "runtime facts must not report a provider available when ToolGateway fails it closed"
+        );
+
+        assert_eq!(
+            web_credential_snapshot(&config, true, true),
+            (true, "not_required".into()),
+            "web.fetch remains independently available when search is misconfigured"
+        );
+    }
 }

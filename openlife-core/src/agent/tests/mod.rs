@@ -8,6 +8,7 @@ mod evidence_graph;
 mod evidence_store;
 mod governor;
 mod heuristic_store;
+mod hs_asset_authority;
 mod integration;
 mod lifemodel_backend_completion;
 mod lifemodel_maturation_non_default_invocation;

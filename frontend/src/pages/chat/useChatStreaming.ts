@@ -277,11 +277,11 @@ export function useChatStreaming(opts: UseChatStreamingOpts) {
   );
 
   const startSend = useCallback(
-    async (sessionId: string, msgs: ChatMessage[], onDone?: () => void) => {
+    async (sessionId: string, msgs: ChatMessage[], operationId: string, onDone?: () => void) => {
       setSending(true);
       prepareForSend();
       try {
-        await startStreamMessage(sessionId, msgs);
+        await startStreamMessage(sessionId, msgs, { operationId });
         if (onDone) onDone();
       } catch (e) {
         handleStreamError(e);

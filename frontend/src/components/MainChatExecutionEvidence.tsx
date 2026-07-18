@@ -244,7 +244,7 @@ export default function MainChatExecutionEvidence({
             )}
           </div>
           <div className="mt-1 truncate text-sm font-semibold text-stone-950">
-            {state?.task.title ?? taskState?.session?.userGoal ?? "Main Chat turn"}
+            {state?.task.title ?? "Main Chat turn"}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -343,19 +343,18 @@ export default function MainChatExecutionEvidence({
             .slice(0, 3)
             .map((call, index) => (
               <EvidenceRow
-                key={`tool-call-${index}-${call.name}`}
+                key={`tool-call-${index}-${call.actionRef}`}
                 icon={<FileCheck2 size={14} />}
                 label="Tool observation"
-                tone={
-                  call.status === "blocked" || call.error
-                    ? "warning"
-                    : call.success
-                      ? "success"
-                      : "active"
-                }
-                primary={cleanLabel(call.name)}
+                tone={call.status === "success" ? "success" : "warning"}
+                primary={cleanLabel(
+                  call.toolRef.id === "unknown_tool" ? "Governed tool" : call.toolRef.id
+                )}
                 secondary={cleanLabel(
-                  call.error ?? call.output ?? call.react_trace?.outputPreview ?? null
+                  call.failureCode ??
+                    (call.outputReceipt
+                      ? `${call.outputReceipt.byteCount} bytes · ${call.outputReceipt.digest}`
+                      : (call.executionReceipt?.transportStatus ?? null))
                 )}
               />
             ))}
@@ -472,7 +471,9 @@ export default function MainChatExecutionEvidence({
             tone="blocked"
             primary="The task was canceled."
             secondary={
-              taskState?.session?.finalSummary ?? "Queued non-terminal actions should be stopped."
+              taskState?.session?.hasFinalSummary
+                ? "A terminal summary is recorded in the canonical trace."
+                : "Queued non-terminal actions should be stopped."
             }
           />
         )}

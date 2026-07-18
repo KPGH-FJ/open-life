@@ -10,10 +10,11 @@ import {
   Cloud,
   Server,
   FileText,
+  Paperclip,
   X,
   Square,
 } from "lucide-react";
-import type { SystemDiagnostics } from "../../tauri";
+import type { ImportedResourceReceipt, SystemDiagnostics } from "../../tauri";
 
 interface ChatInputAreaProps {
   input: string;
@@ -21,9 +22,17 @@ interface ChatInputAreaProps {
   streamInterrupted: boolean;
   diagnostics: SystemDiagnostics | null;
   selectedSkillId: string;
+  attachments: ImportedResourceReceipt[];
+  resourceImportBusy: boolean;
+  resourceImportError?: string | null;
+  resourceImportNotice?: string | null;
+  removingResourceIds?: string[];
   companionMode?: boolean;
   onInputChange: (value: string) => void;
   onSelectedSkillIdChange: (value: string) => void;
+  onAttachResources: () => void;
+  onCancelResourceImport: () => void;
+  onRemoveResource: (resourceId: string) => void;
   onComposerFocus?: () => void;
   onSend: () => void;
   canCancel?: boolean;
@@ -34,6 +43,12 @@ interface ChatInputAreaProps {
   getFixSuggestion: (
     diagnostics: SystemDiagnostics | null
   ) => { text: string; action: string; link: string } | null;
+}
+
+function formatByteCount(byteCount: number): string {
+  if (byteCount < 1024) return `${byteCount} B`;
+  if (byteCount < 1024 * 1024) return `${(byteCount / 1024).toFixed(1)} KB`;
+  return `${(byteCount / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function NetworkStatusIndicator({ diagnostics }: { diagnostics: SystemDiagnostics | null }) {
@@ -84,9 +99,17 @@ export default function ChatInputArea({
   streamInterrupted,
   diagnostics,
   selectedSkillId,
+  attachments,
+  resourceImportBusy,
+  resourceImportError = null,
+  resourceImportNotice = null,
+  removingResourceIds = [],
   companionMode = false,
   onInputChange,
   onSelectedSkillIdChange,
+  onAttachResources,
+  onCancelResourceImport,
+  onRemoveResource,
   onComposerFocus,
   onSend,
   canCancel = false,
@@ -214,7 +237,82 @@ export default function ChatInputArea({
             </label>
           </div>
         )}
+        {(attachments.length > 0 ||
+          resourceImportBusy ||
+          resourceImportError ||
+          resourceImportNotice) && (
+          <div className="space-y-2" data-testid="resource-attachment-surface">
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap gap-2" aria-label="本轮附件">
+                {attachments.map(resource => {
+                  const removing = removingResourceIds.includes(resource.resourceId);
+                  return (
+                    <div
+                      key={resource.resourceId}
+                      className="flex max-w-full items-center gap-2 rounded-lg border border-indigo-100 bg-indigo-50 px-2.5 py-1.5 text-xs text-indigo-950"
+                      data-testid={`resource-attachment-${resource.resourceId}`}
+                    >
+                      <FileText size={13} className="shrink-0 text-indigo-500" />
+                      <span
+                        className="max-w-[18rem] truncate font-medium"
+                        title={resource.filename}
+                      >
+                        {resource.filename}
+                      </span>
+                      <span className="shrink-0 text-indigo-500">
+                        {formatByteCount(resource.byteCount)}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`移除附件 ${resource.filename}`}
+                        title="从本轮移除；仅在没有其他引用时删除 OpenLife 中的文件副本"
+                        disabled={sending || resourceImportBusy || removing}
+                        onClick={() => onRemoveResource(resource.resourceId)}
+                        className="rounded p-0.5 text-indigo-500 hover:bg-indigo-100 hover:text-indigo-800 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {removing ? (
+                          <Loader2 size={13} className="animate-spin" aria-hidden="true" />
+                        ) : (
+                          <X size={13} aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {resourceImportError && (
+              <p role="alert" className="text-xs text-red-600">
+                {resourceImportError}
+              </p>
+            )}
+            {resourceImportNotice && (
+              <p role="status" className="text-xs text-gray-500">
+                {resourceImportNotice}
+              </p>
+            )}
+          </div>
+        )}
         <div className="flex min-w-0 items-end gap-2 sm:gap-3">
+          <button
+            data-testid="attach-resource-button"
+            type="button"
+            aria-label={resourceImportBusy ? "附件导入进行中" : "添加文件"}
+            title={resourceImportBusy ? "附件导入进行中" : "添加文件（最多 5 个）"}
+            onClick={onAttachResources}
+            disabled={sending || resourceImportBusy}
+            className={
+              companionMode
+                ? "inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border border-stone-300 bg-white text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50"
+                : "inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            }
+          >
+            {resourceImportBusy ? (
+              <Loader2 size={18} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <Paperclip size={18} aria-hidden="true" />
+            )}
+          </button>
           <textarea
             data-testid="chat-input"
             aria-label="消息输入"
@@ -276,7 +374,7 @@ export default function ChatInputArea({
             aria-label={sending ? "正在发送消息" : "发送消息"}
             title={sending ? "正在发送消息" : "发送消息"}
             onClick={onSend}
-            disabled={sending || !input.trim()}
+            disabled={sending || resourceImportBusy || (!input.trim() && attachments.length === 0)}
             className={
               companionMode
                 ? "flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50"
@@ -290,6 +388,18 @@ export default function ChatInputArea({
             )}
           </button>
         </div>
+        {resourceImportBusy && (
+          <div className="flex items-center justify-between gap-3 text-xs text-gray-500">
+            <span>正在读取并解析所选文件；发送前不会交给模型。</span>
+            <button
+              type="button"
+              onClick={onCancelResourceImport}
+              className="shrink-0 rounded-md border border-gray-200 bg-white px-2 py-1 text-gray-700 hover:bg-gray-50"
+            >
+              请求停止导入
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

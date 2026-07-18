@@ -28,6 +28,11 @@ type CloudRouteState =
   | "validated"
   | "failed"
   | "stale"
+  | "unknown"
+  | "remote_unknown"
+  | "runtime_generation_incoherent"
+  | "validation_record_corrupt"
+  | "validation_record_io_error"
   | "scripted_provider_probe";
 
 type GovernanceBlockerReason =
@@ -48,11 +53,18 @@ function localModelName(diagnostics: SystemDiagnostics): string {
 
 function cloudRouteState(diagnostics: SystemDiagnostics): CloudRouteState {
   if (!diagnostics.cloud_api_configured) return "none";
-  if (diagnostics.cloud_api_validation_status === "validated") return "validated";
-  if (diagnostics.cloud_api_validation_status === "failed") return "failed";
-  if (diagnostics.cloud_api_validation_status === "stale") return "stale";
-  if (isScriptedProofStatus(diagnostics.cloud_api_validation_status))
-    return "scripted_provider_probe";
+  const status = diagnostics.cloud_api_validation_status;
+  if (status === "unconfigured") return "none";
+  if (status === "unvalidated") return "unvalidated";
+  if (status === "validated") return "validated";
+  if (status === "failed") return "failed";
+  if (status === "stale") return "stale";
+  if (status === "unknown") return "unknown";
+  if (status === "remote_unknown") return "remote_unknown";
+  if (status === "runtime_generation_incoherent") return "runtime_generation_incoherent";
+  if (status === "validation_record_corrupt") return "validation_record_corrupt";
+  if (status === "validation_record_io_error") return "validation_record_io_error";
+  if (isScriptedProofStatus(status)) return "scripted_provider_probe";
   if (diagnostics.cloud_api_validated === true) return "validated";
   if (diagnostics.cloud_api_configured) return "unvalidated";
   return "none";
@@ -68,6 +80,18 @@ function cloudConfiguredLabel(
 ): string {
   if (state === "failed") return `${providerName(diagnostics)} 验证失败`;
   if (state === "stale") return `${providerName(diagnostics)} 验证已过期或配置已变更`;
+  if (state === "remote_unknown") return `${providerName(diagnostics)} 远端终态未知`;
+  if (state === "runtime_generation_incoherent") {
+    return `${providerName(diagnostics)} 运行代不一致，已失败关闭`;
+  }
+  if (state === "validation_record_corrupt") {
+    return `${providerName(diagnostics)} 验证记录损坏`;
+  }
+  if (state === "validation_record_io_error") {
+    return `${providerName(diagnostics)} 验证记录不可读`;
+  }
+  if (state === "unknown") return `${providerName(diagnostics)} 状态未知`;
+  if (state === "scripted_provider_probe") return `${providerName(diagnostics)} 仅脚本化 proof`;
   return `${providerName(diagnostics)} 已配置，连接未验证`;
 }
 
@@ -82,7 +106,7 @@ export function cloudApiStatusLabel(diagnostics: SystemDiagnostics | null): stri
   }
   if (cloud === "stale") return `${providerName(diagnostics)} 验证已过期或配置已变更`;
   if (cloud === "scripted_provider_probe") return `${providerName(diagnostics)} 仅脚本化 proof`;
-  if (cloud === "unvalidated") return cloudConfiguredLabel(diagnostics, cloud);
+  if (cloud !== "none") return cloudConfiguredLabel(diagnostics, cloud);
   return "未配置";
 }
 

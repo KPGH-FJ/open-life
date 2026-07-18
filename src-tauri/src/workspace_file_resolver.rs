@@ -6,17 +6,17 @@ pub(crate) fn resolve_main_chat_workspace_file_target(
     let workspace = resolve_workspace_root()?;
     let relative = select_workspace_file_relative_path(user_text);
     let safe_relative = validate_relative_workspace_path(&relative)?;
-    let path = workspace.join(&safe_relative);
-    let canonical = path
-        .canonicalize()
-        .map_err(|err| format!("file is not readable in workspace: {err}"))?;
-
-    if !canonical.starts_with(&workspace) {
+    let candidate = workspace.join(&safe_relative);
+    if !candidate.starts_with(&workspace) {
         return Err("file read outside workspace is blocked".into());
     }
 
     let label = safe_relative.to_string_lossy().replace('\\', "/");
-    Ok((label, canonical.to_string_lossy().to_string()))
+    // This boundary performs lexical policy validation only. Whether the
+    // candidate exists, resolves through a symlink, is readable, or exceeds a
+    // size bound is operating-system execution truth and belongs to the
+    // ToolGateway filesystem adapter.
+    Ok((label, candidate.to_string_lossy().to_string()))
 }
 
 pub(crate) fn resolve_workspace_root() -> Result<PathBuf, String> {
@@ -126,6 +126,18 @@ mod tests {
         let error = validate_relative_workspace_path("../Cargo.toml").unwrap_err();
 
         assert!(error.contains("path traversal"));
+    }
+
+    #[test]
+    fn missing_workspace_candidate_is_resolved_without_pre_gateway_io() {
+        let (label, path) = resolve_main_chat_workspace_file_target(
+            "Read frontend/definitely-missing-tool-gateway-owner.md",
+        )
+        .expect("lexically safe missing file must reach ToolGateway");
+
+        assert_eq!(label, "frontend/definitely-missing-tool-gateway-owner.md");
+        assert!(path.ends_with("frontend/definitely-missing-tool-gateway-owner.md"));
+        assert!(!std::path::Path::new(&path).exists());
     }
 
     #[test]

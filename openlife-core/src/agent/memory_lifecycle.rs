@@ -1,17 +1,35 @@
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::{
+    main_chat_agent_v1::{IntentRiskLevel, PolicyMemoryAdmissionProof, PolicySensitivity},
+    main_chat_memory_candidate::MemoryCandidateKind,
+};
+use crate::memory::{
+    CanonicalMemoryRetrievalMutation, CanonicalMemoryRetrievalState, MemoryRetrievalDisposition,
+};
+use crate::persistence_outbox::{
+    self, CanonicalMutationReceipt, ProjectionDelivery, ProjectionDeliveryState, ProjectionSummary,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ring::digest::{digest, SHA256};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
+
+const MEMORY_LIFECYCLE_AGGREGATE_KIND: &str = "memory_lifecycle";
+const MEMORY_LIFECYCLE_PROJECTION_TARGETS: [&str; 2] = ["memory_store", "vector_store"];
+const MEMORY_LIFECYCLE_RETRIEVAL_AGGREGATE_KIND: &str = "memory_retrieval";
+const MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND: &str = "memory_lifecycle";
 
 macro_rules! record_select_sql {
     ($suffix:expr) => {
         concat!(
-            "SELECT memory_id, proposal_id, source_task_session_id, source_run_id, content, scope, category, risk_level, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at FROM memory_lifecycle_records ",
+            "SELECT memory_id, proposal_id, source_task_session_id, source_run_id, content, scope, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at FROM memory_lifecycle_records ",
             $suffix
         )
     };
@@ -69,6 +87,13 @@ impl MemoryLifecycleStatus {
 
     pub fn is_runtime_active(self) -> bool {
         self == Self::Materialized
+    }
+
+    pub fn is_terminal_historical(self) -> bool {
+        matches!(
+            self,
+            Self::Rejected | Self::Deferred | Self::Superseded | Self::RolledBack
+        )
     }
 }
 
@@ -133,12 +158,13 @@ impl MemoryLifecycleScope {
         }
     }
 
-    fn from_str(value: &str) -> Self {
+    fn from_str(value: &str) -> Result<Self> {
         match value {
-            "workspace" => Self::Workspace,
-            "conversation" => Self::Conversation,
-            "project" => Self::Project,
-            _ => Self::Global,
+            "global" => Ok(Self::Global),
+            "workspace" => Ok(Self::Workspace),
+            "conversation" => Ok(Self::Conversation),
+            "project" => Ok(Self::Project),
+            _ => anyhow::bail!("unknown Memory lifecycle scope: {value}"),
         }
     }
 }
@@ -159,6 +185,19 @@ pub enum MemoryLifecycleCategory {
     Boundary,
 }
 
+pub fn memory_lifecycle_category_for_candidate_kind(
+    kind: MemoryCandidateKind,
+) -> MemoryLifecycleCategory {
+    match kind {
+        MemoryCandidateKind::EpisodicLifeEvent | MemoryCandidateKind::SemanticUserFact => {
+            MemoryLifecycleCategory::Fact
+        }
+        MemoryCandidateKind::ProceduralRule => MemoryLifecycleCategory::Workflow,
+        MemoryCandidateKind::Preference => MemoryLifecycleCategory::Preference,
+        MemoryCandidateKind::IdentityOrRole => MemoryLifecycleCategory::Boundary,
+    }
+}
+
 impl MemoryLifecycleCategory {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -170,13 +209,14 @@ impl MemoryLifecycleCategory {
         }
     }
 
-    fn from_str(value: &str) -> Self {
+    fn from_str(value: &str) -> Result<Self> {
         match value {
-            "fact" => Self::Fact,
-            "workflow" => Self::Workflow,
-            "correction" => Self::Correction,
-            "boundary" => Self::Boundary,
-            _ => Self::Preference,
+            "preference" => Ok(Self::Preference),
+            "fact" => Ok(Self::Fact),
+            "workflow" => Ok(Self::Workflow),
+            "correction" => Ok(Self::Correction),
+            "boundary" => Ok(Self::Boundary),
+            _ => anyhow::bail!("unknown Memory lifecycle category: {value}"),
         }
     }
 }
@@ -208,10 +248,37 @@ impl MemoryLifecycleRiskLevel {
 
     fn from_str(value: &str) -> Self {
         match value {
+            "low" => Self::Low,
             "medium" => Self::Medium,
             "high" => Self::High,
             "identity_value" => Self::IdentityValue,
-            _ => Self::Low,
+            _ => Self::High,
+        }
+    }
+
+    pub fn from_intent_risk(value: IntentRiskLevel) -> Self {
+        match value {
+            IntentRiskLevel::Low => Self::Low,
+            IntentRiskLevel::Medium => Self::Medium,
+            IntentRiskLevel::High => Self::High,
+            IntentRiskLevel::Critical => Self::IdentityValue,
+        }
+    }
+
+    fn conservative_max(self, other: Self) -> Self {
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::IdentityValue => 4,
         }
     }
 }
@@ -219,6 +286,118 @@ impl MemoryLifecycleRiskLevel {
 impl std::fmt::Display for MemoryLifecycleRiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLifecycleSensitivity {
+    Internal,
+    Sensitive,
+}
+
+impl MemoryLifecycleSensitivity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Sensitive => "sensitive",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "internal" => Self::Internal,
+            _ => Self::Sensitive,
+        }
+    }
+
+    pub fn from_policy_and_candidate(
+        policy: PolicySensitivity,
+        candidate_sensitivity: &str,
+    ) -> Self {
+        if policy == PolicySensitivity::Sensitive
+            || Self::from_candidate_label(candidate_sensitivity) == Self::Sensitive
+        {
+            Self::Sensitive
+        } else {
+            Self::Internal
+        }
+    }
+
+    pub fn from_candidate_label(candidate_sensitivity: &str) -> Self {
+        Self::from_str(candidate_sensitivity)
+    }
+
+    fn conservative_max(self, other: Self) -> Self {
+        if self == Self::Sensitive || other == Self::Sensitive {
+            Self::Sensitive
+        } else {
+            Self::Internal
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryLifecycleSensitivity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalMemoryFactDescriptor {
+    /// The exact canonical body supplied by the authorized admission. Identity
+    /// normalization never rewrites this value.
+    pub canonical_body: String,
+    pub scope: MemoryLifecycleScope,
+    pub category: MemoryLifecycleCategory,
+    pub risk_level: MemoryLifecycleRiskLevel,
+    pub sensitivity: MemoryLifecycleSensitivity,
+}
+
+impl CanonicalMemoryFactDescriptor {
+    pub fn new(
+        canonical_body: impl Into<String>,
+        scope: MemoryLifecycleScope,
+        category: MemoryLifecycleCategory,
+        risk_level: MemoryLifecycleRiskLevel,
+        sensitivity: MemoryLifecycleSensitivity,
+    ) -> Result<Self> {
+        let canonical_body = canonical_body.into();
+        if canonical_body.trim().is_empty() {
+            anyhow::bail!("canonical Memory fact content is empty");
+        }
+        Ok(Self {
+            canonical_body,
+            scope,
+            category,
+            risk_level,
+            sensitivity,
+        })
+    }
+
+    pub fn from_candidate(
+        canonical_body: impl Into<String>,
+        kind: MemoryCandidateKind,
+        scope: MemoryLifecycleScope,
+        risk_level: MemoryLifecycleRiskLevel,
+        sensitivity: MemoryLifecycleSensitivity,
+    ) -> Result<Self> {
+        Self::new(
+            canonical_body,
+            scope,
+            memory_lifecycle_category_for_candidate_kind(kind),
+            risk_level,
+            sensitivity,
+        )
+    }
+
+    /// Stable semantic identity shared by proposal de-duplication and the
+    /// canonical Memory owner. Source, confidence, evidence and run metadata
+    /// are intentionally excluded by the lifecycle identity contract.
+    pub fn fact_key(&self) -> Result<String> {
+        canonical_memory_fact_identity(self.scope, self.category, &self.canonical_body)
+            .map(|(_, fact_key)| fact_key)
     }
 }
 
@@ -233,6 +412,8 @@ pub struct MemoryLifecycleRecord {
     pub scope: MemoryLifecycleScope,
     pub category: MemoryLifecycleCategory,
     pub risk_level: MemoryLifecycleRiskLevel,
+    pub sensitivity: MemoryLifecycleSensitivity,
+    pub audit_digest: String,
     pub status: MemoryLifecycleStatus,
     pub materialization_status: MemoryMaterializationStatus,
     pub materialization_error_code: Option<String>,
@@ -295,10 +476,7 @@ pub struct MemoryLifecycleAcceptanceInput {
     pub proposal_id: String,
     pub source_task_session_id: Option<String>,
     pub source_run_id: Option<String>,
-    pub content: String,
-    pub scope: MemoryLifecycleScope,
-    pub category: MemoryLifecycleCategory,
-    pub risk_level: MemoryLifecycleRiskLevel,
+    pub fact: CanonicalMemoryFactDescriptor,
     pub created_by: String,
     pub accepted_by: String,
     pub evidence_ids: Vec<String>,
@@ -306,11 +484,69 @@ pub struct MemoryLifecycleAcceptanceInput {
     pub conflict_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryAdmissionOutcome {
+    ExactReplay,
+    AliasLinked,
+    GovernanceUpgraded,
+    OwnerCreated,
+    TerminalHistorical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitMemoryWriteInput {
+    pub source_task_session_id: String,
+    pub source_run_id: String,
+    pub source_message_id: String,
+    pub source_message_digest: String,
+    pub authorized_candidate_id: String,
+    pub fact: CanonicalMemoryFactDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplicitMemoryWriteReceipt {
+    pub receipt_id: String,
+    pub memory_id: String,
+    pub fact_key: String,
+    pub source_message_id: String,
+    pub content_digest: String,
+    pub sensitivity: MemoryLifecycleSensitivity,
+    pub audit_digest: String,
+    pub admission_outcome: MemoryAdmissionOutcome,
+    pub admission_at: DateTime<Utc>,
+    pub owner_accepted_at: Option<DateTime<Utc>>,
+    /// Compatibility alias for `admission_at`. This is never the owner's
+    /// acceptance time unless this admission created that owner.
+    pub created_at: DateTime<Utc>,
+    pub newly_committed: bool,
+    pub undo_available: bool,
+    pub canonical_committed: bool,
+    /// Metadata-only canonical outbox reference. Duplicate explicit writes
+    /// reuse the existing canonical record and therefore may reuse its event.
+    #[serde(default)]
+    pub outbox_event_id: Option<String>,
+    #[serde(default)]
+    pub projection_state: ProjectionDeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_error_digest: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryLifecycleAcceptanceReport {
     pub record: MemoryLifecycleRecord,
-    pub materialized_view: MemoryMaterializedView,
+    pub materialized_view: Option<MemoryMaterializedView>,
+    pub canonical_mutation: Option<CanonicalMutationReceipt>,
+    pub canonical_committed: bool,
+    pub canonical_fact_key: String,
+    pub newly_committed: bool,
+    pub admission_outcome: MemoryAdmissionOutcome,
+    pub admission_at: DateTime<Utc>,
+    pub owner_accepted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub projection_state: ProjectionDeliveryState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,10 +555,70 @@ pub struct MemoryRollbackReport {
     pub record: MemoryLifecycleRecord,
     pub rollback_event: MemoryRollbackEvent,
     pub materialized_view: MemoryMaterializedView,
+    pub canonical_mutation: CanonicalMutationReceipt,
+    pub canonical_committed: bool,
+    #[serde(default)]
+    pub projection_state: ProjectionDeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_error_digest: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct MemoryLifecycleStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
+}
+
+/// Narrow, cloneable read authority for runtime retrieval admission. Tool and
+/// provider-context code can consult current lifecycle truth without receiving
+/// a canonical write interface.
+#[derive(Clone)]
+pub struct MemoryLifecycleRetrievalReader {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl MemoryLifecycleRetrievalReader {
+    /// Prove that canonical lifecycle retrieval truth is readable before a
+    /// caller is allowed to report a healthy empty result.
+    pub fn ensure_available(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let _ = conn
+            .query_row("SELECT 1 FROM memory_lifecycle_records LIMIT 1", [], |_| {
+                Ok(())
+            })
+            .optional()?;
+        let _ = conn
+            .query_row(
+                "SELECT 1 FROM memory_lifecycle_retrieval_states LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(())
+    }
+
+    pub fn is_memory_retrievable(&self, memory_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        lifecycle_memory_is_retrievable_from_conn(&conn, memory_id)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn install_query_failure_for_test(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.execute_batch(
+            "ALTER TABLE memory_lifecycle_retrieval_states
+             RENAME TO memory_lifecycle_retrieval_states_unavailable_for_test;",
+        )?;
+        Ok(())
+    }
 }
 
 impl MemoryLifecycleStore {
@@ -333,8 +629,9 @@ impl MemoryLifecycleStore {
         }
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open memory lifecycle db at {:?}", db_path))?;
+        configure_memory_lifecycle_connection(&conn, true)?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         store.init_tables()?;
         Ok(store)
@@ -343,30 +640,53 @@ impl MemoryLifecycleStore {
     pub fn new_in_memory() -> Result<Self> {
         let conn =
             Connection::open_in_memory().context("failed to open in-memory memory lifecycle db")?;
+        configure_memory_lifecycle_connection(&conn, false)?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         store.init_tables()?;
         Ok(store)
     }
 
+    pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
+        let db_path = db_path.into();
+        let conn = crate::sqlite_migration::open_existing_read_only(
+            &db_path,
+            "memory_lifecycle_store",
+            &["memory_lifecycle_records"],
+        )?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    pub fn retrieval_reader(&self) -> MemoryLifecycleRetrievalReader {
+        MemoryLifecycleRetrievalReader {
+            conn: Arc::clone(&self.conn),
+        }
+    }
+
     fn init_tables(&self) -> Result<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.execute(
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS memory_lifecycle_records (
                 memory_id TEXT PRIMARY KEY,
                 proposal_id TEXT NOT NULL,
+                fact_key TEXT NOT NULL CHECK(TRIM(fact_key) != ''),
                 source_task_session_id TEXT,
                 source_run_id TEXT,
                 content TEXT NOT NULL,
-                scope TEXT NOT NULL,
-                category TEXT NOT NULL,
-                risk_level TEXT NOT NULL,
-                status TEXT NOT NULL,
-                materialization_status TEXT NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('global', 'workspace', 'conversation', 'project')),
+                category TEXT NOT NULL CHECK(category IN ('preference', 'fact', 'workflow', 'correction', 'boundary')),
+                risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'identity_value')),
+                sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal', 'sensitive')),
+                audit_digest TEXT NOT NULL CHECK(TRIM(audit_digest) != ''),
+                status TEXT NOT NULL CHECK(status IN ('candidate', 'pending_review', 'edited_pending_review', 'accepted', 'pending_materialization', 'materialized', 'materialization_failed', 'rejected', 'deferred', 'superseded', 'rolled_back')),
+                materialization_status TEXT NOT NULL CHECK(materialization_status IN ('not_required', 'pending', 'materialized', 'failed')),
                 materialization_error_code TEXT,
                 created_by TEXT NOT NULL,
                 accepted_by TEXT,
@@ -385,15 +705,15 @@ impl MemoryLifecycleStore {
             )",
             [],
         )?;
-        conn.execute(
+        tx.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_lifecycle_proposal ON memory_lifecycle_records(proposal_id)",
             [],
         )?;
-        conn.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_status_scope ON memory_lifecycle_records(status, materialization_status, scope)",
             [],
         )?;
-        conn.execute(
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS memory_rollback_events (
                 rollback_event_id TEXT PRIMARY KEY,
                 memory_id TEXT NOT NULL,
@@ -409,7 +729,7 @@ impl MemoryLifecycleStore {
             )",
             [],
         )?;
-        conn.execute(
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS memory_materialized_views (
                 materialized_view_id TEXT PRIMARY KEY,
                 scope TEXT,
@@ -421,6 +741,93 @@ impl MemoryLifecycleStore {
             )",
             [],
         )?;
+        persistence_outbox::init_schema(&tx)?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_records",
+            "fact_key",
+            "TEXT",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_records",
+            "sensitivity",
+            "TEXT",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_records",
+            "audit_digest",
+            "TEXT",
+        )?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_lifecycle_proposal_links (
+                proposal_id TEXT PRIMARY KEY,
+                memory_id TEXT NOT NULL,
+                admitted_memory_id TEXT NOT NULL,
+                fact_key TEXT NOT NULL CHECK(TRIM(fact_key) != ''),
+                admission_digest TEXT NOT NULL CHECK(TRIM(admission_digest) != ''),
+                risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'identity_value')),
+                sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal', 'sensitive')),
+                linked_at TEXT NOT NULL,
+                FOREIGN KEY(memory_id) REFERENCES memory_lifecycle_records(memory_id),
+                FOREIGN KEY(admitted_memory_id) REFERENCES memory_lifecycle_records(memory_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_proposal_links_memory
+             ON memory_lifecycle_proposal_links(memory_id);",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_proposal_links",
+            "admitted_memory_id",
+            "TEXT",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_proposal_links",
+            "admission_digest",
+            "TEXT",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_proposal_links",
+            "risk_level",
+            "TEXT",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_proposal_links",
+            "sensitivity",
+            "TEXT",
+        )?;
+        migrate_memory_fact_identity_tx(&tx)?;
+        rebuild_memory_lifecycle_tables_if_needed_tx(&tx)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_lifecycle_retrieval_states (
+                memory_id TEXT PRIMARY KEY,
+                disposition TEXT NOT NULL CHECK(disposition IN ('active', 'archived')),
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                last_event_id TEXT NOT NULL,
+                reason_digest TEXT NOT NULL CHECK(TRIM(reason_digest) != ''),
+                changed_at TEXT NOT NULL,
+                FOREIGN KEY(memory_id) REFERENCES memory_lifecycle_records(memory_id),
+                FOREIGN KEY(last_event_id) REFERENCES canonical_outbox_events(event_id)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_retrieval_disposition
+             ON memory_lifecycle_retrieval_states(disposition, changed_at DESC);",
+        )?;
+        tx.execute_batch(
+            "DROP INDEX IF EXISTS idx_memory_lifecycle_active_fact_key;
+             CREATE UNIQUE INDEX idx_memory_lifecycle_active_fact_key
+             ON memory_lifecycle_records(fact_key)
+             WHERE runtime_context_excluded_at IS NULL
+               AND status IN (
+                    'accepted', 'pending_materialization', 'materialized',
+                    'materialization_failed'
+               );",
+        )?;
+        crate::sqlite_migration::record_schema_version(&tx, "memory_lifecycle_store", 5)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -428,17 +835,117 @@ impl MemoryLifecycleStore {
         &self,
         input: MemoryLifecycleAcceptanceInput,
     ) -> Result<MemoryLifecycleAcceptanceReport> {
+        if input.proposal_id.trim().is_empty() {
+            anyhow::bail!("memory proposal id is empty");
+        }
+        let (_, fact_key) = canonical_memory_fact_identity(
+            input.fact.scope,
+            input.fact.category,
+            &input.fact.canonical_body,
+        )?;
+        let admission_digest = memory_fact_admission_digest(&fact_key, &input.fact);
+        let confidence = input
+            .confidence
+            .parse::<f32>()
+            .context("memory proposal confidence is not numeric")?;
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            anyhow::bail!("memory proposal confidence must be finite and within 0..=1");
+        }
         let now = Utc::now();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some(link) = proposal_link_tx(&tx, &input.proposal_id)? {
+            ensure_admission_link_matches(&link, &fact_key, &admission_digest, &input.fact)?;
+            let admitted_record = record_by_memory_id_tx(&tx, &link.admitted_memory_id)?
+                .context("memory admission link points to a missing admitted owner")?;
+            if admitted_record.status.is_terminal_historical() {
+                let report = terminal_historical_acceptance_report(
+                    admitted_record,
+                    fact_key,
+                    link.linked_at,
+                );
+                tx.commit()?;
+                return Ok(report);
+            }
+            let record = record_by_memory_id_tx(&tx, &link.memory_id)?
+                .context("memory proposal link points to a missing canonical owner")?;
+            if !record.status.is_runtime_active() {
+                anyhow::bail!("memory proposal owner is not materialized");
+            }
+            let (record, upgraded) = merge_effective_governance_tx(
+                &tx,
+                record,
+                &fact_key,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+            )?;
+            let report = existing_acceptance_report_tx(
+                &tx,
+                record,
+                fact_key,
+                if upgraded {
+                    MemoryAdmissionOutcome::GovernanceUpgraded
+                } else {
+                    MemoryAdmissionOutcome::ExactReplay
+                },
+                link.linked_at,
+            )?;
+            tx.commit()?;
+            return Ok(report);
+        }
+
+        if let Some(record) = active_record_by_fact_key_tx(&tx, &fact_key)? {
+            if !record.status.is_runtime_active() {
+                anyhow::bail!("existing Memory fact owner is not materialized");
+            }
+            link_proposal_to_memory_tx(
+                &tx,
+                &input.proposal_id,
+                &record.memory_id,
+                &fact_key,
+                &admission_digest,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+                now,
+            )?;
+            let (record, upgraded) = merge_effective_governance_tx(
+                &tx,
+                record,
+                &fact_key,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+            )?;
+            let report = existing_acceptance_report_tx(
+                &tx,
+                record,
+                fact_key,
+                if upgraded {
+                    MemoryAdmissionOutcome::GovernanceUpgraded
+                } else {
+                    MemoryAdmissionOutcome::AliasLinked
+                },
+                now,
+            )?;
+            tx.commit()?;
+            return Ok(report);
+        }
+
         let memory_id = format!("memory:{}", Uuid::new_v4());
         let mut record = MemoryLifecycleRecord {
             memory_id,
-            proposal_id: input.proposal_id,
+            proposal_id: input.proposal_id.clone(),
             source_task_session_id: input.source_task_session_id,
             source_run_id: input.source_run_id,
-            content: input.content,
-            scope: input.scope,
-            category: input.category,
-            risk_level: input.risk_level,
+            content: input.fact.canonical_body,
+            scope: input.fact.scope,
+            category: input.fact.category,
+            risk_level: input.fact.risk_level,
+            sensitivity: input.fact.sensitivity,
+            audit_digest: String::new(),
             status: MemoryLifecycleStatus::Accepted,
             materialization_status: MemoryMaterializationStatus::Pending,
             materialization_error_code: None,
@@ -448,30 +955,294 @@ impl MemoryLifecycleStore {
             materialized_view_id: None,
             materialized_view_version: None,
             evidence_ids: input.evidence_ids,
-            confidence: input.confidence.parse::<f32>().unwrap_or(0.0),
+            confidence,
             conflict_ids: input.conflict_ids,
             supersedes_memory_id: None,
             replacement_memory_id: None,
             rolled_back_by_event_id: None,
             runtime_context_excluded_at: None,
         };
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        insert_record_tx(&tx, &record, now, now)?;
+        record.audit_digest = memory_record_audit_digest(&record, &fact_key);
+        insert_record_tx(&tx, &record, &fact_key, now, now)?;
+        link_proposal_to_memory_tx(
+            &tx,
+            &input.proposal_id,
+            &record.memory_id,
+            &fact_key,
+            &admission_digest,
+            input.fact.risk_level,
+            input.fact.sensitivity,
+            now,
+        )?;
         let view = rebuild_view_tx(&tx, Some(record.scope), Some(&record.memory_id), None)?;
         record.status = MemoryLifecycleStatus::Materialized;
         record.materialization_status = MemoryMaterializationStatus::Materialized;
         record.materialized_view_id = Some(view.materialized_view_id.clone());
         record.materialized_view_version = Some(view.version);
         update_record_tx(&tx, &record, Utc::now())?;
+        let canonical_mutation = persistence_outbox::enqueue_mutation(
+            &tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            &record.memory_id,
+            "materialized",
+            &memory_lifecycle_projection_token(&record),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        )?;
         tx.commit()?;
         Ok(MemoryLifecycleAcceptanceReport {
             record,
-            materialized_view: view,
+            materialized_view: Some(view),
+            canonical_mutation: Some(canonical_mutation),
+            canonical_committed: true,
+            canonical_fact_key: fact_key,
+            newly_committed: true,
+            admission_outcome: MemoryAdmissionOutcome::OwnerCreated,
+            admission_at: now,
+            owner_accepted_at: Some(now),
+            projection_state: ProjectionDeliveryState::Pending,
         })
+    }
+
+    pub fn commit_explicit_user_memory(
+        &self,
+        input: ExplicitMemoryWriteInput,
+        admission_proof: PolicyMemoryAdmissionProof,
+    ) -> Result<ExplicitMemoryWriteReceipt> {
+        admission_proof.consume_for_explicit_input(&input)?;
+        if !matches!(
+            input.fact.risk_level,
+            MemoryLifecycleRiskLevel::Low | MemoryLifecycleRiskLevel::Medium
+        ) {
+            anyhow::bail!("explicit Memory lane rejects high-risk or identity/value content");
+        }
+        if input.fact.sensitivity == MemoryLifecycleSensitivity::Sensitive {
+            anyhow::bail!("explicit Memory lane rejects sensitive content");
+        }
+        if input.fact.category == MemoryLifecycleCategory::Boundary {
+            anyhow::bail!("explicit Memory lane rejects identity or boundary content");
+        }
+        if input.source_message_id.trim().is_empty() {
+            anyhow::bail!("explicit Memory source message id is empty");
+        }
+        let (_, fact_key) = canonical_memory_fact_identity(
+            input.fact.scope,
+            input.fact.category,
+            &input.fact.canonical_body,
+        )?;
+        let content_digest = digest_label(&input.fact.canonical_body);
+        let admission_digest = memory_fact_admission_digest(&fact_key, &input.fact);
+        let explicit_admission_id = digest_length_delimited_values(
+            "openlife_explicit_memory_admission_id_v1",
+            &[&input.source_message_id, &fact_key],
+        );
+        let proposal_id = format!("explicit_memory:{explicit_admission_id}");
+        let now = Utc::now();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(link) = proposal_link_tx(&tx, &proposal_id)? {
+            ensure_admission_link_matches(&link, &fact_key, &admission_digest, &input.fact)?;
+            let admitted_record = record_by_memory_id_tx(&tx, &link.admitted_memory_id)?
+                .context("explicit Memory admission link lost its admitted owner")?;
+            if admitted_record.status.is_terminal_historical() {
+                tx.commit()?;
+                return Ok(ExplicitMemoryWriteReceipt {
+                    receipt_id: admitted_record.memory_id.clone(),
+                    memory_id: admitted_record.memory_id,
+                    fact_key,
+                    source_message_id: input.source_message_id,
+                    content_digest,
+                    sensitivity: admitted_record.sensitivity,
+                    audit_digest: admitted_record.audit_digest,
+                    admission_outcome: MemoryAdmissionOutcome::TerminalHistorical,
+                    admission_at: link.linked_at,
+                    owner_accepted_at: admitted_record.accepted_at,
+                    created_at: link.linked_at,
+                    newly_committed: false,
+                    undo_available: false,
+                    canonical_committed: false,
+                    outbox_event_id: None,
+                    projection_state: terminal_projection_state(admitted_record.status),
+                    projection_error_digest: None,
+                });
+            }
+            let record = record_by_memory_id_tx(&tx, &link.memory_id)?
+                .context("explicit Memory admission link lost its canonical owner")?;
+            if !record.status.is_runtime_active() {
+                anyhow::bail!("explicit Memory canonical owner is not materialized");
+            }
+            let (record, upgraded) = merge_effective_governance_tx(
+                &tx,
+                record,
+                &fact_key,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+            )?;
+            let canonical_mutation = ensure_materialized_mutation_tx(&tx, &record)?;
+            let projection_state =
+                persistence_outbox::projection_summary(&tx, &canonical_mutation.event_id)?.state();
+            tx.commit()?;
+            return Ok(ExplicitMemoryWriteReceipt {
+                receipt_id: record.memory_id.clone(),
+                memory_id: record.memory_id,
+                fact_key,
+                source_message_id: input.source_message_id,
+                content_digest,
+                sensitivity: record.sensitivity,
+                audit_digest: record.audit_digest,
+                admission_outcome: if upgraded {
+                    MemoryAdmissionOutcome::GovernanceUpgraded
+                } else {
+                    MemoryAdmissionOutcome::ExactReplay
+                },
+                admission_at: link.linked_at,
+                owner_accepted_at: record.accepted_at,
+                created_at: link.linked_at,
+                newly_committed: upgraded,
+                undo_available: true,
+                canonical_committed: true,
+                outbox_event_id: Some(canonical_mutation.event_id),
+                projection_state,
+                projection_error_digest: None,
+            });
+        }
+        let existing = active_record_by_fact_key_tx(&tx, &fact_key)?;
+        if let Some(record) = existing {
+            if !record.status.is_runtime_active() {
+                anyhow::bail!("existing explicit Memory owner is not materialized");
+            }
+            link_proposal_to_memory_tx(
+                &tx,
+                &proposal_id,
+                &record.memory_id,
+                &fact_key,
+                &admission_digest,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+                now,
+            )?;
+            let (record, upgraded) = merge_effective_governance_tx(
+                &tx,
+                record,
+                &fact_key,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+            )?;
+            let canonical_mutation = ensure_materialized_mutation_tx(&tx, &record)?;
+            let projection_state =
+                persistence_outbox::projection_summary(&tx, &canonical_mutation.event_id)?.state();
+            tx.commit()?;
+            return Ok(ExplicitMemoryWriteReceipt {
+                receipt_id: record.memory_id.clone(),
+                memory_id: record.memory_id,
+                fact_key,
+                source_message_id: input.source_message_id,
+                content_digest,
+                sensitivity: record.sensitivity,
+                audit_digest: record.audit_digest,
+                admission_outcome: if upgraded {
+                    MemoryAdmissionOutcome::GovernanceUpgraded
+                } else {
+                    MemoryAdmissionOutcome::AliasLinked
+                },
+                admission_at: now,
+                owner_accepted_at: record.accepted_at,
+                created_at: now,
+                newly_committed: upgraded,
+                undo_available: true,
+                canonical_committed: true,
+                outbox_event_id: Some(canonical_mutation.event_id),
+                projection_state,
+                projection_error_digest: None,
+            });
+        }
+
+        let memory_id = format!("memory:{}", Uuid::new_v4());
+        let mut record = MemoryLifecycleRecord {
+            memory_id: memory_id.clone(),
+            proposal_id: proposal_id.clone(),
+            source_task_session_id: Some(input.source_task_session_id),
+            source_run_id: Some(input.source_run_id),
+            content: input.fact.canonical_body,
+            scope: input.fact.scope,
+            category: input.fact.category,
+            risk_level: input.fact.risk_level,
+            sensitivity: input.fact.sensitivity,
+            audit_digest: String::new(),
+            status: MemoryLifecycleStatus::Accepted,
+            materialization_status: MemoryMaterializationStatus::Pending,
+            materialization_error_code: None,
+            created_by: "current_authenticated_user_message".into(),
+            accepted_by: Some("user_explicit_instruction".into()),
+            accepted_at: Some(now),
+            materialized_view_id: None,
+            materialized_view_version: None,
+            evidence_ids: vec![input.source_message_id.clone()],
+            confidence: 1.0,
+            conflict_ids: Vec::new(),
+            supersedes_memory_id: None,
+            replacement_memory_id: None,
+            rolled_back_by_event_id: None,
+            runtime_context_excluded_at: None,
+        };
+        record.audit_digest = memory_record_audit_digest(&record, &fact_key);
+        insert_record_tx(&tx, &record, &fact_key, now, now)?;
+        link_proposal_to_memory_tx(
+            &tx,
+            &proposal_id,
+            &record.memory_id,
+            &fact_key,
+            &admission_digest,
+            input.fact.risk_level,
+            input.fact.sensitivity,
+            now,
+        )?;
+        let view = rebuild_view_tx(&tx, Some(record.scope), Some(&record.memory_id), None)?;
+        record.status = MemoryLifecycleStatus::Materialized;
+        record.materialization_status = MemoryMaterializationStatus::Materialized;
+        record.materialized_view_id = Some(view.materialized_view_id);
+        record.materialized_view_version = Some(view.version);
+        update_record_tx(&tx, &record, Utc::now())?;
+        let canonical_mutation = persistence_outbox::enqueue_mutation(
+            &tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            &record.memory_id,
+            "materialized",
+            &memory_lifecycle_projection_token(&record),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        )?;
+        tx.commit()?;
+
+        Ok(ExplicitMemoryWriteReceipt {
+            receipt_id: memory_id.clone(),
+            memory_id,
+            fact_key,
+            source_message_id: input.source_message_id,
+            content_digest,
+            sensitivity: record.sensitivity,
+            audit_digest: record.audit_digest,
+            admission_outcome: MemoryAdmissionOutcome::OwnerCreated,
+            admission_at: now,
+            owner_accepted_at: record.accepted_at,
+            created_at: now,
+            newly_committed: true,
+            undo_available: true,
+            canonical_committed: true,
+            outbox_event_id: Some(canonical_mutation.event_id),
+            projection_state: ProjectionDeliveryState::Pending,
+            projection_error_digest: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn commit_test_explicit_user_memory(
+        &self,
+        input: ExplicitMemoryWriteInput,
+    ) -> Result<ExplicitMemoryWriteReceipt> {
+        let admission_proof = PolicyMemoryAdmissionProof::test_fixture_for_explicit_input(&input);
+        self.commit_explicit_user_memory(input, admission_proof)
     }
 
     pub fn get_record(&self, memory_id: &str) -> Result<Option<MemoryLifecycleRecord>> {
@@ -497,7 +1268,12 @@ impl MemoryLifecycleStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.query_row(
-            record_select_sql!("WHERE proposal_id = ?1"),
+            record_select_sql!(
+                "WHERE memory_id = (
+                    SELECT admitted_memory_id FROM memory_lifecycle_proposal_links
+                    WHERE proposal_id = ?1
+                 )"
+            ),
             [proposal_id],
             row_to_record,
         )
@@ -586,12 +1362,107 @@ impl MemoryLifecycleStore {
         record.materialized_view_id = Some(view.materialized_view_id.clone());
         record.materialized_view_version = Some(view.version);
         update_record_tx(&tx, &record, now)?;
+        let canonical_mutation = persistence_outbox::enqueue_tombstone(
+            &tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            &record.memory_id,
+            Some(reason),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        )?;
         tx.commit()?;
         Ok(MemoryRollbackReport {
             record,
             rollback_event,
             materialized_view: view,
+            canonical_mutation,
+            canonical_committed: true,
+            projection_state: ProjectionDeliveryState::Pending,
+            projection_error_digest: None,
         })
+    }
+
+    pub fn list_replayable_projection_deliveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProjectionDelivery>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::list_replayable_deliveries(&conn, limit)
+    }
+
+    pub fn list_replayable_projection_deliveries_for_event(
+        &self,
+        event_id: &str,
+    ) -> Result<Vec<ProjectionDelivery>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::list_replayable_deliveries_for_event(&conn, event_id)
+    }
+
+    pub fn mark_projection_applied(&self, event_id: &str, projection_target: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::mark_delivery_applied(&conn, event_id, projection_target)
+    }
+
+    pub fn mark_projection_degraded(
+        &self,
+        event_id: &str,
+        projection_target: &str,
+        error: &str,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::mark_delivery_degraded(&conn, event_id, projection_target, error)
+    }
+
+    pub fn projection_summary(&self, event_id: &str) -> Result<ProjectionSummary> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::projection_summary(&conn, event_id)
+    }
+
+    pub fn latest_projection_event_id(&self, memory_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.query_row(
+            "SELECT event_id FROM canonical_outbox_events
+             WHERE aggregate_kind = ?1 AND aggregate_id = ?2
+             ORDER BY created_at DESC, event_id DESC LIMIT 1",
+            params![MEMORY_LIFECYCLE_AGGREGATE_KIND, memory_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn install_outbox_insert_failure_for_test(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_memory_lifecycle_outbox_insert_for_test
+             BEFORE INSERT ON canonical_outbox_events
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected memory lifecycle outbox insert failure');
+             END;",
+        )?;
+        Ok(())
     }
 
     pub fn list_records(
@@ -652,24 +1523,471 @@ impl MemoryLifecycleStore {
         scope: Option<MemoryLifecycleScope>,
         limit: i64,
     ) -> Result<Vec<MemoryLifecycleRecord>> {
-        self.list_records(scope, Some(MemoryLifecycleStatus::Materialized), limit, 0)
-            .map(|records| {
-                records
-                    .into_iter()
-                    .filter(|record| {
-                        record.materialization_status == MemoryMaterializationStatus::Materialized
-                            && record.runtime_context_excluded_at.is_none()
-                    })
-                    .collect()
-            })
+        self.list_retrievable_records(scope, limit)
     }
 
+    /// Runtime-safe personal Memory context. The lifecycle row and retrieval
+    /// disposition live in this one canonical database, so archive/restore,
+    /// rollback and context selection are serialized by the same SQLite
+    /// transaction authority. A lagging MemoryStore/VectorStore projection can
+    /// therefore never make an archived lifecycle body eligible for context.
+    pub fn list_retrievable_records(
+        &self,
+        scope: Option<MemoryLifecycleScope>,
+        limit: i64,
+    ) -> Result<Vec<MemoryLifecycleRecord>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let limit = limit.clamp(1, 200);
+        let predicate = "status = 'materialized'
+             AND materialization_status = 'materialized'
+             AND runtime_context_excluded_at IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM memory_lifecycle_retrieval_states retrieval
+                 WHERE retrieval.memory_id = memory_lifecycle_records.memory_id
+                   AND retrieval.disposition = 'archived'
+             )";
+        if let Some(scope) = scope {
+            let sql = format!(
+                "{} WHERE scope = ?1 AND {predicate}
+                 ORDER BY accepted_at DESC, memory_id DESC LIMIT ?2",
+                record_select_sql!("")
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map(params![scope.as_str(), limit], row_to_record)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        } else {
+            let sql = format!(
+                "{} WHERE {predicate}
+                 ORDER BY accepted_at DESC, memory_id DESC LIMIT ?1",
+                record_select_sql!("")
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map([limit], row_to_record)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        }
+    }
+
+    /// Canonical asset liveness independent of retrieval disposition. This is
+    /// used to authorize both archive and restore. Runtime context must use
+    /// `is_memory_retrievable` instead.
     pub fn is_memory_active(&self, memory_id: &str) -> Result<bool> {
         Ok(self.get_record(memory_id)?.is_some_and(|record| {
             record.status.is_runtime_active()
                 && record.materialization_status == MemoryMaterializationStatus::Materialized
                 && record.runtime_context_excluded_at.is_none()
         }))
+    }
+
+    pub fn is_memory_retrievable(&self, memory_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        lifecycle_memory_is_retrievable_from_conn(&conn, memory_id)
+    }
+
+    pub fn set_memory_retrieval_disposition(
+        &self,
+        memory_id: &str,
+        disposition: MemoryRetrievalDisposition,
+        reason_code: &str,
+    ) -> Result<CanonicalMemoryRetrievalMutation> {
+        self.set_memory_retrieval_dispositions(
+            std::slice::from_ref(&memory_id.to_string()),
+            disposition,
+            reason_code,
+        )?
+        .into_iter()
+        .next()
+        .context("canonical lifecycle Memory retrieval single mutation is missing")
+    }
+
+    /// Mutate retrieval visibility under the same canonical transaction that
+    /// owns lifecycle liveness. Every owner is validated before the first
+    /// outbox event, so a rollback/delete race has one serial outcome and a
+    /// mixed valid/stale batch cannot partially commit.
+    pub fn set_memory_retrieval_dispositions(
+        &self,
+        memory_ids: &[String],
+        disposition: MemoryRetrievalDisposition,
+        reason_code: &str,
+    ) -> Result<Vec<CanonicalMemoryRetrievalMutation>> {
+        ensure_lifecycle_retrieval_reason_code(reason_code)?;
+        if memory_ids.is_empty() || memory_ids.len() > 200 {
+            anyhow::bail!("canonical lifecycle Memory retrieval batch must contain 1..=200 owners");
+        }
+        let unique = memory_ids.iter().collect::<std::collections::HashSet<_>>();
+        if unique.len() != memory_ids.len() {
+            anyhow::bail!("canonical lifecycle Memory retrieval batch contains duplicate owners");
+        }
+        if memory_ids.iter().any(|memory_id| {
+            memory_id.trim() != memory_id || memory_id.is_empty() || memory_id.len() > 256
+        }) {
+            anyhow::bail!("canonical lifecycle Memory owner id is invalid");
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for memory_id in memory_ids {
+            let active = tx
+                .query_row(
+                    "SELECT 1 FROM memory_lifecycle_records
+                     WHERE memory_id = ?1
+                       AND status = 'materialized'
+                       AND materialization_status = 'materialized'
+                       AND runtime_context_excluded_at IS NULL",
+                    [memory_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !active {
+                anyhow::bail!(
+                    "canonical lifecycle Memory owner proof is missing, stale, or inactive"
+                );
+            }
+        }
+        let mutations = memory_ids
+            .iter()
+            .map(|memory_id| {
+                Self::set_memory_retrieval_disposition_in_transaction(
+                    &tx,
+                    memory_id,
+                    disposition,
+                    reason_code,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(mutations)
+    }
+
+    fn set_memory_retrieval_disposition_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        memory_id: &str,
+        disposition: MemoryRetrievalDisposition,
+        reason_code: &str,
+    ) -> Result<CanonicalMemoryRetrievalMutation> {
+        let existing = tx
+            .query_row(
+                "SELECT disposition, revision, last_event_id, changed_at
+                 FROM memory_lifecycle_retrieval_states WHERE memory_id = ?1",
+                [memory_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((stored, revision, last_event_id, changed_at)) = existing.as_ref() {
+            let stored_disposition = MemoryRetrievalDisposition::parse(stored)?;
+            if stored_disposition == disposition {
+                let revision = u64::try_from(*revision)
+                    .context("canonical lifecycle Memory retrieval revision is invalid")?;
+                let canonical_mutation =
+                    persistence_outbox::mutation_by_event_id(tx, last_event_id)?.context(
+                        "canonical lifecycle Memory retrieval state lost its outbox event",
+                    )?;
+                return Ok(CanonicalMemoryRetrievalMutation {
+                    changed: false,
+                    state: Some(CanonicalMemoryRetrievalState {
+                        owner_kind: MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND.into(),
+                        owner_id: memory_id.to_string(),
+                        disposition,
+                        revision,
+                        last_event_id: last_event_id.clone(),
+                        changed_at: changed_at.clone(),
+                    }),
+                    canonical_mutation: Some(canonical_mutation),
+                });
+            }
+        } else if disposition == MemoryRetrievalDisposition::Active {
+            return Ok(CanonicalMemoryRetrievalMutation {
+                changed: false,
+                state: None,
+                canonical_mutation: None,
+            });
+        }
+
+        let payload_digest = persistence_outbox::metadata_digest(&format!(
+            "memory_lifecycle_retrieval:{}:{}:{}",
+            memory_id,
+            disposition.as_str(),
+            Uuid::new_v4()
+        ));
+        let canonical_mutation = persistence_outbox::enqueue_mutation(
+            tx,
+            MEMORY_LIFECYCLE_RETRIEVAL_AGGREGATE_KIND,
+            &lifecycle_retrieval_aggregate_id(memory_id),
+            disposition.as_str(),
+            &payload_digest,
+            &["vector_store"],
+        )?;
+        let revision = i64::try_from(canonical_mutation.aggregate_revision)
+            .context("canonical lifecycle Memory retrieval revision exceeds SQLite range")?;
+        let changed_at = canonical_mutation.created_at.to_rfc3339();
+        tx.execute(
+            "INSERT INTO memory_lifecycle_retrieval_states (
+                memory_id, disposition, revision, last_event_id, reason_digest, changed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(memory_id) DO UPDATE SET
+                disposition = excluded.disposition,
+                revision = excluded.revision,
+                last_event_id = excluded.last_event_id,
+                reason_digest = excluded.reason_digest,
+                changed_at = excluded.changed_at",
+            params![
+                memory_id,
+                disposition.as_str(),
+                revision,
+                canonical_mutation.event_id,
+                persistence_outbox::metadata_digest(reason_code),
+                changed_at,
+            ],
+        )?;
+        Ok(CanonicalMemoryRetrievalMutation {
+            changed: true,
+            state: Some(CanonicalMemoryRetrievalState {
+                owner_kind: MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND.into(),
+                owner_id: memory_id.to_string(),
+                disposition,
+                revision: canonical_mutation.aggregate_revision,
+                last_event_id: canonical_mutation.event_id.clone(),
+                changed_at,
+            }),
+            canonical_mutation: Some(canonical_mutation),
+        })
+    }
+
+    pub fn memory_retrieval_state(
+        &self,
+        memory_id: &str,
+    ) -> Result<Option<CanonicalMemoryRetrievalState>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        lifecycle_retrieval_state_from_conn(&conn, memory_id)
+    }
+
+    pub fn list_archived_memory_retrieval_states(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<CanonicalMemoryRetrievalState>> {
+        self.list_archived_memory_retrieval_states_page(limit, 0)
+    }
+
+    pub fn list_archived_memory_retrieval_states_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<CanonicalMemoryRetrievalState>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut statement = conn.prepare(
+            "SELECT retrieval.memory_id, retrieval.disposition, retrieval.revision,
+                    retrieval.last_event_id, retrieval.changed_at
+             FROM memory_lifecycle_retrieval_states retrieval
+             JOIN memory_lifecycle_records records
+               ON records.memory_id = retrieval.memory_id
+             WHERE retrieval.disposition = 'archived'
+               AND records.status = 'materialized'
+               AND records.materialization_status = 'materialized'
+               AND records.runtime_context_excluded_at IS NULL
+             ORDER BY retrieval.changed_at DESC, retrieval.memory_id
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = statement.query_map(
+            [
+                i64::try_from(limit).context("archived lifecycle Memory limit exceeds i64")?,
+                i64::try_from(offset).context("archived lifecycle Memory offset exceeds i64")?,
+            ],
+            lifecycle_retrieval_state_from_row,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn get_active_record_for_fact(
+        &self,
+        fact: &CanonicalMemoryFactDescriptor,
+    ) -> Result<Option<MemoryLifecycleRecord>> {
+        let fact_key = fact.fact_key()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.query_row(
+            record_select_sql!(
+                "WHERE fact_key = ?1
+                   AND runtime_context_excluded_at IS NULL
+                   AND status IN (
+                        'accepted', 'pending_materialization', 'materialized',
+                        'materialization_failed'
+                   )
+                 LIMIT 1"
+            ),
+            [fact_key],
+            row_to_record,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn count_archived_memory_retrieval_states(&self) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let count = conn.query_row(
+            "SELECT COUNT(*)
+             FROM memory_lifecycle_retrieval_states retrieval
+             JOIN memory_lifecycle_records records
+               ON records.memory_id = retrieval.memory_id
+             WHERE retrieval.disposition = 'archived'
+               AND records.status = 'materialized'
+               AND records.materialization_status = 'materialized'
+               AND records.runtime_context_excluded_at IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        usize::try_from(count).context("archived lifecycle Memory count exceeds usize")
+    }
+
+    pub fn load_memory_retrieval_state_for_projection(
+        &self,
+        event_id: &str,
+    ) -> Result<CanonicalMemoryRetrievalState> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let (state, aggregate_id, mutation_kind, event_revision) = conn
+            .query_row(
+                "SELECT states.memory_id, states.disposition, states.revision,
+                        states.last_event_id, states.changed_at,
+                        events.aggregate_id, events.mutation_kind,
+                        events.aggregate_revision
+                 FROM memory_lifecycle_retrieval_states states
+                 JOIN canonical_outbox_events events
+                   ON events.event_id = states.last_event_id
+                 WHERE states.last_event_id = ?1
+                   AND events.aggregate_kind = 'memory_retrieval'",
+                [event_id],
+                |row| {
+                    let state = lifecycle_retrieval_state_from_row(row)?;
+                    let event_revision_raw = row.get::<_, i64>(7)?;
+                    let event_revision = u64::try_from(event_revision_raw).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok((
+                        state,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        event_revision,
+                    ))
+                },
+            )
+            .optional()?
+            .context("canonical lifecycle Memory retrieval projection is stale or missing")?;
+        if aggregate_id != lifecycle_retrieval_aggregate_id(&state.owner_id)
+            || mutation_kind != state.disposition.as_str()
+            || event_revision != state.revision
+        {
+            anyhow::bail!(
+                "canonical lifecycle Memory retrieval projection identity is inconsistent"
+            );
+        }
+        Ok(state)
+    }
+
+    pub fn load_memory_retrieval_head_for_event(
+        &self,
+        event_id: &str,
+    ) -> Result<CanonicalMemoryRetrievalState> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let state = conn
+            .query_row(
+                "SELECT states.memory_id, states.disposition, states.revision,
+                        states.last_event_id, states.changed_at
+                 FROM canonical_outbox_events stale_events
+                 JOIN canonical_outbox_events head_events
+                   ON head_events.aggregate_kind = stale_events.aggregate_kind
+                  AND head_events.aggregate_id = stale_events.aggregate_id
+                 JOIN memory_lifecycle_retrieval_states states
+                   ON states.last_event_id = head_events.event_id
+                 WHERE stale_events.event_id = ?1
+                   AND stale_events.aggregate_kind = 'memory_retrieval'",
+                [event_id],
+                lifecycle_retrieval_state_from_row,
+            )
+            .optional()?
+            .context("canonical lifecycle Memory retrieval event has no current head")?;
+        let head = lifecycle_retrieval_state_from_conn(&conn, &state.owner_id)?
+            .context("canonical lifecycle Memory retrieval head is missing")?;
+        if head != state {
+            anyhow::bail!("canonical lifecycle Memory retrieval head changed while loading");
+        }
+        Ok(state)
+    }
+
+    pub fn mark_memory_retrieval_projection_applied_if_head(
+        &self,
+        event_id: &str,
+        revision: u64,
+        projection_target: &str,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::mark_delivery_applied_if_canonical_head(
+            &mut conn,
+            event_id,
+            revision,
+            projection_target,
+        )
+    }
+
+    pub fn mark_memory_retrieval_projection_compensated_to_head(
+        &self,
+        stale_event_id: &str,
+        head_event_id: &str,
+        head_revision: u64,
+        projection_target: &str,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        persistence_outbox::mark_delivery_compensated_to_head(
+            &mut conn,
+            stale_event_id,
+            head_event_id,
+            head_revision,
+            projection_target,
+        )
     }
 
     pub fn lifecycle_events(&self, memory_id: &str) -> Result<Vec<MemoryLifecycleEvent>> {
@@ -724,16 +2042,161 @@ impl MemoryLifecycleStore {
     }
 }
 
+fn ensure_lifecycle_retrieval_reason_code(reason_code: &str) -> Result<()> {
+    if reason_code.is_empty()
+        || reason_code.len() > 96
+        || !reason_code.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
+    {
+        anyhow::bail!("invalid canonical lifecycle Memory retrieval reason code");
+    }
+    Ok(())
+}
+
+fn lifecycle_retrieval_aggregate_id(memory_id: &str) -> String {
+    persistence_outbox::metadata_digest(&format!(
+        "memory_retrieval_owner:{MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND}:{memory_id}"
+    ))
+}
+
+fn lifecycle_memory_is_retrievable_from_conn(conn: &Connection, memory_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1
+             FROM memory_lifecycle_records records
+             WHERE records.memory_id = ?1
+               AND records.status = 'materialized'
+               AND records.materialization_status = 'materialized'
+               AND records.runtime_context_excluded_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_lifecycle_retrieval_states retrieval
+                   WHERE retrieval.memory_id = records.memory_id
+                     AND retrieval.disposition = 'archived'
+               )",
+            [memory_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn lifecycle_retrieval_state_from_conn(
+    conn: &Connection,
+    memory_id: &str,
+) -> Result<Option<CanonicalMemoryRetrievalState>> {
+    conn.query_row(
+        "SELECT memory_id, disposition, revision, last_event_id, changed_at
+         FROM memory_lifecycle_retrieval_states WHERE memory_id = ?1",
+        [memory_id],
+        lifecycle_retrieval_state_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn lifecycle_retrieval_state_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CanonicalMemoryRetrievalState> {
+    let disposition_raw = row.get::<_, String>(1)?;
+    let disposition = MemoryRetrievalDisposition::parse(&disposition_raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })?;
+    let revision_raw = row.get::<_, i64>(2)?;
+    let revision = u64::try_from(revision_raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    Ok(CanonicalMemoryRetrievalState {
+        owner_kind: MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND.into(),
+        owner_id: row.get(0)?,
+        disposition,
+        revision,
+        last_event_id: row.get(3)?,
+        changed_at: row.get(4)?,
+    })
+}
+
 impl MemoryLifecycleAcceptanceInput {
-    pub fn from_memory_proposal(proposal: &AgentProposal, content: String) -> Self {
-        Self {
-            proposal_id: proposal.id.clone(),
-            source_task_session_id: proposal.source_detail.clone(),
-            source_run_id: proposal.run_id.clone(),
+    pub fn from_memory_proposal_with_terminal_origin(
+        proposal: &AgentProposal,
+        content: String,
+        task_session_id: &str,
+        run_id: &str,
+        canonical_user_message_ref: &str,
+        canonical_user_message_digest: &str,
+    ) -> Result<Self> {
+        let mut input = Self::from_memory_proposal(proposal, content)?;
+        if task_session_id.trim().is_empty()
+            || run_id.trim().is_empty()
+            || canonical_user_message_ref.trim().is_empty()
+            || canonical_user_message_digest.trim().is_empty()
+        {
+            anyhow::bail!("terminal owner Memory origin is incomplete");
+        }
+        input.source_task_session_id = Some(task_session_id.to_string());
+        input.source_run_id = Some(run_id.to_string());
+        input.evidence_ids = vec![
+            proposal.id.clone(),
+            canonical_user_message_ref.to_string(),
+            canonical_user_message_digest.to_string(),
+        ];
+        Ok(input)
+    }
+
+    pub fn from_memory_proposal(proposal: &AgentProposal, content: String) -> Result<Self> {
+        let reviewed_content = proposal
+            .after
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .context("Memory proposal reviewed content is missing or not a string")?;
+        if reviewed_content != content {
+            anyhow::bail!("Memory proposal materialization content differs from reviewed content");
+        }
+        let risk_level = risk_from_proposal(proposal);
+        let reviewed_risk = proposal
+            .after
+            .get("riskLevel")
+            .or_else(|| proposal.after.get("risk_level"))
+            .and_then(serde_json::Value::as_str)
+            .context("Memory proposal reviewed risk level is missing or not a string")?;
+        let reviewed_risk = strict_risk_level(reviewed_risk)?;
+        if reviewed_risk != risk_level {
+            anyhow::bail!("Memory proposal reviewed risk disagrees with proposal risk");
+        }
+        let sensitivity = sensitivity_from_proposal(proposal)?;
+        if matches!(
+            risk_level,
+            MemoryLifecycleRiskLevel::High | MemoryLifecycleRiskLevel::IdentityValue
+        ) && sensitivity != MemoryLifecycleSensitivity::Sensitive
+        {
+            anyhow::bail!("high-risk Memory proposal must be marked sensitive");
+        }
+        let fact = CanonicalMemoryFactDescriptor::new(
             content,
-            scope: scope_from_proposal(proposal),
-            category: category_from_proposal(proposal),
-            risk_level: risk_from_proposal(proposal),
+            scope_from_proposal(proposal)?,
+            category_from_proposal(proposal)?,
+            risk_level,
+            sensitivity,
+        )?;
+        Ok(Self {
+            proposal_id: proposal.id.clone(),
+            // Untyped Proposal fields are never terminal-owner authority.
+            // Origin-bound Review acceptance must use
+            // `from_memory_proposal_with_terminal_origin`.
+            source_task_session_id: None,
+            source_run_id: proposal.run_id.clone(),
+            fact,
             created_by: created_by_from_source(proposal.source).into(),
             accepted_by: "user".into(),
             evidence_ids: proposal
@@ -745,21 +2208,24 @@ impl MemoryLifecycleAcceptanceInput {
                 .collect(),
             confidence: format!("{:.3}", proposal.confidence),
             conflict_ids: conflict_ids_from_proposal(proposal),
-        }
+        })
     }
 }
 
-fn scope_from_proposal(proposal: &AgentProposal) -> MemoryLifecycleScope {
+fn scope_from_proposal(proposal: &AgentProposal) -> Result<MemoryLifecycleScope> {
     let after_scope = proposal
         .after
         .get("scope")
-        .or_else(|| proposal.after.get("memoryScope"))
-        .and_then(serde_json::Value::as_str);
+        .or_else(|| proposal.after.get("memoryScope"));
     if let Some(scope) = after_scope {
-        return MemoryLifecycleScope::from_str(scope);
+        return MemoryLifecycleScope::from_str(
+            scope
+                .as_str()
+                .context("Memory lifecycle scope must be a string")?,
+        );
     }
     let path = proposal.affected_path.to_ascii_lowercase();
-    if path.contains("project") {
+    Ok(if path.contains("project") {
         MemoryLifecycleScope::Project
     } else if path.contains("workspace") {
         MemoryLifecycleScope::Workspace
@@ -767,23 +2233,70 @@ fn scope_from_proposal(proposal: &AgentProposal) -> MemoryLifecycleScope {
         MemoryLifecycleScope::Conversation
     } else {
         MemoryLifecycleScope::Global
-    }
+    })
 }
 
-fn category_from_proposal(proposal: &AgentProposal) -> MemoryLifecycleCategory {
-    if let Some(category) = proposal
+fn category_from_proposal(proposal: &AgentProposal) -> Result<MemoryLifecycleCategory> {
+    let kind = proposal
         .after
-        .get("category")
-        .and_then(serde_json::Value::as_str)
+        .get("candidateKind")
+        .or_else(|| proposal.after.get("candidate_kind"));
+    let category = proposal.after.get("category");
+    if proposal.proposal_type == ProposalType::MemoryWrite && (kind.is_none() || category.is_none())
     {
-        return MemoryLifecycleCategory::from_str(category);
+        anyhow::bail!("Memory write proposal requires candidateKind and category");
     }
-    match proposal.proposal_type {
+    if let Some(kind) = kind {
+        let kind = kind
+            .as_str()
+            .context("Memory candidate kind must be a string")?;
+        let kind = memory_candidate_kind_from_str(kind)
+            .with_context(|| format!("unknown Memory candidate kind: {kind}"))?;
+        let expected = memory_lifecycle_category_for_candidate_kind(kind);
+        let reviewed = MemoryLifecycleCategory::from_str(
+            category
+                .and_then(serde_json::Value::as_str)
+                .context("Memory lifecycle category must be a string")?,
+        )?;
+        if reviewed != expected {
+            anyhow::bail!("Memory candidate kind and reviewed category disagree");
+        }
+        return Ok(expected);
+    }
+    if let Some(category) = category {
+        return MemoryLifecycleCategory::from_str(
+            category
+                .as_str()
+                .context("Memory lifecycle category must be a string")?,
+        );
+    }
+    Ok(match proposal.proposal_type {
         ProposalType::PreferenceUpdate | ProposalType::MemoryWrite => {
             MemoryLifecycleCategory::Preference
         }
         ProposalType::MemoryArchive => MemoryLifecycleCategory::Correction,
         _ => MemoryLifecycleCategory::Fact,
+    })
+}
+
+fn strict_risk_level(value: &str) -> Result<MemoryLifecycleRiskLevel> {
+    match value {
+        "low" => Ok(MemoryLifecycleRiskLevel::Low),
+        "medium" => Ok(MemoryLifecycleRiskLevel::Medium),
+        "high" => Ok(MemoryLifecycleRiskLevel::High),
+        "identity_value" => Ok(MemoryLifecycleRiskLevel::IdentityValue),
+        _ => anyhow::bail!("unknown Memory lifecycle risk level: {value}"),
+    }
+}
+
+fn memory_candidate_kind_from_str(value: &str) -> Option<MemoryCandidateKind> {
+    match value {
+        "episodic_life_event" => Some(MemoryCandidateKind::EpisodicLifeEvent),
+        "semantic_user_fact" => Some(MemoryCandidateKind::SemanticUserFact),
+        "procedural_rule" => Some(MemoryCandidateKind::ProceduralRule),
+        "preference" => Some(MemoryCandidateKind::Preference),
+        "identity_or_role" => Some(MemoryCandidateKind::IdentityOrRole),
+        _ => None,
     }
 }
 
@@ -795,7 +2308,32 @@ fn risk_from_proposal(proposal: &AgentProposal) -> MemoryLifecycleRiskLevel {
     match proposal.risk_level {
         RiskLevel::Low => MemoryLifecycleRiskLevel::Low,
         RiskLevel::Medium => MemoryLifecycleRiskLevel::Medium,
-        RiskLevel::High | RiskLevel::Critical => MemoryLifecycleRiskLevel::High,
+        RiskLevel::High => MemoryLifecycleRiskLevel::High,
+        RiskLevel::Critical => MemoryLifecycleRiskLevel::IdentityValue,
+    }
+}
+
+fn sensitivity_from_proposal(proposal: &AgentProposal) -> Result<MemoryLifecycleSensitivity> {
+    let value = proposal
+        .after
+        .get("sensitivity")
+        .context("Memory proposal reviewed sensitivity is missing")?;
+    match value
+        .as_str()
+        .context("Memory lifecycle sensitivity must be a string")?
+    {
+        "internal" => Ok(MemoryLifecycleSensitivity::Internal),
+        "sensitive" => Ok(MemoryLifecycleSensitivity::Sensitive),
+        value => anyhow::bail!("unknown Memory lifecycle sensitivity: {value}"),
+    }
+}
+
+fn legacy_default_sensitivity(risk_level: MemoryLifecycleRiskLevel) -> MemoryLifecycleSensitivity {
+    match risk_level {
+        MemoryLifecycleRiskLevel::Low => MemoryLifecycleSensitivity::Internal,
+        MemoryLifecycleRiskLevel::Medium
+        | MemoryLifecycleRiskLevel::High
+        | MemoryLifecycleRiskLevel::IdentityValue => MemoryLifecycleSensitivity::Sensitive,
     }
 }
 
@@ -822,16 +2360,788 @@ fn conflict_ids_from_proposal(proposal: &AgentProposal) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn configure_memory_lifecycle_connection(conn: &Connection, file_backed: bool) -> Result<()> {
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    if file_backed {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    }
+    Ok(())
+}
+
+/// Canonical identity for one active Memory fact. Governance metadata that can
+/// legitimately vary between proposals (source, evidence and confidence) is
+/// deliberately excluded; scope, category and normalized content define the
+/// semantic identity without rewriting the canonical body. Each admission
+/// retains its exact risk and sensitivity, while the shared owner only moves
+/// toward the more conservative effective governance level.
+fn canonical_memory_fact_identity(
+    scope: MemoryLifecycleScope,
+    category: MemoryLifecycleCategory,
+    content: &str,
+) -> Result<(String, String)> {
+    let compatibility_normalized = content.nfkc().collect::<String>();
+    let normalized = compatibility_normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        anyhow::bail!("canonical Memory fact content is empty");
+    }
+    let mut material = Vec::new();
+    for value in [
+        "openlife_memory_fact_v1",
+        scope.as_str(),
+        category.as_str(),
+        normalized.as_str(),
+    ] {
+        let length = u64::try_from(value.len()).context("Memory fact identity is too large")?;
+        material.extend_from_slice(&length.to_be_bytes());
+        material.extend_from_slice(value.as_bytes());
+    }
+    let digest = digest(&SHA256, &material);
+    let encoded = digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok((normalized, format!("memory_fact_v1:sha256:{encoded}")))
+}
+
+fn digest_length_delimited_values(namespace: &str, values: &[&str]) -> String {
+    let mut material = Vec::new();
+    for value in std::iter::once(namespace).chain(values.iter().copied()) {
+        material.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        material.extend_from_slice(value.as_bytes());
+    }
+    let digest = digest(&SHA256, &material);
+    let encoded = digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{encoded}")
+}
+
+fn memory_fact_admission_digest(fact_key: &str, fact: &CanonicalMemoryFactDescriptor) -> String {
+    digest_length_delimited_values(
+        "openlife_memory_admission_v1",
+        &[
+            fact_key,
+            &fact.canonical_body,
+            fact.scope.as_str(),
+            fact.category.as_str(),
+            fact.risk_level.as_str(),
+            fact.sensitivity.as_str(),
+        ],
+    )
+}
+
+fn memory_record_audit_digest(record: &MemoryLifecycleRecord, fact_key: &str) -> String {
+    digest_length_delimited_values(
+        "openlife_memory_record_audit_v1",
+        &[
+            &record.memory_id,
+            &record.proposal_id,
+            fact_key,
+            &record.content,
+            record.scope.as_str(),
+            record.category.as_str(),
+            record.risk_level.as_str(),
+            record.sensitivity.as_str(),
+            &record.created_by,
+            record.accepted_by.as_deref().unwrap_or(""),
+        ],
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryAdmissionLink {
+    memory_id: String,
+    admitted_memory_id: String,
+    fact_key: String,
+    admission_digest: String,
+    risk_level: MemoryLifecycleRiskLevel,
+    sensitivity: MemoryLifecycleSensitivity,
+    linked_at: DateTime<Utc>,
+}
+
+fn proposal_link_tx(
+    tx: &rusqlite::Transaction<'_>,
+    proposal_id: &str,
+) -> Result<Option<MemoryAdmissionLink>> {
+    tx.query_row(
+        "SELECT memory_id, admitted_memory_id, fact_key, admission_digest,
+                risk_level, sensitivity, linked_at
+         FROM memory_lifecycle_proposal_links
+         WHERE proposal_id = ?1",
+        [proposal_id],
+        |row| {
+            Ok(MemoryAdmissionLink {
+                memory_id: row.get(0)?,
+                admitted_memory_id: row.get(1)?,
+                fact_key: row.get(2)?,
+                admission_digest: row.get(3)?,
+                risk_level: MemoryLifecycleRiskLevel::from_str(&row.get::<_, String>(4)?),
+                sensitivity: MemoryLifecycleSensitivity::from_str(&row.get::<_, String>(5)?),
+                linked_at: parse_time(&row.get::<_, String>(6)?),
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+// The canonical proposal-memory relation is one transactional row whose
+// identity and audit fields remain explicit.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
+fn link_proposal_to_memory_tx(
+    tx: &rusqlite::Transaction<'_>,
+    proposal_id: &str,
+    memory_id: &str,
+    fact_key: &str,
+    admission_digest: &str,
+    risk_level: MemoryLifecycleRiskLevel,
+    sensitivity: MemoryLifecycleSensitivity,
+    linked_at: DateTime<Utc>,
+) -> Result<()> {
+    if proposal_id.trim().is_empty()
+        || memory_id.trim().is_empty()
+        || fact_key.trim().is_empty()
+        || admission_digest.trim().is_empty()
+    {
+        anyhow::bail!("Memory proposal link identity is incomplete");
+    }
+    if let Some(existing) = proposal_link_tx(tx, proposal_id)? {
+        if existing.memory_id == memory_id
+            && existing.admitted_memory_id == memory_id
+            && existing.fact_key == fact_key
+            && existing.admission_digest == admission_digest
+            && existing.risk_level == risk_level
+            && existing.sensitivity == sensitivity
+        {
+            return Ok(());
+        }
+        anyhow::bail!("Memory proposal link conflicts with its canonical owner");
+    }
+    tx.execute(
+        "INSERT INTO memory_lifecycle_proposal_links (
+            proposal_id, memory_id, admitted_memory_id, fact_key,
+            admission_digest, risk_level, sensitivity, linked_at
+         ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            proposal_id,
+            memory_id,
+            fact_key,
+            admission_digest,
+            risk_level.to_string(),
+            sensitivity.to_string(),
+            linked_at.to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_admission_link_matches(
+    link: &MemoryAdmissionLink,
+    fact_key: &str,
+    admission_digest: &str,
+    fact: &CanonicalMemoryFactDescriptor,
+) -> Result<()> {
+    if link.fact_key != fact_key
+        || link.admission_digest != admission_digest
+        || link.risk_level != fact.risk_level
+        || link.sensitivity != fact.sensitivity
+    {
+        anyhow::bail!(
+            "memory proposal idempotency key was reused with a different canonical admission"
+        );
+    }
+    Ok(())
+}
+
+fn record_by_memory_id_tx(
+    tx: &rusqlite::Transaction<'_>,
+    memory_id: &str,
+) -> Result<Option<MemoryLifecycleRecord>> {
+    tx.query_row(
+        record_select_sql!("WHERE memory_id = ?1"),
+        [memory_id],
+        row_to_record,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn active_record_by_fact_key_tx(
+    tx: &rusqlite::Transaction<'_>,
+    fact_key: &str,
+) -> Result<Option<MemoryLifecycleRecord>> {
+    tx.query_row(
+        record_select_sql!(
+            "WHERE fact_key = ?1
+               AND runtime_context_excluded_at IS NULL
+               AND status IN (
+                    'accepted', 'pending_materialization', 'materialized',
+                    'materialization_failed'
+               )
+             LIMIT 1"
+        ),
+        [fact_key],
+        row_to_record,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn merge_effective_governance_tx(
+    tx: &rusqlite::Transaction<'_>,
+    mut record: MemoryLifecycleRecord,
+    fact_key: &str,
+    admitted_risk: MemoryLifecycleRiskLevel,
+    admitted_sensitivity: MemoryLifecycleSensitivity,
+) -> Result<(MemoryLifecycleRecord, bool)> {
+    let effective_risk = record.risk_level.conservative_max(admitted_risk);
+    let effective_sensitivity = record.sensitivity.conservative_max(admitted_sensitivity);
+    if effective_risk == record.risk_level && effective_sensitivity == record.sensitivity {
+        return Ok((record, false));
+    }
+    record.risk_level = effective_risk;
+    record.sensitivity = effective_sensitivity;
+    record.audit_digest = memory_record_audit_digest(&record, fact_key);
+    update_record_tx(tx, &record, Utc::now())?;
+    if record.status.is_runtime_active()
+        && record.materialization_status == MemoryMaterializationStatus::Materialized
+    {
+        persistence_outbox::enqueue_mutation(
+            tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            &record.memory_id,
+            "materialized",
+            &memory_lifecycle_projection_token(&record),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        )?;
+    }
+    Ok((record, true))
+}
+
+fn ensure_materialized_mutation_tx(
+    tx: &rusqlite::Transaction<'_>,
+    record: &MemoryLifecycleRecord,
+) -> Result<CanonicalMutationReceipt> {
+    let event_id = tx
+        .query_row(
+            "SELECT event_id FROM canonical_outbox_events
+             WHERE aggregate_kind = ?1 AND aggregate_id = ?2
+               AND mutation_kind = 'materialized'
+             ORDER BY aggregate_revision DESC LIMIT 1",
+            params![MEMORY_LIFECYCLE_AGGREGATE_KIND, record.memory_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match event_id {
+        Some(event_id) => persistence_outbox::mutation_by_event_id(tx, &event_id)?
+            .context("MemoryLifecycle materialized outbox event is missing"),
+        None => persistence_outbox::enqueue_mutation(
+            tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            &record.memory_id,
+            "materialized",
+            &memory_lifecycle_projection_token(record),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        ),
+    }
+}
+
+fn existing_acceptance_report_tx(
+    tx: &rusqlite::Transaction<'_>,
+    mut record: MemoryLifecycleRecord,
+    fact_key: String,
+    admission_outcome: MemoryAdmissionOutcome,
+    admission_at: DateTime<Utc>,
+) -> Result<MemoryLifecycleAcceptanceReport> {
+    let materialized_view = match record
+        .materialized_view_id
+        .as_deref()
+        .map(|view_id| load_materialized_view_tx(tx, view_id))
+        .transpose()?
+        .flatten()
+    {
+        Some(view) => view,
+        None => {
+            let view = rebuild_view_tx(
+                tx,
+                Some(record.scope),
+                record
+                    .status
+                    .is_runtime_active()
+                    .then_some(record.memory_id.as_str()),
+                (!record.status.is_runtime_active()).then_some(record.memory_id.as_str()),
+            )?;
+            record.materialized_view_id = Some(view.materialized_view_id.clone());
+            record.materialized_view_version = Some(view.version);
+            update_record_tx(tx, &record, Utc::now())?;
+            view
+        }
+    };
+    let canonical_mutation = ensure_materialized_mutation_tx(tx, &record)?;
+    let projection_state =
+        persistence_outbox::projection_summary(tx, &canonical_mutation.event_id)?.state();
+    let owner_accepted_at = record.accepted_at;
+    Ok(MemoryLifecycleAcceptanceReport {
+        record,
+        materialized_view: Some(materialized_view),
+        canonical_mutation: Some(canonical_mutation),
+        canonical_committed: true,
+        canonical_fact_key: fact_key,
+        newly_committed: admission_outcome == MemoryAdmissionOutcome::GovernanceUpgraded,
+        admission_outcome,
+        admission_at,
+        owner_accepted_at,
+        projection_state,
+    })
+}
+
+fn terminal_historical_acceptance_report(
+    record: MemoryLifecycleRecord,
+    fact_key: String,
+    admission_at: DateTime<Utc>,
+) -> MemoryLifecycleAcceptanceReport {
+    let projection_state = terminal_projection_state(record.status);
+    MemoryLifecycleAcceptanceReport {
+        owner_accepted_at: record.accepted_at,
+        record,
+        materialized_view: None,
+        canonical_mutation: None,
+        canonical_committed: false,
+        canonical_fact_key: fact_key,
+        newly_committed: false,
+        admission_outcome: MemoryAdmissionOutcome::TerminalHistorical,
+        admission_at,
+        projection_state,
+    }
+}
+
+fn terminal_projection_state(status: MemoryLifecycleStatus) -> ProjectionDeliveryState {
+    if status == MemoryLifecycleStatus::RolledBack {
+        ProjectionDeliveryState::Compensated
+    } else {
+        ProjectionDeliveryState::Superseded
+    }
+}
+
+fn load_materialized_view_tx(
+    tx: &rusqlite::Transaction<'_>,
+    view_id: &str,
+) -> Result<Option<MemoryMaterializedView>> {
+    tx.query_row(
+        "SELECT materialized_view_id, scope, version, active_memory_ids_json,
+                runtime_surface_ids_json, updated_at, content_digest
+         FROM memory_materialized_views WHERE materialized_view_id = ?1",
+        [view_id],
+        |row| {
+            let scope = row
+                .get::<_, Option<String>>(1)?
+                .map(|scope| {
+                    MemoryLifecycleScope::from_str(&scope)
+                        .map_err(|_| invalid_db_enum_error(1, "scope", &scope))
+                })
+                .transpose()?;
+            let active_ids_json: String = row.get(3)?;
+            let runtime_ids_json: String = row.get(4)?;
+            let updated_at: String = row.get(5)?;
+            Ok(MemoryMaterializedView {
+                materialized_view_id: row.get(0)?,
+                scope,
+                version: row.get(2)?,
+                active_memory_ids: serde_json::from_str(&active_ids_json).unwrap_or_default(),
+                runtime_surface_ids: serde_json::from_str(&runtime_ids_json).unwrap_or_default(),
+                updated_at: parse_time(&updated_at),
+                content_digest: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let records = {
+        let mut statement = tx.prepare(
+            "SELECT memory_id, proposal_id, content, scope, category, risk_level,
+                    COALESCE(sensitivity, '')
+             FROM memory_lifecycle_records ORDER BY memory_id ASC",
+        )?;
+        let loaded = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        loaded
+    };
+    let now = Utc::now();
+    for (memory_id, proposal_id, content, scope, category, risk_level, sensitivity) in records {
+        let scope = MemoryLifecycleScope::from_str(&scope)?;
+        let category = MemoryLifecycleCategory::from_str(&category)?;
+        let risk_level = MemoryLifecycleRiskLevel::from_str(&risk_level);
+        let sensitivity = if sensitivity.trim().is_empty() {
+            legacy_default_sensitivity(risk_level)
+        } else {
+            MemoryLifecycleSensitivity::from_str(&sensitivity)
+        };
+        let fact =
+            CanonicalMemoryFactDescriptor::new(content, scope, category, risk_level, sensitivity)?;
+        let (_, fact_key) =
+            canonical_memory_fact_identity(fact.scope, fact.category, &fact.canonical_body)?;
+        let admission_digest = memory_fact_admission_digest(&fact_key, &fact);
+        tx.execute(
+            "UPDATE memory_lifecycle_records
+             SET fact_key = ?2, risk_level = ?3, sensitivity = ?4,
+                 audit_digest = COALESCE(audit_digest, '')
+             WHERE memory_id = ?1",
+            params![
+                memory_id,
+                fact_key,
+                risk_level.to_string(),
+                sensitivity.to_string()
+            ],
+        )?;
+        let record = record_by_memory_id_tx(tx, &memory_id)?
+            .context("Memory migration lost a canonical lifecycle record")?;
+        let audit_digest = memory_record_audit_digest(&record, &fact_key);
+        tx.execute(
+            "UPDATE memory_lifecycle_records SET audit_digest = ?2 WHERE memory_id = ?1",
+            params![memory_id, audit_digest],
+        )?;
+        tx.execute(
+            "INSERT INTO memory_lifecycle_proposal_links (
+                proposal_id, memory_id, admitted_memory_id, fact_key,
+                admission_digest, risk_level, sensitivity, linked_at
+             ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(proposal_id) DO UPDATE SET
+                admitted_memory_id = CASE
+                    WHEN memory_lifecycle_proposal_links.admitted_memory_id IS NULL
+                      OR TRIM(memory_lifecycle_proposal_links.admitted_memory_id) = ''
+                    THEN excluded.admitted_memory_id
+                    ELSE memory_lifecycle_proposal_links.admitted_memory_id
+                END,
+                fact_key = CASE
+                    WHEN memory_lifecycle_proposal_links.fact_key IS NULL
+                      OR TRIM(memory_lifecycle_proposal_links.fact_key) = ''
+                    THEN excluded.fact_key
+                    ELSE memory_lifecycle_proposal_links.fact_key
+                END,
+                admission_digest = CASE
+                    WHEN memory_lifecycle_proposal_links.admission_digest IS NULL
+                      OR TRIM(memory_lifecycle_proposal_links.admission_digest) = ''
+                    THEN excluded.admission_digest
+                    ELSE memory_lifecycle_proposal_links.admission_digest
+                END,
+                risk_level = CASE
+                    WHEN memory_lifecycle_proposal_links.risk_level IS NULL
+                      OR TRIM(memory_lifecycle_proposal_links.risk_level) = ''
+                    THEN excluded.risk_level
+                    ELSE memory_lifecycle_proposal_links.risk_level
+                END,
+                sensitivity = CASE
+                    WHEN memory_lifecycle_proposal_links.sensitivity IS NULL
+                      OR TRIM(memory_lifecycle_proposal_links.sensitivity) = ''
+                    THEN excluded.sensitivity
+                    ELSE memory_lifecycle_proposal_links.sensitivity
+                END",
+            params![
+                proposal_id,
+                memory_id,
+                fact_key,
+                admission_digest,
+                risk_level.to_string(),
+                sensitivity.to_string(),
+                now.to_rfc3339()
+            ],
+        )?;
+    }
+    tx.execute(
+        "UPDATE memory_lifecycle_proposal_links
+         SET admitted_memory_id = memory_id
+         WHERE admitted_memory_id IS NULL OR TRIM(admitted_memory_id) = ''",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE memory_lifecycle_proposal_links
+         SET risk_level = 'high'
+         WHERE risk_level IS NULL
+            OR risk_level NOT IN ('low', 'medium', 'high', 'identity_value')",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE memory_lifecycle_proposal_links
+         SET sensitivity = 'sensitive'
+         WHERE sensitivity IS NULL
+            OR sensitivity NOT IN ('internal', 'sensitive')",
+        [],
+    )?;
+
+    let active_records = {
+        let mut statement = tx.prepare(
+            "SELECT memory_id, fact_key, scope, risk_level, sensitivity
+             FROM memory_lifecycle_records
+             WHERE runtime_context_excluded_at IS NULL
+               AND status IN (
+                    'accepted', 'pending_materialization', 'materialized',
+                    'materialization_failed'
+             )
+             ORDER BY fact_key ASC,
+                      CASE
+                        WHEN status = 'materialized'
+                         AND materialization_status = 'materialized' THEN 5
+                        WHEN materialization_status = 'pending' THEN 4
+                        WHEN status = 'accepted' THEN 3
+                        WHEN status = 'pending_materialization' THEN 2
+                        ELSE 1
+                      END DESC,
+                      CASE risk_level
+                        WHEN 'identity_value' THEN 4
+                        WHEN 'high' THEN 3
+                        WHEN 'medium' THEN 2
+                        ELSE 1
+                      END DESC,
+                      CASE sensitivity WHEN 'sensitive' THEN 2 ELSE 1 END DESC,
+                      COALESCE(accepted_at, created_at) ASC,
+                      memory_id ASC",
+        )?;
+        let loaded = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        loaded
+    };
+    let mut owner_by_fact_key = BTreeMap::<String, (String, MemoryLifecycleScope)>::new();
+    let mut loser_tombstones = Vec::<String>::new();
+    for (memory_id, fact_key, scope, risk_level, sensitivity) in active_records {
+        let scope = MemoryLifecycleScope::from_str(&scope)?;
+        let risk_level = MemoryLifecycleRiskLevel::from_str(&risk_level);
+        let sensitivity = MemoryLifecycleSensitivity::from_str(&sensitivity);
+        let Some((owner_memory_id, _)) = owner_by_fact_key.get(&fact_key) else {
+            owner_by_fact_key.insert(fact_key, (memory_id, scope));
+            continue;
+        };
+        let owner = record_by_memory_id_tx(tx, owner_memory_id)?
+            .context("Memory migration canonical fact owner is missing")?;
+        merge_effective_governance_tx(tx, owner, &fact_key, risk_level, sensitivity)?;
+        tx.execute(
+            "UPDATE memory_lifecycle_records
+             SET status = 'superseded', materialization_status = 'not_required',
+                 replacement_memory_id = ?2,
+                 runtime_context_excluded_at = COALESCE(runtime_context_excluded_at, ?3),
+                 updated_at = ?3
+             WHERE memory_id = ?1",
+            params![memory_id, owner_memory_id, now.to_rfc3339()],
+        )?;
+        tx.execute(
+            "UPDATE memory_lifecycle_proposal_links
+             SET memory_id = ?2, fact_key = ?3
+             WHERE memory_id = ?1",
+            params![memory_id, owner_memory_id, fact_key],
+        )?;
+        loser_tombstones.push(memory_id);
+    }
+
+    let mut materialized_owner_seen = false;
+    for (fact_key, (memory_id, scope)) in &owner_by_fact_key {
+        let mut owner = record_by_memory_id_tx(tx, memory_id)?
+            .context("Memory migration canonical fact owner disappeared")?;
+        if !owner.status.is_runtime_active()
+            || owner.materialization_status != MemoryMaterializationStatus::Materialized
+        {
+            continue;
+        }
+        materialized_owner_seen = true;
+        let view = ensure_materialized_view_for_scope_tx(tx, Some(*scope))?;
+        if owner.materialized_view_id.as_deref() != Some(&view.materialized_view_id)
+            || owner.materialized_view_version != Some(view.version)
+        {
+            owner.materialized_view_id = Some(view.materialized_view_id.clone());
+            owner.materialized_view_version = Some(view.version);
+            owner.audit_digest = memory_record_audit_digest(&owner, fact_key);
+            update_record_tx(tx, &owner, Utc::now())?;
+        }
+        ensure_materialized_mutation_tx(tx, &owner)?;
+    }
+    if materialized_owner_seen {
+        ensure_materialized_view_for_scope_tx(tx, None)?;
+    }
+
+    for memory_id in loser_tombstones {
+        persistence_outbox::enqueue_tombstone(
+            tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            &memory_id,
+            Some("legacy_duplicate_memory_fact_superseded"),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        )?;
+    }
+    Ok(())
+}
+
+fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let records_sql = tx
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_lifecycle_records'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .context("memory lifecycle record schema is missing")?;
+    let links_sql = tx
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_lifecycle_proposal_links'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .context("memory lifecycle admission-link schema is missing")?;
+    let records_strict = records_sql.contains("fact_key TEXT NOT NULL CHECK")
+        && records_sql.contains("CHECK(risk_level IN")
+        && records_sql.contains("CHECK(sensitivity IN")
+        && records_sql.contains("CHECK(scope IN")
+        && records_sql.contains("CHECK(category IN");
+    let links_strict = links_sql.contains("admitted_memory_id TEXT NOT NULL")
+        && links_sql.contains("fact_key TEXT NOT NULL CHECK")
+        && links_sql.contains("CHECK(risk_level IN")
+        && links_sql.contains("CHECK(sensitivity IN")
+        && links_sql.contains("FOREIGN KEY(admitted_memory_id)");
+    if records_strict && links_strict {
+        return Ok(());
+    }
+
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS memory_lifecycle_proposal_links_v4;
+         DROP TABLE IF EXISTS memory_lifecycle_records_v4;
+         CREATE TABLE memory_lifecycle_records_v4 (
+            memory_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            fact_key TEXT NOT NULL CHECK(TRIM(fact_key) != ''),
+            source_task_session_id TEXT,
+            source_run_id TEXT,
+            content TEXT NOT NULL,
+            scope TEXT NOT NULL CHECK(scope IN ('global', 'workspace', 'conversation', 'project')),
+            category TEXT NOT NULL CHECK(category IN ('preference', 'fact', 'workflow', 'correction', 'boundary')),
+            risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'identity_value')),
+            sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal', 'sensitive')),
+            audit_digest TEXT NOT NULL CHECK(TRIM(audit_digest) != ''),
+            status TEXT NOT NULL CHECK(status IN ('candidate', 'pending_review', 'edited_pending_review', 'accepted', 'pending_materialization', 'materialized', 'materialization_failed', 'rejected', 'deferred', 'superseded', 'rolled_back')),
+            materialization_status TEXT NOT NULL CHECK(materialization_status IN ('not_required', 'pending', 'materialized', 'failed')),
+            materialization_error_code TEXT,
+            created_by TEXT NOT NULL,
+            accepted_by TEXT,
+            accepted_at TEXT,
+            materialized_view_id TEXT,
+            materialized_view_version INTEGER,
+            evidence_ids_json TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            conflict_ids_json TEXT NOT NULL,
+            supersedes_memory_id TEXT,
+            replacement_memory_id TEXT,
+            rolled_back_by_event_id TEXT,
+            runtime_context_excluded_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         INSERT INTO memory_lifecycle_records_v4 (
+            memory_id, proposal_id, fact_key, source_task_session_id, source_run_id,
+            content, scope, category, risk_level, sensitivity, audit_digest, status,
+            materialization_status, materialization_error_code, created_by, accepted_by,
+            accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json,
+            confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id,
+            rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at
+         )
+         SELECT memory_id, proposal_id, fact_key, source_task_session_id, source_run_id,
+            content, scope, category, risk_level, sensitivity, audit_digest, status,
+            materialization_status, materialization_error_code, created_by, accepted_by,
+            accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json,
+            confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id,
+            rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at
+         FROM memory_lifecycle_records;
+         CREATE TABLE memory_lifecycle_proposal_links_v4 (
+            proposal_id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            admitted_memory_id TEXT NOT NULL,
+            fact_key TEXT NOT NULL CHECK(TRIM(fact_key) != ''),
+            admission_digest TEXT NOT NULL CHECK(TRIM(admission_digest) != ''),
+            risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'identity_value')),
+            sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal', 'sensitive')),
+            linked_at TEXT NOT NULL,
+            FOREIGN KEY(memory_id) REFERENCES memory_lifecycle_records_v4(memory_id),
+            FOREIGN KEY(admitted_memory_id) REFERENCES memory_lifecycle_records_v4(memory_id)
+         );
+         INSERT INTO memory_lifecycle_proposal_links_v4 (
+            proposal_id, memory_id, admitted_memory_id, fact_key,
+            admission_digest, risk_level, sensitivity, linked_at
+         )
+         SELECT proposal_id, memory_id, admitted_memory_id, fact_key,
+            admission_digest, risk_level, sensitivity, linked_at
+         FROM memory_lifecycle_proposal_links;
+         DROP TABLE memory_lifecycle_proposal_links;
+         DROP TABLE memory_lifecycle_records;
+         ALTER TABLE memory_lifecycle_records_v4 RENAME TO memory_lifecycle_records;
+         ALTER TABLE memory_lifecycle_proposal_links_v4 RENAME TO memory_lifecycle_proposal_links;
+         CREATE UNIQUE INDEX idx_memory_lifecycle_proposal
+         ON memory_lifecycle_records(proposal_id);
+         CREATE INDEX idx_memory_lifecycle_status_scope
+         ON memory_lifecycle_records(status, materialization_status, scope);
+         CREATE INDEX idx_memory_lifecycle_proposal_links_memory
+         ON memory_lifecycle_proposal_links(memory_id);",
+    )?;
+    Ok(())
+}
+
+fn ensure_materialized_view_for_scope_tx(
+    tx: &rusqlite::Transaction<'_>,
+    scope: Option<MemoryLifecycleScope>,
+) -> Result<MemoryMaterializedView> {
+    let expected_active_ids = active_materialized_ids_tx(tx, scope)?;
+    let view_id = view_id_for_scope(scope);
+    if let Some(existing) = load_materialized_view_tx(tx, &view_id)? {
+        if existing.active_memory_ids == expected_active_ids {
+            return Ok(existing);
+        }
+    }
+    rebuild_view_tx(tx, scope, None, None)
+}
+
 fn insert_record_tx(
     tx: &rusqlite::Transaction<'_>,
     record: &MemoryLifecycleRecord,
+    fact_key: &str,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 ) -> Result<()> {
-    let params = record_params(record, created_at, updated_at);
+    let mut params = record_params(record, created_at, updated_at)
+        .into_iter()
+        .collect::<Vec<_>>();
+    params.push(Box::new(fact_key.to_string()));
     tx.execute(
-        "INSERT INTO memory_lifecycle_records (memory_id, proposal_id, source_task_session_id, source_run_id, content, scope, category, risk_level, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+        "INSERT INTO memory_lifecycle_records (memory_id, proposal_id, fact_key, source_task_session_id, source_run_id, content, scope, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at)
+         VALUES (?1, ?2, ?28, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
         rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
     )?;
     Ok(())
@@ -844,7 +3154,7 @@ fn update_record_tx(
 ) -> Result<()> {
     let params = record_update_params(record, updated_at);
     tx.execute(
-        "UPDATE memory_lifecycle_records SET proposal_id = ?2, source_task_session_id = ?3, source_run_id = ?4, content = ?5, scope = ?6, category = ?7, risk_level = ?8, status = ?9, materialization_status = ?10, materialization_error_code = ?11, created_by = ?12, accepted_by = ?13, accepted_at = ?14, materialized_view_id = ?15, materialized_view_version = ?16, evidence_ids_json = ?17, confidence = ?18, conflict_ids_json = ?19, supersedes_memory_id = ?20, replacement_memory_id = ?21, rolled_back_by_event_id = ?22, runtime_context_excluded_at = ?23, updated_at = ?24 WHERE memory_id = ?1",
+        "UPDATE memory_lifecycle_records SET proposal_id = ?2, source_task_session_id = ?3, source_run_id = ?4, content = ?5, scope = ?6, category = ?7, risk_level = ?8, sensitivity = ?9, audit_digest = ?10, status = ?11, materialization_status = ?12, materialization_error_code = ?13, created_by = ?14, accepted_by = ?15, accepted_at = ?16, materialized_view_id = ?17, materialized_view_version = ?18, evidence_ids_json = ?19, confidence = ?20, conflict_ids_json = ?21, supersedes_memory_id = ?22, replacement_memory_id = ?23, rolled_back_by_event_id = ?24, runtime_context_excluded_at = ?25, updated_at = ?26 WHERE memory_id = ?1",
         rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
     )?;
     Ok(())
@@ -854,7 +3164,7 @@ fn record_params(
     record: &MemoryLifecycleRecord,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-) -> [Box<dyn rusqlite::ToSql>; 25] {
+) -> [Box<dyn rusqlite::ToSql>; 27] {
     [
         Box::new(record.memory_id.clone()),
         Box::new(record.proposal_id.clone()),
@@ -864,6 +3174,8 @@ fn record_params(
         Box::new(record.scope.to_string()),
         Box::new(record.category.to_string()),
         Box::new(record.risk_level.to_string()),
+        Box::new(record.sensitivity.to_string()),
+        Box::new(record.audit_digest.clone()),
         Box::new(record.status.to_string()),
         Box::new(record.materialization_status.to_string()),
         Box::new(record.materialization_error_code.clone()),
@@ -891,7 +3203,7 @@ fn record_params(
 fn record_update_params(
     record: &MemoryLifecycleRecord,
     updated_at: DateTime<Utc>,
-) -> [Box<dyn rusqlite::ToSql>; 24] {
+) -> [Box<dyn rusqlite::ToSql>; 26] {
     [
         Box::new(record.memory_id.clone()),
         Box::new(record.proposal_id.clone()),
@@ -901,6 +3213,8 @@ fn record_update_params(
         Box::new(record.scope.to_string()),
         Box::new(record.category.to_string()),
         Box::new(record.risk_level.to_string()),
+        Box::new(record.sensitivity.to_string()),
+        Box::new(record.audit_digest.clone()),
         Box::new(record.status.to_string()),
         Box::new(record.materialization_status.to_string()),
         Box::new(record.materialization_error_code.clone()),
@@ -1036,33 +3350,52 @@ fn insert_rollback_event_tx(
     Ok(())
 }
 
+fn invalid_db_enum_error(column: usize, kind: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown Memory lifecycle {kind}: {value}"),
+        )),
+    )
+}
+
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLifecycleRecord> {
-    let evidence_json: String = row.get(16)?;
-    let conflict_json: String = row.get(18)?;
+    let evidence_json: String = row.get(18)?;
+    let conflict_json: String = row.get(20)?;
+    let scope_raw = row.get::<_, String>(5)?;
+    let category_raw = row.get::<_, String>(6)?;
+    let scope = MemoryLifecycleScope::from_str(&scope_raw)
+        .map_err(|_| invalid_db_enum_error(5, "scope", &scope_raw))?;
+    let category = MemoryLifecycleCategory::from_str(&category_raw)
+        .map_err(|_| invalid_db_enum_error(6, "category", &category_raw))?;
     Ok(MemoryLifecycleRecord {
         memory_id: row.get(0)?,
         proposal_id: row.get(1)?,
         source_task_session_id: row.get(2)?,
         source_run_id: row.get(3)?,
         content: row.get(4)?,
-        scope: MemoryLifecycleScope::from_str(&row.get::<_, String>(5)?),
-        category: MemoryLifecycleCategory::from_str(&row.get::<_, String>(6)?),
+        scope,
+        category,
         risk_level: MemoryLifecycleRiskLevel::from_str(&row.get::<_, String>(7)?),
-        status: MemoryLifecycleStatus::from_str(&row.get::<_, String>(8)?),
-        materialization_status: MemoryMaterializationStatus::from_str(&row.get::<_, String>(9)?),
-        materialization_error_code: row.get(10)?,
-        created_by: row.get(11)?,
-        accepted_by: row.get(12)?,
-        accepted_at: parse_optional_time(row.get::<_, Option<String>>(13)?),
-        materialized_view_id: row.get(14)?,
-        materialized_view_version: row.get(15)?,
+        sensitivity: MemoryLifecycleSensitivity::from_str(&row.get::<_, String>(8)?),
+        audit_digest: row.get(9)?,
+        status: MemoryLifecycleStatus::from_str(&row.get::<_, String>(10)?),
+        materialization_status: MemoryMaterializationStatus::from_str(&row.get::<_, String>(11)?),
+        materialization_error_code: row.get(12)?,
+        created_by: row.get(13)?,
+        accepted_by: row.get(14)?,
+        accepted_at: parse_optional_time(row.get::<_, Option<String>>(15)?),
+        materialized_view_id: row.get(16)?,
+        materialized_view_version: row.get(17)?,
         evidence_ids: serde_json::from_str(&evidence_json).unwrap_or_default(),
-        confidence: row.get(17)?,
+        confidence: row.get(19)?,
         conflict_ids: serde_json::from_str(&conflict_json).unwrap_or_default(),
-        supersedes_memory_id: row.get(19)?,
-        replacement_memory_id: row.get(20)?,
-        rolled_back_by_event_id: row.get(21)?,
-        runtime_context_excluded_at: parse_optional_time(row.get::<_, Option<String>>(22)?),
+        supersedes_memory_id: row.get(21)?,
+        replacement_memory_id: row.get(22)?,
+        rolled_back_by_event_id: row.get(23)?,
+        runtime_context_excluded_at: parse_optional_time(row.get::<_, Option<String>>(24)?),
     })
 }
 
@@ -1109,6 +3442,23 @@ fn runtime_surface_id_for_scope(scope: Option<MemoryLifecycleScope>) -> String {
     }
 }
 
+/// Projection triggers deliberately contain only refs and an opaque receipt
+/// token. The random nonce is consumed before persistence, so low-entropy
+/// Memory content cannot be tested against a deterministic outbox digest. The
+/// body remains owned by `memory_lifecycle_records` and is loaded by the
+/// replaceable materializer when a delivery is applied.
+fn memory_lifecycle_projection_token(record: &MemoryLifecycleRecord) -> String {
+    let one_time_nonce = Uuid::new_v4();
+    persistence_outbox::metadata_digest(&format!(
+        "{}:{}:{}:{}:{}",
+        record.memory_id,
+        record.status,
+        record.materialization_status,
+        record.scope,
+        one_time_nonce
+    ))
+}
+
 fn digest_label(input: &str) -> String {
     let bytes = input.as_bytes();
     let digest = digest(&SHA256, bytes);
@@ -1128,6 +3478,1187 @@ mod tests {
     use super::*;
     use crate::agent::types::{AgentProposal, ProposalSource, ProposalType};
     use serde_json::json;
+    use std::sync::Arc;
+
+    fn fact_descriptor(
+        content: &str,
+        risk_level: MemoryLifecycleRiskLevel,
+        sensitivity: MemoryLifecycleSensitivity,
+    ) -> CanonicalMemoryFactDescriptor {
+        CanonicalMemoryFactDescriptor::from_candidate(
+            content,
+            MemoryCandidateKind::SemanticUserFact,
+            MemoryLifecycleScope::Global,
+            risk_level,
+            sensitivity,
+        )
+        .unwrap()
+    }
+
+    fn explicit_input(message_id: &str, content: &str) -> ExplicitMemoryWriteInput {
+        ExplicitMemoryWriteInput {
+            source_task_session_id: "task-session".into(),
+            source_run_id: "run".into(),
+            source_message_id: message_id.into(),
+            source_message_digest: digest_label(content),
+            authorized_candidate_id: format!("candidate:test:{message_id}"),
+            fact: fact_descriptor(
+                content,
+                MemoryLifecycleRiskLevel::Low,
+                MemoryLifecycleSensitivity::Internal,
+            ),
+        }
+    }
+
+    fn acceptance_input(proposal_id: &str, content: &str) -> MemoryLifecycleAcceptanceInput {
+        MemoryLifecycleAcceptanceInput {
+            proposal_id: proposal_id.into(),
+            source_task_session_id: Some(format!("task:{proposal_id}")),
+            source_run_id: Some(format!("run:{proposal_id}")),
+            fact: fact_descriptor(
+                content,
+                MemoryLifecycleRiskLevel::Low,
+                MemoryLifecycleSensitivity::Internal,
+            ),
+            created_by: "agent".into(),
+            accepted_by: "user".into(),
+            evidence_ids: vec![format!("evidence:{proposal_id}")],
+            confidence: "0.900".into(),
+            conflict_ids: Vec::new(),
+        }
+    }
+
+    fn create_pre_d045_database(path: &std::path::Path, scope: &str) {
+        let now = Utc::now().to_rfc3339();
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memory_lifecycle_records (
+                memory_id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL,
+                source_task_session_id TEXT,
+                source_run_id TEXT,
+                content TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                category TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                status TEXT NOT NULL,
+                materialization_status TEXT NOT NULL,
+                materialization_error_code TEXT,
+                created_by TEXT NOT NULL,
+                accepted_by TEXT,
+                accepted_at TEXT,
+                materialized_view_id TEXT,
+                materialized_view_version INTEGER,
+                evidence_ids_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                conflict_ids_json TEXT NOT NULL,
+                supersedes_memory_id TEXT,
+                replacement_memory_id TEXT,
+                rolled_back_by_event_id TEXT,
+                runtime_context_excluded_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_lifecycle_records (
+                memory_id, proposal_id, content, scope, category, risk_level,
+                status, materialization_status, created_by, accepted_by,
+                accepted_at, evidence_ids_json, confidence, conflict_ids_json,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'fact', 'low', 'materialized',
+                'materialized', 'legacy', 'user', ?5, '[]', 0.9, '[]', ?5, ?5)",
+            params![
+                "memory:pre-d045",
+                "proposal-pre-d045",
+                "Pre D045 fact",
+                scope,
+                now
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn explicit_and_proposal_lanes_share_one_typed_canonical_owner_in_both_orders() {
+        let explicit_first = MemoryLifecycleStore::new_in_memory().unwrap();
+        let mut explicit = explicit_input("message-explicit-first", "Line one\nLine two");
+        explicit.fact.risk_level = MemoryLifecycleRiskLevel::Medium;
+        let explicit_receipt = explicit_first
+            .commit_test_explicit_user_memory(explicit)
+            .unwrap();
+        let accepted = explicit_first
+            .accept_memory_proposal(acceptance_input(
+                "proposal-after-explicit",
+                "Line one Line two",
+            ))
+            .unwrap();
+
+        assert_eq!(accepted.record.memory_id, explicit_receipt.memory_id);
+        assert_eq!(
+            accepted.admission_outcome,
+            MemoryAdmissionOutcome::AliasLinked
+        );
+        assert_eq!(accepted.record.content, "Line one\nLine two");
+        assert_eq!(accepted.record.risk_level, MemoryLifecycleRiskLevel::Medium);
+        assert_eq!(
+            accepted.record.sensitivity,
+            MemoryLifecycleSensitivity::Internal
+        );
+        assert_eq!(accepted.record.audit_digest, explicit_receipt.audit_digest);
+        assert_eq!(
+            explicit_first.list_active_records(None, 10).unwrap().len(),
+            1
+        );
+
+        let proposal_first = MemoryLifecycleStore::new_in_memory().unwrap();
+        let proposed = proposal_first
+            .accept_memory_proposal(acceptance_input(
+                "proposal-before-explicit",
+                "Stable canonical fact",
+            ))
+            .unwrap();
+        let mut explicit = explicit_input("message-after-proposal", "Stable canonical fact");
+        explicit.fact.risk_level = MemoryLifecycleRiskLevel::Medium;
+        let explicit_receipt = proposal_first
+            .commit_test_explicit_user_memory(explicit)
+            .unwrap();
+
+        assert_eq!(explicit_receipt.memory_id, proposed.record.memory_id);
+        assert_eq!(
+            explicit_receipt.admission_outcome,
+            MemoryAdmissionOutcome::GovernanceUpgraded
+        );
+        let owner = proposal_first
+            .get_record(&proposed.record.memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.risk_level, MemoryLifecycleRiskLevel::Medium);
+        assert_eq!(owner.sensitivity, MemoryLifecycleSensitivity::Internal);
+        assert_eq!(owner.audit_digest, explicit_receipt.audit_digest);
+        assert_eq!(
+            proposal_first.list_active_records(None, 10).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn explicit_and_proposal_cross_connection_race_keeps_one_conservative_owner() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("mixed-lane-race.db");
+        let stores = (0..8)
+            .map(|_| MemoryLifecycleStore::new(&path).expect("open lifecycle connection"))
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(std::sync::Barrier::new(stores.len()));
+        let handles = stores
+            .into_iter()
+            .enumerate()
+            .map(|(index, store)| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if index % 2 == 0 {
+                        let mut input = explicit_input(
+                            &format!("mixed-message-{index}"),
+                            "One mixed lane fact",
+                        );
+                        input.fact.risk_level = MemoryLifecycleRiskLevel::Medium;
+                        store
+                            .commit_test_explicit_user_memory(input)
+                            .map(|receipt| receipt.memory_id)
+                    } else {
+                        store
+                            .accept_memory_proposal(acceptance_input(
+                                &format!("mixed-proposal-{index}"),
+                                "One mixed lane fact",
+                            ))
+                            .map(|report| report.record.memory_id)
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let memory_ids = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(memory_ids
+            .iter()
+            .all(|memory_id| memory_id == &memory_ids[0]));
+        let verifier = MemoryLifecycleStore::new(&path).unwrap();
+        let active = verifier.list_active_records(None, 10).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].risk_level, MemoryLifecycleRiskLevel::Medium);
+        assert_eq!(active[0].sensitivity, MemoryLifecycleSensitivity::Internal);
+        assert!(active[0].audit_digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn explicit_medium_memory_persists_sensitivity_and_audit_receipt() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let mut input = explicit_input("message-medium", "A medium-risk exact fact");
+        input.fact.risk_level = MemoryLifecycleRiskLevel::Medium;
+        let receipt = store.commit_test_explicit_user_memory(input).unwrap();
+        let owner = store.get_record(&receipt.memory_id).unwrap().unwrap();
+
+        assert_eq!(owner.risk_level, MemoryLifecycleRiskLevel::Medium);
+        assert_eq!(owner.sensitivity, MemoryLifecycleSensitivity::Internal);
+        assert_eq!(receipt.sensitivity, MemoryLifecycleSensitivity::Internal);
+        assert_eq!(receipt.audit_digest, owner.audit_digest);
+        assert!(receipt.audit_digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn proposal_candidate_kind_uses_the_same_typed_fact_descriptor_as_explicit_memory() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            json!({
+                "content": "User prefers focused work before lunch.",
+                "scope": "global",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal"
+            }),
+            "The user approved a semantic Memory fact.",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        proposal.id = "proposal-typed-semantic-fact".into();
+        let proposal_input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &proposal,
+            "User prefers focused work before lunch.".into(),
+        )
+        .unwrap();
+
+        assert_eq!(proposal_input.fact.category, MemoryLifecycleCategory::Fact);
+        assert_eq!(
+            proposal_input.fact.risk_level,
+            MemoryLifecycleRiskLevel::Medium
+        );
+        assert_eq!(
+            proposal_input.fact.sensitivity,
+            MemoryLifecycleSensitivity::Internal
+        );
+        let proposed = store.accept_memory_proposal(proposal_input).unwrap();
+        let explicit = store
+            .commit_test_explicit_user_memory(ExplicitMemoryWriteInput {
+                source_task_session_id: "task-session".into(),
+                source_run_id: "run".into(),
+                source_message_id: "message-typed-semantic-fact".into(),
+                source_message_digest: digest_label("User prefers focused work before lunch."),
+                authorized_candidate_id: "candidate:test:message-typed-semantic-fact".into(),
+                fact: CanonicalMemoryFactDescriptor::from_candidate(
+                    "User prefers focused work before lunch.",
+                    MemoryCandidateKind::SemanticUserFact,
+                    MemoryLifecycleScope::Global,
+                    MemoryLifecycleRiskLevel::Medium,
+                    MemoryLifecycleSensitivity::Internal,
+                )
+                .unwrap(),
+            })
+            .unwrap();
+
+        assert_eq!(explicit.memory_id, proposed.record.memory_id);
+        assert!(!explicit.newly_committed);
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restart_preserves_original_admission_after_owner_governance_upgrade() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("admission-history.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let explicit_input = explicit_input(
+            "message-stable-admission",
+            "A stable admission survives governance upgrades.",
+        );
+        let explicit = store
+            .commit_test_explicit_user_memory(explicit_input.clone())
+            .unwrap();
+        let mut proposal = acceptance_input(
+            "proposal-governance-upgrade",
+            "A stable admission survives governance upgrades.",
+        );
+        proposal.fact.risk_level = MemoryLifecycleRiskLevel::Medium;
+        let upgraded = store.accept_memory_proposal(proposal).unwrap();
+        assert_eq!(upgraded.record.memory_id, explicit.memory_id);
+        assert_eq!(upgraded.record.risk_level, MemoryLifecycleRiskLevel::Medium);
+        drop(store);
+
+        let reopened = MemoryLifecycleStore::new(&path).unwrap();
+        let replay = reopened
+            .commit_test_explicit_user_memory(explicit_input)
+            .expect("restart must preserve the explicit lane's original admission");
+        assert!(!replay.newly_committed);
+        assert_eq!(replay.memory_id, explicit.memory_id);
+        let owner = reopened.get_record(&replay.memory_id).unwrap().unwrap();
+        assert_eq!(owner.risk_level, MemoryLifecycleRiskLevel::Medium);
+    }
+
+    #[test]
+    fn distinct_equivalent_proposals_concurrently_share_one_canonical_fact() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("memory-lifecycle.db");
+        let stores = (0..8)
+            .map(|_| MemoryLifecycleStore::new(&path).expect("open lifecycle connection"))
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(std::sync::Barrier::new(stores.len()));
+        let handles = stores
+            .into_iter()
+            .enumerate()
+            .map(|(index, store)| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .accept_memory_proposal(acceptance_input(
+                            &format!("proposal-concurrent-{index}"),
+                            if index % 2 == 0 {
+                                "User prefers focused work in the morning."
+                            } else {
+                                "  User prefers focused work   in the morning.  "
+                            },
+                        ))
+                        .expect("accept equivalent proposal")
+                })
+            })
+            .collect::<Vec<_>>();
+        let reports = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join acceptance"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|report| report.newly_committed)
+                .count(),
+            1
+        );
+        assert!(reports
+            .iter()
+            .all(|report| report.record.memory_id == reports[0].record.memory_id));
+        assert!(reports
+            .iter()
+            .all(|report| report.canonical_fact_key == reports[0].canonical_fact_key));
+        assert!(reports.iter().all(
+            |report| report.canonical_mutation.as_ref().unwrap().event_id
+                == reports[0].canonical_mutation.as_ref().unwrap().event_id
+        ));
+
+        let verifier = MemoryLifecycleStore::new(&path).expect("reopen lifecycle store");
+        assert_eq!(verifier.list_active_records(None, 20).unwrap().len(), 1);
+        for index in 0..8 {
+            let linked = verifier
+                .get_record_by_proposal_id(&format!("proposal-concurrent-{index}"))
+                .unwrap()
+                .expect("proposal alias resolves");
+            assert_eq!(linked.memory_id, reports[0].record.memory_id);
+        }
+        let conn = verifier.conn.lock().unwrap();
+        let canonical_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_events
+                 WHERE aggregate_kind = 'memory_lifecycle'
+                   AND mutation_kind = 'materialized'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canonical_event_count, 1);
+    }
+
+    #[test]
+    fn proposal_id_reuse_with_different_fact_fails_closed() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let first = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-idempotency-conflict",
+                "First canonical fact.",
+            ))
+            .unwrap();
+        let error = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-idempotency-conflict",
+                "Different canonical fact.",
+            ))
+            .expect_err("proposal id cannot be rebound");
+
+        assert!(error.to_string().contains("idempotency key"));
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .get_record_by_proposal_id("proposal-idempotency-conflict")
+                .unwrap()
+                .unwrap()
+                .memory_id,
+            first.record.memory_id
+        );
+    }
+
+    #[test]
+    fn fact_identity_keeps_scope_and_category_distinct() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let global = store
+            .accept_memory_proposal(acceptance_input("proposal-global-fact", "Shared words"))
+            .unwrap();
+        let mut project_preference =
+            acceptance_input("proposal-project-preference", "Shared words");
+        project_preference.fact.scope = MemoryLifecycleScope::Project;
+        project_preference.fact.category = MemoryLifecycleCategory::Preference;
+        let project = store.accept_memory_proposal(project_preference).unwrap();
+
+        assert!(global.newly_committed);
+        assert!(project.newly_committed);
+        assert_ne!(global.canonical_fact_key, project.canonical_fact_key);
+        assert_ne!(global.record.memory_id, project.record.memory_id);
+    }
+
+    #[test]
+    fn public_fact_identity_finds_the_existing_active_canonical_owner() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let accepted = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-active-fact-lookup",
+                "I prefer quiet focus time.",
+            ))
+            .unwrap();
+        let equivalent = fact_descriptor(
+            "  I   prefer quiet focus time.  ",
+            MemoryLifecycleRiskLevel::Medium,
+            MemoryLifecycleSensitivity::Sensitive,
+        );
+
+        assert_eq!(equivalent.fact_key().unwrap(), accepted.canonical_fact_key);
+        let existing = store
+            .get_active_record_for_fact(&equivalent)
+            .unwrap()
+            .expect("active canonical owner");
+        assert_eq!(existing.memory_id, accepted.record.memory_id);
+    }
+
+    #[test]
+    fn fact_identity_nfkc_unifies_unicode_equivalents_without_rewriting_canonical_body() {
+        let original_body = "Ｃａｆｅ\u{301} １２３";
+        let (normalized_original, original_key) = canonical_memory_fact_identity(
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleCategory::Fact,
+            original_body,
+        )
+        .unwrap();
+        let (normalized_equivalent, equivalent_key) = canonical_memory_fact_identity(
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleCategory::Fact,
+            "Café 123",
+        )
+        .unwrap();
+        let (_, decomposed_key) = canonical_memory_fact_identity(
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleCategory::Fact,
+            "Cafe\u{301} 123",
+        )
+        .unwrap();
+
+        assert_eq!(normalized_original, "Café 123");
+        assert_eq!(normalized_equivalent, "Café 123");
+        assert_eq!(original_key, equivalent_key);
+        assert_eq!(original_key, decomposed_key);
+
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let first = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-unicode-original",
+                original_body,
+            ))
+            .unwrap();
+        let equivalent = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-unicode-equivalent",
+                "Café 123",
+            ))
+            .unwrap();
+
+        assert_eq!(equivalent.memory_id, first.memory_id);
+        assert!(!equivalent.newly_committed);
+        assert_eq!(
+            store.get_record(&first.memory_id).unwrap().unwrap().content,
+            original_body
+        );
+    }
+
+    #[test]
+    fn malformed_risk_and_sensitivity_are_never_downgraded() {
+        assert_eq!(
+            MemoryLifecycleRiskLevel::from_str("low"),
+            MemoryLifecycleRiskLevel::Low
+        );
+        assert_eq!(
+            MemoryLifecycleRiskLevel::from_str("LOW"),
+            MemoryLifecycleRiskLevel::High
+        );
+        assert_eq!(
+            MemoryLifecycleRiskLevel::from_str("unexpected"),
+            MemoryLifecycleRiskLevel::High
+        );
+        assert_eq!(
+            MemoryLifecycleSensitivity::from_str("internal"),
+            MemoryLifecycleSensitivity::Internal
+        );
+        assert_eq!(
+            MemoryLifecycleSensitivity::from_candidate_label("INTERNAL"),
+            MemoryLifecycleSensitivity::Sensitive
+        );
+        assert_eq!(
+            MemoryLifecycleSensitivity::from_candidate_label("unexpected"),
+            MemoryLifecycleSensitivity::Sensitive
+        );
+    }
+
+    #[test]
+    fn current_schema_rejects_unknown_governance_enums_without_mutating_owner() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("conservative-enum-repair.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let receipt = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-enum-repair",
+                "Unknown governance metadata must not lower protection.",
+            ))
+            .unwrap();
+        let before = store.get_record(&receipt.memory_id).unwrap().unwrap();
+        for (column, invalid_value) in [
+            ("risk_level", "unexpected-risk"),
+            ("sensitivity", "unexpected-sensitivity"),
+        ] {
+            let conn = store.conn.lock().unwrap();
+            let result = conn.execute(
+                &format!("UPDATE memory_lifecycle_records SET {column} = ?2 WHERE memory_id = ?1"),
+                params![receipt.memory_id, invalid_value],
+            );
+            assert!(
+                result.is_err(),
+                "{column} CHECK constraint must reject corruption"
+            );
+        }
+        let after = store.get_record(&receipt.memory_id).unwrap().unwrap();
+        assert_eq!(
+            after, before,
+            "rejected corruption must not mutate canonical owner"
+        );
+    }
+
+    #[test]
+    fn malformed_scope_category_and_candidate_kind_fail_admission() {
+        let proposal = |id: &str, after: serde_json::Value| {
+            let mut proposal = AgentProposal::new(
+                ProposalType::MemoryWrite,
+                "memory.records",
+                after,
+                "Malformed typed metadata must fail closed.",
+                0.9,
+                RiskLevel::Medium,
+                ProposalSource::Manual,
+            );
+            proposal.id = id.into();
+            proposal
+        };
+        let invalid_scope = proposal(
+            "proposal-invalid-scope",
+            json!({"content": "Typed fact", "scope": "planet", "category": "fact", "candidateKind": "semantic_user_fact", "riskLevel": "medium", "sensitivity": "internal"}),
+        );
+        let invalid_category = proposal(
+            "proposal-invalid-category",
+            json!({"content": "Typed fact", "scope": "global", "category": "guess", "candidateKind": "semantic_user_fact", "riskLevel": "medium", "sensitivity": "internal"}),
+        );
+        let invalid_kind = proposal(
+            "proposal-invalid-kind",
+            json!({"content": "Typed fact", "scope": "global", "category": "fact", "candidateKind": "maybe_fact", "riskLevel": "medium", "sensitivity": "internal"}),
+        );
+        let invalid_sensitivity = proposal(
+            "proposal-invalid-sensitivity",
+            json!({"content": "Typed fact", "scope": "global", "category": "fact", "candidateKind": "semantic_user_fact", "riskLevel": "medium", "sensitivity": 7}),
+        );
+
+        for proposal in [
+            invalid_scope,
+            invalid_category,
+            invalid_kind,
+            invalid_sensitivity,
+        ] {
+            assert!(MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &proposal,
+                "Typed fact".into(),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn proposal_admission_binds_reviewed_content_risk_sensitivity_and_candidate_category() {
+        let proposal = |id: &str, risk: RiskLevel, after: serde_json::Value| {
+            let mut proposal = AgentProposal::new(
+                ProposalType::MemoryWrite,
+                "memory.records",
+                after,
+                "Reviewed Memory admission must remain exact.",
+                0.9,
+                risk,
+                ProposalSource::Manual,
+            );
+            proposal.id = id.into();
+            proposal
+        };
+        let risk_mismatch = proposal(
+            "proposal-risk-mismatch",
+            RiskLevel::Medium,
+            json!({"content": "Exact reviewed fact", "scope": "global", "category": "fact", "candidateKind": "semantic_user_fact", "riskLevel": "low", "sensitivity": "internal"}),
+        );
+        let unsafe_high = proposal(
+            "proposal-high-internal",
+            RiskLevel::High,
+            json!({"content": "Exact reviewed fact", "scope": "global", "category": "fact", "candidateKind": "semantic_user_fact", "riskLevel": "high", "sensitivity": "internal"}),
+        );
+        let category_mismatch = proposal(
+            "proposal-category-mismatch",
+            RiskLevel::Medium,
+            json!({"content": "Exact reviewed fact", "scope": "global", "category": "preference", "candidateKind": "semantic_user_fact", "riskLevel": "medium", "sensitivity": "internal"}),
+        );
+        let content_mismatch = proposal(
+            "proposal-content-mismatch",
+            RiskLevel::Medium,
+            json!({"content": "Exact reviewed fact", "scope": "global", "category": "fact", "candidateKind": "semantic_user_fact", "riskLevel": "medium", "sensitivity": "internal"}),
+        );
+
+        let risk_error = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &risk_mismatch,
+            "Exact reviewed fact".into(),
+        )
+        .unwrap_err();
+        assert!(risk_error.to_string().contains("reviewed risk disagrees"));
+        let sensitivity_error = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &unsafe_high,
+            "Exact reviewed fact".into(),
+        )
+        .unwrap_err();
+        assert!(sensitivity_error
+            .to_string()
+            .contains("must be marked sensitive"));
+        let category_error = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &category_mismatch,
+            "Exact reviewed fact".into(),
+        )
+        .unwrap_err();
+        assert!(category_error.to_string().contains("category disagree"));
+        let content_error = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &content_mismatch,
+            "Changed after review".into(),
+        )
+        .unwrap_err();
+        assert!(content_error
+            .to_string()
+            .contains("differs from reviewed content"));
+    }
+
+    #[test]
+    fn proposal_admission_ignores_untyped_session_fields_and_uses_terminal_origin() {
+        let proposal = |after: serde_json::Value, source_detail: Option<&str>| {
+            let mut proposal = AgentProposal::new(
+                ProposalType::MemoryWrite,
+                "memory.records",
+                after,
+                "Task session ownership must remain exact.",
+                0.9,
+                RiskLevel::Medium,
+                ProposalSource::Manual,
+            );
+            proposal.source_detail = source_detail.map(str::to_string);
+            proposal
+        };
+        let valid_after = json!({
+            "content": "Task-bound reviewed fact",
+            "scope": "global",
+            "category": "fact",
+            "candidateKind": "semantic_user_fact",
+            "riskLevel": "medium",
+            "sensitivity": "internal",
+            "originatingTaskSessionId": "task-session-1"
+        });
+        let valid = proposal(
+            valid_after.clone(),
+            Some("main_chat_agent_task_session:task-session-1;candidate:candidate-1"),
+        );
+        let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &valid,
+            "Task-bound reviewed fact".into(),
+        )
+        .unwrap();
+        assert_eq!(input.source_task_session_id, None);
+
+        let terminal_bound =
+            MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
+                &valid,
+                "Task-bound reviewed fact".into(),
+                "task-session-1",
+                "run-1",
+                "conversation-message:1",
+                "sha256:canonical-user-message",
+            )
+            .unwrap();
+        assert_eq!(
+            terminal_bound.source_task_session_id.as_deref(),
+            Some("task-session-1")
+        );
+        assert_eq!(terminal_bound.source_run_id.as_deref(), Some("run-1"));
+
+        let drift = proposal(
+            valid_after.clone(),
+            Some("main_chat_agent_task_session:task-session-2;candidate:candidate-1"),
+        );
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &drift,
+                "Task-bound reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "source_detail cannot authorize terminal ownership"
+        );
+
+        let mut alias_drift = valid_after;
+        alias_drift["session_id"] = json!("task-session-2");
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &proposal(alias_drift, None),
+                "Task-bound reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "proposal JSON aliases cannot authorize terminal ownership"
+        );
+
+        let unbound = proposal(
+            json!({
+                "content": "Global reviewed fact",
+                "scope": "global",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal"
+            }),
+            Some("maturation:preference.communication"),
+        );
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &unbound,
+                "Global reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "non-session source metadata must not become a MemoryStore session owner"
+        );
+    }
+
+    #[test]
+    fn current_schema_rejects_invalid_scope_or_category_without_mutating_owner() {
+        for (column, corrupt_value) in [("scope", "planet"), ("category", "guess")] {
+            let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+            let path = directory.path().join(format!("corrupt-{column}.db"));
+            let store = MemoryLifecycleStore::new(&path).unwrap();
+            let receipt = store
+                .commit_test_explicit_user_memory(explicit_input(
+                    &format!("message-corrupt-{column}"),
+                    &format!("Corrupted {column} must not be guessed."),
+                ))
+                .unwrap();
+            let before = store.get_record(&receipt.memory_id).unwrap().unwrap();
+            {
+                let conn = store.conn.lock().unwrap();
+                let result = conn.execute(
+                    &format!(
+                        "UPDATE memory_lifecycle_records SET {column} = ?2 WHERE memory_id = ?1"
+                    ),
+                    params![receipt.memory_id, corrupt_value],
+                );
+                assert!(
+                    result.is_err(),
+                    "{column} CHECK constraint must reject corruption"
+                );
+            }
+            let after = store.get_record(&receipt.memory_id).unwrap().unwrap();
+            assert_eq!(
+                after, before,
+                "rejected corruption must preserve canonical row"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_d045_schema_is_transactionally_rebuilt_with_non_null_and_check_constraints() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("pre-d045-schema.db");
+        create_pre_d045_database(&path, "global");
+
+        let store = MemoryLifecycleStore::new(&path).expect("strict D045 rebuild");
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+        let conn = store.conn.lock().unwrap();
+        let mut table_info = conn
+            .prepare("PRAGMA table_info(memory_lifecycle_records)")
+            .unwrap();
+        let columns = table_info
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            .unwrap();
+        for column in ["fact_key", "risk_level", "sensitivity", "audit_digest"] {
+            assert_eq!(columns.get(column), Some(&1), "{column} must be NOT NULL");
+        }
+        let records_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_lifecycle_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(records_sql.contains("CHECK(risk_level IN"));
+        assert!(records_sql.contains("CHECK(sensitivity IN"));
+        let active_index_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_lifecycle_active_fact_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!active_index_sql.contains("fact_key IS NOT NULL"));
+        let foreign_key_violation_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violation_count, 0);
+        assert!(conn
+            .execute(
+                "UPDATE memory_lifecycle_records SET fact_key = NULL WHERE memory_id = 'memory:pre-d045'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE memory_lifecycle_records SET risk_level = 'unknown' WHERE memory_id = 'memory:pre-d045'",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn failed_pre_d045_migration_rolls_back_all_schema_changes() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("pre-d045-failed-schema.db");
+        create_pre_d045_database(&path, "unknown-scope");
+
+        let error = match MemoryLifecycleStore::new(&path) {
+            Ok(_) => panic!("invalid legacy scope must fail migration"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unknown Memory lifecycle scope"));
+
+        let conn = Connection::open(&path).unwrap();
+        let mut statement = conn
+            .prepare("PRAGMA table_info(memory_lifecycle_records)")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "fact_key"));
+        let added_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN (
+                    'memory_lifecycle_proposal_links', 'canonical_outbox_events',
+                    'canonical_outbox_deliveries', 'canonical_tombstones'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(added_table_count, 0);
+    }
+
+    #[test]
+    fn legacy_duplicate_facts_migrate_to_one_conservative_owner() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("legacy-duplicates.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let low = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-legacy-low",
+                "Legacy duplicate fact",
+            ))
+            .unwrap();
+        let (_, fact_key) = canonical_memory_fact_identity(
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleCategory::Fact,
+            "Legacy duplicate fact",
+        )
+        .unwrap();
+        let mut high_record = low.record.clone();
+        high_record.memory_id = "memory:legacy-high-risk-owner".into();
+        high_record.proposal_id = "proposal-legacy-high".into();
+        high_record.risk_level = MemoryLifecycleRiskLevel::High;
+        high_record.sensitivity = MemoryLifecycleSensitivity::Sensitive;
+        high_record.accepted_at = low
+            .record
+            .accepted_at
+            .map(|accepted| accepted + chrono::Duration::seconds(1));
+        high_record.audit_digest = memory_record_audit_digest(&high_record, &fact_key);
+        {
+            let mut conn = store.conn.lock().unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("DROP INDEX idx_memory_lifecycle_active_fact_key", [])
+                .unwrap();
+            insert_record_tx(&tx, &high_record, &fact_key, Utc::now(), Utc::now()).unwrap();
+            let high_fact = CanonicalMemoryFactDescriptor::new(
+                high_record.content.clone(),
+                high_record.scope,
+                high_record.category,
+                high_record.risk_level,
+                high_record.sensitivity,
+            )
+            .unwrap();
+            link_proposal_to_memory_tx(
+                &tx,
+                &high_record.proposal_id,
+                &high_record.memory_id,
+                &fact_key,
+                &memory_fact_admission_digest(&fact_key, &high_fact),
+                high_record.risk_level,
+                high_record.sensitivity,
+                Utc::now(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        drop(store);
+
+        let migrated = MemoryLifecycleStore::new(&path).expect("migrate duplicate facts");
+        let active = migrated.list_active_records(None, 10).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].memory_id, high_record.memory_id);
+        assert_eq!(active[0].risk_level, MemoryLifecycleRiskLevel::High);
+        assert_eq!(active[0].sensitivity, MemoryLifecycleSensitivity::Sensitive);
+        assert_eq!(
+            migrated
+                .get_record_by_proposal_id("proposal-legacy-low")
+                .unwrap()
+                .unwrap()
+                .memory_id,
+            low.record.memory_id
+        );
+        assert_eq!(
+            migrated
+                .get_record_by_proposal_id("proposal-legacy-high")
+                .unwrap()
+                .unwrap()
+                .memory_id,
+            high_record.memory_id
+        );
+        let superseded = migrated.get_record(&low.record.memory_id).unwrap().unwrap();
+        assert_eq!(superseded.status, MemoryLifecycleStatus::Superseded);
+        assert_eq!(
+            superseded.replacement_memory_id.as_deref(),
+            Some(high_record.memory_id.as_str())
+        );
+        let conn = migrated.conn.lock().unwrap();
+        let winner_materialized_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_events
+                 WHERE aggregate_kind = 'memory_lifecycle' AND aggregate_id = ?1
+                   AND mutation_kind = 'materialized'",
+                [&high_record.memory_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let winner_deliveries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_deliveries deliveries
+                 JOIN canonical_outbox_events events ON events.event_id = deliveries.event_id
+                 WHERE events.aggregate_kind = 'memory_lifecycle'
+                   AND events.aggregate_id = ?1 AND events.mutation_kind = 'materialized'",
+                [&high_record.memory_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tombstone_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_tombstones
+                 WHERE aggregate_kind = 'memory_lifecycle' AND aggregate_id = ?1
+                   AND superseded_at IS NULL",
+                [&low.record.memory_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(winner_materialized_events, 1);
+        assert_eq!(winner_deliveries, 2);
+        assert_eq!(tombstone_count, 1);
+        drop(conn);
+
+        let replay = migrated
+            .accept_memory_proposal(acceptance_input(
+                "proposal-legacy-low",
+                "Legacy duplicate fact",
+            ))
+            .expect("legacy losing alias must replay against its original admission");
+        assert!(!replay.newly_committed);
+        assert_eq!(
+            replay.admission_outcome,
+            MemoryAdmissionOutcome::TerminalHistorical
+        );
+        assert!(!replay.canonical_committed);
+        assert!(replay.canonical_mutation.is_none());
+        assert_eq!(replay.record.memory_id, low.record.memory_id);
+    }
+
+    #[test]
+    fn legacy_migration_preserves_materialized_capability_and_is_reopen_idempotent() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("legacy-capability-owner.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let low_materialized = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-capability-low",
+                "Capability must survive conservative migration",
+            ))
+            .unwrap();
+        let fact_key = low_materialized.canonical_fact_key.clone();
+        let mut failed_high = low_materialized.record.clone();
+        failed_high.memory_id = "memory:legacy-failed-high".into();
+        failed_high.proposal_id = "proposal-capability-failed-high".into();
+        failed_high.risk_level = MemoryLifecycleRiskLevel::High;
+        failed_high.sensitivity = MemoryLifecycleSensitivity::Sensitive;
+        failed_high.status = MemoryLifecycleStatus::MaterializationFailed;
+        failed_high.materialization_status = MemoryMaterializationStatus::Failed;
+        failed_high.materialization_error_code = Some("legacy_failure".into());
+        failed_high.materialized_view_id = None;
+        failed_high.materialized_view_version = None;
+        failed_high.audit_digest = memory_record_audit_digest(&failed_high, &fact_key);
+        {
+            let mut conn = store.conn.lock().unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("DROP INDEX idx_memory_lifecycle_active_fact_key", [])
+                .unwrap();
+            insert_record_tx(&tx, &failed_high, &fact_key, Utc::now(), Utc::now()).unwrap();
+            let failed_fact = CanonicalMemoryFactDescriptor::new(
+                failed_high.content.clone(),
+                failed_high.scope,
+                failed_high.category,
+                failed_high.risk_level,
+                failed_high.sensitivity,
+            )
+            .unwrap();
+            link_proposal_to_memory_tx(
+                &tx,
+                &failed_high.proposal_id,
+                &failed_high.memory_id,
+                &fact_key,
+                &memory_fact_admission_digest(&fact_key, &failed_fact),
+                failed_high.risk_level,
+                failed_high.sensitivity,
+                Utc::now(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        drop(store);
+
+        let migrated = MemoryLifecycleStore::new(&path).unwrap();
+        let active = migrated.list_active_records(None, 10).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].memory_id, low_materialized.record.memory_id);
+        assert_eq!(active[0].status, MemoryLifecycleStatus::Materialized);
+        assert_eq!(
+            active[0].materialization_status,
+            MemoryMaterializationStatus::Materialized
+        );
+        assert_eq!(active[0].risk_level, MemoryLifecycleRiskLevel::High);
+        assert_eq!(active[0].sensitivity, MemoryLifecycleSensitivity::Sensitive);
+        let failed_history = migrated
+            .get_record(&failed_high.memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed_history.status, MemoryLifecycleStatus::Superseded);
+        assert_eq!(
+            failed_history.replacement_memory_id.as_deref(),
+            Some(low_materialized.record.memory_id.as_str())
+        );
+        let event_count_before_reopen: i64 = migrated
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_events
+                 WHERE aggregate_kind = 'memory_lifecycle' AND aggregate_id = ?1
+                   AND mutation_kind = 'materialized'",
+                [&low_materialized.record.memory_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(migrated);
+
+        let reopened = MemoryLifecycleStore::new(&path).unwrap();
+        let event_count_after_reopen: i64 = reopened
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_outbox_events
+                 WHERE aggregate_kind = 'memory_lifecycle' AND aggregate_id = ?1
+                   AND mutation_kind = 'materialized'",
+                [&low_materialized.record.memory_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count_after_reopen, event_count_before_reopen);
+        assert_eq!(reopened.list_active_records(None, 10).unwrap().len(), 1);
+        let historical = reopened
+            .accept_memory_proposal(MemoryLifecycleAcceptanceInput {
+                proposal_id: failed_high.proposal_id,
+                source_task_session_id: None,
+                source_run_id: None,
+                fact: CanonicalMemoryFactDescriptor::new(
+                    failed_high.content,
+                    failed_high.scope,
+                    failed_high.category,
+                    failed_high.risk_level,
+                    failed_high.sensitivity,
+                )
+                .unwrap(),
+                created_by: "agent".into(),
+                accepted_by: "user".into(),
+                evidence_ids: Vec::new(),
+                confidence: "0.900".into(),
+                conflict_ids: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            historical.admission_outcome,
+            MemoryAdmissionOutcome::TerminalHistorical
+        );
+    }
 
     #[test]
     fn accepted_memory_materializes_and_rollback_excludes_active_context() {
@@ -1138,7 +4669,10 @@ mod tests {
             json!({
                 "content": "User prefers execution-first agents.",
                 "scope": "project",
-                "category": "preference"
+                "category": "preference",
+                "candidateKind": "preference",
+                "riskLevel": "low",
+                "sensitivity": "internal"
             }),
             "User accepted a memory proposal.",
             0.82,
@@ -1148,10 +4682,13 @@ mod tests {
         proposal.id = "proposal-memory-lifecycle-test".into();
 
         let accepted = store
-            .accept_memory_proposal(MemoryLifecycleAcceptanceInput::from_memory_proposal(
-                &proposal,
-                "User prefers execution-first agents.".into(),
-            ))
+            .accept_memory_proposal(
+                MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                    &proposal,
+                    "User prefers execution-first agents.".into(),
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         assert_eq!(accepted.record.proposal_id, proposal.id);
@@ -1162,6 +4699,8 @@ mod tests {
         );
         assert!(accepted
             .materialized_view
+            .as_ref()
+            .unwrap()
             .active_memory_ids
             .contains(&accepted.record.memory_id));
         assert_eq!(
@@ -1204,7 +4743,10 @@ mod tests {
             json!({
                 "content": "User has an identity-level memory.",
                 "scope": "global",
-                "category": "preference"
+                "category": "boundary",
+                "candidateKind": "identity_or_role",
+                "riskLevel": "identity_value",
+                "sensitivity": "sensitive"
             }),
             "User accepted a sensitive memory proposal.",
             0.82,
@@ -1214,10 +4756,13 @@ mod tests {
         proposal.id = "proposal-memory-high-risk-rollback-test".into();
 
         let accepted = store
-            .accept_memory_proposal(MemoryLifecycleAcceptanceInput::from_memory_proposal(
-                &proposal,
-                "User has an identity-level memory.".into(),
-            ))
+            .accept_memory_proposal(
+                MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                    &proposal,
+                    "User has an identity-level memory.".into(),
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         let blocked = store
@@ -1231,5 +4776,541 @@ mod tests {
             "high-risk rollback must become a confirmation/blocker path: {blocked}"
         );
         assert!(store.is_memory_active(&accepted.record.memory_id).unwrap());
+    }
+
+    #[test]
+    fn explicit_memory_uses_the_canonical_lifecycle_owner_and_is_reversible() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let first = store
+            .commit_test_explicit_user_memory(explicit_input("message-1", "我早餐喜欢咖啡和面包"))
+            .unwrap();
+        let duplicate = store
+            .commit_test_explicit_user_memory(explicit_input("message-2", "我早餐喜欢咖啡和面包"))
+            .unwrap();
+
+        assert!(first.newly_committed);
+        assert!(!duplicate.newly_committed);
+        assert_eq!(duplicate.memory_id, first.memory_id);
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+        let record = store.get_record(&first.memory_id).unwrap().unwrap();
+        assert_eq!(record.created_by, "current_authenticated_user_message");
+        assert!(record.proposal_id.starts_with("explicit_memory:"));
+
+        store
+            .rollback_memory_asset(&first.memory_id, "user", "explicit memory undo")
+            .unwrap();
+        assert!(store.list_active_records(None, 10).unwrap().is_empty());
+
+        let recreated = store
+            .commit_test_explicit_user_memory(explicit_input("message-3", "我早餐喜欢咖啡和面包"))
+            .unwrap();
+        assert!(recreated.newly_committed);
+        assert_ne!(recreated.memory_id, first.memory_id);
+    }
+
+    #[test]
+    fn admission_outcomes_and_timestamps_distinguish_owner_from_each_admission() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let first_input = explicit_input("message-outcome-owner", "One admission outcome fact");
+        let owner = store
+            .commit_test_explicit_user_memory(first_input.clone())
+            .unwrap();
+        let replay = store.commit_test_explicit_user_memory(first_input).unwrap();
+        let alias = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-outcome-alias",
+                "One admission outcome fact",
+            ))
+            .unwrap();
+
+        assert_eq!(
+            owner.admission_outcome,
+            MemoryAdmissionOutcome::OwnerCreated
+        );
+        assert_eq!(
+            replay.admission_outcome,
+            MemoryAdmissionOutcome::ExactReplay
+        );
+        assert_eq!(alias.admission_outcome, MemoryAdmissionOutcome::AliasLinked);
+        assert_eq!(owner.admission_at, owner.owner_accepted_at.unwrap());
+        assert_eq!(replay.admission_at, owner.admission_at);
+        assert_eq!(alias.owner_accepted_at, owner.owner_accepted_at);
+        assert_eq!(alias.memory_id, owner.memory_id);
+        assert!(!replay.newly_committed);
+        assert!(!alias.newly_committed);
+    }
+
+    #[test]
+    fn terminal_admission_replay_never_reactivates_but_new_admission_rebuilds_same_fact() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let original_input = explicit_input("message-terminal-original", "Rebuildable fact");
+        let original = store
+            .commit_test_explicit_user_memory(original_input.clone())
+            .unwrap();
+        store
+            .rollback_memory_asset(&original.memory_id, "user", "remove old admission")
+            .unwrap();
+
+        let historical = store
+            .commit_test_explicit_user_memory(original_input.clone())
+            .unwrap();
+        assert_eq!(
+            historical.admission_outcome,
+            MemoryAdmissionOutcome::TerminalHistorical
+        );
+        assert!(!historical.canonical_committed);
+        assert!(!historical.undo_available);
+        assert!(historical.outbox_event_id.is_none());
+        assert!(store.list_active_records(None, 10).unwrap().is_empty());
+
+        let rebuilt = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-terminal-new-admission",
+                "Rebuildable fact",
+            ))
+            .unwrap();
+        assert_eq!(
+            rebuilt.admission_outcome,
+            MemoryAdmissionOutcome::OwnerCreated
+        );
+        assert_ne!(rebuilt.memory_id, original.memory_id);
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+
+        let historical_again = store
+            .commit_test_explicit_user_memory(original_input)
+            .unwrap();
+        assert_eq!(
+            historical_again.admission_outcome,
+            MemoryAdmissionOutcome::TerminalHistorical
+        );
+        assert_eq!(historical_again.memory_id, original.memory_id);
+        assert_eq!(
+            store.list_active_records(None, 10).unwrap()[0].memory_id,
+            rebuilt.memory_id
+        );
+    }
+
+    #[test]
+    fn rolled_back_proposal_replay_is_historical_and_new_proposal_creates_a_new_owner() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let original_input = acceptance_input("proposal-terminal-original", "Proposal fact");
+        let original = store
+            .accept_memory_proposal(original_input.clone())
+            .unwrap();
+        store
+            .rollback_memory_asset(&original.record.memory_id, "user", "remove proposal fact")
+            .unwrap();
+
+        let historical = store.accept_memory_proposal(original_input).unwrap();
+        assert_eq!(
+            historical.admission_outcome,
+            MemoryAdmissionOutcome::TerminalHistorical
+        );
+        assert!(!historical.canonical_committed);
+        assert!(historical.canonical_mutation.is_none());
+
+        let rebuilt = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-terminal-new-admission",
+                "Proposal fact",
+            ))
+            .unwrap();
+        assert_eq!(
+            rebuilt.admission_outcome,
+            MemoryAdmissionOutcome::OwnerCreated
+        );
+        assert_ne!(rebuilt.record.memory_id, original.record.memory_id);
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn direct_lane_rejects_boundary_identity_high_and_sensitive_memory() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let boundary = ExplicitMemoryWriteInput {
+            source_task_session_id: "task-boundary".into(),
+            source_run_id: "run-boundary".into(),
+            source_message_id: "message-boundary".into(),
+            source_message_digest: digest_label("I am the finance administrator."),
+            authorized_candidate_id: "candidate:test:message-boundary".into(),
+            fact: CanonicalMemoryFactDescriptor::new(
+                "I am the finance administrator.",
+                MemoryLifecycleScope::Global,
+                MemoryLifecycleCategory::Boundary,
+                MemoryLifecycleRiskLevel::Low,
+                MemoryLifecycleSensitivity::Internal,
+            )
+            .unwrap(),
+        };
+        let identity = ExplicitMemoryWriteInput {
+            source_task_session_id: "task-identity".into(),
+            source_run_id: "run-identity".into(),
+            source_message_id: "message-identity".into(),
+            source_message_digest: digest_label("I am the finance administrator."),
+            authorized_candidate_id: "candidate:test:message-identity".into(),
+            fact: CanonicalMemoryFactDescriptor::from_candidate(
+                "I am the finance administrator.",
+                MemoryCandidateKind::IdentityOrRole,
+                MemoryLifecycleScope::Global,
+                MemoryLifecycleRiskLevel::Low,
+                MemoryLifecycleSensitivity::Internal,
+            )
+            .unwrap(),
+        };
+        let mut high = explicit_input("message-high", "High-risk direct Memory");
+        high.fact.risk_level = MemoryLifecycleRiskLevel::High;
+        let mut sensitive = explicit_input("message-sensitive", "Sensitive direct Memory");
+        sensitive.fact.sensitivity = MemoryLifecycleSensitivity::Sensitive;
+
+        assert!(store.commit_test_explicit_user_memory(boundary).is_err());
+        assert!(store.commit_test_explicit_user_memory(identity).is_err());
+        assert!(store.commit_test_explicit_user_memory(high).is_err());
+        assert!(store.commit_test_explicit_user_memory(sensitive).is_err());
+        assert!(store.list_active_records(None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn canonical_store_rejects_proof_rebound_to_different_message_candidate_or_fact() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        for mutation in ["message", "candidate", "fact"] {
+            let mut input = explicit_input(
+                &format!("message-proof-{mutation}"),
+                "One exact proof-bound Memory fact",
+            );
+            let proof = PolicyMemoryAdmissionProof::test_fixture_for_explicit_input(&input);
+            match mutation {
+                "message" => input.source_message_digest = digest_label("different message"),
+                "candidate" => input.authorized_candidate_id.push_str(":forged"),
+                "fact" => input.fact.canonical_body.push_str(" changed"),
+                _ => unreachable!(),
+            }
+
+            let error = store
+                .commit_explicit_user_memory(input, proof)
+                .expect_err("rebound admission proof must fail before canonical mutation");
+            assert!(error
+                .to_string()
+                .contains("proof does not match canonical write input"));
+        }
+        assert!(store.list_active_records(None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_explicit_memory_writes_materialize_one_canonical_fact() {
+        let store = Arc::new(MemoryLifecycleStore::new_in_memory().unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let handles = (0..16)
+            .map(|index| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .commit_test_explicit_user_memory(explicit_input(
+                            &format!("message-{index}"),
+                            "我喜欢上午进行深度工作",
+                        ))
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let receipts = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt.newly_committed)
+                .count(),
+            1
+        );
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt.memory_id == receipts[0].memory_id));
+        assert_eq!(store.list_active_records(None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn explicit_memory_and_outbox_roll_back_as_one_transaction() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        store.install_outbox_insert_failure_for_test().unwrap();
+
+        let error = store
+            .commit_test_explicit_user_memory(explicit_input("message-atomic", "低熵偏好：咖啡"))
+            .expect_err("canonical record must not survive a failed outbox insert");
+
+        assert!(error
+            .to_string()
+            .contains("injected memory lifecycle outbox"));
+        assert!(store.list_active_records(None, 10).unwrap().is_empty());
+        assert!(store
+            .list_replayable_projection_deliveries(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn rollback_tombstone_failure_preserves_the_active_canonical_memory() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let receipt = store
+            .commit_test_explicit_user_memory(explicit_input("message-rollback", "需要保留的事实"))
+            .unwrap();
+        store.install_outbox_insert_failure_for_test().unwrap();
+
+        store
+            .rollback_memory_asset(&receipt.memory_id, "user", "forget")
+            .expect_err("rollback and tombstone must share one transaction");
+
+        assert!(store.is_memory_active(&receipt.memory_id).unwrap());
+        assert_eq!(store.lifecycle_events(&receipt.memory_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn outbox_tokens_are_opaque_random_and_never_copy_low_entropy_content() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let sentinel = "咖啡";
+        let first = store
+            .commit_test_explicit_user_memory(explicit_input("message-token-1", sentinel))
+            .unwrap();
+        store
+            .rollback_memory_asset(&first.memory_id, "user", "replace")
+            .unwrap();
+        let second = store
+            .commit_test_explicit_user_memory(explicit_input("message-token-2", sentinel))
+            .unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let first_digest: String = conn
+            .query_row(
+                "SELECT payload_digest FROM canonical_outbox_events WHERE event_id = ?1",
+                [first.outbox_event_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let second_digest: String = conn
+            .query_row(
+                "SELECT payload_digest FROM canonical_outbox_events WHERE event_id = ?1",
+                [second.outbox_event_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let persisted_metadata: String = conn
+            .query_row(
+                "SELECT COALESCE(group_concat(
+                    event_id || aggregate_kind || aggregate_id || mutation_kind || payload_digest,
+                    '|'
+                 ), '') FROM canonical_outbox_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_ne!(first_digest, second_digest);
+        assert!(!persisted_metadata.contains(sentinel));
+        assert!(
+            !serde_json::to_string(&store.list_replayable_projection_deliveries(100).unwrap())
+                .unwrap()
+                .contains(sentinel)
+        );
+    }
+
+    #[test]
+    fn duplicate_legacy_memory_without_outbox_is_repaired_as_pending_not_applied() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let first = store
+            .commit_test_explicit_user_memory(explicit_input("message-legacy-1", "legacy fact"))
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM canonical_outbox_deliveries WHERE event_id = ?1",
+                [first.outbox_event_id.as_deref().unwrap()],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM canonical_outbox_events WHERE event_id = ?1",
+                [first.outbox_event_id.as_deref().unwrap()],
+            )
+            .unwrap();
+        }
+
+        let repaired = store
+            .commit_test_explicit_user_memory(explicit_input("message-legacy-2", "legacy fact"))
+            .unwrap();
+
+        assert!(!repaired.newly_committed);
+        assert_eq!(repaired.memory_id, first.memory_id);
+        assert_eq!(repaired.projection_state, ProjectionDeliveryState::Pending);
+        assert!(repaired.outbox_event_id.is_some());
+        assert_eq!(
+            store
+                .projection_summary(repaired.outbox_event_id.as_deref().unwrap())
+                .unwrap()
+                .pending,
+            2
+        );
+    }
+
+    #[test]
+    fn lifecycle_archive_is_canonical_before_derived_projection_and_restore_is_revisioned() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let receipt = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-retrieval-owner",
+                "lifecycle retrieval sentinel",
+            ))
+            .unwrap();
+        assert!(store.is_memory_retrievable(&receipt.memory_id).unwrap());
+        assert_eq!(store.list_retrievable_records(None, 10).unwrap().len(), 1);
+
+        let archived = store
+            .set_memory_retrieval_disposition(
+                &receipt.memory_id,
+                MemoryRetrievalDisposition::Archived,
+                "user_reviewed_archive",
+            )
+            .unwrap();
+        let archived_event = archived.canonical_mutation.as_ref().unwrap();
+        assert!(archived.changed);
+        assert_eq!(archived.state.as_ref().unwrap().revision, 1);
+        assert_eq!(
+            store
+                .projection_summary(&archived_event.event_id)
+                .unwrap()
+                .pending,
+            1,
+            "derived vector projection intentionally remains behind canonical archive"
+        );
+        assert!(!store.is_memory_retrievable(&receipt.memory_id).unwrap());
+        assert!(store.list_retrievable_records(None, 10).unwrap().is_empty());
+        assert!(
+            store.is_memory_active(&receipt.memory_id).unwrap(),
+            "archive changes retrieval eligibility, not canonical asset liveness"
+        );
+
+        let restored = store
+            .set_memory_retrieval_disposition(
+                &receipt.memory_id,
+                MemoryRetrievalDisposition::Active,
+                "user_reviewed_restore",
+            )
+            .unwrap();
+        assert!(restored.changed);
+        assert_eq!(restored.state.as_ref().unwrap().revision, 2);
+        assert!(store.is_memory_retrievable(&receipt.memory_id).unwrap());
+        assert_eq!(store.list_retrievable_records(None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lifecycle_retrieval_mutation_and_owner_validation_are_one_transaction() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let first = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-retrieval-batch-one",
+                "first lifecycle retrieval owner",
+            ))
+            .unwrap();
+        let second = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-retrieval-batch-two",
+                "second lifecycle retrieval owner",
+            ))
+            .unwrap();
+        let owners = vec![first.memory_id.clone(), second.memory_id.clone()];
+        let mut invalid = owners.clone();
+        invalid.push("memory:missing-owner".into());
+
+        assert!(store
+            .set_memory_retrieval_dispositions(
+                &invalid,
+                MemoryRetrievalDisposition::Archived,
+                "user_reviewed_archive",
+            )
+            .is_err());
+        assert!(owners
+            .iter()
+            .all(|owner| store.memory_retrieval_state(owner).unwrap().is_none()));
+
+        store.install_outbox_insert_failure_for_test().unwrap();
+        assert!(store
+            .set_memory_retrieval_dispositions(
+                &owners,
+                MemoryRetrievalDisposition::Archived,
+                "user_reviewed_archive",
+            )
+            .is_err());
+        assert!(owners
+            .iter()
+            .all(|owner| store.memory_retrieval_state(owner).unwrap().is_none()));
+    }
+
+    #[test]
+    fn lifecycle_rollback_cannot_race_a_separate_retrieval_owner_check() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let receipt = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-retrieval-rollback",
+                "rollback serialization sentinel",
+            ))
+            .unwrap();
+        store
+            .rollback_memory_asset(&receipt.memory_id, "user", "remove canonical owner")
+            .unwrap();
+
+        let error = store
+            .set_memory_retrieval_disposition(
+                &receipt.memory_id,
+                MemoryRetrievalDisposition::Archived,
+                "user_reviewed_archive",
+            )
+            .expect_err("terminal lifecycle owner must not acquire retrieval state");
+        assert!(error.to_string().contains("owner proof"));
+        assert!(store
+            .memory_retrieval_state(&receipt.memory_id)
+            .unwrap()
+            .is_none());
+        assert!(!store.is_memory_retrievable(&receipt.memory_id).unwrap());
+    }
+
+    #[test]
+    fn archived_lifecycle_count_and_pages_exceed_legacy_five_hundred_cap() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let mut owners = Vec::with_capacity(501);
+        for index in 0..501 {
+            let receipt = store
+                .commit_test_explicit_user_memory(explicit_input(
+                    &format!("message-archive-page-{index}"),
+                    &format!("archived lifecycle page fact {index}"),
+                ))
+                .unwrap();
+            owners.push(receipt.memory_id);
+        }
+        for batch in owners.chunks(200) {
+            store
+                .set_memory_retrieval_dispositions(
+                    batch,
+                    MemoryRetrievalDisposition::Archived,
+                    "user_reviewed_archive",
+                )
+                .unwrap();
+        }
+
+        assert_eq!(store.count_archived_memory_retrieval_states().unwrap(), 501);
+        assert_eq!(
+            store
+                .list_archived_memory_retrieval_states_page(500, 0)
+                .unwrap()
+                .len(),
+            500
+        );
+        assert_eq!(
+            store
+                .list_archived_memory_retrieval_states_page(10, 500)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

@@ -17,7 +17,7 @@ pub(crate) async fn compile_main_chat_context(
     task_session_id: &str,
     user_text: &str,
     selected_skill_id: Option<&str>,
-) -> openlife_core::agent::main_chat_agent_v1::CompiledContext {
+) -> Result<openlife_core::agent::main_chat_agent_v1::CompiledContext, String> {
     let mut candidates = vec![
         ContextSourceCandidate::new(
             ContextSourceKind::StableCore,
@@ -69,64 +69,88 @@ pub(crate) async fn compile_main_chat_context(
     ];
 
     let selected_skill_id = sanitize_main_chat_selected_skill_id(selected_skill_id);
-    candidates.extend(load_current_workspace_knowledge_context_candidates(
-        selected_skill_id.as_deref(),
-    ));
     let configured_knowledge_roots = {
         let config = state.config.lock().await;
         config.system.knowledge_roots.clone()
     };
-    candidates.extend(load_configured_knowledge_context_candidates(
-        &configured_knowledge_roots,
-        selected_skill_id.as_deref(),
-    ));
-    if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
-        let store = lifecycle_store.lock().await;
-        if let Ok(records) = store.list_active_records(None, 8) {
-            for record in records {
-                candidates.push(ContextSourceCandidate::new(
-                    ContextSourceKind::SelectedPersonalContext,
-                    &record.memory_id,
-                    format!(
-                        "Accepted memory [{}:{}]: {}",
-                        record.scope, record.category, record.content
-                    ),
-                    format!(
-                        "accepted memory lifecycle; materialized view {} version {}",
-                        record.materialized_view_id.as_deref().unwrap_or("unknown"),
-                        record.materialized_view_version.unwrap_or_default()
-                    ),
-                    "private",
-                    16,
-                ));
-            }
-        }
-    }
-    if let Ok(sessions) = {
+    let current_skill_id = selected_skill_id.clone();
+    let configured_skill_id = selected_skill_id.clone();
+    let current_context = tokio::task::spawn_blocking(move || {
+        load_current_workspace_knowledge_context_candidates(current_skill_id.as_deref())
+    });
+    let configured_context = tokio::task::spawn_blocking(move || {
+        load_configured_knowledge_context_candidates(
+            &configured_knowledge_roots,
+            configured_skill_id.as_deref(),
+        )
+    });
+    let (current_context, configured_context) = tokio::join!(current_context, configured_context);
+    candidates.extend(current_context.unwrap_or_default());
+    candidates.extend(configured_context.unwrap_or_default());
+    candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
+    let sessions = {
         let store = state.memory_store.lock().await;
-        store.list_sessions(5)
-    } {
-        candidates.push(ContextSourceCandidate::new(
-            ContextSourceKind::SelectedPersonalContext,
-            "chat_sessions.recent",
-            format!(
-                "Recent session count available for search: {}",
-                sessions.len()
-            ),
-            "bounded session search metadata",
-            "internal",
-            8,
-        ));
-    }
+        store.list_sessions(5).map_err(|error| {
+            format!("memory_retrieval_degraded:memory_store_query_failed:{error}")
+        })?
+    };
+    candidates.push(ContextSourceCandidate::new(
+        ContextSourceKind::SelectedPersonalContext,
+        "chat_sessions.recent",
+        format!(
+            "Recent session count available for search: {}",
+            sessions.len()
+        ),
+        "bounded session search metadata",
+        "internal",
+        8,
+    ));
 
-    ContextCompiler.compile(ContextCompilerInput {
+    Ok(ContextCompiler.compile(ContextCompilerInput {
         strategy: decision.selected_strategy,
         privacy_risk: decision.privacy_risk.clone(),
         active_session_id: Some(task_session_id.to_string()),
         token_budget: 160,
         selected_skill_id,
         candidates,
-    })
+    }))
+}
+
+/// The only Main Chat adapter from canonical lifecycle Memory into prompt
+/// context. Both ordinary send/stream compilation and the command-surface
+/// kernel use this function, so neither can reinterpret a lagging vector or
+/// MemoryStore projection as current lifecycle truth.
+pub(crate) async fn retrievable_lifecycle_context_candidates(
+    state: &Arc<AppState>,
+) -> Result<Vec<ContextSourceCandidate>, String> {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "memory_retrieval_degraded:lifecycle_store_unavailable".to_string())?;
+    let store = lifecycle_store.lock().await;
+    let records = store.list_retrievable_records(None, 8).map_err(|error| {
+        format!("memory_retrieval_degraded:lifecycle_records_query_failed:{error}")
+    })?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            ContextSourceCandidate::new(
+                ContextSourceKind::SelectedPersonalContext,
+                &record.memory_id,
+                format!(
+                    "Accepted memory [{}:{}]: {}",
+                    record.scope, record.category, record.content
+                ),
+                format!(
+                    "accepted memory lifecycle; materialized view {} version {}",
+                    record.materialized_view_id.as_deref().unwrap_or("unknown"),
+                    record.materialized_view_version.unwrap_or_default()
+                ),
+                "private",
+                16,
+            )
+        })
+        .collect())
 }
 
 pub(crate) fn sanitize_main_chat_selected_skill_id(
@@ -334,7 +358,10 @@ fn push_selected_skill_file(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn push_known_file(
     candidates: &mut Vec<ContextSourceCandidate>,
     seen: &mut HashSet<String>,
@@ -430,6 +457,27 @@ fn validate_selected_skill_id(selected_skill_id: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn accepted_lifecycle_memory_proposal(content: &str) -> openlife_core::agent::AgentProposal {
+        let mut proposal = openlife_core::agent::AgentProposal::new(
+            openlife_core::agent::ProposalType::MemoryWrite,
+            "memory.candidates",
+            serde_json::json!({
+                "content": content,
+                "scope": "global",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "low",
+                "sensitivity": "internal"
+            }),
+            "User reviewed a lifecycle Memory candidate.",
+            0.9,
+            openlife_core::agent::RiskLevel::Low,
+            openlife_core::agent::ProposalSource::Manual,
+        );
+        proposal.id = format!("proposal:context:retrieval:{}", uuid::Uuid::new_v4());
+        proposal
+    }
+
     #[test]
     fn loads_bounded_workspace_knowledge_surfaces_and_selected_skill_only() {
         let dir = tempfile::tempdir().expect("temp knowledge root");
@@ -518,5 +566,93 @@ mod tests {
             .expect("agents candidate");
 
         assert_eq!(agents.content.chars().count(), MAX_CONTEXT_CHARS_PER_FILE);
+    }
+
+    #[tokio::test]
+    async fn archived_lifecycle_memory_is_excluded_before_projection_catches_up() {
+        const SENTINEL: &str = "ARCHIVED_CONTEXT_MUST_NOT_LEAK";
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let proposal = accepted_lifecycle_memory_proposal(SENTINEL);
+        let accepted = {
+            let store = state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("lifecycle store")
+                .lock()
+                .await;
+            store
+                .accept_memory_proposal(
+                    openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                        &proposal,
+                        SENTINEL.to_string(),
+                    )
+                    .expect("typed lifecycle acceptance"),
+                )
+                .expect("accept lifecycle memory")
+        };
+
+        let before = retrievable_lifecycle_context_candidates(&state)
+            .await
+            .expect("canonical lifecycle reader");
+        assert!(before
+            .iter()
+            .any(|candidate| candidate.source_id == accepted.record.memory_id));
+
+        let archive = {
+            let store = state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("lifecycle store")
+                .lock()
+                .await;
+            let archive = store
+                .set_memory_retrieval_disposition(
+                    &accepted.record.memory_id,
+                    openlife_core::memory::MemoryRetrievalDisposition::Archived,
+                    "user_reviewed_archive",
+                )
+                .expect("archive canonical lifecycle owner");
+            let event_id = archive
+                .canonical_mutation
+                .as_ref()
+                .expect("archive outbox")
+                .event_id
+                .clone();
+            assert_eq!(
+                store
+                    .projection_summary(&event_id)
+                    .expect("pending archive projection")
+                    .pending,
+                1
+            );
+            archive
+        };
+        assert!(archive.changed);
+
+        let after = retrievable_lifecycle_context_candidates(&state)
+            .await
+            .expect("canonical lifecycle reader");
+        assert!(!after
+            .iter()
+            .any(|candidate| candidate.source_id == accepted.record.memory_id));
+        assert!(!after
+            .iter()
+            .any(|candidate| candidate.content.contains(SENTINEL)));
+    }
+
+    #[tokio::test]
+    async fn missing_lifecycle_store_is_degraded_not_healthy_empty_context() {
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("isolated state owner")
+            .memory_lifecycle_store = None;
+
+        let error = retrievable_lifecycle_context_candidates(&state)
+            .await
+            .expect_err("missing canonical lifecycle store cannot become empty context");
+        assert_eq!(
+            error,
+            "memory_retrieval_degraded:lifecycle_store_unavailable"
+        );
     }
 }

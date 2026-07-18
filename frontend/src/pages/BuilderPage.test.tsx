@@ -9,6 +9,23 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+function builderReview(signals: Array<Record<string, unknown>>, sessionId = "test-session") {
+  return {
+    session_id: sessionId,
+    signals,
+    summary: {
+      identity_summary: "后端身份摘要",
+      goals_summary: "后端目标摘要",
+      capabilities_summary: "后端能力摘要",
+      state_summary: "后端状态摘要",
+      assumptions: ["后端审阅事实"],
+      unresolved_questions: [],
+      recommended_next_steps: ["审阅并确认候选"],
+    },
+    finished: true,
+  };
+}
+
 describe("BuilderPage", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -159,7 +176,7 @@ describe("BuilderPage", () => {
           finished: false,
           progress: { progress: 0.6, current_step_label: "下一步", step_index: 4, total_steps: 6 },
           mode: "Socratic",
-          pending_signals: [],
+          review: null,
         });
       }
       return mockInvoke(cmd, args);
@@ -207,7 +224,7 @@ describe("BuilderPage", () => {
           finished: false,
           progress: { progress: 0.5, current_step_label: "下一步", step_index: 3, total_steps: 6 },
           mode: "Socratic",
-          pending_signals: [],
+          review: null,
         });
       }
       return mockInvoke(cmd, args);
@@ -277,22 +294,10 @@ describe("BuilderPage", () => {
             mode: "Quick",
             step_index: 6,
             finished: true,
-            draft_yaml: "",
             current_prompt: "请审阅以下建议",
-            pending_signals: [
-              {
-                id: "sig-1",
-                source_step: 1,
-                source_question_id: "q1",
-                dimension: "Identity",
-                affected_path: "identity.name",
-                proposed_value: "OpenLife 用户",
-                confidence: 0.8,
-                reason: "来自快速构建",
-                risk_level: "low",
-                user_status: "Pending",
-              },
-            ],
+            pending_signal_count: 1,
+            waiting_for_review: true,
+            review_in_progress: false,
           },
         ]);
       }
@@ -306,20 +311,23 @@ describe("BuilderPage", () => {
             step_index: 6,
             total_steps: 6,
           },
-          pending_signals: [
-            {
-              id: "sig-1",
-              source_step: 1,
-              source_question_id: "q1",
-              dimension: "Identity",
-              affected_path: "identity.name",
-              proposed_value: "OpenLife 用户",
-              confidence: 0.8,
-              reason: "来自快速构建",
-              risk_level: "low",
-              user_status: "Pending",
-            },
-          ],
+          review: builderReview(
+            [
+              {
+                id: "sig-1",
+                source_step: 1,
+                source_question_id: "q1",
+                dimension: "Identity",
+                affected_path: "identity.name",
+                proposed_value: "OpenLife 用户",
+                confidence: 0.8,
+                reason: "来自快速构建",
+                risk_level: "low",
+                user_status: "Pending",
+              },
+            ],
+            "review-session"
+          ),
           mode: "Quick",
         });
       }
@@ -339,8 +347,72 @@ describe("BuilderPage", () => {
     fireEvent.click(screen.getByText("去审阅"));
 
     expect(await screen.findByText("OpenLife 准备这样理解你")).toBeInTheDocument();
+    expect(screen.getByText(/后端审阅事实/)).toBeInTheDocument();
     expect(screen.getByText("名称")).toBeInTheDocument();
     expect(screen.getByText("OpenLife 用户")).toBeInTheDocument();
+  });
+
+  it("shows the backend retention state for an expired recoverable draft", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "builder_list_unfinished") {
+        return Promise.resolve([
+          {
+            session_id: "recoverable-draft",
+            mode: "Socratic",
+            step_index: 3,
+            finished: false,
+            current_prompt: "价值排序",
+            pending_signal_count: 0,
+            waiting_for_review: false,
+            review_in_progress: false,
+            retention_status: "expired_recoverable",
+            expires_at: "2026-07-01T00:00:00Z",
+            purge_after: "2026-08-01T00:00:00Z",
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("可恢复草稿")).toBeInTheDocument();
+    expect(screen.getByText(/已过活跃期；将在.*后自动清除/)).toBeInTheDocument();
+  });
+
+  it("renders a claimed builder review as non-actionable reconciliation state", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "builder_list_unfinished") {
+        return Promise.resolve([
+          {
+            session_id: "claimed-review",
+            mode: "Quick",
+            step_index: 7,
+            finished: true,
+            current_prompt: "候选已提交",
+            pending_signal_count: 2,
+            waiting_for_review: true,
+            review_in_progress: true,
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("等待后台协调")).toBeInTheDocument();
+    expect(screen.getByText("审阅批次已被后台领取，正在确认持久化状态")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "协调中" })).toBeDisabled();
+    expect(screen.getByTitle("后台协调完成前不能删除")).toBeDisabled();
   });
 
   it("shows safe mode banner and blocks starting new builder sessions when diagnostics are degraded", async () => {
@@ -428,7 +500,7 @@ describe("BuilderPage", () => {
           finished: true,
           progress: { progress: 1.0, current_step_label: "完成", step_index: 5, total_steps: 5 },
           mode: "Quick",
-          pending_signals: [
+          review: builderReview([
             {
               id: "sig_name",
               source_step: 1,
@@ -441,7 +513,7 @@ describe("BuilderPage", () => {
               risk_level: "low",
               user_status: "Pending",
             },
-          ],
+          ]),
           model: null,
         });
       }
@@ -449,6 +521,8 @@ describe("BuilderPage", () => {
         return Promise.resolve({
           success: true,
           created_count: 1,
+          reused_count: 0,
+          updated_count: 0,
           rejected_count: 0,
           proposal_ids: ["proposal-edited"],
           run_id: "run-edited",
@@ -536,7 +610,7 @@ describe("BuilderPage", () => {
           finished: true,
           progress: { progress: 1.0, current_step_label: "完成", step_index: 5, total_steps: 5 },
           mode: "Quick",
-          pending_signals: [
+          review: builderReview([
             {
               id: "sig_1",
               source_step: 1,
@@ -549,7 +623,7 @@ describe("BuilderPage", () => {
               risk_level: "low",
               user_status: "Pending",
             },
-          ],
+          ]),
           model: null,
         });
       }
@@ -557,6 +631,8 @@ describe("BuilderPage", () => {
         return Promise.resolve({
           success: true,
           created_count: 1,
+          reused_count: 0,
+          updated_count: 0,
           rejected_count: 0,
           proposal_ids: ["proposal-1"],
           run_id: "run-1",
@@ -649,7 +725,7 @@ describe("BuilderPage", () => {
           finished: true,
           progress: { progress: 1.0, current_step_label: "完成", step_index: 5, total_steps: 5 },
           mode: "Quick",
-          pending_signals: [
+          review: builderReview([
             {
               id: "sig_1",
               source_step: 1,
@@ -662,16 +738,18 @@ describe("BuilderPage", () => {
               risk_level: "low",
               user_status: "Pending",
             },
-          ],
+          ]),
           model: mockLifeModel,
         });
       }
       if (cmd === "builder_create_proposals") {
         return Promise.resolve({
           success: true,
-          created_count: 2,
+          created_count: 1,
+          reused_count: 0,
+          updated_count: 0,
           rejected_count: 2,
-          proposal_ids: ["proposal-1", "proposal-2"],
+          proposal_ids: ["proposal-1"],
           run_id: "run-review-center",
           warnings: [],
         });
@@ -707,10 +785,10 @@ describe("BuilderPage", () => {
     fireEvent.click(screen.getByText("发送到 Mailbox"));
 
     await waitFor(() => {
-      expect(screen.getByText(/已创建/)).toBeInTheDocument();
+      expect(screen.getByText(/待确认 Proposal：新建/)).toBeInTheDocument();
     });
 
-    expect(screen.getByText(/条待确认 Proposal/)).toBeInTheDocument();
+    expect(screen.getByText(/复用/)).toBeInTheDocument();
     expect(screen.getByText("去 Mailbox 确认 →")).toBeInTheDocument();
     expect(screen.queryByText("本轮写入结果")).not.toBeInTheDocument();
   });
@@ -724,8 +802,10 @@ describe("BuilderPage", () => {
             mode: "Quick",
             step_index: 6,
             finished: true,
-            draft_yaml: "",
             current_prompt: "请审阅以下建议",
+            pending_signal_count: 1,
+            waiting_for_review: true,
+            review_in_progress: false,
           },
         ]);
       }
@@ -741,7 +821,7 @@ describe("BuilderPage", () => {
           finished: true,
           progress: { progress: 1.0, current_step_label: "完成", step_index: 5, total_steps: 5 },
           mode: "Quick",
-          pending_signals: [
+          review: builderReview([
             {
               id: "sig_1",
               source_step: 1,
@@ -754,7 +834,7 @@ describe("BuilderPage", () => {
               risk_level: "low",
               user_status: "Pending",
             },
-          ],
+          ]),
           model: null,
         });
       }
@@ -813,7 +893,7 @@ describe("BuilderPage", () => {
           finished: true,
           progress: { progress: 1.0, current_step_label: "完成", step_index: 7, total_steps: 7 },
           mode: "Quick",
-          pending_signals: [
+          review: builderReview([
             {
               id: "sig_comm_style",
               source_step: 7,
@@ -826,7 +906,7 @@ describe("BuilderPage", () => {
               risk_level: "low",
               user_status: "Pending",
             },
-          ],
+          ]),
           model: mockLifeModel,
         });
       }

@@ -1,6 +1,4 @@
-use crate::agent::review_workflow::{
-    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
-};
+use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use serde_json::Value;
 
@@ -10,7 +8,10 @@ use super::AgentActionRequest;
 
 impl super::ActionExecutor {
     /// For manifest-only provider-gated tools, create a Proposal instead of blocking.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn create_declarative_stub_proposal(
         &self,
         request: &AgentActionRequest,
@@ -21,7 +22,7 @@ impl super::ActionExecutor {
         category: &str,
         reason: &str,
     ) -> Option<anyhow::Result<ActionExecutionResult>> {
-        let proposal_store = ctx.proposal_store?;
+        ctx.proposal_store?;
 
         // Build after payload from tool arguments
         let after = match tool_name {
@@ -57,21 +58,19 @@ impl super::ActionExecutor {
             proposal.run_id = Some(run_id.clone());
         }
 
-        let outcome = match ReviewWorkflow::new(proposal_store).submit(
-            DurableWriteRequest::from_agent_proposal(
-                DurableWriteSource::ToolPermission,
-                DurableWriteSubject::from_proposal_type(proposal.proposal_type),
-                proposal,
-                "Tool proposal is pending Review Center approval.",
-            ),
-        ) {
+        let outcome = match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::ToolPermission,
+            DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+            proposal,
+            "Tool proposal is pending Review Center approval.",
+        )) {
             Ok(outcome) => outcome,
             Err(e) => {
                 eprintln!(
                     "[warn] Failed to create {} Proposal for {}: {}",
                     proposal_type, tool_name, e
                 );
-                return None;
+                return Some(Err(e));
             }
         };
 

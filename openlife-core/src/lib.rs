@@ -1,9 +1,11 @@
 pub mod a2a;
 pub mod agent;
+pub mod atomic_file;
 pub mod builder;
 pub mod calendar;
 pub mod config;
 pub mod core_value_signal_extractor;
+pub mod embedding;
 pub mod evolution;
 pub mod feedback;
 // Hermes module removed: replaced by agent::reasoning module
@@ -17,18 +19,28 @@ pub mod mcp_audit;
 pub mod memory;
 pub mod memory_cache;
 pub mod memory_gateway;
+pub mod network_client;
 pub mod ollama;
+pub mod persistence_outbox;
 pub mod plugins;
 pub mod privacy;
 pub mod proactive;
 pub mod reflex_engine;
+pub mod resource;
+pub mod resource_gateway;
+pub mod resource_parser;
+pub mod resource_selection;
 pub mod scheduler;
 pub mod skills;
+pub mod sqlite_migration;
+pub mod state_store;
 pub mod tasks;
+pub mod tool_execution_receipt;
 pub mod tool_manifest;
 pub mod tool_permissions;
 pub mod vectors;
 pub mod versioning;
+pub mod web_search;
 
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

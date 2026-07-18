@@ -5,10 +5,15 @@ import {
   type AppConfig,
   exportAllData,
   importAllData,
+  abandonGovernedDataImportRecovery,
+  getGovernedDataImportStatus,
+  describeDataImportResult,
   getPolicyRouterStatus,
   getModelRouterStatus,
   getSystemDiagnostics,
   getLifeStateProjection,
+  getMemoryViewModel,
+  getProviderPrivacyBoundarySummary,
   getHotCache,
   exportMcpAuditLogs,
   cleanupMcpAuditLogs,
@@ -19,15 +24,20 @@ import {
   getDangerActionPreflight,
   buildDangerActionConfirmationEvidence,
   type ExportPayload,
+  parseOpenLifeExportPayload,
   type HotMemoryCache,
   type PrivacyPolicy,
   type PolicyRouterStatus,
   type ModelRouterStatus,
   type SystemDiagnostics,
   type LifeStateProjection,
+  type MemoryViewModel,
+  type ProviderPrivacyBoundarySummary,
   type DangerActionPreflightView,
   type DangerActionType,
   type DangerActionConfirmationEvidence,
+  type GovernedDataImportStatusView,
+  MAX_OPENLIFE_IMPORT_FILE_BYTES,
   listToolPermissions,
   revokeToolPermission,
   listPlugins,
@@ -38,7 +48,7 @@ import {
 } from "../tauri";
 import { Cpu, Shield, Wrench, Inbox, SlidersHorizontal } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
-import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile, readTextFile, stat } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import { isInternalDebugSurfaceEnabled } from "../utils/internalDebug";
 import { buildRuntimeActionError } from "../utils/runtimeMessages";
@@ -66,12 +76,6 @@ function defaultConfig(): AppConfig {
     runtime_mode: "local_first_default",
     prefer_local_model: false,
     local_model: "llama2",
-    chat_proposal: {
-      enabled: true,
-      confidence_threshold: 0.6,
-      min_message_length: 10,
-      cooldown_seconds: 300,
-    },
   };
 }
 
@@ -96,6 +100,7 @@ function classNames(...classes: (string | false | undefined)[]) {
 const DANGER_ACTION_LABELS: Record<DangerActionType, string> = {
   data_export: "导出全部数据",
   data_import_overwrite: "导入覆盖备份",
+  data_import_abandon_recovery: "保留当前数据并终止导入恢复",
   mcp_audit_export: "导出审计",
   mcp_audit_cleanup: "清理旧日志",
   mcp_audit_key_rotation: "轮换密钥",
@@ -121,6 +126,9 @@ export default function SettingsPage() {
   const [modelRouterStatus, setModelRouterStatus] = useState<ModelRouterStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [lifeStateProjection, setLifeStateProjection] = useState<LifeStateProjection | null>(null);
+  const [memoryViewModel, setMemoryViewModel] = useState<MemoryViewModel | null>(null);
+  const [providerPrivacyBoundary, setProviderPrivacyBoundary] =
+    useState<ProviderPrivacyBoundarySummary | null>(null);
   const [hotCache, setHotCache] = useState<HotMemoryCache | null>(null);
   const [privacyPolicy, setPrivacyPolicyState] = useState<PrivacyPolicy | null>(null);
   const [toolPermissions, setToolPermissions] = useState<ToolPermissionRecord[]>([]);
@@ -132,6 +140,8 @@ export default function SettingsPage() {
   const [pendingImport, setPendingImport] = useState<{
     payload: ExportPayload;
     path: string;
+    operationId: string;
+    recoveryStage?: string | null;
     confirmationEvidence: DangerActionConfirmationEvidence;
   } | null>(null);
   const [dangerPreflight, setDangerPreflight] = useState<DangerActionPreflightView | null>(null);
@@ -139,7 +149,23 @@ export default function SettingsPage() {
   const [dangerPreflightLoading, setDangerPreflightLoading] = useState<DangerActionType | null>(
     null
   );
+  const [governedImportStatus, setGovernedImportStatus] =
+    useState<GovernedDataImportStatusView | null>(null);
+  const [governedImportStatusError, setGovernedImportStatusError] = useState<string | null>(null);
   const showInternalDebug = isInternalDebugSurfaceEnabled();
+  const devExtensionsEnabled = diagnostics?.runtime_build_info?.devExtensionsEnabled === true;
+
+  const refreshGovernedImportStatus = async () => {
+    try {
+      const status = await getGovernedDataImportStatus();
+      setGovernedImportStatus(status);
+      setGovernedImportStatusError(null);
+      return status;
+    } catch (error) {
+      setGovernedImportStatusError("导入恢复状态读取失败：" + readableError(error));
+      return null;
+    }
+  };
 
   useEffect(() => {
     getConfig()
@@ -158,17 +184,30 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    void refreshGovernedImportStatus();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "privacy_data") {
+      void refreshGovernedImportStatus();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
     if (!showInternalDebug && activeTab === "experimental") {
       setActiveTab("advanced");
     }
   }, [activeTab, showInternalDebug]);
 
   const refreshAllDiagnostics = async () => {
+    const diag = await getSystemDiagnostics().catch(() => null);
+    const extensionsEnabled = diag?.runtime_build_info?.devExtensionsEnabled === true;
     const [
       policyRouter,
       modelRouter,
-      diag,
       projection,
+      memoryEnvelope,
+      providerBoundaryEnvelope,
       cache,
       policy,
       permissions,
@@ -177,18 +216,21 @@ export default function SettingsPage() {
     ] = await Promise.all([
       getPolicyRouterStatus().catch(() => null),
       getModelRouterStatus().catch(() => null),
-      getSystemDiagnostics().catch(() => null),
       getLifeStateProjection().catch(() => null),
+      getMemoryViewModel().catch(() => null),
+      getProviderPrivacyBoundarySummary().catch(() => null),
       getHotCache().catch(() => null),
       getPrivacyPolicy().catch(() => null),
       listToolPermissions().catch(() => []),
-      listPlugins().catch(() => []),
+      extensionsEnabled ? listPlugins().catch(() => []) : Promise.resolve([]),
       listToolManifests().catch(() => []),
     ]);
     setPolicyRouterStatus(policyRouter);
     setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
     setLifeStateProjection(projection);
+    setMemoryViewModel(memoryEnvelope?.data ?? null);
+    setProviderPrivacyBoundary(providerBoundaryEnvelope?.data ?? null);
     setHotCache(cache);
     setPrivacyPolicyState(policy);
     setToolPermissions(permissions);
@@ -227,7 +269,6 @@ export default function SettingsPage() {
           runtime_mode: config.runtime_mode,
           prefer_local: config.prefer_local_model,
           local_model: config.local_model,
-          chat_proposal_enabled: config.chat_proposal?.enabled,
           use_agent_loop: config.use_agent_loop,
         },
         screen_size: `${window.screen.width}x${window.screen.height}`,
@@ -252,7 +293,8 @@ export default function SettingsPage() {
 
   const openDangerActionPreflight = async (
     actionType: DangerActionType,
-    channel: "data" | "security"
+    channel: "data" | "security",
+    options: { targetIds?: string[]; affectedCount?: number } = {}
   ) => {
     setDangerPreflightLoading(actionType);
     if (channel === "security") {
@@ -261,7 +303,10 @@ export default function SettingsPage() {
       setMessage(null);
     }
     try {
-      const view = await getDangerActionPreflight(actionType, safeMode);
+      // LifeStateProjection reports observed backend Safe Mode; it is not an
+      // explicit user veto. The backend re-observes Safe Mode and is the sole
+      // authority that may admit the tightly scoped import-recovery lane.
+      const view = await getDangerActionPreflight(actionType, false, options);
       setDangerPreflight(view);
       setDangerPreflightAction(actionType);
     } catch (e: any) {
@@ -304,8 +349,18 @@ export default function SettingsPage() {
 
   const handleImport = async () => openDangerActionPreflight("data_import_overwrite", "data");
 
+  const handleAbandonInterruptedImport = async (operationId: string) => {
+    setDangerPreflight(null);
+    setDangerPreflightAction(null);
+    await openDangerActionPreflight("data_import_abandon_recovery", "data", {
+      targetIds: [operationId],
+    });
+  };
+
   const executeImportFileSelection = async (
-    confirmationEvidence: DangerActionConfirmationEvidence
+    confirmationEvidence: DangerActionConfirmationEvidence,
+    recoveryOperationId?: string | null,
+    recoveryStage?: string | null
   ) => {
     setImportLoading(true);
     setMessage(null);
@@ -319,10 +374,24 @@ export default function SettingsPage() {
         setImportLoading(false);
         return;
       }
+      const fileInfo = await stat(path);
+      if (fileInfo.size > MAX_OPENLIFE_IMPORT_FILE_BYTES) {
+        throw new Error("OpenLife 备份超过 64 MiB 导入上限");
+      }
       const text = await readTextFile(path);
-      const payload: ExportPayload = JSON.parse(text);
-      setPendingImport({ payload, path, confirmationEvidence });
-      setMessage("已读取导入文件，请确认覆盖导入。");
+      const payload = parseOpenLifeExportPayload(text);
+      setPendingImport({
+        payload,
+        path,
+        operationId: recoveryOperationId?.trim() || crypto.randomUUID(),
+        recoveryStage,
+        confirmationEvidence,
+      });
+      setMessage(
+        recoveryOperationId
+          ? "已读取导入文件，请确认继续恢复上次中断的导入。"
+          : "已读取导入文件，请确认覆盖导入。"
+      );
     } catch (e: any) {
       setMessage(buildRuntimeActionError("导入数据", e, "data"));
     } finally {
@@ -335,12 +404,40 @@ export default function SettingsPage() {
     setImportLoading(true);
     setMessage(null);
     try {
-      await importAllData(pendingImport.payload, pendingImport.confirmationEvidence);
+      const result = await importAllData(
+        pendingImport.payload,
+        pendingImport.confirmationEvidence,
+        pendingImport.operationId
+      );
       setPendingImport(null);
-      setMessage("导入成功，请刷新页面以查看最新数据");
-      await refreshAllDiagnostics();
+      setMessage(describeDataImportResult(result));
+      await Promise.all([refreshAllDiagnostics(), refreshGovernedImportStatus()]);
     } catch (e: any) {
       setMessage(buildRuntimeActionError("导入数据", e, "data"));
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const executeAbandonInterruptedImport = async (
+    operationId: string,
+    confirmationEvidence: DangerActionConfirmationEvidence
+  ) => {
+    setImportLoading(true);
+    setMessage(null);
+    try {
+      const result = await abandonGovernedDataImportRecovery(operationId, confirmationEvidence);
+      setPendingImport(null);
+      setMessage(
+        result.stage === "abandoned_preserving_current"
+          ? result.restart_required
+            ? "已保留当前 canonical 数据并终止这次中断的导入；它没有被标记为完成或回滚。请立即重启 OpenLife，重启前普通副作用仍保持隔离。"
+            : "已保留当前 canonical 数据并终止这次中断的导入；它没有被标记为完成或回滚。当前启动已读取终态，无需再次重启。"
+          : `导入恢复仍未终止：后端返回 ${result.status || "unknown"}。`
+      );
+      await Promise.all([refreshAllDiagnostics(), refreshGovernedImportStatus()]);
+    } catch (e: any) {
+      setMessage(buildRuntimeActionError("终止中断的导入恢复", e, "data"));
     } finally {
       setImportLoading(false);
     }
@@ -438,7 +535,21 @@ export default function SettingsPage() {
         await executeExport();
         break;
       case "data_import_overwrite":
-        await executeImportFileSelection(confirmationEvidence);
+        await executeImportFileSelection(
+          confirmationEvidence,
+          dangerPreflight.recoveryOperationId,
+          dangerPreflight.recoveryStage
+        );
+        break;
+      case "data_import_abandon_recovery":
+        if (!dangerPreflight.recoveryOperationId) {
+          setMessage("动作预检失败: 缺少 durable recovery operation id");
+          break;
+        }
+        await executeAbandonInterruptedImport(
+          dangerPreflight.recoveryOperationId,
+          confirmationEvidence
+        );
         break;
       case "mcp_audit_export":
         await executeExportAudit();
@@ -487,7 +598,31 @@ export default function SettingsPage() {
         <ConfirmDangerDialog
           open={Boolean(dangerPreflight)}
           title={`动作预检：${DANGER_ACTION_LABELS[dangerPreflight.actionType] ?? "危险动作"}`}
-          description={<DangerActionPreflightDetails view={dangerPreflight} />}
+          description={
+            <>
+              <DangerActionPreflightDetails view={dangerPreflight} />
+              {dangerPreflight.actionType === "data_import_overwrite" &&
+                dangerPreflight.recoveryOperationId && (
+                  <div className="mt-3 border-t border-stone-200 pt-3">
+                    <p className="text-xs text-stone-600">
+                      如果原备份文件已经丢失，可以保留当前 canonical
+                      数据并明确终止这次恢复；该操作不会声称导入已完成或已回滚。
+                    </p>
+                    <button
+                      type="button"
+                      className="mt-2 rounded-md border border-rose-300 bg-white px-3 py-2 text-xs font-semibold text-rose-800 hover:bg-rose-50"
+                      onClick={() =>
+                        void handleAbandonInterruptedImport(
+                          dangerPreflight.recoveryOperationId as string
+                        )
+                      }
+                    >
+                      无法取得原备份，保留当前数据并终止恢复
+                    </button>
+                  </div>
+                )}
+            </>
+          }
           confirmLabel={dangerPreflight.finalActionEnabled ? "继续执行" : "Safe Mode 已阻断"}
           cancelLabel="返回"
           severity={dangerPreflight.riskTier === "critical" ? "danger" : "warning"}
@@ -518,6 +653,9 @@ export default function SettingsPage() {
                 ? ` / 应用 ${pendingImport.payload.app_version}`
                 : ""}
             </div>
+            {pendingImport?.recoveryStage ? (
+              <div>恢复阶段：{pendingImport.recoveryStage}</div>
+            ) : null}
           </div>
         }
         confirmationText={pendingImport?.confirmationEvidence.confirmationPhrase || "IMPORT"}
@@ -535,7 +673,10 @@ export default function SettingsPage() {
             </p>
           </div>
           <button
-            onClick={refreshAllDiagnostics}
+            onClick={() => {
+              void refreshAllDiagnostics();
+              void refreshGovernedImportStatus();
+            }}
             className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
           >
             刷新状态
@@ -583,6 +724,7 @@ export default function SettingsPage() {
         {activeTab === "overview" && (
           <OverviewTab
             diagnostics={diagnostics}
+            providerPrivacyBoundary={providerPrivacyBoundary}
             projection={lifeStateProjection}
             safeMode={safeMode}
             exportLoading={exportLoading}
@@ -605,6 +747,7 @@ export default function SettingsPage() {
             config={config}
             setConfig={setConfig}
             diagnostics={diagnostics}
+            providerPrivacyBoundary={providerPrivacyBoundary}
             policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
@@ -633,6 +776,7 @@ export default function SettingsPage() {
               refreshSecurityState={refreshSecurityState}
               toolManifests={toolManifests}
               handleSavePrivacyPolicy={handleSavePrivacyPolicy}
+              devExtensionsEnabled={devExtensionsEnabled}
             />
             <DataTab
               handleExport={handleExport}
@@ -650,6 +794,8 @@ export default function SettingsPage() {
               setTierLoading={setTierLoading}
               setTierResult={setTierResult}
               handleExportDiagnostics={handleExportDiagnostics}
+              governedImportStatusMessage={describeGovernedImportStatus(governedImportStatus)}
+              governedImportStatusError={governedImportStatusError}
             />
           </div>
         )}
@@ -669,7 +815,7 @@ export default function SettingsPage() {
         )}
 
         {activeTab === "review_memory" && (
-          <ReviewMemoryTab config={config} setConfig={setConfig} projection={lifeStateProjection} />
+          <ReviewMemoryTab projection={lifeStateProjection} memoryViewModel={memoryViewModel} />
         )}
 
         {activeTab === "advanced" && (
@@ -681,6 +827,7 @@ export default function SettingsPage() {
             policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
+            devExtensionsEnabled={devExtensionsEnabled}
             pluginSection={
               <PluginSection
                 plugins={plugins}
@@ -704,6 +851,33 @@ export default function SettingsPage() {
       </div>
     </div>
   );
+}
+
+function describeGovernedImportStatus(status: GovernedDataImportStatusView | null): string | null {
+  if (!status || status.status === "idle") return null;
+
+  if (status.preservedCurrent) {
+    return [
+      "上次中断的导入已保留当前 canonical 数据并终止；原导入没有完成，也没有回滚。",
+      status.restartRequired
+        ? "当前进程仍处于恢复隔离，请重启 OpenLife 后再执行普通副作用。"
+        : "当前启动已读取该终态，无需再次重启。",
+    ].join("");
+  }
+
+  if (status.recoveryRequired) {
+    const stage = status.stage?.trim() || status.status.trim() || "unknown";
+    const isolation = status.runtimeRecoveryIsolationActive
+      ? "普通副作用当前保持隔离。"
+      : "后端未报告当前进程处于恢复隔离，请先停止写入并检查数据诊断。";
+    return `检测到未终态的导入（阶段：${stage}）。恢复仍然必需；${isolation}请通过“导入覆盖备份”继续同一操作。`;
+  }
+
+  if (status.restartRequired) {
+    return "导入已经进入 durable 终态，但当前进程仍处于恢复隔离。请重启 OpenLife 后再执行普通副作用。";
+  }
+
+  return null;
 }
 
 function readableError(e: unknown): string {

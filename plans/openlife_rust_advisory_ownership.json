@@ -1,0 +1,188 @@
+{
+  "schema_version": "openlife-rust-advisory-ownership-v1",
+  "reviewed_on": "2026-07-11",
+  "policy": "Every cargo-audit informational warning in Cargo.lock must be listed exactly once, have a concrete owner and an unexpired review date, and disappear from this file when it disappears from cargo-audit output. Vulnerabilities are never accepted by this registry.",
+  "entries": [
+    {
+      "id": "RUSTSEC-2024-0429",
+      "kind": "unsound",
+      "package": "glib",
+      "version": "0.18.5",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime; OpenLife has no direct VariantStrIter call, but transitive reachability is not proven absent.",
+      "remediation": "Upgrade the Tauri Linux GTK stack to glib >=0.20 or adopt a reviewed upstream-compatible backport before expiry.",
+      "upstream": "https://github.com/gtk-rs/gtk-rs-core/pull/1343"
+    },
+    {
+      "id": "RUSTSEC-2024-0413",
+      "kind": "unmaintained",
+      "package": "atk",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0416",
+      "kind": "unmaintained",
+      "package": "atk-sys",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0412",
+      "kind": "unmaintained",
+      "package": "gdk",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0418",
+      "kind": "unmaintained",
+      "package": "gdk-sys",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0411",
+      "kind": "unmaintained",
+      "package": "gdkwayland-sys",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0417",
+      "kind": "unmaintained",
+      "package": "gdkx11",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0414",
+      "kind": "unmaintained",
+      "package": "gdkx11-sys",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0415",
+      "kind": "unmaintained",
+      "package": "gtk",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0420",
+      "kind": "unmaintained",
+      "package": "gtk-sys",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0419",
+      "kind": "unmaintained",
+      "package": "gtk3-macros",
+      "version": "0.18.2",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux-only transitive Tauri GTK3 runtime.",
+      "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
+    },
+    {
+      "id": "RUSTSEC-2024-0436",
+      "kind": "unmaintained",
+      "package": "paste",
+      "version": "1.0.15",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Cross-platform compile-time transitive dependency through tokenizers and tract-onnx.",
+      "remediation": "Upgrade or replace the upstream tokenizers/tract dependency chain when it removes paste."
+    },
+    {
+      "id": "RUSTSEC-2024-0370",
+      "kind": "unmaintained",
+      "package": "proc-macro-error",
+      "version": "1.0.4",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Linux compile-time transitive dependency through glib-macros 0.18.",
+      "remediation": "Remove with the Tauri GTK3 binding migration."
+    },
+    {
+      "id": "RUSTSEC-2025-0081",
+      "kind": "unmaintained",
+      "package": "unic-char-property",
+      "version": "0.9.0",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Transitive dependency through Tauri urlpattern support.",
+      "remediation": "Upgrade Tauri/tauri-utils/urlpattern when the chain removes unic 0.9."
+    },
+    {
+      "id": "RUSTSEC-2025-0075",
+      "kind": "unmaintained",
+      "package": "unic-char-range",
+      "version": "0.9.0",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Transitive dependency through Tauri urlpattern support.",
+      "remediation": "Upgrade Tauri/tauri-utils/urlpattern when the chain removes unic 0.9."
+    },
+    {
+      "id": "RUSTSEC-2025-0080",
+      "kind": "unmaintained",
+      "package": "unic-common",
+      "version": "0.9.0",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Transitive dependency through Tauri urlpattern support.",
+      "remediation": "Upgrade Tauri/tauri-utils/urlpattern when the chain removes unic 0.9."
+    },
+    {
+      "id": "RUSTSEC-2025-0100",
+      "kind": "unmaintained",
+      "package": "unic-ucd-ident",
+      "version": "0.9.0",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Transitive dependency through Tauri urlpattern support.",
+      "remediation": "Upgrade Tauri/tauri-utils/urlpattern when the chain removes unic 0.9."
+    },
+    {
+      "id": "RUSTSEC-2025-0098",
+      "kind": "unmaintained",
+      "package": "unic-ucd-version",
+      "version": "0.9.0",
+      "owner": "backend-platform",
+      "expires_on": "2026-10-01",
+      "reachability": "Transitive dependency through Tauri urlpattern support.",
+      "remediation": "Upgrade Tauri/tauri-utils/urlpattern when the chain removes unic 0.9."
+    }
+  ]
+}

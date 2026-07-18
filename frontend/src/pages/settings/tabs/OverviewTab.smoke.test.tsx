@@ -135,6 +135,17 @@ const baseProps = {
     high_risk_pending_proposal_count: 0,
     proposal_store_status: "ok",
   } as any,
+  providerPrivacyBoundary: {
+    routeType: "auto",
+    externalTransmission: "possible",
+    providerLabel: "DeepSeek",
+    modelLabel: "deepseek-chat",
+    privacyLabel:
+      "cloud route configured; external transmission is possible, not proven by this summary",
+    risk: "medium",
+    localOnlyRequired: false,
+    evidenceRefs: [],
+  } as any,
   projection: baseProjection as any,
   safeMode: false,
   exportLoading: false,
@@ -221,7 +232,7 @@ describe("OverviewTab readiness smoke", () => {
         <OverviewTab {...baseProps} />
       </MemoryRouter>
     );
-    expect(screen.getByText("云端模型")).toBeInTheDocument();
+    expect(screen.getByText("模型边界")).toBeInTheDocument();
     expect(screen.getByText("本地模型")).toBeInTheDocument();
     expect(screen.getAllByText("人生模型").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("数据文件")).toBeInTheDocument();

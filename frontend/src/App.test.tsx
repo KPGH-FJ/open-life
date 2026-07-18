@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
-import App from "./App";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import App, { DevelopmentExtensionRoute } from "./App";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -392,8 +392,6 @@ describe("App product surface routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
 
     for (const [label, path] of [
-      ["MCP / Tools", "/mcp"],
-      ["A2A", "/a2a"],
       ["Metrics", "/metrics"],
       ["Calibration", "/calibration"],
       ["Versions", "/versions"],
@@ -420,11 +418,11 @@ describe("App product surface routing", () => {
     expect(menuButton).toHaveFocus();
 
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("link", { name: "MCP / Tools" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Metrics" })).toBeInTheDocument();
 
     await user.keyboard("{Escape}");
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Metrics" })).not.toBeInTheDocument();
     });
     expect(menuButton).toHaveFocus();
   });
@@ -442,12 +440,70 @@ describe("App product surface routing", () => {
 
     await screen.findByRole("link", { name: "Companion" });
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
-    expect(screen.getByRole("link", { name: "MCP / Tools" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Metrics" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "Today" }));
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Metrics" })).not.toBeInTheDocument();
     });
+  });
+
+  it("fails closed on direct extension routes until backend build truth enables them", async () => {
+    const { rerender } = render(
+      <MemoryRouter initialEntries={["/mcp"]}>
+        <Routes>
+          <Route
+            path="/mcp"
+            element={
+              <DevelopmentExtensionRoute diagnosticsResolved={false} enabled={false}>
+                <div>extension-content</div>
+              </DevelopmentExtensionRoute>
+            }
+          />
+          <Route path="/settings" element={<div>settings-content</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText("正在确认扩展能力...")).toBeInTheDocument();
+    expect(screen.queryByText("extension-content")).not.toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter initialEntries={["/mcp"]}>
+        <Routes>
+          <Route
+            path="/mcp"
+            element={
+              <DevelopmentExtensionRoute diagnosticsResolved enabled={false}>
+                <div>extension-content</div>
+              </DevelopmentExtensionRoute>
+            }
+          />
+          <Route path="/settings" element={<div>settings-content</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+    expect(await screen.findByText("settings-content")).toBeInTheDocument();
+    expect(screen.queryByText("extension-content")).not.toBeInTheDocument();
+  });
+
+  it("renders a direct extension route only after backend build truth enables it", () => {
+    render(
+      <MemoryRouter initialEntries={["/mcp"]}>
+        <Routes>
+          <Route
+            path="/mcp"
+            element={
+              <DevelopmentExtensionRoute diagnosticsResolved enabled>
+                <div>extension-content</div>
+              </DevelopmentExtensionRoute>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText("extension-content")).toBeInTheDocument();
   });
 
   it("keeps W166 product surface files free of disabled backend wrappers", () => {

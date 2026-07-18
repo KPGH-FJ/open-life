@@ -2,11 +2,12 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import ProductShell from "./ProductShell";
+import type { SystemDiagnostics } from "../tauri";
 
-function renderShell(path = "/today") {
+function renderShell(path = "/today", diagnostics: SystemDiagnostics | null = null) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <ProductShell diagnostics={null} safeMode={false} safeModeReason="">
+      <ProductShell diagnostics={diagnostics} safeMode={false} safeModeReason="">
         <div data-testid="shell-content" />
       </ProductShell>
     </MemoryRouter>
@@ -59,8 +60,10 @@ describe("ProductShell navigation IA", () => {
     }
   );
 
-  it("keeps MCP, A2A, metrics, calibration, and maintenance surfaces in Advanced", () => {
-    renderShell("/companion");
+  it("keeps release extension routes absent while retaining non-extension maintenance", () => {
+    renderShell("/companion", {
+      runtime_build_info: { devExtensionsEnabled: false },
+    } as SystemDiagnostics);
 
     expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "A2A" })).not.toBeInTheDocument();
@@ -76,9 +79,9 @@ describe("ProductShell navigation IA", () => {
     expect(within(advancedNav).getByText("Maintenance")).toBeInTheDocument();
     expect(within(advancedNav).queryByText("Stage / debug / eval")).not.toBeInTheDocument();
 
+    expect(within(advancedNav).queryByText("Advanced connections")).not.toBeInTheDocument();
+
     for (const [label, path] of [
-      ["MCP / Tools", "/mcp"],
-      ["A2A", "/a2a"],
       ["Metrics", "/metrics"],
       ["Calibration", "/calibration"],
       ["Versions", "/versions"],
@@ -88,5 +91,21 @@ describe("ProductShell navigation IA", () => {
 
     expect(within(advancedNav).queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
     expect(within(advancedNav).queryByRole("link", { name: "Settings" })).not.toBeInTheDocument();
+  });
+
+  it("shows MCP and A2A navigation only when backend build truth enables extensions", () => {
+    renderShell("/companion", {
+      runtime_build_info: { devExtensionsEnabled: true },
+    } as SystemDiagnostics);
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    const advancedNav = screen.getByRole("navigation", {
+      name: "Advanced technical navigation",
+    });
+    expect(within(advancedNav).getByRole("link", { name: "MCP / Tools" })).toHaveAttribute(
+      "href",
+      "/mcp"
+    );
+    expect(within(advancedNav).getByRole("link", { name: "A2A" })).toHaveAttribute("href", "/a2a");
   });
 });

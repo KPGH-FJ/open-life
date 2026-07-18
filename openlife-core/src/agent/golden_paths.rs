@@ -17,8 +17,7 @@ use crate::agent::hs_selector::{
 };
 use crate::agent::lifemodel_backend_completion::{
     bridge_life_signal_to_evidence, extract_life_signals, LifeDomain, LifeEventPrivacyLevel,
-    LifeEventSourceRef, LifeEventSourceType, LifeEventStore, LifeSignalBridgeInput,
-    LifeSignalExtractorInput,
+    LifeEventStore, LifeSignalBridgeInput, LifeSignalExtractorInput,
 };
 use crate::agent::maturation::{evaluate_maturation_engine_v1, MaturationEngineV1Input};
 use crate::agent::plan_execute::{
@@ -34,9 +33,10 @@ use crate::agent::runtime_contract::{
     LifeEventDraft, RuntimeGuidanceConsumptionMode, RuntimeInput,
 };
 use crate::agent::types::{
-    AgentExecutionBudget, AgentProposal, AgentTask, AgentTaskKind, ProposalSource, ProposalStatus,
-    ProposalType, RiskLevel,
+    AgentExecutionBudget, AgentProposal, AgentRun, AgentTask, AgentTaskKind, ProposalSource,
+    ProposalStatus, ProposalType, RiskLevel,
 };
+use crate::agent::AgentRunStore;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::{agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, layer::Layer};
@@ -350,16 +350,18 @@ pub fn run_low_energy_support_golden_path(
 ) -> Result<LowEnergySupportGoldenPathReport> {
     let mut blocking_reasons = Vec::new();
     let event_store = LifeEventStore::new_in_memory()?;
+    let agent_run_store = AgentRunStore::new_in_memory()?;
+    let mut canonical_source_run = AgentRun::new_chat_run("w145-golden-path", "");
+    canonical_source_run.id = input.source_run_id.clone();
+    agent_run_store.create_run(&canonical_source_run)?;
+    event_store.bind_canonical_agent_run_store(&agent_run_store)?;
     let evidence_store = EvidenceStore::new_in_memory()?;
     let heuristic_store = HeuristicStore::new_in_memory()?;
     let policy_store = PolicyStore::mvp_builtin();
-    let source_ref = LifeEventSourceRef::from_digest(
-        LifeEventSourceType::AgentRun,
-        input.source_run_id.clone(),
+    let event = agent_run_store.create_life_event_from_active_run(
+        &event_store,
+        &input.source_run_id,
         Some("w145.low_energy_support_golden_path"),
-        digest_str(&input.source_run_id),
-    );
-    let event = event_store.create_event(
         LifeEventDraft::new(
             "preference.planning.low_energy",
             "User prefers low-pressure planning with small next steps.",
@@ -371,7 +373,6 @@ pub fn run_low_energy_support_golden_path(
             "domain": "low_energy_planning",
             "sourceDigest": digest_str(&input.source_run_id),
         })),
-        vec![source_ref],
         LifeDomain::LowEnergyPlanning,
         RiskLevel::Low,
         LifeEventPrivacyLevel::Internal,

@@ -1,5 +1,5 @@
 use crate::main_chat_generation_support::{main_chat_provider_endpoint_kind, preview_text};
-use crate::main_chat_send::send_message_with_state;
+use crate::main_chat_send::send_message_with_operation_state;
 use crate::{main_chat_command_surface_eval, main_chat_eval_state, main_chat_final_gate, AppState};
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
@@ -213,7 +213,8 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         main_chat_command_surface_eval::grant_builtin_echo_read_once(&state).await?;
     }
 
-    let result = send_message_with_state(
+    let result = send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         input.session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
@@ -239,7 +240,7 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         .get("legacy_fallback_used")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let model_invoked = response
+    let transcript_model_invoked = response
         .get("execution_transcript")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|entries| {
@@ -256,6 +257,19 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                         == Some(provider_endpoint_kind.as_str())
             })
         });
+    let model_invoked = match (task_session_id.as_deref(), run_id.as_deref()) {
+        (Some(task_session_id), Some(run_id)) => {
+            durable_provider_completion_present(
+                &state,
+                task_session_id,
+                run_id,
+                &raw_provider,
+                &provider_model,
+            )
+            .await?
+        }
+        _ => false,
+    };
     let agent_loop_metadata = response
         .get("execution_transcript")
         .and_then(serde_json::Value::as_array)
@@ -514,7 +528,7 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                 MAIN_CHAT_LIVE_PROVIDER_RESPONSE_PREVIEW_MAX_CHARS,
             )
         });
-    let provider_model_invoked = model_invoked || react_model_invoked;
+    let provider_model_invoked = model_invoked;
     let provider_identity_trace_present = live_provider_contract_safe_label(&raw_provider);
     let provider_model_trace_present = live_provider_contract_safe_label(&provider_model);
     let traceable_response = traceable_response_metadata_present(
@@ -691,8 +705,62 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
     };
     if !report.ready {
         report.blockers = main_chat_final_gate::main_chat_live_provider_report_blockers(&report);
+        if transcript_model_invoked && !model_invoked {
+            report
+                .blockers
+                .push("live_provider_transcript_without_durable_receipt".into());
+        }
+        if react_model_invoked && !model_invoked {
+            report
+                .blockers
+                .push("live_provider_agent_loop_without_durable_receipt".into());
+        }
     }
     Ok(report)
+}
+
+async fn durable_provider_completion_present(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    expected_provider: &str,
+    expected_model: &str,
+) -> Result<bool, String> {
+    let events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        state,
+        task_session_id.to_string(),
+        Some(0),
+        Some(250),
+    )
+    .await?;
+    let mut started_request_ids = std::collections::BTreeSet::new();
+    for event in events {
+        if event.run_id != run_id
+            || event.object_type != "provider_request"
+            || event
+                .payload
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected_provider)
+            || event
+                .payload
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected_model)
+        {
+            continue;
+        }
+        match event.event_type.as_str() {
+            "provider.started" => {
+                started_request_ids.insert(event.object_id);
+            }
+            "provider.completed" if started_request_ids.contains(&event.object_id) => {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn non_empty_string_metadata(metadata: &Option<serde_json::Value>, key: &str) -> Option<String> {
@@ -1100,7 +1168,10 @@ fn distinct_registered_mcp_candidate_metadata_trace_present(
         && candidate_targets == action_targets
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_ranked_registered_mcp_selection_metadata_trace_present(
     scenario: main_chat_final_gate::MainChatLiveProviderEvalHarnessScenario,
     expected_provider: &str,

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use openlife_core::agent::{AgentTask, AgentTaskKind, PolicyTopic, RiskLevel, RuntimeHSPacket};
+use openlife_core::agent::{
+    AgentTask, AgentTaskKind, HSAssetAuthorityRegistry, HSAssetCategory, HSAssetOwner, PolicyTopic,
+    RiskLevel, RuntimeHSPacket,
+};
 use openlife_core::life_model::LifeModel;
 use openlife_core::privacy::{PrivacyEngine, PrivacyType};
 
@@ -26,6 +29,18 @@ pub(crate) async fn build_chat_runtime_hs_packet(
     tools_prompt: &str,
     agent_run_id: Option<String>,
 ) -> Result<Option<RuntimeHSPacket>, String> {
+    let authority_registry_path = {
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .hs_asset_authority_registry_path()
+    };
+    let authority_registry = HSAssetAuthorityRegistry::new(authority_registry_path)
+        .map_err(|error| format!("HS asset authority registry unavailable: {error}"))?;
+    let collaboration_authority = authority_registry
+        .authority(HSAssetCategory::CollaborationGuidance)
+        .map_err(|error| format!("HS collaboration guidance authority unavailable: {error}"))?;
     let topic = classify_hs_policy_topic(&task.user_text, tools_prompt);
     let tool_requirements = hs_tool_requirements(&task.user_text, tools_prompt);
     let risk_level = hs_risk_level(topic, &tool_requirements);
@@ -35,22 +50,38 @@ pub(crate) async fn build_chat_runtime_hs_packet(
     let sanitized_intent_summary =
         sanitized_hs_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
 
-    let heuristic_store = state.heuristic_store.lock().await;
-    openlife_core::agent::build_runtime_hs_packet(
-        &state.policy_store,
-        &heuristic_store,
-        openlife_core::agent::RuntimeHSPacketBuildInput {
-            task,
-            sanitized_intent_summary,
-            privacy_topic: topic,
-            risk_level,
-            tool_requirements,
-            current_state_hints: state_hints,
-            token_budget: 384,
-            agent_run_id,
-        },
-    )
-    .map_err(|e| format!("HS runtime packet build failed: {}", e))
+    let packet = {
+        let heuristic_store = state.heuristic_store.lock().await;
+        openlife_core::agent::build_runtime_hs_packet(
+            &state.policy_store,
+            &heuristic_store,
+            openlife_core::agent::RuntimeHSPacketBuildInput {
+                task,
+                sanitized_intent_summary,
+                privacy_topic: topic,
+                risk_level,
+                tool_requirements,
+                current_state_hints: state_hints,
+                token_budget: 384,
+                agent_run_id,
+            },
+        )
+        .map_err(|e| format!("HS runtime packet build failed: {}", e))?
+    };
+
+    if collaboration_authority.owner == HSAssetOwner::AcceptedHsStore {
+        return Ok(packet);
+    }
+
+    // LM-B shadow selection is evidence about deterministic materialization,
+    // not evidence that a product turn completed with the candidate owner.
+    // This pre-provider seam must never manufacture a product-scenario
+    // receipt: no provider/tool/final fact exists yet and the packet below is
+    // deliberately withheld while YAML remains canonical. A later, explicit
+    // trial verifier may record a receipt only after linking a successful
+    // terminal turn to the selected asset references and output digest.
+    let _shadow_packet = packet;
+    Ok(None)
 }
 
 pub(crate) fn classify_hs_policy_topic(user_text: &str, _tools_prompt: &str) -> PolicyTopic {

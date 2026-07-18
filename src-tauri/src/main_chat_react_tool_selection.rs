@@ -1,6 +1,11 @@
-use openlife_core::life_model::LifeModel;
-use openlife_core::llm::ChatMessage;
-use openlife_core::scheduler::InferenceScheduler;
+use openlife_core::config::NetworkPolicy;
+use openlife_core::llm::{
+    ChatMessage, ContextManifest, ProviderDataRoute, ProviderInvocationReceipt,
+    ProviderPayloadPurpose,
+};
+use openlife_core::scheduler::{InferenceScheduler, ProviderInvocationProgress};
+
+use crate::main_chat_kernel::{MainChatModelProgress, MainChatProviderAuthorization};
 
 const MAIN_CHAT_CONTRACT_SAFE_LABEL_MAX_LEN: usize = 96;
 const MAIN_CHAT_CANDIDATE_RANKING_TOOLS_PROMPT: &str =
@@ -108,6 +113,7 @@ pub(crate) struct MainChatReactToolSelectionRanking {
     pub(crate) model_response_digest: Option<String>,
     pub(crate) ignored: bool,
     pub(crate) ranked_candidate_ids: Vec<String>,
+    pub(crate) provider_receipt: Option<ProviderInvocationReceipt>,
 }
 
 impl MainChatReactToolSelectionRanking {
@@ -122,20 +128,27 @@ impl MainChatReactToolSelectionRanking {
             model_response_digest: None,
             ignored: false,
             ranked_candidate_ids: Vec::new(),
+            provider_receipt: None,
         }
     }
 
-    fn deterministic_with_route(route: openlife_core::agent::ModelRouteTrace) -> Self {
+    fn deterministic_with_prepared_target(provider: String, model: String) -> Self {
+        let route_type = if provider == "ollama" {
+            "local"
+        } else {
+            "cloud"
+        };
         Self {
             model_ranked: false,
             ranking_source: "deterministic_local".into(),
-            ranking_provider: Some(route.provider),
-            ranking_model: Some(route.model),
-            ranking_route_type: Some(route.route_type),
+            ranking_provider: Some(provider),
+            ranking_model: Some(model),
+            ranking_route_type: Some(route_type.into()),
             provider_backed: false,
             model_response_digest: None,
             ignored: false,
             ranked_candidate_ids: Vec::new(),
+            provider_receipt: None,
         }
     }
 }
@@ -293,14 +306,37 @@ impl MainChatReactActionPlan {
     }
 }
 
-pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
+pub(crate) async fn rank_main_chat_react_tool_candidates_with_authorization(
     scheduler: &InferenceScheduler,
-    _life_model: &LifeModel,
     messages_for_generation: &[ChatMessage],
     plan: MainChatReactActionPlan,
-    allow_cloud: bool,
+    provider_authorization: &MainChatProviderAuthorization,
+    network_policy: &NetworkPolicy,
+    privacy_engine: &openlife_core::privacy::PrivacyEngine,
 ) -> (MainChatReactActionPlan, MainChatReactToolSelectionRanking) {
-    if !allow_cloud
+    let mut ignore_progress = |_: MainChatModelProgress| Ok(());
+    rank_main_chat_react_tool_candidates_with_authorization_and_progress(
+        scheduler,
+        messages_for_generation,
+        plan,
+        provider_authorization,
+        network_policy,
+        privacy_engine,
+        &mut ignore_progress,
+    )
+    .await
+}
+
+pub(crate) async fn rank_main_chat_react_tool_candidates_with_authorization_and_progress(
+    scheduler: &InferenceScheduler,
+    messages_for_generation: &[ChatMessage],
+    plan: MainChatReactActionPlan,
+    provider_authorization: &MainChatProviderAuthorization,
+    network_policy: &NetworkPolicy,
+    privacy_engine: &openlife_core::privacy::PrivacyEngine,
+    emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
+) -> (MainChatReactActionPlan, MainChatReactToolSelectionRanking) {
+    if provider_authorization.data_route == ProviderDataRoute::LocalOnly
         || plan.tool_candidate_count() < 2
         || !main_chat_provider_rankable_candidate_contract(&plan)
         || scheduler.scripted_generation_response.is_some()
@@ -309,50 +345,142 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
         return (plan, MainChatReactToolSelectionRanking::deterministic());
     }
 
-    let ranking_route = scheduler
-        .preview_chat_route(Some(MAIN_CHAT_CANDIDATE_RANKING_TOOLS_PROMPT))
-        .await;
-    let ranking_provider_backed = ranking_route.route_type == "cloud"
-        && main_chat_contract_safe_label(&ranking_route.provider, false)
-        && main_chat_contract_safe_label(&ranking_route.model, false)
-        && main_chat_provider_ranked_route_provider_allowed(&ranking_route.provider);
+    let ranking_messages =
+        build_main_chat_candidate_ranking_messages(messages_for_generation, &plan, privacy_engine);
+    let Some(current_user_text) = messages_for_generation
+        .iter()
+        .rev()
+        .find(|message| message.role.eq_ignore_ascii_case("user"))
+        .map(|message| message.content.as_str())
+    else {
+        return (plan, MainChatReactToolSelectionRanking::deterministic());
+    };
+    let Ok(ranking_authorization) = provider_authorization
+        .policy_authorization
+        .clone()
+        .authorize_derived_payload(
+            ProviderPayloadPurpose::MainChatReactRanking,
+            current_user_text,
+            &ranking_messages,
+            &[],
+        )
+    else {
+        return (plan, MainChatReactToolSelectionRanking::deterministic());
+    };
+    let prepared = match scheduler
+        .prepare_chat_request_with_authorization(
+            ranking_messages,
+            Vec::new(),
+            ContextManifest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                privacy_decision_id: provider_authorization
+                    .policy_authorization
+                    .decision_id()
+                    .to_string(),
+                selected_context_refs: Vec::new(),
+                included_context_categories: Vec::new(),
+                declared_payload_categories: vec![
+                    openlife_core::llm::ProviderPayloadCategory::MainChatReactCandidateRanking,
+                ],
+                policy_provenance_refs: Vec::new(),
+                raw_life_model_included: false,
+                raw_unbounded_memory_included: false,
+            },
+            ranking_authorization,
+            network_policy.clone(),
+            false,
+        )
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(_) => return (plan, MainChatReactToolSelectionRanking::deterministic()),
+    };
+    let ranking_provider = prepared.provider_target.clone();
+    let ranking_model = prepared.model_target.clone();
+    let ranking_provider_backed = ranking_provider != "ollama"
+        && main_chat_contract_safe_label(&ranking_provider, false)
+        && main_chat_contract_safe_label(&ranking_model, false)
+        && main_chat_provider_ranked_route_provider_allowed(&ranking_provider);
     if !ranking_provider_backed {
         return (
             plan,
-            MainChatReactToolSelectionRanking::deterministic_with_route(ranking_route),
-        );
-    }
-    if !main_chat_ranking_route_matches_scheduler(&ranking_route, scheduler) {
-        return (
-            plan,
-            MainChatReactToolSelectionRanking::deterministic_with_route(ranking_route),
+            MainChatReactToolSelectionRanking::deterministic_with_prepared_target(
+                ranking_provider,
+                ranking_model,
+            ),
         );
     }
 
-    let ranking_messages =
-        build_main_chat_candidate_ranking_messages(messages_for_generation, &plan);
-    let ranking_response = openlife_core::llm::chat_with_openrouter_raw(
-        ranking_messages,
-        None,
-        &scheduler.provider,
-        &scheduler.openai_base,
-        &scheduler.openai_key,
-        &scheduler.chat_model,
-    )
-    .await;
-    let Ok(response) = ranking_response else {
+    let outcome = scheduler
+        .execute_prepared_with_observer(prepared, |progress| match progress {
+            ProviderInvocationProgress::Started {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence,
+            } => emit_progress(MainChatModelProgress::Started {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence: Box::new(policy_evidence),
+            }),
+            ProviderInvocationProgress::Completed(receipt) => {
+                emit_progress(MainChatModelProgress::Completed {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                })
+            }
+            ProviderInvocationProgress::Failed(receipt) => {
+                emit_progress(MainChatModelProgress::Failed {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                    error_digest: receipt.error_digest.unwrap_or_else(|| {
+                        openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                            &serde_json::json!({ "error": "provider_failed_without_digest" }),
+                        )
+                        .1
+                    }),
+                })
+            }
+            ProviderInvocationProgress::RemoteUnknown(receipt) => {
+                emit_progress(MainChatModelProgress::RemoteUnknown {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                    reason_digest: receipt.error_digest.unwrap_or_else(|| {
+                        openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                            &serde_json::json!({
+                                "error": "provider_remote_unknown_without_digest"
+                            }),
+                        )
+                        .1
+                    }),
+                })
+            }
+        })
+        .await;
+    let provider_receipt = outcome.receipt;
+    let Ok(response) = outcome.result else {
         return (
             plan,
             MainChatReactToolSelectionRanking {
                 model_ranked: false,
                 ranking_source: "deterministic_local".into(),
-                ranking_provider: Some(ranking_route.provider),
-                ranking_model: Some(ranking_route.model),
-                ranking_route_type: Some(ranking_route.route_type),
+                ranking_provider: Some(ranking_provider),
+                ranking_model: Some(ranking_model),
+                ranking_route_type: Some("cloud".into()),
                 provider_backed: ranking_provider_backed,
                 model_response_digest: None,
                 ignored: false,
                 ranked_candidate_ids: Vec::new(),
+                provider_receipt,
             },
         );
     };
@@ -368,13 +496,14 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
             MainChatReactToolSelectionRanking {
                 model_ranked: false,
                 ranking_source: "deterministic_local".into(),
-                ranking_provider: Some(ranking_route.provider),
-                ranking_model: Some(ranking_route.model),
-                ranking_route_type: Some(ranking_route.route_type),
+                ranking_provider: Some(ranking_provider),
+                ranking_model: Some(ranking_model),
+                ranking_route_type: Some("cloud".into()),
                 provider_backed: ranking_provider_backed,
                 model_response_digest: Some(response_digest_label),
                 ignored: true,
                 ranked_candidate_ids: Vec::new(),
+                provider_receipt,
             },
         );
     };
@@ -384,13 +513,14 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
             MainChatReactToolSelectionRanking {
                 model_ranked: false,
                 ranking_source: "deterministic_local".into(),
-                ranking_provider: Some(ranking_route.provider),
-                ranking_model: Some(ranking_route.model),
-                ranking_route_type: Some(ranking_route.route_type),
+                ranking_provider: Some(ranking_provider),
+                ranking_model: Some(ranking_model),
+                ranking_route_type: Some("cloud".into()),
                 provider_backed: ranking_provider_backed,
                 model_response_digest: Some(response_digest_label),
                 ignored: true,
                 ranked_candidate_ids: Vec::new(),
+                provider_receipt,
             },
         );
     };
@@ -400,22 +530,49 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
         MainChatReactToolSelectionRanking {
             model_ranked: true,
             ranking_source: "provider_model".into(),
-            ranking_provider: Some(ranking_route.provider),
-            ranking_model: Some(ranking_route.model),
-            ranking_route_type: Some(ranking_route.route_type),
+            ranking_provider: Some(ranking_provider),
+            ranking_model: Some(ranking_model),
+            ranking_route_type: Some("cloud".into()),
             provider_backed: ranking_provider_backed,
             model_response_digest: Some(response_digest_label),
             ignored: false,
             ranked_candidate_ids,
+            provider_receipt,
         },
     )
 }
 
-fn main_chat_ranking_route_matches_scheduler(
-    route: &openlife_core::agent::ModelRouteTrace,
+#[cfg(test)]
+pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
     scheduler: &InferenceScheduler,
-) -> bool {
-    route.provider == scheduler.provider && route.model == scheduler.chat_model
+    _life_model: &openlife_core::life_model::LifeModel,
+    messages_for_generation: &[ChatMessage],
+    plan: MainChatReactActionPlan,
+    allow_cloud: bool,
+) -> (MainChatReactActionPlan, MainChatReactToolSelectionRanking) {
+    let current_user_text = messages_for_generation
+        .iter()
+        .rev()
+        .find(|message| message.role.eq_ignore_ascii_case("user"))
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+    let authorization = MainChatProviderAuthorization::test_fixture_for_user_text(
+        "react_tool_candidate_ranking",
+        allow_cloud,
+        current_user_text,
+    );
+    rank_main_chat_react_tool_candidates_with_authorization(
+        scheduler,
+        messages_for_generation,
+        plan,
+        &authorization,
+        &NetworkPolicy {
+            default_decision: "allow".into(),
+            ..NetworkPolicy::default()
+        },
+        &openlife_core::privacy::PrivacyEngine::new(),
+    )
+    .await
 }
 
 fn main_chat_provider_ranked_route_provider_allowed(provider: &str) -> bool {
@@ -780,6 +937,7 @@ pub(crate) fn build_main_chat_react_agent_loop_messages(
 fn build_main_chat_candidate_ranking_messages(
     messages_for_generation: &[ChatMessage],
     plan: &MainChatReactActionPlan,
+    privacy_engine: &openlife_core::privacy::PrivacyEngine,
 ) -> Vec<ChatMessage> {
     let bounded_context = messages_for_generation
         .iter()
@@ -789,7 +947,7 @@ fn build_main_chat_candidate_ranking_messages(
             format!(
                 "{}: {}",
                 main_chat_contract_label_or(&message.role, false, "role"),
-                bounded_main_chat_ranking_text(&message.content, 1200)
+                bounded_main_chat_ranking_text(&message.content, 1200, privacy_engine)
             )
         })
         .collect::<Vec<_>>()
@@ -821,12 +979,16 @@ fn build_main_chat_candidate_ranking_messages(
     ]
 }
 
-fn bounded_main_chat_ranking_text(value: &str, max_chars: usize) -> String {
+fn bounded_main_chat_ranking_text(
+    value: &str,
+    max_chars: usize,
+    privacy_engine: &openlife_core::privacy::PrivacyEngine,
+) -> String {
     let normalized = value
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect::<String>();
-    let (masked, _) = openlife_core::privacy::PrivacyEngine::new().desensitize(&normalized);
+    let (masked, _) = privacy_engine.desensitize(&normalized);
     masked.chars().take(max_chars).collect()
 }
 
@@ -1028,15 +1190,36 @@ pub(crate) fn resolve_main_chat_mcp_read_target(
         };
     }
 
+    let supplied_arguments = plan
+        .arguments
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let arguments = normalize_main_chat_mcp_read_arguments(&manifest, supplied_arguments);
     MainChatMcpReadResolution {
         target: manifest.name,
-        arguments: plan
-            .arguments
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
+        arguments,
         resolved: true,
         blocker_reason: None,
+    }
+}
+
+/// Produce the exact governed input used for both initial Kernel dispatch and
+/// permission replay. Replay intentionally reconstructs and hashes this input
+/// instead of persisting a second copy of arbitrary tool arguments, so every
+/// deterministic built-in default must have one owner.
+pub(crate) fn normalize_main_chat_mcp_read_arguments(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+    supplied_arguments: serde_json::Value,
+) -> serde_json::Value {
+    if manifest.name == "builtin_echo"
+        && supplied_arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        serde_json::json!({ "text": "kernel registered MCP read" })
+    } else {
+        supplied_arguments
     }
 }
 

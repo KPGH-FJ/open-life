@@ -12,6 +12,7 @@ const McpPage = React.lazy(() => import("./pages/McpPage"));
 const BuilderPage = React.lazy(() => import("./pages/BuilderPage"));
 const LifeModelPage = React.lazy(() => import("./pages/LifeModelPage"));
 const TodayPage = React.lazy(() => import("./pages/TodayPage"));
+const TodayV2PreviewPage = React.lazy(() => import("./pages/TodayV2PreviewPage"));
 const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
 const CalibrationPage = React.lazy(() => import("./pages/CalibrationPage"));
 const MailboxPage = React.lazy(() => import("./pages/MailboxPage"));
@@ -157,13 +158,33 @@ function RedirectWithState({ to }: { to: string }) {
   );
 }
 
+export function DevelopmentExtensionRoute({
+  diagnosticsResolved,
+  enabled,
+  children,
+}: {
+  diagnosticsResolved: boolean;
+  enabled: boolean;
+  children: ReactNode;
+}) {
+  if (!diagnosticsResolved) {
+    return <LoadingSpinner text="正在确认扩展能力..." />;
+  }
+  if (!enabled) {
+    return <Navigate to={productRoutePath("Settings")} replace />;
+  }
+  return children;
+}
+
 function App() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [diagnosticsResolved, setDiagnosticsResolved] = useState(false);
 
   useEffect(() => {
     getSystemDiagnostics()
       .then(setDiagnostics)
-      .catch(() => setDiagnostics(null));
+      .catch(() => setDiagnostics(null))
+      .finally(() => setDiagnosticsResolved(true));
   }, []);
 
   useEffect(() => {
@@ -172,6 +193,7 @@ function App() {
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
+  const devExtensionsEnabled = diagnostics?.runtime_build_info?.devExtensionsEnabled === true;
 
   return (
     <>
@@ -180,6 +202,7 @@ function App() {
           <Suspense fallback={<LoadingSpinner text="加载中..." />}>
             <Routes>
               <Route path={productRoutePath("Today")} element={<TodayPage />} />
+              <Route path="/today-v2-preview" element={<TodayV2PreviewPage />} />
               <Route path={productRoutePath("Companion")} element={<CompanionPage />} />
               <Route path={productRoutePath("Life Model")} element={<LifeModelPage />} />
               <Route path={productRoutePath("Mailbox")} element={<MailboxPage />} />
@@ -196,8 +219,28 @@ function App() {
               <Route path={secondaryRoutePath("LifeModelBuild")} element={<BuilderPage />} />
               <Route path={secondaryRoutePath("Memory")} element={<MemorySearch />} />
               <Route path={advancedRoutePath("Versions")} element={<VersionControl />} />
-              <Route path={advancedRoutePath("McpTools")} element={<McpPage />} />
-              <Route path={advancedRoutePath("A2A")} element={<A2APage />} />
+              <Route
+                path={advancedRoutePath("McpTools")}
+                element={
+                  <DevelopmentExtensionRoute
+                    diagnosticsResolved={diagnosticsResolved}
+                    enabled={devExtensionsEnabled}
+                  >
+                    <McpPage />
+                  </DevelopmentExtensionRoute>
+                }
+              />
+              <Route
+                path={advancedRoutePath("A2A")}
+                element={
+                  <DevelopmentExtensionRoute
+                    diagnosticsResolved={diagnosticsResolved}
+                    enabled={devExtensionsEnabled}
+                  >
+                    <A2APage />
+                  </DevelopmentExtensionRoute>
+                }
+              />
               <Route path={advancedRoutePath("Calibration")} element={<CalibrationPage />} />
               <Route path={advancedRoutePath("Metrics")} element={<MetricsPage />} />
             </Routes>

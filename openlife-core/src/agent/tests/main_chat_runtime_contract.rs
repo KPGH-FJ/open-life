@@ -8,7 +8,7 @@ use crate::agent::main_chat_runtime_contract::{
     assemble_main_chat_agent_state, main_chat_agent_product_scenarios,
     MainChatAgentProductProposalStatus, MainChatAgentProductScenarioRunMode,
     MainChatAgentProductStrategyRoute, MainChatAgentStateAssemblerInput,
-    MainChatAgentStateEventType,
+    MainChatAgentStateEventType, ProviderRouteEvidence,
 };
 use crate::agent::types::{
     AgentProposal, AgentRun, AgentRunStatus, AgentTaskKind, ContextSummary, ModelRouteTrace,
@@ -49,6 +49,17 @@ fn fixture_run(session_id: &str, output: &str) -> AgentRun {
     });
     run.kind = AgentTaskKind::Conversation;
     run
+}
+
+fn fixture_provider_evidence() -> ProviderRouteEvidence {
+    ProviderRouteEvidence {
+        provider: "scripted_eval".into(),
+        model: "productization-fixture".into(),
+        route_type: "cloud".into(),
+        provider_config_generation: Some("fixture-provider-generation".into()),
+        reason: "durable_provider_lifecycle:provider.completed".into(),
+        evidence_id: "event-provider-completed-productization-fixture".into(),
+    }
 }
 
 #[test]
@@ -129,6 +140,244 @@ fn main_chat_runtime_contract_scenario_fixture_uses_canonical_routes() {
 }
 
 #[test]
+fn minimized_agent_run_context_receipts_never_become_canonical_context_evidence() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let canonical_context_ref = "mainchat_ctx_0123456789abcdef";
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-opaque-run-context".into(),
+            user_goal: "Project minimized run context without treating its receipt as identity."
+                .into(),
+            selected_strategy: MainChatAgentStrategy::DirectAnswer,
+            current_plan_summary: None,
+            context_snapshot_refs: vec![canonical_context_ref.into()],
+        })
+        .expect("create session");
+    let source_a = format!("memory_source_ref:bytes=23:hmac-sha256:{}", "a".repeat(64));
+    let source_b = format!("memory_source_ref:bytes=24:hmac-sha256:{}", "b".repeat(64));
+    let mut run = fixture_run("chat-opaque-run-context", "opaque context fixture");
+    run.context_summary
+        .as_mut()
+        .expect("fixture context summary")
+        .memory_sources = vec![source_a.clone(), source_a.clone(), source_b.clone()];
+
+    let assemble = || {
+        assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+            session: session.clone(),
+            run_identity: Some("run-productization-fixture".into()),
+            run: Some(run.clone()),
+            provider: Some(fixture_provider_evidence()),
+            transcript: Vec::new(),
+            actions: Vec::new(),
+            proposals: Vec::new(),
+            memory_lifecycle_records: Vec::new(),
+        })
+        .expect("assemble runtime state")
+    };
+    let first = assemble();
+
+    let canonical = first
+        .context
+        .iter()
+        .find(|context| context.source_kind == "context_snapshot")
+        .expect("canonical session context");
+    assert_eq!(canonical.context_id, canonical_context_ref);
+    assert_eq!(canonical.evidence_id, canonical_context_ref);
+
+    assert_eq!(first.context.len(), 1);
+    assert!(first
+        .context
+        .iter()
+        .all(|context| context.source_kind != "run_context"));
+
+    let serialized = serde_json::to_value(first).expect("serialize runtime state");
+    let serialized = serialized.to_string();
+    assert!(!serialized.contains(&source_a));
+    assert!(!serialized.contains(&source_b));
+    assert!(!serialized.contains("run_context"));
+}
+
+#[test]
+fn main_chat_runtime_contract_never_reconstructs_provider_from_current_or_legacy_run_receipts() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-provider-authority-counterexample".into(),
+            user_goal: "Do not reconstruct provider identity from AgentRun receipts.".into(),
+            selected_strategy: MainChatAgentStrategy::DirectAnswer,
+            current_plan_summary: None,
+            context_snapshot_refs: Vec::new(),
+        })
+        .expect("create session");
+    let mut receipt_shaped_run = fixture_run(
+        "chat-provider-authority-counterexample",
+        "provider authority fixture",
+    );
+    receipt_shaped_run
+        .model_route
+        .as_mut()
+        .expect("fixture model route")
+        .model = format!("model:bytes=21:hmac-sha256:{}", "a".repeat(64));
+
+    for legacy_payload_unverified in [false, true] {
+        let mut run = receipt_shaped_run.clone();
+        run.legacy_payload_unverified = legacy_payload_unverified;
+        let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+            session: session.clone(),
+            run_identity: Some("run-productization-fixture".into()),
+            run: Some(run),
+            provider: None,
+            transcript: Vec::new(),
+            actions: Vec::new(),
+            proposals: Vec::new(),
+            memory_lifecycle_records: Vec::new(),
+        })
+        .expect("assemble provider-authority counterexample");
+
+        assert!(
+            snapshot.provider.is_none(),
+            "neither current nor legacy AgentRun receipts may become provider identity"
+        );
+        assert!(!snapshot
+            .diagnostics
+            .iter()
+            .any(|gap| gap.gap_code == "provider_route_evidence_unavailable"));
+    }
+
+    let provider = fixture_provider_evidence();
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run_identity: Some("run-productization-fixture".into()),
+        run: Some(receipt_shaped_run),
+        provider: Some(provider.clone()),
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("assemble explicit provider lifecycle evidence");
+    assert_eq!(snapshot.provider, Some(provider));
+    assert!(!snapshot
+        .diagnostics
+        .iter()
+        .any(|gap| gap.gap_code == "provider_route_evidence_unavailable"));
+}
+
+#[test]
+fn main_chat_runtime_contract_verified_no_provider_is_not_attempted_without_a_gap() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-provider-not-attempted".into(),
+            user_goal: "Answer without invoking a provider.".into(),
+            selected_strategy: MainChatAgentStrategy::DirectAnswer,
+            current_plan_summary: None,
+            context_snapshot_refs: Vec::new(),
+        })
+        .expect("create session");
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run_identity: Some("run-provider-not-attempted".into()),
+        run: None,
+        provider: None,
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("assemble provider-not-attempted snapshot");
+
+    assert_eq!(snapshot.task.run_id, "run-provider-not-attempted");
+    assert!(snapshot.provider.is_none());
+    assert!(!snapshot
+        .diagnostics
+        .iter()
+        .any(|gap| gap.gap_code == "provider_route_evidence_unavailable"));
+}
+
+#[test]
+fn main_chat_runtime_contract_keeps_validated_lifecycle_when_agent_run_projection_is_unavailable() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-provider-without-agent-run".into(),
+            user_goal: "Keep durable provider truth without AgentRun projection.".into(),
+            selected_strategy: MainChatAgentStrategy::DirectAnswer,
+            current_plan_summary: None,
+            context_snapshot_refs: Vec::new(),
+        })
+        .expect("create session");
+    let provider = fixture_provider_evidence();
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run_identity: Some("run-provider-without-agent-run".into()),
+        run: None,
+        provider: Some(provider.clone()),
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("assemble provider lifecycle without AgentRun projection");
+
+    assert_eq!(snapshot.task.run_id, "run-provider-without-agent-run");
+    assert_eq!(snapshot.provider, Some(provider));
+    assert!(!snapshot
+        .diagnostics
+        .iter()
+        .any(|gap| gap.gap_code == "missing_run_identity"));
+}
+
+#[test]
+fn main_chat_runtime_contract_excludes_legacy_run_context_but_keeps_session_context() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let canonical_context_ref = "mainchat_ctx_legacy_boundary";
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-legacy-run-context-boundary".into(),
+            user_goal: "Keep canonical session context while excluding legacy run payload.".into(),
+            selected_strategy: MainChatAgentStrategy::DirectAnswer,
+            current_plan_summary: None,
+            context_snapshot_refs: vec![canonical_context_ref.into()],
+        })
+        .expect("create session");
+    let mut legacy_run = fixture_run(
+        "chat-legacy-run-context-boundary",
+        "legacy context boundary fixture",
+    );
+    legacy_run.legacy_payload_unverified = true;
+    legacy_run
+        .context_summary
+        .as_mut()
+        .expect("fixture context summary")
+        .memory_sources = vec!["memory_source_ref:legacy-unverified".into()];
+
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run_identity: Some("run-productization-fixture".into()),
+        run: Some(legacy_run),
+        provider: None,
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("assemble legacy context boundary");
+
+    assert!(snapshot.context.iter().any(|context| {
+        context.source_kind == "context_snapshot" && context.context_id == canonical_context_ref
+    }));
+    assert!(snapshot
+        .context
+        .iter()
+        .all(|context| context.source_kind != "run_context"));
+    assert!(snapshot.diagnostics.iter().any(|gap| {
+        gap.gap_code == "legacy_agent_run_payload_unverified"
+            && gap.evidence_id.as_deref() == Some("run-productization-fixture")
+    }));
+}
+
+#[test]
 fn main_chat_runtime_contract_task_control_scenarios_reference_prior_objects() {
     let scenarios = main_chat_agent_product_scenarios();
     let task_control = scenarios
@@ -185,7 +434,7 @@ fn main_chat_runtime_contract_task_control_scenarios_reference_prior_objects() {
 fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime_evidence() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let action_queue = ActionQueueStore::new_in_memory().expect("action queue");
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
 
     let session = session_store
         .create_session(AgentTaskSessionDraft {
@@ -220,7 +469,19 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
             Some(serde_json::json!({
                 "sourceKind": "file",
                 "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
-                "preview": "Main Chat Agent Productization v1 requires runtime-backed UI evidence."
+                "preview": "Main Chat Agent Productization v1 requires runtime-backed UI evidence.",
+                "structuredResult": {
+                    "readExecutionEvidence": {
+                        "kind": "file_system_read",
+                        "sourceKind": "file",
+                        "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "target": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "realReadOnlyExecution": true,
+                        "fixtureBacked": false,
+                        "networkReadAttempted": false,
+                        "directWritesExecuted": false
+                    }
+                }
             })),
         )
         .expect("observed action");
@@ -272,6 +533,10 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
             }),
         })
         .expect("observation transcript");
+    assert!(
+        observation.metadata.get("structuredResult").is_none(),
+        "transcript minimization must not persist nested tool bodies or reconstruct execution truth"
+    );
     let final_entry = session_store
         .append_transcript_entry(ExecutionTranscriptEntryDraft {
             session_id: session.id.clone(),
@@ -308,7 +573,9 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
 
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
+        run_identity: Some("run-productization-fixture".into()),
         run: Some(fixture_run("chat-productization", &final_entry.summary)),
+        provider: Some(fixture_provider_evidence()),
         transcript: session_store
             .list_transcript_entries(&action.session_id)
             .expect("transcript"),
@@ -418,7 +685,9 @@ fn main_chat_runtime_contract_fails_closed_when_observation_lacks_action_evidenc
 
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
+        run_identity: None,
         run: None,
+        provider: None,
         transcript,
         actions: vec![],
         proposals: vec![],
@@ -474,7 +743,9 @@ fn main_chat_runtime_contract_does_not_promote_assistant_text_to_runtime_objects
         .expect("complete with fake assistant text");
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
+        run_identity: None,
         run: None,
+        provider: None,
         transcript: Vec::new(),
         actions: Vec::new(),
         proposals: Vec::new(),
@@ -543,6 +814,8 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
         scope: MemoryLifecycleScope::Workspace,
         category: MemoryLifecycleCategory::Preference,
         risk_level: MemoryLifecycleRiskLevel::Low,
+        sensitivity: crate::agent::MemoryLifecycleSensitivity::Internal,
+        audit_digest: "sha256:test-runtime-contract-memory".into(),
         status: MemoryLifecycleStatus::Materialized,
         materialization_status: MemoryMaterializationStatus::Materialized,
         materialization_error_code: None,
@@ -562,19 +835,24 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
     let mut context_only_memory = memory.clone();
     context_only_memory.memory_id = "memory:stage4-context-only".into();
     context_only_memory.proposal_id = "proposal-not-in-snapshot".into();
+    let mut explicit_memory = memory.clone();
+    explicit_memory.memory_id = "memory:stage4-explicit".into();
+    explicit_memory.proposal_id = "explicit_memory:sha256:test-explicit-admission".into();
 
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
+        run_identity: Some("run-productization-fixture".into()),
         run: Some(fixture_run(
             "chat-stage4-durable-memory",
             &final_entry.summary,
         )),
+        provider: Some(fixture_provider_evidence()),
         transcript: session_store
             .list_transcript_entries(&task_session_id)
             .unwrap_or_default(),
         actions: Vec::new(),
         proposals: vec![proposal],
-        memory_lifecycle_records: vec![memory, context_only_memory],
+        memory_lifecycle_records: vec![memory, context_only_memory, explicit_memory],
     })
     .expect("snapshot");
 
@@ -597,6 +875,12 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
         "context-only lifecycle memory must not be reported as a new durable delivery change: {:?}",
         delivery.durable_changes
     );
+    assert!(delivery.durable_changes.iter().any(|change| {
+        change.change_type == "memory.materialized"
+            && change.target == "memory:stage4-explicit"
+            && change.provenance_id == "explicit_memory:sha256:test-explicit-admission"
+            && change.rollback_available
+    }));
     assert!(snapshot.proposals.iter().any(|proposal| {
         proposal.status == MainChatAgentProductProposalStatus::Accepted
             && proposal.memory_lifecycle.is_some()
@@ -658,10 +942,12 @@ fn main_chat_runtime_contract_final_delivery_lists_managed_knowledge_file_change
 
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
+        run_identity: Some("run-productization-fixture".into()),
         run: Some(fixture_run(
             "chat-productization-managed-knowledge",
             &final_entry.summary,
         )),
+        provider: Some(fixture_provider_evidence()),
         transcript: session_store
             .list_transcript_entries(&task_session_id)
             .unwrap_or_default(),
@@ -757,10 +1043,12 @@ fn main_chat_runtime_contract_links_tool_permission_proposal_to_pending_action()
         .expect("session");
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
+        run_identity: Some("run-productization-fixture".into()),
         run: Some(fixture_run(
             "chat-productization-permission",
             "Permission is pending.",
         )),
+        provider: Some(fixture_provider_evidence()),
         transcript: session_store
             .list_transcript_entries(&action.session_id)
             .expect("transcript"),

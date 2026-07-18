@@ -1,7 +1,10 @@
 use crate::agent::heuristic_store::{
     HeuristicActivationAuthority, HeuristicDraft, HeuristicLifecycleStatus, HeuristicStore,
 };
-use crate::agent::hs_selector::{HSExclusionReason, HSSelector, HSSelectorInput};
+use crate::agent::hs_selector::{
+    build_runtime_hs_packet, HSExclusionReason, HSSelector, HSSelectorInput,
+    RuntimeHSPacketBuildInput,
+};
 use crate::agent::policy_store::{
     ModelRoutePolicy, PolicyStore, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
@@ -41,7 +44,7 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
     let policy_store = PolicyStore::mvp_builtin();
     let heuristic_store = HeuristicStore::new_in_memory().unwrap();
     heuristic_store.seed_mvp_heuristics().unwrap();
-    let selector = HSSelector::default();
+    let selector = HSSelector;
 
     let planning_packet = selector
         .select(
@@ -127,6 +130,82 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
 }
 
 #[test]
+fn serialized_hs_packet_cannot_rehydrate_cloud_authorization() {
+    let packet = HSSelector
+        .select(
+            &PolicyStore::mvp_builtin(),
+            &HeuristicStore::new_in_memory().unwrap(),
+            &HSSelectorInput {
+                task_kind: AgentTaskKind::Conversation,
+                intent_summary: "metadata-safe general conversation".into(),
+                privacy_topic: PolicyTopic::General,
+                risk_level: RiskLevel::Low,
+                tool_requirements: vec![],
+                current_state_hints: serde_json::json!({}),
+                token_budget: 128,
+                agent_task_id: Some("task-serialized-hs".into()),
+                agent_run_id: Some("run-serialized-hs".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        packet.provider_authorization().data_route(),
+        crate::llm::ProviderDataRoute::PolicyAllowed
+    );
+
+    let serialized = serde_json::to_value(&packet).unwrap();
+    assert!(serialized.get("providerAuthorization").is_none());
+    let rehydrated: crate::agent::RuntimeHSPacket = serde_json::from_value(serialized).unwrap();
+
+    assert_eq!(
+        rehydrated.provider_authorization().data_route(),
+        crate::llm::ProviderDataRoute::LocalOnly
+    );
+    assert_eq!(
+        rehydrated.provider_authorization().authority(),
+        crate::llm::ProviderPolicyAuthority::LocalOnlyFailClosed
+    );
+}
+
+#[test]
+fn empty_asset_selection_keeps_canonical_hs_provider_policy_capability() {
+    let task = crate::agent::AgentTask {
+        kind: AgentTaskKind::Conversation,
+        session_id: "empty-hs-policy-session".into(),
+        messages: vec![],
+        user_text: "ordinary general request".into(),
+        layer: crate::layer::Layer::L2,
+    };
+    let packet = build_runtime_hs_packet(
+        &PolicyStore::mvp_builtin(),
+        &HeuristicStore::new_in_memory().unwrap(),
+        RuntimeHSPacketBuildInput {
+            task: &task,
+            sanitized_intent_summary: "ordinary general request".into(),
+            privacy_topic: PolicyTopic::General,
+            risk_level: RiskLevel::Low,
+            tool_requirements: vec![],
+            current_state_hints: serde_json::json!({}),
+            token_budget: 128,
+            agent_run_id: Some("empty-hs-policy-run".into()),
+        },
+    )
+    .unwrap()
+    .expect("provider policy is an HS runtime fact even without optional assets");
+
+    assert!(packet.selected_policies.is_empty());
+    assert!(packet.selected_heuristics.is_empty());
+    assert_eq!(
+        packet.provider_authorization().data_route(),
+        crate::llm::ProviderDataRoute::PolicyAllowed
+    );
+    assert_eq!(
+        packet.provider_authorization().authority(),
+        crate::llm::ProviderPolicyAuthority::HsPolicyStore
+    );
+}
+
+#[test]
 fn selector_emits_guidance_refs_only_for_accepted_guidance_assets() {
     let policy_store = PolicyStore::mvp_builtin();
     let heuristic_store = HeuristicStore::new_in_memory().unwrap();
@@ -160,7 +239,7 @@ fn selector_emits_guidance_refs_only_for_accepted_guidance_assets() {
         .update_lifecycle(&accepted.id, HeuristicLifecycleStatus::Trial, None)
         .unwrap();
 
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &policy_store,
             &heuristic_store,
@@ -230,7 +309,7 @@ fn selector_excludes_rejected_archived_over_budget_and_policy_conflicting_assets
         "A very long guidance block that should be excluded when the token budget is tiny.",
     );
 
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &policy_store,
             &heuristic_store,
@@ -280,7 +359,7 @@ fn selector_audit_is_metadata_safe() {
         "Do not serialize this private guidance sentence in audit.",
     );
 
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &policy_store,
             &heuristic_store,

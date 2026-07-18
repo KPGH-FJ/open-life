@@ -46,10 +46,10 @@ pub(crate) use eval::{
 pub(crate) use provider_route::{
     build_settings_runtime_route_evidence, classify_provider_route_query,
     provider_route_fact_should_block_before_model, provider_route_query_has_followup_task,
-    provider_transmission_history_from_runs, provider_transmission_history_item_from_run,
-    resolve_provider_route_fact_answer, FallbackEvidence, ProviderReadiness,
-    ProviderTransmissionHistoryItem, ProviderTransmissionSourceRef, RouteIdentity,
-    RuntimeRouteEvidence,
+    provider_transmission_history_from_runs, provider_transmission_history_from_runs_with_state,
+    provider_transmission_history_item_from_run, resolve_provider_route_fact_answer,
+    FallbackEvidence, ProviderReadiness, ProviderTransmissionHistoryItem,
+    ProviderTransmissionSourceRef, RouteIdentity, RuntimeRouteEvidence,
 };
 pub(crate) use resolver::{
     resolve_post_model_runtime_fact_answer, resolve_pre_model_runtime_fact_answer,

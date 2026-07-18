@@ -1,7 +1,98 @@
 use crate::agent::types::RiskLevel;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use uuid::Uuid;
+
+pub const LIFEMODEL_PATCH_BATCH_SCHEMA_V1: &str = "lifemodel_patch_batch_v1";
+pub const LIFEMODEL_PATCH_BATCH_PATH: &str = "$lifemodel_batch";
+/// Public contract bounds used by every producer before it acquires a durable
+/// review claim. Keeping these values private previously let Builder admit a
+/// much larger request and discover the real limit only after mutating its
+/// canonical session.
+pub const MAX_LIFEMODEL_PATCH_BATCH_OPERATIONS: usize = 64;
+pub const MAX_LIFEMODEL_PATCH_BATCH_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelPatchBatchOperationV1 {
+    pub candidate_id: String,
+    pub path: String,
+    pub candidate: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelPatchBatchV1 {
+    pub schema_version: String,
+    pub operations: Vec<LifeModelPatchBatchOperationV1>,
+}
+
+impl LifeModelPatchBatchV1 {
+    pub fn new(operations: Vec<LifeModelPatchBatchOperationV1>) -> Result<Self, String> {
+        let batch = Self {
+            schema_version: LIFEMODEL_PATCH_BATCH_SCHEMA_V1.to_string(),
+            operations,
+        };
+        batch.validate()?;
+        Ok(batch)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != LIFEMODEL_PATCH_BATCH_SCHEMA_V1 {
+            return Err("unsupported_lifemodel_patch_batch_schema".into());
+        }
+        if self.operations.is_empty()
+            || self.operations.len() > MAX_LIFEMODEL_PATCH_BATCH_OPERATIONS
+        {
+            return Err("lifemodel_patch_batch_operation_count_out_of_bounds".into());
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| "lifemodel_patch_batch_serialization_failed")?
+            .len()
+            > MAX_LIFEMODEL_PATCH_BATCH_BYTES
+        {
+            return Err("lifemodel_patch_batch_payload_too_large".into());
+        }
+
+        let mut paths = BTreeSet::new();
+        let mut candidate_ids = BTreeSet::new();
+        for operation in &self.operations {
+            let candidate_id = operation.candidate_id.trim();
+            if candidate_id != operation.candidate_id
+                || candidate_id.is_empty()
+                || candidate_id.len() > 160
+            {
+                return Err("invalid_lifemodel_patch_batch_candidate_id".into());
+            }
+            if !candidate_ids.insert(candidate_id) {
+                return Err("duplicate_lifemodel_patch_batch_candidate_id".into());
+            }
+            let path = operation.path.trim();
+            if path != operation.path
+                || path.is_empty()
+                || path.len() > 160
+                || path.starts_with('.')
+                || path.ends_with('.')
+                || path.split('.').any(|segment| {
+                    segment.is_empty()
+                        || !segment
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                })
+            {
+                return Err("invalid_lifemodel_patch_batch_path".into());
+            }
+            if operation.candidate.is_null() {
+                return Err("lifemodel_patch_batch_candidate_must_not_be_null".into());
+            }
+            if !paths.insert(path) {
+                return Err("duplicate_lifemodel_patch_batch_path".into());
+            }
+        }
+        Ok(())
+    }
+}
 
 /// A single patch operation on a LifeModel path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +226,10 @@ impl LifeModelPatch {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn from_proposal(
         proposal_id: &str,
         path_pointer: &str,
@@ -609,6 +703,40 @@ pub fn auto_resolve_conflicts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_candidate_batch_is_minimal_and_rejects_canonical_before_after_copies() {
+        let batch = LifeModelPatchBatchV1::new(vec![LifeModelPatchBatchOperationV1 {
+            candidate_id: "sig_goal".into(),
+            path: "goals.short_term".into(),
+            candidate: serde_json::json!([{
+                "name": "new candidate",
+                "priority": 0,
+                "status": "pending",
+                "milestones": [],
+                "description": "",
+                "progress": 0.0
+            }]),
+        }])
+        .unwrap();
+        let value = serde_json::to_value(&batch).unwrap();
+        let operation = &value["operations"][0];
+        assert!(operation.get("before").is_none());
+        assert!(operation.get("after").is_none());
+        assert_eq!(operation["candidateId"], "sig_goal");
+
+        let legacy_copy = serde_json::json!({
+            "schemaVersion": LIFEMODEL_PATCH_BATCH_SCHEMA_V1,
+            "operations": [{
+                "candidateId": "sig_goal",
+                "path": "goals.short_term",
+                "candidate": [],
+                "before": ["PRIVATE_EXISTING_CANONICAL_VALUE"],
+                "after": []
+            }]
+        });
+        assert!(serde_json::from_value::<LifeModelPatchBatchV1>(legacy_copy).is_err());
+    }
 
     #[test]
     fn test_dot_to_pointer() {

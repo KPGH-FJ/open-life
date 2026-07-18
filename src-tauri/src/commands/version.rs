@@ -7,7 +7,6 @@ use crate::life_model_write_gateway;
 use crate::AppState;
 use openlife_core::versioning::LifeModelVersion;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
@@ -48,15 +47,8 @@ fn require_governed_snapshot_restore_request(
     }
 }
 
-fn hash_json_value(value: &serde_json::Value) -> Result<String, AppError> {
-    let bytes = serde_json::to_vec(value)?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
 fn hash_life_model(model: &openlife_core::life_model::LifeModel) -> Result<String, AppError> {
-    hash_json_value(&serde_json::to_value(model)?)
+    life_model_write_gateway::hash_life_model(model).map_err(AppError::from)
 }
 
 fn validate_snapshot_restore_response_is_metadata_safe(value: &serde_json::Value) -> bool {
@@ -146,13 +138,16 @@ async fn restore_snapshot_governed_operation(
     let current_model_hash = hash_life_model(&current_model)?;
     let pre_restore_snapshot_version = {
         let vm = state.version_manager.lock().await;
-        vm.snapshot(
-            &current_model,
-            "auto:pre-restore",
-            &format!("回滚到 {} 之前自动备份", version),
+        Some(
+            vm.ensure_projection_snapshot(
+                &current_model,
+                &format!("pre-change:restore:{version}:{current_model_hash}"),
+                "auto:pre-restore",
+                &format!("回滚到 {} 之前自动备份", version),
+            )
+            .map_err(AppError::from)?
+            .version,
         )
-        .ok()
-        .map(|snapshot| snapshot.version)
     };
     let restored_model = {
         let vm = state.version_manager.lock().await;
@@ -170,6 +165,7 @@ async fn restore_snapshot_governed_operation(
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ),
+        Some(&current_model_hash),
     )
     .await?;
 

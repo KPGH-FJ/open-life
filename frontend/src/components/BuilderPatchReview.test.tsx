@@ -339,7 +339,7 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    expect(screen.getByText("AI 做出的假设")).toBeInTheDocument();
+    expect(screen.getByText("本轮审阅依据")).toBeInTheDocument();
     expect(screen.getByText("• 用户通过快速构建流程提供")).toBeInTheDocument();
     expect(screen.getByText("建议的下一步")).toBeInTheDocument();
     expect(screen.getByText("• 审阅并确认信号")).toBeInTheDocument();

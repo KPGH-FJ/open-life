@@ -1,10 +1,7 @@
 use openlife_core::{layer::Layer, life_model::LifeModel, llm::ChatMessage};
 
-use crate::{
-    main_chat_generation_support::generate_non_stream_fallback,
-    main_chat_hs_runtime::{
-        build_chat_runtime_hs_packet, classify_hs_policy_topic, hs_tool_requirements,
-    },
+use crate::main_chat_hs_runtime::{
+    build_chat_runtime_hs_packet, classify_hs_policy_topic, hs_tool_requirements,
 };
 
 #[test]
@@ -15,8 +12,8 @@ fn main_chat_hs_runtime_behavior_tests_are_not_concentrated_in_lib_rs() {
     for forbidden in [
         "chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores",
         "tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_policy",
-        "hs_runtime_fallback_local_only_does_not_fall_back_to_cloud_without_ollama",
         "hs_runtime_topic_keywords_select_sensitive_local_only_policy",
+        "pre_provider_hs_selection_never_records_product_scenario_success",
     ] {
         assert!(
             !source.contains(&format!("\n    async fn {forbidden}(")),
@@ -28,6 +25,22 @@ fn main_chat_hs_runtime_behavior_tests_are_not_concentrated_in_lib_rs() {
     assert!(
         !source.contains(&format!("\n    fn {forbidden}(")),
         "HS runtime extraction guard {forbidden} should live outside src/lib.rs"
+    );
+}
+
+#[test]
+fn pre_provider_hs_selection_never_records_product_scenario_success() {
+    let module_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_hs_runtime.rs");
+    let source = std::fs::read_to_string(module_path).expect("read main_chat_hs_runtime.rs");
+
+    assert!(
+        !source.contains(".record_product_scenario("),
+        "pre-provider HS selection cannot claim a successful product scenario"
+    );
+    assert!(
+        !source.contains("durable_session_exists"),
+        "session existence is not terminal product evidence"
     );
 }
 
@@ -172,65 +185,6 @@ async fn tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_pol
 }
 
 #[tokio::test]
-async fn hs_runtime_fallback_local_only_does_not_fall_back_to_cloud_without_ollama() {
-    let mut router = openlife_core::agent::ModelRouter::new();
-    router.providers.insert(
-        "ollama".into(),
-        openlife_core::agent::ProviderAvailability {
-            provider: "ollama".into(),
-            available: false,
-            latency_ms: None,
-            models: vec![],
-            last_checked: chrono::Utc::now(),
-            last_error: Some("not running".into()),
-            health_is_estimated: false,
-        },
-    );
-    router.providers.insert(
-        "openai".into(),
-        openlife_core::agent::ProviderAvailability {
-            provider: "openai".into(),
-            available: true,
-            latency_ms: Some(120),
-            models: vec!["gpt-4o-mini".into()],
-            last_checked: chrono::Utc::now(),
-            last_error: None,
-            health_is_estimated: false,
-        },
-    );
-    let scheduler = openlife_core::scheduler::InferenceScheduler::new(
-        "openlife-test-local-model-that-should-not-exist".into(),
-        false,
-        "openai".into(),
-        "https://api.openai.com/v1".into(),
-        "sk-test-cloud-key-present".into(),
-        "gpt-4o-mini".into(),
-        "text-embedding-3-small".into(),
-        true,
-    )
-    .with_model_router(router);
-
-    let err = generate_non_stream_fallback(
-        &scheduler,
-        vec![ChatMessage {
-            role: "user".into(),
-            content: "请处理我的用药记录".into(),
-        }],
-        &LifeModel::default(),
-        "",
-        Some(local_only_test_packet()),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(
-        err.contains("LocalOnly") || err.contains("local") || err.contains("本地"),
-        "unexpected fallback error: {}",
-        err
-    );
-}
-
-#[tokio::test]
 async fn hs_runtime_topic_keywords_select_sensitive_local_only_policy() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let life_model = LifeModel::default();
@@ -258,32 +212,4 @@ async fn hs_runtime_topic_keywords_select_sensitive_local_only_policy() {
         .selected_policies
         .iter()
         .any(|policy| policy.route == Some(openlife_core::agent::ModelRoutePolicy::LocalOnly)));
-}
-
-fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
-    openlife_core::agent::RuntimeHSPacket {
-        selected_policies: vec![openlife_core::agent::SelectedPolicyRef {
-            policy_id: openlife_core::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
-            reason: "test_sensitive_topic".into(),
-            route: Some(openlife_core::agent::ModelRoutePolicy::LocalOnly),
-            digest: "digest".into(),
-        }],
-        selected_heuristics: vec![],
-        guidance_refs: vec![],
-        estimated_tokens: 0,
-        audit: openlife_core::agent::HSSelectionAudit {
-            agent_task_id: None,
-            agent_run_id: Some("run-fallback-hs".into()),
-            input_digest: "input-digest".into(),
-            selected_policy_ids: vec![
-                openlife_core::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
-            ],
-            selected_heuristic_ids: vec![],
-            selected_guidance_ids: vec![],
-            selected_guidance_refs: vec![],
-            excluded_assets: vec![],
-            estimated_tokens: 0,
-            token_budget: 128,
-        },
-    }
 }

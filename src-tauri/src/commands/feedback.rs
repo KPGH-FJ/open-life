@@ -12,6 +12,10 @@ pub async fn save_feedback(
     content_preview: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
     let ft = match feedback_type.as_str() {
         "up" => FeedbackType::ThumbsUp,
         _ => FeedbackType::ThumbsDown,
@@ -34,6 +38,10 @@ pub async fn save_feedback(
 pub async fn get_feedback_summary(
     state: State<'_, Arc<AppState>>,
 ) -> Result<AnalyticsSummary, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("FeedbackStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let store = state.feedback_store.lock().await;
     store.summary().map_err(AppError::from)
 }
@@ -55,6 +63,10 @@ async fn apply_feedback_evolution_with_state(
 async fn apply_feedback_evolution_with_state_gated(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("FeedbackStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let store = state.feedback_store.lock().await;
     let report = store.generate_evolution_report().map_err(AppError::from)?;
     Err(AppError::permission(format!(
@@ -75,6 +87,10 @@ pub async fn generate_evolution_report(
 async fn generate_evolution_report_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("FeedbackStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let store = state.feedback_store.lock().await;
     let report = store.generate_evolution_report().map_err(AppError::from)?;
     let liked_pattern_count = report.liked_patterns.len();
@@ -106,6 +122,10 @@ pub async fn log_analytics_event(
     detail: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
     let store = state.feedback_store.lock().await;
     store
         .log_event(&event_name, session_id.as_deref(), detail.as_deref())

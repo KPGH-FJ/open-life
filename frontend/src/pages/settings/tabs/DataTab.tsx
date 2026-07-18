@@ -33,6 +33,8 @@ interface DataTabProps {
   setTierLoading: (v: boolean) => void;
   setTierResult: (v: string | null) => void;
   handleExportDiagnostics: () => Promise<void>;
+  governedImportStatusMessage: string | null;
+  governedImportStatusError: string | null;
 }
 
 export default function DataTab({
@@ -51,6 +53,8 @@ export default function DataTab({
   setTierLoading,
   setTierResult,
   handleExportDiagnostics,
+  governedImportStatusMessage,
+  governedImportStatusError,
 }: DataTabProps) {
   const [confirmTierMaintenance, setConfirmTierMaintenance] = useState(false);
 
@@ -103,6 +107,23 @@ export default function DataTab({
           title="恢复向导"
           description="导入会覆盖当前 Life Model、聊天记录与记忆数据。跨主版本导入会被拒绝，执行前会要求二次确认。"
         >
+          {governedImportStatusError && (
+            <div
+              role="alert"
+              className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-800"
+            >
+              {governedImportStatusError}
+            </div>
+          )}
+          {governedImportStatusMessage && (
+            <div
+              role="status"
+              data-testid="governed-import-status"
+              className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900"
+            >
+              {governedImportStatusMessage}
+            </div>
+          )}
           <button
             onClick={handleImport}
             disabled={importLoading}

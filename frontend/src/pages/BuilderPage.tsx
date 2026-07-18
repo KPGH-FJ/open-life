@@ -31,6 +31,7 @@ import {
   type Model4DCompletion,
   type BuilderAnalysis,
   type BuilderSignal,
+  type BuilderSummary,
   type SystemDiagnostics,
   type BuilderSignalDecision,
 } from "../tauri";
@@ -236,8 +237,11 @@ function buildStageSuggestions(
 
 function sortResumeSessions(sessions: UnfinishedBuilderSession[]): UnfinishedBuilderSession[] {
   return [...sessions].sort((a, b) => {
-    const aPendingReview = a.finished && (a.pending_signals?.length ?? 0) > 0;
-    const bPendingReview = b.finished && (b.pending_signals?.length ?? 0) > 0;
+    if (a.review_in_progress !== b.review_in_progress) {
+      return a.review_in_progress ? -1 : 1;
+    }
+    const aPendingReview = a.waiting_for_review && a.pending_signal_count > 0;
+    const bPendingReview = b.waiting_for_review && b.pending_signal_count > 0;
     if (aPendingReview !== bPendingReview) {
       return aPendingReview ? -1 : 1;
     }
@@ -246,6 +250,17 @@ function sortResumeSessions(sessions: UnfinishedBuilderSession[]): UnfinishedBui
     }
     return b.step_index - a.step_index;
   });
+}
+
+function formatRetentionDate(value?: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }
 
 const dimensionStyleMap: Record<
@@ -298,6 +313,7 @@ export default function BuilderPage() {
     targetDimension?: "identity" | "goals" | "capabilities" | "state";
   } | null>(null);
   const [pendingSignals, setPendingSignals] = useState<BuilderSignal[]>([]);
+  const [reviewSummary, setReviewSummary] = useState<BuilderSummary | null>(null);
   const [reviewMode, setReviewMode] = useState(false);
   const [appliedFields, setAppliedFields] = useState<string[]>([]);
   const [mergedFields, setMergedFields] = useState<string[]>([]);
@@ -373,14 +389,19 @@ export default function BuilderPage() {
       setPrompt(res.prompt);
       setProgress(res.progress);
       if (res.analysis) setAnalysis(res.analysis);
-      const restoredPendingSignals = res.pending_signals ?? [];
-      if (res.finished && restoredPendingSignals.length > 0) {
-        setPendingSignals(restoredPendingSignals);
+      const restoredReview = res.review;
+      if (res.finished && (!restoredReview || restoredReview.signals.length === 0)) {
+        throw new Error("builder_review_read_model_missing");
+      }
+      if (res.finished && restoredReview) {
+        setPendingSignals(restoredReview.signals);
+        setReviewSummary(restoredReview.summary);
         setReviewMode(true);
         setFinished(false);
         setResultModel(null);
       } else {
         setPendingSignals([]);
+        setReviewSummary(null);
         setReviewMode(false);
         setFinished(false);
       }
@@ -392,6 +413,10 @@ export default function BuilderPage() {
   };
 
   const resume = async (session: UnfinishedBuilderSession) => {
+    if (session.review_in_progress) {
+      setBuilderError("该构建会话正在提交审阅或等待后台协调，当前不能重复提交。");
+      return;
+    }
     if (safeMode) {
       setBuilderError(buildSafeModeBlockedMessage("恢复构建会话", diagnostics));
       return;
@@ -435,23 +460,23 @@ export default function BuilderPage() {
       setPrompt(res.prompt);
       setProgress(res.progress);
       if (res.analysis) setAnalysis(res.analysis);
-      const nextPendingSignals = res.pending_signals ?? [];
-      const entersReview =
-        res.finished &&
-        (res.mode === "Quick" || res.mode === "Incremental") &&
-        nextPendingSignals.length > 0;
-      setFinished(Boolean(res.finished && !entersReview));
-      if (res.model && !entersReview) {
-        setResultModel(res.model);
+      const nextReview = res.review;
+      if (res.finished && (!nextReview || nextReview.signals.length === 0)) {
+        throw new Error("builder_review_read_model_missing");
       }
-      // For Quick and Incremental modes: when finished, enter review mode instead of auto-saving
+      const entersReview = Boolean(res.finished && nextReview);
+      setFinished(Boolean(res.finished && !entersReview));
+      // Every Builder mode stages typed candidates for governed review; completion is not a write.
       if (entersReview) {
-        setPendingSignals(nextPendingSignals);
+        setPendingSignals(nextReview?.signals ?? []);
+        setReviewSummary(nextReview?.summary ?? null);
         setReviewMode(true);
         setResultModel(null);
         // Keep session alive for review
-      } else if (res.finished && res.mode === "Socratic") {
-        // Socratic mode keeps existing behavior
+      } else {
+        setPendingSignals([]);
+        setReviewSummary(null);
+        setReviewMode(false);
       }
       setInput("");
       await loadCompletion();
@@ -473,6 +498,7 @@ export default function BuilderPage() {
     setBuilderError(null);
     setBuilderNotice(null);
     setPendingSignals([]);
+    setReviewSummary(null);
     setReviewMode(false);
     setBeforeBuildCompletion(null);
     setAppliedFields([]);
@@ -496,6 +522,7 @@ export default function BuilderPage() {
       if (res.success) {
         setReviewMode(false);
         setPendingSignals([]);
+        setReviewSummary(null);
         setFinished(false);
         setPrompt(null);
         setProgress(null);
@@ -507,8 +534,9 @@ export default function BuilderPage() {
         setBuilderNotice(
           <div className="space-y-2">
             <div>
-              已创建 <strong>{res.created_count}</strong> 条待确认 Proposal{runInfo}，拒绝{" "}
-              <strong>{res.rejected_count}</strong> 条。
+              待确认 Proposal：新建 <strong>{res.created_count}</strong> 条、复用{" "}
+              <strong>{res.reused_count}</strong> 条、更新 <strong>{res.updated_count}</strong> 条
+              {runInfo}；拒绝 <strong>{res.rejected_count}</strong> 个候选。
             </div>
             <div>
               <button
@@ -539,6 +567,7 @@ export default function BuilderPage() {
     setBuilderNotice("这轮理解已暂存到未完成会话，还没有写入人生模型。你可以稍后回来继续审阅。");
     setReviewMode(false);
     setPendingSignals([]);
+    setReviewSummary(null);
     setFinished(false);
     setResultModel(null);
     setPrompt(null);
@@ -722,7 +751,12 @@ export default function BuilderPage() {
                   {unfinished.map(s => {
                     const totalSteps = s.mode === "Quick" ? 6 : s.mode === "Socratic" ? 8 : 1;
                     const pct = Math.min(100, Math.round((s.step_index / totalSteps) * 100));
-                    const isPendingReview = s.finished && (s.pending_signals?.length ?? 0) > 0;
+                    const isPendingReview = s.waiting_for_review && s.pending_signal_count > 0;
+                    const isReconciling = s.review_in_progress;
+                    const isRecoverable = s.retention_status === "expired_recoverable";
+                    const retentionDate = formatRetentionDate(
+                      isRecoverable ? s.purge_after : s.expires_at
+                    );
                     return (
                       <div
                         key={s.session_id}
@@ -733,22 +767,41 @@ export default function BuilderPage() {
                             <div className="text-sm font-semibold text-gray-800 truncate">
                               {modeLabel(s.mode)}
                             </div>
-                            {isPendingReview && (
+                            {isReconciling ? (
+                              <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-800">
+                                等待后台协调
+                              </span>
+                            ) : isPendingReview ? (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
                                 待确认项
                               </span>
-                            )}
+                            ) : isRecoverable ? (
+                              <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-800">
+                                可恢复草稿
+                              </span>
+                            ) : null}
                           </div>
                           <div className="text-xs text-gray-500">
-                            {isPendingReview
-                              ? "已完成问题收集，等待你确认并应用模型建议"
-                              : `已进行 ${s.step_index} 步`}
+                            {isReconciling
+                              ? "审阅批次已被后台领取，正在确认持久化状态"
+                              : isPendingReview
+                                ? "已完成问题收集，等待你确认并应用模型建议"
+                                : `已进行 ${s.step_index} 步`}
                           </div>
                           {s.current_prompt && (
                             <div className="text-xs text-gray-500 mt-1 line-clamp-2 max-w-md">
-                              {isPendingReview
-                                ? `待确认内容：${s.current_prompt}`
-                                : `当前问题：${s.current_prompt}`}
+                              {isReconciling
+                                ? `协调上下文：${s.current_prompt}`
+                                : isPendingReview
+                                  ? `待确认内容：${s.current_prompt}`
+                                  : `当前问题：${s.current_prompt}`}
+                            </div>
+                          )}
+                          {retentionDate && (
+                            <div className="mt-1 text-[11px] text-gray-500">
+                              {isRecoverable
+                                ? `已过活跃期；将在 ${retentionDate} 后自动清除，恢复会重新进入活跃期。`
+                                : `当前草稿活跃保留至 ${retentionDate}。`}
                             </div>
                           )}
                           <div className="w-32 bg-gray-200 rounded-full h-1.5 mt-2">
@@ -761,15 +814,16 @@ export default function BuilderPage() {
                         <div className="flex items-center gap-2 shrink-0 ml-3">
                           <button
                             onClick={() => resume(s)}
-                            disabled={safeMode}
-                            className="bg-indigo-600 text-white px-3 py-1.5 rounded-md text-sm hover:bg-indigo-700"
+                            disabled={safeMode || isReconciling}
+                            className="bg-indigo-600 text-white px-3 py-1.5 rounded-md text-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
                           >
-                            {isPendingReview ? "去审阅" : "恢复"}
+                            {isReconciling ? "协调中" : isPendingReview ? "去审阅" : "恢复"}
                           </button>
                           <button
                             onClick={() => removeSession(s.session_id)}
-                            className="text-gray-400 hover:text-red-600 px-2"
-                            title="删除"
+                            disabled={isReconciling}
+                            className="text-gray-400 hover:text-red-600 px-2 disabled:cursor-not-allowed disabled:opacity-40"
+                            title={isReconciling ? "后台协调完成前不能删除" : "删除"}
                           >
                             <Trash2 size={16} />
                           </button>
@@ -1216,19 +1270,11 @@ export default function BuilderPage() {
           </div>
         )}
 
-        {reviewMode && pendingSignals.length > 0 && (
+        {reviewMode && pendingSignals.length > 0 && reviewSummary && (
           <div className="bg-white border rounded-xl p-6 shadow-sm">
             <BuilderPatchReview
               signals={pendingSignals}
-              summary={{
-                identity_summary: `基于 ${pendingSignals.filter(s => s.dimension === "Identity").length} 个信号`,
-                goals_summary: `基于 ${pendingSignals.filter(s => s.dimension === "Goals").length} 个信号`,
-                capabilities_summary: `基于 ${pendingSignals.filter(s => s.dimension === "Capabilities").length} 个信号`,
-                state_summary: `基于 ${pendingSignals.filter(s => s.dimension === "State").length} 个信号`,
-                assumptions: ["用户通过快速构建流程提供"],
-                unresolved_questions: [],
-                recommended_next_steps: ["审阅并确认信号", "可选择进入渐进构建继续完善"],
-              }}
+              summary={reviewSummary}
               onCreateProposals={handleCreateProposals}
               onReject={handleRejectSignals}
             />

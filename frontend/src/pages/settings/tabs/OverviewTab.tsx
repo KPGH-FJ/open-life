@@ -1,10 +1,14 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  recoverRequiredCredentialAccess,
   runMemoryTierMaintenance,
+  type CredentialRecoveryItem,
+  type CredentialRecoveryReport,
   type LifeStateProjection,
+  type ProviderPrivacyBoundarySummary,
   type SystemDiagnostics,
 } from "../../../tauri";
-import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 import {
   advancedRoutePath,
@@ -25,8 +29,24 @@ function readableError(e: unknown): string {
   return String(e);
 }
 
+const CREDENTIAL_PURPOSE_LABELS: Record<CredentialRecoveryItem["purpose"], string> = {
+  agent_run_receipts: "Agent 运行回执",
+  main_chat_events: "主聊天事件",
+  action_queue: "动作队列",
+  task_store: "任务存储",
+};
+
+const CREDENTIAL_STATUS_LABELS: Record<CredentialRecoveryItem["status"], string> = {
+  available: "可访问",
+  created: "已安全初始化",
+  missing_existing_data: "已有数据但密钥缺失",
+  invalid: "密钥格式无效",
+  unavailable: "系统凭据库不可用",
+};
+
 interface OverviewTabProps {
   diagnostics: SystemDiagnostics | null;
+  providerPrivacyBoundary?: ProviderPrivacyBoundarySummary | null;
   projection?: LifeStateProjection | null;
   safeMode: boolean;
   exportLoading: boolean;
@@ -44,6 +64,7 @@ interface OverviewTabProps {
 
 export default function OverviewTab({
   diagnostics,
+  providerPrivacyBoundary = null,
   projection,
   safeMode,
   exportLoading,
@@ -56,8 +77,11 @@ export default function OverviewTab({
   rebuildResult,
   handleVectorRebuild,
 }: OverviewTabProps) {
+  const [credentialRecoveryLoading, setCredentialRecoveryLoading] = useState(false);
+  const [credentialRecoveryReport, setCredentialRecoveryReport] =
+    useState<CredentialRecoveryReport | null>(null);
+  const [credentialRecoveryError, setCredentialRecoveryError] = useState<string | null>(null);
   const runtime = diagnostics?.runtime_build_info;
-  const providerReadiness = buildProviderReadinessView(diagnostics);
   const readiness = projection?.readiness;
   const usageReady = readiness?.usageReady ?? false;
   const modelEmpty = readiness?.modelEmpty ?? true;
@@ -85,9 +109,17 @@ export default function OverviewTab({
   // ---- Trial checklist ----
   const trialChecks = [
     {
-      label: "云端模型",
-      ok: providerReadiness.cloudReady,
-      detail: `${providerReadiness.statusLabel} · ${providerReadiness.detail}`,
+      label: "模型边界",
+      ok: Boolean(
+        providerPrivacyBoundary &&
+        !providerPrivacyBoundary.blockedReason &&
+        providerPrivacyBoundary.risk !== "unknown"
+      ),
+      detail: providerPrivacyBoundary
+        ? `${providerPrivacyBoundary.providerLabel} · ${
+            providerPrivacyBoundary.blockedReason ?? providerPrivacyBoundary.privacyLabel
+          } · ${providerPrivacyBoundary.externalTransmission}`
+        : "等待 ProviderPrivacyBoundarySummary",
       action: "配置模型",
       href: "#llm-settings",
     },
@@ -244,6 +276,19 @@ export default function OverviewTab({
         ]
       : []),
   ];
+
+  const handleCredentialRecovery = async () => {
+    setCredentialRecoveryLoading(true);
+    setCredentialRecoveryReport(null);
+    setCredentialRecoveryError(null);
+    try {
+      setCredentialRecoveryReport(await recoverRequiredCredentialAccess());
+    } catch (error) {
+      setCredentialRecoveryError(readableError(error));
+    } finally {
+      setCredentialRecoveryLoading(false);
+    }
+  };
 
   return (
     <>
@@ -439,6 +484,13 @@ export default function OverviewTab({
           </div>
           <div className="flex flex-wrap gap-2">
             <button
+              onClick={() => void handleCredentialRecovery()}
+              disabled={credentialRecoveryLoading}
+              className="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-800 disabled:opacity-50"
+            >
+              {credentialRecoveryLoading ? "等待系统授权..." : "解锁或初始化系统密钥"}
+            </button>
+            <button
               onClick={handleExport}
               disabled={exportLoading}
               className="rounded-md bg-amber-900 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-amber-950 disabled:opacity-50"
@@ -484,6 +536,39 @@ export default function OverviewTab({
               {rebuildLoading ? "重建中..." : "重建向量索引"}
             </button>
           </div>
+          <div className="rounded-lg border border-indigo-100 bg-indigo-50/80 px-3 py-3 text-xs text-indigo-900">
+            此操作先经过 OpenLife 原生确认，再由系统凭据库授权；前端不会读取或显示密钥。macOS
+            可能再次要求你确认访问。全部就绪后需要重启应用，当前 Safe Mode 不会被页面自行改写。
+          </div>
+          {credentialRecoveryReport && (
+            <div
+              className={classNames(
+                "rounded-lg px-3 py-3 text-xs",
+                credentialRecoveryReport.allRequiredCredentialsReady
+                  ? "bg-emerald-50 text-emerald-900"
+                  : "bg-rose-50 text-rose-900"
+              )}
+            >
+              <div className="font-medium">
+                {credentialRecoveryReport.allRequiredCredentialsReady
+                  ? "系统密钥已可访问，请完全退出并重启 OpenLife。"
+                  : "仍有系统密钥不可用；没有生成替代密钥，也没有覆盖已有数据。"}
+              </div>
+              <div className="mt-2 space-y-1 font-mono">
+                {credentialRecoveryReport.items.map(item => (
+                  <div key={item.purpose}>
+                    {CREDENTIAL_PURPOSE_LABELS[item.purpose]}：
+                    {CREDENTIAL_STATUS_LABELS[item.status]} ({item.status})
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {credentialRecoveryError && (
+            <div className="rounded-lg bg-rose-50 px-3 py-3 text-xs text-rose-900">
+              系统密钥恢复失败：{credentialRecoveryError}
+            </div>
+          )}
           {rebuildResult && (
             <div className="rounded-lg bg-white/80 px-3 py-2 text-xs text-stone-700">
               {rebuildResult}

@@ -35,7 +35,10 @@ fn validate_mcp_command(command: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_mcp_command;
+    use super::{register_mcp_server_with_registry, validate_mcp_command};
+    use openlife_core::mcp::McpRegistry;
+    use openlife_core::tool_manifest::{ToolManifest, ToolSource};
+    use std::sync::Arc;
 
     #[test]
     fn validate_mcp_command_allows_exact_bare_commands() {
@@ -68,6 +71,78 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn registration_probe_never_holds_the_shared_registry_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("tools-list-started");
+        let script = r#"
+import json, pathlib, sys, time
+marker = pathlib.Path(sys.argv[1])
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+    elif method == 'tools/list':
+        marker.write_text('started')
+        time.sleep(0.5)
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'tools':[{'name':'probe.read','description':'read probe','parameters':{'type':'object'}}]}}), flush=True)
+"#;
+        let manifest = ToolManifest {
+            id: "mcp:probe:probe.read".into(),
+            name: "probe.read".into(),
+            description: "Read probe".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::Mcp {
+                server_name: "probe".into(),
+            },
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
+            tags: vec!["typed_contract".into()],
+        };
+        let registry = Arc::new(tokio::sync::Mutex::new(McpRegistry::new()));
+        let registration_registry = Arc::clone(&registry);
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let registration = tokio::spawn(async move {
+            register_mcp_server_with_registry(
+                &registration_registry,
+                "probe".into(),
+                "python3".into(),
+                vec!["-u".into(), "-c".into(), script.into(), marker_arg],
+                Default::default(),
+                vec![manifest],
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture reached external tools/list await");
+
+        let guard = tokio::time::timeout(std::time::Duration::from_millis(100), registry.lock())
+            .await
+            .expect("registry remains available while external MCP probe is pending");
+        assert!(guard.list_servers().is_empty());
+        drop(guard);
+
+        registration
+            .await
+            .expect("registration task joined")
+            .expect("prepared registration committed");
+        assert_eq!(registry.lock().await.list_servers().len(), 1);
+    }
 }
 
 #[tauri::command]
@@ -76,14 +151,41 @@ pub async fn register_mcp_server(
     command: String,
     args: Vec<String>,
     env: Option<std::collections::HashMap<String, String>>,
+    manifests: Option<Vec<openlife_core::tool_manifest::ToolManifest>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
     validate_mcp_command(&command)?;
-    let mut registry = state.mcp_registry.lock().await;
-    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let env_map = env.unwrap_or_default();
+    register_mcp_server_with_registry(
+        &state.mcp_registry,
+        name,
+        command,
+        args,
+        env.unwrap_or_default(),
+        manifests.unwrap_or_default(),
+    )
+    .await
+}
+
+async fn register_mcp_server_with_registry(
+    registry: &Arc<tokio::sync::Mutex<openlife_core::mcp::McpRegistry>>,
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+    manifests: Vec<openlife_core::tool_manifest::ToolManifest>,
+) -> Result<(), AppError> {
+    let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let prepared = openlife_core::mcp::McpRegistry::prepare_registration(
+        &name, &command, &args_ref, &env, manifests,
+    )
+    .await
+    .map_err(AppError::from)?;
+    // The only registry critical section is the synchronous compare-and-commit.
+    // Subprocess spawn, handshake, and tool discovery all happened above.
     registry
-        .register_with_env(&name, &command, &args_ref, &env_map)
+        .lock()
+        .await
+        .commit_prepared_registration(prepared)
         .map_err(AppError::from)
 }
 

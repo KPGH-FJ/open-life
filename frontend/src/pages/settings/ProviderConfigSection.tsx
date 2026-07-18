@@ -1,6 +1,11 @@
-import { useEffect, useState } from "react";
-import { testLlmConnection, checkOllamaStatus } from "../../tauri";
-import type { AgentRuntimeMode, AppConfig, SystemDiagnostics } from "../../tauri";
+import { useState } from "react";
+import { testLlmConnection } from "../../tauri";
+import type {
+  AgentRuntimeMode,
+  AppConfig,
+  CloudApiValidationStatus,
+  SystemDiagnostics,
+} from "../../tauri";
 
 const PROVIDER_PRESETS: Record<
   string,
@@ -74,20 +79,13 @@ export default function ProviderConfigSection({
 }: ProviderConfigSectionProps) {
   const [apiTestLoading, setApiTestLoading] = useState(false);
   const [apiTestResult, setApiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [ollamaOnline, setOllamaOnline] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    checkOllamaStatus()
-      .then(setOllamaOnline)
-      .catch(() => setOllamaOnline(false));
-  }, []);
 
   const provider = config.llm.provider ?? "deepseek";
   const preset = PROVIDER_PRESETS[provider];
   const runtimeMode = config.runtime_mode ?? "local_first_default";
   const providerValidation = providerValidationView(diagnostics);
   const isDeepSeekReasoner = config.llm.chat_model === "deepseek-reasoner";
-  const ollamaServiceOnline = diagnostics?.ollama_service_online ?? ollamaOnline;
+  const ollamaServiceOnline = diagnostics?.ollama_service_online ?? null;
   const resolvedLocalModel = diagnostics?.resolved_local_model ?? null;
   const selectedLocalModel = config.local_model || diagnostics?.local_model || "本地模型";
   const presetLocalModelValues = new Set(LOCAL_MODEL_OPTIONS.map(opt => opt.value));
@@ -383,7 +381,7 @@ export default function ProviderConfigSection({
           </div>
           <div className="text-sm">
             {ollamaServiceOnline === null ? (
-              <span className="text-gray-400">正在检测 Ollama...</span>
+              <span className="text-gray-400">Ollama 状态读取中...</span>
             ) : ollamaServiceOnline ? (
               <span className="text-emerald-600">
                 ● Ollama 在线{resolvedLocalModel ? ` · ${resolvedLocalModel}` : ""}
@@ -472,34 +470,81 @@ function providerValidationView(diagnostics: SystemDiagnostics | null): {
       tone: "neutral",
     };
   }
-  if (diagnostics.cloud_api_validation_status === "validated") {
-    return {
-      label: "Provider 已验证",
-      detail: diagnostics.cloud_api_validated_at
-        ? `最近验证：${diagnostics.cloud_api_validated_at}`
-        : "最近一次真实连接验证成功。",
-      tone: "ready",
-    };
+  const status: CloudApiValidationStatus = diagnostics.cloud_api_validation_status ?? "unvalidated";
+  switch (status) {
+    case "validated":
+      return {
+        label: "Validated",
+        detail: diagnostics.cloud_api_validated_at
+          ? `Provider 已验证；最近验证：${diagnostics.cloud_api_validated_at}`
+          : "Provider 已验证；最近一次真实连接验证成功。",
+        tone: "ready",
+      };
+    case "failed":
+      return {
+        label: "Failed validation",
+        detail: diagnostics.cloud_api_last_error
+          ? `安全错误标签：${diagnostics.cloud_api_last_error}`
+          : "最近一次真实连接验证失败。",
+        tone: "error",
+      };
+    case "stale":
+      return {
+        label: "Validation stale",
+        detail:
+          "Provider 验证已失效：provider、base URL、model、credential generation、network policy 或 24h TTL 已变化。",
+        tone: "warning",
+      };
+    case "remote_unknown":
+      return {
+        label: "Remote state unknown",
+        detail: "本地已停止等待，但无法确认远端是否完成；不会把它显示为成功或远端已取消。",
+        tone: "warning",
+      };
+    case "runtime_generation_incoherent":
+      return {
+        label: "Runtime generation incoherent",
+        detail: "Provider 配置和执行适配器不属于同一运行代，系统已在外发前失败关闭。",
+        tone: "error",
+      };
+    case "validation_record_corrupt":
+      return {
+        label: "Validation record corrupt",
+        detail: "最近验证记录无法通过结构与语义校验；需要重新执行真实连接验证。",
+        tone: "error",
+      };
+    case "validation_record_io_error":
+      return {
+        label: "Validation record unreadable",
+        detail: "无法读取最近验证记录；当前状态保持 unknown，不能当作 cloud-ready。",
+        tone: "error",
+      };
+    case "unknown":
+      return {
+        label: "Provider state unknown",
+        detail: "现有证据不足以确认 Provider 可用；当前不会显示为已验证。",
+        tone: "neutral",
+      };
+    case "scripted_provider_probe":
+    case "scripted_dogfood":
+      return {
+        label: "Local test proof only",
+        detail:
+          "Scripted proof 只证明本地测试链，不是 external cloud ready；实际云端传输状态仍为 unknown。",
+        tone: "warning",
+      };
+    case "unconfigured":
+      return {
+        label: "Provider 未配置",
+        detail: "当前验证状态与配置事实均显示 Provider 未配置。",
+        tone: "neutral",
+      };
+    case "unvalidated":
+      return {
+        label: "Configured, not validated",
+        detail:
+          "Provider 已配置，尚未验证；填写 key 只代表 configured，点击“测试连接”成功后才会显示 validated。",
+        tone: "warning",
+      };
   }
-  if (diagnostics.cloud_api_validation_status === "failed") {
-    return {
-      label: "Provider 验证失败",
-      detail: diagnostics.cloud_api_last_error
-        ? `安全错误标签：${diagnostics.cloud_api_last_error}`
-        : "最近一次真实连接验证失败。",
-      tone: "error",
-    };
-  }
-  if (diagnostics.cloud_api_validation_status === "stale") {
-    return {
-      label: "Provider 验证已失效",
-      detail: "provider、base URL、model、key presence、network policy 或 24h TTL 已变化。",
-      tone: "warning",
-    };
-  }
-  return {
-    label: "Provider 已配置，尚未验证",
-    detail: "填写 key 只代表 configured；点击“测试连接”成功后才会显示 validated。",
-    tone: "warning",
-  };
 }

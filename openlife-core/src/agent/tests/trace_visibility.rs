@@ -122,6 +122,9 @@ fn local_only_packet(run_id: &str) -> RuntimeHSPacket {
             estimated_tokens: 0,
             token_budget: 128,
         },
+        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::TestFixture,
+        ),
     }
 }
 
@@ -354,7 +357,7 @@ fn trace_visibility_lineage_debug_dump_exposes_only_ids_hashes_counts_status_and
     let report = evaluate_low_energy_rule_trace_visibility(
         LowEnergyRuleTraceVisibilityInput::for_selection_report(selection_report),
     );
-    let serialized_lineage = serde_json::to_value(&serde_json::json!({
+    let serialized_lineage = serde_json::to_value(serde_json::json!({
         "evidence": report.trace_metadata.evidence_lineage,
         "proposal": report.trace_metadata.proposal_lineage,
     }))

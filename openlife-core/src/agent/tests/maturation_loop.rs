@@ -394,7 +394,7 @@ fn v1_evidence_and_audit_are_metadata_safe() {
 fn v1_governor_blocked_candidate_creates_audit_without_proposal() {
     let evidence_store = EvidenceStore::new_in_memory().unwrap();
     let proposal_store = ProposalStore::new_in_memory().unwrap();
-    let service = MaturationService::with_governor(LifeModelGovernor::default());
+    let service = MaturationService::with_governor(LifeModelGovernor);
     let runtime_output = RuntimeOutput {
         run_id: Some("run-blocked".into()),
         life_event_candidates: vec![LifeEventDraft::new(

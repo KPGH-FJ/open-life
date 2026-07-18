@@ -90,6 +90,7 @@ interface PrivacyTabProps {
   refreshSecurityState: () => Promise<void>;
   toolManifests: ToolManifest[];
   handleSavePrivacyPolicy: () => Promise<void>;
+  devExtensionsEnabled: boolean;
 }
 
 export default function PrivacyTab({
@@ -104,6 +105,7 @@ export default function PrivacyTab({
   handleRotateAuditKey,
   refreshSecurityState,
   handleSavePrivacyPolicy,
+  devExtensionsEnabled,
 }: PrivacyTabProps) {
   const [transmissionHistory, setTransmissionHistory] = useState<ProviderTransmissionHistoryItem[]>(
     []
@@ -180,36 +182,38 @@ export default function PrivacyTab({
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-            <div className="text-sm font-semibold text-slate-800">本地审计</div>
-            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-600">
-              <div>近期审计：{diagnostics?.mcp_recent_audit_count ?? "-"}</div>
-              <div>PII 命中：{diagnostics?.mcp_recent_pii_count ?? "-"}</div>
+          {devExtensionsEnabled && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-sm font-semibold text-slate-800">本地审计</div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-600">
+                <div>近期审计：{diagnostics?.mcp_recent_audit_count ?? "-"}</div>
+                <div>PII 命中：{diagnostics?.mcp_recent_pii_count ?? "-"}</div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={handleExportAudit}
+                  disabled={securityLoading}
+                  className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-900 disabled:opacity-50"
+                >
+                  导出审计
+                </button>
+                <button
+                  onClick={handleCleanupAudit}
+                  disabled={securityLoading}
+                  className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  清理旧日志
+                </button>
+                <button
+                  onClick={handleRotateAuditKey}
+                  disabled={securityLoading}
+                  className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                >
+                  轮换密钥
+                </button>
+              </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                onClick={handleExportAudit}
-                disabled={securityLoading}
-                className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-900 disabled:opacity-50"
-              >
-                导出审计
-              </button>
-              <button
-                onClick={handleCleanupAudit}
-                disabled={securityLoading}
-                className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                清理旧日志
-              </button>
-              <button
-                onClick={handleRotateAuditKey}
-                disabled={securityLoading}
-                className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-100 disabled:opacity-50"
-              >
-                轮换密钥
-              </button>
-            </div>
-          </div>
+          )}
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4">

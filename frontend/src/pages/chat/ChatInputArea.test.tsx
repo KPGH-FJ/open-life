@@ -14,8 +14,13 @@ function renderComposer(
     streamInterrupted: false,
     diagnostics: null,
     selectedSkillId: "",
+    attachments: [],
+    resourceImportBusy: false,
     onInputChange: vi.fn(),
     onSelectedSkillIdChange: vi.fn(),
+    onAttachResources: vi.fn(),
+    onCancelResourceImport: vi.fn(),
+    onRemoveResource: vi.fn(),
     onComposerFocus: vi.fn(),
     onSend: vi.fn(),
     onContinueStream: vi.fn(),
@@ -51,6 +56,31 @@ describe("ChatInputArea", () => {
     fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
 
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("supports attachment-only sends and backend-owned detach actions", () => {
+    const onRemoveResource = vi.fn();
+    renderComposer({
+      input: "",
+      attachments: [
+        {
+          resourceId: "resource-1",
+          bindingId: "binding-1",
+          filename: "roadshow.pdf",
+          digest: "sha256:resource-1",
+          byteCount: 2048,
+          chunkCount: 4,
+          reusedExisting: false,
+        },
+      ],
+      onRemoveResource,
+    });
+
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "移除附件 roadshow.pdf" }));
+
+    expect(onRemoveResource).toHaveBeenCalledWith("resource-1");
+    expect(screen.getByText("2.0 KB")).toBeInTheDocument();
   });
 
   it("does not submit with Enter during Chinese IME composition", () => {
