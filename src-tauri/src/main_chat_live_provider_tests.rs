@@ -1,5 +1,5 @@
 use crate::main_chat_acceptance_test_support::{
-    configure_live_provider_eval_state,
+    apply_live_search_eval_env, configure_live_provider_eval_state,
     configure_live_provider_eval_state_with_captured_local_http_provider,
     configure_live_provider_eval_state_with_local_http_provider,
     configure_live_web_eval_state_with_citation_echo_local_http_provider,
@@ -2532,6 +2532,10 @@ async fn main_chat_live_web_search_reaches_same_turn_provider_and_truthful_termi
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let captured_provider_requests =
         configure_live_web_eval_state_with_citation_echo_local_http_provider(&state).await;
+    let mut config = state.config.lock().await.clone();
+    apply_live_search_eval_env(&mut config);
+    state.replace_provider_runtime_config(config).await;
+    let configured_search_provider = state.config.lock().await.system.search_provider.clone();
     let events = std::sync::Arc::new(std::sync::Mutex::new(
         Vec::<(String, serde_json::Value)>::new(),
     ));
@@ -2565,7 +2569,8 @@ async fn main_chat_live_web_search_reaches_same_turn_provider_and_truthful_termi
             .expect("terminal stream payload");
         assert_eq!(
             done.get("status").and_then(serde_json::Value::as_str),
-            Some("completed")
+            Some("completed"),
+            "live Web terminal mismatch; configured_search_provider={configured_search_provider}; terminal={done}"
         );
         assert_eq!(
             done.get("model_invoked")

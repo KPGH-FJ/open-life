@@ -9,6 +9,14 @@ pub(crate) async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
     config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
     config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
     config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
+    apply_live_search_eval_env(&mut config);
+    config.prefer_local_model = false;
+    config.system.network_policy.enabled = true;
+    config.system.network_policy.default_decision = "allow".into();
+    let _provider_generation = state.replace_provider_runtime_config(config).await;
+}
+
+pub(crate) fn apply_live_search_eval_env(config: &mut openlife_core::config::AppConfig) {
     if let Ok(provider) = std::env::var("OPENLIFE_LIVE_EVAL_SEARCH_PROVIDER") {
         if !provider.trim().is_empty() {
             config.system.search_provider = provider;
@@ -20,10 +28,6 @@ pub(crate) async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
     if let Ok(url) = std::env::var("OPENLIFE_LIVE_EVAL_SEARXNG_URL") {
         config.system.searxng_url = url;
     }
-    config.prefer_local_model = false;
-    config.system.network_policy.enabled = true;
-    config.system.network_policy.default_decision = "allow".into();
-    let _provider_generation = state.replace_provider_runtime_config(config).await;
 }
 
 pub(crate) async fn configure_live_provider_eval_state_with_local_http_provider(

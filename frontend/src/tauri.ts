@@ -288,6 +288,9 @@ export interface AppConfig {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     safe_paths?: string[];
+    search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
+    search_provider_key?: string;
+    searxng_url?: string;
     network_policy?: NetworkPolicy;
   };
 }

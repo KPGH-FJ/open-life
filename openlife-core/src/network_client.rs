@@ -622,7 +622,7 @@ impl NetworkClient {
         .await
     }
 
-    async fn get_text_with_headers_for_capability_and_start_observer<F, Fut>(
+    pub(crate) async fn get_text_with_headers_for_capability_and_start_observer<F, Fut>(
         &self,
         url: &str,
         network_policy: Option<&NetworkPolicy>,
@@ -733,7 +733,7 @@ impl NetworkClient {
         .await
     }
 
-    async fn post_json_text_for_capability_with_start_observer<F, Fut>(
+    pub(crate) async fn post_json_text_for_capability_with_start_observer<F, Fut>(
         &self,
         url: &str,
         network_policy: Option<&NetworkPolicy>,
@@ -1720,6 +1720,82 @@ mod tests {
             );
             assert!(!observed.load(Ordering::SeqCst));
         }
+    }
+
+    #[tokio::test]
+    async fn capability_specific_http_edges_honor_web_search_override_before_dispatch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let url = "http://127.0.0.1:9/search";
+        let policy = NetworkPolicy {
+            default_decision: "allow".into(),
+            tool_overrides: std::collections::HashMap::from([
+                ("web.fetch".into(), "allow".into()),
+                ("web.search".into(), "deny".into()),
+            ]),
+            ..NetworkPolicy::default()
+        };
+        assert_eq!(
+            resolve_network_policy_decision(&policy, url, "web.fetch")
+                .unwrap()
+                .disposition,
+            NetworkPolicyDisposition::Allow
+        );
+        assert_eq!(
+            resolve_network_policy_decision(&policy, url, "web.search")
+                .unwrap()
+                .disposition,
+            NetworkPolicyDisposition::Deny
+        );
+        let client = NetworkClient::new(NetworkClientPolicy {
+            allow_loopback: true,
+            require_https: false,
+            ..NetworkClientPolicy::default()
+        });
+
+        let get_observed = Arc::new(AtomicBool::new(false));
+        let get_observer = Arc::clone(&get_observed);
+        let get_error = client
+            .get_text_with_headers_for_capability_and_start_observer(
+                url,
+                Some(&policy),
+                "web.search",
+                HeaderMap::new(),
+                move |_| {
+                    let get_observer = Arc::clone(&get_observer);
+                    async move {
+                        get_observer.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{get_error:#}").contains("network_policy_override_deny"));
+        assert!(!get_observed.load(Ordering::SeqCst));
+
+        let post_observed = Arc::new(AtomicBool::new(false));
+        let post_observer = Arc::clone(&post_observed);
+        let post_error = client
+            .post_json_text_for_capability_with_start_observer(
+                url,
+                Some(&policy),
+                "web.search",
+                HeaderMap::new(),
+                &serde_json::json!({"query": "bounded"}),
+                move |_| {
+                    let post_observer = Arc::clone(&post_observer);
+                    async move {
+                        post_observer.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{post_error:#}").contains("network_policy_override_deny"));
+        assert!(!post_observed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

@@ -168,7 +168,7 @@ pub struct SystemConfig {
     /// Proactive engine: days before a pending proposal triggers a reminder
     #[serde(default = "default_proposal_reminder_days")]
     pub proposal_reminder_days: i64,
-    /// Web search provider: "duckduckgo" (default), "brave", or "searxng"
+    /// Web search provider: "duckduckgo" (default), "brave", "deepseek", or "searxng"
     #[serde(default = "default_search_provider")]
     pub search_provider: String,
     /// Runtime-only API key for the web search provider.

@@ -244,7 +244,7 @@ fn web_credential_snapshot(
         .to_ascii_lowercase()
         .as_str()
     {
-        "brave" => {
+        "brave" | "deepseek" => {
             let available = !config.system.search_provider_key.trim().is_empty();
             (
                 available,
@@ -650,6 +650,12 @@ mod tests {
         );
 
         config.system.search_provider = "brave".into();
+        assert_eq!(
+            web_credential_snapshot(&config, true, false),
+            (false, "missing_search_provider_key".into())
+        );
+
+        config.system.search_provider = "deepseek".into();
         assert_eq!(
             web_credential_snapshot(&config, true, false),
             (false, "missing_search_provider_key".into())

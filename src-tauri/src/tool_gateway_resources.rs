@@ -288,7 +288,7 @@ mod tests {
 
         let (first, _) = capture_governed(&state).await;
         assert_eq!(first.search_provider.provider, "brave");
-        assert_eq!(first.search_provider.brave_api_key, "brave-test-key");
+        assert_eq!(first.search_provider.api_key, "brave-test-key");
 
         let mut searxng = state.config.lock().await.clone();
         searxng.system.search_provider = "searxng".into();
