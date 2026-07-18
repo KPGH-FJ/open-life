@@ -1,10 +1,10 @@
 # OpenLife Roadshow V2 Web Evidence
 
-Status: scoped implementation verified and real DuckDuckGo search path passed;
-generic live fetch is blocked by the current macOS fake-IP/proxy environment,
-while external cloud-provider proof, native product trial, and independent
-read-only review remain pending. This file does not make a roadshow release or
-global backend-remediation completion claim.
+Status: scoped implementation, generic live fetch, governed DeepSeek live
+search, and the RC04 external Resource + Web + Provider backend chain are
+verified on current code. Native product trial and independent read-only review
+remain pending. This file does not make a roadshow release or global
+backend-remediation completion claim.
 
 ## Scope and commit
 
@@ -35,6 +35,50 @@ on `codex/roadshow-core-recovery`:
   redispatch the Web tool or Provider;
 - canonical AgentRun reasoning strategies now persist as the typed `direct`,
   `react`, or `memory_governance` values instead of degrading to opaque receipts.
+
+## 2026-07-18 current-code addendum
+
+Commit `930ce33e76583371e6fe067940042d89fb9c2f59` adds a governed
+DeepSeek server-side Web Search adapter without adding a second runtime,
+router, ToolGateway, observation schema, or credential owner:
+
+- the adapter uses one bounded POST through the existing `NetworkClient` with
+  the exact `web.search` capability, redirect rejection, DNS/SSRF validation,
+  response limits, timeout, and no automatic POST retry;
+- the response edge accepts only structured `web_search_result` title and
+  canonical HTTPS URL pairs;
+- provider thinking, signatures, encrypted content, error bodies, and prose
+  without an exact structured-result URL are discarded;
+- a bounded provider-synthesized line may become that result's snippet only
+  when the same line contains its exact URL, and the observation explicitly
+  states that it is untrusted, not independently verified, and not guaranteed
+  to be entailed by the page;
+- output remains the existing strict
+  `openlife_web_search_observation_v1` contract; an attempted parallel set of
+  extra provider-summary fields was caught by the live gate and removed rather
+  than weakening `deny_unknown_fields`;
+- `SearchProviderConfig` remains per-execution and the existing SystemConfig +
+  Keychain-backed search credential remains the one configuration owner;
+- the frontend change is type-contract only. A visual/product control for
+  choosing the search provider belongs to the later frontend handoff and is
+  not claimed by this backend freeze.
+
+Current mechanical and live evidence:
+
+| Gate | Current result | Credit boundary |
+| --- | --- | --- |
+| Core full suite | 1476 passed, 0 failed, 2 ignored | current code, including typed DeepSeek and exact network-policy counterfactuals |
+| Tauri full suite | 1172 passed, 0 failed, 13 ignored; parser binary 2/2 | ignored live gates do not receive credit from this run |
+| workspace all-target Clippy with `-D warnings` | passed | warning-free current workspace |
+| frontend typecheck and format | passed | backend config contract only; no UI journey credit |
+| real DeepSeek search + captured local Provider | 1/1 passed | actual external search, one dispatch, typed observation, bound Web citation, durable Provider lifecycle |
+| RC04 real Resource + DeepSeek search + external Provider | 1/1 passed | one frozen Resource, one external Web action, one external Provider, both citation classes, zero Proposals |
+
+The current macOS proxy/fake-IP path is handled by a domain-bound egress
+exception for the fixed official DeepSeek endpoint. It does not weaken private,
+reserved, mixed-DNS, redirect, or caller-controlled URL checks. DuckDuckGo's
+current challenge response still fails closed as `web_search_challenge_detected`;
+the DeepSeek success does not relabel that route as successful.
 
 ## Mechanical evidence
 
@@ -75,9 +119,11 @@ provider is not external cloud-provider credit.
 - durable provider events reject malformed Web refs and retain no raw Web body;
 - replay with the same operation id performs no second Provider dispatch.
 
-## Bounded red and environment evidence
+## Historical bounded red at the original V2 checkpoint
 
-The following results are intentionally not converted into green credit:
+The following results describe the original `a4060557` checkpoint. They remain
+historical failure evidence and are not rewritten as if they had passed at that
+time; the dated addendum above records which items were later repaired:
 
 - the ignored generic `web.fetch https://example.com/` live gate returned
   `network_policy_blocked`;
@@ -101,15 +147,10 @@ The following results are intentionally not converted into green credit:
 
 ## Remaining V2 evidence
 
-- external cloud-provider Web answer with real credentials and the same
-  receipt/citation assertions;
-- generic live fetch on a network that exposes the destination's real public
-  address, without weakening the SSRF/DNS-rebinding policy;
 - native desktop product trial covering search success, challenge/blocker,
   citation display, retry/replay, and no-Proposal ordinary reads;
-- independent read-only source and evidence review;
-- cumulative concurrency, fault injection, and soak execution.
+- independent read-only source and evidence review.
 
 Until those finish, V2 is
-`implementation_verified_live_search_passed_live_fetch_environment_blocked`,
+`implementation_and_external_live_verified_native_trial_and_independent_review_pending`,
 not globally complete, and the roadshow release remains NO-GO.

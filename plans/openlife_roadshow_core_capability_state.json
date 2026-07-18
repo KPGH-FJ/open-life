@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "backend_capability_freeze_in_progress_current_provider_stream_live_fetch_and_quality_gates_green_stable_live_search_configuration_and_independent_review_pending_roadshow_phase7_v4_not_complete",
+  "status": "backend_capability_freeze_in_progress_current_provider_stream_live_fetch_deepseek_live_search_rc04_and_quality_gates_green_independent_review_and_final_freeze_hash_pending_roadshow_phase7_v4_not_complete",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -45,6 +45,7 @@
       ],
       "excluded_until_frontend_handoff": [
         "frontend_visual_refactor",
+        "frontend_search_provider_configuration_control",
         "signed_or_notarized_app",
         "final_roadshow_app_freeze"
       ]
@@ -61,19 +62,21 @@
       "external_provider_direct_answer": "passed_current_code",
       "external_provider_streaming": "passed_current_code_29_provider_bound_chunks_final_completed",
       "live_https_fetch_same_turn_provider": "passed_example_com_real_network_read_local_capture_provider_receipt_truth",
+      "live_deepseek_search_same_turn_provider": "passed_current_code_once_one_bounded_post_structured_https_results_typed_observation_local_capture_provider_bound_citation_receipt_truth",
+      "roadshow_rc04_current_deepseek_search_and_external_provider": "passed_current_code_once_one_resource_one_live_search_action_one_external_provider_resource_and_web_citations_zero_proposals",
       "roadshow_rc01": "passed_current_code_509_provider_bound_chunks_three_prose_blocks_five_steps_zero_side_effects",
       "roadshow_rc02_rc03": "passed_current_code_both_resource_source_classes",
       "roadshow_rc06_rc07": "passed_current_code_review_before_materialize_and_idempotent_acceptance",
-      "roadshow_rc08": "passed_current_code_external_provider_cancel_remote_unknown_no_late_commit_then_new_operation_retry_fixture_web_only"
+      "roadshow_rc08": "passed_current_code_external_provider_cancel_remote_unknown_no_late_commit_then_new_operation_retry_fixture_web_only",
+      "deepseek_search_adapter_commit": "930ce33e76583371e6fe067940042d89fb9c2f59"
     },
     "open_blockers": {
-      "stable_live_web_search": "no Brave credential or SearXNG endpoint is configured; current DuckDuckGo route encounters a real challenge and fails closed as web_search_challenge_detected",
       "independent_read_only_review": "pending and must rerun mechanical evidence from source, not review this summary only",
-      "freeze_commit": "pending until current evidence state and remaining blockers are resolved"
+      "final_freeze_hash": "pending until independent read-only review reruns source and mechanical gates"
     },
     "anti_hallucination_non_claims": [
       "fixture-backed Web evidence is not external live Web credit",
-      "historical RC04 success does not override the current DuckDuckGo challenge failure",
+      "DeepSeek live-search success does not convert DuckDuckGo challenge responses into success",
       "Backend Capability Freeze is not Roadshow GREEN",
       "Backend Capability Freeze is not Phase7 completion",
       "Backend Capability Freeze is not backend remediation V4 completion"
@@ -143,9 +146,10 @@
     },
     {
       "id": "V2_WEB",
-      "status": "implementation_verified_current_generic_live_fetch_passed_stable_live_search_configuration_and_independent_review_pending",
-      "completion_claim": "scoped_mechanical_and_real_fetch_gates_green_stable_search_provider_requirement_remains_explicit",
+      "status": "implementation_and_external_live_verified_current_generic_fetch_deepseek_search_and_rc04_green_independent_review_pending",
+      "completion_claim": "scoped_mechanical_real_fetch_live_search_and_external_provider_gates_green_native_trial_and_independent_review_pending",
       "commit": "a40605579cfed02b310cfaa0f7be2bbea82af596",
+      "deepseek_search_adapter_commit": "930ce33e76583371e6fe067940042d89fb9c2f59",
       "evidence": "plans/openlife_roadshow_v2_web_evidence.md"
     },
     {
@@ -187,7 +191,7 @@
     },
     {
       "id": "BACKEND_CAPABILITY_FREEZE",
-      "status": "in_progress_provider_stream_fetch_and_mechanical_gates_green_live_search_config_independent_review_and_freeze_commit_pending",
+      "status": "in_progress_provider_stream_fetch_deepseek_live_search_rc04_and_mechanical_gates_green_independent_review_and_final_freeze_hash_pending",
       "completion_claim": "no_completion_claim_current_backend_evidence_only",
       "evidence": "backend_capability_freeze"
     }
@@ -267,7 +271,7 @@
     "roadshow_release": "no_go"
   },
   "v2_results": {
-    "typed_search_and_fetch_contract": "passed",
+    "typed_search_and_fetch_contract": "passed_including_deepseek_single_schema_no_thinking_signature_encrypted_content_or_unbound_provider_prose",
     "challenge_false_success_removed": "passed_with_captcha_false_positive_counterexample",
     "same_turn_provider_synthesis": "passed_existing_openlife_turn_runtime_and_prepared_provider_boundary",
     "citation_truth": "passed_current_run_required_missing_forged_cross_run_rejected_backend_footer_owned",
@@ -277,13 +281,14 @@
     "operation_replay": "passed_no_tool_or_provider_redispatch",
     "reasoning_strategy_canonicalization": "passed_direct_react_memory_governance_round_trip",
     "real_duckduckgo_local_provider_chain": "passed_network_read_provider_adapter_receipt_durable_events_final_last",
+    "real_deepseek_local_provider_chain": "passed_current_code_once_one_bounded_post_one_tool_receipt_typed_observation_bound_web_citation_provider_lifecycle_and_final_last",
     "generic_live_fetch": "passed_current_mac_fake_ip_environment_via_verified_loopback_system_proxy_https_hostname_and_adapter_bound_domain_allowlist_without_private_or_mixed_dns_relaxation",
-    "external_live_cloud_provider": "historical_rc04_and_cc01_pass_evidence_retained_current_rc04_revalidation_blocked_before_provider_by_duckduckgo_challenge_no_new_live_search_credit",
+    "external_live_cloud_provider": "passed_current_code_once_rc04_resource_plus_deepseek_live_search_plus_external_provider_with_backend_validated_resource_and_web_citations_zero_proposals",
     "native_product_trial": "pending",
     "independent_read_only_review": "pending_not_run",
-    "main_chat_kernel": "failed_60_of_68_passed_same_8_preexisting_red",
-    "single_system": "failed_24_of_32_passed_same_8_preexisting_red",
-    "clippy": "failed_with_35_existing_errors_no_new_v2_web_error",
+    "main_chat_kernel": "passed_103_of_103_current_checkpoint",
+    "single_system": "passed_39_of_39_current_checkpoint",
+    "clippy": "passed_workspace_all_targets_deny_warnings_current_checkpoint",
     "roadshow_release": "no_go"
   },
   "v3_results": {
@@ -393,7 +398,7 @@
     "rc08_full_process_restart": "partial_three_backend_os_processes_and_default_feature_packaged_shell_bootstrap_window_relaunch_passed_native_cancel_retry_projection_journey_pending",
     "rc08_native_product_ui_trial": "pending",
     "rc08_external_live_provider_cancel_retry": "passed_twice_external_provider_cancel_under_one_second_remote_unknown_no_late_durable_commit_then_new_uuid_retry_completed_with_governed_fixture_web_observation",
-    "rc08_external_live_provider_and_web": "partial_external_provider_cancel_retry_passed_twice_governed_fixture_web_only_external_live_web_pending_current_duckduckgo_endpoint_challenge_failed_closed_as_web_search_challenge_detected",
+    "rc08_external_live_provider_and_web": "partial_rc08_cancel_retry_itself_uses_governed_fixture_web_only_external_live_web_is_credited_separately_by_current_rc04_deepseek_gate",
     "rc08_final_delivery_fact_alignment": "passed_durable_current_run_tool_receipt_preserves_tool_invoked_truth_after_cancelled_kernel_output_is_dropped_without_crediting_not_attempted_or_wrong_run_receipts",
     "rc08_resource_citation_contract": "passed_trusted_final_request_scoped_citation_allowlist_after_untrusted_resource_blocks_with_strict_validator_and_no_hidden_retry",
     "rc08_independent_review": "pending",
@@ -438,11 +443,12 @@
     "cumulative_rc08_external_live_provider": "passed_twice_current_evidence_commit_real_external_provider_cancel_remote_unknown_no_late_durable_commit_and_one_new_uuid_retry_governed_fixture_web_only_no_external_live_web_credit",
     "cumulative_cc01_external_live": "passed_twice_current_commit_after_root_stack_repair_one_resource_one_real_web_action_one_external_provider_one_pending_cited_report_zero_preaccept_files_then_one_confirmed_idempotent_materialization",
     "cumulative_rc04_latest_control": "failed_closed_after_completed_real_web_and_external_provider_when_model_omitted_required_web_citation_not_counted_as_new_credit_prior_two_pass_evidence_retained",
-    "cumulative_rc04_current_revalidation": "failed_closed_before_provider_after_real_duckduckgo_challenge_web_search_challenge_detected_no_fixture_or_historical_credit_substitution",
+    "cumulative_rc04_current_revalidation": "passed_current_code_once_deepseek_live_search_external_provider_resource_and_web_citations_zero_proposals_without_retry_or_validator_relaxation",
     "cumulative_current_external_provider_direct": "passed_current_code_external_provider_completed_without_side_effects",
     "cumulative_current_external_provider_stream": "passed_current_code_29_provider_bound_chunks_done_completed_final_last",
     "cumulative_current_live_https_fetch": "passed_real_example_com_network_dispatch_response_observed_receipt_and_same_turn_provider_synthesis_under_adapter_bound_fake_ip_proxy_domain_policy",
-    "cumulative_current_core_full": "passed_1473_failed_0_ignored_2",
+    "cumulative_current_live_deepseek_search": "passed_one_bounded_anthropic_compatible_post_structured_result_only_exact_url_bound_untrusted_snippets_and_same_turn_provider_synthesis",
+    "cumulative_current_core_full": "passed_1476_failed_0_ignored_2",
     "cumulative_current_tauri_full_three_consecutive": "passed_1172_failed_0_ignored_13_each_run",
     "cumulative_current_workspace_clippy": "passed_all_targets_deny_warnings_all_clippy_waivers_are_expiring_owned_expectations_and_five_stale_waivers_were_deleted",
     "cumulative_current_cargo_audit": "passed_exact_ownership_for_18_informational_warnings",
@@ -470,5 +476,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-18T13:46:52+08:00"
+  "last_updated_at": "2026-07-18T14:27:00+08:00"
 }
