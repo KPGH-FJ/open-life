@@ -1,7 +1,7 @@
 # Phase 3F Summary And Phase 4A Gate
 
-Status: `HUMAN_APPROVED_PRE_4A_BLOCKED`
-Date: 2026-07-18
+Status: `PRE4A_GATE_COMPLETE_AWAITING_START_DECISION`
+Date: 2026-07-19
 
 ## 1. Review Entry
 
