@@ -173,6 +173,7 @@ impl StartupKeyringSecretStore {
         // Keep the platform interaction guard on the caller. Even if the OS
         // worker outlives the bounded deadline, returning from this function
         // restores normal Keychain UI for later user-initiated Settings work.
+        #[cfg(target_os = "macos")]
         let _interaction_guard = disable_startup_keyring_interaction()?;
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -203,11 +204,6 @@ fn disable_startup_keyring_interaction(
 ) -> Result<security_framework::os::macos::keychain::KeychainUserInteractionLock> {
     security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
         .context("disable interactive macOS Keychain UI during startup")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn disable_startup_keyring_interaction() -> Result<()> {
-    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

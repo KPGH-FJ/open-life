@@ -211,7 +211,9 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Run coverage for openlife-core
-        run: cargo tarpaulin -p openlife-core --out json --output-dir coverage-rust
+        # Tarpaulin's default is one minute without a test response. The
+        # final-acceptance tests remain bounded but exceed that under ptrace.
+        run: cargo tarpaulin -p openlife-core --timeout 300 --out json --output-dir coverage-rust
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
