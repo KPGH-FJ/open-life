@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="OpenLife Codex and Cursor white workbench Phase 3D/3E visual review board"
+    />
+    <title>OpenLife White Workbench - 视觉方案审阅板</title>
+    <link rel="stylesheet" href="review.css" />
+  </head>
+  <body>
+    <header class="review-header">
+      <a class="review-brand" href="#overview" aria-label="回到方案概览">
+        <span class="brand-mark" aria-hidden="true">OL</span>
+        <span><strong>OpenLife</strong><small>视觉方案审阅板</small></span>
+      </a>
+      <nav aria-label="审阅板章节">
+        <a href="#direction">方向</a>
+        <a href="#foundation">基础</a>
+        <a href="#desktop">桌面</a>
+        <a href="#mobile">移动</a>
+        <a href="#states">状态</a>
+        <a href="#decision">决策</a>
+      </nav>
+      <span class="review-status">REVIEW CANDIDATE</span>
+    </header>
+
+    <main>
+      <section class="overview" id="overview">
+        <div class="overview-copy">
+          <span class="eyebrow">Phase 3D / 3E · Codex / Cursor Visual Baseline</span>
+          <h1>White Workbench</h1>
+          <p class="lead">
+            直接采用 Codex 与 Cursor 已验证的白色工作台语言：白色主面、浅灰侧栏、黑灰文字、1px
+            分隔线和黑色主动作。 OpenLife
+            只保留自己的信息架构、安全语义和中文内容，不再创造独立品牌配色。
+          </p>
+          <div class="overview-actions">
+            <a class="button is-primary" href="../prototype/index.html">打开可交互蓝图</a>
+            <a class="button" href="../../phase3d_visual_direction/02_selected_direction.md"
+              >阅读方向说明</a
+            >
+          </div>
+        </div>
+        <dl class="overview-facts">
+          <div>
+            <dt>主要语言</dt>
+            <dd>中文优先</dd>
+          </div>
+          <div>
+            <dt>正文基准</dt>
+            <dd>14–15px</dd>
+          </div>
+          <div>
+            <dt>主强调色</dt>
+            <dd>黑色 / 中性灰</dd>
+          </div>
+          <div>
+            <dt>风险语义</dt>
+            <dd>琥珀等待 / 红色错误</dd>
+          </div>
+          <div>
+            <dt>桌面蓝图</dt>
+            <dd>8 个状态</dd>
+          </div>
+          <div>
+            <dt>移动蓝图</dt>
+            <dd>4 个关键流程</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="review-section" id="direction">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">01 · Reference Baseline</span>
+            <h2>直接采用 Codex / Cursor 共性</h2>
+          </div>
+          <p>用户已否决自定义松绿方案。本版不再探索品牌色，直接收敛到成熟白色工作台。</p>
+        </header>
+        <div class="reference-grid">
+          <article class="reference-card">
+            <div class="reference-sample is-codex" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <span class="option-index">CODEX</span>
+            <h3>内容优先</h3>
+            <p>白色对话面、黑色主动作、浅灰辅助面；信息通过留白与字重分层，不靠品牌色组织。</p>
+          </article>
+          <article class="reference-card">
+            <div class="reference-sample is-cursor" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <span class="option-index">CURSOR</span>
+            <h3>工具优先</h3>
+            <p>
+              浅灰侧栏、白色工作区、中性选中行和细分隔；圆角与阴影仅用于输入器、弹层等浮动控件。
+            </p>
+          </article>
+          <article class="reference-card is-selected">
+            <div class="reference-sample is-openlife" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <span class="option-index">OPENLIFE · SELECTED</span>
+            <h3>White Workbench</h3>
+            <p>
+              复制两者共同视觉基线，保留 OpenLife 的 Today、Workspace、Review、LifeModel 与
+              fail-closed 状态契约。
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="review-section" id="foundation">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">02 · Foundation</span>
+            <h2>视觉基础</h2>
+          </div>
+          <p>固定字号、固定间距和真实 CSS variables 已在蓝图中执行。</p>
+        </header>
+        <div class="foundation-layout">
+          <div class="palette-block">
+            <h3>语义色</h3>
+            <div class="swatches">
+              <div>
+                <span style="--swatch: #ffffff"></span><strong>Canvas</strong><code>#FFFFFF</code>
+              </div>
+              <div>
+                <span style="--swatch: #f5f5f5"></span><strong>Sidebar</strong><code>#F5F5F5</code>
+              </div>
+              <div>
+                <span style="--swatch: #ffffff"></span><strong>Surface</strong><code>#FFFFFF</code>
+              </div>
+              <div>
+                <span style="--swatch: #111111"></span><strong>Ink / Action</strong
+                ><code>#111111</code>
+              </div>
+              <div>
+                <span style="--swatch: #e6e6e6"></span><strong>Divider</strong><code>#E6E6E6</code>
+              </div>
+              <div>
+                <span style="--swatch: #fffaf0"></span><strong>Waiting</strong><code>#FFFAF0</code>
+              </div>
+              <div>
+                <span style="--swatch: #fff7f6"></span><strong>Blocked</strong><code>#FFF7F6</code>
+              </div>
+              <div>
+                <span style="--swatch: #f7f7f7"></span><strong>Evidence</strong><code>#F7F7F7</code>
+              </div>
+            </div>
+          </div>
+          <div class="type-block">
+            <h3>中文排版</h3>
+            <div class="type-sample is-display"><span>24 / 32</span>今天先完成客户方案初稿</div>
+            <div class="type-sample is-surface"><span>20 / 28</span>杭州周末行程</div>
+            <div class="type-sample is-reading">
+              <span>15 / 24</span>批准只记录你的决定，不代表偏好已经应用。
+            </div>
+            <div class="type-sample is-body">
+              <span>14 / 22</span>需要访问“旅行资料”文件夹后才能继续。
+            </div>
+            <div class="type-sample is-caption"><span>12 / 18</span>上次可靠更新：今天 08:42</div>
+          </div>
+          <div class="scale-block">
+            <h3>间距与形状</h3>
+            <div class="space-row"><span style="--size: 4px"></span><code>4</code></div>
+            <div class="space-row"><span style="--size: 8px"></span><code>8</code></div>
+            <div class="space-row"><span style="--size: 12px"></span><code>12</code></div>
+            <div class="space-row"><span style="--size: 16px"></span><code>16</code></div>
+            <div class="space-row"><span style="--size: 24px"></span><code>24</code></div>
+            <div class="space-row"><span style="--size: 32px"></span><code>32</code></div>
+            <div class="radius-row">
+              <span>4</span><span>6</span><span>8</span><small>圆角上限 8px</small>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="review-section shell-section">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">03 · Shell Anatomy</span>
+            <h2>壳层信息优先级</h2>
+          </div>
+          <p>常驻壳只保留导航和最重要上下文，证据按需出现，调试内容不占一级入口。</p>
+        </header>
+        <div class="shell-anatomy" aria-label="OpenLife 桌面壳结构示意">
+          <aside>
+            <strong>主导航</strong><span>今日</span><span>工作区</span><span>任务</span
+            ><span>审核中心</span><span>LifeModel</span><small>设置进入实用工具</small>
+          </aside>
+          <div class="anatomy-main">
+            <header>当前页面 + 单一主状态 <b>依据</b></header>
+            <main>
+              <strong>当前目标</strong><span>阻塞 / 风险</span><span>下一步动作</span
+              ><span>连续内容</span>
+            </main>
+          </div>
+          <aside class="anatomy-inspector">
+            <strong>按需依据</strong><span>发生了什么</span><span>风险是什么</span
+            ><span>需要做什么</span><small>ID 与字段来源折叠</small>
+          </aside>
+        </div>
+      </section>
+
+      <section class="review-section" id="desktop">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">04 · Desktop Blueprints</span>
+            <h2>桌面端全状态</h2>
+          </div>
+          <p>点击图片可查看原尺寸。所有数值与内容均为视觉 fixture。</p>
+        </header>
+        <div class="screen-grid">
+          <a class="screen-figure is-wide" href="../artifacts/phase3e_1440x900_today-ready.png">
+            <img
+              src="../artifacts/phase3e_1440x900_today-ready.png"
+              alt="今日可用且有待审核项桌面蓝图"
+            />
+            <span
+              ><strong>今日 · 可用 + 待审核</strong
+              ><small>一个关注点，一个等待决定，一个下一步</small></span
+            >
+          </a>
+          <a class="screen-figure" href="../artifacts/phase3e_1440x900_today-stale.png">
+            <img
+              src="../artifacts/phase3e_1440x900_today-stale.png"
+              alt="今日陈旧未知保护性关闭桌面蓝图"
+            />
+            <span
+              ><strong>今日 · 陈旧 / 未知</strong
+              ><small>保留只读快照，不根据旧数据生成动作</small></span
+            >
+          </a>
+          <a class="screen-figure" href="../artifacts/phase3e_1440x900_workspace.png">
+            <img
+              src="../artifacts/phase3e_1440x900_workspace.png"
+              alt="工作区等待文件权限桌面蓝图"
+            />
+            <span
+              ><strong>工作区 · 等待权限</strong
+              ><small>任务时间线、权限中断和补充说明形成一条主线</small></span
+            >
+          </a>
+          <a class="screen-figure" href="../artifacts/phase3e_1440x900_tasks.png">
+            <img src="../artifacts/phase3e_1440x900_tasks.png" alt="任务列表与详情桌面蓝图" />
+            <span
+              ><strong>任务 · 队列与连续性</strong
+              ><small>列表负责选择，详情负责继续执行</small></span
+            >
+          </a>
+          <a class="screen-figure is-wide" href="../artifacts/phase3e_1440x900_review-pending.png">
+            <img
+              src="../artifacts/phase3e_1440x900_review-pending.png"
+              alt="审核中心待决策桌面蓝图"
+            />
+            <span
+              ><strong>审核中心 · 待决策</strong
+              ><small>先看当前到建议的差异，再执行拒绝、稍后、修改或批准</small></span
+            >
+          </a>
+          <a class="screen-figure" href="../artifacts/phase3e_1440x900_review-approved.png">
+            <img
+              src="../artifacts/phase3e_1440x900_review-approved.png"
+              alt="审核已批准但尚未应用桌面蓝图"
+            />
+            <span
+              ><strong>审核中心 · 已批准，尚未应用</strong
+              ><small>应用按钮在缺少刷新读模型证明时禁用</small></span
+            >
+          </a>
+          <a class="screen-figure" href="../artifacts/phase3e_1440x900_lifemodel.png">
+            <img
+              src="../artifacts/phase3e_1440x900_lifemodel.png"
+              alt="LifeModel 当前兼容性有限桌面蓝图"
+            />
+            <span
+              ><strong>LifeModel · 有限兼容</strong
+              ><small>以阅读与来源为主，不伪造完整个人模型</small></span
+            >
+          </a>
+          <a class="screen-figure" href="../artifacts/phase3e_1440x900_settings.png">
+            <img
+              src="../artifacts/phase3e_1440x900_settings.png"
+              alt="设置供应商和隐私未知桌面蓝图"
+            />
+            <span
+              ><strong>设置 · 模型与隐私未知</strong><small>未知不显示本地绿色确定态</small></span
+            >
+          </a>
+        </div>
+      </section>
+
+      <section class="review-section" id="mobile">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">05 · Mobile Blueprints</span>
+            <h2>移动端不是压缩桌面侧栏</h2>
+          </div>
+          <p>紧凑 app bar、四项底部导航、抽屉补充入口、证据 bottom sheet、决定动作固定在拇指区。</p>
+        </header>
+        <div class="mobile-grid">
+          <a href="../artifacts/phase3e_390x844_today-ready.png"
+            ><img src="../artifacts/phase3e_390x844_today-ready.png" alt="移动端今日页面" /><span
+              >今日</span
+            ></a
+          >
+          <a href="../artifacts/phase3e_390x844_workspace.png"
+            ><img
+              src="../artifacts/phase3e_390x844_workspace.png"
+              alt="移动端工作区等待权限页面"
+            /><span>工作区 + 固定决定区</span></a
+          >
+          <a href="../artifacts/phase3e_390x844_review-pending.png"
+            ><img
+              src="../artifacts/phase3e_390x844_review-pending.png"
+              alt="移动端审核待决策页面"
+            /><span>审核 + 固定动作</span></a
+          >
+          <a href="../artifacts/phase3e_390x844_today-evidence-sheet.png"
+            ><img
+              src="../artifacts/phase3e_390x844_today-evidence-sheet.png"
+              alt="移动端依据 bottom sheet"
+            /><span>依据 Bottom Sheet</span></a
+          >
+          <a href="../artifacts/phase3e_390x844_navigation-drawer.png"
+            ><img
+              src="../artifacts/phase3e_390x844_navigation-drawer.png"
+              alt="移动端导航抽屉"
+            /><span>完整导航抽屉</span></a
+          >
+        </div>
+      </section>
+
+      <section class="review-section" id="states">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">06 · Component State Matrix</span>
+            <h2>组件状态与语义</h2>
+          </div>
+          <p>Debug 是数据分类，不是产品文案；Safe Mode 是保护机制，使用中性或琥珀语义。</p>
+        </header>
+        <div class="state-board">
+          <div class="state-group">
+            <h3>动作</h3>
+            <div class="component-row">
+              <button class="sample-button is-primary">继续</button><code>default</code>
+            </div>
+            <div class="component-row">
+              <button class="sample-button is-hover">继续</button><code>hover</code>
+            </div>
+            <div class="component-row">
+              <button class="sample-button is-focus">继续</button><code>focus</code>
+            </div>
+            <div class="component-row">
+              <button class="sample-button" disabled>等待确认</button><code>disabled + reason</code>
+            </div>
+            <div class="component-row">
+              <button class="sample-button is-loading" disabled>处理中</button><code>loading</code>
+            </div>
+          </div>
+          <div class="state-group">
+            <h3>产品状态</h3>
+            <div class="status-sample is-ready">
+              <span></span><strong>可用</strong><small>有当前读模型依据</small>
+            </div>
+            <div class="status-sample is-waiting">
+              <span></span><strong>等待确认</strong><small>用户决定尚未给出</small>
+            </div>
+            <div class="status-sample is-unknown">
+              <span></span><strong>未知 / 陈旧</strong><small>保护性关闭</small>
+            </div>
+            <div class="status-sample is-blocked">
+              <span></span><strong>动作被阻断</strong><small>具体错误或策略阻塞</small>
+            </div>
+          </div>
+          <div class="state-group">
+            <h3>依据结构</h3>
+            <div class="evidence-sample">
+              <strong>旅行资料目录授权摘要</strong><small>敏感 · 本机权限上下文</small>
+              <p>明确工具、目标、数据范围、传输边界、有效期和撤销方式。</p>
+              <code>evidence:permission:travel-folder</code>
+            </div>
+            <div class="advanced-sample">
+              <span>技术详情</span><code>routeType · raw id · sourceRef</code
+              ><small>位置、字号、背景降级；不使用整块 opacity</small>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="review-section" id="decision">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">07 · Approval Boundary</span>
+            <h2>必须保持的状态路径</h2>
+          </div>
+          <p>查看不改变状态；批准不等于应用；完成只能来自刷新后的读模型。</p>
+        </header>
+        <ol class="decision-flow">
+          <li>
+            <span>1</span><strong>待审核</strong
+            ><small>展示一句话建议、当前 → 建议、原因、影响、风险、来源</small>
+          </li>
+          <li>
+            <span>2</span><strong>确认决定</strong><small>拒绝 / 稍后 / 修改 / 批准变更</small>
+          </li>
+          <li>
+            <span>3</span><strong>已批准，尚未应用</strong><small>批准只记录决定，不显示完成</small>
+          </li>
+          <li>
+            <span>4</span><strong>等待应用结果</strong><small>由后端动作和刷新读模型证明</small>
+          </li>
+          <li>
+            <span>5</span><strong>已应用</strong><small>仅当 read model 明确返回 applied</small>
+          </li>
+        </ol>
+        <div class="approval-grid">
+          <div><span>保留</span><strong>未知 / 陈旧 / 缺证据时 fail-closed</strong></div>
+          <div><span>保留</span><strong>Product / Review / Debug action 分离</strong></div>
+          <div><span>禁止</span><strong>从页面本地推导产品 truth</strong></div>
+          <div><span>禁止</span><strong>把 fixture 数值写成后端 ready</strong></div>
+        </div>
+      </section>
+
+      <section class="review-section final-review">
+        <header class="section-header">
+          <div>
+            <span class="eyebrow">08 · Review Gate</span>
+            <h2>本轮请审阅什么</h2>
+          </div>
+          <p>本方案尚未进入 React。你的结论会决定下一阶段是否继续。</p>
+        </header>
+        <div class="review-questions">
+          <span>视觉气质是否像你希望的 OpenLife？</span>
+          <span>桌面密度是否合适，工作区是否足够专注？</span>
+          <span>今日、工作区、任务、审核中心的边界是否清楚？</span>
+          <span>权限与审批是否足够安全、易懂？</span>
+          <span>移动端导航与证据访问是否符合预期？</span>
+          <span>可否将 Codex / Cursor 白色工作台锁定为 React 重构视觉基线？</span>
+        </div>
+        <div class="gate-row">
+          <strong>当前 Gate</strong>
+          <span>PENDING YOUR APPROVAL</span>
+          <small>未修改 ProductShell、routes、App 或后端</small>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>OpenLife Phase 3D/3E · Visual review artifact</span>
+      <a href="../05_visual_qa_report.md">查看 QA 报告</a>
+    </footer>
+  </body>
+</html>
