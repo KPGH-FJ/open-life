@@ -51,7 +51,7 @@
       ]
     },
     "current_verified_evidence": {
-      "openlife_core_full": "1473_passed_0_failed_2_ignored",
+      "openlife_core_full": "1477_passed_0_failed_2_ignored",
       "openlife_tauri_full_three_consecutive": "1172_passed_0_failed_13_ignored_each_run",
       "single_system_authority": "39_passed",
       "main_chat_runtime_module": "30_passed",
