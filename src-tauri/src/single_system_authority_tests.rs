@@ -751,7 +751,8 @@ fn single_system_r0_readmodel_authority_map_keeps_frontend_adapters_transitional
         );
     }
 
-    for missing_backend_owner in ["src-tauri/src/read_models/workspace.rs"] {
+    {
+        let missing_backend_owner = "src-tauri/src/read_models/workspace.rs";
         assert!(
             !repo_root().join(missing_backend_owner).exists(),
             "R0 source map must be updated before treating {missing_backend_owner} as an existing backend read-model owner"
@@ -1803,6 +1804,286 @@ fn single_system_handler_legacy_development_commands_match_inventory_or_allowlis
 }
 
 #[test]
+fn governed_data_import_recovery_has_one_journal_owner_and_bounded_product_commands() {
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    let handler = lib
+        .split("tauri::generate_handler![")
+        .nth(1)
+        .and_then(|rest| rest.split("])").next())
+        .expect("Tauri generate_handler body");
+    let settings_source = read_repo_file("src-tauri/src/commands/settings.rs");
+    let settings = strip_cfg_test_module(&settings_source);
+    let bootstrap_source = read_repo_file("src-tauri/src/bootstrap.rs");
+    let bootstrap = strip_cfg_test_module(&bootstrap_source);
+    let app_state = read_repo_file("src-tauri/src/state.rs");
+    let journal_source = read_repo_file("openlife-core/src/persistence_outbox.rs");
+    let journal = strip_cfg_test_module(&journal_source);
+    let state_projection = read_repo_file("src-tauri/src/state_projection.rs");
+    let frontend = read_repo_file("frontend/src/tauri.ts");
+
+    for command in [
+        "abandon_governed_data_import_recovery",
+        "get_governed_data_import_status",
+    ] {
+        assert_eq!(
+            settings
+                .matches(&format!("pub async fn {command}("))
+                .count(),
+            1,
+            "governed import recovery command {command} must have one backend owner"
+        );
+        assert_eq!(
+            handler
+                .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+                .filter(|token| *token == command)
+                .count(),
+            1,
+            "governed import recovery command {command} must be shipped exactly once"
+        );
+        assert!(
+            frontend.contains(&format!("\"{command}\"")),
+            "frontend contract adapter must expose {command}"
+        );
+    }
+    assert_eq!(
+        journal
+            .matches("pub fn abandon_preserving_current(")
+            .count(),
+        1,
+        "GovernedDataImportJournal must remain the sole abandonment evidence owner"
+    );
+    assert_eq!(
+        journal.matches("pub fn latest_receipt(").count(),
+        1,
+        "durable recovery status must reuse the existing journal rather than a second ledger"
+    );
+    assert_eq!(
+        settings.matches("GovernedDataImportJournal::new(").count(),
+        0,
+        "product Settings paths must reuse the bootstrap-owned journal; Journal::new performs schema migration and is not a read-only status operation"
+    );
+    assert_eq!(
+        bootstrap.matches("GovernedDataImportJournal::new(").count(),
+        1,
+        "release bootstrap must open and migrate the governed import journal exactly once"
+    );
+    assert!(app_state.contains("pub(crate) governed_data_import_journal:"));
+    assert!(
+        app_state
+            .contains("Option<Arc<openlife_core::persistence_outbox::GovernedDataImportJournal>>"),
+        "AppState must retain the reusable bootstrap-owned governed import journal"
+    );
+    let status_command = source_between(
+        settings,
+        "pub async fn get_governed_data_import_status(",
+        "pub async fn abandon_governed_data_import_recovery(",
+    );
+    assert!(status_command.contains("required_governed_data_import_journal(state.inner())"));
+    for forbidden in [
+        "GovernedDataImportJournal::new(",
+        "migrate_",
+        "CREATE TABLE",
+        "CREATE INDEX",
+        "pragma_update",
+    ] {
+        assert!(
+            !status_command.contains(forbidden),
+            "read-only governed import status must not execute journal schema work: {forbidden}"
+        );
+    }
+    let journal_accessor = source_between(
+        settings,
+        "fn required_governed_data_import_journal(",
+        "async fn governed_import_recovery_preflight_receipt(",
+    );
+    assert!(journal_accessor.contains(".governed_data_import_journal"));
+    assert!(journal_accessor.contains(".cloned()"));
+    assert!(!journal_accessor.contains("mutation_journal_path"));
+    assert!(!journal_accessor.contains("GovernedDataImportJournal::new("));
+    assert!(state_projection
+        .contains("reconcile_state_store_lifemodel_projection_for_import_recovery_event"));
+    assert!(!state_projection
+        .contains("fn reconcile_state_store_lifemodel_projection_for_import_recovery("));
+    let status_adapter = source_between(
+        &frontend,
+        "export async function getGovernedDataImportStatus",
+        "export async function abandonGovernedDataImportRecovery",
+    );
+    assert!(status_adapter.contains("get_governed_data_import_status"));
+    for forbidden in [
+        "payload",
+        "requestDigest",
+        "observedDigest",
+        "beforeDigest",
+        "targetDigest",
+    ] {
+        assert!(
+            !status_adapter.contains(forbidden),
+            "bounded recovery status adapter must not accept {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn governed_import_resolution_barrier_covers_all_four_canonical_owners() {
+    let coordinator = read_repo_file("src-tauri/src/persistence_coordinator.rs");
+    for required in [
+        "canonical_write_barrier: tokio::sync::RwLock<()>",
+        "admit_normal_or_governed_data_import_writes",
+        "admit_startup_reconciliation_writes",
+        "acquire_canonical_commit_permit",
+        "acquire_governed_data_import_resolution_fence",
+        "acquire_governed_data_import_completion_fence",
+        "invalidate_canonical_write_admissions",
+    ] {
+        assert!(
+            coordinator.contains(required),
+            "PersistenceCoordinator must own canonical recovery barrier marker {required}"
+        );
+    }
+
+    let lifemodel = read_repo_file("src-tauri/src/life_model_write_gateway.rs");
+    let lifemodel_commit = source_between(
+        &lifemodel,
+        "async fn write_prepared_life_model_compare_and_swap",
+        "async fn write_life_model_without_prepare",
+    );
+    assert!(lifemodel_commit.contains("CanonicalCommitPermit"));
+    assert!(lifemodel_commit.contains("manager.save("));
+    assert!(lifemodel_commit.contains("observe_canonical_digest"));
+
+    let memory = read_repo_file("src-tauri/src/memory_gateway.rs");
+    let memory_admission = source_between(
+        &memory,
+        "fn admit_memory_vector_writes",
+        "async fn exchange_memory_vector_commit_admission",
+    );
+    assert!(memory_admission.contains("admit_normal_or_governed_data_import_writes"));
+    let memory_exchange = source_between(
+        &memory,
+        "async fn exchange_memory_vector_commit_admission",
+        "async fn acquire_memory_vector_commit_permit",
+    );
+    assert!(memory_exchange.contains("acquire_canonical_commit_permit"));
+    let memory_barrier_composition = source_between(
+        &memory,
+        "async fn acquire_memory_vector_commit_permit",
+        "async fn commit_vector_store_mutation",
+    );
+    assert!(memory_barrier_composition.contains("admit_memory_vector_writes"));
+    assert!(memory_barrier_composition.contains("exchange_memory_vector_commit_admission"));
+    for (start, end) in [
+        (
+            "pub(crate) async fn save_conversation_message_idempotent_with_state",
+            "pub(crate) async fn save_turn_user_message_idempotent_with_state",
+        ),
+        (
+            "pub(crate) async fn save_turn_user_message_idempotent_with_state",
+            "pub(crate) async fn create_chat_session_with_state",
+        ),
+        (
+            "pub(crate) async fn delete_chat_session_with_state",
+            "pub(crate) async fn reconcile_canonical_outboxes_with_state",
+        ),
+        (
+            "pub(crate) async fn run_memory_tier_maintenance_with_state",
+            "pub(crate) async fn archive_low_access_memories_with_state",
+        ),
+        (
+            "async fn replace_imported_memory_with_state_inner",
+            "pub(crate) async fn materialize_memory_proposal_with_state",
+        ),
+    ] {
+        assert!(
+            source_between(&memory, start, end).contains("acquire_memory_vector_commit_permit"),
+            "Memory/Vector canonical write path {start} must acquire the shared commit permit"
+        );
+    }
+    let rebuild = source_between(
+        &memory,
+        "pub(crate) async fn rebuild_memory_index_with_state",
+        "async fn cancellable_rebuild_embedding",
+    );
+    assert!(rebuild.contains("commit_vector_store_mutation"));
+
+    let kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    let state_helper = source_between(
+        &kernel,
+        "async fn acquire_state_store_commit_permit",
+        "fn resolve_transient_state_execution_context",
+    );
+    assert!(state_helper.contains("GovernedDataImportRecoveryOwner::StateStore"));
+    assert!(state_helper.contains("acquire_canonical_commit_permit"));
+    for start in [
+        "async fn build_kernel_transient_state_command_surface_result",
+        "async fn build_kernel_resource_daily_task_batch_result",
+    ] {
+        let body = kernel
+            .split(start)
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing StateGateway owner {start}"));
+        assert!(body.contains("acquire_state_store_commit_permit"));
+    }
+
+    let settings = read_repo_file("src-tauri/src/commands/settings.rs");
+    let state_restore = source_between(
+        &settings,
+        "if saga.stage == GovernedDataImportStage::VectorApplied",
+        "if saga.stage == GovernedDataImportStage::StateCommitted",
+    );
+    assert!(state_restore.contains("GovernedDataImportRecoveryOwner::StateStore"));
+    assert!(state_restore.contains("acquire_canonical_commit_permit"));
+    let explicit_abandonment = source_between(
+        &settings,
+        "pub async fn abandon_governed_data_import_recovery",
+        "async fn import_all_data_with_state",
+    );
+    assert!(explicit_abandonment.contains("acquire_governed_data_import_resolution_fence"));
+    let automatic_abandonment = source_between(
+        &settings,
+        "async fn abandon_governed_import_after_exact_observation",
+        "async fn mark_governed_import_owner_unknown",
+    );
+    assert!(automatic_abandonment.contains("acquire_governed_data_import_resolution_fence"));
+
+    let state_projection = read_repo_file("src-tauri/src/state_projection.rs");
+    let state_projection_finalize = source_between(
+        &state_projection,
+        "async fn acquire_state_projection_finalize_permit",
+        "pub(crate) async fn reconcile_state_store_lifemodel_projection",
+    );
+    assert!(state_projection_finalize.contains("GovernedDataImportRecoveryOwner::StateStore"));
+    assert!(state_projection_finalize.contains("acquire_canonical_commit_permit"));
+    let state_projection_terminal = source_between(
+        &state_projection,
+        "\n    match projection_result {\n",
+        "fn required_projection_proof",
+    );
+    assert!(state_projection_terminal.contains("acquire_state_projection_finalize_permit"));
+    assert!(state_projection_terminal.contains("mark_projection_applied"));
+    assert!(state_projection_terminal.contains("mark_projection_degraded"));
+
+    let successful_completion = source_between(
+        &settings,
+        "let completion_fence = state",
+        "let durable_lifemodel_write =",
+    );
+    assert!(successful_completion.contains("acquire_governed_data_import_completion_fence"));
+    assert!(successful_completion.contains("verify_governed_import_terminal_facts"));
+    assert!(successful_completion.contains("GovernedDataImportStage::Completed"));
+    assert!(successful_completion.contains("drop(completion_fence)"));
+
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    let dev_workers = source_between(
+        &lib,
+        "fn start_dev_extension_background_workers",
+        "fn runtime_dev_url",
+    );
+    assert!(dev_workers.contains("run_memory_tier_maintenance_with_state"));
+    assert!(!dev_workers.contains(".run_tier_maintenance("));
+}
+
+#[test]
 fn single_system_direct_proposal_write_callsites_match_inventory() {
     let expected = expected_count_map("direct_proposal_write_surfaces");
     let mut actual = BTreeMap::new();
@@ -1974,6 +2255,73 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
         );
     }
 
+    let provider_network_consent = read_repo_file("src-tauri/src/provider_network_consent.rs");
+    assert!(
+        provider_network_consent.contains("submit_main_chat_terminal_review_relation("),
+        "Main Chat provider consent must use the typed terminal-owner Review seam"
+    );
+    assert!(
+        provider_network_consent.contains("ProposalTerminalRelationKind::ActionResumePrerequisite"),
+        "provider consent must declare its action-resume lifecycle explicitly"
+    );
+    let task_controls_source = read_repo_file("src-tauri/src/main_chat_task_controls.rs");
+    let task_controls = strip_cfg_test_module(&task_controls_source);
+    assert!(
+        task_controls.contains(".run_provider_network_consent_continuation("),
+        "accepted provider consent must resume through the one OpenLifeTurnRuntime owner"
+    );
+    for forbidden_command_owned_provider_path in [
+        ".generate_direct_answer(",
+        "CommandSurfaceDirectAnswerModelClient",
+        "SchedulerMainChatModelClient",
+    ] {
+        assert!(
+            !task_controls.contains(forbidden_command_owned_provider_path),
+            "task controls must not own a parallel provider continuation path: {forbidden_command_owned_provider_path}"
+        );
+    }
+    let turn_runtime = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
+    for runtime_owner_marker in [
+        "pub(crate) async fn run_provider_network_consent_continuation(",
+        "OpenLifeTurnExecutionMode::ProviderConsentContinuation",
+        "issue_terminal_owner_provider_consent_replay_admission(",
+        "terminalized_provider_continuation_preparation_error(",
+    ] {
+        assert!(
+            turn_runtime.contains(runtime_owner_marker),
+            "OpenLifeTurnRuntime lost provider continuation owner marker {runtime_owner_marker}"
+        );
+    }
+    let permissions = read_repo_file("openlife-core/src/tool_permissions.rs");
+    for exact_grant_marker in [
+        "pub fn consume_reviewed_network_once_for_proposal(",
+        "pub fn reviewed_network_once_available_for_proposal(",
+    ] {
+        assert!(
+            permissions.contains(exact_grant_marker),
+            "provider continuation must bind AllowOnce to the exact accepted Proposal: {exact_grant_marker}"
+        );
+    }
+    let event_store = read_repo_file("src-tauri/src/main_chat_event_stream.rs");
+    assert!(
+        event_store.contains("PayloadFieldSchema::optional(\"replayCause\"")
+            && event_store.contains("latest_provider_event_after_replay_start("),
+        "startup recovery must retain replay type and query only provider facts after that replay start"
+    );
+    assert!(
+        !turn_runtime.contains("bind_staged_proposal_to_terminal_owner_origin("),
+        "TurnRuntime finalization must validate canonical typed Review relations, never late-bind them"
+    );
+    assert!(
+        !review_workflow_owner.contains("bind_staged_proposal_to_terminal_owner_origin("),
+        "ReviewWorkflow must not retain a late-bind escape hatch for Main Chat proposals"
+    );
+    let main_chat_kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    assert!(
+        !main_chat_kernel.contains("AgentRunProposalStagingKind::MainChatReview"),
+        "ordinary Main Chat must project typed Review relations at creation instead of staging AgentRun ids later"
+    );
+
     let retired_stage4_memory_knowledge = "src-tauri/src/main_chat_stage4_memory_knowledge.rs";
     assert!(
         !repo_root().join(retired_stage4_memory_knowledge).exists(),
@@ -2061,7 +2409,9 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         ".insert(&session_id",
         ".insert_batch(",
         ".replace_all_messages(",
+        ".replace_all_messages_guarded(",
         ".replace_all_chunks(",
+        ".replace_portable_chunks_guarded(",
         ".archive_lifecycle_memory_records(",
         ".rollback_memory_asset(",
         ".rebuild_materialized_view(",
@@ -2084,7 +2434,8 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         ".save_message_idempotent(",
         ".save_message_idempotent_with_proof(",
         ".save_knowledge_note_idempotent_with_outbox(",
-        ".replace_all_messages(",
+        ".replace_all_messages_guarded(",
+        ".replace_portable_chunks_guarded(",
         ".rollback_memory_asset(",
         ".rebuild_materialized_view(",
     ] {
@@ -2134,8 +2485,8 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         ),
         (
             "src-tauri/src/commands/settings.rs",
-            "async fn import_all_data_governed_operation",
-            "async fn apply_import_payload",
+            "async fn import_all_data_governed_operation_with_fault",
+            "let before_digest =",
         ),
     ] {
         let source = read_repo_file(path);
@@ -2240,6 +2591,183 @@ fn single_system_phase6_product_tool_execution_uses_tool_gateway() {
         !source_between(lib, "tauri::generate_handler![", "])").contains("grant_tool_permission"),
         "Phase6 direct grant_tool_permission IPC must not stay mounted as product authority"
     );
+}
+
+#[test]
+fn single_system_phase6_workspace_file_execution_has_one_tool_gateway_owner() {
+    let resolver = read_repo_file("src-tauri/src/workspace_file_resolver.rs");
+    let target_resolution = source_between(
+        &resolver,
+        "pub(crate) fn resolve_main_chat_workspace_file_target",
+        "pub(crate) fn resolve_workspace_root",
+    );
+    for forbidden in [
+        "canonicalize()",
+        ".metadata()",
+        "std::fs::read",
+        "File::open",
+    ] {
+        assert!(
+            !target_resolution.contains(forbidden),
+            "workspace candidate resolution must remain lexical before ToolGateway: {forbidden}"
+        );
+    }
+
+    let kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    let pre_gateway_blocker = source_between(
+        &kernel,
+        "fn blocked_kernel_read_tool_execution",
+        "fn merge_kernel_read_selection_metadata",
+    );
+    assert!(
+        !pre_gateway_blocker.contains("ToolExecutionReceipt::failed_before_dispatch"),
+        "a lexical Kernel blocker must not manufacture a ToolGateway execution receipt"
+    );
+    assert!(pre_gateway_blocker.contains("execution_receipt: None"));
+
+    let filesystem_adapter =
+        read_repo_file("openlife-core/src/agent/action_executor/execution_tools.rs");
+    assert!(
+        filesystem_adapter.contains("tokio::fs::metadata")
+            && filesystem_adapter.contains("tokio::fs::read_to_string"),
+        "ToolGateway filesystem adapter must own operating-system file observations"
+    );
+    let executor_context = read_repo_file("openlife-core/src/agent/action_executor/mod.rs");
+    assert!(executor_context.contains("struct ToolDispatchAdmission"));
+    assert!(executor_context.contains("Result<ToolDispatchAdmission<'a>>"));
+    for adapter_path in [
+        "openlife-core/src/agent/action_executor/core_os_tools.rs",
+        "openlife-core/src/agent/action_executor/execution_tools.rs",
+        "openlife-core/src/agent/action_executor/tool_executor.rs",
+    ] {
+        let adapter = read_repo_file(adapter_path);
+        for forbidden in ["mark_local_dispatched", "mark_simulated_dispatched"] {
+            assert!(
+                !adapter.contains(forbidden),
+                "concrete adapter {adapter_path} must consume ToolDispatchAdmission instead of mutating dispatch truth via {forbidden}"
+            );
+        }
+    }
+    let remote_helpers = read_repo_file("openlife-core/src/agent/action_executor/helpers.rs");
+    for helper in ["fetch_url_async", "search_web_async", "call_a2a_agent"] {
+        let marker = format!("async fn {helper}");
+        let signature = remote_helpers
+            .split(&marker)
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing remote adapter {helper}"))
+            .chars()
+            .take(500)
+            .collect::<String>();
+        assert!(
+            signature.contains("ToolDispatchAdmission"),
+            "remote adapter {helper} must require a sealed dispatch admission"
+        );
+    }
+
+    let runtime = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
+    let final_persistence = source_between(
+        &runtime,
+        "async fn persist_openlife_turn_final_delivery_receipt",
+        "fn canonical_final_owner_digest",
+    );
+    assert!(final_persistence.contains("toolOwnerBindingsVersion"));
+    assert!(final_persistence.contains("toolOwnerBindings"));
+    for legacy_parallel_field in [
+        "toolReceiptRefs",
+        "toolTerminalEventRefs",
+        "toolTerminalEventDigests",
+    ] {
+        assert!(
+            !final_persistence.contains(legacy_parallel_field),
+            "new finals must not persist the positional v1 tool owner field {legacy_parallel_field}"
+        );
+    }
+    let identity_recovery = source_between(
+        &runtime,
+        "async fn recover_canonical_tool_facts",
+        "async fn recover_openlife_turn_from_durable_final",
+    );
+    assert!(identity_recovery.contains("binding.action_queue_id"));
+    assert!(identity_recovery.contains("binding.receipt_id"));
+    assert!(identity_recovery.contains("binding.terminal_event_id"));
+}
+
+#[test]
+fn single_system_phase6_resource_artifact_and_tool_gateways_are_distinct() {
+    let resource_commands_source = read_repo_file("src-tauri/src/resource_commands.rs");
+    let resource_commands = strip_cfg_test_module(&resource_commands_source);
+    assert!(
+        resource_commands.contains("gateway.detach_resource_from_message("),
+        "resource detach must enter ResourceGateway instead of mutating ResourceStore from IPC"
+    );
+    assert!(
+        !resource_commands.contains("store.detach_resource_from_message("),
+        "resource detach must not retain a command-owned canonical write path"
+    );
+
+    let resource_gateway_source = read_repo_file("openlife-core/src/resource_gateway.rs");
+    let resource_gateway = strip_cfg_test_module(&resource_gateway_source);
+    for lifecycle_owner in [
+        "commit_import_batch_guarded(",
+        "pub fn detach_resource_from_message(",
+    ] {
+        assert!(
+            resource_gateway.contains(lifecycle_owner),
+            "ResourceGateway must own canonical resource lifecycle operation {lifecycle_owner}"
+        );
+    }
+    assert!(
+        !resource_gateway.contains("agent::ToolGateway")
+            && !resource_gateway.contains("ToolGateway::from_executor_config"),
+        "ResourceGateway must not become a second Agent tool executor"
+    );
+
+    let proposal_source = read_repo_file("src-tauri/src/commands/proposal.rs");
+    let proposal = strip_cfg_test_module(&proposal_source);
+    let artifact_apply = source_between(
+        proposal,
+        "async fn apply_external_write_artifact",
+        "pub(crate) fn memory_session_id",
+    );
+    for required in [
+        "claim_id: &str",
+        "prepare_artifact_materialization(",
+        "stage_artifact_bytes(",
+        "commit_staged_artifact(",
+        "finish_artifact_confirmed(",
+    ] {
+        assert!(
+            artifact_apply.contains(required),
+            "accepted artifact materialization must retain review-claim-bound owner {required}"
+        );
+    }
+    let accept_flow = source_between(
+        proposal,
+        "pub(crate) async fn accept_proposal_with_state",
+        "async fn terminal_owner_relation_kind",
+    );
+    assert!(
+        accept_flow.contains(".claim_dispatch(&proposal_id)")
+            && accept_flow.contains(".claimed_acceptance_snapshot(&proposal_id, &dispatch_claim_id)"),
+        "artifact bytes must not materialize before ReviewWorkflow proves the claimed accepted decision"
+    );
+    assert!(
+        accept_flow.contains("apply_external_write_artifact(state, &proposal, &dispatch_claim_id)"),
+        "artifact materialization must consume the exact accepted dispatch claim"
+    );
+
+    let tool_gateway_source = read_repo_file("openlife-core/src/agent/tool_gateway.rs");
+    let tool_gateway = strip_cfg_test_module(&tool_gateway_source);
+    for foreign_owner in [
+        "ResourceGateway",
+        "stage_artifact_bytes",
+        "commit_staged_artifact",
+    ] {
+        assert!(
+            !tool_gateway.contains(foreign_owner),
+            "ToolGateway must not absorb Resource/Artifact canonical ownership: {foreign_owner}"
+        );
+    }
 }
 
 #[test]
@@ -2506,6 +3034,54 @@ fn single_system_statestore_is_the_only_shipped_daily_task_read_owner() {
 }
 
 #[test]
+fn single_system_statestore_owned_lifemodel_fields_have_no_shipped_second_writer() {
+    let builder_raw = read_repo_file("openlife-core/src/builder/engine.rs");
+    let builder = strip_cfg_test_module(&builder_raw);
+    assert!(
+        builder.contains("life_model_field_authority(&signal.affected_path)"),
+        "Builder must consult the shared LifeModel field-authority contract before applying candidates"
+    );
+    for forbidden in [
+        "[\"goals\", \"daily\"] =>",
+        "[\"state\", \"alerts\"] =>",
+        "goals.daily (merged)",
+        "state.alerts (merged)",
+    ] {
+        assert!(
+            !builder.contains(forbidden),
+            "Builder must not retain a second StateStore/derived LifeModel writer: {forbidden}"
+        );
+    }
+    assert!(
+        builder.contains("\"sig_blocker\"")
+            && builder.contains("\"state.open_questions\""),
+        "Builder must preserve explicit blocker capability through a reviewed canonical LifeModel field"
+    );
+
+    let core_gateway = read_repo_file("openlife-core/src/life_model_write_gateway.rs");
+    assert!(
+        core_gateway.contains("pub fn life_model_field_authority"),
+        "the field-authority classification must have one reusable Core owner"
+    );
+    let tauri_gateway_raw = read_repo_file("src-tauri/src/life_model_write_gateway.rs");
+    let tauri_gateway = strip_cfg_test_module(&tauri_gateway_raw);
+    assert!(
+        count_occurrences(tauri_gateway, "validate_lifemodel_field_authority(") >= 4,
+        "manual/import, accepted Proposal, batch Proposal, and restore writes must enforce field ownership"
+    );
+    assert!(
+        tauri_gateway.contains("STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID"),
+        "the compatibility exception must be bound to the exact StateStore projector identity"
+    );
+    let projection_raw = read_repo_file("src-tauri/src/state_projection.rs");
+    let projection = strip_cfg_test_module(&projection_raw);
+    assert!(
+        projection.contains("STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID"),
+        "the one legitimate compatibility writer must consume the shared projector identity"
+    );
+}
+
+#[test]
 fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
     let expected = expected_count_map("direct_memory_lifemodel_write_surfaces");
     let needles = [
@@ -2515,7 +3091,9 @@ fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
         ".record_state_entry(",
         ".insert(&session_id",
         "replace_all_messages(",
+        "replace_all_messages_guarded(",
         "replace_all_chunks(",
+        "replace_portable_chunks_guarded(",
         "archive_lifecycle_memory_records(",
         "rollback_memory_asset(",
         "restore_archived_chunks(",
@@ -2892,7 +3470,8 @@ fn single_system_d049_keyword_conversation_update_routes_stay_absent() {
         "D049 inventory must enumerate semantic markers that could rename the retired route"
     );
 
-    for former_path in ["src-tauri/src/main_chat_conversation_updates.rs"] {
+    {
+        let former_path = "src-tauri/src/main_chat_conversation_updates.rs";
         assert!(
             !repo_root().join(former_path).exists(),
             "D049 callerless conversation-inference module must stay absent: {former_path}"

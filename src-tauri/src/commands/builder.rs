@@ -87,6 +87,50 @@ fn validate_builder_decisions(
     Ok(())
 }
 
+fn normalize_legacy_builder_signal(
+    mut signal: openlife_core::builder::BuilderSignal,
+) -> Result<openlife_core::builder::BuilderSignal, AppError> {
+    match signal.affected_path.as_str() {
+        "state.alerts" => {
+            let messages = signal
+                .proposed_value
+                .as_array()
+                .ok_or_else(|| {
+                    AppError::serialization(
+                        "Legacy Builder alert candidate is malformed and cannot be migrated.",
+                    )
+                })?
+                .iter()
+                .map(|item| {
+                    item.get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|message| !message.is_empty())
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| {
+                            AppError::serialization(
+                                "Legacy Builder alert candidate is missing its blocker text.",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if messages.is_empty() {
+                return Err(AppError::serialization(
+                    "Legacy Builder alert candidate contains no reviewable blocker text.",
+                ));
+            }
+            signal.affected_path = "state.open_questions".into();
+            signal.proposed_value = serde_json::json!(messages);
+            signal.reason = format!("{}; migrated_from_derived_state_alert", signal.reason);
+            Ok(signal)
+        }
+        "goals.daily" => Err(AppError::permission(
+            "Legacy Builder daily-task candidates cannot write LifeModel after the StateStore cutover. Reject this candidate and create the task through Main Chat so current-user authority, TTL, and the StateGateway receipt are preserved.",
+        )),
+        _ => Ok(signal),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct BuilderSessionSummary {
     session_id: String,
@@ -564,7 +608,7 @@ async fn builder_create_proposals_with_state(
         } else {
             selected.user_status = openlife_core::builder::SignalUserStatus::Accepted;
         }
-        selected_signals.push(selected);
+        selected_signals.push(normalize_legacy_builder_signal(selected)?);
     }
 
     if selected_signals.is_empty() {
@@ -643,23 +687,17 @@ async fn builder_create_proposals_with_state(
         )
         .await
         .map_err(AppError::from)?;
-        let agent_run_store = state.agent_run_store.clone().ok_or_else(|| {
+        state.agent_run_store.as_ref().ok_or_else(|| {
             AppError::db("AgentRun store is unavailable; Builder review cannot be traced.")
         })?;
         let proposal_store = state
             .proposal_store
             .clone()
             .ok_or_else(|| AppError::db("Proposal store is unavailable."))?;
-        Ok((
-            agent_run,
-            run_id,
-            vec![proposal],
-            agent_run_store,
-            proposal_store,
-        ))
+        Ok((agent_run, run_id, proposal, proposal_store))
     }
     .await;
-    let (mut agent_run, run_id, proposals, agent_run_store, proposal_store) = preparation?;
+    let (agent_run, run_id, proposal, proposal_store) = preparation?;
 
     let claimed_session = {
         let store = state.builder_session_store.lock().await;
@@ -676,13 +714,17 @@ async fn builder_create_proposals_with_state(
         .review_claim_id
         .clone()
         .ok_or_else(|| AppError::internal("Builder review claim was not persisted."))?;
-    let create_run_result = {
-        let store = agent_run_store.lock().await;
-        store.create_run(&agent_run).map_err(AppError::from)
-    };
+    let create_run_result =
+        crate::terminal_owner_write_gateway::create_agent_run(state, &agent_run)
+            .await
+            .map_err(|error| AppError::db_with_hint(error, "read_only_degraded"));
     if let Err(error) = create_run_result {
         let store = state.builder_session_store.lock().await;
-        let _ = store.release_review_claim(&session_id, &claim_id);
+        if let Err(release_error) = store.release_review_claim(&session_id, &claim_id) {
+            return Err(AppError::db(format!(
+                "Builder AgentRun create failed and its review claim release also failed: {release_error}"
+            )));
+        }
         return Err(error);
     }
 
@@ -692,86 +734,91 @@ async fn builder_create_proposals_with_state(
     let mut updated_count = 0usize;
     let submit_result: Result<(), AppError> = async {
         let store = proposal_store.lock().await;
-        for proposal in &proposals {
-            let outcome = ReviewWorkflow::new(&store)
-                .submit(
-                    DurableWriteRequest::from_agent_proposal(
-                        DurableWriteSource::Builder,
-                        DurableWriteSubject::LifeModel,
-                        proposal.clone(),
-                        "Builder proposal is pending Review Center approval.",
-                    )
-                    .with_evidence_refs(vec![proposal.source_detail.clone().unwrap_or_default()]),
+        let outcome = ReviewWorkflow::new(&store)
+            .submit(
+                DurableWriteRequest::from_agent_proposal(
+                    DurableWriteSource::Builder,
+                    DurableWriteSubject::LifeModel,
+                    proposal.clone(),
+                    "Builder proposal is pending Review Center approval.",
                 )
-                .map_err(AppError::from)?;
-            match outcome.decision.kind {
-                DurableWriteDecisionKind::CreatePendingProposal => created_count += 1,
-                DurableWriteDecisionKind::ReusePendingProposal => reused_count += 1,
-                DurableWriteDecisionKind::UpdatePendingProposal => updated_count += 1,
-            }
-            proposal_ids.push(outcome.proposal_id().to_string());
+                .with_evidence_refs(vec![proposal.source_detail.clone().unwrap_or_default()]),
+            )
+            .map_err(AppError::from)?;
+        match outcome.decision.kind {
+            DurableWriteDecisionKind::CreatePendingProposal => created_count += 1,
+            DurableWriteDecisionKind::ReusePendingProposal => reused_count += 1,
+            DurableWriteDecisionKind::UpdatePendingProposal => updated_count += 1,
         }
+        proposal_ids.push(outcome.proposal_id().to_string());
         Ok(())
     }
     .await;
     if let Err(error) = submit_result {
-        agent_run.status = openlife_core::agent::AgentRunStatus::Failed;
-        agent_run.finished_at = Some(chrono::Utc::now());
-        agent_run.error = Some(openlife_core::agent::AgentRunError {
-            message: "builder_proposal_submission_failed".into(),
-            phase: "review_staging".into(),
-            recoverable: true,
-        });
-        let update_result = agent_run_store.lock().await.update_run(&agent_run);
+        let update_result = crate::terminal_owner_write_gateway::fail_agent_run_from_owned_phase(
+            state,
+            &run_id,
+            crate::terminal_owner_write_gateway::AgentRunOwnedFailure::BuilderProposalSubmission,
+        )
+        .await;
         let release_result = state
             .builder_session_store
             .lock()
             .await
             .release_review_claim(&session_id, &claim_id);
-        if update_result.is_err() {
-            return Err(AppError::db(
-                "Builder proposal submission and AgentRun finalization both failed.",
-            ));
-        }
-        if release_result.is_err() {
-            return Err(AppError::db(
-                "Builder proposal submission failed and its review claim could not be released.",
-            ));
+        match (update_result, release_result) {
+            (Err(update_error), Err(release_error)) => {
+                return Err(AppError::db(format!(
+                    "Builder proposal submission failed; AgentRun finalization failed ({update_error}); review claim release failed ({release_error})."
+                )));
+            }
+            (Err(update_error), Ok(_)) => {
+                return Err(AppError::db(format!(
+                    "Builder proposal submission and AgentRun finalization both failed: {update_error}"
+                )));
+            }
+            (Ok(_), Err(release_error)) => {
+                return Err(AppError::db(format!(
+                    "Builder proposal submission failed and its review claim could not be released: {release_error}"
+                )));
+            }
+            (Ok(_), Ok(_)) => {}
         }
         return Err(error);
     }
 
-    for proposal_id in &proposal_ids {
-        agent_run.add_generated_proposal(proposal_id);
-    }
-    agent_run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
-    agent_run.output_preview = Some(format!(
-        "{} Builder proposals staged for Review Center",
-        proposal_ids.len()
-    ));
-    let mut warnings = Vec::new();
-    let run_update_result = {
-        let store = agent_run_store.lock().await;
-        store.update_run(&agent_run)
-    };
-    if let Err(error) = run_update_result {
-        warnings.push(format!(
-            "Proposal 已创建，但 AgentRun 投影仍需协调: {}",
-            error
-        ));
-    }
+    crate::terminal_owner_write_gateway::project_agent_run_from_proposal_staging(
+        state,
+        &run_id,
+        &proposal_ids,
+        crate::terminal_owner_write_gateway::AgentRunProposalStagingReceipt {
+            kind: crate::terminal_owner_write_gateway::AgentRunProposalStagingKind::Builder,
+            requested_count: 1,
+            failed_count: 0,
+        },
+    )
+    .await
+    .map_err(|error| {
+        AppError::db(format!(
+            "Builder Proposals were committed, but AgentRun projection is degraded: {error}"
+        ))
+    })?;
     let removed = {
         let store = state.builder_session_store.lock().await;
         store.remove_claimed_session(&session_id, &claim_id)
     };
     match removed {
         Ok(true) => {}
-        Ok(false) => warnings
-            .push("Proposal 已创建，但构建会话 claim 已变化；会话保持锁定并等待协调。".into()),
-        Err(error) => warnings.push(format!(
-            "Proposal 已创建，但构建会话清理失败并等待协调: {}",
-            error
-        )),
+        Ok(false) => {
+            return Err(AppError::db(
+                "Builder Proposals and AgentRun projection committed, but the review claim changed; reconciliation is required.",
+            ));
+        }
+        Err(error) => {
+            return Err(AppError::db(format!(
+                "Builder Proposals and AgentRun projection committed, but review claim cleanup failed: {error}"
+            )));
+        }
     }
 
     Ok(serde_json::json!({
@@ -782,7 +829,7 @@ async fn builder_create_proposals_with_state(
         "rejected_count": rejected_count,
         "proposal_ids": proposal_ids,
         "run_id": run_id,
-        "warnings": warnings,
+        "warnings": [],
     }))
 }
 
@@ -880,6 +927,7 @@ mod tests {
             persistence_coordinator: Arc::new(
                 crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
             ),
+            governed_data_import_journal: None,
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(life_model_manager)),
             life_model_write_coordinator: Arc::new(tokio::sync::Mutex::new(())),
@@ -1475,6 +1523,126 @@ mod tests {
             .get_session("proposal-session")
             .unwrap();
         assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn builder_review_cannot_stage_a_statestore_owned_lifemodel_candidate() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("state-owner-review", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals.push(BuilderSignal {
+            id: "sig_daily".into(),
+            source_step: 3,
+            source_question_id: "daily_task".into(),
+            dimension: BuilderDimension::Goals,
+            affected_path: "goals.daily".into(),
+            proposed_value: serde_json::json!([{"name": "wrong owner", "done": false}]),
+            confidence: 0.9,
+            reason: "must route through StateGateway".into(),
+            risk_level: RiskLevel::Low,
+            user_status: SignalUserStatus::Pending,
+        });
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        let error = builder_create_proposals_with_state(
+            "state-owner-review".into(),
+            vec![BuilderSignalDecision {
+                id: "sig_daily".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            }],
+            &state,
+        )
+        .await
+        .expect_err("Builder must reject a second transient-state write owner");
+
+        assert!(error
+            .message()
+            .contains("create the task through Main Chat"));
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(10, 0)
+            .unwrap()
+            .is_empty());
+        let persisted = state
+            .builder_session_store
+            .lock()
+            .await
+            .get_active_session("state-owner-review")
+            .unwrap()
+            .expect("failed preparation must not consume the review session");
+        assert!(persisted.review_claim_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_builder_alert_candidate_migrates_to_reviewed_open_question() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("legacy-alert-review", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals.push(BuilderSignal {
+            id: "sig_alert".into(),
+            source_step: 6,
+            source_question_id: "current_blockers".into(),
+            dimension: BuilderDimension::State,
+            affected_path: "state.alerts".into(),
+            proposed_value: serde_json::json!([{
+                "dimension_name": "general",
+                "severity": "info",
+                "message": "当前卡点: 需要理清技术路线"
+            }]),
+            confidence: 0.8,
+            reason: "legacy explicit blocker".into(),
+            risk_level: RiskLevel::Medium,
+            user_status: SignalUserStatus::Pending,
+        });
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        let result = builder_create_proposals_with_state(
+            "legacy-alert-review".into(),
+            vec![BuilderSignalDecision {
+                id: "sig_alert".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            }],
+            &state,
+        )
+        .await
+        .expect("legacy blocker text has a lossless canonical migration");
+
+        let proposal_id = result["proposal_ids"][0].as_str().unwrap();
+        let proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(proposal_id)
+            .unwrap()
+            .unwrap();
+        let batch: openlife_core::life_model::patch::LifeModelPatchBatchV1 =
+            serde_json::from_value(proposal.after).unwrap();
+        assert_eq!(batch.operations.len(), 1);
+        assert_eq!(batch.operations[0].path, "state.open_questions");
+        assert_eq!(
+            batch.operations[0].candidate,
+            serde_json::json!(["当前卡点: 需要理清技术路线"])
+        );
     }
 
     #[tokio::test]

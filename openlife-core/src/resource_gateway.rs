@@ -5,8 +5,8 @@
 //! and cancellation is linearized against the final SQLite commit.
 
 use crate::resource::{
-    ResourceImportBatch, ResourceImportCandidate, ResourceImportReceipt, ResourceStore,
-    MAX_IMPORT_BYTES, MAX_RESOURCES_PER_IMPORT, MAX_RESOURCE_BYTES,
+    ResourceDetachReceipt, ResourceImportBatch, ResourceImportCandidate, ResourceImportReceipt,
+    ResourceStore, MAX_IMPORT_BYTES, MAX_RESOURCES_PER_IMPORT, MAX_RESOURCE_BYTES,
 };
 use crate::resource_parser::{extract_resource, ResourceExtraction, ResourceExtractionRequest};
 use anyhow::{Context, Result};
@@ -319,6 +319,20 @@ impl ResourceGateway {
             },
             || cancellation.begin_commit(),
         )
+    }
+
+    /// Canonical resource/message binding mutation. Product callers must not
+    /// reach through `store()` for this write: ResourceGateway owns resource
+    /// lifecycle admission while ToolGateway remains exclusively responsible
+    /// for Agent tool execution.
+    pub fn detach_resource_from_message(
+        &self,
+        operation_id: &str,
+        message_id: &str,
+        resource_id: &str,
+    ) -> Result<ResourceDetachReceipt> {
+        self.store
+            .detach_resource_from_message(operation_id, message_id, resource_id)
     }
 }
 

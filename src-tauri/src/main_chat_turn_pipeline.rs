@@ -86,9 +86,9 @@ mod tests {
             ),
             (
                 "Please remember that I prefer morning writing blocks.",
-                MainChatAgentStrategy::MemoryProposal,
+                MainChatAgentStrategy::ReversibleMemoryCommit,
                 MainChatExecutionPath::WriteOutcome,
-                "openlife_runtime_proposal_only_write",
+                "openlife_runtime_reversible_memory_commit",
             ),
             (
                 "Send this private medical update to my coworker.",

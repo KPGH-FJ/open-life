@@ -25,6 +25,10 @@ const KNOWLEDGE_NOTE_MAX_SOURCE_BYTES: usize = 128;
 const KNOWLEDGE_NOTE_MAX_TAGS: usize = 32;
 const KNOWLEDGE_NOTE_MAX_TAG_BYTES: usize = 128;
 const LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS: usize = 50_000;
+/// Reserved materialized-view partition for lifecycle-owned Memory whose
+/// canonical scope is global. Session-scoped reads include this partition but
+/// never widen to unrelated conversation partitions.
+pub const MEMORY_LIFECYCLE_GLOBAL_SESSION_ID: &str = "memory-lifecycle-global";
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -207,6 +211,64 @@ fn conversation_content_digest(content: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("sha256:{hex}")
+}
+
+/// Deterministic semantic digest for the canonical conversation-message
+/// archive. Row ids are deliberately excluded because a portable restore
+/// assigns new SQLite ids; chronological order and the complete exported body
+/// remain covered.
+pub fn canonical_message_archive_digest(messages: &[ExportedMessage]) -> String {
+    let mut ordered = messages.iter().enumerate().collect::<Vec<_>>();
+    ordered.sort_by(|(left_index, left), (right_index, right)| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left_index.cmp(right_index))
+    });
+
+    let mut context = DigestContext::new(&SHA256);
+    update_length_delimited_digest(&mut context, b"openlife:canonical-message-archive:v1");
+    context.update(&(ordered.len() as u64).to_le_bytes());
+    for (_, message) in ordered {
+        update_length_delimited_digest(&mut context, message.session_id.as_bytes());
+        update_length_delimited_digest(&mut context, message.role.as_bytes());
+        update_length_delimited_digest(&mut context, message.content.as_bytes());
+        update_length_delimited_digest(&mut context, message.created_at.as_bytes());
+    }
+    let hash = context.finish();
+    let hex = hash
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+fn validate_canonical_message_archive_digest(value: &str) -> Result<()> {
+    if value.len() != 71
+        || !value.starts_with("sha256:")
+        || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("invalid canonical message archive digest");
+    }
+    Ok(())
+}
+
+fn export_messages_from_conn(conn: &Connection) -> Result<Vec<ExportedMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, role, content, created_at
+         FROM messages
+         ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ExportedMessage {
+            session_id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("failed to export messages")
 }
 
 fn ensure_message_operation_id(operation_id: &str) -> Result<()> {
@@ -892,7 +954,10 @@ impl MemoryStore {
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn insert_memory_row(
         conn: &Connection,
         session_id: &str,
@@ -997,6 +1062,146 @@ impl MemoryStore {
             proof,
             || {},
         )
+    }
+
+    /// Issue a typed Review target only while both canonical owners still
+    /// agree on the exact current user message. MemoryStore re-reads the body
+    /// and digest under its mutation fence; AgentRunStore then binds the live
+    /// run revision and status without exposing either body to the caller.
+    pub fn issue_agent_run_terminal_relation_target_intent(
+        &self,
+        agent_run_store: &AgentRunStore,
+        origin: &crate::agent::TerminalOwnerReviewOriginProof,
+    ) -> Result<crate::agent::store::AgentRunTerminalRelationTargetIntentAdmission> {
+        origin.validate()?;
+        if origin.canonical_store_identity() != self.canonical_store_identity.as_ref() {
+            anyhow::bail!("agent_run_terminal_relation_target_memory_store_mismatch");
+        }
+        let canonical_ref = origin.canonical_user_message_ref();
+        let Some(reference) = canonical_ref.strip_prefix("conversation://") else {
+            anyhow::bail!("agent_run_terminal_relation_target_message_ref_invalid");
+        };
+        let Some((expected_session_id, message_id)) = reference.rsplit_once("/message/") else {
+            anyhow::bail!("agent_run_terminal_relation_target_message_ref_invalid");
+        };
+        let message_id = message_id
+            .parse::<i64>()
+            .context("agent_run_terminal_relation_target_message_ref_invalid")?;
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        // Keep the same lock order as canonical AgentRun creation:
+        // MemoryStore -> AgentRunStore. No external await occurs in the fence.
+        let conversation_fence = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if persistence_outbox::has_active_tombstone(
+            &conversation_fence,
+            "conversation",
+            expected_session_id,
+        )? {
+            anyhow::bail!("agent_run_terminal_relation_target_message_tombstoned");
+        }
+        let current = conversation_fence
+            .query_row(
+                "SELECT session_id, role, content FROM messages WHERE id = ?1",
+                [message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("agent_run_terminal_relation_target_message_missing")?;
+        let current_ref = format!("conversation://{}/message/{message_id}", current.0);
+        let current_digest = conversation_content_digest(&current.2);
+        if current.0 != expected_session_id
+            || current.1 != "user"
+            || current_ref != canonical_ref
+            || current_digest != origin.canonical_user_message_digest()
+        {
+            anyhow::bail!("agent_run_terminal_relation_target_message_owner_mismatch");
+        }
+        let message_proof = CanonicalConversationMessageProof {
+            message_id,
+            session_id: current.0,
+            role: current.1,
+            canonical_store_identity: Arc::clone(&self.canonical_store_identity),
+            canonical_ref: current_ref,
+            content_digest: current_digest,
+        };
+        let target = agent_run_store.issue_terminal_relation_target_intent(
+            origin,
+            &message_proof,
+            &current.2,
+        )?;
+        conversation_fence.commit()?;
+        Ok(target)
+    }
+
+    /// Restores an AgentRun only while its canonical parent Conversation is
+    /// still active. The MemoryStore connection is the existing Conversation
+    /// mutation fence: holding it across the AgentRun transaction linearizes
+    /// restore against canonical Conversation deletion without adding a
+    /// second session lock.
+    ///
+    /// Lock order is deliberately identical to AgentRun creation:
+    /// MemoryStore connection -> AgentRunStore connection. Callers must obtain
+    /// any cross-owner commit permit before entering this synchronous helper.
+    pub fn restore_agent_run_with_parent_conversation_fence(
+        &self,
+        agent_run_store: &AgentRunStore,
+        run_id: &str,
+    ) -> Result<CanonicalMutationReceipt> {
+        self.restore_agent_run_with_parent_conversation_fence_internal(
+            agent_run_store,
+            run_id,
+            || {},
+        )
+    }
+
+    fn restore_agent_run_with_parent_conversation_fence_internal(
+        &self,
+        agent_run_store: &AgentRunStore,
+        run_id: &str,
+        before_agent_run_restore: impl FnOnce(),
+    ) -> Result<CanonicalMutationReceipt> {
+        let parent_conversation_id = agent_run_store
+            .lifecycle_parent_conversation_id(run_id)?
+            .context("agent_run_restore_missing")?;
+        let bound_memory_store_identity = agent_run_store
+            .bound_canonical_memory_store_identity()?
+            .context("agent_run_canonical_memory_store_not_bound")?;
+        if bound_memory_store_identity != self.canonical_store_identity.as_ref() {
+            anyhow::bail!("agent_run_canonical_memory_store_identity_conflict");
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        // BEGIN IMMEDIATE also excludes a separately opened connection to the
+        // same canonical Memory database. This transaction intentionally owns
+        // no mutation; dropping it after the AgentRun commit releases the
+        // cross-store linearization fence.
+        let conversation_fence = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(session_id) = parent_conversation_id.as_deref() {
+            if persistence_outbox::has_active_tombstone(
+                &conversation_fence,
+                "conversation",
+                session_id,
+            )? {
+                anyhow::bail!("agent_run_restore_blocked_by_conversation_tombstone");
+            }
+        }
+
+        before_agent_run_restore();
+        let receipt = agent_run_store.restore_run_with_receipt(run_id)?;
+        drop(conversation_fence);
+        Ok(receipt)
     }
 
     /// Production core seam for the non-interruptive, low-risk LifeEvent lane.
@@ -1161,6 +1366,62 @@ impl MemoryStore {
                 replayed: true,
             },
         }))
+    }
+
+    /// Rehydrate a bounded conversation prefix ending at the exact canonical
+    /// user-message operation. Later assistant or user messages must not leak
+    /// into a resumed turn after approval or restart.
+    pub fn load_conversation_messages_through_operation(
+        &self,
+        operation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        ensure_message_operation_id(operation_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        let target = conn
+            .query_row(
+                "SELECT id, session_id, role FROM messages WHERE operation_id = ?1",
+                [operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((target_id, session_id, target_role)) = target else {
+            return Ok(Vec::new());
+        };
+        if target_role != "user"
+            || persistence_outbox::has_active_tombstone(&conn, "conversation", &session_id)?
+        {
+            return Ok(Vec::new());
+        }
+        let mut statement = conn.prepare(
+            "SELECT role, content FROM (
+                SELECT id, role, content FROM messages
+                WHERE session_id = ?1 AND id <= ?2
+                ORDER BY id DESC
+                LIMIT ?3
+             ) bounded_prefix
+             ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, target_id, i64::try_from(limit.max(1))?],
+            |row| {
+                Ok(ChatMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                })
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     fn create_agent_run_from_active_conversation_message_internal(
@@ -1378,23 +1639,17 @@ impl MemoryStore {
     }
 
     pub fn export_all_messages(&self) -> Result<Vec<ExportedMessage>> {
+        Ok(self.export_canonical_message_archive()?.messages)
+    }
+
+    pub fn export_canonical_message_archive(&self) -> Result<CanonicalMessageArchiveSnapshot> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT session_id, role, content, created_at FROM messages ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ExportedMessage {
-                session_id: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to export messages")
+        let messages = export_messages_from_conn(&conn)?;
+        let digest = canonical_message_archive_digest(&messages);
+        Ok(CanonicalMessageArchiveSnapshot { messages, digest })
     }
 
     pub fn export_active_memory_records(&self) -> Result<Vec<MemoryRecord>> {
@@ -1886,17 +2141,51 @@ impl MemoryStore {
     }
 
     pub fn replace_all_messages(&self, messages: &[ExportedMessage]) -> Result<()> {
+        let expected_before_digest = self.export_canonical_message_archive()?.digest;
+        self.replace_all_messages_guarded(messages, &expected_before_digest)
+            .map(|_| ())
+    }
+
+    /// Replace the canonical conversation archive under an owner-local CAS.
+    ///
+    /// The digest is re-read after `BEGIN IMMEDIATE`; drift therefore fails
+    /// before any delete. Replaying an already-applied payload is a typed
+    /// no-op, even when the caller still carries the original before digest.
+    pub fn replace_all_messages_guarded(
+        &self,
+        messages: &[ExportedMessage],
+        expected_before_digest: &str,
+    ) -> Result<CanonicalMessageReplaceOutcome> {
+        validate_canonical_message_archive_digest(expected_before_digest)?;
+        let desired_digest = canonical_message_archive_digest(messages);
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for session_id in messages
             .iter()
             .map(|message| message.session_id.as_str())
             .collect::<HashSet<_>>()
         {
             ensure_conversation_write_allowed(&tx, session_id)?;
+        }
+        let before_messages = export_messages_from_conn(&tx)?;
+        let before_digest = canonical_message_archive_digest(&before_messages);
+        if before_digest == desired_digest {
+            tx.commit()?;
+            return Ok(CanonicalMessageReplaceOutcome {
+                disposition: CanonicalMessageReplaceDisposition::AlreadyCurrent,
+                supplied: messages.len(),
+                applied: messages.len(),
+                before_digest: before_digest.clone(),
+                after_digest: before_digest,
+            });
+        }
+        if before_digest != expected_before_digest {
+            anyhow::bail!(
+                "canonical_message_archive_drift expected={expected_before_digest} observed={before_digest}"
+            );
         }
         tx.execute("DELETE FROM messages", [])?;
         tx.execute(
@@ -1909,8 +2198,19 @@ impl MemoryStore {
                 params![msg.session_id, msg.role, msg.content, msg.created_at],
             )?;
         }
+        let after_messages = export_messages_from_conn(&tx)?;
+        let after_digest = canonical_message_archive_digest(&after_messages);
+        if after_digest != desired_digest {
+            anyhow::bail!("canonical_message_archive_digest_mismatch_after_replace");
+        }
         tx.commit()?;
-        Ok(())
+        Ok(CanonicalMessageReplaceOutcome {
+            disposition: CanonicalMessageReplaceDisposition::Applied,
+            supplied: messages.len(),
+            applied: messages.len(),
+            before_digest,
+            after_digest,
+        })
     }
 
     pub fn create_chat_session(&self, session_id: &str, title: &str) -> Result<()> {
@@ -2685,6 +2985,10 @@ impl MemoryStore {
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn record_state_entry_idempotent(
         &self,
         operation_id: &str,
@@ -2701,8 +3005,8 @@ impl MemoryStore {
         if dimension_name.trim().is_empty()
             || unit.trim().is_empty()
             || !value.is_finite()
-            || min_threshold.map_or(false, |threshold| !threshold.is_finite())
-            || max_threshold.map_or(false, |threshold| !threshold.is_finite())
+            || min_threshold.is_some_and(|threshold| !threshold.is_finite())
+            || max_threshold.is_some_and(|threshold| !threshold.is_finite())
         {
             anyhow::bail!("State entry payload is invalid");
         }
@@ -2879,7 +3183,10 @@ impl MemoryStore {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn save_memory_record(
         &self,
         session_id: &str,
@@ -2913,7 +3220,10 @@ impl MemoryStore {
     /// trigger in one local transaction. The outbox stores only the row id and
     /// an opaque digest; the vector materializer reloads the body from this
     /// canonical owner.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn save_knowledge_note_idempotent_with_outbox(
         &self,
         operation_id: &str,
@@ -3043,7 +3353,10 @@ impl MemoryStore {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn knowledge_note_payload_matches(
         conn: &Connection,
         memory_id: i64,
@@ -3196,7 +3509,10 @@ impl MemoryStore {
     /// content enters this legacy projection only here; the delivery and marker
     /// remain ref-only so D010 can later replace this with Lifecycle FTS without
     /// changing the outbox contract.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn project_lifecycle_memory(
         &self,
         event_id: &str,
@@ -3345,6 +3661,8 @@ impl MemoryStore {
         Ok(deleted)
     }
 
+    /// Pure text lookup. Access telemetry is a separate explicit mutation via
+    /// [`Self::record_text_search_access_telemetry`].
     pub fn search_text_memories(
         &self,
         session_id: Option<&str>,
@@ -3368,7 +3686,8 @@ impl MemoryStore {
                 "SELECT m.id, m.session_id, m.content, m.source, m.created_at, m.access_count, m.last_accessed_at, bm25(memories_fts) AS rank
                  FROM memories_fts
                  JOIN memories m ON m.id = memories_fts.rowid
-                 WHERE memories_fts MATCH ?1 AND m.session_id = ?2
+                 WHERE memories_fts MATCH ?1
+                   AND (m.session_id = ?2 OR m.session_id = ?3)
                    AND (
                        m.archived = 0 OR EXISTS (
                            SELECT 1 FROM memory_materialization_projections projection
@@ -3378,7 +3697,7 @@ impl MemoryStore {
                        )
                    )
                  ORDER BY rank ASC, m.created_at DESC
-                 LIMIT ?3",
+                 LIMIT ?4",
             ) {
                 Ok(stmt) => stmt,
                 Err(_) => {
@@ -3399,11 +3718,18 @@ impl MemoryStore {
                     return Ok(fallback);
                 }
             };
-            let rows =
-                stmt.query_map(params![normalized_query, session_id, limit as i64], |row| {
+            let rows = stmt.query_map(
+                params![
+                    normalized_query,
+                    session_id,
+                    MEMORY_LIFECYCLE_GLOBAL_SESSION_ID,
+                    limit as i64
+                ],
+                |row| {
                     let rank: f32 = row.get(7)?;
                     Ok(Self::row_to_search_hit(row, rank, "fts"))
-                })?;
+                },
+            )?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = match conn.prepare(
@@ -3452,24 +3778,42 @@ impl MemoryStore {
             });
         }
 
-        let now = Utc::now().to_rfc3339();
-        let ids: Vec<i64> = results
-            .iter()
-            .map(|hit| hit.chunk.id)
-            .filter(|id| *id > 0)
-            .collect();
-        if !ids.is_empty() {
-            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE archived = 0 AND id IN ({})",
-                placeholders
-            );
-            let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&now];
-            params_vec.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
-            let _ = conn.execute(&sql, &*params_vec);
-        }
         results.truncate(limit);
         Ok(results)
+    }
+
+    /// Commit optional access telemetry for results returned by a prior pure
+    /// text search. Callers must place this mutation behind their canonical
+    /// owner admission fence; a failed telemetry commit must never invalidate
+    /// the already-observed search result.
+    pub fn record_text_search_access_telemetry(&self, memory_ids: &[i64]) -> Result<usize> {
+        let mut memory_ids = memory_ids
+            .iter()
+            .copied()
+            .filter(|memory_id| *memory_id > 0)
+            .collect::<Vec<_>>();
+        memory_ids.sort_unstable();
+        memory_ids.dedup();
+        if memory_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let mut updated = 0usize;
+        for memory_id in memory_ids {
+            updated += tx.execute(
+                "UPDATE memories
+                 SET access_count = access_count + 1, last_accessed_at = ?1
+                 WHERE id = ?2 AND archived = 0",
+                params![&now, memory_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(updated)
     }
 
     fn search_text_memories_fallback(
@@ -3505,9 +3849,9 @@ impl MemoryStore {
                              AND projection.mutation_kind = 'materialized'
                        )
                    )
-               AND session_id = ?1 AND content LIKE ?2
+               AND (session_id = ?1 OR session_id = ?2) AND content LIKE ?3
              ORDER BY created_at DESC
-             LIMIT ?3"
+             LIMIT ?4"
         };
         let mut stmt = conn.prepare(sql)?;
         let rows = if session_id.is_empty() {
@@ -3516,9 +3860,15 @@ impl MemoryStore {
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(params![session_id, like_query, limit as i64], |row| {
-                Ok(Self::row_to_search_hit_fallback(row, query, "keyword"))
-            })?
+            stmt.query_map(
+                params![
+                    session_id,
+                    MEMORY_LIFECYCLE_GLOBAL_SESSION_ID,
+                    like_query,
+                    limit as i64
+                ],
+                |row| Ok(Self::row_to_search_hit_fallback(row, query, "keyword")),
+            )?
             .collect::<Result<Vec<_>, _>>()?
         };
         Self::filter_retrieval_active_search_hits(conn, rows)
@@ -3828,12 +4178,42 @@ fn insert_memory_projection_marker(
     Ok(())
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExportedMessage {
     pub session_id: String,
     pub role: String,
     pub content: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalMessageArchiveSnapshot {
+    pub messages: Vec<ExportedMessage>,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalMessageReplaceDisposition {
+    Applied,
+    AlreadyCurrent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalMessageReplaceOutcome {
+    pub disposition: CanonicalMessageReplaceDisposition,
+    pub supplied: usize,
+    pub applied: usize,
+    pub before_digest: String,
+    pub after_digest: String,
+}
+
+impl CanonicalMessageReplaceOutcome {
+    pub fn changed(&self) -> bool {
+        self.disposition == CanonicalMessageReplaceDisposition::Applied
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -4393,6 +4773,45 @@ mod tests {
     }
 
     #[test]
+    fn continuation_context_stops_at_exact_user_operation() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        let session_id = "continuation-prefix";
+        for (role, content, operation) in [
+            ("user", "first", "continuation-first"),
+            ("assistant", "answer", "continuation-answer"),
+            ("user", "blocked turn", "continuation-blocked"),
+            ("assistant", "pending review", "continuation-pending"),
+            ("user", "later turn", "continuation-later"),
+        ] {
+            store
+                .save_message_idempotent(
+                    session_id,
+                    &ChatMessage {
+                        role: role.into(),
+                        content: content.into(),
+                    },
+                    operation,
+                )
+                .unwrap();
+        }
+
+        let prefix = store
+            .load_conversation_messages_through_operation("continuation-blocked", 64)
+            .unwrap();
+        assert_eq!(
+            prefix
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "answer", "blocked turn"]
+        );
+        assert_eq!(
+            prefix.last().map(|message| message.role.as_str()),
+            Some("user")
+        );
+    }
+
+    #[test]
     fn memory_store_rejects_and_migrates_lifecycle_retrieval_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory-lifecycle-owner-boundary.db");
@@ -4416,12 +4835,14 @@ mod tests {
             )
             .unwrap();
             let tx = conn.transaction().unwrap();
+            let legacy_reason_digest =
+                crate::persistence_outbox::metadata_digest("legacy_lifecycle_archive");
             let receipt = crate::persistence_outbox::enqueue_mutation(
                 &tx,
                 "memory_retrieval",
                 "legacy-lifecycle-owner",
                 "archived",
-                "sha256:legacy",
+                &legacy_reason_digest,
                 &["vector_store"],
             )
             .unwrap();
@@ -4431,8 +4852,8 @@ mod tests {
                     (owner_kind, owner_id, disposition, revision, last_event_id,
                      reason_digest, changed_at)
                  VALUES ('memory_lifecycle', 'memory:owner', 'archived', 1, ?1,
-                         'sha256:legacy', '2026-07-12T00:00:00Z')",
-                [receipt.event_id],
+                         ?2, '2026-07-12T00:00:00Z')",
+                params![receipt.event_id, legacy_reason_digest],
             )
             .unwrap();
             tx.commit().unwrap();
@@ -4504,12 +4925,14 @@ mod tests {
                 [],
             )
             .unwrap();
+            let stale_reason_digest =
+                crate::persistence_outbox::metadata_digest("stale_lifecycle_archive");
             let receipt = crate::persistence_outbox::enqueue_mutation(
                 &tx,
                 "memory_retrieval",
                 "stale-memory-store-lifecycle-owner",
                 "archived",
-                "sha256:stale",
+                &stale_reason_digest,
                 &["vector_store"],
             )
             .unwrap();
@@ -4518,8 +4941,8 @@ mod tests {
                     (owner_kind, owner_id, disposition, revision, last_event_id,
                      reason_digest, changed_at)
                  VALUES ('memory_lifecycle', 'memory:reader-canonical', 'archived', 1,
-                         ?1, 'sha256:stale', '2026-07-12T00:00:00Z')",
-                [receipt.event_id],
+                         ?1, ?2, '2026-07-12T00:00:00Z')",
+                params![receipt.event_id, stale_reason_digest],
             )
             .unwrap();
             tx.commit().unwrap();
@@ -4783,6 +5206,86 @@ mod tests {
     }
 
     #[test]
+    fn session_text_search_includes_global_lifecycle_memory_but_not_other_sessions() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        for (session_id, content) in [
+            ("current-session", "SHARED_RETRIEVAL_SENTINEL current"),
+            (
+                MEMORY_LIFECYCLE_GLOBAL_SESSION_ID,
+                "SHARED_RETRIEVAL_SENTINEL global",
+            ),
+            ("other-session", "SHARED_RETRIEVAL_SENTINEL private"),
+        ] {
+            store
+                .save_memory_record(session_id, content, "note", "test", &[], "private", None)
+                .unwrap();
+        }
+
+        let hits = store
+            .search_text_memories(Some("current-session"), "SHARED_RETRIEVAL_SENTINEL", 10)
+            .unwrap();
+        let sessions = hits
+            .iter()
+            .map(|hit| hit.chunk.session_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(hits.len(), 2);
+        assert!(sessions.contains("current-session"));
+        assert!(sessions.contains(MEMORY_LIFECYCLE_GLOBAL_SESSION_ID));
+        assert!(!sessions.contains("other-session"));
+    }
+
+    #[test]
+    fn text_search_is_a_pure_read_of_memory_owner_state() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        store
+            .save_memory_record(
+                "pure-search-session",
+                "PURE_TEXT_SEARCH_RESULT",
+                "note",
+                "manual",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
+        let before_records = store.export_active_memory_records().unwrap();
+        let before_rebuild_source = store.vector_rebuild_source_snapshot().unwrap();
+
+        let hits = store
+            .search_text_memories(None, "PURE_TEXT_SEARCH_RESULT", 5)
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            serde_json::to_value(store.export_active_memory_records().unwrap()).unwrap(),
+            serde_json::to_value(&before_records).unwrap()
+        );
+        assert_eq!(
+            store.vector_rebuild_source_snapshot().unwrap(),
+            before_rebuild_source,
+            "a read must not drift the digest used to bind a vector rebuild source"
+        );
+
+        assert_eq!(
+            store
+                .record_text_search_access_telemetry(&[hits[0].chunk.id, hits[0].chunk.id, -1,])
+                .unwrap(),
+            1,
+            "duplicate and conversation-only hit ids must not overcount telemetry"
+        );
+        let after_records = store.export_active_memory_records().unwrap();
+        assert_eq!(after_records[0].access_count, 1);
+        assert!(after_records[0].last_accessed_at.is_some());
+        assert_ne!(
+            store
+                .vector_rebuild_source_snapshot()
+                .unwrap()
+                .metadata_digest,
+            before_rebuild_source.metadata_digest
+        );
+    }
+
+    #[test]
     fn memory_store_export_import_messages() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
@@ -4801,6 +5304,93 @@ mod tests {
         store.import_messages(&exported).unwrap();
         let loaded = store.load_recent_messages("s1", 10).unwrap();
         assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn guarded_message_archive_replace_rejects_owner_drift_before_effect() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        store
+            .save_message(
+                "before",
+                &ChatMessage {
+                    role: "user".into(),
+                    content: "canonical before".into(),
+                },
+            )
+            .unwrap();
+        let expected = store.export_canonical_message_archive().unwrap();
+        store
+            .save_message(
+                "concurrent",
+                &ChatMessage {
+                    role: "assistant".into(),
+                    content: "late owner write".into(),
+                },
+            )
+            .unwrap();
+        let replacement = vec![ExportedMessage {
+            session_id: "replacement".into(),
+            role: "user".into(),
+            content: "must not apply".into(),
+            created_at: Utc::now().to_rfc3339(),
+        }];
+
+        let error = store
+            .replace_all_messages_guarded(&replacement, &expected.digest)
+            .expect_err("stale expected digest must fail before delete");
+        assert!(error
+            .to_string()
+            .contains("canonical_message_archive_drift"));
+        let after = store.export_canonical_message_archive().unwrap();
+        assert_eq!(after.messages.len(), 2);
+        assert!(after
+            .messages
+            .iter()
+            .any(|message| message.content == "late owner write"));
+        assert!(!after
+            .messages
+            .iter()
+            .any(|message| message.content == "must not apply"));
+    }
+
+    #[test]
+    fn guarded_message_archive_replace_is_digest_exact_and_replay_safe() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        store
+            .save_message(
+                "before",
+                &ChatMessage {
+                    role: "user".into(),
+                    content: "before".into(),
+                },
+            )
+            .unwrap();
+        let before = store.export_canonical_message_archive().unwrap();
+        let replacement = vec![ExportedMessage {
+            session_id: "restored".into(),
+            role: "assistant".into(),
+            content: "portable replacement".into(),
+            created_at: "2026-07-17T00:00:00Z".into(),
+        }];
+        let desired_digest = canonical_message_archive_digest(&replacement);
+
+        let applied = store
+            .replace_all_messages_guarded(&replacement, &before.digest)
+            .unwrap();
+        assert!(applied.changed());
+        assert_eq!(applied.after_digest, desired_digest);
+        let replayed = store
+            .replace_all_messages_guarded(&replacement, &before.digest)
+            .unwrap();
+        assert_eq!(
+            replayed.disposition,
+            CanonicalMessageReplaceDisposition::AlreadyCurrent
+        );
+        assert!(!replayed.changed());
+        assert_eq!(
+            store.export_canonical_message_archive().unwrap().digest,
+            desired_digest
+        );
     }
 
     #[test]
@@ -5167,6 +5757,94 @@ mod tests {
             .project_conversation_tombstone(&tombstone.event_id, "fence-interleave-session")
             .unwrap();
         assert!(agent_runs.get_run(&run_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn agent_run_restore_fence_linearizes_before_conversation_delete_and_projection_hides_run() {
+        let memory = Arc::new(MemoryStore::new_in_memory().unwrap());
+        let session_id = "restore-first-parent-delete-session";
+        memory
+            .create_chat_session(session_id, "Restore first")
+            .unwrap();
+        let agent_runs = Arc::new(AgentRunStore::new_in_memory().unwrap());
+        agent_runs.bind_canonical_memory_store(&memory).unwrap();
+        let run = AgentRun::new_chat_run(session_id, "metadata safe input");
+        let run_id = run.id.clone();
+        agent_runs.create_run(&run).unwrap();
+        agent_runs
+            .delete_run_with_tombstone(&run_id, Some("precondition delete"))
+            .unwrap();
+
+        let restore_entered = Arc::new(std::sync::Barrier::new(2));
+        let release_restore = Arc::new(std::sync::Barrier::new(2));
+        let memory_for_restore = Arc::clone(&memory);
+        let runs_for_restore = Arc::clone(&agent_runs);
+        let run_for_restore = run_id.clone();
+        let entered_for_restore = Arc::clone(&restore_entered);
+        let release_for_restore = Arc::clone(&release_restore);
+        let restore = std::thread::spawn(move || {
+            memory_for_restore.restore_agent_run_with_parent_conversation_fence_internal(
+                &runs_for_restore,
+                &run_for_restore,
+                || {
+                    entered_for_restore.wait();
+                    release_for_restore.wait();
+                },
+            )
+        });
+        restore_entered.wait();
+
+        let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
+        let (delete_done_tx, delete_done_rx) = std::sync::mpsc::channel();
+        let memory_for_delete = Arc::clone(&memory);
+        let delete = std::thread::spawn(move || {
+            delete_started_tx.send(()).unwrap();
+            let result = memory_for_delete
+                .delete_chat_session_with_tombstone(session_id, Some("canonical parent delete"));
+            delete_done_tx.send(result).unwrap();
+        });
+        delete_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            delete_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "Conversation delete must wait for the existing MemoryStore restore fence"
+        );
+
+        release_restore.wait();
+        let restored = restore.join().unwrap().unwrap();
+        let deleted_parent = delete_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Conversation delete must finish after restore releases its fence")
+            .unwrap();
+        delete.join().unwrap();
+        assert_eq!(restored.aggregate_revision, 2);
+        assert_eq!(
+            memory
+                .projection_summary(&deleted_parent.event_id)
+                .unwrap()
+                .pending,
+            5
+        );
+        assert!(agent_runs.get_live_run(&run_id).unwrap().is_some());
+
+        agent_runs
+            .project_conversation_tombstone(
+                deleted_parent.tombstone_id.as_deref().unwrap(),
+                session_id,
+            )
+            .unwrap();
+        assert!(
+            agent_runs.get_live_run(&run_id).unwrap().is_none(),
+            "the later canonical parent delete must win final product visibility"
+        );
+        assert!(agent_runs
+            .restore_run_with_receipt(&run_id)
+            .unwrap_err()
+            .to_string()
+            .contains("agent_run_restore_blocked_by_conversation_tombstone"));
     }
 
     #[test]
@@ -5650,6 +6328,7 @@ mod tests {
                 "manual",
                 vec!["manual".to_string()],
                 "private",
+                "KnowledgeNote operation id was reused with a different canonical payload",
             ),
             (
                 "manual-session",
@@ -5658,6 +6337,7 @@ mod tests {
                 "manual",
                 vec!["manual".to_string()],
                 "private",
+                "KnowledgeNote operation id was reused with a different canonical payload",
             ),
             (
                 "manual-session",
@@ -5666,6 +6346,7 @@ mod tests {
                 "manual",
                 vec!["manual".to_string()],
                 "private",
+                "KnowledgeNote admission requires the private typed-note contract",
             ),
             (
                 "manual-session",
@@ -5674,6 +6355,7 @@ mod tests {
                 "other-source",
                 vec!["manual".to_string()],
                 "private",
+                "KnowledgeNote operation id was reused with a different canonical payload",
             ),
             (
                 "manual-session",
@@ -5682,6 +6364,7 @@ mod tests {
                 "manual",
                 vec!["changed".to_string()],
                 "private",
+                "KnowledgeNote operation id was reused with a different canonical payload",
             ),
             (
                 "manual-session",
@@ -5690,10 +6373,13 @@ mod tests {
                 "manual",
                 vec!["manual".to_string()],
                 "sensitive",
+                "KnowledgeNote admission requires the private typed-note contract",
             ),
         ];
 
-        for (session_id, content, content_type, source, tags, privacy_level) in variants {
+        for (session_id, content, content_type, source, tags, privacy_level, expected_error) in
+            variants
+        {
             let store = MemoryStore::new_in_memory().unwrap();
             let operation_id = uuid::Uuid::new_v4().to_string();
             store
@@ -5718,7 +6404,7 @@ mod tests {
                     privacy_level,
                 )
                 .expect_err("operation id reuse must bind the complete canonical payload");
-            assert!(error.to_string().contains("different canonical payload"));
+            assert_eq!(error.to_string(), expected_error);
         }
     }
 

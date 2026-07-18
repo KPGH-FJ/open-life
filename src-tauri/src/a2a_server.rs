@@ -510,8 +510,10 @@ mod tests {
             .expect("malformed persisted privacy policy must fail closed");
         assert!(malformed.contains("a2a_persisted_privacy_policy_parse_failed"));
 
-        let mut persisted = PrivacyPolicy::default();
-        persisted.enabled = false;
+        let persisted = PrivacyPolicy {
+            enabled: false,
+            ..Default::default()
+        };
         std::fs::write(
             data_dir.path().join("privacy_policy.yaml"),
             persisted.to_yaml().unwrap(),

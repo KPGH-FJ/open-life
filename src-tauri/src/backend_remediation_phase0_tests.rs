@@ -382,15 +382,18 @@ fn backend_remediation_phase0_inventory_freezes_all_audit_findings() {
         "fix-under-verification-concurrency-limit-pending",
         "fix-under-verification-full-suite-pending",
         "fix-under-verification-full-symbol-scan-pending",
+        "fix-under-verification-independent-review-pending",
         "fix-under-verification-live-redirect-pending",
         "fix-under-verification-real-keychain-smoke-pending",
         "fix-under-verification-restart-parity-pending",
         "fix-under-verification-store-migration-pending",
         "local-claim-fixed-remote-reconciliation-pending",
+        "mechanical-gates-green-independent-review-pending",
         "model-route-fixed-migration-proof-pending",
         "network-client-integrated-authentication-pending",
         "phase7-deletion-in-progress",
         "provider-facts-partial-projection-pending",
+        "dependency-gate-green-owned-advisories-remediation-open",
         "release-quarantined-authentication-pending",
         "release-quarantined-phase4-pending",
         "reproduced-dependency-gate-pending",
@@ -456,6 +459,15 @@ fn backend_remediation_phase0_inventory_freezes_all_audit_findings() {
             ] {
                 if evidence_ref.starts_with("test:") {
                     assert_executable_test_reference(evidence_ref);
+                } else if let Some(gate) = evidence_ref.strip_prefix("gate:") {
+                    assert!(
+                        !gate.trim().is_empty()
+                            && gate
+                                .chars()
+                                .all(|character| character.is_ascii_alphanumeric()
+                                    || character == '-'),
+                        "{id} has a malformed mechanical gate reference: {evidence_ref}"
+                    );
                 } else {
                     assert!(
                         evidence_ref.starts_with("planned:"),

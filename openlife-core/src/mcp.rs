@@ -1159,6 +1159,11 @@ impl McpRegistry {
         );
     }
 
+    // The typed built-in manifest registers each risk and capability field explicitly.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn register_core_os_tool_with_parameters(
         &mut self,
         id: &str,

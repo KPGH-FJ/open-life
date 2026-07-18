@@ -28,6 +28,7 @@ pub(crate) async fn finalize_chat_agent_run(
     reply: &str,
     reasoning_trace: &mut ReasoningTrace,
     agent_run: &mut openlife_core::agent::AgentRun,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
     if assistant_message.role != "assistant" {
@@ -36,11 +37,13 @@ pub(crate) async fn finalize_chat_agent_run(
     if agent_run.task_id.trim().is_empty() || agent_run.id.trim().is_empty() {
         return Err("Main Chat finalization requires task/run-bound message identity".into());
     }
+    let terminal_owner_generation = execution_epoch.terminal_owner_generation()?;
     commit_main_chat_assistant_message(
         session_id,
         assistant_message,
         &agent_run.task_id,
         &agent_run.id,
+        terminal_owner_generation,
         state,
     )
     .await?;
@@ -60,9 +63,37 @@ pub(crate) async fn finalize_chat_agent_run(
     agent_run.finished_at = Some(chrono::Utc::now());
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
 
-    crate::terminal_owner_write_gateway::update_agent_run(state, agent_run)
-        .await
-        .map_err(|err| format!("update canonical AgentRun during finalization failed: {err}"))?;
+    crate::terminal_owner_write_gateway::project_main_chat_generation_result(
+        state,
+        &agent_run.id,
+        &agent_run.task_id,
+        execution_epoch,
+        crate::terminal_owner_write_gateway::MainChatGenerationProjection {
+            context_summary: agent_run
+                .context_summary
+                .clone()
+                .ok_or_else(|| "Main Chat finalization context summary missing".to_string())?,
+            model_route: agent_run
+                .model_route
+                .clone()
+                .ok_or_else(|| "Main Chat finalization model route missing".to_string())?,
+            output_preview: agent_run
+                .output_preview
+                .clone()
+                .ok_or_else(|| "Main Chat finalization output preview missing".to_string())?,
+            reasoning_strategy: agent_run.reasoning_strategy.clone(),
+            reasoning_trace: reasoning_trace.clone(),
+            terminal_owner_generation,
+            actions: agent_run.actions.clone(),
+            observations: agent_run.observations.clone(),
+            hs_selection_audit: agent_run.hs_selection_audit.clone(),
+            behavior_checks: agent_run.behavior_checks.clone(),
+            step_count: agent_run.step_count,
+            tool_call_count: agent_run.tool_call_count,
+        },
+    )
+    .await
+    .map_err(|err| format!("update canonical AgentRun during finalization failed: {err}"))?;
 
     // Proposal creation is intentionally absent from terminalization. Typed
     // PolicyDecision/ReviewWorkflow paths must stage proposals before this
@@ -74,7 +105,21 @@ pub(crate) fn main_chat_assistant_message_operation_id(
     task_session_id: &str,
     run_id: &str,
 ) -> String {
-    format!("main_chat_assistant_message:{task_session_id}:{run_id}")
+    main_chat_assistant_message_operation_id_for_generation(task_session_id, run_id, 1)
+}
+
+pub(crate) fn main_chat_assistant_message_operation_id_for_generation(
+    task_session_id: &str,
+    run_id: &str,
+    terminal_owner_generation: u64,
+) -> String {
+    if terminal_owner_generation <= 1 {
+        format!("main_chat_assistant_message:{task_session_id}:{run_id}")
+    } else {
+        format!(
+            "main_chat_assistant_message:{task_session_id}:{run_id}:generation:{terminal_owner_generation}"
+        )
+    }
 }
 
 pub(crate) async fn commit_main_chat_assistant_message(
@@ -82,6 +127,7 @@ pub(crate) async fn commit_main_chat_assistant_message(
     assistant_message: &ChatMessage,
     task_session_id: &str,
     run_id: &str,
+    terminal_owner_generation: u64,
     state: &Arc<AppState>,
 ) -> Result<openlife_core::memory::CanonicalConversationMessageReceipt, String> {
     if assistant_message.role != "assistant" {
@@ -90,7 +136,11 @@ pub(crate) async fn commit_main_chat_assistant_message(
     crate::memory_gateway::save_conversation_message_idempotent_with_state(
         session_id,
         assistant_message,
-        &main_chat_assistant_message_operation_id(task_session_id, run_id),
+        &main_chat_assistant_message_operation_id_for_generation(
+            task_session_id,
+            run_id,
+            terminal_owner_generation,
+        ),
         state,
     )
     .await

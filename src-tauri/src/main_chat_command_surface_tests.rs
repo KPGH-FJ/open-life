@@ -3,6 +3,43 @@ use crate::main_chat_turn_pipeline::{
     MainChatExecutionPath, MainChatTurnRouteDecision, MainChatTurnStreamMode,
 };
 
+fn detached_test_execution_epoch(
+    task_session_id: &str,
+) -> crate::main_chat_cancellation::MainChatExecutionEpoch {
+    let registry = crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+    let registration = registry.register(task_session_id);
+    let epoch = registration.execution_epoch();
+    epoch
+        .bind_terminal_owner_generation(1)
+        .expect("detached finalization fixture binds one terminal-owner generation");
+    epoch
+}
+
+fn bind_detached_finalization_metadata(run: &mut openlife_core::agent::AgentRun) {
+    run.context_summary = Some(openlife_core::agent::ContextSummary {
+        life_model_empty: true,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: false,
+        redaction_level: openlife_core::agent::RedactionLevel::None,
+    });
+    run.model_route = Some(openlife_core::agent::ModelRouteTrace {
+        provider: "direct".into(),
+        model: "deterministic".into(),
+        route_type: "direct".into(),
+        prefer_local: false,
+        local_model: "none".into(),
+        reason: "detached_test_finalization".into(),
+        privacy_level: openlife_core::agent::RedactionLevel::None,
+        latency_ms: None,
+        retry_count: 0,
+        fallback_reason: None,
+        provider_health_is_estimated: Some(false),
+    });
+}
+
 #[test]
 fn shipped_handler_keeps_main_chat_receipt_commands_registered() {
     let source = include_str!("lib.rs");
@@ -269,6 +306,7 @@ async fn isolated_command_surface_state_skips_vectors_but_saves_assistant_messag
     let mut agent_run =
         openlife_core::agent::AgentRun::new_chat_run(session_id, "Trigger eval vector skip");
     agent_run.tool_call_count = 1;
+    bind_detached_finalization_metadata(&mut agent_run);
     state
         .agent_run_store
         .as_ref()
@@ -277,12 +315,14 @@ async fn isolated_command_surface_state_skips_vectors_but_saves_assistant_messag
         .await
         .create_run(&agent_run)
         .expect("persist canonical AgentRun before finalization");
+    let execution_epoch = detached_test_execution_epoch(&agent_run.task_id);
     crate::main_chat_generation_support::finalize_chat_agent_run(
         session_id,
         &assistant_message,
         &assistant_message.content,
         &mut reasoning_trace,
         &mut agent_run,
+        &execution_epoch,
         &state,
     )
     .await
@@ -1866,6 +1906,7 @@ async fn ordinary_chat_finalization_never_creates_post_hoc_proposals() {
     let mut reasoning_trace = openlife_core::agent::ReasoningTrace::default();
     let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_text);
     agent_run.id = "ordinary-chat-no-post-hoc-proposal-run".into();
+    bind_detached_finalization_metadata(&mut agent_run);
     state
         .agent_run_store
         .as_ref()
@@ -1874,6 +1915,7 @@ async fn ordinary_chat_finalization_never_creates_post_hoc_proposals() {
         .await
         .create_run(&agent_run)
         .expect("persist canonical AgentRun before finalization");
+    let execution_epoch = detached_test_execution_epoch(&agent_run.task_id);
 
     crate::main_chat_generation_support::finalize_chat_agent_run(
         session_id,
@@ -1881,6 +1923,7 @@ async fn ordinary_chat_finalization_never_creates_post_hoc_proposals() {
         &assistant_message.content,
         &mut reasoning_trace,
         &mut agent_run,
+        &execution_epoch,
         &state,
     )
     .await
@@ -2505,6 +2548,36 @@ async fn main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_re
             .and_then(serde_json::Value::as_str),
         Some("filesystem_path_traversal_blocked")
     );
+    let send_traversal_metadata = send_file_action
+        .observation_metadata
+        .as_ref()
+        .expect("send traversal blocker metadata");
+    assert_eq!(
+        send_traversal_metadata
+            .get("preGatewayBlocker")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        send_traversal_metadata
+            .get("toolExecutionReceipt")
+            .is_none(),
+        "a lexical blocker must not persist a synthetic ToolGateway receipt"
+    );
+    let send_events = send_state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("send traversal EventStore")
+        .lock()
+        .await
+        .list(send_task_session_id, 0, 250)
+        .expect("list send traversal events");
+    assert!(
+        send_events
+            .iter()
+            .all(|event| event.object_type != "tool_execution_receipt"),
+        "lexical path rejection cannot manufacture ToolGateway lifecycle facts"
+    );
 
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let stream_response = invoke_start_stream_message_for_kernel_goal_3(
@@ -2528,11 +2601,18 @@ async fn main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_re
         .pending_blockers
         .contains(&"filesystem_path_traversal_blocked".to_string()));
     let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
-    assert!(stream_actions
+    let stream_file_action = stream_actions
         .iter()
-        .any(|action| action.action.action_type == "file.read"
-            && action.status
-                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+        .find(|action| action.action.action_type == "file.read")
+        .expect("stream traversal file.read action");
+    assert_eq!(
+        stream_file_action.status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+    );
+    assert!(stream_file_action
+        .observation_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.get("toolExecutionReceipt").is_none()));
 }
 
 #[tokio::test]
@@ -5547,28 +5627,29 @@ async fn roadshow_rc01_exact_prompt_streams_one_writing_and_plan_final_without_r
     assert!(captured_request.contains("exactly 5 top-level items numbered 1 through 5"));
     assert!(captured_request.contains("grants no tool, write, memory, or policy authority"));
     assert!(captured_request.contains("\"stream\":true"));
-    let events = emitted.lock().expect("read RC01 stream events");
-    assert_eq!(
-        events
-            .iter()
-            .filter(|(event, _)| event == "stream-message-chunk")
-            .count(),
-        3,
-        "RC01 must expose each of the three Provider chunks incrementally"
-    );
-    assert_eq!(
-        events.last().map(|(event, _)| event.as_str()),
-        Some("stream-message-done"),
-        "RC01 final must be the last transport event"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|(event, _)| event == "stream-message-done")
-            .count(),
-        1
-    );
-    drop(events);
+    {
+        let events = emitted.lock().expect("read RC01 stream events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(event, _)| event == "stream-message-chunk")
+                .count(),
+            3,
+            "RC01 must expose each of the three Provider chunks incrementally"
+        );
+        assert_eq!(
+            events.last().map(|(event, _)| event.as_str()),
+            Some("stream-message-done"),
+            "RC01 final must be the last transport event"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(event, _)| event == "stream-message-done")
+                .count(),
+            1
+        );
+    }
 
     let replay = crate::main_chat_send::send_message_with_operation_state(
         operation_id.clone(),
@@ -6018,15 +6099,16 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
         "Review pending is not file completion"
     );
 
-    let requests = captured_requests
-        .lock()
-        .expect("captured CC01 provider requests");
-    assert_eq!(requests.len(), 1, "CC01 uses one bounded synthesis request");
-    assert!(requests[0].contains("cite_"));
-    assert!(requests[0].contains("webref_"));
-    assert!(requests[0].contains("COMBINED_REPORT_PAGE_ONE"));
-    assert!(requests[0].contains(WEB_BODY_MARKER));
-    drop(requests);
+    {
+        let requests = captured_requests
+            .lock()
+            .expect("captured CC01 provider requests");
+        assert_eq!(requests.len(), 1, "CC01 uses one bounded synthesis request");
+        assert!(requests[0].contains("cite_"));
+        assert!(requests[0].contains("webref_"));
+        assert!(requests[0].contains("COMBINED_REPORT_PAGE_ONE"));
+        assert!(requests[0].contains(WEB_BODY_MARKER));
+    }
 
     let accepted =
         crate::commands::proposal::accept_proposal_with_state(proposals[0].id.clone(), &state)
@@ -8350,7 +8432,7 @@ async fn send_message_missing_workspace_file_source_records_kernel_blocked_read_
     assert!(
         response["reply"]
             .as_str()
-            .is_some_and(|reply| reply.contains("filesystem_read_blocked")),
+            .is_some_and(|reply| reply.contains("filesystem_read_failed")),
         "missing file response: {response:#}"
     );
     assert_eq!(
@@ -8361,9 +8443,38 @@ async fn send_message_missing_workspace_file_source_records_kernel_blocked_read_
         response["reasoning_trace"]["generation_result"]["legacyFallbackUsed"],
         false
     );
+    let product_tool_calls = response["tool_calls"]
+        .as_array()
+        .expect("missing file product tool calls");
+    assert_eq!(
+        product_tool_calls.len(),
+        1,
+        "an operating-system file-not-found observation belongs to ToolGateway"
+    );
+    let receipt = &product_tool_calls[0]["executionReceipt"];
+    assert_eq!(receipt["dispatchKind"], "local");
+    assert_eq!(receipt["transportStatus"], "response_observed");
+    assert_eq!(receipt["outcome"], "failed");
+    let receipt_id = receipt["receiptRef"]
+        .as_str()
+        .expect("missing file runtime receipt id");
     let task_session_id = response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
         .expect("missing file task session id");
+    let run_id = response["run_id"]
+        .as_str()
+        .expect("missing file canonical run id");
+
+    let terminal = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("missing file EventStore")
+        .lock()
+        .await
+        .get_unique_tool_terminal_event(task_session_id, run_id, receipt_id)
+        .expect("query missing file terminal")
+        .expect("missing file owns one terminal event");
+    assert_eq!(terminal.event_type, "tool.failed");
 
     let session = {
         let store_arc = state
@@ -8378,18 +8489,18 @@ async fn send_message_missing_workspace_file_source_records_kernel_blocked_read_
     };
     assert_eq!(
         session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
     );
     assert_eq!(
         session.pending_blockers,
-        vec!["filesystem_read_blocked".to_string()]
+        vec!["filesystem_read_failed".to_string()]
     );
 
     let actions = list_command_surface_actions(&state, task_session_id).await;
     let file_action = actions
         .iter()
         .find(|action| action.action.action_type == "file.read")
-        .expect("missing file.read blocked action");
+        .expect("missing file.read failed action");
     assert_eq!(
         file_action.status,
         openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
@@ -8408,13 +8519,20 @@ async fn send_message_missing_workspace_file_source_records_kernel_blocked_read_
         action_metadata
             .get("blockerReason")
             .and_then(serde_json::Value::as_str),
-        Some("filesystem_read_blocked")
+        Some("filesystem_read_failed")
     );
     assert_eq!(
         action_metadata
             .get("legacyFallbackUsed")
             .and_then(serde_json::Value::as_bool),
         Some(false)
+    );
+    assert_eq!(
+        action_metadata
+            .get("toolExecutionReceipt")
+            .and_then(|receipt| receipt.get("receiptId"))
+            .and_then(serde_json::Value::as_str),
+        Some(receipt_id)
     );
 
     let transcript = list_command_surface_transcript(&state, task_session_id).await;

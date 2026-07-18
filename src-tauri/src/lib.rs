@@ -203,13 +203,14 @@ use commands::proposal::{
     postpone_proposal, rebuild_memory_materialized_view, reject_proposal, rollback_memory_asset,
 };
 use commands::router::get_model_router_status;
-#[cfg(feature = "dev-extensions")]
-use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
 use commands::settings::{
-    export_all_data, get_config, get_danger_action_preflight, get_last_model_error,
+    abandon_governed_data_import_recovery, export_all_data, get_config,
+    get_danger_action_preflight, get_governed_data_import_status, get_last_model_error,
     get_privacy_policy, import_all_data, recover_required_credential_access, save_config,
     set_privacy_policy, test_llm_connection,
 };
+#[cfg(feature = "dev-extensions")]
+use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
 use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
@@ -596,6 +597,7 @@ async fn execute_tool_call(
     );
     let ctx = ctx
         .with_tool_audit_persistence_observer(resources.shared.persistence_coordinator.as_ref())
+        .with_durable_store_failure_observer(resources.shared.persistence_coordinator.as_ref())
         .with_agent_run_store(&resources.agent_run_store);
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -691,28 +693,29 @@ fn start_dev_extension_background_workers(app_state: Arc<AppState>) {
         .require_effects_allowed()
         .is_ok()
     {
-        let vector_store = app_state.vector_store.clone();
+        let maintenance_state = Arc::clone(&app_state);
         tauri::async_runtime::spawn(async move {
-            {
-                let store = vector_store.lock().await;
-                match store.run_tier_maintenance() {
-                    Ok((upgraded, downgraded)) => {
-                        log::info!(
-                            "[tier] development maintenance done: upgraded={} downgraded={}",
-                            upgraded,
-                            downgraded
-                        );
-                    }
-                    Err(error) => {
-                        log::warn!("[tier] development maintenance failed: {}", error);
-                    }
+            match memory_gateway::run_memory_tier_maintenance_with_state(&maintenance_state).await {
+                Ok((upgraded, downgraded)) => {
+                    log::info!(
+                        "[tier] development maintenance done: upgraded={} downgraded={}",
+                        upgraded,
+                        downgraded
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[tier] development maintenance skipped or failed: {}",
+                        error
+                    );
                 }
             }
             let interval = std::time::Duration::from_secs(600);
             loop {
                 tokio::time::sleep(interval).await;
-                let store = vector_store.lock().await;
-                match store.run_tier_maintenance() {
+                match memory_gateway::run_memory_tier_maintenance_with_state(&maintenance_state)
+                    .await
+                {
                     Ok((upgraded, downgraded)) => {
                         log::info!(
                             "[tier] periodic development maintenance done: upgraded={} downgraded={}",
@@ -721,7 +724,10 @@ fn start_dev_extension_background_workers(app_state: Arc<AppState>) {
                         );
                     }
                     Err(error) => {
-                        log::warn!("[tier] periodic development maintenance failed: {}", error);
+                        log::warn!(
+                            "[tier] periodic development maintenance skipped or failed: {}",
+                            error
+                        );
                     }
                 }
             }
@@ -1069,6 +1075,8 @@ pub fn run() {
             export_all_data,
             get_danger_action_preflight,
             import_all_data,
+            abandon_governed_data_import_recovery,
+            get_governed_data_import_status,
             test_llm_connection,
             get_last_model_error,
             list_chat_sessions,

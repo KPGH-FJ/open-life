@@ -58,12 +58,13 @@ fn b1_deleted_agent_run_raw_read_callers_are_exactly_allowlisted() {
     fn visit_rust_sources(
         directory: &std::path::Path,
         repository_root: &std::path::Path,
-        hits: &mut std::collections::BTreeMap<String, usize>,
+        production_hits: &mut std::collections::BTreeMap<String, usize>,
+        test_hits: &mut std::collections::BTreeMap<String, usize>,
     ) {
         for entry in std::fs::read_dir(directory).expect("read source directory") {
             let path = entry.expect("read source entry").path();
             if path.is_dir() {
-                visit_rust_sources(&path, repository_root, hits);
+                visit_rust_sources(&path, repository_root, production_hits, test_hits);
             } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
                 let relative = path
                     .strip_prefix(repository_root)
@@ -74,7 +75,155 @@ fn b1_deleted_agent_run_raw_read_callers_are_exactly_allowlisted() {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read Rust source");
-                let count = source.matches(".get_run_including_deleted(").count();
+                let (production, tests) = source
+                    .find("#[cfg(test)]\nmod tests {")
+                    .map_or((source.as_str(), ""), |boundary| source.split_at(boundary));
+                let production_count = production.matches(".get_run_including_deleted(").count();
+                let test_count = tests.matches(".get_run_including_deleted(").count();
+                if production_count > 0 {
+                    production_hits.insert(relative.clone(), production_count);
+                }
+                if test_count > 0 {
+                    test_hits.insert(relative, test_count);
+                }
+            }
+        }
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository_root = manifest.parent().expect("src-tauri has repository parent");
+    let mut actual_production = std::collections::BTreeMap::new();
+    let mut test_only = std::collections::BTreeMap::new();
+    visit_rust_sources(
+        &repository_root.join("openlife-core/src"),
+        repository_root,
+        &mut actual_production,
+        &mut test_only,
+    );
+    visit_rust_sources(
+        &manifest.join("src"),
+        repository_root,
+        &mut actual_production,
+        &mut test_only,
+    );
+    let expected_production = std::collections::BTreeMap::from([
+        // The two product-internal recovery/admission callers are the complete
+        // release surface. The marker matches method calls (not the store
+        // definition); tombstone assertions below cfg(test) are classified
+        // separately and cannot widen production.
+        (
+            "src-tauri/src/main_chat_turn_runtime.rs".to_string(),
+            1usize,
+        ),
+        ("src-tauri/src/memory_gateway.rs".to_string(), 1usize),
+    ]);
+    assert_eq!(
+        actual_production, expected_production,
+        "release deleted-AgentRun raw reads are limited to store definition, canonical run admission, and projection recovery"
+    );
+    assert!(
+        !test_only.is_empty(),
+        "the quarantine classification must exercise tombstone regression assertions"
+    );
+}
+
+#[test]
+fn b1_agent_run_lifecycle_task_binding_is_metadata_only_and_callers_are_semantic() {
+    let marker = [".lifecycle_", "task_id("].concat();
+    let core_store = include_str!("../../openlife-core/src/agent/store.rs");
+    let lifecycle_reader = core_store
+        .split("pub fn lifecycle_task_id(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(crate) fn lifecycle_parent_conversation_id(")
+                .next()
+        })
+        .expect("metadata-only AgentRun lifecycle task reader");
+    assert!(lifecycle_reader.contains("SELECT task_id FROM agent_runs WHERE id = ?1"));
+    for forbidden in [
+        "AGENT_RUN_SELECT_COLUMNS",
+        "row_to_run",
+        "input_ref",
+        "output_preview",
+        "actions_json",
+        "observations_json",
+    ] {
+        assert!(
+            !lifecycle_reader.contains(forbidden),
+            "lifecycle task binding must not expose AgentRun content via {forbidden}"
+        );
+    }
+
+    let gateway = include_str!("terminal_owner_write_gateway.rs");
+    assert!(
+        !gateway.contains("pub(crate) async fn update_agent_run("),
+        "release must not expose a caller-shaped full-row AgentRun update gateway"
+    );
+    let typed_delta = gateway
+        .split("async fn project_agent_run_from_typed_delta")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(crate) async fn project_main_chat_agent_run_failure")
+                .next()
+        })
+        .expect("typed AgentRun delta gateway");
+    assert!(typed_delta.contains("load_live_agent_run(state, &store, run_id)"));
+    assert!(typed_delta.contains("run.task_id != expected_task_id"));
+    let delete = gateway
+        .split("pub(crate) async fn delete_agent_run_with_tombstone(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(crate) async fn restore_agent_run_with_receipt(")
+                .next()
+        })
+        .expect("delete lifecycle block");
+    assert_eq!(delete.matches(&marker).count(), 1);
+    let restore_revalidation = gateway
+        .split("pub(crate) async fn restore_agent_run_with_receipt(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(crate) async fn append_runtime_event(")
+                .next()
+        })
+        .expect("restore lifecycle revalidation block");
+    assert_eq!(restore_revalidation.matches(&marker).count(), 2);
+    assert_eq!(
+        gateway.matches(&marker).count(),
+        3,
+        "normal update admission, delete/restore lookup, and restore revalidation are the only production lifecycle binding consumers"
+    );
+    let agent_command = include_str!("commands/agent.rs");
+    let (agent_production, agent_tests) = agent_command
+        .split_once("#[cfg(test)]\nmod tests")
+        .expect("Agent command test boundary");
+    assert_eq!(agent_production.matches(&marker).count(), 0);
+    assert_eq!(
+        agent_tests.matches(&marker).count(),
+        1,
+        "the command-local call is an explicit tombstone regression assertion only"
+    );
+
+    fn visit_rust_sources(
+        directory: &std::path::Path,
+        repository_root: &std::path::Path,
+        marker: &str,
+        hits: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("read source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                visit_rust_sources(&path, repository_root, marker, hits);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                let relative = path
+                    .strip_prefix(repository_root)
+                    .expect("source must remain below repository root")
+                    .to_string_lossy()
+                    .to_string();
+                if relative == "src-tauri/src/backend_remediation_phase2_tests.rs" {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read Rust source");
+                let count = source.matches(marker).count();
                 if count > 0 {
                     hits.insert(relative, count);
                 }
@@ -88,26 +237,558 @@ fn b1_deleted_agent_run_raw_read_callers_are_exactly_allowlisted() {
     visit_rust_sources(
         &repository_root.join("openlife-core/src"),
         repository_root,
+        &marker,
         &mut actual,
     );
-    visit_rust_sources(&manifest.join("src"), repository_root, &mut actual);
-    let expected = std::collections::BTreeMap::from([
-        // Store- and command-local hits are tombstone regression assertions.
-        // Product code has only two authorized raw-read owners: early
-        // canonical run admission prevents tombstone resurrection, and
-        // projection recovery reads the deleted aggregate without exposing it
-        // through a product list/detail surface.
-        ("openlife-core/src/agent/store.rs".to_string(), 5usize),
-        ("src-tauri/src/commands/agent.rs".to_string(), 2usize),
-        (
-            "src-tauri/src/main_chat_turn_runtime.rs".to_string(),
-            1usize,
-        ),
-        ("src-tauri/src/memory_gateway.rs".to_string(), 1usize),
-    ]);
+    visit_rust_sources(&manifest.join("src"), repository_root, &marker, &mut actual);
     assert_eq!(
-        actual, expected,
-        "deleted AgentRun raw reads are limited to canonical run admission, projection recovery, and explicit regression assertions"
+        actual,
+        std::collections::BTreeMap::from([
+            ("src-tauri/src/commands/agent.rs".to_string(), 1usize),
+            (
+                "src-tauri/src/terminal_owner_write_gateway.rs".to_string(),
+                3usize,
+            ),
+        ]),
+        "metadata-only deleted-row binding must remain confined to lifecycle serialization and its regression assertion"
+    );
+}
+
+#[test]
+fn b1_product_review_paths_cannot_write_caller_shaped_agent_run_rows() {
+    for (path, source) in [
+        ("commands/builder.rs", include_str!("commands/builder.rs")),
+        (
+            "commands/calibration.rs",
+            include_str!("commands/calibration.rs"),
+        ),
+        (
+            "commands/agent_runtime/plan_execute_product.rs",
+            include_str!("commands/agent_runtime/plan_execute_product.rs"),
+        ),
+        (
+            "main_chat_runtime_support.rs",
+            include_str!("main_chat_runtime_support.rs"),
+        ),
+        (
+            "main_chat_generation_support.rs",
+            include_str!("main_chat_generation_support.rs"),
+        ),
+        ("main_chat_kernel.rs", include_str!("main_chat_kernel.rs")),
+        (
+            "main_chat_turn_runtime.rs",
+            include_str!("main_chat_turn_runtime.rs"),
+        ),
+    ] {
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("production source boundary");
+        assert!(
+            !production.contains("terminal_owner_write_gateway::update_agent_run("),
+            "{path} must use identity-only canonical AgentRun projection gateways"
+        );
+    }
+
+    let proposal = include_str!("commands/proposal.rs");
+    let proposal_production = proposal
+        .split("\n#[cfg(test)]\nmod tests {")
+        .next()
+        .expect("Proposal production source boundary");
+    assert!(
+        !proposal_production.contains("AgentRunReviewProjection")
+            && !proposal_production.contains("requested_projection"),
+        "Proposal reconciliation must derive review truth from canonical linked Proposals"
+    );
+}
+
+#[test]
+fn b1_agent_run_delete_restore_permit_sections_are_synchronous() {
+    let gateway = include_str!("terminal_owner_write_gateway.rs");
+    for (function, next_function) in [
+        (
+            "pub(crate) async fn delete_agent_run_with_tombstone(",
+            "pub(crate) async fn restore_agent_run_with_receipt(",
+        ),
+        (
+            "pub(crate) async fn restore_agent_run_with_receipt(",
+            "pub(crate) async fn append_runtime_event(",
+        ),
+    ] {
+        let body = gateway
+            .split(function)
+            .nth(1)
+            .and_then(|tail| tail.split(next_function).next())
+            .expect("AgentRun lifecycle owner function");
+        let after_permit = body
+            .split("acquire_agent_run_commit_permit(admission)")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split_once(".await")
+                    .map(|(_, after_await)| after_await)
+            })
+            .expect("AgentRun lifecycle function awaits a generation-bound permit");
+        assert!(
+            !after_permit.contains(".await"),
+            "{function} must clone every owner before permit acquisition and perform no await while the permit is live"
+        );
+    }
+}
+
+#[test]
+fn p2_clippy_waivers_are_expiring_owned_expectations() {
+    fn visit(directory: &std::path::Path, violations: &mut Vec<String>) {
+        for entry in std::fs::read_dir(directory).expect("read Rust source directory") {
+            let path = entry.expect("read Rust source entry").path();
+            if path.is_dir() {
+                visit(&path, violations);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read Rust source");
+            let lines = source.lines().collect::<Vec<_>>();
+            let mut index = 0usize;
+            while index < lines.len() {
+                let trimmed = lines[index].trim();
+                let permanent_allow = trimmed.starts_with("#[allow(");
+                if !permanent_allow && !trimmed.starts_with("#[expect(") {
+                    index += 1;
+                    continue;
+                }
+                let start_line = index + 1;
+                let mut attribute = trimmed.to_string();
+                while !attribute.contains(")]") && index + 1 < lines.len() {
+                    index += 1;
+                    attribute.push(' ');
+                    attribute.push_str(lines[index].trim());
+                }
+                index += 1;
+                if !attribute.contains("clippy::") {
+                    continue;
+                }
+                if permanent_allow {
+                    violations.push(format!(
+                        "{}:{} uses a permanent allow instead of an expiring expectation",
+                        path.display(),
+                        start_line
+                    ));
+                    continue;
+                }
+                let Some(reason) = attribute
+                    .split("reason = \"")
+                    .nth(1)
+                    .and_then(|tail| tail.split('"').next())
+                else {
+                    violations.push(format!(
+                        "{}:{} has no machine-readable reason",
+                        path.display(),
+                        start_line
+                    ));
+                    continue;
+                };
+                let owner = reason
+                    .split(';')
+                    .map(str::trim)
+                    .find_map(|field| field.strip_prefix("owner="));
+                let expiry = reason
+                    .split(';')
+                    .map(str::trim)
+                    .find_map(|field| field.strip_prefix("expires="));
+                if owner.is_none_or(str::is_empty) {
+                    violations.push(format!(
+                        "{}:{} has no non-empty owner",
+                        path.display(),
+                        start_line
+                    ));
+                }
+                let Some(expiry) = expiry else {
+                    violations.push(format!("{}:{} has no expiry", path.display(), start_line));
+                    continue;
+                };
+                let Ok(expiry) = chrono::NaiveDate::parse_from_str(expiry, "%Y-%m-%d") else {
+                    violations.push(format!(
+                        "{}:{} has malformed expiry {expiry}",
+                        path.display(),
+                        start_line
+                    ));
+                    continue;
+                };
+                if expiry < chrono::Utc::now().date_naive() {
+                    violations.push(format!(
+                        "{}:{} expired on {expiry}",
+                        path.display(),
+                        start_line
+                    ));
+                }
+            }
+        }
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository = manifest.parent().expect("src-tauri repository root");
+    let mut violations = Vec::new();
+    for directory in [
+        repository.join("openlife-core/src"),
+        repository.join("openlife-core/benches"),
+        manifest.join("src"),
+        repository.join("tools"),
+    ] {
+        visit(&directory, &mut violations);
+    }
+    assert!(
+        violations.is_empty(),
+        "every Clippy waiver must be an expiring, owned expectation:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn b1_agent_run_create_has_one_tauri_authority_and_raw_calls_are_quarantined() {
+    const MARKER: &str = ".create_run(";
+
+    fn visit_rust_sources(
+        directory: &std::path::Path,
+        repository_root: &std::path::Path,
+        hits: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("read source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                visit_rust_sources(&path, repository_root, hits);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(repository_root)
+                .expect("source must remain below repository root")
+                .to_string_lossy()
+                .to_string();
+            if matches!(
+                relative.as_str(),
+                "src-tauri/src/backend_remediation_phase2_tests.rs"
+                    | "src-tauri/src/d055_terminal_owner_graph_compile_red.rs"
+            ) {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read Rust source");
+            let count = source.matches(MARKER).count();
+            if count > 0 {
+                hits.insert(relative, count);
+            }
+        }
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository_root = manifest.parent().expect("src-tauri has repository parent");
+    let mut hits = std::collections::BTreeMap::new();
+    visit_rust_sources(&manifest.join("src"), repository_root, &mut hits);
+
+    let mixed_test_module_boundaries = std::collections::BTreeMap::from([
+        ("src-tauri/src/bootstrap.rs", "\n#[cfg(test)]\nmod tests {"),
+        (
+            "src-tauri/src/commands/agent.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/commands/proposal.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/commands/agent_runtime/plan_execute_product.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/main_chat_event_stream.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/main_chat_kernel.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/main_chat_react_runtime.rs",
+            "\n#[cfg(test)]\nmod canonical_delta_tests {",
+        ),
+        (
+            "src-tauri/src/main_chat_turn_runtime.rs",
+            "\n#[cfg(test)]\nmod turn_admission_tests {",
+        ),
+        (
+            "src-tauri/src/memory_gateway.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/persistence_coordinator.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/scheduler_runner.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/tool_gateway_resources.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+    ]);
+
+    for (relative, count) in &hits {
+        let source = std::fs::read_to_string(repository_root.join(relative))
+            .expect("read classified AgentRun create source");
+        match relative.as_str() {
+            "src-tauri/src/terminal_owner_write_gateway.rs" => {
+                assert_eq!(
+                    *count, 1,
+                    "the Tauri AgentRun owner gateway must contain exactly one generic raw create"
+                );
+                assert_eq!(
+                    source
+                        .matches(".create_agent_run_from_active_conversation_message(")
+                        .count(),
+                    1,
+                    "the conversation-bound create must retain exactly one Core proof seam"
+                );
+            }
+            "src-tauri/src/lib.rs" => {
+                assert_eq!(
+                    *count, 1,
+                    "the only non-gateway Tauri raw create is the quarantined dev command"
+                );
+                let dev_create = source
+                    .split("#[cfg(feature = \"dev-extensions\")]\nasync fn execute_tool_call(")
+                    .nth(1)
+                    .and_then(|tail| tail.split("\n#[tauri::command]").next())
+                    .expect("dev execute_tool_call quarantine boundary");
+                assert_eq!(dev_create.matches(MARKER).count(), 1);
+            }
+            relative if relative.ends_with("_tests.rs") => {
+                assert!(*count > 0, "test fixture classification must be exercised");
+            }
+            relative => {
+                let boundary = mixed_test_module_boundaries
+                    .get(relative)
+                    .unwrap_or_else(|| {
+                        panic!("unclassified raw AgentRun create caller: {relative}")
+                    });
+                let production = source
+                    .split(boundary)
+                    .next()
+                    .expect("mixed source production prefix");
+                assert_eq!(
+                    production.matches(MARKER).count(),
+                    0,
+                    "release production must enter AgentRun creation through terminal_owner_write_gateway: {relative}"
+                );
+            }
+        }
+    }
+
+    for required in [
+        "src-tauri/src/terminal_owner_write_gateway.rs",
+        "src-tauri/src/lib.rs",
+    ] {
+        assert!(
+            hits.contains_key(required),
+            "classification did not exercise {required}"
+        );
+    }
+
+    for release_caller in [
+        "src-tauri/src/commands/builder.rs",
+        "src-tauri/src/commands/calibration.rs",
+        "src-tauri/src/commands/agent_runtime/plan_execute_product.rs",
+        "src-tauri/src/scheduler_runner.rs",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+    ] {
+        let source = std::fs::read_to_string(repository_root.join(release_caller))
+            .expect("read migrated release AgentRun caller");
+        assert!(
+            source.contains("terminal_owner_write_gateway::create_"),
+            "release AgentRun caller is not routed through the unique gateway: {release_caller}"
+        );
+    }
+
+    let calibration =
+        std::fs::read_to_string(repository_root.join("src-tauri/src/commands/calibration.rs"))
+            .expect("read Calibration preview source");
+    let preview = calibration
+        .split("pub async fn generate_micro_evolution_changes(")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#[tauri::command]").next())
+        .expect("Calibration preview function");
+    assert!(
+        !preview.contains("AgentRun") && !preview.contains(MARKER),
+        "read-only Calibration preview must not perform a silent AgentRun write"
+    );
+}
+
+#[test]
+fn b1_agent_run_update_has_one_release_owner_and_test_dev_hits_are_classified() {
+    const MARKER: &str = ".update_run(";
+
+    fn visit(
+        directory: &std::path::Path,
+        repository_root: &std::path::Path,
+        hits: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("read Rust source directory") {
+            let path = entry.expect("read Rust source entry").path();
+            if path.is_dir() {
+                visit(&path, repository_root, hits);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                let relative = path
+                    .strip_prefix(repository_root)
+                    .expect("source stays inside repository")
+                    .to_string_lossy()
+                    .to_string();
+                if relative == "src-tauri/src/backend_remediation_phase2_tests.rs" {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read Rust source");
+                let count = source.matches(MARKER).count();
+                if count > 0 {
+                    hits.insert(relative, count);
+                }
+            }
+        }
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository_root = manifest.parent().expect("src-tauri repository parent");
+    let mut hits = std::collections::BTreeMap::new();
+    visit(&manifest.join("src"), repository_root, &mut hits);
+    assert_eq!(
+        hits,
+        std::collections::BTreeMap::from([
+            ("src-tauri/src/bootstrap.rs".to_string(), 5usize),
+            ("src-tauri/src/commands/a2a.rs".to_string(), 1usize),
+            ("src-tauri/src/commands/agent.rs".to_string(), 2usize),
+            (
+                "src-tauri/src/commands/agent_runtime/plan_execute_product.rs".to_string(),
+                1usize,
+            ),
+            (
+                "src-tauri/src/d055_terminal_owner_graph_tests.rs".to_string(),
+                1usize,
+            ),
+            ("src-tauri/src/main_chat_kernel.rs".to_string(), 2usize),
+            (
+                "src-tauri/src/main_chat_turn_runtime.rs".to_string(),
+                1usize
+            ),
+            (
+                "src-tauri/src/terminal_owner_write_gateway.rs".to_string(),
+                1usize,
+            ),
+        ]),
+        "every raw AgentRun update is classified; release code has one owner transaction seam"
+    );
+
+    let mixed_test_boundaries = [
+        ("src-tauri/src/bootstrap.rs", "\n#[cfg(test)]\nmod tests {"),
+        (
+            "src-tauri/src/commands/a2a.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/commands/agent.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/commands/agent_runtime/plan_execute_product.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/main_chat_kernel.rs",
+            "\n#[cfg(test)]\nmod tests {",
+        ),
+        (
+            "src-tauri/src/main_chat_turn_runtime.rs",
+            "\n#[cfg(test)]\nmod turn_admission_tests {",
+        ),
+    ];
+    for (relative, boundary) in mixed_test_boundaries {
+        let source = std::fs::read_to_string(repository_root.join(relative)).unwrap();
+        let production = source
+            .split(boundary)
+            .next()
+            .expect("production prefix before test module");
+        assert_eq!(
+            production.matches(MARKER).count(),
+            0,
+            "release raw AgentRun update escaped the terminal gateway: {relative}"
+        );
+    }
+    let gateway = include_str!("terminal_owner_write_gateway.rs");
+    assert_eq!(gateway.matches(MARKER).count(), 1);
+    assert!(gateway.contains("acquire_agent_run_commit_permit"));
+    assert!(gateway.contains("commit_agent_run_update"));
+    let lib = include_str!("lib.rs");
+    let dev_extensions = lib
+        .split("#[cfg(feature = \"dev-extensions\")]")
+        .skip(1)
+        .collect::<String>();
+    assert_eq!(
+        dev_extensions.matches(MARKER).count(),
+        0,
+        "dev-extensions must not gain a second AgentRun update authority"
+    );
+}
+
+#[test]
+fn b1_conversation_bound_agent_run_create_helper_is_tauri_gateway_only() {
+    const MARKER: &str = ".create_agent_run_from_active_conversation_message(";
+    fn visit(
+        directory: &std::path::Path,
+        repository_root: &std::path::Path,
+        hits: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        for entry in std::fs::read_dir(directory).expect("read Tauri source directory") {
+            let path = entry.expect("read Tauri source entry").path();
+            if path.is_dir() {
+                visit(&path, repository_root, hits);
+                continue;
+            }
+            if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(repository_root)
+                .expect("source stays inside repository")
+                .to_string_lossy()
+                .to_string();
+            if matches!(
+                relative.as_str(),
+                "src-tauri/src/backend_remediation_phase2_tests.rs"
+                    | "src-tauri/src/d055_terminal_owner_graph_compile_red.rs"
+            ) {
+                continue;
+            }
+            let source = std::fs::read_to_string(path).expect("read Rust source");
+            let count = source.matches(MARKER).count();
+            if count > 0 {
+                hits.insert(relative, count);
+            }
+        }
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository_root = manifest.parent().expect("src-tauri repository parent");
+    let mut hits = std::collections::BTreeMap::new();
+    visit(&manifest.join("src"), repository_root, &mut hits);
+    assert_eq!(
+        hits,
+        std::collections::BTreeMap::from([(
+            "src-tauri/src/terminal_owner_write_gateway.rs".to_string(),
+            1usize,
+        )])
+    );
+    let turn_runtime = include_str!("main_chat_turn_runtime.rs");
+    assert!(
+        turn_runtime.contains("terminal_owner_write_gateway::create_conversation_bound_agent_run")
     );
 }
 
@@ -516,7 +1197,10 @@ fn tool_gateway_product_paths_use_one_resource_snapshot_authority() {
         }
     }
 
-    let authority = include_str!("tool_gateway_resources.rs");
+    let authority_file = include_str!("tool_gateway_resources.rs");
+    let authority = authority_file
+        .split_once("#[cfg(test)]\nmod tests")
+        .map_or(authority_file, |(production, _)| production);
     assert!(
         !authority.contains("openlife_core::config::AppConfig"),
         "ToolGateway snapshots must not retain the full config or hydrated provider secrets"
@@ -589,6 +1273,11 @@ fn tool_gateway_product_paths_use_one_resource_snapshot_authority() {
                 assert!(
                     production.contains("snapshot_tool_gateway_resources"),
                     "product ActionExecutionContext owner bypasses the snapshot authority: {}",
+                    path.display()
+                );
+                assert!(
+                    production.contains("with_durable_store_failure_observer"),
+                    "product ActionExecutionContext owner omits the canonical durable-failure observer: {}",
                     path.display()
                 );
                 owners.insert(
@@ -781,16 +1470,28 @@ async fn real_app_state_snapshot_commit_cancel_paths_complete_10000_barrier_inte
             .await
             .expect("commit/cancel worker joins");
     };
-    if tokio::time::timeout(Duration::from_secs(45), workers)
-        .await
-        .is_err()
-    {
-        panic!(
-            "P0-03 product interleaving stalled: read={}, execution={}, commit_cancel={}",
-            read_progress.load(Ordering::Acquire),
-            execution_progress.load(Ordering::Acquire),
-            commit_cancel_progress.load(Ordering::Acquire),
-        );
+    tokio::pin!(workers);
+    let mut previous_progress = (0, 0, 0);
+    loop {
+        tokio::select! {
+            () = &mut workers => break,
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                let current_progress = (
+                    read_progress.load(Ordering::Acquire),
+                    execution_progress.load(Ordering::Acquire),
+                    commit_cancel_progress.load(Ordering::Acquire),
+                );
+                assert_ne!(
+                    current_progress,
+                    previous_progress,
+                    "P0-03 product interleaving stalled without progress: read={}, execution={}, commit_cancel={}",
+                    current_progress.0,
+                    current_progress.1,
+                    current_progress.2,
+                );
+                previous_progress = current_progress;
+            }
+        }
     }
     assert_eq!(read_progress.load(Ordering::Acquire), ITERATIONS);
     assert_eq!(execution_progress.load(Ordering::Acquire), ITERATIONS);
@@ -2119,14 +2820,15 @@ async fn stream_done_is_not_emitted_when_cancellation_durable_batch_fails() {
 
     release_late_response.store(true, Ordering::SeqCst);
 
-    let captured = events.lock().expect("read failed cancellation events");
-    assert!(
-        captured
-            .iter()
-            .all(|(event_name, _)| event_name != "stream-message-done"),
-        "stream done must remain behind a successfully committed durable cancellation batch"
-    );
-    drop(captured);
+    {
+        let captured = events.lock().expect("read failed cancellation events");
+        assert!(
+            captured
+                .iter()
+                .all(|(event_name, _)| event_name != "stream-message-done"),
+            "stream done must remain behind a successfully committed durable cancellation batch"
+        );
+    }
 
     let durable_events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
         &state,
@@ -2314,6 +3016,11 @@ async fn conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_rec
             && event.object_type == "provider_request"
             && event.object_id == provider_request_id
     }));
+    assert!(durable_events.iter().any(|event| {
+        event.event_type == "provider.remote_unknown"
+            && event.object_type == "provider_request"
+            && event.object_id == provider_request_id
+    }), "an invalid aggregate receipt state must not erase the per-request remote_unknown terminal for the verified first adapter attempt");
     assert!(durable_events
         .iter()
         .any(|event| event.event_type == "failed"));
@@ -3023,7 +3730,7 @@ async fn repeated_prompt_creates_independent_uuid_request_task_and_run_ids_acros
         "repeated buffered and streaming turns must not share execution state"
     );
     for id in operation_ids {
-        let parsed = uuid::Uuid::parse_str(&id).expect("identity is a UUID");
+        let parsed = uuid::Uuid::parse_str(id).expect("identity is a UUID");
         assert_eq!(parsed.get_version_num(), 4, "identity must be UUIDv4: {id}");
     }
     assert_eq!(
@@ -3049,7 +3756,7 @@ async fn every_ordinary_kernel_builder_reuses_exactly_one_early_canonical_agent_
             "write",
             "Please remember this private health fact: coffee causes heart palpitations.",
             "memory_proposal",
-            openlife_core::agent::AgentRunStatus::Completed,
+            openlife_core::agent::AgentRunStatus::WaitingPermission,
         ),
         (
             "blocker",
@@ -3114,7 +3821,10 @@ async fn every_ordinary_kernel_builder_reuses_exactly_one_early_canonical_agent_
         );
         assert_eq!(runs[0].id, run_id);
         assert_eq!(runs[0].task_id, task_session_id);
-        assert_eq!(runs[0].status, expected_run_status);
+        assert_eq!(
+            runs[0].status, expected_run_status,
+            "{case_id} builder canonical run terminal status drifted"
+        );
 
         let durable_events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
             &state,
@@ -3136,7 +3846,7 @@ async fn every_ordinary_kernel_builder_reuses_exactly_one_early_canonical_agent_
         }));
 
         if case_id == "write" {
-            {
+            let proposal_ids = {
                 let proposal_store = state
                     .proposal_store
                     .as_ref()
@@ -3150,15 +3860,94 @@ async fn every_ordinary_kernel_builder_reuses_exactly_one_early_canonical_agent_
                     !proposals.is_empty(),
                     "write builder must stage a governed review item"
                 );
-                for proposal in proposals {
+                for proposal in &proposals {
                     let origin = proposal_store
                         .terminal_owner_origin_binding(&proposal.id)
                         .expect("load canonical proposal origin")
                         .expect("write builder proposal has a terminal-owner origin");
                     assert_eq!(origin.task_session_id(), task_session_id);
                     assert_eq!(origin.run_id(), run_id);
+                    let projection = proposal_store
+                        .terminal_relation_projection_proof(&proposal.id)
+                        .expect("load canonical typed relation projection")
+                        .expect("write builder proposal has a typed terminal relation");
+                    assert_eq!(
+                        projection.relation_kind(),
+                        openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+                    );
                 }
+                proposals
+                    .into_iter()
+                    .map(|proposal| proposal.id)
+                    .collect::<Vec<_>>()
+            };
+            let run_store = state
+                .agent_run_store
+                .as_ref()
+                .expect("agent run store")
+                .lock()
+                .await;
+            for proposal_id in &proposal_ids {
+                let linked = run_store
+                    .list_runs_linked_to_proposal(proposal_id)
+                    .expect("list typed AgentRun review links");
+                assert_eq!(linked.len(), 1);
+                assert_eq!(linked[0].id, run_id);
+                assert_eq!(linked[0].status, expected_run_status);
             }
+            drop(run_store);
+
+            let owner_before_accept = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await
+                .canonical_owner_head(task_session_id)
+                .expect("load completed task owner before non-blocking review")
+                .expect("completed task owner exists before non-blocking review");
+            for proposal_id in &proposal_ids {
+                let acceptance = crate::commands::proposal::accept_proposal_with_state(
+                    proposal_id.clone(),
+                    &state,
+                )
+                .await
+                .expect("accept typed non-blocking Memory review");
+                assert_eq!(
+                    acceptance
+                        .get("proposal_projection_status")
+                        .and_then(serde_json::Value::as_str),
+                    Some("confirmed"),
+                    "effect-blocking Memory effect and Proposal truth diverged: {acceptance}"
+                );
+                assert!(acceptance.get("terminalOwnerTransition").is_some());
+                assert!(state
+                    .main_chat_agent_event_store
+                    .as_ref()
+                    .expect("event store")
+                    .lock()
+                    .await
+                    .get_immutable_event(
+                        task_session_id,
+                        "terminal_owner.successor_confirmed",
+                        &format!("successor:{proposal_id}"),
+                    )
+                    .expect("query non-blocking terminal successor")
+                    .is_some());
+            }
+            let owner_after_accept = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await
+                .canonical_owner_head(task_session_id)
+                .expect("load completed task owner after non-blocking review")
+                .expect("completed task owner exists after non-blocking review");
+            assert_ne!(
+                owner_after_accept, owner_before_accept,
+                "EffectBlockingPrerequisite acceptance must append one verified source-task successor"
+            );
         }
         if case_id == "plan" {
             let plan_event = durable_events

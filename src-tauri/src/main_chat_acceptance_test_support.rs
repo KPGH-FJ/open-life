@@ -9,6 +9,17 @@ pub(crate) async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
     config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
     config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
     config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
+    if let Ok(provider) = std::env::var("OPENLIFE_LIVE_EVAL_SEARCH_PROVIDER") {
+        if !provider.trim().is_empty() {
+            config.system.search_provider = provider;
+        }
+    }
+    if let Ok(key) = std::env::var("OPENLIFE_LIVE_EVAL_SEARCH_API_KEY") {
+        config.system.search_provider_key = key;
+    }
+    if let Ok(url) = std::env::var("OPENLIFE_LIVE_EVAL_SEARXNG_URL") {
+        config.system.searxng_url = url;
+    }
     config.prefer_local_model = false;
     config.system.network_policy.enabled = true;
     config.system.network_policy.default_decision = "allow".into();

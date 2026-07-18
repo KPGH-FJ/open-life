@@ -231,14 +231,32 @@ async fn agent_self_state_snapshot(
     };
     let run_id = match transcript_run_id(&transcript) {
         Some(run_id) => Some(run_id),
-        None => latest_matching_run_id_from_store(state, chat_session_id, &target_session).await,
+        None => match latest_matching_run_id_from_store(state, chat_session_id, &target_session)
+            .await
+        {
+            Ok(run_id) => run_id,
+            Err(_) => {
+                return missing_agent_self_state_snapshot(chat_session_id, "agent_run_list_failed");
+            }
+        },
     };
     let run = if let (Some(run_store_arc), Some(run_id)) =
         (state.agent_run_store.as_ref(), run_id.as_deref())
     {
         let run_store = run_store_arc.lock().await;
-        run_store.get_run(run_id).ok().flatten()
+        match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            run_store.get_run(run_id).map_err(|error| error.to_string()),
+        ) {
+            Ok(run) => run,
+            Err(_) => {
+                return missing_agent_self_state_snapshot(chat_session_id, "agent_run_load_failed");
+            }
+        }
     } else {
+        if run_id.is_some() {
+            return missing_agent_self_state_snapshot(chat_session_id, "agent_run_store_missing");
+        }
         None
     };
     let proposals = load_self_state_proposals(
@@ -535,19 +553,26 @@ async fn latest_matching_run_id_from_store(
     state: &Arc<AppState>,
     chat_session_id: &str,
     session: &AgentTaskSession,
-) -> Option<String> {
-    let run_store_arc = state.agent_run_store.as_ref()?;
+) -> Result<Option<String>, String> {
+    let run_store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let run_store = run_store_arc.lock().await;
-    run_store
-        .list_runs_for_session(chat_session_id, 20)
-        .ok()?
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        run_store
+            .list_runs_for_session(chat_session_id, 20)
+            .map_err(|error| error.to_string()),
+    )?;
+    Ok(runs
         .into_iter()
         .find(|run| {
             run.user_input.as_deref() == Some(session.user_goal.as_str())
                 && classify_agent_self_state_query(run.user_input.as_deref().unwrap_or_default())
                     .is_none()
         })
-        .map(|run| run.id)
+        .map(|run| run.id))
 }
 
 async fn load_self_state_proposals(
@@ -940,57 +965,26 @@ mod tests {
                 ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
-        let initially_failed = actions
-            .fail(&queued.id, "pre-dispatch setup failure", None)
-            .expect("enter failed");
-        let replay_execution_id = uuid::Uuid::new_v4().to_string();
-        let claim = actions
-            .claim_replay_for_test_fixture(
-                &queued.id,
-                initially_failed.status,
-                initially_failed.revision,
-                &replay_execution_id,
-            )
-            .expect("claim replay");
-        let retrying = actions
-            .transition_claimed_replay(
-                &queued.id,
-                &claim.claim_id,
-                initially_failed.status,
-                claim.revision,
-                ExecutionQueueStatus::Retrying,
-                None,
-            )
-            .expect("enter retrying");
-        let executing = actions
-            .transition_claimed_replay(
-                &queued.id,
-                &claim.claim_id,
-                retrying.status,
-                retrying.revision,
-                ExecutionQueueStatus::Executing,
-                None,
-            )
-            .expect("enter executing");
-        let fenced = actions
-            .fence_replay_dispatch_commit(
-                &queued.id,
-                &claim.claim_id,
-                claim.owner_generation,
-                executing.revision,
-            )
-            .expect("persist replay pre-edge dispatch fence");
-        let dispatched = actions
-            .record_replay_dispatch_started(&queued.id, &claim.claim_id, fenced.revision)
-            .expect("record physical dispatch boundary");
+        let receipt = ToolExecutionReceipt::test_remote_unknown(
+            Some("run-agent-self-unknown-effect".into()),
+            Some("file.read".into()),
+            "agent-self-unknown-effect".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
         let failed = actions
-            .fail_claimed_replay(
+            .project_initial_tool_execution_receipt(
                 &queued.id,
-                &claim.claim_id,
-                dispatched.status,
-                dispatched.revision,
-                "remote effect unknown",
-                Some(serde_json::json!({"retryReplayable": true})),
+                queued.status,
+                queued.revision,
+                InitialToolExecutionProjection {
+                    execution_status: ActionExecutionStatus::Failed,
+                    receipt: &receipt,
+                    observation_metadata: Some(serde_json::json!({
+                        "toolExecutionReceipt": receipt,
+                    })),
+                    error: Some("remote effect unknown".into()),
+                },
             )
             .expect("persist unknown effect");
         assert_eq!(

@@ -5,7 +5,7 @@ import SettingsPage from "./SettingsPage";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
 import { save, open } from "@tauri-apps/plugin-dialog";
-import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
+import { writeTextFile, readTextFile, stat } from "@tauri-apps/plugin-fs";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -19,12 +19,14 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@tauri-apps/plugin-fs", () => ({
   writeTextFile: vi.fn(),
   readTextFile: vi.fn(),
+  stat: vi.fn(),
 }));
 
 describe("SettingsPage", () => {
   beforeEach(() => {
     vi.stubGlobal("__OPENLIFE_INTERNAL_DEBUG__", true);
     vi.mocked(invoke).mockImplementation(mockInvoke);
+    vi.mocked(stat).mockResolvedValue({ size: 1024 } as Awaited<ReturnType<typeof stat>>);
   });
 
   afterEach(() => {
@@ -123,6 +125,25 @@ describe("SettingsPage", () => {
     sourceRefs: ["diagnostics", "life_state_projection"],
   });
 
+  const governedImportStatus = (overrides: Record<string, unknown> = {}) => ({
+    status: "idle",
+    operationId: null,
+    stage: null,
+    terminal: false,
+    terminalAt: null,
+    recoveryRequired: false,
+    runtimeRecoveryIsolationActive: false,
+    restartRequired: false,
+    originalImportCompleted: false,
+    rollbackCompleted: false,
+    preservedCurrent: false,
+    ownerCount: 0,
+    resolutionEvidenceCount: 0,
+    ownerResolutionCounts: { before: 0, target: 0, other: 0 },
+    observedAt: "2026-07-17T00:00:01Z",
+    ...overrides,
+  });
+
   it("renders settings title and checklist", async () => {
     renderSettings();
 
@@ -137,6 +158,114 @@ describe("SettingsPage", () => {
     await clickTab("数据与恢复");
     expect(screen.getByText(/导出全部数据/)).toBeInTheDocument();
     expect(await screen.findByText(/旧 run 可能未接入/)).toBeInTheDocument();
+  });
+
+  it("restores an abandoned governed import terminal from durable status on a clean startup", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_governed_data_import_status") {
+        return Promise.resolve(
+          governedImportStatus({
+            status: "abandoned_preserving_current",
+            operationId: "11111111-1111-4111-8111-444444444444",
+            stage: "abandoned_preserving_current",
+            terminal: true,
+            terminalAt: "2026-07-17T00:00:00Z",
+            preservedCurrent: true,
+            ownerCount: 4,
+            resolutionEvidenceCount: 4,
+            ownerResolutionCounts: { before: 1, target: 2, other: 1 },
+          })
+        );
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+    await waitFor(() => {
+      expect(
+        vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "get_governed_data_import_status")
+      ).toBe(true);
+    });
+    await clickTab("数据与恢复");
+
+    expect(await screen.findByText(/原导入没有完成，也没有回滚/)).toBeInTheDocument();
+    expect(screen.getByText(/当前启动已读取该终态，无需再次重启/)).toBeInTheDocument();
+    expect(screen.queryByText(/导入成功/)).not.toBeInTheDocument();
+  });
+
+  it("keeps an abandoned terminal restart-required while runtime isolation is active", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_governed_data_import_status") {
+        return Promise.resolve(
+          governedImportStatus({
+            status: "abandoned_preserving_current",
+            operationId: "11111111-1111-4111-8111-444444444445",
+            stage: "abandoned_preserving_current",
+            terminal: true,
+            terminalAt: "2026-07-17T00:00:00Z",
+            runtimeRecoveryIsolationActive: true,
+            restartRequired: true,
+            preservedCurrent: true,
+            ownerCount: 4,
+            resolutionEvidenceCount: 4,
+          })
+        );
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+    await clickTab("数据与恢复");
+
+    expect(await screen.findByText(/请重启 OpenLife 后再执行普通副作用/)).toBeInTheDocument();
+    expect(screen.queryByText(/无需再次重启/)).not.toBeInTheDocument();
+  });
+
+  it("shows a durable non-terminal governed import as recovery required", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_governed_data_import_status") {
+        return Promise.resolve(
+          governedImportStatus({
+            status: "memory_applied",
+            operationId: "11111111-1111-4111-8111-555555555555",
+            stage: "memory_applied",
+            recoveryRequired: true,
+            runtimeRecoveryIsolationActive: true,
+            ownerCount: 4,
+          })
+        );
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+    await clickTab("数据与恢复");
+
+    expect(await screen.findByText(/阶段：memory_applied/)).toBeInTheDocument();
+    expect(screen.getByText(/恢复仍然必需/)).toBeInTheDocument();
+    expect(screen.getByText(/普通副作用当前保持隔离/)).toBeInTheDocument();
+    expect(screen.queryByText(/导入成功/)).not.toBeInTheDocument();
+  });
+
+  it("reads governed import status on mount and data-tab entry without warning for idle", async () => {
+    renderSettings();
+
+    await waitFor(() => {
+      const statusReads = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "get_governed_data_import_status");
+      expect(statusReads.length).toBeGreaterThanOrEqual(1);
+    });
+    await clickTab("数据与恢复");
+    await waitFor(() => {
+      const statusReads = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "get_governed_data_import_status");
+      expect(statusReads.length).toBeGreaterThanOrEqual(2);
+    });
+
+    expect(screen.queryByTestId("governed-import-status")).not.toBeInTheDocument();
+    expect(screen.queryByText(/导入恢复状态读取失败/)).not.toBeInTheDocument();
   });
 
   it("hides internal multi-strategy and default Chat migration surfaces by default", async () => {
@@ -291,9 +420,19 @@ describe("SettingsPage", () => {
     vi.mocked(readTextFile).mockResolvedValue(
       JSON.stringify({
         version: "2.0",
+        exported_at: "2026-06-03T00:00:00Z",
+        life_model: {},
         app_version: "0.1.0",
         messages: [],
         vectors: [],
+        state_store: {
+          schema: "openlife.state-store-daily-tasks-portable.v1",
+          exportedAt: "2026-06-03T00:00:00Z",
+          canonicalDigest: `sha256:${"1".repeat(64)}`,
+          payloadDigest: `sha256:${"2".repeat(64)}`,
+          skippedExpiredCount: 0,
+          dailyTasks: [],
+        },
       })
     );
 
@@ -337,6 +476,65 @@ describe("SettingsPage", () => {
         })
       );
     });
+  });
+
+  it("terminalizes lost-payload recovery without file access and does not demand a second restart", async () => {
+    const operationId = "11111111-1111-4111-8111-333333333333";
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: Record<string, any>) => {
+      const result = (await mockInvoke(cmd, args)) as Record<string, any>;
+      if (cmd === "get_danger_action_preflight") {
+        const actionType = args?.actionType ?? args?.action_type;
+        if (
+          actionType === "data_import_overwrite" ||
+          actionType === "data_import_abandon_recovery"
+        ) {
+          return {
+            ...result,
+            recoveryOperationId: operationId,
+            recoveryStage: "compensation_unknown",
+            finalActionEnabled: true,
+            safeModeBlocked: false,
+            blockingReasons: [],
+          };
+        }
+      }
+      if (cmd === "abandon_governed_data_import_recovery") {
+        return {
+          ...result,
+          status: "abandoned_preserving_current",
+          restart_required: false,
+        };
+      }
+      return result;
+    });
+
+    renderSettings();
+    await clickTab("数据与恢复");
+    fireEvent.click(await screen.findByRole("button", { name: "导入覆盖备份" }));
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "无法取得原备份，保留当前数据并终止恢复" }));
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：保留当前数据并终止导入恢复" })
+    ).toBeInTheDocument();
+    const continueButton = screen.getByRole("button", { name: "继续执行" });
+    expect(continueButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/输入 PRESERVE CURRENT 以继续/), {
+      target: { value: "PRESERVE CURRENT" },
+    });
+    fireEvent.click(continueButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "abandon_governed_data_import_recovery",
+        expect.objectContaining({ operationId, operation_id: operationId })
+      );
+    });
+    expect(await screen.findByText(/当前启动已读取终态，无需再次重启/)).toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
+    expect(readTextFile).not.toHaveBeenCalled();
   });
 
   it("shows audit action preflights on first click before final commands", async () => {
@@ -783,6 +981,12 @@ describe("SettingsPage", () => {
           })
         );
       }
+      if (cmd === "get_danger_action_preflight") {
+        // The real Rust command re-observes Safe Mode from AppState. The page
+        // must not become a second policy authority, so the mock emulates that
+        // backend-owned observation here.
+        return mockInvoke(cmd, { ...args, safeMode: true, safe_mode: true });
+      }
       return mockInvoke(cmd, args);
     });
 
@@ -887,6 +1091,11 @@ describe("SettingsPage", () => {
             },
           })
         );
+      }
+      if (cmd === "get_danger_action_preflight") {
+        // Match the backend-owned Safe Mode re-observation performed by the
+        // real command instead of granting the page policy authority.
+        return mockInvoke(cmd, { ...args, safeMode: true, safe_mode: true });
       }
       return mockInvoke(cmd, args);
     });

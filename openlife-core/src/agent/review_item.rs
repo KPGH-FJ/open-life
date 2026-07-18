@@ -779,7 +779,7 @@ mod tests {
         )
     }
 
-    fn find_action<'a>(item: &'a ReviewItem, kind: ReviewActionKind) -> &'a ReviewAction {
+    fn find_action(item: &ReviewItem, kind: ReviewActionKind) -> &ReviewAction {
         item.allowed_actions
             .iter()
             .find(|action| action.kind == kind)

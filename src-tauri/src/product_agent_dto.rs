@@ -207,6 +207,11 @@ pub struct ProductToolExecutionReceipt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// Tool prefixes are serialized product contract values, not redundant local names.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
+)]
 pub enum ProductToolFailureCode {
     ToolFailed,
     ToolEffectUnknown,
@@ -396,7 +401,7 @@ impl VerifiedProductToolCallProjection {
             tool_ref: self.tool_ref.clone(),
             action_ref: self.action_ref.clone(),
             run_ref: (self.run_ref != "unknown_run").then(|| self.run_ref.clone()),
-            status: self.status.clone(),
+            status: self.status,
             requires_confirmation: false,
             failure_code: self.failure_code,
             privacy_warning_count: 0,
@@ -550,18 +555,23 @@ fn product_terminal_blocker(value: &str) -> String {
 fn product_terminal_proposal_ref(value: &str) -> String {
     let proposal_id = value.strip_prefix("proposal:").unwrap_or(value);
     let proposal_ref = strict_uuid_ref(proposal_id, "unknown_proposal");
-    (proposal_ref != "unknown_proposal")
-        .then(|| format!("proposal:{proposal_ref}"))
-        .unwrap_or(proposal_ref)
+    if proposal_ref != "unknown_proposal" {
+        format!("proposal:{proposal_ref}")
+    } else {
+        proposal_ref
+    }
 }
 
 impl From<&crate::main_chat_turn_runtime::OpenLifeTurnTerminal> for ProductOpenLifeTurnTerminal {
     fn from(terminal: &crate::main_chat_turn_runtime::OpenLifeTurnTerminal) -> Self {
         Self {
-            runtime_owner: (terminal.runtime_owner
-                == crate::main_chat_turn_runtime::OPENLIFE_TURN_RUNTIME_OWNER)
-                .then(|| terminal.runtime_owner.clone())
-                .unwrap_or_else(|| "unknown_runtime".into()),
+            runtime_owner: if terminal.runtime_owner
+                == crate::main_chat_turn_runtime::OPENLIFE_TURN_RUNTIME_OWNER
+            {
+                terminal.runtime_owner.clone()
+            } else {
+                "unknown_runtime".into()
+            },
             status: product_terminal_status(&terminal.status),
             state: product_terminal_state(&terminal.state),
             final_delivery: ProductFinalDeliveryView::from(&terminal.final_delivery),

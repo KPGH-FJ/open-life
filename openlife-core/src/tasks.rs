@@ -931,7 +931,6 @@ impl ScheduledProviderGrantV2 {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn deterministic_local_only_with_provider_digest(
         task_id: &str,
         description: &str,
@@ -1118,7 +1117,7 @@ impl ScheduledProviderGrantV2 {
             && self
                 .model_digest
                 .as_deref()
-                .map_or(true, |expected| expected == model_digest)
+                .is_none_or(|expected| expected == model_digest)
     }
 }
 
@@ -1323,10 +1322,10 @@ impl ScheduledReconciliationIssuer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScheduledReconciliationEvidenceKind {
     #[cfg(any(test, feature = "test-utils"))]
-    NoEffectConfirmed,
-    FailedConfirmed,
+    NoEffect,
+    Failed,
     #[cfg(any(test, feature = "test-utils"))]
-    CompletedConfirmed,
+    Completed,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -1334,10 +1333,10 @@ impl ScheduledReconciliationEvidenceKind {
     fn as_str(self) -> &'static str {
         match self {
             #[cfg(any(test, feature = "test-utils"))]
-            Self::NoEffectConfirmed => "no_effect_confirmed",
-            Self::FailedConfirmed => "failed_confirmed",
+            Self::NoEffect => "no_effect_confirmed",
+            Self::Failed => "failed_confirmed",
             #[cfg(any(test, feature = "test-utils"))]
-            Self::CompletedConfirmed => "completed_confirmed",
+            Self::Completed => "completed_confirmed",
         }
     }
 }
@@ -4357,7 +4356,7 @@ impl TaskStore {
             },
             evidence_id: uuid::Uuid::new_v4().to_string(),
             issuer: ScheduledReconciliationIssuer::ProviderAdapterReconciler,
-            evidence_kind: ScheduledReconciliationEvidenceKind::FailedConfirmed,
+            evidence_kind: ScheduledReconciliationEvidenceKind::Failed,
             evidence_ref,
             evidence_digest,
             issued_at: chrono::Utc::now().to_rfc3339(),
@@ -4461,7 +4460,7 @@ impl TaskStore {
             },
             evidence_id: uuid::Uuid::new_v4().to_string(),
             issuer: ScheduledReconciliationIssuer::ToolGatewayReconciler,
-            evidence_kind: ScheduledReconciliationEvidenceKind::FailedConfirmed,
+            evidence_kind: ScheduledReconciliationEvidenceKind::Failed,
             evidence_ref,
             evidence_digest,
             issued_at: chrono::Utc::now().to_rfc3339(),
@@ -4516,11 +4515,11 @@ impl TaskStore {
         let (resolution, evidence_kind) = match resolution {
             ScheduledReconciliationTestResolution::RetrySafe => (
                 ScheduledReconciliationResolution::RetrySafe,
-                ScheduledReconciliationEvidenceKind::NoEffectConfirmed,
+                ScheduledReconciliationEvidenceKind::NoEffect,
             ),
             ScheduledReconciliationTestResolution::ConfirmedFailed { reason_code } => (
                 ScheduledReconciliationResolution::ConfirmedFailed { reason_code },
-                ScheduledReconciliationEvidenceKind::FailedConfirmed,
+                ScheduledReconciliationEvidenceKind::Failed,
             ),
             ScheduledReconciliationTestResolution::ConfirmedCompleted {
                 result_ref,
@@ -4530,7 +4529,7 @@ impl TaskStore {
                     result_ref,
                     result_digest,
                 },
-                ScheduledReconciliationEvidenceKind::CompletedConfirmed,
+                ScheduledReconciliationEvidenceKind::Completed,
             ),
         };
         let source_id = digest_parts(&[
@@ -4617,6 +4616,15 @@ impl TaskStore {
         };
         let now_value = chrono::Utc::now();
         let now = now_value.to_rfc3339();
+        type ScheduledReconciliationTransition = (
+            &'static str,
+            &'static str,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
         let (
             task_status,
             attempt_status,
@@ -4625,18 +4633,10 @@ impl TaskStore {
             result_digest,
             completed_at,
             eligible_at,
-        ): (
-            &str,
-            &str,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = match record.resolution {
+        ): ScheduledReconciliationTransition = match record.resolution {
             #[cfg(any(test, feature = "test-utils"))]
             ScheduledReconciliationResolution::RetrySafe => {
-                if record.evidence_kind != ScheduledReconciliationEvidenceKind::NoEffectConfirmed {
+                if record.evidence_kind != ScheduledReconciliationEvidenceKind::NoEffect {
                     anyhow::bail!("scheduled retry-safe reconciliation evidence kind mismatch");
                 }
                 if _reviewed_cloud_grant_consumed {
@@ -4663,7 +4663,7 @@ impl TaskStore {
             }
             ScheduledReconciliationResolution::ConfirmedFailed { reason_code } => {
                 validate_reason_code(&reason_code)?;
-                if record.evidence_kind != ScheduledReconciliationEvidenceKind::FailedConfirmed {
+                if record.evidence_kind != ScheduledReconciliationEvidenceKind::Failed {
                     anyhow::bail!("scheduled failed reconciliation evidence kind mismatch");
                 }
                 (
@@ -4683,7 +4683,7 @@ impl TaskStore {
             } => {
                 validate_scheduled_result_ref(&result_ref)?;
                 validate_digest("reconciled result digest", &result_digest)?;
-                if record.evidence_kind != ScheduledReconciliationEvidenceKind::CompletedConfirmed {
+                if record.evidence_kind != ScheduledReconciliationEvidenceKind::Completed {
                     anyhow::bail!("scheduled completed reconciliation evidence kind mismatch");
                 }
                 (
@@ -7204,14 +7204,19 @@ fn classify_legacy_scheduled_task(
             let provably_not_due = scheduled_at.zip(parsed_due).is_some_and(|(raw, parsed)| {
                 raw > migration_cutoff_text && parsed > migration_cutoff
             });
-            if provably_not_due && title.is_some() && description.is_some() && action_type_valid {
+            if let (true, Some(title), Some(description), Some(parsed_due)) = (
+                provably_not_due && action_type_valid,
+                title,
+                description,
+                parsed_due,
+            ) {
                 let candidate = LegacyScheduledTaskReviewCandidate {
                     source_digest: source_digest.to_string(),
                     source_ordinal: ordinal,
                     item_digest: item_digest.clone(),
-                    title: title.unwrap().to_string(),
-                    description: description.unwrap().to_string(),
-                    due_at: parsed_due.unwrap().to_rfc3339(),
+                    title: title.to_string(),
+                    description: description.to_string(),
+                    due_at: parsed_due.to_rfc3339(),
                     priority: priority.to_string(),
                     action_type: action_type.to_string(),
                     source_run_id: legacy_bounded_optional_reference(item, "source_run_id"),
@@ -7341,13 +7346,13 @@ impl LegacyFileIdentity {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            return Ok(Self {
+            Ok(Self {
                 device: metadata.dev(),
                 inode: metadata.ino(),
                 byte_len: metadata.len(),
                 modified_marker: i128::from(metadata.mtime()) * 1_000_000_000
                     + i128::from(metadata.mtime_nsec()),
-            });
+            })
         }
         #[cfg(not(unix))]
         {
@@ -7868,7 +7873,10 @@ pub(crate) fn scheduled_task_schedule_digest(
     .1
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) fn scheduled_provider_policy_decision_digest(
     task_id: &str,
     subject_digest: &str,
@@ -8883,7 +8891,6 @@ mod tests {
                 let barrier = std::sync::Arc::clone(&barrier);
                 let claim = std::sync::Arc::clone(&claim);
                 let policy_evidence = policy_evidence.clone();
-                let started_at = started_at.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
                     store
@@ -9685,8 +9692,7 @@ mod tests {
         let mut dispatch_count_drift = terminal.clone();
         dispatch_count_drift.dispatch_attempt_count = 2;
         let mut started_at_drift = terminal.clone();
-        started_at_drift.started_at =
-            started_at_drift.started_at - chrono::Duration::milliseconds(1);
+        started_at_drift.started_at -= chrono::Duration::milliseconds(1);
         let mut action_effect_drift = terminal.clone();
         action_effect_drift.action_effect = ToolActionEffect::LocalMutation;
         action_effect_drift.effect_status = ToolEffectStatus::Confirmed;
@@ -10730,8 +10736,7 @@ mod tests {
         assert_eq!(read_only.list_tasks(Some("running")).unwrap().len(), 1);
         let read_only_claim_error = read_only
             .claim_next_due(chrono::Utc::now(), chrono::Duration::seconds(30))
-            .err()
-            .expect("a read-only TaskStore must reject claim authority before SQLite mutation")
+            .expect_err("a read-only TaskStore must reject claim authority before SQLite mutation")
             .to_string();
         assert_eq!(
             read_only_claim_error,
@@ -10739,8 +10744,7 @@ mod tests {
         );
         let read_only_reconcile_error = read_only
             .reconcile_previous_process_claims(chrono::Utc::now())
-            .err()
-            .expect(
+            .expect_err(
                 "a read-only TaskStore must reject reconciliation authority before SQLite mutation",
             )
             .to_string();
@@ -11007,6 +11011,12 @@ mod tests {
         }
     }
 
+    // This test's temporary provider endpoint is process-global and must stay
+    // isolated until the async reconciliation request is fully observed.
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn provider_failed_reconciliation_read_only_gate_preserves_all_file_and_capability_state()
@@ -11153,8 +11163,7 @@ mod tests {
         before.push((lock_path.clone(), exact_file_state(&lock_path)));
         let error = read_only
             .issue_provider_failed_reconciliation(&task_id, &attempt_id, proof)
-            .err()
-            .expect("read-only provider reconciliation must reject before proof consumption")
+            .expect_err("read-only provider reconciliation must reject before proof consumption")
             .to_string();
         assert_eq!(
             error,
@@ -12358,8 +12367,7 @@ mod tests {
             || std::fs::hard_link(&path, &alias).unwrap(),
             || {},
         )
-        .err()
-        .expect("lease/open hardlink race must fail closed")
+        .expect_err("lease/open hardlink race must fail closed")
         .to_string();
         assert!(
             error.contains("scheduled_task_store_database_link_count_invalid"),
@@ -12407,8 +12415,7 @@ mod tests {
             std::fs::rename(&lock_path, &displaced_lock).unwrap();
             std::fs::File::create(&lock_path).unwrap();
         })
-        .err()
-        .expect("sidecar replacement after preflight must fail before configure")
+        .expect_err("sidecar replacement after preflight must fail before configure")
         .to_string();
         assert!(
             error.contains("scheduled_task_store_owner_lock_identity_changed"),
@@ -12418,8 +12425,7 @@ mod tests {
         std::fs::rename(&displaced_lock, &lock_path).unwrap();
         let poisoned = connection
             .lock()
-            .err()
-            .expect("restoring the sidecar pathname must not unpoison the handle")
+            .expect_err("restoring the sidecar pathname must not unpoison the handle")
             .to_string();
         assert!(
             poisoned.contains("scheduled_task_store_sqlite_slot_owner_poisoned"),
@@ -12461,8 +12467,7 @@ mod tests {
         let error = configure_authenticated_task_store_connection(&connection, || {
             std::fs::hard_link(&path, &alias).unwrap()
         })
-        .err()
-        .expect("database hardlink after preflight must fail before configure")
+        .expect_err("database hardlink after preflight must fail before configure")
         .to_string();
         assert!(
             error.contains("scheduled_task_store_database_link_count_invalid"),
@@ -12471,8 +12476,7 @@ mod tests {
         std::fs::remove_file(&alias).unwrap();
         let poisoned = connection
             .lock()
-            .err()
-            .expect("removing the hardlink must not unpoison the handle")
+            .expect_err("removing the hardlink must not unpoison the handle")
             .to_string();
         assert!(
             poisoned.contains("scheduled_task_store_sqlite_slot_owner_poisoned"),
@@ -12687,8 +12691,7 @@ mod tests {
                 symlink(&first, &slot).unwrap();
             },
         )
-        .err()
-        .expect("read-only TaskStore open must reject a changed symlink slot")
+        .expect_err("read-only TaskStore open must reject a changed symlink slot")
         .to_string();
         assert!(
             read_only_error

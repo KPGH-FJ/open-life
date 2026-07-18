@@ -616,7 +616,7 @@ fn canonical_life_event_json_material(value: &Value) -> String {
         ),
         Value::Object(values) => {
             let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             format!(
                 "{{{}}}",
                 entries
@@ -783,7 +783,7 @@ impl LifeEventStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_with_receipt_key(db_path, AgentRunReceiptKey::test_key());
+            Self::new_with_receipt_key(db_path, AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -818,7 +818,7 @@ impl LifeEventStore {
     pub fn new_in_memory() -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_in_memory_with_receipt_key(AgentRunReceiptKey::test_key());
+            Self::new_in_memory_with_receipt_key(AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -841,10 +841,7 @@ impl LifeEventStore {
     pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::open_read_only_existing_with_receipt_key(
-                db_path,
-                AgentRunReceiptKey::test_key(),
-            );
+            Self::open_read_only_existing_with_receipt_key(db_path, AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -896,6 +893,10 @@ impl LifeEventStore {
 
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn create_canonical_agent_run_event_for_test(
         &self,
         agent_run_store: &crate::agent::store::AgentRunStore,

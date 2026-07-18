@@ -2,8 +2,8 @@ use crate::agent::action_executor::helpers::{
     call_a2a_agent, canonical_tool_source, ensure_external_write_content_size,
     external_write_content_preview, extract_host_from_url, fetch_url_async,
     filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
-    is_path_in_safe_paths_async, prepare_web_content_observation, reserve_web_search_rate_limit,
-    search_web_async, ToolCallInternalResult,
+    is_path_in_safe_paths_async, is_path_lexically_in_safe_paths, prepare_web_content_observation,
+    reserve_web_search_rate_limit, search_web_async, ToolCallInternalResult,
 };
 use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
@@ -18,6 +18,12 @@ use super::AgentActionRequest;
 
 impl super::ActionExecutor {
     /// Execute an Execution tool (file.read, web.fetch, etc.).
+    // ToolGateway keeps action, cancellation, queue, and authorized network
+    // capabilities explicit at the execution boundary.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub(crate) async fn execute_execution_tool(
         &self,
         tool_name: &str,
@@ -105,6 +111,21 @@ impl super::ActionExecutor {
                     .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument for file.read"))?;
 
                 // Validate path is within safe_paths
+                if !is_path_lexically_in_safe_paths(path, ctx.safe_paths) {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(filesystem_access_error(path, ctx.safe_paths)),
+                    });
+                }
+
+                // From this point onward every filesystem observation is an
+                // adapter attempt owned by ToolGateway. A missing file cannot
+                // be downgraded to a caller-shaped pre-gateway blocker.
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?
+                    .observe_local()
+                    .await?;
                 if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
                     return Ok(ToolCallInternalResult {
                         success: false,
@@ -113,13 +134,14 @@ impl super::ActionExecutor {
                     });
                 }
 
-                // Check file size before reading
-                let metadata = tokio::fs::metadata(path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to read file metadata: {}", e))?;
                 let max_size = 100 * 1024; // 100KB limit
-                if metadata.len() > max_size {
-                    return Ok(ToolCallInternalResult {
+                let execution = match tokio::fs::metadata(path).await {
+                    Err(error) => ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to read file metadata: {error}")),
+                    },
+                    Ok(metadata) if metadata.len() > max_size => ToolCallInternalResult {
                         success: false,
                         output: None,
                         error: Some(format!(
@@ -127,25 +149,21 @@ impl super::ActionExecutor {
                             metadata.len(),
                             max_size
                         )),
-                    });
-                }
-
-                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
-                    .await?;
-                receipt_tracker.mark_local_dispatched();
-                ctx.observe_tool_started(&receipt_tracker).await?;
-                match tokio::fs::read_to_string(path).await {
-                    Ok(content) => Ok(ToolCallInternalResult {
-                        success: true,
-                        output: Some(content),
-                        error: None,
-                    }),
-                    Err(e) => Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!("Failed to read file '{}': {}", path, e)),
-                    }),
-                }
+                    },
+                    Ok(_) => match tokio::fs::read_to_string(path).await {
+                        Ok(content) => ToolCallInternalResult {
+                            success: true,
+                            output: Some(content),
+                            error: None,
+                        },
+                        Err(error) => ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!("Failed to read file '{path}': {error}")),
+                        },
+                    },
+                };
+                Ok(execution)
             }
             "calendar.read" => {
                 let range_start = args.get("range_start").and_then(|v: &Value| v.as_str());
@@ -153,11 +171,22 @@ impl super::ActionExecutor {
 
                 // Use the ICS file path from args or from safe_paths
                 let ics_path = args.get("source").and_then(|v: &Value| v.as_str());
+                let mut all_calendar_paths: Vec<String> = ctx.calendar_ics_paths.to_vec();
+                all_calendar_paths.extend(ctx.safe_paths.iter().cloned());
 
                 let events = if let Some(path) = ics_path {
                     // Validate source path is within calendar_ics_paths or safe_paths
-                    let mut all_calendar_paths: Vec<String> = ctx.calendar_ics_paths.to_vec();
-                    all_calendar_paths.extend(ctx.safe_paths.iter().cloned());
+                    if !is_path_lexically_in_safe_paths(path, &all_calendar_paths) {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(filesystem_access_error(path, &all_calendar_paths)),
+                        });
+                    }
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?
+                        .observe_local()
+                        .await?;
                     if !is_path_in_safe_paths_async(path, &all_calendar_paths).await {
                         return Ok(ToolCallInternalResult {
                             success: false,
@@ -187,10 +216,6 @@ impl super::ActionExecutor {
                             )),
                         });
                     }
-                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
-                        .await?;
-                    receipt_tracker.mark_local_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     match tokio::fs::read_to_string(path).await {
                         Ok(content) => crate::calendar::parse_ics(&content, range_start, range_end),
                         Err(e) => {
@@ -215,11 +240,14 @@ impl super::ActionExecutor {
                         ctx.calendar_ics_paths.iter().collect()
                     };
                     ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?
+                        .observe_local()
                         .await?;
-                    receipt_tracker.mark_local_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     let mut all_events = Vec::new();
                     for search_path in &ics_search_paths {
+                        if !is_path_in_safe_paths_async(search_path, &all_calendar_paths).await {
+                            continue;
+                        }
                         if let Ok(mut entries) = tokio::fs::read_dir(search_path).await {
                             while let Ok(Some(entry)) = entries.next_entry().await {
                                 let path = entry.path();
@@ -280,15 +308,10 @@ impl super::ActionExecutor {
                     });
                 }
 
-                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                let admission = ctx
+                    .authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
                     .await?;
-                let result = fetch_url_async(
-                    url,
-                    network_policy,
-                    receipt_tracker.clone(),
-                    ctx.tool_started_transition_observer,
-                )
-                .await?;
+                let result = fetch_url_async(url, network_policy, admission).await?;
                 // Keep model synthesis inside the active TurnRuntime. The tool returns an
                 // explicitly untrusted, bounded observation instead of starting a hidden
                 // provider request of its own.
@@ -329,9 +352,9 @@ impl super::ActionExecutor {
 
                 if let Some(fixture_output) = ctx.web_search_fixture_output {
                     ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?
+                        .observe_simulated()
                         .await?;
-                    receipt_tracker.mark_simulated_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     receipt_tracker.mark_response_observed();
                     super::tool_executor::record_effect_outcome(&receipt_tracker, true);
                     return Ok(ToolCallInternalResult {
@@ -349,14 +372,15 @@ impl super::ActionExecutor {
                     });
                 }
 
-                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                let admission = ctx
+                    .authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
                     .await?;
                 search_web_async(
                     query,
                     max_results,
+                    &self.config.search_provider,
                     network_policy,
-                    receipt_tracker.clone(),
-                    ctx.tool_started_transition_observer,
+                    admission,
                 )
                 .await
             }
@@ -417,9 +441,9 @@ impl super::ActionExecutor {
                         &tool_args,
                         &receipt_tracker,
                     )
+                    .await?
+                    .observe_local()
                     .await?;
-                    receipt_tracker.mark_local_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     let proposal_result = match self.create_external_write_action_proposal_record(
                         request,
                         ctx,
@@ -506,20 +530,21 @@ impl super::ActionExecutor {
                 }
 
                 // 4. Execute target tool
-                ctx.authorize_tool_dispatch(
-                    &target_manifest,
-                    request,
-                    &tool_args,
-                    &receipt_tracker,
-                )
-                .await?;
+                let admission = ctx
+                    .authorize_tool_dispatch(
+                        &target_manifest,
+                        request,
+                        &tool_args,
+                        &receipt_tracker,
+                    )
+                    .await?;
                 Ok(self
                     .call_tool_internal(
                         &target_manifest,
                         tool_args,
                         ctx,
                         inspection.pii_found,
-                        receipt_tracker.clone(),
+                        admission,
                     )
                     .await)
             }
@@ -536,7 +561,7 @@ impl super::ActionExecutor {
                 }
 
                 // Validate path is within safe_paths
-                if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
+                if !is_path_lexically_in_safe_paths(path, ctx.safe_paths) {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
@@ -585,9 +610,9 @@ impl super::ActionExecutor {
                     proposal.run_id = Some(run_id.clone());
                 }
                 ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?
+                    .observe_local()
                     .await?;
-                receipt_tracker.mark_local_dispatched();
-                ctx.observe_tool_started(&receipt_tracker).await?;
                 let proposal_id =
                     match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
                         DurableWriteSource::ToolPermission,
@@ -683,9 +708,9 @@ impl super::ActionExecutor {
                         proposal.run_id = Some(run_id.clone());
                     }
                     ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?
+                        .observe_local()
                         .await?;
-                    receipt_tracker.mark_local_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
                         DurableWriteSource::ToolPermission,
                         DurableWriteSubject::Calendar,
@@ -752,9 +777,9 @@ impl super::ActionExecutor {
                         proposal.run_id = Some(run_id.clone());
                     }
                     ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?
+                        .observe_local()
                         .await?;
-                    receipt_tracker.mark_local_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
                         DurableWriteSource::ToolPermission,
                         DurableWriteSubject::Email,
@@ -837,9 +862,9 @@ impl super::ActionExecutor {
                         proposal.run_id = Some(run_id.clone());
                     }
                     ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?
+                        .observe_local()
                         .await?;
-                    receipt_tracker.mark_local_dispatched();
-                    ctx.observe_tool_started(&receipt_tracker).await?;
                     match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
                         DurableWriteSource::ToolPermission,
                         DurableWriteSubject::Calendar,
@@ -897,15 +922,15 @@ impl super::ActionExecutor {
                         error: Some(format!("Invalid A2A URL scheme: {}", agent_url)),
                     });
                 }
-                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                let admission = ctx
+                    .authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
                     .await?;
                 call_a2a_agent(
                     agent_url,
                     task_text,
                     session_id,
                     request_id,
-                    receipt_tracker.clone(),
-                    ctx.tool_started_transition_observer,
+                    admission,
                     ctx.a2a_outbound_authorization,
                 )
                 .await

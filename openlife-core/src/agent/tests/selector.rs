@@ -44,7 +44,7 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
     let policy_store = PolicyStore::mvp_builtin();
     let heuristic_store = HeuristicStore::new_in_memory().unwrap();
     heuristic_store.seed_mvp_heuristics().unwrap();
-    let selector = HSSelector::default();
+    let selector = HSSelector;
 
     let planning_packet = selector
         .select(
@@ -131,7 +131,7 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
 
 #[test]
 fn serialized_hs_packet_cannot_rehydrate_cloud_authorization() {
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &PolicyStore::mvp_builtin(),
             &HeuristicStore::new_in_memory().unwrap(),
@@ -239,7 +239,7 @@ fn selector_emits_guidance_refs_only_for_accepted_guidance_assets() {
         .update_lifecycle(&accepted.id, HeuristicLifecycleStatus::Trial, None)
         .unwrap();
 
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &policy_store,
             &heuristic_store,
@@ -309,7 +309,7 @@ fn selector_excludes_rejected_archived_over_budget_and_policy_conflicting_assets
         "A very long guidance block that should be excluded when the token budget is tiny.",
     );
 
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &policy_store,
             &heuristic_store,
@@ -359,7 +359,7 @@ fn selector_audit_is_metadata_safe() {
         "Do not serialize this private guidance sentence in audit.",
     );
 
-    let packet = HSSelector::default()
+    let packet = HSSelector
         .select(
             &policy_store,
             &heuristic_store,

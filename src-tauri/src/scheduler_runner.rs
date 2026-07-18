@@ -605,7 +605,10 @@ async fn execute_scheduled_task(
         resources.agent_runtime_config.clone(),
     );
     let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
-        openlife_core::agent::ActionExecutorConfig::default(),
+        openlife_core::agent::ActionExecutorConfig {
+            search_provider: resources.governed.search_provider.clone(),
+            ..Default::default()
+        },
     );
     let loop_config = AgentLoopConfig {
         max_steps: 2,
@@ -658,6 +661,9 @@ async fn execute_scheduled_task(
         .with_tool_audit_persistence_observer(
             resources.governed.shared.persistence_coordinator.as_ref(),
         )
+        .with_durable_store_failure_observer(
+            resources.governed.shared.persistence_coordinator.as_ref(),
+        )
         .with_calendar_ics_paths(&calendar_ics_paths)
         .with_life_model(&life_model)
         .with_memory_store(&resources.governed.memory_store)
@@ -688,6 +694,7 @@ async fn execute_scheduled_task(
             )
             .await
             .map_err(|error| {
+                crate::terminal_owner_write_gateway::register_agent_run_store_error(state, &error);
                 ScheduledExecutionFailure::from_error("scheduled_agent_loop_failed", error)
             })
     }?;
@@ -741,9 +748,8 @@ async fn execute_scheduled_task(
         "canonical_delivery_ref={};digest={}",
         delivery.canonical_ref, delivery.content_digest
     ));
-    resources
-        .agent_run_store
-        .create_run(&loop_result.run)
+    crate::terminal_owner_write_gateway::create_agent_run(state, &loop_result.run)
+        .await
         .map_err(|error| {
             ScheduledExecutionFailure::from_error("scheduled_agent_run_persistence_failed", error)
         })?;

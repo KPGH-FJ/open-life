@@ -713,7 +713,7 @@
       "disposition": "keep",
       "phase4_classification": "product_path",
       "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Builder accepted signals now route through ReviewWorkflow before storage."
+      "reason": "Builder accepted signals route through ReviewWorkflow before storage and consult the shared LifeModel field-authority contract; StateStore-owned daily tasks and derived alerts cannot become Builder LifeModel writes."
     },
     {
       "id": "phase4_calibration",
@@ -856,18 +856,18 @@
       "path": "openlife-core/src/memory.rs",
       "phase": 5,
       "disposition": "storage_only",
-      "reason": "MemoryStore remains valid only behind MemoryGateway.",
+      "reason": "MemoryStore remains valid only behind MemoryGateway; the counted replacement primitives include digest-bound guarded CAS and its compatibility delegator, never a product command route.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
+      "expected_count": 3
     },
     {
       "id": "memory_write_core_vector_store",
       "path": "openlife-core/src/vectors.rs",
       "phase": 5,
       "disposition": "storage_only",
-      "reason": "VectorStore remains valid only behind MemoryGateway.",
+      "reason": "VectorStore remains valid only behind MemoryGateway; the counted portable replacement primitives include digest-bound guarded CAS and its compatibility delegator, never a product command route.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
+      "expected_count": 3
     },
     {
       "id": "memory_write_memory_commands",
@@ -901,9 +901,9 @@
       "path": "src-tauri/src/memory_gateway.rs",
       "phase": 5,
       "disposition": "storage_only",
-      "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore, including the policy-bound explicit rollback path.",
+      "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore, including digest-bound import CAS, CAS-bounded compensation, and the policy-bound explicit rollback paths.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 4
+      "expected_count": 5
     }
   ],
   "backend_readmodel_review_authority_surfaces": [
@@ -1099,7 +1099,7 @@
       "path": "openlife-core/src/life_model_write_gateway.rs",
       "phase": 5,
       "disposition": "keep",
-      "reason": "Core LifeModelWriteGateway decides canonical write/materialization eligibility and stale conflicts; it is not a LifeModelViewModel.",
+      "reason": "Core LifeModelWriteGateway decides canonical write/materialization eligibility, stale conflicts, and the shared canonical owner classification for LifeModel-shaped fields; it is not a LifeModelViewModel.",
       "concern": "lifemodel_materialization",
       "backend_owner": true,
       "r0_authority_classification": "backend_lifemodel_write_gateway_boundary",
@@ -1110,7 +1110,7 @@
       "path": "src-tauri/src/life_model_write_gateway.rs",
       "phase": 5,
       "disposition": "keep",
-      "reason": "Tauri LifeModelWriteGateway adapter applies governed writes and records conflicts; it is not a LifeModelViewModel command owner.",
+      "reason": "Tauri LifeModelWriteGateway adapter applies governed writes, enforces StateStore/derived field ownership across every write lane, and records conflicts; only the exact StateStore projector identity may update the daily-task compatibility view. It is not a LifeModelViewModel command owner.",
       "concern": "lifemodel_materialization",
       "backend_owner": true,
       "r0_authority_classification": "backend_lifemodel_write_gateway_adapter",

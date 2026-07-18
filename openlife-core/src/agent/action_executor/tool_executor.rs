@@ -7,7 +7,7 @@ use serde_json::Value;
 use super::helpers::{
     canonical_tool_source, configured_web_search_endpoint, ensure_external_write_content_size,
     external_write_content_preview, filesystem_access_error, hs_requires_external_write_proposal,
-    is_direct_external_write_tool, is_path_in_safe_paths_async, is_proposal_generation_tool,
+    is_direct_external_write_tool, is_path_lexically_in_safe_paths, is_proposal_generation_tool,
     minimized_external_write_arguments, normalize_tool_name, should_mark_needs_confirmation,
     ToolCallInternalResult,
 };
@@ -297,7 +297,35 @@ impl super::ActionExecutor {
                     .map(str::to_string)
                     .ok_or_else(|| anyhow::anyhow!("Missing 'url' argument for web.fetch"))?
             } else {
-                configured_web_search_endpoint()
+                match configured_web_search_endpoint(&self.config.search_provider) {
+                    Ok(endpoint) => endpoint,
+                    Err(reason) => {
+                        let forced_decision = ToolPermissionDecision {
+                            allowed: false,
+                            requires_confirmation: false,
+                            decision: "blocked".into(),
+                            reason: reason.into(),
+                            policy_id: None,
+                        };
+                        let (action, observation) = self.build_blocked_action_observation(
+                            tool_name,
+                            &args,
+                            &inspection,
+                            &forced_decision,
+                            manifest.as_ref(),
+                            &request,
+                        );
+                        return Ok(ActionExecutionResult {
+                            action,
+                            observation,
+                            status: ActionExecutionStatus::Blocked,
+                            stop_reason: Some(reason.into()),
+                            governance_report: None,
+                            execution_receipt: receipt_tracker.snapshot(),
+                            observed_body_admission: None,
+                        });
+                    }
+                }
             };
             if let Some(policy) = ctx.network_policy {
                 let network_decision = resolve_network_policy_decision(
@@ -713,7 +741,7 @@ impl super::ActionExecutor {
                     .get("path")
                     .and_then(|v: &Value| v.as_str())
                     .unwrap_or("");
-                if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
+                if !is_path_lexically_in_safe_paths(path, ctx.safe_paths) {
                     let (action, observation) = self.build_blocked_action_observation(
                         tool_name,
                         &args,
@@ -838,14 +866,15 @@ impl super::ActionExecutor {
                 });
             result
         } else {
-            ctx.authorize_tool_dispatch(manifest_ref, &request, &args, &receipt_tracker)
+            let admission = ctx
+                .authorize_tool_dispatch(manifest_ref, &request, &args, &receipt_tracker)
                 .await?;
             self.call_tool_internal(
                 manifest_ref,
                 args.clone(),
                 ctx,
                 inspection.pii_found,
-                receipt_tracker.clone(),
+                admission,
             )
             .await
         };
@@ -1024,12 +1053,14 @@ impl super::ActionExecutor {
         } else {
             ActionExecutionStatus::Failed
         };
+        let stop_reason = (!result.success && tool_name == "file.read")
+            .then(|| "filesystem_read_failed".to_string());
 
         Ok(ActionExecutionResult {
             action,
             observation,
             status,
-            stop_reason: None,
+            stop_reason,
             governance_report: None,
             execution_receipt: receipt_tracker.snapshot(),
             observed_body_admission,
@@ -1042,8 +1073,9 @@ impl super::ActionExecutor {
         args: Value,
         ctx: &ActionExecutionContext<'_>,
         pii_found: bool,
-        receipt_tracker: ToolExecutionReceiptTracker,
+        admission: super::ToolDispatchAdmission<'_>,
     ) -> ToolCallInternalResult {
+        let (receipt_tracker, started_observer) = admission.into_remote_parts();
         receipt_tracker.mark_audit_persistence_pending();
         let result = match ctx
             .registry
@@ -1051,7 +1083,7 @@ impl super::ActionExecutor {
                 manifest,
                 args.clone(),
                 receipt_tracker.clone(),
-                ctx.tool_started_transition_observer,
+                started_observer,
             )
             .await
         {
@@ -1518,7 +1550,10 @@ impl super::ActionExecutor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn build_react_trace_envelope(
         &self,
         action_id: &str,

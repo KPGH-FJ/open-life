@@ -3449,6 +3449,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       );
       const mutating = [
         "data_import_overwrite",
+        "data_import_abandon_recovery",
         "mcp_audit_cleanup",
         "mcp_audit_key_rotation",
         "agent_run_delete",
@@ -3457,6 +3458,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       ].includes(actionType);
       const confirmationPhrases: Record<string, string> = {
         data_import_overwrite: "IMPORT",
+        data_import_abandon_recovery: "PRESERVE CURRENT",
         mcp_audit_cleanup: "CLEANUP",
         mcp_audit_key_rotation: "ROTATE",
         agent_run_delete: "DELETE RUN",
@@ -3467,6 +3469,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       const labels: Record<string, string> = {
         data_export: "导出本地 LifeModel、聊天记录和向量记忆到本地 JSON 文件。",
         data_import_overwrite: "覆盖当前 LifeModel、聊天记录和向量记忆。",
+        data_import_abandon_recovery:
+          "保留当前 canonical 数据，并以 abandoned_preserving_current 终止中断的导入。",
         mcp_audit_export:
           "导出最近 MCP 审计日志元数据，可能包含工具输入参数文本和工具执行结果文本。",
         mcp_audit_cleanup: "删除超过保留期限的本地 MCP 审计日志。",
@@ -3478,6 +3482,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       const finalCommands: Record<string, string> = {
         data_export: "export_all_data",
         data_import_overwrite: "import_all_data",
+        data_import_abandon_recovery: "abandon_governed_data_import_recovery",
         mcp_audit_export: "export_mcp_audit_logs",
         mcp_audit_cleanup: "cleanup_mcp_audit_logs",
         mcp_audit_key_rotation: "rotate_mcp_audit_key",
@@ -3488,7 +3493,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve({
         actionType,
         riskTier:
-          actionType === "data_import_overwrite" || actionType === "mcp_audit_key_rotation"
+          actionType === "data_import_overwrite" ||
+          actionType === "data_import_abandon_recovery" ||
+          actionType === "mcp_audit_key_rotation"
             ? "critical"
             : "high",
         scopeSummary: labels[actionType] ?? "未知危险动作。",
@@ -3496,23 +3503,31 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           ? actionType === "mcp_audit_export"
             ? ["mcp_audit_metadata", "tool_metadata", "tool_input_text", "tool_output_text"]
             : ["mcp_audit_metadata", "tool_metadata"]
-          : actionType.startsWith("agent_run")
-            ? ["agent_run_metadata", "run_trace_metadata"]
-            : actionType === "vector_rebuild"
-              ? ["messages_metadata", "vectors"]
-              : ["life_model", "messages", "vectors"],
+          : actionType === "data_import_abandon_recovery"
+            ? [
+                "governed_import_journal_metadata",
+                "canonical_owner_digest_evidence",
+                "state_projection_delivery_metadata",
+              ]
+            : actionType.startsWith("agent_run")
+              ? ["agent_run_metadata", "run_trace_metadata"]
+              : actionType === "vector_rebuild"
+                ? ["messages_metadata", "vectors"]
+                : ["life_model", "messages", "vectors"],
         writesDurableState: mutating,
         privacySensitive: true,
         externalTransmission: "not_sent_externally",
         dryRunAvailable: false,
         backupStatus:
           actionType === "data_import_overwrite"
-            ? "will_create_on_execute"
-            : actionType === "vector_rebuild"
-              ? "rollback_previous_vectors_on_failure"
-              : mutating
-                ? "none"
-                : "not_required_read_only",
+            ? "lifemodel_snapshot_only_other_owners_forward_recovery"
+            : actionType === "data_import_abandon_recovery"
+              ? "not_applicable_preserves_current_canonical_data"
+              : actionType === "vector_rebuild"
+                ? "rollback_previous_vectors_on_failure"
+                : mutating
+                  ? "none"
+                  : "not_required_read_only",
         requiresTypedConfirmation: Boolean(confirmationPhrases[actionType]),
         confirmationRequired: Boolean(confirmationPhrases[actionType]),
         confirmationPhrase: confirmationPhrases[actionType] ?? null,
@@ -3533,6 +3548,40 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         ],
       } as T);
     }
+    case "abandon_governed_data_import_recovery":
+      return Promise.resolve({
+        success: true,
+        status: "abandoned_preserving_current_restart_required",
+        operation_id: _args?.operationId ?? _args?.operation_id,
+        stage: "abandoned_preserving_current",
+        recovery_terminalized: true,
+        original_import_completed: false,
+        rollback_completed: false,
+        preserved_current_canonical_data: true,
+        abandonment_mutated_canonical_owners: false,
+        original_import_effect_state: "preserved_current_observed_per_owner",
+        owner_resolution_counts: { before: 1, target: 2, other: 1 },
+        resolution_evidence_count: 4,
+        restart_required: true,
+      } as T);
+    case "get_governed_data_import_status":
+      return Promise.resolve({
+        status: "idle",
+        operationId: null,
+        stage: null,
+        terminal: false,
+        terminalAt: null,
+        recoveryRequired: false,
+        runtimeRecoveryIsolationActive: false,
+        restartRequired: false,
+        originalImportCompleted: false,
+        rollbackCompleted: false,
+        preservedCurrent: false,
+        ownerCount: 0,
+        resolutionEvidenceCount: 0,
+        ownerResolutionCounts: { before: 0, target: 0, other: 0 },
+        observedAt: new Date().toISOString(),
+      } as T);
     case "export_mcp_audit_logs":
       return Promise.resolve({
         exported_at: new Date().toISOString(),

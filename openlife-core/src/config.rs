@@ -530,6 +530,7 @@ mod tests {
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let mut config = AppConfig::default();
         config.llm.provider = "deepseek".into();
+        config.llm.openai_base = crate::llm::default_base_for_provider("deepseek").into();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
         assert_eq!(config.effective_cloud_api_key(), "sk-deepseek");
         std::env::remove_var("DEEPSEEK_API_KEY");

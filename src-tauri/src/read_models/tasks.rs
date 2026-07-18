@@ -188,7 +188,13 @@ async fn load_run_inputs(
         ));
         return Vec::new();
     };
-    match store.lock().await.list_runs(100, 0) {
+    let store = store.lock().await;
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store.list_runs(100, 0).map_err(|error| error.to_string()),
+    );
+    drop(store);
+    match runs {
         Ok(runs) => runs
             .into_iter()
             .map(|run| TaskViewModelRunInput { run })
@@ -291,13 +297,27 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::review_refs_for_task;
+    use super::{load_run_inputs, review_refs_for_task};
     use openlife_core::agent::{
         build_review_center_view_model, AgentProposal, ProposalSource, ProposalType,
         ReviewCenterBuildInput, RiskLevel,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn install_release_like_persistence_coordinator(state: &mut Arc<crate::AppState>) {
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        Arc::get_mut(state)
+            .expect("test state has one outer owner")
+            .persistence_coordinator = coordinator;
+    }
 
     fn pending_chat_proposal() -> AgentProposal {
         let mut proposal = AgentProposal::new(
@@ -345,5 +365,35 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, proposal_id);
         assert!(review_refs_for_task(&model.items, "forged-task").is_empty());
+    }
+
+    #[tokio::test]
+    async fn tasks_run_read_failure_is_unknown_and_degrades_before_future_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tasks-agent-run-read-failure.db");
+        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("test state has one outer owner")
+            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
+        install_release_like_persistence_coordinator(&mut state);
+        let fault = rusqlite::Connection::open(&path).unwrap();
+        fault.execute_batch("DROP TABLE agent_runs;").unwrap();
+        drop(fault);
+
+        let mut warnings = Vec::new();
+        let inputs = load_run_inputs(&state, &mut warnings).await;
+        assert!(inputs.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.code == "agent_run_store_read_failed"));
+        assert_eq!(
+            state.persistence_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded
+        );
+        assert!(state
+            .persistence_coordinator
+            .admit_agent_run_write()
+            .is_err());
     }
 }

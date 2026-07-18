@@ -39,34 +39,24 @@ async fn assert_disallowed_model_tool_blocked(
             )
             .expect("grant builtin echo permission");
     }
-    {
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "test-key".into(),
-            "gpt-react-mcp-loop-disallowed-tool".into(),
-            "text-embedding-test".into(),
-            false,
-        )
-        .with_scripted_generation_response(
-            serde_json::json!({
-                "final": "I will try an unsafe tool.",
-                "actions": [{
-                    "name": model_tool_name,
-                    "action_type": model_action_type,
-                    "arguments": {
-                        "content": "do not write"
-                    }
-                }],
-                "thought_summary": "This attempts a disallowed tool selection outside the candidate contract.",
-                "warnings": []
-            })
-            .to_string(),
-        );
-    }
+    configure_scripted_provider_scheduler(
+        &state,
+        "gpt-react-mcp-loop-disallowed-tool",
+        serde_json::json!({
+            "final": "I will try an unsafe tool.",
+            "actions": [{
+                "name": model_tool_name,
+                "action_type": model_action_type,
+                "arguments": {
+                    "content": "do not write"
+                }
+            }],
+            "thought_summary": "This attempts a disallowed tool selection outside the candidate contract.",
+            "warnings": []
+        })
+        .to_string(),
+    )
+    .await;
 
     let session_id = format!("command-surface-mcp-agent-loop-disallowed-tool-{case_id}");
     let user_text = "Use mcp builtin_echo read-only now.";
@@ -108,46 +98,6 @@ async fn assert_disallowed_model_tool_blocked(
         .pending_blockers
         .iter()
         .any(|blocker| blocker == "model_selected_disallowed_tool"));
-
-    let transcript = {
-        let store_arc = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .expect("main chat session store");
-        let store = store_arc.lock().await;
-        store
-            .list_transcript_entries(task_session_id)
-            .expect("list disallowed tool transcript")
-    };
-    let blocked_entry = transcript
-        .iter()
-        .find(|entry| {
-            entry
-                .summary
-                .contains("blocked a disallowed model-selected tool")
-        })
-        .expect("disallowed tool blocker transcript entry");
-    assert_eq!(
-        blocked_entry
-            .metadata
-            .get("modelSelectedAllowedTool")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        blocked_entry
-            .metadata
-            .get("singleStepFallbackUsed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        blocked_entry
-            .metadata
-            .get("blockerReason")
-            .and_then(serde_json::Value::as_str),
-        Some("model_selected_disallowed_tool")
-    );
 
     let actions = {
         let queue_arc = state
@@ -208,22 +158,39 @@ async fn configure_http_provider_scheduler(
     provider_base: &str,
     chat_model: &str,
 ) {
-    {
-        let mut config = state.config.lock().await;
-        config.system.network_policy.enabled = true;
-        config.system.network_policy.default_decision = "allow".into();
-    }
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.llm.provider = "openai".into();
+    config.llm.openai_base = provider_base.into();
+    config.llm.openai_key = "test-key".into();
+    config.llm.chat_model = chat_model.into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    config.system.network_policy.enabled = true;
+    config.system.network_policy.default_decision = "allow".into();
+    state.replace_provider_runtime_config(config).await;
+}
+
+async fn configure_scripted_provider_scheduler(
+    state: &std::sync::Arc<crate::AppState>,
+    chat_model: &str,
+    response: String,
+) {
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.llm.provider = "openai".into();
+    config.llm.openai_base = "https://example.invalid/v1".into();
+    config.llm.openai_key = "test-key".into();
+    config.llm.chat_model = chat_model.into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    state.replace_provider_runtime_config(config).await;
     let mut scheduler = state.scheduler.lock().await;
-    *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-        "unused-local-model".into(),
-        false,
-        "openai".into(),
-        provider_base.into(),
-        "test-key".into(),
-        chat_model.into(),
-        "text-embedding-test".into(),
-        false,
-    );
+    *scheduler = scheduler
+        .clone()
+        .with_scripted_generation_response(response);
 }
 
 async fn main_chat_transcript(
@@ -521,7 +488,23 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
     let transcript = main_chat_transcript(&state, task_session_id).await;
     let plan_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("AgentLoop attempt started"))
+        .find(|entry| {
+            entry
+                .metadata
+                .get("agentLoopAttempted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && entry
+                    .metadata
+                    .get("toolSelectionModelRanked")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && entry
+                    .metadata
+                    .get("toolSelectionRankingProviderBacked")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        })
         .expect("provider-ranked plan transcript entry");
     assert_eq!(
         plan_entry
@@ -533,59 +516,44 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
     assert_eq!(
         plan_entry
             .metadata
-            .get("toolSelectionRankingSource")
-            .and_then(serde_json::Value::as_str),
-        Some("provider_model")
-    );
-    assert_eq!(
-        plan_entry
-            .metadata
-            .get("toolSelectionRankingRouteType")
-            .and_then(serde_json::Value::as_str),
-        Some("cloud")
-    );
-    assert_eq!(
-        plan_entry
-            .metadata
             .get("toolSelectionRankingProviderBacked")
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
-    assert_eq!(
+    assert!(
         plan_entry
             .metadata
-            .get("toolSelectionRankingModel")
-            .and_then(serde_json::Value::as_str),
-        Some("gpt-general-read-model")
+            .get("toolSelectionRankingSource")
+            .is_none()
+            && plan_entry
+                .metadata
+                .get("toolSelectionRankingModel")
+                .is_none(),
+        "minimized transcript facts must not duplicate provider route identity"
     );
-    assert_eq!(
+    assert!(
         plan_entry
             .metadata
             .get("toolSelectionCandidateIds")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|ids| ids.first())
-            .and_then(serde_json::Value::as_str),
-        Some("tool.list_available")
+            .is_none(),
+        "minimized plan facts must not duplicate the governed candidate allowlist"
     );
 
     let completed_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("AgentLoop completed"))
+        .find(|entry| {
+            entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && entry
+                    .metadata
+                    .get("modelSelectedArgumentsSource")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("governed_candidate_contract")
+        })
         .expect("provider-ranked completion transcript entry");
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("toolSelectionCandidateId")
-            .and_then(serde_json::Value::as_str),
-        Some("tool.list_available")
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("toolSelectionCandidateRank")
-            .and_then(serde_json::Value::as_u64),
-        Some(1)
-    );
     assert_eq!(
         completed_entry
             .metadata
@@ -596,17 +564,41 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
     assert_eq!(
         completed_entry
             .metadata
-            .get("stopReason")
-            .and_then(serde_json::Value::as_str),
-        Some("no_tools")
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
             .get("liveProviderInvoked")
             .and_then(serde_json::Value::as_bool),
         Some(true),
         "live-provider truth must come from adapter-edge receipts"
+    );
+
+    let actions = {
+        let queue_arc = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("main chat action queue store");
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(task_session_id)
+            .expect("list provider-ranked actions")
+    };
+    let selected_action = actions
+        .iter()
+        .find(|action| action.action.action_type == "mcp.read_only")
+        .expect("provider-ranked read action");
+    let selected_observation = selected_action
+        .observation_metadata
+        .as_ref()
+        .expect("provider-ranked action observation");
+    assert_eq!(
+        selected_observation["toolSelectionCandidateId"],
+        serde_json::json!("tool.list_available")
+    );
+    assert_eq!(
+        selected_observation["toolSelectionCandidateRank"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        selected_observation["toolSelectionCandidateMatchReason"],
+        serde_json::json!("provider_model_ranked")
     );
 
     let durable_events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
@@ -646,7 +638,7 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
 }
 
 #[tokio::test]
-async fn main_chat_react_provider_candidate_ranking_masks_sensitive_context_before_provider_call() {
+async fn main_chat_react_provider_candidate_ranking_keeps_sensitive_context_local() {
     let (provider_base, request_rx) = fake_capturing_chat_provider_endpoint(
         serde_json::json!({
             "ranked_candidate_ids": ["candidate.beta", "candidate.alpha"]
@@ -714,29 +706,21 @@ async fn main_chat_react_provider_candidate_ranking_masks_sensitive_context_befo
     )
     .await;
 
-    assert!(ranking.model_ranked);
+    assert!(
+        !ranking.model_ranked,
+        "PolicyRouter local-only authority must take precedence over cloud ranking"
+    );
+    assert_eq!(ranking.ranking_source, "deterministic_local");
+    assert_eq!(ranking.ranking_provider, None);
     assert_eq!(
         ranked_plan.tool_candidate_ids(),
-        vec!["candidate.beta".to_string(), "candidate.alpha".to_string()]
-    );
-    let captured_request = request_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .expect("capture provider ranking request");
-    assert!(
-        !captured_request.contains("alice@example.com"),
-        "provider-ranking prompt must not send raw email context"
+        vec!["candidate.alpha".to_string(), "candidate.beta".to_string()]
     );
     assert!(
-        !captured_request.contains("13800138000"),
-        "provider-ranking prompt must not send raw phone context"
-    );
-    assert!(
-        captured_request.contains("<EMAIL_0>"),
-        "provider-ranking prompt should keep metadata-safe email placeholder"
-    );
-    assert!(
-        captured_request.contains("<PHONE_0>"),
-        "provider-ranking prompt should keep metadata-safe phone placeholder"
+        request_rx
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .is_err(),
+        "sensitive current-user context must not cross the provider adapter edge, even masked"
     );
 }
 
@@ -1198,7 +1182,10 @@ async fn main_chat_react_provider_candidate_ranking_rejects_wrapping_whitespace_
         "provider ranking must fail soft when raw route identity only becomes metadata-safe after trimming whitespace"
     );
     assert_eq!(ranking.ranking_source, "deterministic_local");
-    assert_eq!(ranking.ranking_provider.as_deref(), Some(" openai"));
+    assert_eq!(
+        ranking.ranking_provider, None,
+        "an invalid raw route identity must not become an observed provider fact"
+    );
     assert_eq!(
         ranked_plan.tool_candidate_ids(),
         vec!["candidate.alpha".to_string(), "candidate.beta".to_string()]
@@ -1330,6 +1317,13 @@ async fn main_chat_react_registered_mcp_agent_loop_ignores_invalid_provider_cand
             "warnings": []
         })
         .to_string(),
+        serde_json::json!({
+            "final": "The governed default read candidate completed.",
+            "actions": [],
+            "thought_summary": "Finish after observing the governed read result.",
+            "warnings": []
+        })
+        .to_string(),
     ])
     .await;
     configure_http_provider_scheduler(&state, &provider_base, "gpt-invalid-provider-ranking").await;
@@ -1355,7 +1349,23 @@ async fn main_chat_react_registered_mcp_agent_loop_ignores_invalid_provider_cand
     let transcript = main_chat_transcript(&state, task_session_id).await;
     let plan_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("AgentLoop attempt started"))
+        .find(|entry| {
+            entry
+                .metadata
+                .get("agentLoopAttempted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && entry
+                    .metadata
+                    .get("toolSelectionModelRankingIgnored")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && entry
+                    .metadata
+                    .get("toolSelectionRankingProviderBacked")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        })
         .expect("invalid ranking plan transcript entry");
     assert_eq!(
         plan_entry
@@ -1367,13 +1377,6 @@ async fn main_chat_react_registered_mcp_agent_loop_ignores_invalid_provider_cand
     assert_eq!(
         plan_entry
             .metadata
-            .get("toolSelectionRankingSource")
-            .and_then(serde_json::Value::as_str),
-        Some("deterministic_local")
-    );
-    assert_eq!(
-        plan_entry
-            .metadata
             .get("toolSelectionModelRankingIgnored")
             .and_then(serde_json::Value::as_bool),
         Some(true)
@@ -1381,37 +1384,24 @@ async fn main_chat_react_registered_mcp_agent_loop_ignores_invalid_provider_cand
     assert!(
         plan_entry
             .metadata
-            .get("toolSelectionModelRankingCandidateIds")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|ids| ids.is_empty()),
-        "ignored provider candidate orders must not persist untrusted ranked ids"
+            .get("toolSelectionRankingSource")
+            .is_none(),
+        "minimized transcript facts must not duplicate ranking route identity"
     );
     assert!(
         plan_entry
             .metadata
-            .get("toolSelectionModelRankingResponseDigest")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|digest| {
-                digest.starts_with("bytes:") && digest.contains(" hash:sha256:")
-            }),
-        "ignored provider candidate orders should preserve only a metadata-safe response digest"
-    );
-    let candidate_ids = plan_entry
-        .metadata
-        .get("toolSelectionCandidateIds")
-        .and_then(serde_json::Value::as_array)
-        .expect("candidate ids");
-    assert!(
-        candidate_ids
-            .iter()
-            .all(|candidate| candidate.as_str() != Some("file.write")),
-        "invalid provider-ranked candidates must not enter the governed allowlist"
-    );
-    assert!(
-        candidate_ids
-            .iter()
-            .any(|candidate| candidate.as_str() == Some("builtin_echo")),
-        "safe default MCP read candidate must remain available"
+            .get("toolSelectionModelRankingCandidateIds")
+            .is_none()
+            && plan_entry
+                .metadata
+                .get("toolSelectionModelRankingResponseDigest")
+                .is_none()
+            && plan_entry
+                .metadata
+                .get("toolSelectionCandidateIds")
+                .is_none(),
+        "minimized transcript facts must persist neither untrusted ranking output nor the governed allowlist"
     );
 }
 
@@ -2136,32 +2126,37 @@ async fn main_chat_react_registered_mcp_agent_loop_records_selected_candidate_ex
             )
             .expect("grant builtin echo permission");
     }
-    {
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "test-key".into(),
-            "gpt-react-mcp-loop-policy-validation".into(),
-            "text-embedding-test".into(),
-            false,
-        )
-        .with_scripted_generation_response(
-            serde_json::json!({
-                "final": "I will run the selected read-only MCP candidate first.",
-                "actions": [{
-                    "name": "builtin_echo",
-                    "action_type": "mcp_tool",
-                    "arguments": {}
-                }],
-                "thought_summary": "Select the governed read-only candidate.",
-                "warnings": []
-            })
-            .to_string(),
-        );
-    }
+    let provider_base = fake_ordered_chat_provider_endpoint(vec![
+        serde_json::json!({
+            "ranked_candidate_ids": ["builtin_echo"]
+        })
+        .to_string(),
+        serde_json::json!({
+            "final": "I will run the selected read-only MCP candidate first.",
+            "actions": [{
+                "name": "builtin_echo",
+                "action_type": "mcp_tool",
+                "arguments": {}
+            }],
+            "thought_summary": "Select the governed read-only candidate.",
+            "warnings": []
+        })
+        .to_string(),
+        serde_json::json!({
+            "final": "The selected read-only MCP candidate completed.",
+            "actions": [],
+            "thought_summary": "Finish after observing the governed read result.",
+            "warnings": []
+        })
+        .to_string(),
+    ])
+    .await;
+    configure_http_provider_scheduler(
+        &state,
+        &provider_base,
+        "gpt-react-mcp-loop-policy-validation",
+    )
+    .await;
 
     let session_id = "command-surface-mcp-agent-loop-selected-policy";
     let user_text = "Use mcp builtin_echo read-only now.";
@@ -2196,9 +2191,21 @@ async fn main_chat_react_registered_mcp_agent_loop_records_selected_candidate_ex
     };
     let completed_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .find(|entry| {
+            entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
         .expect("selected policy completion transcript entry");
-    assert_selected_candidate_policy_metadata(&completed_entry.metadata);
+    assert_eq!(
+        completed_entry
+            .metadata
+            .get("summaryCode")
+            .and_then(serde_json::Value::as_str),
+        Some("final_result_state_recorded")
+    );
 
     let actions = {
         let queue_arc = state
@@ -2223,7 +2230,7 @@ async fn main_chat_react_registered_mcp_agent_loop_records_selected_candidate_ex
         .observation_metadata
         .as_ref()
         .expect("selected policy observation metadata");
-    assert_selected_candidate_policy_metadata(observation_metadata);
+    assert_selected_candidate_gateway_metadata(observation_metadata);
     assert_eq!(
         observation_metadata
             .get("toolExecutionReceipt")
@@ -2284,34 +2291,39 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_governed_candidate_argum
             )
             .expect("grant argument guard permission");
     }
-    {
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "test-key".into(),
-            "gpt-react-mcp-loop-governed-arguments".into(),
-            "text-embedding-test".into(),
-            false,
-        )
-        .with_scripted_generation_response(
-            serde_json::json!({
-                "final": "I will run the selected read-only MCP candidate first.",
-                "actions": [{
-                    "name": "argument_guard.read",
-                    "action_type": "mcp_tool",
-                    "arguments": {
-                        "content": "model-supplied argument must not reach executor"
-                    }
-                }],
-                "thought_summary": "Select the governed read-only candidate.",
-                "warnings": []
-            })
-            .to_string(),
-        );
-    }
+    let provider_base = fake_ordered_chat_provider_endpoint(vec![
+        serde_json::json!({
+            "ranked_candidate_ids": ["argument_guard.read"]
+        })
+        .to_string(),
+        serde_json::json!({
+            "final": "I will run the selected read-only MCP candidate first.",
+            "actions": [{
+                "name": "argument_guard.read",
+                "action_type": "mcp_tool",
+                "arguments": {
+                    "content": "model-supplied argument must not reach executor"
+                }
+            }],
+            "thought_summary": "Select the governed read-only candidate.",
+            "warnings": []
+        })
+        .to_string(),
+        serde_json::json!({
+            "final": "The governed argument read completed.",
+            "actions": [],
+            "thought_summary": "Finish after observing the governed read result.",
+            "warnings": []
+        })
+        .to_string(),
+    ])
+    .await;
+    configure_http_provider_scheduler(
+        &state,
+        &provider_base,
+        "gpt-react-mcp-loop-governed-arguments",
+    )
+    .await;
 
     let session_id = "command-surface-mcp-agent-loop-governed-arguments";
     let user_text = "Use mcp argument_guard.read read-only now.";
@@ -2374,81 +2386,73 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_governed_candidate_argum
         .as_ref()
         .expect("governed argument observation metadata");
     assert_eq!(
-        metadata["modelSelectedArgumentsSource"],
-        serde_json::json!("governed_candidate_contract")
+        metadata["governedArgumentsSource"],
+        serde_json::json!("kernel_manifest_candidate_contract")
     );
-    assert_eq!(
-        metadata["modelSelectedAllowedTool"],
-        serde_json::json!(true)
+    assert_eq!(metadata["governedInput"], serde_json::json!({}));
+    assert!(
+        metadata["governedInput"].get("content").is_none(),
+        "model-supplied arguments must not reach the ToolGateway input"
     );
+    assert_eq!(metadata["boundedArguments"], serde_json::json!(true));
+    assert_eq!(metadata["strictManifestIdentity"], serde_json::json!(true));
     assert_eq!(metadata["directWritesExecuted"], serde_json::json!(false));
 }
 
-fn assert_selected_candidate_policy_metadata(metadata: &serde_json::Value) {
+fn assert_selected_candidate_gateway_metadata(metadata: &serde_json::Value) {
     assert_eq!(
         metadata
-            .get("toolSelectionCandidateRank")
+            .get("selectedCandidateRank")
             .and_then(serde_json::Value::as_u64),
         Some(1),
         "selected candidate metadata must preserve deterministic rank evidence"
     );
     assert!(
         metadata
-            .get("toolSelectionCandidateSource")
+            .get("selectedCandidateSource")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|source| !source.trim().is_empty()),
         "selected candidate metadata must preserve a metadata-safe manifest source"
     );
     assert!(
         metadata
-            .get("toolSelectionCandidateCapabilitiesDigest")
+            .get("selectedCandidateCapabilityDigest")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|digest| digest.starts_with("bytes:")),
         "selected candidate metadata must preserve metadata-safe capability digest evidence"
     );
     assert!(
         metadata
-            .get("toolSelectionCandidateCapabilityLabels")
+            .get("selectedCandidateCapabilityLabels")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|labels| labels == "read" || labels.starts_with("read/")),
         "selected candidate metadata must preserve bounded safe capability labels"
     );
     assert!(
         metadata
-            .get("toolSelectionCandidateMatchReason")
+            .get("selectedCandidateMatchReason")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|reason| !reason.trim().is_empty()),
         "selected candidate metadata must preserve a bounded match reason"
     );
+    assert_eq!(metadata["strictManifestIdentity"], serde_json::json!(true));
+    assert_eq!(metadata["fuzzyNameMatchingUsed"], serde_json::json!(false));
+    assert_eq!(metadata["boundedArguments"], serde_json::json!(true));
     assert_eq!(
-        metadata
-            .get("modelSelectedExecutionPolicyValidated")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
+        metadata["governedArgumentsSource"],
+        serde_json::json!("kernel_manifest_candidate_contract")
     );
     assert_eq!(
-        metadata
-            .get("modelSelectedExecutionAllowed")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
+        metadata["structuredResult"]["toolGateway"]["toolGatewayAuthority"],
+        serde_json::json!(true)
     );
     assert_eq!(
-        metadata
-            .get("modelSelectedExecutionPolicyLevel")
-            .and_then(serde_json::Value::as_str),
-        Some("l1_read_only_auto")
+        metadata["structuredResult"]["toolGateway"]["actionEffect"],
+        serde_json::json!("read_only")
     );
     assert_eq!(
-        metadata
-            .get("modelSelectedExecutionPolicyReasonCode")
-            .and_then(serde_json::Value::as_str),
-        Some("read_only_action_allowed")
-    );
-    assert_eq!(
-        metadata
-            .get("modelSelectedSilentWriteAllowed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
+        metadata["structuredResult"]["toolGateway"]["inferredNameContractCredit"],
+        serde_json::json!(false)
     );
     assert_eq!(
         metadata

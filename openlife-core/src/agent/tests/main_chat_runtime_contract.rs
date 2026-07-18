@@ -434,7 +434,7 @@ fn main_chat_runtime_contract_task_control_scenarios_reference_prior_objects() {
 fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime_evidence() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let action_queue = ActionQueueStore::new_in_memory().expect("action queue");
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
 
     let session = session_store
         .create_session(AgentTaskSessionDraft {

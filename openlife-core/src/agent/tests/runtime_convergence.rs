@@ -133,13 +133,18 @@ async fn agent_loop_runtime_input_entry_matches_existing_run_entry_for_final_onl
     let (registry, permission_store, audit_store, privacy_engine, _audit_file) =
         test_action_context_deps();
     let safe_paths: Vec<String> = Vec::new();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+    let lifecycle_reader = lifecycle_store.retrieval_reader();
     let action_ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
         &audit_store,
         &privacy_engine,
         &safe_paths,
-    );
+    )
+    .with_memory_store(&memory_store)
+    .with_memory_lifecycle_retrieval_reader(&lifecycle_reader);
 
     let legacy = legacy_loop
         .run(
@@ -186,13 +191,18 @@ async fn runtime_input_with_broad_tools_prompt_does_not_infer_external_write_int
     let (registry, permission_store, audit_store, privacy_engine, _audit_file) =
         test_action_context_deps();
     let safe_paths: Vec<String> = Vec::new();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+    let lifecycle_reader = lifecycle_store.retrieval_reader();
     let action_ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
         &audit_store,
         &privacy_engine,
         &safe_paths,
-    );
+    )
+    .with_memory_store(&memory_store)
+    .with_memory_lifecycle_retrieval_reader(&lifecycle_reader);
 
     let output = loop_instance
         .run_runtime_input(input, privacy_engine.clone(), &action_ctx)

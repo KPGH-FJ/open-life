@@ -59,9 +59,9 @@ impl super::ActionExecutor {
             });
         }
         ctx.authorize_tool_dispatch(manifest, outer_request, args, &receipt_tracker)
+            .await?
+            .observe_local()
             .await?;
-        receipt_tracker.mark_local_dispatched();
-        ctx.observe_tool_started(&receipt_tracker).await?;
         let operation = (|| -> Result<ToolCallInternalResult> {
             let output = match tool_name {
                 "life_model.read" => {
@@ -200,10 +200,17 @@ impl super::ActionExecutor {
                         })
                         .to_string()
                     } else if let Some(store) = ctx.agent_run_store {
-                        match store
-                            .get_run(run_id)
-                            .map_err(|e| anyhow::anyhow!("Failed to lookup agent run: {}", e))?
-                        {
+                        let run = match store.get_run(run_id) {
+                            Ok(run) => run,
+                            Err(error) => {
+                                ctx.observe_durable_store_failure("AgentRunStore", &error);
+                                return Err(anyhow::anyhow!(
+                                    "Failed to lookup agent run: {}",
+                                    error
+                                ));
+                            }
+                        };
+                        match run {
                             Some(run) => serde_json::to_string(&run).unwrap_or_else(|_| {
                                 "{\"error\":\"serialization failed\"}".to_string()
                             }),

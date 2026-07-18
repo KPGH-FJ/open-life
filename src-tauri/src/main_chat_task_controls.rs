@@ -788,7 +788,12 @@ async fn load_main_chat_task_agent_run(
         return CanonicalAgentRunLoad::Degraded;
     };
     let run_store = run_store_arc.lock().await;
-    match run_store.get_run_for_task_id(&session.id) {
+    match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        run_store
+            .get_run_for_task_id(&session.id)
+            .map_err(|error| error.to_string()),
+    ) {
         Ok(Some(run)) if run.task_id == session.id => {
             CanonicalAgentRunLoad::Available(Box::new(run))
         }
@@ -802,7 +807,7 @@ enum DurableTurnLifecycleLoad {
     Available {
         sequence: u64,
         bound_run_id: Option<String>,
-        receipt: Option<DurableTurnLifecycleReceiptView>,
+        receipt: Option<Box<DurableTurnLifecycleReceiptView>>,
     },
     Unavailable,
     Degraded,
@@ -822,7 +827,7 @@ async fn load_durable_turn_lifecycle(
     };
     let receipt = snapshot.lifecycle_event.map(|event| {
         let terminal = durable_terminal_product_projection(&event);
-        DurableTurnLifecycleReceiptView {
+        Box::new(DurableTurnLifecycleReceiptView {
             event_id: product_task_ref_or_unknown(event.event_id),
             run_id: product_task_ref_or_unknown(event.run_id),
             sequence: event.sequence,
@@ -832,7 +837,7 @@ async fn load_durable_turn_lifecycle(
             failure_kind: terminal.failure_kind,
             created_at: event.created_at,
             payload_digest: product_task_digest(&event.payload_digest),
-        }
+        })
     });
     DurableTurnLifecycleLoad::Available {
         sequence: snapshot.latest_sequence,
@@ -954,7 +959,12 @@ fn reconcile_run_evidence(
                 sequence,
                 bound_run_id,
                 receipt,
-            } => (Some(sequence), bound_run_id, receipt, true),
+            } => (
+                Some(sequence),
+                bound_run_id,
+                receipt.map(|receipt| *receipt),
+                true,
+            ),
             DurableTurnLifecycleLoad::Unavailable => (None, None, None, false),
             DurableTurnLifecycleLoad::Degraded => (None, None, None, false),
         };
@@ -1123,7 +1133,10 @@ fn lifecycle_projection_agrees(canonical: &str, projected: &str) -> bool {
         )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn build_run_evidence_view(
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
@@ -1429,10 +1442,11 @@ fn product_route_source(value: &str) -> String {
 }
 
 fn product_route_enum(value: &str, allowed: &[&str]) -> String {
-    allowed
-        .contains(&value)
-        .then(|| value.to_string())
-        .unwrap_or_else(|| "unknown".into())
+    if allowed.contains(&value) {
+        value.to_string()
+    } else {
+        "unknown".into()
+    }
 }
 
 fn product_provider_validation_status(value: &str) -> String {
@@ -2280,14 +2294,17 @@ async fn permission_scope_mismatch_detected(
         return Ok(false);
     }
     let canonical_run_id = if let Some(run_store_arc) = state.agent_run_store.as_ref() {
-        run_store_arc
-            .lock()
-            .await
-            .get_run_for_task_id(&session.id)
-            .map_err(|error| {
-                format!("load canonical AgentRun for permission diagnostics failed: {error}")
-            })?
-            .map(|run| run.id)
+        let run_store = run_store_arc.lock().await;
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            run_store
+                .get_run_for_task_id(&session.id)
+                .map_err(|error| error.to_string()),
+        )
+        .map_err(|error| {
+            format!("load canonical AgentRun for permission diagnostics failed: {error}")
+        })?
+        .map(|run| run.id)
     } else {
         None
     };
@@ -2693,11 +2710,14 @@ fn product_task_ref_or_unknown(value: String) -> String {
 }
 
 fn product_task_timestamp(value: &str) -> String {
-    (!product_task_text_is_internal_authority(value)
+    if !product_task_text_is_internal_authority(value)
         && value.len() <= 64
-        && chrono::DateTime::parse_from_rfc3339(value).is_ok())
-    .then(|| value.to_string())
-    .unwrap_or_else(|| "unknown".into())
+        && chrono::DateTime::parse_from_rfc3339(value).is_ok()
+    {
+        value.to_string()
+    } else {
+        "unknown".into()
+    }
 }
 
 fn product_task_digest(value: &str) -> String {
@@ -2887,17 +2907,29 @@ pub(crate) async fn resume_main_chat_agent_task_with_state(
                     )
                     .await?
                 {
-                    crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(state)
-                        .run_replay(
+                    let runtime =
+                        crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(state);
+                    Box::pin(runtime.run_replay(
                             crate::main_chat_turn_runtime::OpenLifeReplayInput::resume_after_permission(
                                 task_session_id,
                                 &action_ref.id,
                                 action_bound_permission,
                             ),
-                        )
-                        .await?;
+                        ))
+                    .await?;
                     return load_main_chat_agent_task_state(task_session_id, state).await;
                 }
+            }
+            if let Some(proposal_id) =
+                main_chat_provider_consent_ready_for_resume(state, session_ref).await?
+            {
+                let runtime = crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(state);
+                Box::pin(
+                    runtime
+                        .run_provider_network_consent_continuation(task_session_id, &proposal_id),
+                )
+                .await?;
+                return load_main_chat_agent_task_state(task_session_id, state).await;
             }
         }
         let store = store_arc.lock().await;
@@ -2938,6 +2970,78 @@ pub(crate) async fn resume_main_chat_agent_task_with_state(
     )
     .await;
     Err("resume Main Chat task rejected: resume_checkpoint_execution_unavailable".into())
+}
+
+async fn main_chat_provider_consent_ready_for_resume(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+) -> Result<Option<String>, String> {
+    use openlife_core::agent::{ProposalSource, ProposalType};
+
+    if session.status
+        != openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    {
+        return Ok(None);
+    }
+    let proposals = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?
+        .lock()
+        .await
+        .list_accepted_action_resume_prerequisites_for_task(&session.id, 16)
+        .map_err(|error| error.to_string())?;
+    let mut ready = Vec::new();
+    for proposal in proposals {
+        let canonical_scope = proposal.after.get("canonical_scope");
+        let field = |key: &str| {
+            canonical_scope
+                .and_then(|scope| scope.get(key))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| proposal.after.get(key).and_then(serde_json::Value::as_str))
+        };
+        if proposal.proposal_type != ProposalType::ToolPermission
+            || proposal.source != ProposalSource::ChatConversation
+            || proposal
+                .after
+                .get("permission_scope_kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("network_policy")
+            || proposal
+                .after
+                .get("permission")
+                .and_then(serde_json::Value::as_str)
+                != Some("allow_once")
+            || field("source") != Some("provider")
+            || field("risk_level") != Some("high")
+            || field("action_type") != Some("network")
+        {
+            continue;
+        }
+        let Some(permission_scope) = field("tool_name") else {
+            continue;
+        };
+        let available = state
+            .tool_permission_store
+            .lock()
+            .await
+            .reviewed_network_once_available_for_proposal(
+                &proposal.id,
+                permission_scope,
+                "provider",
+                "high",
+                "network",
+            )
+            .map_err(|error| error.to_string())?;
+        if available {
+            ready.push(proposal.id);
+        }
+    }
+    match ready.as_slice() {
+        [] => Ok(None),
+        [proposal_id] => Ok(Some(proposal_id.clone())),
+        _ => Err("provider_consent_continuation_ambiguous_accepted_proposals".into()),
+    }
 }
 
 async fn main_chat_pending_action_permission_ready_for_resume(
@@ -3131,7 +3235,7 @@ struct AcceptedToolPermissionScope {
 enum AcceptedToolPermissionScopeLookup {
     NotAccepted,
     AcceptedInvalid,
-    AcceptedValid(AcceptedToolPermissionScope),
+    AcceptedValid(Box<AcceptedToolPermissionScope>),
 }
 
 impl AcceptedToolPermissionScope {
@@ -3329,6 +3433,7 @@ async fn main_chat_pending_action_accepted_tool_permission_scope(
     };
     Ok(
         AcceptedToolPermissionScope::from_proposal(&proposal, &origin, session, action, envelope)
+            .map(Box::new)
             .map(AcceptedToolPermissionScopeLookup::AcceptedValid)
             .unwrap_or(AcceptedToolPermissionScopeLookup::AcceptedInvalid),
     )
@@ -3427,10 +3532,14 @@ pub(crate) async fn cancel_main_chat_agent_task_with_state(
     let cancel_request = cancellation_registry.request_cancel(task_session_id);
     let canonical_run_id = {
         let store = store_arc.lock().await;
-        store
-            .get_run_for_task_id(task_session_id)
-            .map_err(|error| format!("load canonical AgentRun before cancel failed: {error}"))?
-            .map(|run| run.id)
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .get_run_for_task_id(task_session_id)
+                .map_err(|error| error.to_string()),
+        )
+        .map_err(|error| format!("load canonical AgentRun before cancel failed: {error}"))?
+        .map(|run| run.id)
     };
     let Some(canonical_run_id) = canonical_run_id else {
         // This is an accepted pending cancellation, not a terminal result. The
@@ -3915,8 +4024,7 @@ mod product_task_dto_tests {
             "memory.search",
             ACTION_SECRET,
         );
-        let policy =
-            openlife_core::agent::main_chat_agent_v1::ExecutionPolicy::default().classify(&action);
+        let policy = openlife_core::agent::main_chat_agent_v1::ExecutionPolicy.classify(&action);
         let mut queued = queue.enqueue(&session_id, action, policy).unwrap();
         queued.observation_metadata = Some(serde_json::json!({"body": METADATA_SECRET}));
         queued.error = Some(ERROR_SECRET.into());

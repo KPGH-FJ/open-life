@@ -384,9 +384,11 @@ async fn streaming_recovery(
 // sensitive-Memory product path stages the Proposal through its real kernel +
 // ReviewWorkflow route and attaches the TaskSession blocker. The target is an
 // exact typed defer before dispatch claim while the origin epoch is SEALING,
-// followed by one proven successor after SEALED.
+// followed by one effect-blocking Memory commit and one durable TaskSession
+// successor after SEALED. The original final remains immutable; acceptance
+// advances the canonical owner exactly once so the approved task can finish.
 #[tokio::test]
-async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_successor() {
+async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_task_successor() {
     tokio::time::timeout(SCENARIO_TIMEOUT, async {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let operation_id = uuid::Uuid::new_v4().to_string();
@@ -453,6 +455,7 @@ async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_success
         .expect("post-seal replay must not hang");
         let after_truth = proposal_truth(&state, &proposal.id).await;
         let memory_after = active_memory_record_count(&state).await;
+        let owner_after = task_owner_digest(&state, &operation_id).await;
         let buffered = buffered_recovery(&state, &operation_id, session_id, body).await;
         let (streaming, streaming_events) =
             streaming_recovery(&state, &operation_id, session_id, body).await;
@@ -493,18 +496,24 @@ async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_success
         assert_eq!(after["success"], true);
         assert_eq!(after["effect_status"], "confirmed");
         assert_eq!(after["proposal_projection_status"], "confirmed");
+        let transition = after
+            .get("terminalOwnerTransition")
+            .expect("effect-blocking Memory acceptance returns its owner transition");
         let replay = idempotent_accept.expect("exact retry returns confirmed truth");
         assert_eq!(replay["success"], true);
         assert_eq!(after_truth.0, ProposalStatus::Accepted);
         assert_eq!(after_truth.1, "confirmed");
         assert_eq!(memory_after, memory_before + 1);
+        assert_ne!(owner_after, owner_before);
+        assert_eq!(transition["beforeOwnerDigest"], owner_before);
+        assert_eq!(transition["afterOwnerDigest"], owner_after);
         assert!(
             buffered.is_ok(),
-            "buffered recovery must fold the proven successor: {buffered:?}"
+            "buffered replay must reuse the immutable sealed final after the legal successor: {buffered:?}"
         );
         assert!(
             streaming.is_ok(),
-            "streaming recovery must fold the proven successor: {streaming:?}"
+            "streaming replay must reuse the immutable sealed final after the legal successor: {streaming:?}"
         );
         assert_eq!(
             streaming_events
@@ -514,7 +523,7 @@ async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_success
             1
         );
         assert_eq!(finals.len(), 1, "one immutable original final");
-        assert_eq!(successors.len(), 1, "one exact post-final successor");
+        assert_eq!(successors.len(), 1, "one accepted blocking effect mints one successor");
         let final_event = finals[0];
         let successor = successors[0];
         assert_eq!(final_event.task_session_id, operation_id);
@@ -529,6 +538,7 @@ async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_success
             "openlife_turn_runtime.final_delivery_owner"
         );
         assert_eq!(final_event.payload["taskOwnerDigest"], owner_before);
+        assert_eq!(successor.event_id, transition["successorEventId"]);
         assert_eq!(successor.task_session_id, operation_id);
         assert_eq!(successor.run_id, operation_id);
         assert_eq!(successor.object_type, "terminal_owner_successor");
@@ -536,38 +546,25 @@ async fn real_sensitive_memory_accept_defers_at_sealing_then_commits_one_success
             successor.source,
             "terminal_owner_write_gateway.review_successor"
         );
-        assert_eq!(
-            successor.payload["causeKind"],
-            "proposal_review_acceptance"
-        );
+        assert_eq!(successor.payload["causeKind"], "proposal_review_acceptance");
         assert_eq!(successor.payload["causeRef"], proposal.id);
         assert_eq!(successor.payload["finalEventId"], final_event.event_id);
-        assert_eq!(successor.payload["ownerKind"], "agent_task_session");
-        assert_eq!(successor.payload["ownerId"], operation_id);
-        let before_revision = successor.payload["beforeOwnerRevision"]
-            .as_u64()
-            .expect("successor binds a real owner revision");
-        let after_revision = successor.payload["afterOwnerRevision"]
-            .as_u64()
-            .expect("successor binds a real next owner revision");
-        assert!(before_revision > 0);
-        assert_eq!(after_revision, before_revision + 1);
         assert_eq!(successor.payload["beforeOwnerDigest"], owner_before);
-        assert_ne!(
-            successor.payload["afterOwnerDigest"],
-            successor.payload["beforeOwnerDigest"]
+        assert_eq!(successor.payload["afterOwnerDigest"], owner_after);
+        let completed_session = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("real TaskSession store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load accepted sensitive-Memory task")
+            .expect("accepted sensitive-Memory task remains present");
+        assert_eq!(
+            completed_session.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
         );
-        for field in [
-            "localTransitionReceiptRef",
-            "localTransitionReceiptDigest",
-        ] {
-            assert!(
-                successor.payload[field]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()),
-                "successor must bind {field}"
-            );
-        }
+        assert!(completed_session.pending_blockers.is_empty());
     })
     .await
     .expect("D055 real accept-at-sealing scenario exceeded its outer timeout");

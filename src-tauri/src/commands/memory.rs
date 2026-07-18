@@ -175,6 +175,7 @@ pub async fn rebuild_memory_index(
             arguments_summary: &format!(
                 "扫描 {affected_count} 条 canonical Memory 记录重建本地索引；仅关系证据完整的 KnowledgeNote/Lifecycle 资产会进入向量空间，未验证记录计入 skipped。"
             ),
+            governed_data_import_recovery: None,
         },
         &window,
         state.inner(),
@@ -222,11 +223,11 @@ mod tests {
     use openlife_core::{embedding::clear_embedding_cache, llm::ChatMessage};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc as StdArc, Mutex,
+        Arc as StdArc,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    static OLLAMA_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static OLLAMA_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn fake_cloud_embedding_endpoint() -> (String, StdArc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -776,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_a_hung_rebuild_keeps_the_active_projection_unchanged() {
-        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let (ollama_base, accepted_count) = fake_hanging_embedding_endpoint().await;
@@ -881,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedding_failure_preserves_text_hits_with_degraded_receipt() {
-        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -936,11 +937,23 @@ mod tests {
             openlife_core::embedding::EmbeddingInvocationStatus::Failed
         );
         assert!(result.embedding_receipt.error_digest.is_some());
+        let stored = state
+            .memory_store
+            .lock()
+            .await
+            .export_active_memory_records()
+            .unwrap();
+        let searched = stored
+            .iter()
+            .find(|record| record.content == "DEGRADED_TEXT_HIT_SENTINEL")
+            .expect("text search result remains canonical");
+        assert_eq!(searched.access_count, 1);
+        assert!(searched.last_accessed_at.is_some());
     }
 
     #[tokio::test]
     async fn ollama_search_verifies_artifact_identity_and_preserves_text_hits() {
-        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

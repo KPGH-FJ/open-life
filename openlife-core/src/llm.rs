@@ -773,6 +773,11 @@ impl ProviderPolicyAuthorization {
         }
     }
 
+    // Every provider envelope field is independently bound into the authenticated digest.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub(crate) fn bind_prepared_envelope(
         mut self,
         messages: &[ChatMessage],
@@ -802,6 +807,11 @@ impl ProviderPolicyAuthorization {
         Ok(self)
     }
 
+    // Validation recomputes the exact envelope from all independently bound fields.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn validate_for_request(
         &self,
         messages: &[ChatMessage],
@@ -900,6 +910,11 @@ fn append_scope_part(target: &mut Vec<u8>, value: &[u8]) {
     target.extend_from_slice(value);
 }
 
+// The digest commits every prepared-provider field without an unauthenticated wrapper.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_prepared_envelope_digest(
     messages: &[ChatMessage],
     context_blocks: &[BoundedContextBlock],
@@ -1637,7 +1652,11 @@ fn provider_network_client(
             // providers and the repository's capture-adapter evidence.
             require_https: !explicitly_loopback,
             allow_loopback: explicitly_loopback,
-            allow_system_proxy_for_official_fake_ip_endpoint: official_endpoint,
+            fake_ip_proxy_domain_allowlist: if official_endpoint {
+                vec![host.to_string()]
+            } else {
+                Vec::new()
+            },
             max_redirects: 0,
             max_body_bytes: PROVIDER_MAX_RESPONSE_BYTES,
             connect_timeout: Duration::from_secs(STREAM_CONNECT_TIMEOUT_SECS),
@@ -2306,9 +2325,9 @@ mod tests {
             test_chat_with_openrouter_raw(vec![], None, "openai", &base, "sk-test", "gpt-test")
                 .await
                 .unwrap_err();
-        let message = error.to_string();
+        let message = format!("{error:#}");
 
-        assert!(message.contains("HTTP 500"));
+        assert!(message.contains("HTTP 500"), "{message}");
         assert!(message.contains("body_digest=sha256:"));
         assert!(!message.contains("TOP_SECRET_PROVIDER_ERROR_BODY"));
         server.await.unwrap();
@@ -2547,8 +2566,8 @@ mod tests {
             .await
             .expect("structured provider error must terminate the stream")
             .expect_err("structured provider error cannot become completed output");
-        let message = error.to_string();
-        assert!(message.contains("provider_stream_error"));
+        let message = format!("{error:#}");
+        assert!(message.contains("provider_stream_error"), "{message}");
         assert!(message.contains("body_digest=sha256:"));
         assert!(!message.contains("remote secret detail"));
         assert_eq!(

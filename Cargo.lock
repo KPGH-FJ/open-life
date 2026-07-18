@@ -3412,6 +3412,7 @@ dependencies = [
  "keyring",
  "libc",
  "log",
+ "once_cell",
  "open",
  "openlife-core",
  "rand 0.8.6",

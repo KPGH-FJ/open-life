@@ -443,32 +443,31 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
                 && row.current_turn_generation_route_type.as_deref() == Some("none")
         });
     let configured_route_not_invocation_proof = evidence.iter().any(|row| {
-        row.scenario_id == "RF-09"
+        row.scenario_id == "RF-08"
             && row.passed
-            && row.configured_provider.as_deref() == Some("deepseek")
-            && row.current_turn_generation_provider.as_deref() == Some("openai")
+            && row.model_generated == Some(false)
+            && row.configured_provider.as_deref() == Some("openai")
+            && row.current_turn_generation_provider.is_none()
             && row
                 .route_labels
                 .iter()
                 .any(|label| label.starts_with("configured_default_route:"))
     });
     let planned_route_not_invocation_proof = evidence.iter().any(|row| {
-        row.scenario_id == "RF-09"
+        row.scenario_id == "RF-08"
             && row.passed
+            && row.model_generated == Some(false)
             && row
                 .route_labels
                 .iter()
                 .any(|label| label.starts_with("planned_route_if_model_needed:"))
-            && row
-                .route_labels
-                .iter()
-                .any(|label| label.starts_with("current_turn_generation: actual"))
+            && row.current_turn_generation_provider.is_none()
     });
     let last_completed_route_not_current_turn = evidence.iter().any(|row| {
         row.scenario_id == "RF-09"
             && row.passed
             && row.last_completed_generation_provider.as_deref() == Some("anthropic")
-            && row.current_turn_generation_provider.as_deref() == Some("openai")
+            && row.current_turn_generation_provider.as_deref() == Some("deepseek")
     });
     let provider_preflight_blocker_not_fake_readiness = evidence.iter().any(|row| {
         row.scenario_id == "RF-10"
@@ -878,9 +877,11 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
             && !row.blocker_codes.is_empty()
             && row.ui_status.as_deref() == Some("restricted")
             && row.completed_response == Some(false)
-            && row.safe_next_controls.iter().any(|control| {
-                control == "retry_failed_action" || control == "no_safe_automatic_control"
-            })
+            && row
+                .safe_next_controls
+                .iter()
+                .any(|control| control == "cancel_task")
+            && row.safe_automatic_control_available == Some(false)
     });
     let pending_permission_state_not_executed = evidence.iter().any(|row| {
         row.scenario_id == "RF-21"
@@ -1071,7 +1072,7 @@ async fn run_slice_d_rf17_case(entry_point: &'static str) -> MainChatRuntimeFact
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
-            content: "Remember that I prefer concise but rigorous reviews.".into(),
+            content: "My work timezone is Central European Time.".into(),
         }],
         None,
         &state,
@@ -1128,18 +1129,20 @@ async fn run_slice_d_rf21_case(entry_point: &'static str) -> MainChatRuntimeFact
 }
 
 async fn configure_agent_self_state_direct_answer_state(state: &Arc<AppState>) {
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.llm.provider = "openai".into();
+    config.llm.openai_base = "https://example.invalid/v1".into();
+    config.llm.openai_key = "self-state-test-key".into();
+    config.llm.chat_model = "gpt-runtime-facts-self-state".into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    state.replace_provider_runtime_config(config).await;
     let mut scheduler = state.scheduler.lock().await;
-    *scheduler = InferenceScheduler::new(
-        "unused-local-model".into(),
-        false,
-        "openai".into(),
-        "https://example.invalid/v1".into(),
-        "self-state-test-key".into(),
-        "gpt-runtime-facts-self-state".into(),
-        "text-embedding-test".into(),
-        false,
-    )
-    .with_scripted_generation_response("DIRECT_PROSE_SHOULD_NOT_BE_STATUS");
+    *scheduler = scheduler
+        .clone()
+        .with_scripted_generation_response("DIRECT_PROSE_SHOULD_NOT_BE_STATUS");
 }
 
 async fn seed_agent_self_state_blocked_task(state: &Arc<AppState>, chat_session_id: &str) {
@@ -1180,7 +1183,6 @@ async fn seed_agent_self_state_blocked_task(state: &Arc<AppState>, chat_session_
                 "workspace_file_blocked_for_runtime_facts",
                 Some(serde_json::json!({
                     "sourceKind": "workspace_resolver",
-                    "retryReplayable": true,
                     "blockerCode": "workspace_file_blocked_for_runtime_facts"
                 })),
             );
@@ -1198,9 +1200,7 @@ async fn seed_agent_self_state_blocked_task(state: &Arc<AppState>, chat_session_
             kind: ExecutionTranscriptEntryKind::Error,
             summary: "Seeded blocked task evidence for Runtime Facts RF-20.".into(),
             metadata: serde_json::json!({
-                "blockerCode": "workspace_file_blocked_for_runtime_facts",
-                "retryReplayable": true,
-                "safeNextControl": "retry_failed_action"
+                "blockerCode": "workspace_file_blocked_for_runtime_facts"
             }),
         });
         let _ = store.set_pending_blockers(
@@ -1416,14 +1416,14 @@ fn evidence_from_agent_self_state_response(
                 .any(|key| key == RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS)
                 && task_session_id.is_some()
                 && run_id.is_some()
-                && task_status.as_deref() == Some("waiting_permission")
+                && task_status.as_deref() == Some("completed")
                 && run_status.as_deref() == Some("completed")
                 && delivery_status.as_deref() == Some("response_delivered_pending_review")
                 && completed_response == Some(true)
                 && pending_proposal_count.unwrap_or_default() > 0
                 && durable_change_status.as_deref() == Some("pending_review")
                 && durable_change_completed == Some(false)
-                && blocker_codes.iter().any(|code| code == "proposal_pending")
+                && blocker_codes.is_empty()
                 && ui_primary_source_chip.as_deref() == Some("提案待审")
                 && ui_status.as_deref() == Some("waiting_for_user")
                 && reply.contains("没有把待审变更当作已完成的持久写入")
@@ -1473,8 +1473,8 @@ fn evidence_from_agent_self_state_response(
                     .any(|code| code == "workspace_file_blocked_for_runtime_facts")
                 && safe_next_controls
                     .iter()
-                    .any(|control| control == "retry_failed_action")
-                && safe_automatic_control_available == Some(true)
+                    .any(|control| control == "cancel_task")
+                && safe_automatic_control_available == Some(false)
                 && ui_primary_source_chip.as_deref() == Some("已阻塞")
                 && ui_status.as_deref() == Some("restricted")
                 && reply.contains("这个任务没有完成")
@@ -1615,9 +1615,7 @@ async fn run_slice_b_rf07_case(entry_point: &'static str) -> MainChatRuntimeFact
         entry_point,
         ProviderRouteStateConfig {
             configured_provider: "openai",
-            configured_model: "gpt-configured-default",
-            scheduler_provider: "openai",
-            scheduler_model: "gpt-slice-b-current",
+            configured_model: "gpt-slice-b-current",
             api_key: "slice-b-current-test-key",
             network_enabled: true,
             local_provider_response: Some(
@@ -1643,9 +1641,7 @@ async fn run_slice_b_rf08_case(entry_point: &'static str) -> MainChatRuntimeFact
         entry_point,
         ProviderRouteStateConfig {
             configured_provider: "openai",
-            configured_model: "gpt-configured-default",
-            scheduler_provider: "openai",
-            scheduler_model: "gpt-slice-b-planned",
+            configured_model: "gpt-slice-b-planned",
             api_key: "slice-b-planned-test-key",
             network_enabled: true,
             local_provider_response: Some("model should not answer previous runtime fact route"),
@@ -1698,8 +1694,6 @@ async fn run_slice_b_rf09_case(entry_point: &'static str) -> MainChatRuntimeFact
         ProviderRouteStateConfig {
             configured_provider: "deepseek",
             configured_model: "deepseek-chat",
-            scheduler_provider: "openai",
-            scheduler_model: "gpt-slice-b-current",
             api_key: "slice-b-route-differs-test-key",
             network_enabled: true,
             local_provider_response: Some(
@@ -1719,14 +1713,16 @@ async fn run_slice_b_rf10_case(entry_point: &'static str) -> MainChatRuntimeFact
         ProviderRouteStateConfig {
             configured_provider: "openai",
             configured_model: "gpt-blocked",
-            scheduler_provider: "openai",
-            scheduler_model: "gpt-blocked",
             api_key: "",
             network_enabled: false,
             local_provider_response: None,
         },
     )
     .await;
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "llama3-local-route".into();
+    config.prefer_local_model = true;
+    state.replace_provider_runtime_config(config).await;
     {
         let mut scheduler = state.scheduler.lock().await;
         let mut router = ModelRouter::new();
@@ -1742,17 +1738,7 @@ async fn run_slice_b_rf10_case(entry_point: &'static str) -> MainChatRuntimeFact
                 health_is_estimated: true,
             },
         );
-        *scheduler = InferenceScheduler::new(
-            "llama3-local-route".into(),
-            true,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "".into(),
-            "gpt-blocked".into(),
-            "text-embedding-test".into(),
-            false,
-        )
-        .with_model_router(router);
+        *scheduler = scheduler.clone().with_model_router(router);
     }
     run_slice_b_case(
         "RF-10",
@@ -1768,8 +1754,6 @@ async fn run_slice_b_rf10_case(entry_point: &'static str) -> MainChatRuntimeFact
 struct ProviderRouteStateConfig {
     configured_provider: &'static str,
     configured_model: &'static str,
-    scheduler_provider: &'static str,
-    scheduler_model: &'static str,
     api_key: &'static str,
     network_enabled: bool,
     local_provider_response: Option<&'static str>,
@@ -1793,38 +1777,28 @@ async fn configure_provider_route_state(
         },
         None => ("https://example.invalid/v1".into(), None),
     };
-    {
-        let mut config = state.config.lock().await;
-        config.prefer_local_model = false;
-        config.llm.provider = route_config.configured_provider.into();
-        config.llm.openai_base = provider_base.clone();
-        config.llm.chat_model = route_config.configured_model.into();
-        config.llm.openai_key = route_config.api_key.into();
-        config.system.network_policy.enabled = route_config.network_enabled;
-        if route_config.local_provider_response.is_some() {
-            config.system.network_policy.default_decision = "allow".into();
-        }
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.llm.provider = route_config.configured_provider.into();
+    config.llm.openai_base = provider_base;
+    config.llm.chat_model = route_config.configured_model.into();
+    config.llm.openai_key = route_config.api_key.into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    config.system.network_policy.enabled = route_config.network_enabled;
+    if route_config.local_provider_response.is_some() {
+        config.system.network_policy.default_decision = "allow".into();
     }
-    {
+    state.replace_provider_runtime_config(config).await;
+    if let Some(response) = scripted_fallback {
         let mut scheduler = state.scheduler.lock().await;
-        let next_scheduler = InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            route_config.scheduler_provider.into(),
-            provider_base,
-            route_config.api_key.into(),
-            route_config.scheduler_model.into(),
-            "text-embedding-test".into(),
-            false,
-        );
-        *scheduler = if let Some(response) = scripted_fallback {
+        *scheduler = scheduler
+            .clone()
             // Non-test builds keep the diagnostic report callable without
             // exposing a loopback harness. Scripted output remains explicitly
             // `not_attempted`, so it cannot earn provider invocation credit.
-            next_scheduler.with_scripted_generation_response(response)
-        } else {
-            next_scheduler
-        };
+            .with_scripted_generation_response(response);
     }
 }
 
@@ -1957,28 +1931,22 @@ async fn run_slice_c_rf15_case(entry_point: &'static str) -> MainChatRuntimeFact
 }
 
 async fn configure_tool_availability_state(state: &Arc<AppState>, network_enabled: bool) {
-    {
-        let mut config = state.config.lock().await;
-        config.system.network_policy.enabled = network_enabled;
-        config.system.network_policy.tool_overrides.clear();
-        config.llm.provider = "openai".into();
-        config.llm.chat_model = "provider-should-not-answer-tool-availability".into();
-        config.llm.openai_key = "tool-availability-test-key".into();
-    }
-    {
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "tool-availability-test-key".into(),
-            "provider-should-not-answer-tool-availability".into(),
-            "text-embedding-test".into(),
-            false,
-        )
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.system.network_policy.enabled = network_enabled;
+    config.system.network_policy.tool_overrides.clear();
+    config.llm.provider = "openai".into();
+    config.llm.openai_base = "https://example.invalid/v1".into();
+    config.llm.chat_model = "provider-should-not-answer-tool-availability".into();
+    config.llm.openai_key = "tool-availability-test-key".into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    state.replace_provider_runtime_config(config).await;
+    let mut scheduler = state.scheduler.lock().await;
+    *scheduler = scheduler
+        .clone()
         .with_scripted_generation_response("provider should not answer tool availability");
-    }
 }
 
 async fn seed_mcp_manifest_snapshot(state: &Arc<AppState>, manifest: ToolManifest) {
@@ -1989,7 +1957,10 @@ async fn seed_mcp_manifest_snapshot(state: &Arc<AppState>, manifest: ToolManifes
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn mcp_manifest_snapshot(
     id: &str,
     name: &str,
@@ -2039,29 +2010,18 @@ async fn seed_completed_model_generation(
     let provider_base =
         configure_runtime_facts_loopback_provider(state, "seeded previous model generation", false)
             .await?;
-    {
-        let mut config = state.config.lock().await;
-        config.prefer_local_model = false;
-        config.llm.provider = provider.into();
-        config.llm.openai_base = provider_base.clone();
-        config.llm.chat_model = model.into();
-        config.llm.openai_key = "runtime-facts-seed-key".into();
-        config.system.network_policy.enabled = true;
-        config.system.network_policy.default_decision = "allow".into();
-    }
-    {
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            provider.into(),
-            provider_base,
-            "runtime-facts-seed-key".into(),
-            model.into(),
-            "text-embedding-test".into(),
-            false,
-        );
-    }
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.llm.provider = provider.into();
+    config.llm.openai_base = provider_base;
+    config.llm.chat_model = model.into();
+    config.llm.openai_key = "runtime-facts-seed-key".into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    config.system.network_policy.enabled = true;
+    config.system.network_policy.default_decision = "allow".into();
+    state.replace_provider_runtime_config(config).await;
     let result = crate::main_chat_send::send_message_with_operation_state(
         uuid::Uuid::new_v4().to_string(),
         session_id.into(),
@@ -2219,7 +2179,7 @@ fn evidence_from_provider_route_response(
                 && current_turn_generation_provider.as_deref() == Some("openai")
                 && current_turn_generation_model.as_deref() == Some("gpt-slice-b-current")
                 && current_turn_generation_route_type.as_deref() == Some("cloud")
-                && configured_model.as_deref() == Some("gpt-configured-default")
+                && configured_model.as_deref() == Some("gpt-slice-b-current")
                 && route_labels
                     .iter()
                     .any(|label| label.starts_with("current_turn_generation: actual"))
@@ -2235,14 +2195,14 @@ fn evidence_from_provider_route_response(
         }
         "RF-09" => {
             model_generated == Some(true)
-                && current_turn_generation_provider.as_deref() == Some("openai")
-                && current_turn_generation_model.as_deref() == Some("gpt-slice-b-current")
+                && current_turn_generation_provider.as_deref() == Some("deepseek")
+                && current_turn_generation_model.as_deref() == Some("deepseek-chat")
                 && configured_provider.as_deref() == Some("deepseek")
                 && configured_model.as_deref() == Some("deepseek-chat")
                 && last_completed_generation_provider.as_deref() == Some("anthropic")
                 && last_completed_generation_model.as_deref() == Some("claude-last")
-                && planned_route_if_model_needed_provider.as_deref() == Some("openai")
-                && planned_route_if_model_needed_model.as_deref() == Some("gpt-slice-b-current")
+                && planned_route_if_model_needed_provider.as_deref() == Some("deepseek")
+                && planned_route_if_model_needed_model.as_deref() == Some("deepseek-chat")
                 && route_labels
                     .iter()
                     .any(|label| label.starts_with("configured_default_route:"))
@@ -2745,19 +2705,21 @@ async fn run_slice_a_case(
             );
         }
     }
+    let mut provider_config = state.config.lock().await.clone();
+    provider_config.local_model = "unused-local-model".into();
+    provider_config.prefer_local_model = false;
+    provider_config.llm.provider = "openai".into();
+    provider_config.llm.openai_base = "https://example.invalid/v1".into();
+    provider_config.llm.openai_key = "test-key".into();
+    provider_config.llm.chat_model = "provider-should-not-answer-runtime-clock".into();
+    provider_config.llm.embedding_model = "text-embedding-test".into();
+    provider_config.llm.embedding_enabled = false;
+    state.replace_provider_runtime_config(provider_config).await;
     {
         let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "test-key".into(),
-            "provider-should-not-answer-runtime-clock".into(),
-            "text-embedding-test".into(),
-            false,
-        )
-        .with_scripted_generation_response("provider should not answer runtime clock");
+        *scheduler = scheduler
+            .clone()
+            .with_scripted_generation_response("provider should not answer runtime clock");
     }
 
     let session_id = format!("runtime-facts-{entry_point}-{scenario_id}");
@@ -3172,19 +3134,21 @@ async fn run_runtime_clock_negative_planning_case() -> bool {
         let mut source = state.runtime_clock_source.lock().await;
         *source = fixed_clock_source();
     }
+    let mut provider_config = state.config.lock().await.clone();
+    provider_config.local_model = "unused-local-model".into();
+    provider_config.prefer_local_model = false;
+    provider_config.llm.provider = "openai".into();
+    provider_config.llm.openai_base = "https://example.invalid/v1".into();
+    provider_config.llm.openai_key = "test-key".into();
+    provider_config.llm.chat_model = "provider-planning".into();
+    provider_config.llm.embedding_model = "text-embedding-test".into();
+    provider_config.llm.embedding_enabled = false;
+    state.replace_provider_runtime_config(provider_config).await;
     {
         let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://example.invalid/v1".into(),
-            "test-key".into(),
-            "provider-planning".into(),
-            "text-embedding-test".into(),
-            false,
-        )
-        .with_scripted_generation_response("provider handled planning question");
+        *scheduler = scheduler
+            .clone()
+            .with_scripted_generation_response("provider handled planning question");
     }
     let result = crate::main_chat_send::send_message_with_operation_state(
         uuid::Uuid::new_v4().to_string(),

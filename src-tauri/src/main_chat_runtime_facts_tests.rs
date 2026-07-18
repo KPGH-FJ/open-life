@@ -428,7 +428,7 @@ async fn main_chat_runtime_facts_provider_route_slice_b_covers_rf_07_to_rf_10() 
     );
     assert_eq!(
         current.configured_model.as_deref(),
-        Some("gpt-configured-default")
+        Some("gpt-slice-b-current")
     );
 
     let after_clock = report
@@ -454,7 +454,7 @@ async fn main_chat_runtime_facts_provider_route_slice_b_covers_rf_07_to_rf_10() 
     assert_eq!(separated.configured_provider.as_deref(), Some("deepseek"));
     assert_eq!(
         separated.current_turn_generation_provider.as_deref(),
-        Some("openai")
+        Some("deepseek")
     );
     assert_eq!(
         separated.last_completed_generation_provider.as_deref(),
@@ -462,7 +462,7 @@ async fn main_chat_runtime_facts_provider_route_slice_b_covers_rf_07_to_rf_10() 
     );
     assert_eq!(
         separated.planned_route_if_model_needed_provider.as_deref(),
-        Some("openai")
+        Some("deepseek")
     );
 
     let blocked = report
@@ -894,7 +894,7 @@ async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_21(
         .runtime_fact_keys
         .iter()
         .any(|key| key == RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS));
-    assert_eq!(proposal.task_status.as_deref(), Some("waiting_permission"));
+    assert_eq!(proposal.task_status.as_deref(), Some("completed"));
     assert_eq!(proposal.run_status.as_deref(), Some("completed"));
     assert_eq!(
         proposal.delivery_status.as_deref(),
@@ -907,10 +907,7 @@ async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_21(
         Some("pending_review")
     );
     assert_eq!(proposal.durable_change_completed, Some(false));
-    assert!(proposal
-        .blocker_codes
-        .iter()
-        .any(|code| code == "proposal_pending"));
+    assert!(proposal.blocker_codes.is_empty());
     assert_eq!(proposal.ui_primary_source_chip.as_deref(), Some("提案待审"));
     assert_eq!(proposal.ui_status.as_deref(), Some("waiting_for_user"));
     assert!(proposal.answer_preview.contains("待审变更"));
@@ -977,8 +974,8 @@ async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_21(
     assert!(blocked
         .safe_next_controls
         .iter()
-        .any(|control| control == "retry_failed_action"));
-    assert_eq!(blocked.safe_automatic_control_available, Some(true));
+        .any(|control| control == "cancel_task"));
+    assert_eq!(blocked.safe_automatic_control_available, Some(false));
     assert_eq!(blocked.ui_primary_source_chip.as_deref(), Some("已阻塞"));
     assert_eq!(blocked.ui_status.as_deref(), Some("restricted"));
     assert!(blocked.answer_preview.contains("这个任务没有完成"));
@@ -1231,32 +1228,18 @@ mod provider_route_focused_tests {
 }
 
 #[tokio::test]
-async fn provider_route_runtime_route_evidence_reports_local_fallback_and_transmission_boundary() {
+async fn provider_route_runtime_route_evidence_fails_closed_when_minimized_run_cannot_prove_fallback(
+) {
     let state = crate::test_utils::test_app_state();
-    {
-        let mut config = state.config.lock().await;
-        config.llm.provider = "deepseek".into();
-        config.llm.openai_base = "https://api.deepseek.example/v1".into();
-        config.llm.openai_key.clear();
-        config.llm.chat_model = "deepseek-chat".into();
-        config.prefer_local_model = false;
-        config.local_model = "llama3".into();
-        config.system.network_policy.enabled = true;
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            config.llm.openai_base.clone(),
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            config.llm.embedding_enabled,
-        );
-    }
+    let mut config = state.config.lock().await.clone();
+    config.llm.provider = "deepseek".into();
+    config.llm.openai_base = "https://api.deepseek.example/v1".into();
+    config.llm.openai_key.clear();
+    config.llm.chat_model = "deepseek-chat".into();
+    config.prefer_local_model = false;
+    config.local_model = "llama3".into();
+    config.system.network_policy.enabled = true;
+    state.replace_provider_runtime_config(config).await;
 
     let mut run = openlife_core::agent::AgentRun::new_chat_run(
         "session-route-evidence",
@@ -1325,21 +1308,11 @@ async fn provider_route_runtime_route_evidence_reports_local_fallback_and_transm
             .map(|route| route.route_type.as_str()),
         Some("local")
     );
-    assert_eq!(evidence.provider_readiness.validated, false);
+    assert!(!evidence.provider_readiness.validated);
     assert_eq!(evidence.external_transmission, "not_sent");
-    let historical_fallback = evidence
-        .fallback
-        .as_ref()
-        .expect("same-run fallback metadata remains visible");
-    assert_eq!(historical_fallback.reason, "provider_api_key_missing");
-    assert_eq!(historical_fallback.from_route, None);
-    assert!(historical_fallback.blocker_codes.is_empty());
-    assert_eq!(
-        historical_fallback
-            .to_route
-            .as_ref()
-            .map(|route| route.provider.as_str()),
-        Some("ollama")
+    assert!(
+        evidence.fallback.is_none(),
+        "the minimized AgentRun model receipt cannot be joined back to raw provider-event model identity to invent fallback truth"
     );
     assert!(evidence
         .source_refs
@@ -1735,7 +1708,7 @@ async fn provider_transmission_sent_requires_durable_exact_request_completion() 
 fn provider_transmission_item(
     run: &openlife_core::agent::AgentRun,
 ) -> ProviderTransmissionHistoryItem {
-    provider_transmission_history_from_runs(&[run.clone()])
+    provider_transmission_history_from_runs(std::slice::from_ref(run))
         .into_iter()
         .next()
         .expect("provider transmission item")

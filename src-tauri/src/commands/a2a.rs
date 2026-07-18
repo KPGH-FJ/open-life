@@ -295,6 +295,7 @@ async fn a2a_send_task_with_state(
         &resources.shared.safe_paths,
     )
     .with_tool_audit_persistence_observer(resources.shared.persistence_coordinator.as_ref())
+    .with_durable_store_failure_observer(resources.shared.persistence_coordinator.as_ref())
     .with_agent_run_store(&resources.agent_run_store)
     .with_a2a_outbound_authorization(&authorization);
     let execution = openlife_core::agent::ToolGateway::from_executor_config(
@@ -323,10 +324,15 @@ async fn a2a_send_task_with_state(
     let result = match execution {
         Ok(result) => result,
         Err(error) => {
+            crate::terminal_owner_write_gateway::register_agent_run_store_error(state, &error);
             if let Err(recovery_error) = resources
                 .agent_run_store
                 .reconcile_agent_run_tool_execution_owner_now()
             {
+                crate::terminal_owner_write_gateway::register_agent_run_store_error(
+                    state,
+                    &recovery_error,
+                );
                 return Err(AppError::internal(format!(
                     "a2a_tool_gateway_execution_and_owner_reconciliation_failed:{recovery_error}"
                 )));

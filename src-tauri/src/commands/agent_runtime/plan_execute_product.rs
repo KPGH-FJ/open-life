@@ -6,8 +6,8 @@ use openlife_core::agent::main_chat_runtime_contract::{
     PlanArtifactStepView, PlanArtifactView, ProposalEvidence, StrategyEvidence,
 };
 use openlife_core::agent::{
-    behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentRunStatus, AgentTask,
-    AgentTaskKind, ContextSummary, LifeModelGovernor, PlanExecuteInput, PlanExecuteProductContract,
+    behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentTask, AgentTaskKind,
+    ContextSummary, LifeModelGovernor, PlanExecuteInput, PlanExecuteProductContract,
     PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteSessionStatus,
     PlanExecuteStepEdit, PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace,
     RedactionLevel, RiskLevel, RuntimeGuidanceConsumptionMode, RuntimeInput,
@@ -342,10 +342,13 @@ async fn create_plan_execute_session_with_source_run(
 
     if let Some(run) = owned_plan_run.as_mut() {
         run.task_id = session.session_id.clone();
+        run.hs_selection_audit = hs_selection_audit;
+        run.behavior_checks = behavior_checks;
+        initialize_product_run_immutable_evidence(run, &session);
         create_product_run(state, run).await?;
     }
 
-    {
+    let session_creation = {
         let store_arc = state
             .plan_execute_session_store
             .as_ref()
@@ -368,21 +371,57 @@ async fn create_plan_execute_session_with_source_run(
                 if let Some(commit_permit) = commit_permit {
                     commit_permit.finish_committed();
                 }
+                Ok(())
             }
             Err(error) => {
                 if let Some(commit_permit) = commit_permit {
                     commit_permit.finish_failed();
                 }
-                return Err(error);
+                Err(error)
             }
         }
+    };
+    if let Err(error) = session_creation {
+        if let Some(run) = owned_plan_run.as_ref() {
+            if let Err(finalization_error) =
+                crate::terminal_owner_write_gateway::fail_agent_run_from_owned_phase(
+                    state,
+                    &run.id,
+                    crate::terminal_owner_write_gateway::AgentRunOwnedFailure::PlanSessionCreate,
+                )
+                .await
+            {
+                return Err(format!(
+                    "{error}; Plan-Execute AgentRun failure projection is degraded: {finalization_error}"
+                ));
+            }
+        }
+        return Err(error);
     }
-    append_plan_created_events(state, &session).await?;
+    if let Err(error) = append_plan_created_events(state, &session).await {
+        if let Some(run) = owned_plan_run.as_ref() {
+            if let Err(finalization_error) = crate::terminal_owner_write_gateway::fail_agent_run_from_owned_phase(
+                state,
+                &run.id,
+                crate::terminal_owner_write_gateway::AgentRunOwnedFailure::PlanCreatedEventProjection,
+            )
+            .await
+            {
+                return Err(format!(
+                    "{error}; Plan-Execute AgentRun failure projection is degraded: {finalization_error}"
+                ));
+            }
+        }
+        return Err(error);
+    }
 
-    if let Some(run) = owned_plan_run.as_mut() {
-        run.hs_selection_audit = hs_selection_audit;
-        run.behavior_checks = behavior_checks;
-        update_product_run_for_session(state, run, &session).await?;
+    if let Some(run) = owned_plan_run.as_ref() {
+        crate::terminal_owner_write_gateway::project_agent_run_from_plan_execute_session(
+            state,
+            &run.id,
+            &session.session_id,
+        )
+        .await?;
     }
     Ok(session)
 }
@@ -1479,18 +1518,7 @@ async fn append_plan_runtime_event(
         .source_agent_run_id
         .as_deref()
         .ok_or_else(|| "Plan-Execute source AgentRun id missing".to_string())?;
-    let task_session_id = {
-        let store_arc = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "AgentRun store not available for Plan-Execute event".to_string())?;
-        let store = store_arc.lock().await;
-        store
-            .get_run(run_id)
-            .map_err(|error| format!("load Plan-Execute source AgentRun failed: {error}"))?
-            .ok_or_else(|| "Plan-Execute source AgentRun missing".to_string())?
-            .task_id
-    };
+    let task_session_id = load_plan_execute_source_task_id(state, run_id).await?;
     if let Some(object) = payload.as_object_mut() {
         object.insert("taskSessionId".into(), serde_json::json!(task_session_id));
         object.insert(
@@ -1518,6 +1546,24 @@ async fn append_plan_runtime_event(
         payload,
     )
     .await
+}
+
+async fn load_plan_execute_source_task_id(
+    state: &Arc<AppState>,
+    run_id: &str,
+) -> Result<String, String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for Plan-Execute event".to_string())?;
+    let store = store_arc.lock().await;
+    crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store.get_run(run_id).map_err(|error| error.to_string()),
+    )
+    .map_err(|error| format!("load Plan-Execute source AgentRun failed: {error}"))?
+    .map(|run| run.task_id)
+    .ok_or_else(|| "Plan-Execute source AgentRun missing".to_string())
 }
 
 fn plan_event_payload(session: &PlanExecuteSession) -> Value {
@@ -1634,87 +1680,13 @@ fn new_plan_execute_product_run(session_id: &str) -> AgentRun {
     let mut run = AgentRun::new_chat_run(session_id, "");
     run.kind = AgentTaskKind::Planning;
     run.user_input = None;
-    run.reasoning_strategy = Some("plan_execute_product".into());
+    run.reasoning_strategy = Some("plan_execute".into());
     run.output_preview = Some("Weekly plan draft started".into());
     run.context_summary = Some(plan_execute_context_summary(false));
-    run.reasoning_trace = Some(ReasoningTrace {
-        strategy_result: Some(json!({
-            "runtimeStrategyTraceKind": "plan_execute_product",
-            "planExecuteProductVertical": true,
-            "scenarioId": "weekly_planning",
-            "status": "started",
-            "strategyKind": "plan_execute",
-            "selectedStrategyKind": "plan_execute",
-            "payloadKind": "plan_execute",
-            "strategyDescriptorId": "plan_execute",
-            "strategyCapabilityIds": ["planning.plan_execute", "proposal_first_steps", "metadata_safe_trace"],
-            "selectionReasonCode": "weekly_planning_product",
-            "governanceDecisionKind": "allow",
-            "registryReady": RuntimeStrategyRegistry::fixed_readiness_report().ready,
-            "metadataSafe": true,
-            "defaultChatUnchanged": true,
-            "sideEffectBudget": plan_execute_trace_side_effect_budget(),
-            "rawPromptStored": false,
-            "rawWeeklyPlanProseStored": false,
-            "directLifeModelWrites": false,
-            "externalWritesExecuted": false,
-        })),
-        output: Some("plan_execute_product_started".into()),
-        ..ReasoningTrace::default()
-    });
     run
 }
 
-async fn create_product_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "AgentRun store not available for Plan-Execute product".to_string())?;
-    let store = store_arc.lock().await;
-    store
-        .create_run(run)
-        .map_err(|e| format!("failed to create Plan-Execute AgentRun: {e}"))
-}
-
-async fn update_existing_product_run_for_session(
-    state: &Arc<AppState>,
-    session: &PlanExecuteSession,
-) -> Result<(), String> {
-    let Some(run_id) = session.source_agent_run_id.as_deref() else {
-        return Ok(());
-    };
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "AgentRun store not available for Plan-Execute product".to_string())?;
-    let store = store_arc.lock().await;
-    let Some(mut run) = store
-        .get_run(run_id)
-        .map_err(|e| format!("failed to load Plan-Execute AgentRun: {e}"))?
-    else {
-        return Ok(());
-    };
-    drop(store);
-    if run.kind != AgentTaskKind::Planning {
-        return Ok(());
-    }
-    update_product_run_for_session(state, &mut run, session).await
-}
-
-async fn update_product_run_for_session(
-    state: &Arc<AppState>,
-    run: &mut AgentRun,
-    session: &PlanExecuteSession,
-) -> Result<(), String> {
-    run.status = AgentRunStatus::Completed;
-    run.finished_at = Some(chrono::Utc::now());
-    run.generated_proposals = session.linked_proposal_ids.clone();
-    run.warnings = session.warnings.clone();
-    run.step_count = session.step_count as u32;
-    run.tool_call_count = 0;
-    run.context_summary = Some(plan_execute_context_summary(false));
-    run.output_preview = Some(plan_execute_output_preview(session));
-    run.reasoning_strategy = Some("plan_execute_product".into());
+fn initialize_product_run_immutable_evidence(run: &mut AgentRun, session: &PlanExecuteSession) {
     run.reasoning_trace = Some(ReasoningTrace {
         strategy_result: Some(plan_execute_trace_metadata(session)),
         output: Some("plan_execute_product".into()),
@@ -1726,14 +1698,28 @@ async fn update_product_run_for_session(
         ],
         ..ReasoningTrace::default()
     });
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "AgentRun store not available for Plan-Execute product".to_string())?;
-    let store = store_arc.lock().await;
-    store
-        .update_run(run)
-        .map_err(|e| format!("failed to update Plan-Execute AgentRun: {e}"))
+}
+
+async fn create_product_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    crate::terminal_owner_write_gateway::create_agent_run(state, run)
+        .await
+        .map_err(|error| format!("failed to create Plan-Execute AgentRun: {error}"))
+}
+
+async fn update_existing_product_run_for_session(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+) -> Result<(), String> {
+    let Some(run_id) = session.source_agent_run_id.as_deref() else {
+        return Ok(());
+    };
+    crate::terminal_owner_write_gateway::project_agent_run_from_plan_execute_session(
+        state,
+        run_id,
+        &session.session_id,
+    )
+    .await
+    .map_err(|error| format!("failed to update Plan-Execute AgentRun: {error}"))
 }
 
 fn plan_execute_context_summary(life_model_empty: bool) -> ContextSummary {
@@ -1842,19 +1828,106 @@ fn plan_execute_trace_side_effect_budget() -> Value {
     })
 }
 
-fn plan_execute_output_preview(session: &PlanExecuteSession) -> String {
-    format!(
-        "Weekly plan {}: {} steps, {} proposals",
-        session.status,
-        session.step_count,
-        session.linked_proposal_ids.len()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::agent::{PlanExecuteSessionStatus, PlanStepStatus, ProposalSource};
+    use openlife_core::agent::{
+        AgentRunStatus, PlanExecuteSessionStatus, PlanStepStatus, ProposalSource,
+    };
+
+    fn install_release_like_persistence_coordinator(state: &mut Arc<AppState>) {
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        coordinator
+            .require_effects_allowed()
+            .expect("complete sealed manifest enables canonical writes");
+        Arc::get_mut(state)
+            .expect("test state must have one outer owner")
+            .persistence_coordinator = coordinator;
+    }
+
+    #[tokio::test]
+    async fn plan_execute_source_preflight_read_failure_degrades_before_future_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plan-source-agent-run-failure.db");
+        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
+        let run = new_plan_execute_product_run("plan-source-read-failure");
+        let run_id = run.id.clone();
+        store.create_run(&run).unwrap();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("test state has one outer owner")
+            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
+        install_release_like_persistence_coordinator(&mut state);
+
+        let missing = load_plan_execute_source_task_id(&state, "missing-plan-source")
+            .await
+            .unwrap_err();
+        assert_eq!(missing, "Plan-Execute source AgentRun missing");
+        assert_eq!(
+            state.persistence_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+
+        let fault = rusqlite::Connection::open(&path).unwrap();
+        fault.execute_batch("DROP TABLE agent_runs;").unwrap();
+        drop(fault);
+        let error = load_plan_execute_source_task_id(&state, &run_id)
+            .await
+            .expect_err("Plan-Execute source read must fail closed on durable corruption");
+        assert!(error.to_ascii_lowercase().contains("no such table"));
+        assert_eq!(
+            state.persistence_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded
+        );
+        assert!(state
+            .persistence_coordinator
+            .admit_agent_run_write()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn late_degradation_blocks_standalone_plan_execute_agent_run_create() {
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        install_release_like_persistence_coordinator(&mut state);
+        let run = new_plan_execute_product_run("late-degraded-plan-execute-create");
+        let (reached, release) =
+            crate::terminal_owner_write_gateway::install_agent_run_lifecycle_commit_test_barrier(
+                &run.id,
+            );
+        let operation_state = Arc::clone(&state);
+        let operation_run = run.clone();
+        let operation =
+            tokio::spawn(async move { create_product_run(&operation_state, &operation_run).await });
+
+        reached
+            .await
+            .expect("PlanExecute create reached the post-precheck commit barrier");
+        state
+            .persistence_coordinator
+            .degrade_globally("injected_after_plan_execute_create_precheck");
+        release.send(()).unwrap();
+
+        let error = operation.await.unwrap().unwrap_err();
+        assert!(
+            error.contains(crate::persistence_coordinator::PERSISTENCE_ADMISSION_INVALIDATED),
+            "late degradation returned the wrong PlanExecute create error: {error}"
+        );
+        assert!(state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run_including_deleted(&run.id)
+            .unwrap()
+            .is_none());
+    }
 
     #[tokio::test]
     async fn plan_execute_create_command_stores_draft_session_and_trace_without_proposals() {
@@ -1900,10 +1973,7 @@ mod tests {
             .get_run(session.source_agent_run_id.as_deref().unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(
-            run.reasoning_strategy.as_deref(),
-            Some("plan_execute_product")
-        );
+        assert_eq!(run.reasoning_strategy.as_deref(), Some("plan_execute"));
         assert!(
             run.reasoning_trace.is_none(),
             "AgentRun persists a digest, not a second copy of reasoning payload"
@@ -1911,7 +1981,20 @@ mod tests {
         assert!(run
             .reasoning_trace_digest
             .as_deref()
-            .is_some_and(|digest| digest.starts_with("sha256:")));
+            .is_some_and(|digest| digest.starts_with("hmac-sha256:")));
+
+        // Counterfactual: lifecycle projection may reuse the create-time
+        // receipt, but it may never replace Plan-Execute immutable evidence.
+        let mut tampered = run.clone();
+        tampered.reasoning_trace = Some(ReasoningTrace {
+            strategy_result: Some(json!({ "counterfactual": "late_trace_rewrite" })),
+            ..ReasoningTrace::default()
+        });
+        tampered.reasoning_trace_digest = None;
+        let error = agent_run_store.update_run(&tampered).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("agent_run_immutable_evidence_update_conflict"));
     }
 
     #[tokio::test]
@@ -2093,11 +2176,13 @@ mod tests {
             .unwrap();
         assert_eq!(run.generated_proposals.len(), 1);
         assert_eq!(run.generated_proposals[0], proposals[0].id);
+        assert_eq!(run.status, AgentRunStatus::WaitingPermission);
+        assert!(run.finished_at.is_none());
         assert!(run.reasoning_trace.is_none());
         assert!(run
             .reasoning_trace_digest
             .as_deref()
-            .is_some_and(|digest| digest.starts_with("sha256:")));
+            .is_some_and(|digest| digest.starts_with("hmac-sha256:")));
         drop(agent_run_store);
 
         let replay = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
@@ -2130,6 +2215,35 @@ mod tests {
             }),
             "Plan-Execute command events must not claim direct LifeModel or external writes"
         );
+
+        crate::commands::proposal::accept_proposal_with_state(proposals[0].id.clone(), &state)
+            .await
+            .unwrap();
+        let session_after_review = get_plan_execute_session_with_state(
+            GetPlanExecuteSessionInput {
+                session_id: session.session_id.clone(),
+            },
+            &state,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            session_after_review.status,
+            PlanExecuteSessionStatus::InProgress,
+            "Proposal approval does not complete the remaining Plan-Execute steps"
+        );
+        let run_after_review = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(session.source_agent_run_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after_review.status, AgentRunStatus::Running);
+        assert!(run_after_review.finished_at.is_none());
     }
 
     #[tokio::test]
@@ -2182,6 +2296,17 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cancelled.status, PlanExecuteSessionStatus::Cancelled);
+        let cancelled_run = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(cancelled.source_agent_run_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled_run.status, AgentRunStatus::Cancelled);
+        assert!(cancelled_run.finished_at.is_some());
         assert!(cancelled
             .steps
             .iter()

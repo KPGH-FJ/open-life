@@ -230,7 +230,10 @@ pub(crate) fn typed_agent_loop_permission_code(value: Option<&str>) -> Option<&'
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) fn attach_main_chat_read_observation_metadata(
     metadata: &mut serde_json::Value,
     queue_action_type: &str,
@@ -377,7 +380,10 @@ fn attach_tool_selection_ranking_metadata(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn try_run_main_chat_react_agent_loop(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -392,37 +398,12 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     provider_authorization: &MainChatProviderAuthorization,
     provider_runtime: &crate::state::ProviderRuntimeSnapshot,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
-    emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+    emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
 ) -> Result<MainChatReactAgentLoopAttempt, String> {
     use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
-
-    let canonical_run = {
-        let store_arc = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        let run = store
-            .get_run(canonical_run_id)
-            .map_err(|error| format!("load canonical ReAct AgentRun failed: {error}"))?
-            .ok_or_else(|| format!("canonical_react_agent_run_missing:{canonical_run_id}"))?;
-        if run.task_id != task_session_id {
-            return Err(format!(
-                "canonical_react_agent_run_task_mismatch:{canonical_run_id}"
-            ));
-        }
-        if run.session_id.as_deref() != Some(session_id) {
-            return Err(format!(
-                "canonical_react_agent_run_session_mismatch:{canonical_run_id}"
-            ));
-        }
-        if run.status != openlife_core::agent::AgentRunStatus::Running {
-            return Err(format!(
-                "canonical_react_agent_run_not_running:{canonical_run_id}"
-            ));
-        }
-        run
-    };
+    let canonical_run =
+        load_canonical_react_agent_run(state, task_session_id, canonical_run_id, session_id)
+            .await?;
     let baseline_action_ids = canonical_run
         .actions
         .iter()
@@ -716,6 +697,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         openlife_core::agent::ActionExecutorConfig {
             allow_writes: false,
             allow_cloud,
+            search_provider: resources.execution.governed.search_provider.clone(),
             ..Default::default()
         },
     )
@@ -917,6 +899,14 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 .persistence_coordinator
                 .as_ref(),
         )
+        .with_durable_store_failure_observer(
+            resources
+                .execution
+                .governed
+                .shared
+                .persistence_coordinator
+                .as_ref(),
+        )
         .with_life_model(life_model)
         .with_memory_store(&resources.execution.governed.memory_store)
         .with_calendar_ics_paths(&calendar_ics_paths)
@@ -938,62 +928,58 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         if let Some(ref fixture_output) = web_search_fixture_output {
             action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
         }
-
-        let mut agent_loop_provider_progress = |progress| {
-            match progress {
-                ProviderInvocationProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                } => emit_progress(MainChatModelProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                }),
-                ProviderInvocationProgress::Completed(receipt) => {
-                    emit_progress(MainChatModelProgress::Completed {
-                        request_id: receipt.request_id,
-                        provider: receipt.provider,
-                        model: receipt.model,
-                        finished_at: receipt.finished_at,
-                    })
-                }
-                ProviderInvocationProgress::Failed(receipt) => {
-                    emit_progress(MainChatModelProgress::Failed {
-                        request_id: receipt.request_id,
-                        provider: receipt.provider,
-                        model: receipt.model,
-                        finished_at: receipt.finished_at,
-                        error_digest: receipt.error_digest.unwrap_or_else(|| {
-                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-                                &serde_json::json!({ "error": "provider_failed_without_digest" }),
-                            )
-                            .1
-                        }),
-                    })
-                }
-                ProviderInvocationProgress::RemoteUnknown(receipt) => {
-                    emit_progress(MainChatModelProgress::RemoteUnknown {
-                        request_id: receipt.request_id,
-                        provider: receipt.provider,
-                        model: receipt.model,
-                        finished_at: receipt.finished_at,
-                        reason_digest: receipt.error_digest.unwrap_or_else(|| {
-                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-                                &serde_json::json!({
-                                    "error": "provider_remote_unknown_without_digest"
-                                }),
-                            )
-                            .1
-                        }),
-                    })
-                }
+        let mut agent_loop_provider_progress = |progress| match progress {
+            ProviderInvocationProgress::Started {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence,
+            } => emit_progress(MainChatModelProgress::Started {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence: Box::new(policy_evidence),
+            }),
+            ProviderInvocationProgress::Completed(receipt) => {
+                emit_progress(MainChatModelProgress::Completed {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                })
             }
-            Ok(())
+            ProviderInvocationProgress::Failed(receipt) => {
+                emit_progress(MainChatModelProgress::Failed {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                    error_digest: receipt.error_digest.unwrap_or_else(|| {
+                        openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                            &serde_json::json!({ "error": "provider_failed_without_digest" }),
+                        )
+                        .1
+                    }),
+                })
+            }
+            ProviderInvocationProgress::RemoteUnknown(receipt) => {
+                emit_progress(MainChatModelProgress::RemoteUnknown {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                    reason_digest: receipt.error_digest.unwrap_or_else(|| {
+                        openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                            &serde_json::json!({
+                                "error": "provider_remote_unknown_without_digest"
+                            }),
+                        )
+                        .1
+                    }),
+                })
+            }
         };
         agent_loop
             .run_existing_with_provider_observer(
@@ -1557,6 +1543,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             })
         }
         Err(err) => {
+            crate::terminal_owner_write_gateway::register_agent_run_store_error(state, &err);
             #[cfg(test)]
             eprintln!("main_chat_agent_loop_failure_debug={err}");
             let model_error_digest =
@@ -1587,6 +1574,43 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             )
         }
     }
+}
+
+async fn load_canonical_react_agent_run(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    canonical_run_id: &str,
+    session_id: &str,
+) -> Result<openlife_core::agent::AgentRun, String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
+    let store = store_arc.lock().await;
+    let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run(canonical_run_id)
+            .map_err(|error| error.to_string()),
+    )
+    .map_err(|error| format!("load canonical ReAct AgentRun failed: {error}"))?
+    .ok_or_else(|| format!("canonical_react_agent_run_missing:{canonical_run_id}"))?;
+    if run.task_id != task_session_id {
+        return Err(format!(
+            "canonical_react_agent_run_task_mismatch:{canonical_run_id}"
+        ));
+    }
+    if run.session_id.as_deref() != Some(session_id) {
+        return Err(format!(
+            "canonical_react_agent_run_session_mismatch:{canonical_run_id}"
+        ));
+    }
+    if run.status != openlife_core::agent::AgentRunStatus::Running {
+        return Err(format!(
+            "canonical_react_agent_run_not_running:{canonical_run_id}"
+        ));
+    }
+    Ok(run)
 }
 
 pub(crate) fn main_chat_permission_blocker_reason(
@@ -1756,6 +1780,71 @@ pub(crate) fn agent_actions_to_tool_call_results(
 #[cfg(test)]
 mod canonical_delta_tests {
     use super::*;
+
+    fn install_release_like_persistence_coordinator(state: &mut Arc<AppState>) {
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        Arc::get_mut(state)
+            .expect("test state has one outer owner")
+            .persistence_coordinator = coordinator;
+    }
+
+    #[tokio::test]
+    async fn react_preflight_read_failure_degrades_and_blocks_future_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("react-preflight-agent-run-failure.db");
+        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
+        let run = openlife_core::agent::AgentRun::new_chat_run(
+            "react-preflight-session",
+            "metadata safe input",
+        );
+        let task_id = run.task_id.clone();
+        let run_id = run.id.clone();
+        store.create_run(&run).unwrap();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("test state has one outer owner")
+            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
+        install_release_like_persistence_coordinator(&mut state);
+
+        let missing = load_canonical_react_agent_run(
+            &state,
+            &task_id,
+            "missing-react-run",
+            "react-preflight-session",
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.contains("canonical_react_agent_run_missing"));
+        assert_eq!(
+            state.persistence_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+
+        let fault = rusqlite::Connection::open(&path).unwrap();
+        fault.execute_batch("DROP TABLE agent_runs;").unwrap();
+        drop(fault);
+        let error =
+            load_canonical_react_agent_run(&state, &task_id, &run_id, "react-preflight-session")
+                .await
+                .expect_err("ReAct preflight must fail closed on durable read failure");
+        assert!(error.to_ascii_lowercase().contains("no such table"));
+        assert_eq!(
+            state.persistence_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded
+        );
+        assert!(state
+            .persistence_coordinator
+            .admit_agent_run_write()
+            .is_err());
+    }
 
     #[test]
     fn budget_observation_does_not_discard_a_completed_tool_graph() {

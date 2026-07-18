@@ -4,7 +4,7 @@ use openlife_core::agent::main_chat_agent_v1::{
     ExecutionQueueStatus, ExecutionTranscriptEntry, ExecutionTranscriptEntryDraft,
     ExecutionTranscriptEntryKind, QueuedExecutionAction,
 };
-use openlife_core::agent::{AgentRunError, AgentRunStatus, AgentTaskKind};
+use openlife_core::agent::{AgentRunStatus, AgentTaskKind};
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -426,22 +426,6 @@ impl MainChatTaskFailureKind {
             | Self::UnknownError => "failed",
         }
     }
-
-    fn run_error_phase(self) -> &'static str {
-        match self {
-            Self::Timeout => "timeout",
-            Self::Cancelled => "cancelled",
-            Self::Interrupted => "interrupted",
-            Self::ProviderError => "provider_error",
-            Self::ToolError => "tool_error",
-            Self::PolicyBlocker => "policy_blocker",
-            Self::UnknownError => "unknown_error",
-        }
-    }
-
-    fn recoverable(self) -> bool {
-        !matches!(self, Self::Cancelled | Self::Interrupted)
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -462,6 +446,13 @@ struct MainChatTaskFailureFinalizationRequest<'a> {
     safe_reason: &'a str,
     source_ref: &'a str,
     durable_event: Option<crate::main_chat_event_stream::MainChatAgentDurableEvent>,
+    agent_run_write_lane: AgentRunFailureWriteLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRunFailureWriteLane {
+    Normal,
+    StartupReconciliation,
 }
 
 pub(crate) async fn finalize_main_chat_task_failure(
@@ -480,6 +471,28 @@ pub(crate) async fn finalize_main_chat_task_failure(
         safe_reason,
         source_ref,
         durable_event: None,
+        agent_run_write_lane: AgentRunFailureWriteLane::Normal,
+    })
+    .await
+}
+
+pub(crate) async fn finalize_main_chat_task_failure_at_startup_reconciliation(
+    state: &Arc<AppState>,
+    run_id: Option<&str>,
+    task_session_id: Option<&str>,
+    failure_kind: MainChatTaskFailureKind,
+    safe_reason: &str,
+    source_ref: &str,
+) -> Result<MainChatTaskFailureFinalization, String> {
+    finalize_main_chat_task_failure_inner(MainChatTaskFailureFinalizationRequest {
+        state,
+        run_id,
+        task_session_id,
+        failure_kind,
+        safe_reason,
+        source_ref,
+        durable_event: None,
+        agent_run_write_lane: AgentRunFailureWriteLane::StartupReconciliation,
     })
     .await
 }
@@ -503,6 +516,29 @@ pub(crate) async fn finalize_main_chat_task_failure_after_durable_receipt(
         safe_reason,
         source_ref,
         durable_event: Some(durable_event),
+        agent_run_write_lane: AgentRunFailureWriteLane::Normal,
+    })
+    .await
+}
+
+pub(crate) async fn finalize_main_chat_task_failure_after_durable_receipt_at_startup_reconciliation(
+    state: &Arc<AppState>,
+    failure_kind: MainChatTaskFailureKind,
+    safe_reason: &str,
+    source_ref: &str,
+    durable_event: crate::main_chat_event_stream::MainChatAgentDurableEvent,
+) -> Result<MainChatTaskFailureFinalization, String> {
+    let run_id = durable_event.run_id.clone();
+    let task_session_id = durable_event.task_session_id.clone();
+    finalize_main_chat_task_failure_inner(MainChatTaskFailureFinalizationRequest {
+        state,
+        run_id: Some(&run_id),
+        task_session_id: Some(&task_session_id),
+        failure_kind,
+        safe_reason,
+        source_ref,
+        durable_event: Some(durable_event),
+        agent_run_write_lane: AgentRunFailureWriteLane::StartupReconciliation,
     })
     .await
 }
@@ -518,6 +554,7 @@ async fn finalize_main_chat_task_failure_inner(
         safe_reason,
         source_ref,
         durable_event,
+        agent_run_write_lane,
     } = request;
     let safe_reason = metadata_safe_failure_label(safe_reason, 240);
     let source_ref = metadata_safe_failure_label(source_ref, 120);
@@ -571,8 +608,11 @@ async fn finalize_main_chat_task_failure_inner(
     finalize_agent_run_failure(
         state,
         resolved_run_id.as_deref(),
+        task_id,
         failure_kind,
         &safe_reason,
+        agent_run_write_lane,
+        Some(&durable_event),
     )
     .await?;
     finalize_task_session_failure(
@@ -580,6 +620,7 @@ async fn finalize_main_chat_task_failure_inner(
         resolved_task_session_id.as_deref(),
         failure_kind,
         &safe_reason,
+        agent_run_write_lane,
     )
     .await?;
 
@@ -664,8 +705,11 @@ pub(crate) async fn mark_main_chat_pre_dispatch_event_store_failure(
     finalize_agent_run_failure(
         state,
         Some(run_id),
+        task_session_id,
         MainChatTaskFailureKind::UnknownError,
         safe_reason,
+        AgentRunFailureWriteLane::Normal,
+        None,
     )
     .await
 }
@@ -718,11 +762,14 @@ pub(crate) async fn canonical_main_chat_run_status(
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let store = store_arc.lock().await;
-    store
-        .get_run(run_id)
-        .map_err(|error| format!("load canonical AgentRun status failed: {error}"))?
-        .map(|run| run.status)
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))
+    crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run(run_id)
+            .map_err(|error| format!("load canonical AgentRun status failed: {error}")),
+    )?
+    .map(|run| run.status)
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))
 }
 
 pub(crate) async fn record_main_chat_post_commit_degradation(
@@ -819,10 +866,13 @@ async fn canonical_agent_run_id_for_task(
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let store = store_arc.lock().await;
-    store
-        .get_run_for_task_id(task_session_id)
-        .map(|run| run.map(|run| run.id))
-        .map_err(|err| format!("load canonical AgentRun for task failed: {err}"))
+    crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run_for_task_id(task_session_id)
+            .map(|run| run.map(|run| run.id))
+            .map_err(|err| format!("load canonical AgentRun for task failed: {err}")),
+    )
 }
 
 async fn validate_failure_run_task_binding(
@@ -835,10 +885,13 @@ async fn validate_failure_run_task_binding(
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let store = store_arc.lock().await;
-    let run = store
-        .get_run(run_id)
-        .map_err(|error| format!("load canonical AgentRun for failure failed: {error}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run(run_id)
+            .map_err(|error| format!("load canonical AgentRun for failure failed: {error}")),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
     if run.task_id != task_session_id {
         return Err(format!(
             "canonical_agent_run_task_mismatch:{run_id}:expected={task_session_id}"
@@ -874,9 +927,12 @@ async fn runtime_route_evidence_value_for_run_id(
         return Ok(None);
     };
     let store = store_arc.lock().await;
-    let Some(run) = store
-        .get_run(run_id)
-        .map_err(|err| format!("load AgentRun route evidence failed: {err}"))?
+    let Some(run) = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run(run_id)
+            .map_err(|err| format!("load AgentRun route evidence failed: {err}")),
+    )?
     else {
         return Ok(None);
     };
@@ -890,44 +946,43 @@ async fn runtime_route_evidence_value_for_run_id(
 async fn finalize_agent_run_failure(
     state: &Arc<AppState>,
     run_id: Option<&str>,
+    task_session_id: &str,
     failure_kind: MainChatTaskFailureKind,
     safe_reason: &str,
+    write_lane: AgentRunFailureWriteLane,
+    durable_evidence: Option<&crate::main_chat_event_stream::MainChatAgentDurableEvent>,
 ) -> Result<(), String> {
     let Some(run_id) = run_id else {
         return Ok(());
     };
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    let mut run = {
-        let store = store_arc.lock().await;
-        store
-            .get_run(run_id)
-            .map_err(|err| format!("load AgentRun for failure finalizer failed: {err}"))?
-            .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?
-    };
-    if run.status == AgentRunStatus::Completed {
-        return Ok(());
-    }
-
-    match failure_kind {
-        MainChatTaskFailureKind::Cancelled => {
-            if run.status != AgentRunStatus::Cancelled {
-                run.cancel();
-            }
-        }
-        _ => {
-            run.fail(AgentRunError {
-                message: safe_reason.to_string(),
-                phase: failure_kind.run_error_phase().to_string(),
-                recoverable: failure_kind.recoverable(),
-            });
+    match write_lane {
+        AgentRunFailureWriteLane::Normal => crate::terminal_owner_write_gateway::project_main_chat_agent_run_failure(
+            state,
+            run_id,
+            task_session_id,
+            match failure_kind {
+                MainChatTaskFailureKind::Timeout => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::Timeout,
+                MainChatTaskFailureKind::Cancelled => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::Cancelled,
+                MainChatTaskFailureKind::Interrupted => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::Interrupted,
+                MainChatTaskFailureKind::ProviderError => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::ProviderError,
+                MainChatTaskFailureKind::ToolError => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::ToolError,
+                MainChatTaskFailureKind::PolicyBlocker => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::PolicyBlocker,
+                MainChatTaskFailureKind::UnknownError => crate::terminal_owner_write_gateway::AgentRunMainChatFailureKind::UnknownError,
+            },
+            safe_reason,
+        )
+        .await,
+        AgentRunFailureWriteLane::StartupReconciliation => {
+            let evidence = durable_evidence.ok_or_else(|| {
+                "startup_agent_run_failure_projection_durable_evidence_missing".to_string()
+            })?;
+            crate::terminal_owner_write_gateway::project_agent_run_from_startup_durable_event(
+                state, evidence,
+            )
+            .await
         }
     }
-    crate::terminal_owner_write_gateway::update_agent_run(state, &run)
-        .await
-        .map_err(|err| format!("update AgentRun failure finalizer failed: {err}"))
+    .map_err(|err| format!("update AgentRun failure finalizer failed: {err}"))
 }
 
 async fn finalize_task_session_failure(
@@ -935,6 +990,7 @@ async fn finalize_task_session_failure(
     task_session_id: Option<&str>,
     failure_kind: MainChatTaskFailureKind,
     safe_reason: &str,
+    write_lane: AgentRunFailureWriteLane,
 ) -> Result<(), String> {
     let Some(task_session_id) = task_session_id else {
         return Ok(());
@@ -950,13 +1006,13 @@ async fn finalize_task_session_failure(
             .map_err(|err| format!("load task session for failure finalizer failed: {err}"))?
             .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?
     };
-    if matches!(
-        session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
-    ) {
+    if session.status == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+        && write_lane == AgentRunFailureWriteLane::Normal
+    {
         return Ok(());
     }
     if session.status == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled
+        && write_lane == AgentRunFailureWriteLane::Normal
         && !matches!(
             failure_kind,
             MainChatTaskFailureKind::Cancelled | MainChatTaskFailureKind::Interrupted

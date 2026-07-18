@@ -29,6 +29,8 @@ describe("DataTab", () => {
     setTierLoading: vi.fn(),
     setTierResult: vi.fn(),
     handleExportDiagnostics: vi.fn(),
+    governedImportStatusMessage: null,
+    governedImportStatusError: null,
   };
 
   it("renders data migration section", () => {

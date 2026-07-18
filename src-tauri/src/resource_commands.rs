@@ -247,15 +247,14 @@ pub(crate) async fn detach_resource_from_turn(
     validate_uuid_v4("resource_detach_operation_id", &operation_id)?;
     validate_uuid_v4("resource_turn_operation_id", &turn_operation_id)?;
     validate_uuid_v4("resource_id", &resource_id)?;
-    let store = state
+    let gateway = state
         .resource_runtime
         .as_ref()
         .ok_or_else(|| "resource_runtime_unavailable".to_string())?
         .gateway()
-        .store()
         .clone();
     tokio::task::spawn_blocking(move || {
-        store.detach_resource_from_message(&operation_id, &turn_operation_id, &resource_id)
+        gateway.detach_resource_from_message(&operation_id, &turn_operation_id, &resource_id)
     })
     .await
     .map_err(|_| "resource_detach_task_failed".to_string())?

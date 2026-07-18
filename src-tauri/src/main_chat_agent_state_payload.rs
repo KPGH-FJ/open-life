@@ -91,7 +91,10 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
     let run = if let (Some(run_store_arc), Some(run_id)) = (state.agent_run_store.as_ref(), run_id)
     {
         let run_store = run_store_arc.lock().await;
-        match run_store.get_run(run_id) {
+        match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            run_store.get_run(run_id).map_err(|error| error.to_string()),
+        ) {
             Ok(run) => run,
             Err(err) => {
                 assembly_diagnostics.push(gap(

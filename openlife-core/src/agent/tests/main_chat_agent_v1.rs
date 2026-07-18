@@ -133,7 +133,7 @@ fn seed_router_cases_match_main_chat_v1_strategy_contract() {
             .filter(|case| case.kind == MainChatEvalCaseKind::Router)
             .collect(),
         ingress: &ingress,
-        policy: &ExecutionPolicy::default(),
+        policy: &ExecutionPolicy,
     });
 
     assert_eq!(report.total_cases, 10);
@@ -1442,7 +1442,7 @@ fn stage1_browser_prompts_select_expected_main_chat_strategies() {
 
 #[test]
 fn seed_policy_cases_enforce_no_silent_high_risk_writes() {
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
     let report = run_main_chat_agent_v1_eval_suite(MainChatEvalSuiteInput {
         cases: first_40_seed_eval_cases()
             .into_iter()
@@ -1487,7 +1487,7 @@ fn seed_end_to_end_cases_have_deterministic_contract_coverage() {
     let report = run_main_chat_agent_v1_eval_suite(MainChatEvalSuiteInput {
         cases,
         ingress: &AgentIngress::default(),
-        policy: &ExecutionPolicy::default(),
+        policy: &ExecutionPolicy,
     });
 
     assert_eq!(report.total_cases, 20);
@@ -1504,7 +1504,7 @@ fn legacy_100_case_scaffold_eval_is_not_the_runtime_gate() {
     let report = run_main_chat_agent_v1_eval_suite(MainChatEvalSuiteInput {
         cases,
         ingress: &AgentIngress::default(),
-        policy: &ExecutionPolicy::default(),
+        policy: &ExecutionPolicy,
     });
 
     assert!(report.total_cases >= 100);
@@ -1722,7 +1722,7 @@ fn final_acceptance_gate_requires_runtime_command_surface_and_live_provider_evid
     assert!(report
         .required_evidence
         .contains(&"provider_backed_mcp_agent_loop".to_string()));
-    assert_eq!(report.direct_writes_executed, false);
+    assert!(!report.direct_writes_executed);
 }
 
 #[test]
@@ -2085,7 +2085,7 @@ fn context_compiler_selects_bounded_context_and_blocks_raw_truth_promotion() {
             AgentTaskKind::Conversation,
         )
         .privacy_risk;
-    let compiled = ContextCompiler::default().compile(ContextCompilerInput {
+    let compiled = ContextCompiler.compile(ContextCompilerInput {
         strategy: MainChatAgentStrategy::ReActToolExecution,
         privacy_risk,
         active_session_id: Some("task-1".into()),
@@ -2316,7 +2316,7 @@ fn agent_task_session_store_rejects_terminal_state_resume_and_cancel() {
 #[test]
 fn action_queue_persists_policy_first_lifecycle() {
     let queue = ActionQueueStore::new_in_memory().expect("action queue");
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
     let read_decision = policy.classify(&ExecutionAction::new(
         "memory.search",
         "Search past sessions for energy notes.",
@@ -2421,7 +2421,7 @@ fn action_queue_persists_policy_first_lifecycle() {
 #[test]
 fn action_queue_rejects_illegal_retry_and_terminal_transitions() {
     let queue = ActionQueueStore::new_in_memory().expect("action queue");
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
     let read_decision = policy.classify(&ExecutionAction::new(
         "file.read",
         "Read AGENTS.md as a workspace observation.",
@@ -2540,7 +2540,7 @@ fn action_queue_rejects_illegal_retry_and_terminal_transitions() {
 fn retry_decision_requires_failed_action_on_resumable_task() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let queue = ActionQueueStore::new_in_memory().expect("action queue");
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
     let session = session_store
         .create_session(AgentTaskSessionDraft {
             chat_session_id: "chat-retry-guard".into(),
@@ -2602,7 +2602,7 @@ fn retry_decision_requires_failed_action_on_resumable_task() {
 fn retry_decision_requires_canonical_authority_for_failed_safe_read_action() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let queue = ActionQueueStore::new_in_memory().expect("action queue");
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
     let session = session_store
         .create_session(AgentTaskSessionDraft {
             chat_session_id: "chat-retry-auto".into(),
@@ -2677,7 +2677,7 @@ fn resume_decision_keeps_pending_permission_task_waiting_instead_of_running() {
         .enqueue(
             &session.id,
             ExecutionAction::new("file.read", "Read a workspace file."),
-            ExecutionPolicy::default().classify(&ExecutionAction::new(
+            ExecutionPolicy.classify(&ExecutionAction::new(
                 "external.write",
                 "Requires explicit permission.",
             )),

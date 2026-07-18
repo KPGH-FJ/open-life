@@ -33,7 +33,7 @@ fn seeded_packet(
     let policy_store = PolicyStore::mvp_builtin();
     let heuristic_store = HeuristicStore::new_in_memory().unwrap();
     heuristic_store.seed_mvp_heuristics().unwrap();
-    HSSelector::default()
+    HSSelector
         .select(
             &policy_store,
             &heuristic_store,
@@ -50,6 +50,14 @@ fn seeded_packet(
             },
         )
         .unwrap()
+}
+
+fn canonical_tool_owner() -> (AgentRunStore, String) {
+    let store = AgentRunStore::new_in_memory().unwrap();
+    let run = AgentRun::new_tool_execution_run("runtime-integration");
+    let run_id = run.id.clone();
+    store.create_run(&run).unwrap();
+    (store, run_id)
 }
 
 #[test]
@@ -383,14 +391,23 @@ fn agent_run_store_persists_metadata_safe_hs_audit_and_behavior_checks() {
     let fetched = store.get_run(&run.id).unwrap().unwrap();
 
     let audit = fetched.hs_selection_audit.expect("audit should persist");
-    assert!(audit
+    assert!(packet
+        .audit
+        .selected_policy_ids
+        .contains(&BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.to_string()));
+    assert_eq!(audit.selected_policy_ids.len(), 1);
+    assert!(audit.selected_policy_ids[0].starts_with("policy_id:bytes="));
+    assert!(!audit
         .selected_policy_ids
         .contains(&BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.to_string()));
     assert_eq!(fetched.behavior_checks.len(), 1);
     assert_eq!(
-        fetched.behavior_checks[0].label,
+        run.behavior_checks[0].label,
         "External writes stay reviewable"
     );
+    assert!(fetched.behavior_checks[0]
+        .label
+        .starts_with("behavior_check_label:bytes="));
 
     let serialized = serde_json::to_string(&serde_json::json!({
         "audit": audit,
@@ -463,6 +480,7 @@ async fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -575,18 +593,10 @@ async fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_executio
     assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
     assert_eq!(
         result.stop_reason.as_deref(),
-        Some("unsupported_tool_source")
+        Some("tool_gateway_source_executor_unavailable")
     );
-    let report = result
-        .governance_report
-        .as_ref()
-        .expect("blocked tool should include governor report");
-    assert_eq!(
-        report.classification,
-        GovernanceDecisionClassification::Block
-    );
-    assert!(report.blocked);
-    assert!(!serde_json::to_string(report)
+    assert!(result.governance_report.is_none());
+    assert!(!serde_json::to_string(&result.execution_receipt)
         .unwrap()
         .contains("raw plugin payload"));
 }
@@ -599,6 +609,7 @@ async fn calendar_propose_event_creates_scheduled_task_never_external_write_acti
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
@@ -607,6 +618,7 @@ async fn calendar_propose_event_creates_scheduled_task_never_external_write_acti
         &[],
     )
     .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
     .with_canonical_write_admission(
         &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
     );
@@ -623,7 +635,7 @@ async fn calendar_propose_event_creates_scheduled_task_never_external_write_acti
                         "description": "Review results"
                     }
                 }),
-                source_run_id: Some("run-calendar-proposal".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
@@ -672,6 +684,7 @@ async fn email_propose_draft_creates_data_export_never_external_write_action() {
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
@@ -680,6 +693,7 @@ async fn email_propose_draft_creates_data_export_never_external_write_action() {
         &[],
     )
     .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
     .with_canonical_write_admission(
         &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
     );
@@ -696,7 +710,7 @@ async fn email_propose_draft_creates_data_export_never_external_write_action() {
                         "body": "Draft body"
                     }
                 }),
-                source_run_id: Some("run-email-proposal".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
@@ -740,6 +754,7 @@ async fn file_write_proposal_rejects_oversized_content_before_proposal_insertion
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
     let safe_paths = vec![safe_path];
@@ -753,6 +768,7 @@ async fn file_write_proposal_rejects_oversized_content_before_proposal_insertion
         &safe_paths,
     )
     .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
     .with_canonical_write_admission(
         &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
     );
@@ -768,7 +784,7 @@ async fn file_write_proposal_rejects_oversized_content_before_proposal_insertion
                         "content": oversized_content
                     }
                 }),
-                source_run_id: Some("run-oversized-file-proposal".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
@@ -837,7 +853,7 @@ async fn hs_direct_external_write_rejects_oversized_content_before_proposal_inse
     )
     .with_hs_runtime_packet(&packet);
 
-    let err = ToolGateway::from_executor_config(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -854,9 +870,18 @@ async fn hs_direct_external_write_rejects_oversized_content_before_proposal_inse
             &ctx,
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(err.to_string().contains("exceeds maximum allowed"));
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Failed);
+    assert!(result
+        .action
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("exceeds maximum allowed")));
+    assert_eq!(
+        result.execution_receipt.execution_outcome,
+        crate::tool_execution_receipt::ToolExecutionOutcome::Failed
+    );
     assert_eq!(proposal_store.pending_count().unwrap(), 0);
 }
 
@@ -905,6 +930,7 @@ async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
     let safe_paths = vec![safe_path];
@@ -917,6 +943,7 @@ async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal
         &safe_paths,
     )
     .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
     .with_canonical_write_admission(
         &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
     )
@@ -936,7 +963,7 @@ async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal
                         }
                     }
                 }),
-                source_run_id: Some("run-oversized-wrapped-write".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
@@ -1027,6 +1054,7 @@ async fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_execut
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1147,6 +1175,7 @@ async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allo
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
     let file_path = safe_dir
@@ -1165,14 +1194,15 @@ async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allo
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&proposal_store),
-        agent_run_store: None,
-        bound_content_receipt_issuer: None,
+        agent_run_store: Some(&agent_run_store),
+        bound_content_receipt_issuer: Some(&agent_run_store),
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1196,7 +1226,7 @@ async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allo
                         }
                     }
                 }),
-                source_run_id: Some("run-runtime".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,

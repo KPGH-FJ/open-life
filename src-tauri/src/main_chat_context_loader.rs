@@ -358,7 +358,10 @@ fn push_selected_skill_file(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn push_known_file(
     candidates: &mut Vec<ContextSourceCandidate>,
     seen: &mut HashSet<String>,

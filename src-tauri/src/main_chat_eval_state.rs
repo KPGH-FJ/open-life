@@ -69,16 +69,29 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
     main_chat_action_queue_store
         .install_event_store_reconciliation_public_key(&reconciliation_public_key)
         .expect("isolated eval ActionQueue must trust its EventStore");
+    let life_model_manager =
+        openlife_core::life_model::LifeModelManager::new(base.join("life-model").join("current"));
+    // Mirror release bootstrap ordering because both metadata owners share one
+    // SQLite file. Recovery preflight opens the file read-only and therefore
+    // requires the canonical file-journal schema to exist before the governed
+    // import journal makes the path observable.
+    openlife_core::persistence_outbox::FileMutationJournal::new(
+        life_model_manager.mutation_journal_path(),
+    )
+    .expect("isolated eval LifeModel file-mutation journal");
+    let governed_data_import_journal = Arc::new(
+        openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            life_model_manager.mutation_journal_path(),
+        )
+        .expect("isolated eval governed data-import journal"),
+    );
     let state = Arc::new(AppState {
         persistence_coordinator: Arc::new(
             crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
         ),
+        governed_data_import_journal: Some(governed_data_import_journal),
         config: Arc::new(Mutex::new(config.clone())),
-        life_model_manager: Arc::new(Mutex::new(
-            openlife_core::life_model::LifeModelManager::new(
-                base.join("life-model").join("current"),
-            ),
-        )),
+        life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
         memory_store: Arc::new(Mutex::new(memory_store)),
         mcp_registry: Arc::new(Mutex::new(openlife_core::mcp::McpRegistry::new())),
@@ -211,6 +224,24 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         manager
             .save_hs_compatibility_view(&report.projection.yaml)
             .expect("isolated eval derived compatibility view");
+    }
+    {
+        let manager = state
+            .life_model_manager
+            .try_lock()
+            .expect("isolated eval LifeModel manager must remain uncontended");
+        let model = manager
+            .load()
+            .expect("isolated eval daily-task migration source");
+        crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+            state
+                .state_store
+                .as_ref()
+                .expect("isolated eval canonical StateStore"),
+            &model,
+            chrono::Utc::now(),
+        )
+        .expect("isolated eval daily-task product owner cutover fixture");
     }
     state
 }

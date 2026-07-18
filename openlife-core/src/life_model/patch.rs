@@ -226,7 +226,10 @@ impl LifeModelPatch {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn from_proposal(
         proposal_id: &str,
         path_pointer: &str,

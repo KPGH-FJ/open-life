@@ -504,7 +504,7 @@ fn w136_version_read_model_links_diff_and_rollback_to_safe_provenance() {
                 vec![heuristic.id.clone()],
             )],
             &[],
-            &[heuristic.clone()],
+            std::slice::from_ref(&heuristic),
             &[],
         )
         .unwrap();

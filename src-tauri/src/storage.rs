@@ -1,4 +1,6 @@
 use crate::errors::AppError;
+#[cfg(test)]
+use once_cell::sync::Lazy as LazyLock;
 use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
 #[cfg(test)]
@@ -6,7 +8,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 
 const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
 const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";

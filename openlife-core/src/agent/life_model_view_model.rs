@@ -1502,6 +1502,6 @@ mod tests {
 
         assert!(!manual.active);
         assert!(manual.blocked_reason.unwrap().contains("governed"));
-        assert_eq!(manual.save_action.expect("save action").enabled, false);
+        assert!(!manual.save_action.expect("save action").enabled);
     }
 }

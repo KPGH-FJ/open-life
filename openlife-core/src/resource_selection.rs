@@ -183,7 +183,10 @@ impl DeterministicResourceSelector {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn select_for_message_with_budget(
         &self,
         store: &ResourceStore,

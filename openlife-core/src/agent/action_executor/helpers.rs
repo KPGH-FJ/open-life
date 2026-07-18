@@ -16,12 +16,32 @@ static LAST_SEARCH_AT: Mutex<Option<Instant>> = Mutex::new(None);
 pub const EXTERNAL_WRITE_PROPOSAL_MAX_SIZE_BYTES: usize = 100 * 1024;
 pub const EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS: usize = 4000;
 
-/// Search provider configuration (set at startup from SystemConfig).
 #[derive(Clone)]
 pub struct SearchProviderConfig {
     pub provider: String,
     pub brave_api_key: String,
     pub searxng_url: String,
+}
+
+impl SearchProviderConfig {
+    pub fn from_system_config(config: &crate::config::SystemConfig) -> Self {
+        Self {
+            provider: config.search_provider.clone(),
+            brave_api_key: config.search_provider_key.clone(),
+            searxng_url: config.searxng_url.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SearchProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SearchProviderConfig")
+            .field("provider", &self.provider)
+            .field("brave_api_key_present", &(!self.brave_api_key.is_empty()))
+            .field("searxng_url_present", &(!self.searxng_url.is_empty()))
+            .finish()
+    }
 }
 
 impl Default for SearchProviderConfig {
@@ -34,40 +54,26 @@ impl Default for SearchProviderConfig {
     }
 }
 
-static SEARCH_CONFIG: Mutex<SearchProviderConfig> = Mutex::new(SearchProviderConfig {
-    provider: String::new(),
-    brave_api_key: String::new(),
-    searxng_url: String::new(),
-});
-
-/// Initialize search provider configuration from SystemConfig values.
-pub fn set_search_config(provider: &str, brave_key: &str, searxng_url: &str) {
-    if let Ok(mut cfg) = SEARCH_CONFIG.lock() {
-        cfg.provider = provider.to_string();
-        cfg.brave_api_key = brave_key.to_string();
-        cfg.searxng_url = searxng_url.to_string();
-    }
-}
-
 /// Return the exact configured search transport endpoint used by `web.search`.
 ///
 /// Network consent is scoped to an endpoint decision, so ToolGateway must be
 /// able to evaluate policy before it emits a dispatch fact. Keep this selector
 /// beside the execution selector below so the preflight and transport cannot
 /// silently choose different providers.
-pub(crate) fn configured_web_search_endpoint() -> String {
-    let cfg = SEARCH_CONFIG
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    match cfg.provider.as_str() {
-        "brave" if !cfg.brave_api_key.is_empty() => {
-            "https://api.search.brave.com/res/v1/web/search".into()
+pub(crate) fn configured_web_search_endpoint(
+    cfg: &SearchProviderConfig,
+) -> std::result::Result<String, &'static str> {
+    match cfg.provider.trim().to_ascii_lowercase().as_str() {
+        "" | "duckduckgo" => Ok("https://duckduckgo.com/html/".into()),
+        "brave" if cfg.brave_api_key.trim().is_empty() => {
+            Err("web_search_brave_credential_unavailable")
         }
-        "searxng" if !cfg.searxng_url.is_empty() => {
-            format!("{}/search", cfg.searxng_url.trim_end_matches('/'))
+        "brave" => Ok("https://api.search.brave.com/res/v1/web/search".into()),
+        "searxng" if cfg.searxng_url.trim().is_empty() => {
+            Err("web_search_searxng_endpoint_unavailable")
         }
-        _ => "https://duckduckgo.com/html/".into(),
+        "searxng" => Ok(format!("{}/search", cfg.searxng_url.trim_end_matches('/'))),
+        _ => Err("web_search_provider_unsupported"),
     }
 }
 
@@ -320,11 +326,17 @@ async fn observe_a2a_dispatch_phase(
 pub(crate) async fn fetch_url_async(
     url: &str,
     network_policy: Option<&crate::config::NetworkPolicy>,
-    receipt_tracker: ToolExecutionReceiptTracker,
-    started_observer: Option<&dyn crate::agent::ToolStartedTransitionObserver>,
+    admission: super::ToolDispatchAdmission<'_>,
 ) -> Result<ToolCallInternalResult> {
+    let (receipt_tracker, started_observer) = admission.into_remote_parts();
+    let fake_ip_proxy_domain_allowlist = network_policy
+        .map(|policy| policy.domain_allowlist.clone())
+        .unwrap_or_default();
     let response = match crate::network_client::NetworkClient::new(
-        crate::network_client::NetworkClientPolicy::default(),
+        crate::network_client::NetworkClientPolicy {
+            fake_ip_proxy_domain_allowlist,
+            ..Default::default()
+        },
     )
     .get_text_with_start_observer(url, network_policy, {
         let receipt_tracker = receipt_tracker.clone();
@@ -379,45 +391,15 @@ pub(crate) async fn fetch_url_async(
 pub(crate) async fn search_web_async(
     query: &str,
     max_results: usize,
+    search_config: &SearchProviderConfig,
     network_policy: Option<&crate::config::NetworkPolicy>,
-    receipt_tracker: ToolExecutionReceiptTracker,
-    started_observer: Option<&dyn crate::agent::ToolStartedTransitionObserver>,
+    admission: super::ToolDispatchAdmission<'_>,
 ) -> Result<ToolCallInternalResult> {
-    // Determine search provider
-    let cfg = SEARCH_CONFIG
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let provider = if cfg.provider.is_empty() {
-        "duckduckgo"
-    } else {
-        &cfg.provider
-    };
+    let (receipt_tracker, started_observer) = admission.into_remote_parts();
+    let provider = search_config.provider.trim().to_ascii_lowercase();
 
-    match provider {
-        "brave" if !cfg.brave_api_key.is_empty() => {
-            search_brave_async(
-                query,
-                max_results,
-                &cfg.brave_api_key,
-                network_policy,
-                receipt_tracker,
-                started_observer,
-            )
-            .await
-        }
-        "searxng" if !cfg.searxng_url.is_empty() => {
-            search_searxng_async(
-                query,
-                max_results,
-                &cfg.searxng_url,
-                network_policy,
-                receipt_tracker,
-                started_observer,
-            )
-            .await
-        }
-        _ => {
+    match provider.as_str() {
+        "" | "duckduckgo" => {
             search_duckduckgo_async(
                 query,
                 max_results,
@@ -427,6 +409,43 @@ pub(crate) async fn search_web_async(
             )
             .await
         }
+        "brave" if !search_config.brave_api_key.is_empty() => {
+            search_brave_async(
+                query,
+                max_results,
+                &search_config.brave_api_key,
+                network_policy,
+                receipt_tracker,
+                started_observer,
+            )
+            .await
+        }
+        "searxng" if !search_config.searxng_url.is_empty() => {
+            search_searxng_async(
+                query,
+                max_results,
+                &search_config.searxng_url,
+                network_policy,
+                receipt_tracker,
+                started_observer,
+            )
+            .await
+        }
+        "brave" => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("web_search_brave_credential_unavailable".into()),
+        }),
+        "searxng" => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("web_search_searxng_endpoint_unavailable".into()),
+        }),
+        _ => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("web_search_provider_unsupported".into()),
+        }),
     }
 }
 
@@ -450,7 +469,7 @@ async fn search_duckduckgo_async(
     );
     match crate::network_client::NetworkClient::new(crate::network_client::NetworkClientPolicy {
         require_https: true,
-        allow_system_proxy_for_official_fake_ip_endpoint: true,
+        fake_ip_proxy_domain_allowlist: vec!["duckduckgo.com".into()],
         ..Default::default()
     })
     .get_text_with_headers_and_start_observer(url.as_str(), network_policy, headers, {
@@ -743,7 +762,7 @@ async fn search_brave_async(
     let response =
         crate::network_client::NetworkClient::new(crate::network_client::NetworkClientPolicy {
             require_https: true,
-            allow_system_proxy_for_official_fake_ip_endpoint: true,
+            fake_ip_proxy_domain_allowlist: vec!["api.search.brave.com".into()],
             ..Default::default()
         })
         .get_text_with_headers_and_start_observer(url.as_str(), network_policy, headers, {
@@ -850,19 +869,27 @@ async fn search_searxng_async(
         reqwest::header::USER_AGENT,
         reqwest::header::HeaderValue::from_static("OpenLife/0.1"),
     );
-    let response = crate::network_client::NetworkClient::new(
-        crate::network_client::NetworkClientPolicy::default(),
-    )
-    .get_text_with_headers_and_start_observer(url.as_str(), network_policy, headers, {
-        let receipt_tracker = receipt_tracker.clone();
-        move |phase| {
+    let proxy_domain = url
+        .host_str()
+        .map(str::to_string)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let response =
+        crate::network_client::NetworkClient::new(crate::network_client::NetworkClientPolicy {
+            require_https: true,
+            fake_ip_proxy_domain_allowlist: proxy_domain,
+            ..Default::default()
+        })
+        .get_text_with_headers_and_start_observer(url.as_str(), network_policy, headers, {
             let receipt_tracker = receipt_tracker.clone();
-            async move {
-                observe_network_dispatch_phase(&receipt_tracker, started_observer, phase).await
+            move |phase| {
+                let receipt_tracker = receipt_tracker.clone();
+                async move {
+                    observe_network_dispatch_phase(&receipt_tracker, started_observer, phase).await
+                }
             }
-        }
-    })
-    .await;
+        })
+        .await;
     let response = match response {
         Ok(response) => {
             receipt_tracker.mark_response_observed();
@@ -1073,6 +1100,31 @@ pub async fn is_path_in_safe_paths_async(path: &str, safe_paths: &[String]) -> b
     false
 }
 
+/// Pure path-policy admission. This performs no filesystem observation; the
+/// canonical/symlink check remains inside the admitted ToolGateway adapter so
+/// any operating-system result is represented by a real execution receipt.
+pub fn is_path_lexically_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
+    if safe_paths.is_empty() {
+        return false;
+    }
+    let candidate = std::path::Path::new(path);
+    if candidate.as_os_str().is_empty()
+        || candidate
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return false;
+    }
+    safe_paths.iter().any(|safe| {
+        let safe = std::path::Path::new(safe);
+        !safe.as_os_str().is_empty()
+            && !safe
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+            && candidate.starts_with(safe)
+    })
+}
+
 pub fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
     if safe_paths.is_empty() {
         "No safe paths configured for filesystem access".to_string()
@@ -1211,10 +1263,10 @@ pub(crate) async fn call_a2a_agent(
     task_text: &str,
     session_id: Option<&str>,
     request_id: Option<&str>,
-    receipt_tracker: ToolExecutionReceiptTracker,
-    started_observer: Option<&dyn crate::agent::ToolStartedTransitionObserver>,
+    admission: super::ToolDispatchAdmission<'_>,
     authorization: Option<&super::A2AOutboundAuthorization>,
 ) -> Result<ToolCallInternalResult> {
+    let (receipt_tracker, started_observer) = admission.into_remote_parts();
     let authorization =
         authorization.ok_or_else(|| anyhow::anyhow!("a2a_outbound_authorization_missing"))?;
     if authorization.base_url.trim_end_matches('/') != agent_url.trim_end_matches('/') {
@@ -1366,9 +1418,52 @@ pub fn prepare_web_content_observation(content: &str, source_url: &str) -> Strin
 #[cfg(test)]
 mod web_content_observation_tests {
     use super::{
-        classify_duckduckgo_html_response, format_search_results, prepare_web_content_observation,
-        SearchResult, WEB_CONTENT_OBSERVATION_MAX_CHARS,
+        classify_duckduckgo_html_response, configured_web_search_endpoint, format_search_results,
+        prepare_web_content_observation, SearchProviderConfig, SearchResult,
+        WEB_CONTENT_OBSERVATION_MAX_CHARS,
     };
+
+    #[test]
+    fn search_endpoint_selection_is_per_execution_and_fails_closed_without_requirements() {
+        let duckduckgo = SearchProviderConfig::default();
+        assert_eq!(
+            configured_web_search_endpoint(&duckduckgo).as_deref(),
+            Ok("https://duckduckgo.com/html/")
+        );
+
+        let brave_missing_key = SearchProviderConfig {
+            provider: "brave".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            configured_web_search_endpoint(&brave_missing_key),
+            Err("web_search_brave_credential_unavailable")
+        );
+
+        let brave = SearchProviderConfig {
+            provider: "brave".into(),
+            brave_api_key: "test-only-secret".into(),
+            searxng_url: String::new(),
+        };
+        assert_eq!(
+            configured_web_search_endpoint(&brave).as_deref(),
+            Ok("https://api.search.brave.com/res/v1/web/search")
+        );
+        assert_eq!(
+            configured_web_search_endpoint(&duckduckgo).as_deref(),
+            Ok("https://duckduckgo.com/html/"),
+            "selecting Brave for one ToolGateway must not mutate another execution"
+        );
+
+        let unsupported = SearchProviderConfig {
+            provider: "mystery-search".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            configured_web_search_endpoint(&unsupported),
+            Err("web_search_provider_unsupported")
+        );
+    }
 
     #[test]
     fn duckduckgo_challenge_and_empty_pages_are_typed_failures() {

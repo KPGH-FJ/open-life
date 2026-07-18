@@ -102,6 +102,12 @@ where
     }
 }
 
+// ToolGateway execution keeps route policy, canonical run identity,
+// cancellation, and live event callbacks explicit at the dispatch edge.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
     state: &Arc<AppState>,
     plan: &MainChatReactActionPlan,
@@ -193,6 +199,7 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
     .with_tool_audit_persistence_observer(
         resources.governed.shared.persistence_coordinator.as_ref(),
     )
+    .with_durable_store_failure_observer(resources.governed.shared.persistence_coordinator.as_ref())
     .with_memory_store(&resources.governed.memory_store)
     .with_network_policy(&network_policy)
     .with_calendar_ics_paths(&calendar_ics_paths);
@@ -244,6 +251,7 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
     let gateway = openlife_core::agent::ToolGateway::from_executor_config(
         openlife_core::agent::ActionExecutorConfig {
             allow_writes: false,
+            search_provider: resources.governed.search_provider.clone(),
             ..Default::default()
         },
     );
@@ -261,8 +269,16 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
         });
     let result = await_or_local_abort(execution, cancellation_token, &receipt_registration)
         .await
-        .map_err(|abort| format!("ToolGateway locally aborted by Main Chat cancellation: {abort}"))?
-        .map_err(|err| format!("ToolGateway failed: {err}"))?;
+        .map_err(|abort| {
+            format!("ToolGateway locally aborted by Main Chat cancellation: {abort}")
+        })?;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            crate::terminal_owner_write_gateway::register_agent_run_store_error(state, &error);
+            return Err(format!("ToolGateway failed: {error}"));
+        }
+    };
 
     let executor_status = result.status.clone();
     let status_label = match executor_status {

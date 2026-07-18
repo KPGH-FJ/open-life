@@ -760,7 +760,10 @@ impl Default for PolicyGovernancePlan {
 }
 
 impl PolicyGovernancePlan {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn new(
         primary_route: PolicyRouteKind,
         mut candidate_dispositions: Vec<PolicyGovernanceCandidateDisposition>,
@@ -1242,7 +1245,10 @@ impl PolicyDecision {
         crate::agent::metadata_safe::metadata_safe_value_digest(&contract).1
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn try_authorize_conditional_observation_memory_review(
         &self,
         operation_id: &str,
@@ -3608,7 +3614,7 @@ enum TerminalOwnerEpochAdmissionAuthority {
 
 /// Non-serializable, store-issued authority proving that one active canonical
 /// user-message commit is bound to the exact TaskSession/run owner.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TerminalOwnerEpochAdmission {
     admission_id: String,
     task_session_id: String,
@@ -3732,7 +3738,7 @@ impl AgentTaskSessionStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_with_receipt_key(db_path, AgentRunReceiptKey::test_key());
+            Self::new_with_receipt_key(db_path, AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -3769,7 +3775,7 @@ impl AgentTaskSessionStore {
     pub fn new_in_memory() -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_in_memory_with_receipt_key(AgentRunReceiptKey::test_key());
+            Self::new_in_memory_with_receipt_key(AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -3800,10 +3806,7 @@ impl AgentTaskSessionStore {
     pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::open_read_only_existing_with_receipt_key(
-                db_path,
-                AgentRunReceiptKey::test_key(),
-            );
+            Self::open_read_only_existing_with_receipt_key(db_path, AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -5146,6 +5149,91 @@ impl AgentTaskSessionStore {
             _ => {}
         }
         self.update_session_status(id, AgentTaskSessionStatus::Running, None)
+    }
+
+    /// Atomically remove the exact accepted prerequisite blocker and reopen
+    /// its waiting TaskSession. A continuation cannot silently clear another
+    /// blocker or enter Running while unresolved prerequisites remain.
+    pub fn resume_session_after_resolved_blocker(
+        &self,
+        id: &str,
+        resolved_blocker: &str,
+    ) -> Result<AgentTaskSession> {
+        let current = self
+            .load_session(id)?
+            .ok_or_else(|| anyhow::anyhow!("agent task session not found: {}", id))?;
+        if current.status != AgentTaskSessionStatus::WaitingPermission {
+            anyhow::bail!(
+                "provider continuation task is not waiting permission: {}",
+                id
+            );
+        }
+        if resolved_blocker.trim().is_empty()
+            || !current
+                .pending_blockers
+                .iter()
+                .any(|blocker| blocker == resolved_blocker)
+        {
+            anyhow::bail!(
+                "resolved task blocker is not owned by the waiting task: {}",
+                id
+            );
+        }
+        let remaining = current
+            .pending_blockers
+            .iter()
+            .filter(|blocker| blocker.as_str() != resolved_blocker)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !remaining.is_empty() {
+            anyhow::bail!("provider continuation has unresolved task blockers: {}", id);
+        }
+        let persisted_blockers = normalize_task_session_refs(
+            self.receipt_key.as_ref(),
+            id,
+            "pending_blocker",
+            &remaining,
+            is_typed_task_session_blocker,
+        )?;
+        let now = Utc::now();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE agent_task_sessions
+             SET status = 'running', pending_blockers_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND status = 'waiting_permission'",
+            params![
+                id,
+                serde_json::to_string(&persisted_blockers)?,
+                now.to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("provider continuation task resume CAS lost: {}", id);
+        }
+        tx.execute(
+            "UPDATE agent_task_session_owner_heads
+             SET revision = revision + 1 WHERE task_session_id = ?1",
+            [id],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        let mut transient = self
+            .transient_session_content
+            .lock()
+            .map_err(|err| anyhow::anyhow!("mutex poison: {}", err))?;
+        transient
+            .entry(id.to_string())
+            .or_insert_with(|| TransientTaskSessionContent {
+                current_plan_summary: current.current_plan_summary.clone(),
+                pending_blockers: current.pending_blockers.clone(),
+                context_snapshot_refs: current.context_snapshot_refs.clone(),
+                final_summary: current.final_summary.clone(),
+            })
+            .pending_blockers = remaining;
+        drop(transient);
+        self.load_session(id)?
+            .ok_or_else(|| anyhow::anyhow!("agent task session not found: {}", id))
     }
 
     pub fn cancel_session(&self, id: &str, final_summary: &str) -> Result<AgentTaskSession> {
@@ -6652,10 +6740,10 @@ impl ActionQueueStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_with_authority_key(
+            Self::new_with_authority_key(
                 db_path,
                 ActionQueueAuthorityKey::from_key_material(&[0x6a; 32])?,
-            );
+            )
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -8049,6 +8137,11 @@ impl ActionQueueStore {
         )
     }
 
+    // Replay CAS binds every expected owner field to avoid partial authority.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn claim_replay_for_execution_at(
         &self,
         action_id: &str,
@@ -9075,7 +9168,7 @@ impl ActionQueueStore {
             .optional()?;
         let is_new_head = current_head
             .as_ref()
-            .map_or(true, |(revision, _, _, _)| *revision < canonical_revision);
+            .is_none_or(|(revision, _, _, _)| *revision < canonical_revision);
         if let Some((revision, current_event_id, hidden, tombstone_id)) = current_head {
             if revision > canonical_revision {
                 anyhow::bail!(
@@ -13698,6 +13791,31 @@ fn runtime_eval_local_only_hs_packet(
     }
 }
 
+struct RuntimeEvalTempRoot(std::path::PathBuf);
+
+impl Drop for RuntimeEvalTempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn runtime_eval_temp_root(
+    case: &MainChatRuntimeEvalCase,
+    scope: &str,
+    action_type: &str,
+    failure_reason: &str,
+) -> std::result::Result<RuntimeEvalTempRoot, MainChatRuntimeEvalFailure> {
+    let root = RuntimeEvalTempRoot(std::env::temp_dir().join(format!(
+        "openlife-main-chat-runtime-eval-{scope}-{}-{}-{}",
+        case.id,
+        action_type.replace('.', "_"),
+        uuid::Uuid::new_v4(),
+    )));
+    std::fs::create_dir_all(&root.0)
+        .map_err(|error| runtime_eval_failure(case, failure_reason, &error.to_string()))?;
+    Ok(root)
+}
+
 fn runtime_eval_audit_store(
     case: &MainChatRuntimeEvalCase,
     path: impl Into<std::path::PathBuf>,
@@ -13723,13 +13841,9 @@ fn runtime_eval_formal_executor_observation(
     action_type: &str,
     action_description: &str,
 ) -> std::result::Result<Option<Value>, MainChatRuntimeEvalFailure> {
-    let temp_root = std::env::temp_dir().join(format!(
-        "openlife-main-chat-runtime-eval-{}-{}",
-        case.id,
-        action_type.replace('.', "_")
-    ));
-    std::fs::create_dir_all(&temp_root)
-        .map_err(|err| runtime_eval_failure(case, "executor_temp_dir_failed", &err.to_string()))?;
+    let temp_owner =
+        runtime_eval_temp_root(case, "formal", action_type, "executor_temp_dir_failed")?;
+    let temp_root = &temp_owner.0;
 
     let registry = crate::mcp::McpRegistry::new();
     let permission_store =
@@ -14218,14 +14332,13 @@ fn runtime_eval_multi_step_agent_loop_observation(
         layer: crate::layer::Layer::L2,
     };
 
-    let temp_root = std::env::temp_dir().join(format!(
-        "openlife-main-chat-agent-loop-eval-{}-{}",
-        case.id,
-        action_type.replace('.', "_")
-    ));
-    std::fs::create_dir_all(&temp_root).map_err(|err| {
-        runtime_eval_failure(case, "agent_loop_temp_dir_failed", &err.to_string())
-    })?;
+    let temp_owner = runtime_eval_temp_root(
+        case,
+        "agent-loop",
+        action_type,
+        "agent_loop_temp_dir_failed",
+    )?;
+    let temp_root = &temp_owner.0;
     let registry = crate::mcp::McpRegistry::new();
     let permission_store =
         crate::tool_permissions::ToolPermissionStore::new_in_memory().map_err(|err| {
@@ -14440,7 +14553,10 @@ fn runtime_eval_metadata_preview(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn runtime_eval_case(
     id: u16,
     name: &str,
@@ -16121,6 +16237,12 @@ fn bounded_user_goal(user_message: &str) -> String {
     result.trim().to_string()
 }
 
+// Confidence is derived from explicit deterministic signals; an opaque score
+// input would weaken policy reviewability.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn intent_frame_confidence(
     governance_intent: &MainChatIntentSignals,
     requests_plan_task: bool,
@@ -18080,7 +18202,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 session_id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue replay candidate");
         let tracker = ToolExecutionReceiptTracker::new(
@@ -18121,7 +18243,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "unknown-action-certainty-session",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         store
@@ -18148,7 +18270,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "current-unknown-action-certainty-session",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         store
@@ -18195,7 +18317,7 @@ mod action_queue_replay_claim_tests {
                 .enqueue(
                     &format!("legal-action-certainty-{index}"),
                     action.clone(),
-                    ExecutionPolicy::default().classify(&action),
+                    ExecutionPolicy.classify(&action),
                 )
                 .expect("enqueue legal certainty fixture");
             store
@@ -18310,7 +18432,10 @@ mod action_queue_replay_claim_tests {
         (store, failed, claim, executing, attempt, authority_binding)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn issue_reconciliation_envelope_binding_for_test(
         store: &ActionQueueStore,
         prepared_event_id: &str,
@@ -18338,7 +18463,10 @@ mod action_queue_replay_claim_tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn issue_reconciliation_envelope_binding_with_resolution_for_test(
         store: &ActionQueueStore,
         prepared_event_id: &str,
@@ -18543,7 +18671,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 session_id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue automatic retry candidate");
         let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -18726,7 +18854,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "initial-receipt-preflight",
                 preflight_action.clone(),
-                ExecutionPolicy::default().classify(&preflight_action),
+                ExecutionPolicy.classify(&preflight_action),
             )
             .expect("enqueue preflight action");
         let preflight_tracker = ToolExecutionReceiptTracker::new(
@@ -18792,7 +18920,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "initial-receipt-confirmed",
                 confirmed_action.clone(),
-                ExecutionPolicy::default().classify(&confirmed_action),
+                ExecutionPolicy.classify(&confirmed_action),
             )
             .expect("enqueue confirmed action");
         let confirmed_tracker = ToolExecutionReceiptTracker::new(
@@ -18833,7 +18961,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "initial-receipt-failed-response",
                 failed_response_action.clone(),
-                ExecutionPolicy::default().classify(&failed_response_action),
+                ExecutionPolicy.classify(&failed_response_action),
             )
             .expect("enqueue failed response action");
         let failed_response_tracker = ToolExecutionReceiptTracker::new(
@@ -18875,7 +19003,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "initial-receipt-unknown",
                 unknown_action.clone(),
-                ExecutionPolicy::default().classify(&unknown_action),
+                ExecutionPolicy.classify(&unknown_action),
             )
             .expect("enqueue unknown action");
         let unknown_tracker = ToolExecutionReceiptTracker::new(
@@ -18942,7 +19070,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "legacy-receipt-only",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue legacy row");
         let receipt = ToolExecutionReceipt::failed_before_dispatch(
@@ -18985,7 +19113,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "caller-declared-receipt",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue caller-declared row");
         let receipt = ToolExecutionReceipt::failed_before_dispatch(
@@ -19029,7 +19157,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "tamper-resistant-replay-authority",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue tamper test row");
         let tracker = ToolExecutionReceiptTracker::new(
@@ -19481,7 +19609,7 @@ mod action_queue_replay_claim_tests {
                 .enqueue(
                     "legacy-authority-quarantine",
                     action.clone(),
-                    ExecutionPolicy::default().classify(&action),
+                    ExecutionPolicy.classify(&action),
                 )
                 .expect("enqueue legacy authority action");
             let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -19543,7 +19671,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "receipt-transplant-first",
                 first_action.clone(),
-                ExecutionPolicy::default().classify(&first_action),
+                ExecutionPolicy.classify(&first_action),
             )
             .expect("enqueue first action");
         let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -19575,7 +19703,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "receipt-transplant-second",
                 second_action.clone(),
-                ExecutionPolicy::default().classify(&second_action),
+                ExecutionPolicy.classify(&second_action),
             )
             .expect("enqueue second action");
         let projected = store
@@ -19607,7 +19735,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "typed-replay-envelope",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -19657,7 +19785,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "non-idempotent-receipt-transplant",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let original_receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -19740,7 +19868,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "current-manifest-idempotency",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let forged_receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -19805,7 +19933,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "proof-bound-automatic-retry",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
@@ -20170,7 +20298,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "missing-receipt-sentinel",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let sentinel = ToolExecutionReceipt::failed_before_dispatch(
@@ -20210,7 +20338,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "untyped-retry-session",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let failed = store
@@ -20254,7 +20382,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "non-idempotent-read-name",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let tracker = ToolExecutionReceiptTracker::new(
@@ -20311,7 +20439,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "receipt-over-prose",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         let tracker = ToolExecutionReceiptTracker::new(
@@ -22021,7 +22149,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "transition-cas-session",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
 
@@ -22121,7 +22249,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "pending-claim-session",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue pending replay candidate");
         let tracker = ToolExecutionReceiptTracker::new(
@@ -22588,7 +22716,7 @@ mod action_queue_replay_claim_tests {
             )
             .expect("create legacy action queue schema");
         let action = ExecutionAction::new("memory.search", "Legacy replayable read.");
-        let policy = ExecutionPolicy::default().classify(&action);
+        let policy = ExecutionPolicy.classify(&action);
         let now = Utc::now().to_rfc3339();
         connection
             .execute(
@@ -22736,7 +22864,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "corrupt-status-session",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue action");
         store
@@ -22868,7 +22996,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "deleted-task",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .unwrap();
 
@@ -22902,7 +23030,7 @@ mod action_queue_replay_claim_tests {
             .enqueue(
                 "deleted-task",
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .is_err());
 

@@ -1,6 +1,11 @@
 use crate::errors::AppError;
 use crate::main_chat_preprocess::{filter_canonical_retrievable_memory_results, merge_memory_hits};
+use crate::persistence_coordinator::{
+    CanonicalCommitPermit, CanonicalWriteAdmission, GovernedDataImportRecoveryAdmission,
+    GovernedDataImportRecoveryOwner, PersistenceGateError,
+};
 use crate::AppState;
+use once_cell::sync::Lazy as LazyLock;
 use openlife_core::agent::main_chat_agent_v1::{
     PolicyMemoryAdmissionProof, PolicyMemoryRollbackGrant,
 };
@@ -15,7 +20,10 @@ use openlife_core::embedding::{
     PreparedEmbeddingRequestOutcome, UNKNOWN_EMBEDDING_PROFILE_ID,
 };
 use openlife_core::llm::ChatMessage;
-use openlife_core::memory::{CanonicalMemoryRetrievalState, MemoryRetrievalDisposition};
+use openlife_core::memory::{
+    CanonicalMemoryRetrievalState, CanonicalMessageReplaceOutcome, MemoryRetrievalDisposition,
+    MemorySearchHit,
+};
 use openlife_core::memory_gateway::{
     MemoryGateway, MemoryGatewayDecision, MemoryGatewayRequest, MemoryGatewaySubject,
     MemoryGatewayWriteStatus,
@@ -26,17 +34,17 @@ use openlife_core::persistence_outbox::{
 };
 use openlife_core::vectors::{
     plan_embedding_privacy, CanonicalMemoryRetrievalCandidate, CanonicalVectorOwnerRef,
-    ExportedVectorChunk, MemoryChunk, PortableVectorImportReport, TierStats,
-    VectorRebuildBatchItem, VectorRebuildEvidence, VectorRebuildJob, VectorRebuildJobStatus,
-    VectorSearchOutcome, VECTOR_REBUILD_BATCH_LIMIT,
+    ExportedVectorChunk, MemoryChunk, PortableVectorImportReport, PortableVectorReplaceOutcome,
+    TierStats, VectorRebuildBatchItem, VectorRebuildEvidence, VectorRebuildJob,
+    VectorRebuildJobStatus, VectorSearchOutcome, VECTOR_REBUILD_BATCH_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
-use std::sync::{Arc, LazyLock};
 
 const BACKGROUND_CANONICAL_OUTBOX_BATCH: usize = 32;
 const BACKGROUND_CANONICAL_OUTBOX_MAX_PASSES: usize = 4;
@@ -46,6 +54,18 @@ static GOVERNED_MEMORY_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 static MEMORY_RETRIEVAL_PROJECTION_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[cfg(test)]
+struct CanonicalCommitAdmissionBarrier {
+    remaining_skips: usize,
+    admitted: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static CANONICAL_COMMIT_ADMISSION_BARRIER: LazyLock<
+    StdMutex<HashMap<usize, CanonicalCommitAdmissionBarrier>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 fn require_persistence_write(state: &Arc<AppState>) -> Result<(), AppError> {
     state
@@ -59,6 +79,251 @@ fn require_persistence_write_string(state: &Arc<AppState>) -> Result<(), String>
         .persistence_coordinator
         .require_effects_allowed()
         .map_err(|error| error.to_string())
+}
+
+/// Enter the process-wide canonical commit window before taking any Memory or
+/// Vector owner lock. Recovery terminalization takes the exclusive side of the
+/// same barrier, so an admission that predates degradation is rechecked and
+/// refused instead of committing after the owner was observed.
+fn admit_memory_vector_writes<'journal>(
+    state: &Arc<AppState>,
+    owners: &[GovernedDataImportRecoveryOwner],
+    recovery: Option<(
+        &GovernedDataImportRecoveryAdmission<'journal>,
+        &str,
+        &str,
+        &str,
+    )>,
+) -> Result<CanonicalWriteAdmission<'journal>, AppError> {
+    let (recovery_admission, operation_id, payload_digest, request_digest) = recovery
+        .map(
+            |(admission, operation_id, payload_digest, request_digest)| {
+                (
+                    Some(admission),
+                    operation_id,
+                    payload_digest,
+                    request_digest,
+                )
+            },
+        )
+        .unwrap_or((None, "", "", ""));
+    state
+        .persistence_coordinator
+        .admit_normal_or_governed_data_import_writes(
+            owners,
+            recovery_admission,
+            operation_id,
+            payload_digest,
+            request_digest,
+        )
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
+}
+
+async fn exchange_memory_vector_commit_admission<'state>(
+    state: &'state Arc<AppState>,
+    admission: &CanonicalWriteAdmission<'_>,
+) -> Result<CanonicalCommitPermit<'state>, AppError> {
+    #[cfg(test)]
+    wait_at_canonical_commit_admission_barrier(state).await;
+    state
+        .persistence_coordinator
+        .acquire_canonical_commit_permit(admission)
+        .await
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
+}
+
+async fn acquire_memory_vector_commit_permit<'state>(
+    state: &'state Arc<AppState>,
+    owners: &[GovernedDataImportRecoveryOwner],
+    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
+) -> Result<CanonicalCommitPermit<'state>, AppError> {
+    let admission = admit_memory_vector_writes(state, owners, recovery)?;
+    exchange_memory_vector_commit_admission(state, &admission).await
+}
+
+#[cfg(test)]
+async fn wait_at_canonical_commit_admission_barrier(state: &Arc<AppState>) {
+    let coordinator_key = Arc::as_ptr(&state.persistence_coordinator) as usize;
+    let barrier = {
+        let mut barriers = CANONICAL_COMMIT_ADMISSION_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut barrier = barriers.remove(&coordinator_key);
+        if barrier
+            .as_ref()
+            .is_some_and(|barrier| barrier.remaining_skips > 0)
+        {
+            barrier
+                .as_mut()
+                .expect("checked test barrier")
+                .remaining_skips -= 1;
+            barriers.insert(
+                coordinator_key,
+                barrier.take().expect("checked test barrier"),
+            );
+            return;
+        }
+        barrier
+    };
+    if let Some(barrier) = barrier {
+        let _ = barrier.admitted.send(());
+        let _ = barrier.release.await;
+    }
+}
+
+/// Run one synchronous VectorStore transaction under a short-lived shared
+/// canonical permit. Rebuild provider/embedding awaits stay outside this
+/// helper, so recovery terminalization never waits on network latency.
+async fn commit_vector_store_mutation<T>(
+    state: &Arc<AppState>,
+    mutation: impl FnOnce() -> anyhow::Result<T>,
+) -> Result<T, AppError> {
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::VectorStore],
+        None,
+    )
+    .await?;
+    mutation().map_err(AppError::from)
+}
+
+/// One-shot, generation-bound proof minted immediately before a VectorStore
+/// search. It carries no lock and is safe to retain while the pure search runs;
+/// the later telemetry commit must exchange this exact admission, so an import
+/// completion between read and telemetry cannot authorize an old row id under
+/// a newer healthy generation.
+#[must_use = "mint immediately before the vector read and consume when recording telemetry"]
+pub(crate) struct VectorSearchAccessTelemetryTicket {
+    admission: Result<CanonicalWriteAdmission<'static>, MemoryVectorDegradedEvidence>,
+}
+
+/// MemoryStore counterpart to [`VectorSearchAccessTelemetryTicket`]. Distinct
+/// opaque types prevent accidentally using a VectorStore admission for a
+/// MemoryStore telemetry mutation.
+#[must_use = "mint immediately before the memory read and consume when recording telemetry"]
+pub(crate) struct MemorySearchAccessTelemetryTicket {
+    admission: Result<CanonicalWriteAdmission<'static>, MemoryVectorDegradedEvidence>,
+}
+
+fn telemetry_admission_error(reason_code: &str, error: &AppError) -> MemoryVectorDegradedEvidence {
+    MemoryVectorDegradedEvidence {
+        reason_code: reason_code.into(),
+        error_digest: Some(openlife_core::persistence_outbox::metadata_digest(
+            error.message(),
+        )),
+    }
+}
+
+pub(crate) fn prepare_vector_search_access_telemetry(
+    state: &Arc<AppState>,
+) -> VectorSearchAccessTelemetryTicket {
+    let admission: Result<CanonicalWriteAdmission<'static>, AppError> =
+        admit_memory_vector_writes(state, &[GovernedDataImportRecoveryOwner::VectorStore], None);
+    VectorSearchAccessTelemetryTicket {
+        admission: admission
+            .map_err(|error| telemetry_admission_error("vector_access_telemetry_skipped", &error)),
+    }
+}
+
+pub(crate) fn prepare_memory_search_access_telemetry(
+    state: &Arc<AppState>,
+) -> MemorySearchAccessTelemetryTicket {
+    let admission: Result<CanonicalWriteAdmission<'static>, AppError> =
+        admit_memory_vector_writes(state, &[GovernedDataImportRecoveryOwner::MemoryStore], None);
+    MemorySearchAccessTelemetryTicket {
+        admission: admission
+            .map_err(|error| telemetry_admission_error("memory_access_telemetry_skipped", &error)),
+    }
+}
+
+/// Best-effort telemetry is deliberately separate from vector retrieval. The
+/// admission was minted before the read and is revalidated only at commit; a
+/// refused mutation is telemetry evidence and never invalidates valid search
+/// results.
+pub(crate) async fn record_vector_search_access_telemetry_with_state(
+    matches: &[(MemoryChunk, f32)],
+    state: &Arc<AppState>,
+    ticket: VectorSearchAccessTelemetryTicket,
+) -> Option<MemoryVectorDegradedEvidence> {
+    let chunk_ids = matches
+        .iter()
+        .map(|(chunk, _)| chunk.id)
+        .collect::<Vec<_>>();
+    if chunk_ids.is_empty() {
+        return None;
+    }
+    let admission = match ticket.admission {
+        Ok(admission) => admission,
+        Err(evidence) => return Some(evidence),
+    };
+    let store = state.vector_store.lock().await.clone();
+    let result = async {
+        let _commit_permit = exchange_memory_vector_commit_admission(state, &admission).await?;
+        store
+            .record_access_telemetry(&chunk_ids)
+            .map_err(AppError::from)
+    }
+    .await;
+    result
+        .err()
+        .map(|error| telemetry_admission_error("vector_access_telemetry_skipped", &error))
+}
+
+/// Best-effort MemoryStore access telemetry follows the same boundary as
+/// vector telemetry: the search result is already valid, while this optional
+/// mutation must obtain a fresh, short-lived MemoryStore commit permit. A
+/// recovery fence can therefore skip telemetry without erasing the result.
+pub(crate) async fn record_text_search_access_telemetry_with_state(
+    hits: &[MemorySearchHit],
+    state: &Arc<AppState>,
+    ticket: MemorySearchAccessTelemetryTicket,
+) -> Option<MemoryVectorDegradedEvidence> {
+    let memory_ids = hits
+        .iter()
+        .map(|hit| hit.chunk.id)
+        .filter(|memory_id| *memory_id > 0)
+        .collect::<Vec<_>>();
+    if memory_ids.is_empty() {
+        return None;
+    }
+    let admission = match ticket.admission {
+        Ok(admission) => admission,
+        Err(evidence) => return Some(evidence),
+    };
+    let store = state.memory_store.lock().await.clone();
+    let result = async {
+        let _commit_permit = exchange_memory_vector_commit_admission(state, &admission).await?;
+        store
+            .record_text_search_access_telemetry(&memory_ids)
+            .map_err(AppError::from)
+    }
+    .await;
+    result
+        .err()
+        .map(|error| telemetry_admission_error("memory_access_telemetry_skipped", &error))
+}
+
+async fn acquire_canonical_projection_commit_permit<'state>(
+    state: &'state Arc<AppState>,
+    owner: GovernedDataImportRecoveryOwner,
+    lane: CanonicalProjectionCommitLane,
+) -> Result<CanonicalCommitPermit<'state>, ProjectionReconciliationError> {
+    let admission = match lane {
+        CanonicalProjectionCommitLane::Normal => state
+            .persistence_coordinator
+            .admit_normal_or_governed_data_import_writes(&[owner], None, "", "", ""),
+        CanonicalProjectionCommitLane::StartupReconciliation => state
+            .persistence_coordinator
+            .admit_startup_reconciliation_writes(&[owner]),
+    }
+    .map_err(ProjectionReconciliationError::from_gate)?;
+    #[cfg(test)]
+    wait_at_canonical_commit_admission_barrier(state).await;
+    state
+        .persistence_coordinator
+        .acquire_canonical_commit_permit(&admission)
+        .await
+        .map_err(ProjectionReconciliationError::from_gate)
 }
 
 fn require_persistence_read(state: &Arc<AppState>, store: &str) -> Result<(), AppError> {
@@ -85,7 +350,7 @@ pub(crate) fn start_canonical_outbox_background_worker(state: Arc<AppState>) {
         return;
     }
     notify_canonical_outbox_background_worker(&state);
-    let _ = tauri::async_runtime::spawn(async move {
+    std::mem::drop(tauri::async_runtime::spawn(async move {
         let mut delayed_retry = false;
         loop {
             if delayed_retry {
@@ -122,7 +387,7 @@ pub(crate) fn start_canonical_outbox_background_worker(state: Arc<AppState>) {
                 }
             }
         }
-    });
+    }));
 }
 
 fn runtime_store_error(state: &Arc<AppState>, store: &str, error: impl ToString) -> AppError {
@@ -279,6 +544,12 @@ pub(crate) struct CanonicalOutboxReconciliationReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The suffix distinguishes canonical store ownership from similarly named
+// projections and compatibility views.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
+)]
 enum CanonicalOutboxOwner {
     MemoryStore,
     MemoryLifecycleStore,
@@ -303,6 +574,66 @@ enum CanonicalOutboxSelection {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalProjectionCommitLane {
+    Normal,
+    StartupReconciliation,
+}
+
+#[derive(Debug)]
+enum ProjectionReconciliationError {
+    /// The target or marker obtained an admission before an exclusive
+    /// terminalization fence invalidated that generation. No owner mutation
+    /// was attempted, so the durable outbox row must remain replayable rather
+    /// than being mislabeled degraded.
+    Deferred(PersistenceGateError),
+    HeadAdvanced(CanonicalProjectionHeadAdvanced),
+    Failed(String),
+}
+
+impl ProjectionReconciliationError {
+    fn from_gate(error: PersistenceGateError) -> Self {
+        match error {
+            PersistenceGateError::AdmissionInvalidated { .. } => Self::Deferred(error),
+            other => Self::Failed(other.to_string()),
+        }
+    }
+
+    fn failed(error: impl ToString) -> Self {
+        Self::Failed(error.to_string())
+    }
+
+    fn from_anyhow(error: anyhow::Error) -> Self {
+        error
+            .downcast_ref::<CanonicalProjectionHeadAdvanced>()
+            .cloned()
+            .map(Self::HeadAdvanced)
+            .unwrap_or_else(|| Self::Failed(error.to_string()))
+    }
+}
+
+impl std::fmt::Display for ProjectionReconciliationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Deferred(error) => write!(formatter, "{error}"),
+            Self::HeadAdvanced(error) => write!(formatter, "{error}"),
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for ProjectionReconciliationError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<anyhow::Error> for ProjectionReconciliationError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::from_anyhow(error)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OwnedProjectionDelivery {
     owner: CanonicalOutboxOwner,
@@ -322,6 +653,7 @@ enum ProjectionApplicationOutcome {
 enum ProjectionCandidateOutcome {
     Applied,
     Degraded,
+    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,12 +885,18 @@ pub(crate) async fn save_conversation_message_idempotent_with_state(
     operation_id: &str,
     state: &Arc<AppState>,
 ) -> Result<openlife_core::memory::CanonicalConversationMessageReceipt, String> {
-    require_persistence_write_string(state)?;
     if !matches!(message.role.as_str(), "user" | "assistant") {
         return Err("canonical conversation message role must be user or assistant".into());
     }
     let decision = MemoryGateway::decide(MemoryGatewaySubject::ChatTurn);
     debug_assert_eq!(decision.status, MemoryGatewayWriteStatus::ContextOnly);
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::MemoryStore],
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let store = state.memory_store.lock().await;
     let receipt = store
         .save_message_idempotent(session_id, message, operation_id)
@@ -581,9 +919,15 @@ pub(crate) async fn save_turn_user_message_idempotent_with_state(
     if message.role != "user" {
         return Err("canonical TurnRuntime input message must have role=user".into());
     }
-    require_persistence_write_string(state)?;
     let decision = MemoryGateway::decide(MemoryGatewaySubject::ChatTurn);
     debug_assert_eq!(decision.status, MemoryGatewayWriteStatus::ContextOnly);
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::MemoryStore],
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let store = state.memory_store.lock().await;
     let commit = store
         .save_message_idempotent_with_proof(session_id, message, operation_id)
@@ -594,12 +938,30 @@ pub(crate) async fn save_turn_user_message_idempotent_with_state(
     Ok(commit)
 }
 
+pub(crate) async fn load_turn_context_through_operation_with_state(
+    operation_id: &str,
+    limit: usize,
+    state: &Arc<AppState>,
+) -> Result<Vec<ChatMessage>, String> {
+    state
+        .memory_store
+        .lock()
+        .await
+        .load_conversation_messages_through_operation(operation_id, limit)
+        .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())
+}
+
 pub(crate) async fn create_chat_session_with_state(
     session_id: &str,
     title: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    require_persistence_write(state)?;
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::MemoryStore],
+        None,
+    )
+    .await?;
     let store = state.memory_store.lock().await;
     store
         .create_chat_session(session_id, title)
@@ -611,7 +973,12 @@ pub(crate) async fn rename_chat_session_with_state(
     title: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    require_persistence_write(state)?;
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::MemoryStore],
+        None,
+    )
+    .await?;
     let store = state.memory_store.lock().await;
     store
         .rename_chat_session(session_id, title)
@@ -622,8 +989,13 @@ pub(crate) async fn delete_chat_session_with_state(
     session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    require_persistence_write(state)?;
     let receipt = {
+        let _commit_permit = acquire_memory_vector_commit_permit(
+            state,
+            &[GovernedDataImportRecoveryOwner::MemoryStore],
+            None,
+        )
+        .await?;
         let store = state.memory_store.lock().await;
         store
             .delete_chat_session_with_tombstone(
@@ -725,7 +1097,12 @@ async fn reconcile_selected_canonical_outboxes_with_state(
     if !startup_blocking_reconciliation {
         require_persistence_write_string(state)?;
     }
-    let result = reconcile_canonical_outboxes_inner(state, selection).await;
+    let commit_lane = if startup_blocking_reconciliation {
+        CanonicalProjectionCommitLane::StartupReconciliation
+    } else {
+        CanonicalProjectionCommitLane::Normal
+    };
+    let result = reconcile_canonical_outboxes_inner(state, selection, commit_lane).await;
     if let Err(error) = &result {
         state
             .persistence_coordinator
@@ -738,6 +1115,7 @@ async fn reconcile_selected_canonical_outboxes_with_state(
 async fn reconcile_canonical_outboxes_inner(
     state: &Arc<AppState>,
     selection: CanonicalOutboxSelection,
+    commit_lane: CanonicalProjectionCommitLane,
 ) -> Result<CanonicalOutboxReconciliationReport, String> {
     let selected = select_projection_deliveries(state, selection).await?;
     let examined = selected.candidates.len();
@@ -751,13 +1129,22 @@ async fn reconcile_canonical_outboxes_inner(
     };
     for candidate in selected.candidates {
         let blocking = projection_delivery_is_blocking(&candidate.delivery);
-        match reconcile_projection_candidate(state, &candidate).await? {
+        match reconcile_projection_candidate(state, &candidate, commit_lane).await? {
             ProjectionCandidateOutcome::Degraded => {
                 report.degraded += 1;
                 report.blocking_degraded += usize::from(blocking);
             }
             ProjectionCandidateOutcome::Applied => {
                 report.applied += 1;
+            }
+            ProjectionCandidateOutcome::Deferred => {
+                // An exclusive terminalization fence invalidated a previously
+                // admitted target or marker. The durable delivery is still
+                // pending/replayable; do not turn contention into degradation.
+                report.backlog_may_remain = true;
+                report.blocking_backlog_may_remain |= blocking;
+                notify_canonical_outbox_background_worker(state);
+                break;
             }
         }
     }
@@ -769,25 +1156,52 @@ async fn reconcile_canonical_outboxes_inner(
 async fn reconcile_projection_candidate(
     state: &Arc<AppState>,
     candidate: &OwnedProjectionDelivery,
+    commit_lane: CanonicalProjectionCommitLane,
 ) -> Result<ProjectionCandidateOutcome, String> {
     if candidate.delivery.aggregate_kind == "memory_retrieval" {
-        return reconcile_memory_retrieval_projection_candidate(state, candidate).await;
+        return reconcile_memory_retrieval_projection_candidate(state, candidate, commit_lane)
+            .await;
     }
     if candidate.owner != CanonicalOutboxOwner::AgentRunStore
         || candidate.delivery.aggregate_kind != "agent_run"
     {
-        return match apply_projection_delivery(state, &candidate.delivery).await {
-            Ok(ProjectionApplicationOutcome::Applied) => {
-                mark_owned_projection_applied(state, candidate.owner, &candidate.delivery).await?;
-                Ok(ProjectionCandidateOutcome::Applied)
-            }
+        return match apply_projection_delivery(state, &candidate.delivery, commit_lane).await {
+            Ok(ProjectionApplicationOutcome::Applied) => match mark_owned_projection_applied(
+                state,
+                candidate.owner,
+                &candidate.delivery,
+                commit_lane,
+            )
+            .await
+            {
+                Ok(()) => Ok(ProjectionCandidateOutcome::Applied),
+                Err(ProjectionReconciliationError::Deferred(_)) => {
+                    Ok(ProjectionCandidateOutcome::Deferred)
+                }
+                Err(error) => Err(error.to_string()),
+            },
             Ok(ProjectionApplicationOutcome::CompensatedToCanonicalHead { .. }) => {
                 Err("non-AgentRun projection attempted causal compensation".into())
             }
+            Err(ProjectionReconciliationError::Deferred(_)) => {
+                Ok(ProjectionCandidateOutcome::Deferred)
+            }
             Err(error) => {
-                mark_owned_projection_degraded(state, candidate.owner, &candidate.delivery, &error)
-                    .await?;
-                Ok(ProjectionCandidateOutcome::Degraded)
+                match mark_owned_projection_degraded(
+                    state,
+                    candidate.owner,
+                    &candidate.delivery,
+                    &error.to_string(),
+                    commit_lane,
+                )
+                .await
+                {
+                    Ok(()) => Ok(ProjectionCandidateOutcome::Degraded),
+                    Err(ProjectionReconciliationError::Deferred(_)) => {
+                        Ok(ProjectionCandidateOutcome::Deferred)
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             }
         };
     }
@@ -801,14 +1215,30 @@ async fn reconcile_projection_candidate(
     let _causal_guard = causal_lock.lock().await;
     const MAX_HEAD_ADVANCE_RETRIES: usize = 4;
     for attempt in 0..MAX_HEAD_ADVANCE_RETRIES {
-        let application = match apply_projection_delivery(state, &candidate.delivery).await {
-            Ok(application) => application,
-            Err(error) => {
-                mark_owned_projection_degraded(state, candidate.owner, &candidate.delivery, &error)
-                    .await?;
-                return Ok(ProjectionCandidateOutcome::Degraded);
-            }
-        };
+        let application =
+            match apply_projection_delivery(state, &candidate.delivery, commit_lane).await {
+                Ok(application) => application,
+                Err(ProjectionReconciliationError::Deferred(_)) => {
+                    return Ok(ProjectionCandidateOutcome::Deferred)
+                }
+                Err(error) => {
+                    return match mark_owned_projection_degraded(
+                        state,
+                        candidate.owner,
+                        &candidate.delivery,
+                        &error.to_string(),
+                        commit_lane,
+                    )
+                    .await
+                    {
+                        Ok(()) => Ok(ProjectionCandidateOutcome::Degraded),
+                        Err(ProjectionReconciliationError::Deferred(_)) => {
+                            Ok(ProjectionCandidateOutcome::Deferred)
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                }
+            };
         #[cfg(test)]
         wait_at_agent_run_apply_mark_barrier_for_test(&candidate.delivery.aggregate_id).await;
         let finalized = match application {
@@ -850,36 +1280,52 @@ async fn reconcile_projection_candidate(
 async fn reconcile_memory_retrieval_projection_candidate(
     state: &Arc<AppState>,
     candidate: &OwnedProjectionDelivery,
+    commit_lane: CanonicalProjectionCommitLane,
 ) -> Result<ProjectionCandidateOutcome, String> {
     let _causal_guard = MEMORY_RETRIEVAL_PROJECTION_LOCK.lock().await;
     const MAX_HEAD_ADVANCE_RETRIES: usize = 4;
     for attempt in 0..MAX_HEAD_ADVANCE_RETRIES {
-        let application =
-            match apply_memory_retrieval_projection(state, candidate.owner, &candidate.delivery)
+        let application = match apply_memory_retrieval_projection(
+            state,
+            candidate.owner,
+            &candidate.delivery,
+            commit_lane,
+        )
+        .await
+        {
+            Ok(application) => application,
+            Err(ProjectionReconciliationError::Deferred(_)) => {
+                return Ok(ProjectionCandidateOutcome::Deferred)
+            }
+            Err(error) => {
+                return match mark_owned_projection_degraded(
+                    state,
+                    candidate.owner,
+                    &candidate.delivery,
+                    &error.to_string(),
+                    commit_lane,
+                )
                 .await
-            {
-                Ok(application) => application,
-                Err(error) => {
-                    mark_owned_projection_degraded(
-                        state,
-                        candidate.owner,
-                        &candidate.delivery,
-                        &error,
-                    )
-                    .await?;
-                    return Ok(ProjectionCandidateOutcome::Degraded);
-                }
-            };
-        let finalized = finalize_memory_retrieval_projection(state, candidate, &application).await;
+                {
+                    Ok(()) => Ok(ProjectionCandidateOutcome::Degraded),
+                    Err(ProjectionReconciliationError::Deferred(_)) => {
+                        Ok(ProjectionCandidateOutcome::Deferred)
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+            }
+        };
+        let finalized =
+            finalize_memory_retrieval_projection(state, candidate, &application, commit_lane).await;
         match finalized {
             Ok(()) => return Ok(ProjectionCandidateOutcome::Applied),
-            Err(error)
-                if error
-                    .downcast_ref::<CanonicalProjectionHeadAdvanced>()
-                    .is_some()
-                    && attempt + 1 < MAX_HEAD_ADVANCE_RETRIES =>
+            Err(ProjectionReconciliationError::HeadAdvanced(_))
+                if attempt + 1 < MAX_HEAD_ADVANCE_RETRIES =>
             {
                 continue;
+            }
+            Err(ProjectionReconciliationError::Deferred(_)) => {
+                return Ok(ProjectionCandidateOutcome::Deferred)
             }
             Err(error) => return Err(error.to_string()),
         }
@@ -940,9 +1386,16 @@ async fn finalize_memory_retrieval_projection(
     state: &Arc<AppState>,
     candidate: &OwnedProjectionDelivery,
     application: &ProjectionApplicationOutcome,
-) -> anyhow::Result<()> {
-    match candidate.owner {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<(), ProjectionReconciliationError> {
+    let result = match candidate.owner {
         CanonicalOutboxOwner::MemoryStore => {
+            let _commit_permit = acquire_canonical_projection_commit_permit(
+                state,
+                GovernedDataImportRecoveryOwner::MemoryStore,
+                commit_lane,
+            )
+            .await?;
             let store = state.memory_store.lock().await;
             match application {
                 ProjectionApplicationOutcome::Applied => store
@@ -990,7 +1443,8 @@ async fn finalize_memory_retrieval_projection(
         CanonicalOutboxOwner::AgentRunStore => Err(anyhow::anyhow!(
             "AgentRunStore cannot finalize Memory retrieval"
         )),
-    }
+    };
+    result.map_err(ProjectionReconciliationError::from_anyhow)
 }
 
 #[cfg(test)]
@@ -1129,14 +1583,20 @@ async fn load_owner_replayable_deliveries(
                 .map_err(|error| error.to_string()),
             None => Ok(Vec::new()),
         },
-        CanonicalOutboxOwner::AgentRunStore => match state.agent_run_store.as_ref() {
-            Some(store) => store
+        CanonicalOutboxOwner::AgentRunStore => {
+            let store = state
+                .agent_run_store
+                .as_ref()
+                .ok_or_else(|| "AgentRun store not available".to_string())?
                 .lock()
-                .await
-                .list_replayable_projection_deliveries(limit)
-                .map_err(|error| error.to_string()),
-            None => Ok(Vec::new()),
-        },
+                .await;
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .list_replayable_projection_deliveries(limit)
+                    .map_err(|error| error.to_string()),
+            )
+        }
     }
 }
 
@@ -1160,14 +1620,20 @@ async fn load_owner_event_deliveries(
             .await
             .list_replayable_projection_deliveries_for_event(event_id)
             .map_err(|error| error.to_string()),
-        CanonicalOutboxOwner::AgentRunStore => state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "AgentRun store not available".to_string())?
-            .lock()
-            .await
-            .list_replayable_projection_deliveries_for_event(event_id)
-            .map_err(|error| error.to_string()),
+        CanonicalOutboxOwner::AgentRunStore => {
+            let store = state
+                .agent_run_store
+                .as_ref()
+                .ok_or_else(|| "AgentRun store not available".to_string())?
+                .lock()
+                .await;
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .list_replayable_projection_deliveries_for_event(event_id)
+                    .map_err(|error| error.to_string()),
+            )
+        }
     }
 }
 
@@ -1189,14 +1655,23 @@ async fn mark_owned_projection_applied(
     state: &Arc<AppState>,
     owner: CanonicalOutboxOwner,
     delivery: &ProjectionDelivery,
-) -> Result<(), String> {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<(), ProjectionReconciliationError> {
     match owner {
-        CanonicalOutboxOwner::MemoryStore => state
-            .memory_store
-            .lock()
-            .await
-            .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
-            .map_err(|error| error.to_string()),
+        CanonicalOutboxOwner::MemoryStore => {
+            let _commit_permit = acquire_canonical_projection_commit_permit(
+                state,
+                GovernedDataImportRecoveryOwner::MemoryStore,
+                commit_lane,
+            )
+            .await?;
+            state
+                .memory_store
+                .lock()
+                .await
+                .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
+                .map_err(ProjectionReconciliationError::failed)
+        }
         CanonicalOutboxOwner::MemoryLifecycleStore => state
             .memory_lifecycle_store
             .as_ref()
@@ -1204,15 +1679,24 @@ async fn mark_owned_projection_applied(
             .lock()
             .await
             .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
-            .map_err(|error| error.to_string()),
-        CanonicalOutboxOwner::AgentRunStore => state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "AgentRun store unavailable during outbox reconciliation".to_string())?
-            .lock()
-            .await
-            .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
-            .map_err(|error| error.to_string()),
+            .map_err(ProjectionReconciliationError::failed),
+        CanonicalOutboxOwner::AgentRunStore => {
+            let store = state
+                .agent_run_store
+                .as_ref()
+                .ok_or_else(|| {
+                    "AgentRun store unavailable during outbox reconciliation".to_string()
+                })?
+                .lock()
+                .await;
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
+                    .map_err(|error| error.to_string()),
+            )
+            .map_err(ProjectionReconciliationError::failed)
+        }
     }
 }
 
@@ -1221,14 +1705,23 @@ async fn mark_owned_projection_degraded(
     owner: CanonicalOutboxOwner,
     delivery: &ProjectionDelivery,
     error: &str,
-) -> Result<(), String> {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<(), ProjectionReconciliationError> {
     match owner {
-        CanonicalOutboxOwner::MemoryStore => state
-            .memory_store
-            .lock()
-            .await
-            .mark_projection_degraded(&delivery.event_id, &delivery.projection_target, error)
-            .map_err(|mark_error| mark_error.to_string()),
+        CanonicalOutboxOwner::MemoryStore => {
+            let _commit_permit = acquire_canonical_projection_commit_permit(
+                state,
+                GovernedDataImportRecoveryOwner::MemoryStore,
+                commit_lane,
+            )
+            .await?;
+            state
+                .memory_store
+                .lock()
+                .await
+                .mark_projection_degraded(&delivery.event_id, &delivery.projection_target, error)
+                .map_err(ProjectionReconciliationError::failed)
+        }
         CanonicalOutboxOwner::MemoryLifecycleStore => state
             .memory_lifecycle_store
             .as_ref()
@@ -1236,15 +1729,28 @@ async fn mark_owned_projection_degraded(
             .lock()
             .await
             .mark_projection_degraded(&delivery.event_id, &delivery.projection_target, error)
-            .map_err(|mark_error| mark_error.to_string()),
-        CanonicalOutboxOwner::AgentRunStore => state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "AgentRun store unavailable during outbox reconciliation".to_string())?
-            .lock()
-            .await
-            .mark_projection_degraded(&delivery.event_id, &delivery.projection_target, error)
-            .map_err(|mark_error| mark_error.to_string()),
+            .map_err(ProjectionReconciliationError::failed),
+        CanonicalOutboxOwner::AgentRunStore => {
+            let store = state
+                .agent_run_store
+                .as_ref()
+                .ok_or_else(|| {
+                    "AgentRun store unavailable during outbox reconciliation".to_string()
+                })?
+                .lock()
+                .await;
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .mark_projection_degraded(
+                        &delivery.event_id,
+                        &delivery.projection_target,
+                        error,
+                    )
+                    .map_err(|error| error.to_string()),
+            )
+            .map_err(ProjectionReconciliationError::failed)
+        }
     }
 }
 
@@ -1276,6 +1782,9 @@ async fn mark_owned_projection_compensated_to_head(
             head_revision,
             &stale_delivery.projection_target,
         );
+    if let Err(error) = &result {
+        crate::terminal_owner_write_gateway::register_agent_run_store_error(state, error);
+    }
     map_agent_run_projection_finalize_result(result)
 }
 
@@ -1298,6 +1807,9 @@ async fn mark_agent_run_projection_applied_if_head(
             delivery.aggregate_revision,
             &delivery.projection_target,
         );
+    if let Err(error) = &result {
+        crate::terminal_owner_write_gateway::register_agent_run_store_error(state, error);
+    }
     map_agent_run_projection_finalize_result(result)
 }
 
@@ -1316,15 +1828,16 @@ fn map_agent_run_projection_finalize_result(
 async fn apply_projection_delivery(
     state: &Arc<AppState>,
     delivery: &ProjectionDelivery,
-) -> Result<ProjectionApplicationOutcome, String> {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<ProjectionApplicationOutcome, ProjectionReconciliationError> {
     match delivery.aggregate_kind.as_str() {
         "conversation" if delivery.mutation_kind == "deleted" => {
-            apply_conversation_deletion_projection(state, delivery)
+            apply_conversation_deletion_projection(state, delivery, commit_lane)
                 .await
                 .map(|_| ProjectionApplicationOutcome::Applied)
         }
         "knowledge_note" if delivery.mutation_kind == "created" => {
-            apply_knowledge_note_projection(state, delivery)
+            apply_knowledge_note_projection(state, delivery, commit_lane)
                 .await
                 .map(|_| ProjectionApplicationOutcome::Applied)
         }
@@ -1332,21 +1845,23 @@ async fn apply_projection_delivery(
         // retired direct-Memory indexing command. No current product write can
         // enqueue this aggregate/mutation pair.
         "memory_record" if delivery.mutation_kind == "indexed" => {
-            apply_knowledge_note_projection(state, delivery)
+            apply_knowledge_note_projection(state, delivery, commit_lane)
                 .await
                 .map(|_| ProjectionApplicationOutcome::Applied)
         }
-        "memory_lifecycle" => apply_memory_lifecycle_projection(state, delivery)
+        "memory_lifecycle" => apply_memory_lifecycle_projection(state, delivery, commit_lane)
             .await
             .map(|_| ProjectionApplicationOutcome::Applied),
-        "memory_retrieval" => {
-            Err("canonical Memory retrieval projection requires its exact outbox owner".into())
-        }
-        "agent_run" => apply_agent_run_projection(state, delivery).await,
-        other => Err(format!(
+        "memory_retrieval" => Err(ProjectionReconciliationError::failed(
+            "canonical Memory retrieval projection requires its exact outbox owner",
+        )),
+        "agent_run" => apply_agent_run_projection(state, delivery)
+            .await
+            .map_err(ProjectionReconciliationError::failed),
+        other => Err(ProjectionReconciliationError::failed(format!(
             "unsupported canonical outbox aggregate: {other}:{}",
             delivery.mutation_kind
-        )),
+        ))),
     }
 }
 
@@ -1354,15 +1869,26 @@ async fn apply_memory_retrieval_projection(
     state: &Arc<AppState>,
     owner: CanonicalOutboxOwner,
     delivery: &ProjectionDelivery,
-) -> Result<ProjectionApplicationOutcome, String> {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<ProjectionApplicationOutcome, ProjectionReconciliationError> {
     if delivery.projection_target != "vector_store" {
-        return Err(format!(
+        return Err(ProjectionReconciliationError::failed(format!(
             "unsupported canonical Memory retrieval projection target: {}",
             delivery.projection_target
-        ));
+        )));
     }
-    let canonical_head = load_memory_retrieval_projection_head(state, owner, delivery).await?;
-    let owner = canonical_head.owner().map_err(|error| error.to_string())?;
+    let canonical_head = load_memory_retrieval_projection_head(state, owner, delivery)
+        .await
+        .map_err(ProjectionReconciliationError::failed)?;
+    let owner = canonical_head
+        .owner()
+        .map_err(ProjectionReconciliationError::failed)?;
+    let _commit_permit = acquire_canonical_projection_commit_permit(
+        state,
+        GovernedDataImportRecoveryOwner::VectorStore,
+        commit_lane,
+    )
+    .await?;
     let vector_store = state.vector_store.lock().await.clone();
     vector_store
         .project_memory_retrieval_state(
@@ -1371,7 +1897,7 @@ async fn apply_memory_retrieval_projection(
             canonical_head.disposition == MemoryRetrievalDisposition::Archived,
             canonical_head.revision,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(ProjectionReconciliationError::failed)?;
     if canonical_head.last_event_id == delivery.event_id {
         Ok(ProjectionApplicationOutcome::Applied)
     } else {
@@ -1385,12 +1911,13 @@ async fn apply_memory_retrieval_projection(
 async fn apply_knowledge_note_projection(
     state: &Arc<AppState>,
     delivery: &ProjectionDelivery,
-) -> Result<(), String> {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<(), ProjectionReconciliationError> {
     if delivery.projection_target != "vector_store" {
-        return Err(format!(
+        return Err(ProjectionReconciliationError::failed(format!(
             "unsupported KnowledgeNote projection target: {}",
             delivery.projection_target
-        ));
+        )));
     }
     let owner_kind = match (
         delivery.aggregate_kind.as_str(),
@@ -1398,23 +1925,27 @@ async fn apply_knowledge_note_projection(
     ) {
         ("knowledge_note", "created") => "knowledge_note",
         ("memory_record", "indexed") => "memory_record",
-        _ => return Err("unsupported canonical KnowledgeNote projection contract".to_string()),
+        _ => {
+            return Err(ProjectionReconciliationError::failed(
+                "unsupported canonical KnowledgeNote projection contract",
+            ))
+        }
     };
     let owner = CanonicalVectorOwnerRef::new(owner_kind, &delivery.aggregate_id)
-        .map_err(|error| error.to_string())?;
+        .map_err(ProjectionReconciliationError::failed)?;
     let record = state
         .memory_store
         .lock()
         .await
         .load_verified_knowledge_note_projection(&delivery.event_id, &owner)
-        .map_err(|error| error.to_string())?;
+        .map_err(ProjectionReconciliationError::failed)?;
     if state
         .vector_store
         .lock()
         .await
         .clone()
         .projected_materialization_vector_id(&delivery.event_id, &owner)
-        .map_err(|error| error.to_string())?
+        .map_err(ProjectionReconciliationError::failed)?
         .is_some()
     {
         return Ok(());
@@ -1423,9 +1954,15 @@ async fn apply_knowledge_note_projection(
         "knowledge_note_outbox_projection",
         embed_memory_text_with_privacy(&record.content, state)
             .await
-            .map_err(|error| error.to_string())?,
+            .map_err(ProjectionReconciliationError::failed)?,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(ProjectionReconciliationError::failed)?;
+    let _commit_permit = acquire_canonical_projection_commit_permit(
+        state,
+        GovernedDataImportRecoveryOwner::VectorStore,
+        commit_lane,
+    )
+    .await?;
     state
         .vector_store
         .lock()
@@ -1444,7 +1981,7 @@ async fn apply_knowledge_note_projection(
                 .map(|_| ())
                 .ok_or_else(|| anyhow::anyhow!("active KnowledgeNote projection was suppressed"))
         })
-        .map_err(|error| error.to_string())
+        .map_err(ProjectionReconciliationError::failed)
 }
 
 /// The only compatibility materializer for Lifecycle-owned raw Memory. The
@@ -1453,53 +1990,77 @@ async fn apply_knowledge_note_projection(
 async fn apply_memory_lifecycle_projection(
     state: &Arc<AppState>,
     delivery: &ProjectionDelivery,
-) -> Result<(), String> {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<(), ProjectionReconciliationError> {
     let record = state
         .memory_lifecycle_store
         .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?
+        .ok_or_else(memory_lifecycle_store_missing)
+        .map_err(ProjectionReconciliationError::failed)?
         .lock()
         .await
         .get_record(&delivery.aggregate_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "canonical MemoryLifecycle record missing".to_string())?;
+        .map_err(ProjectionReconciliationError::failed)?
+        .ok_or_else(|| {
+            ProjectionReconciliationError::failed("canonical MemoryLifecycle record missing")
+        })?;
     if delivery.mutation_kind == "deleted" {
         return match delivery.projection_target.as_str() {
-            "memory_store" => state
-                .memory_store
-                .lock()
-                .await
-                .project_lifecycle_memory_tombstone(&delivery.event_id, &delivery.aggregate_id)
-                .map(|_| ())
-                .map_err(|error| error.to_string()),
-            "vector_store" => state
-                .vector_store
-                .lock()
-                .await
-                .clone()
-                .project_memory_lifecycle_tombstone(&delivery.event_id, &delivery.aggregate_id)
-                .map(|_| ())
-                .map_err(|error| error.to_string()),
-            other => Err(format!(
+            "memory_store" => {
+                let _commit_permit = acquire_canonical_projection_commit_permit(
+                    state,
+                    GovernedDataImportRecoveryOwner::MemoryStore,
+                    commit_lane,
+                )
+                .await?;
+                state
+                    .memory_store
+                    .lock()
+                    .await
+                    .project_lifecycle_memory_tombstone(&delivery.event_id, &delivery.aggregate_id)
+                    .map(|_| ())
+                    .map_err(ProjectionReconciliationError::failed)
+            }
+            "vector_store" => {
+                let _commit_permit = acquire_canonical_projection_commit_permit(
+                    state,
+                    GovernedDataImportRecoveryOwner::VectorStore,
+                    commit_lane,
+                )
+                .await?;
+                state
+                    .vector_store
+                    .lock()
+                    .await
+                    .clone()
+                    .project_memory_lifecycle_tombstone(&delivery.event_id, &delivery.aggregate_id)
+                    .map(|_| ())
+                    .map_err(ProjectionReconciliationError::failed)
+            }
+            other => Err(ProjectionReconciliationError::failed(format!(
                 "unsupported MemoryLifecycle tombstone projection target: {other}"
-            )),
+            ))),
         };
     }
     if delivery.mutation_kind != "materialized" {
-        return Err(format!(
+        return Err(ProjectionReconciliationError::failed(format!(
             "unsupported MemoryLifecycle mutation: {}",
             delivery.mutation_kind
-        ));
+        )));
     }
     if !record.status.is_runtime_active() || record.runtime_context_excluded_at.is_some() {
         // A rollback may have committed while an older creation delivery was
         // degraded. Never let that late delivery resurrect stale content.
         return Ok(());
     }
-    let session_id = record
-        .source_task_session_id
-        .as_deref()
-        .unwrap_or("memory-lifecycle-global");
+    let session_id = if record.scope == MemoryLifecycleScope::Global {
+        openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID
+    } else {
+        record
+            .source_task_session_id
+            .as_deref()
+            .unwrap_or(openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID)
+    };
     match delivery.projection_target.as_str() {
         "memory_store" => {
             let tags = vec![
@@ -1508,6 +2069,12 @@ async fn apply_memory_lifecycle_projection(
                 format!("proposal_id:{}", record.proposal_id),
                 format!("memory_category:{}", record.category),
             ];
+            let _commit_permit = acquire_canonical_projection_commit_permit(
+                state,
+                GovernedDataImportRecoveryOwner::MemoryStore,
+                commit_lane,
+            )
+            .await?;
             state
                 .memory_store
                 .lock()
@@ -1523,15 +2090,15 @@ async fn apply_memory_lifecycle_projection(
                     None,
                 )
                 .map(|_| ())
-                .map_err(|error| error.to_string())
+                .map_err(ProjectionReconciliationError::failed)
         }
         "vector_store" => {
             let vector_store = state.vector_store.lock().await.clone();
             let owner = CanonicalVectorOwnerRef::new("memory_lifecycle", &record.memory_id)
-                .map_err(|error| error.to_string())?;
+                .map_err(ProjectionReconciliationError::failed)?;
             if vector_store
                 .projected_materialization_vector_id(&delivery.event_id, &owner)
-                .map_err(|error| error.to_string())?
+                .map_err(ProjectionReconciliationError::failed)?
                 .is_some()
             {
                 return Ok(());
@@ -1540,9 +2107,15 @@ async fn apply_memory_lifecycle_projection(
                 "memory_lifecycle_outbox_projection",
                 embed_memory_text_with_privacy(&record.content, state)
                     .await
-                    .map_err(|error| error.to_string())?,
+                    .map_err(ProjectionReconciliationError::failed)?,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(ProjectionReconciliationError::failed)?;
+            let _commit_permit = acquire_canonical_projection_commit_permit(
+                state,
+                GovernedDataImportRecoveryOwner::VectorStore,
+                commit_lane,
+            )
+            .await?;
             vector_store
                 .project_memory_embedding(
                     &delivery.event_id,
@@ -1553,31 +2126,36 @@ async fn apply_memory_lifecycle_projection(
                     &profile,
                 )
                 .map(|_| ())
-                .map_err(|error| error.to_string())
+                .map_err(ProjectionReconciliationError::failed)
         }
-        other => Err(format!(
+        other => Err(ProjectionReconciliationError::failed(format!(
             "unsupported MemoryLifecycle projection target: {other}"
-        )),
+        ))),
     }
 }
 
 async fn apply_conversation_deletion_projection(
     state: &Arc<AppState>,
     delivery: &ProjectionDelivery,
-) -> Result<(), String> {
-    let tombstone_id = delivery
-        .tombstone_id
-        .as_deref()
-        .ok_or_else(|| "conversation deletion outbox missing tombstone id".to_string())?;
-    let projection_refs = if let Some(store) = state.agent_run_store.as_ref() {
+    commit_lane: CanonicalProjectionCommitLane,
+) -> Result<(), ProjectionReconciliationError> {
+    let tombstone_id = delivery.tombstone_id.as_deref().ok_or_else(|| {
+        ProjectionReconciliationError::failed("conversation deletion outbox missing tombstone id")
+    })?;
+    let store = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| ProjectionReconciliationError::failed("AgentRun store unavailable"))?
+        .lock()
+        .await;
+    let projection_refs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
         store
-            .lock()
-            .await
             .projection_refs_for_session(&delivery.aggregate_id)
-            .map_err(|error| error.to_string())?
-    } else {
-        Vec::new()
-    };
+            .map_err(|error| error.to_string()),
+    )
+    .map_err(ProjectionReconciliationError::failed)?;
+    drop(store);
     let run_ids = projection_refs
         .iter()
         .map(|(run_id, _)| run_id.clone())
@@ -1594,51 +2172,63 @@ async fn apply_conversation_deletion_projection(
     }
     match delivery.projection_target.as_str() {
         "vector_store" => {
+            let _commit_permit = acquire_canonical_projection_commit_permit(
+                state,
+                GovernedDataImportRecoveryOwner::VectorStore,
+                commit_lane,
+            )
+            .await?;
             let store = state.vector_store.lock().await.clone();
             store
                 .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
-                .map_err(|error| error.to_string())?;
+                .map_err(ProjectionReconciliationError::failed)?;
         }
         "agent_run_store" => {
             let store = state
                 .agent_run_store
                 .as_ref()
-                .ok_or_else(|| "AgentRun store unavailable".to_string())?
+                .ok_or_else(|| ProjectionReconciliationError::failed("AgentRun store unavailable"))?
                 .lock()
                 .await;
-            store
-                .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
-                .map_err(|error| error.to_string())?;
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
+                    .map_err(|error| error.to_string()),
+            )
+            .map_err(ProjectionReconciliationError::failed)?;
         }
         "turn_event_store" => {
             let store = state
                 .main_chat_agent_event_store
                 .as_ref()
-                .ok_or_else(|| "TurnEventStore unavailable".to_string())?
+                .ok_or_else(|| ProjectionReconciliationError::failed("TurnEventStore unavailable"))?
                 .lock()
                 .await;
             store
                 .project_conversation_tombstone(&delivery.event_id, tombstone_id, &task_ids)
-                .map_err(|error| error.to_string())?;
+                .map_err(ProjectionReconciliationError::failed)?;
         }
         "action_queue_store" => {
             let store = state
                 .main_chat_action_queue_store
                 .as_ref()
-                .ok_or_else(|| "ActionQueueStore unavailable".to_string())?
+                .ok_or_else(|| {
+                    ProjectionReconciliationError::failed("ActionQueueStore unavailable")
+                })?
                 .lock()
                 .await;
             for task_id in &task_ids {
                 store
                     .project_session_tombstone(&delivery.event_id, tombstone_id, task_id)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(ProjectionReconciliationError::failed)?;
             }
         }
         "life_event_store" => {
             let store = state
                 .life_event_store
                 .as_ref()
-                .ok_or_else(|| "LifeEventStore unavailable".to_string())?
+                .ok_or_else(|| ProjectionReconciliationError::failed("LifeEventStore unavailable"))?
                 .lock()
                 .await;
             store
@@ -1648,12 +2238,12 @@ async fn apply_conversation_deletion_projection(
                     openlife_core::agent::LifeEventSourceType::AgentRun,
                     &run_ids,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(ProjectionReconciliationError::failed)?;
         }
         other => {
-            return Err(format!(
+            return Err(ProjectionReconciliationError::failed(format!(
                 "unsupported conversation projection target: {other}"
-            ))
+            )))
         }
     }
     Ok(())
@@ -1670,17 +2260,26 @@ async fn apply_agent_run_projection(
             .ok_or_else(|| "AgentRun store unavailable".to_string())?
             .lock()
             .await;
-        let run = store
-            .get_run_including_deleted(&delivery.aggregate_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "canonical AgentRun missing during projection".to_string())?;
-        let head = store
-            .canonical_projection_head(&delivery.aggregate_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "canonical AgentRun projection head missing".to_string())?;
-        let tombstone_ids = store
-            .canonical_tombstone_ids(&delivery.aggregate_id)
-            .map_err(|error| error.to_string())?;
+        let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .get_run_including_deleted(&delivery.aggregate_id)
+                .map_err(|error| error.to_string()),
+        )?
+        .ok_or_else(|| "canonical AgentRun missing during projection".to_string())?;
+        let head = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .canonical_projection_head(&delivery.aggregate_id)
+                .map_err(|error| error.to_string()),
+        )?
+        .ok_or_else(|| "canonical AgentRun projection head missing".to_string())?;
+        let tombstone_ids = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .canonical_tombstone_ids(&delivery.aggregate_id)
+                .map_err(|error| error.to_string()),
+        )?;
         (run, head, tombstone_ids)
     };
     let deleting = canonical_head.mutation_kind == "deleted";
@@ -1792,7 +2391,12 @@ pub(crate) async fn touch_chat_session_with_state(
     session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    require_persistence_write(state)?;
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::MemoryStore],
+        None,
+    )
+    .await?;
     let store = state.memory_store.lock().await;
     store.touch_chat_session(session_id).map_err(AppError::from)
 }
@@ -1804,7 +2408,6 @@ pub(crate) async fn create_knowledge_note_with_state(
     source: String,
     state: &Arc<AppState>,
 ) -> Result<KnowledgeNoteWriteResult, AppError> {
-    require_persistence_write(state)?;
     let decision = MemoryGateway::decide(MemoryGatewaySubject::KnowledgeNote);
     if decision.lane != openlife_core::memory_gateway::MemoryLane::KnowledgeNote
         || decision.status != MemoryGatewayWriteStatus::KnowledgeNoteWritten
@@ -1816,6 +2419,12 @@ pub(crate) async fn create_knowledge_note_with_state(
         ));
     }
     let canonical_write = {
+        let _commit_permit = acquire_memory_vector_commit_permit(
+            state,
+            &[GovernedDataImportRecoveryOwner::MemoryStore],
+            None,
+        )
+        .await?;
         let store = state.memory_store.lock().await;
         let tags = vec![
             "canonical_owner:knowledge_note".to_string(),
@@ -1901,6 +2510,7 @@ pub(crate) async fn search_memory_with_state(
         let privacy_engine = state.privacy_engine.lock().await;
         privacy_engine.desensitize(&query).0
     };
+    let text_telemetry_ticket = prepare_memory_search_access_telemetry(state);
     let text_hits = {
         let store = state.memory_store.lock().await;
         store
@@ -1935,6 +2545,7 @@ pub(crate) async fn search_memory_with_state(
             }),
         ),
         Ok(embedding) => {
+            let vector_telemetry_ticket = prepare_vector_search_access_telemetry(state);
             let store = state.vector_store.lock().await.clone();
             match store.search(&embedding, &profile, top_k) {
                 Ok(VectorSearchOutcome::Matches { matches, rebuild }) => {
@@ -1943,7 +2554,13 @@ pub(crate) async fn search_memory_with_state(
                     } else {
                         "ready"
                     };
-                    (matches, rebuild, status, None)
+                    let telemetry_evidence = record_vector_search_access_telemetry_with_state(
+                        &matches,
+                        state,
+                        vector_telemetry_ticket,
+                    )
+                    .await;
+                    (matches, rebuild, status, telemetry_evidence)
                 }
                 Ok(VectorSearchOutcome::RebuildRequired(rebuild)) => {
                     (Vec::new(), Some(rebuild), "rebuild_required", None)
@@ -1960,6 +2577,20 @@ pub(crate) async fn search_memory_with_state(
             }
         }
     };
+    let text_telemetry_evidence =
+        record_text_search_access_telemetry_with_state(&text_hits, state, text_telemetry_ticket)
+            .await;
+    if let Some(evidence) = text_telemetry_evidence.as_ref() {
+        log::warn!(
+            "Memory text search telemetry skipped after a successful read: reason={} error_digest={}",
+            evidence.reason_code,
+            evidence.error_digest.as_deref().unwrap_or("none")
+        );
+    }
+    // Vector/embedding degradation is the primary search-quality signal. If
+    // it is healthy, expose a skipped Memory telemetry commit without turning
+    // the already-observed text result into a failed search.
+    let degraded_evidence = degraded_evidence.or(text_telemetry_evidence);
     let hits = filter_canonical_retrievable_memory_results(
         merge_memory_hits(vector_hits, text_hits, top_k),
         state,
@@ -1980,7 +2611,12 @@ pub(crate) async fn search_memory_with_state(
 pub(crate) async fn run_memory_tier_maintenance_with_state(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), AppError> {
-    require_persistence_write(state)?;
+    let _commit_permit = acquire_memory_vector_commit_permit(
+        state,
+        &[GovernedDataImportRecoveryOwner::VectorStore],
+        None,
+    )
+    .await?;
     let store = state.vector_store.lock().await;
     store.run_tier_maintenance().map_err(AppError::from)
 }
@@ -2033,12 +2669,13 @@ pub(crate) async fn list_archived_chunks_with_state(
 
 const ARCHIVED_MEMORY_PAGE_SIZE: usize = 64;
 
+type ArchivedMemoryPageHook<'a> =
+    dyn Fn(&openlife_core::memory::MemoryStore) -> Result<(), AppError> + Sync + 'a;
+
 async fn list_archived_chunks_with_state_inner(
     limit: usize,
     state: &Arc<AppState>,
-    after_initial_pages: Option<
-        &(dyn Fn(&openlife_core::memory::MemoryStore) -> Result<(), AppError> + Sync),
-    >,
+    after_initial_pages: Option<&ArchivedMemoryPageHook<'_>>,
 ) -> Result<Vec<ArchivedCanonicalMemoryView>, AppError> {
     require_persistence_read(state, "MemoryStore")?;
     require_persistence_read(state, "MemoryLifecycleStore")?;
@@ -2314,6 +2951,8 @@ async fn set_memory_retrieval_dispositions_with_state(
     reason_code: &str,
     state: &Arc<AppState>,
 ) -> Result<Vec<MemoryRetrievalMutationResult>, AppError> {
+    // MemoryLifecycleStore is not one of the four import-observed owners, but
+    // its branch still requires the ordinary global effect gate.
     require_persistence_write(state)?;
     if owner_inputs.is_empty() || owner_inputs.len() > 200 {
         return Err(AppError::permission(
@@ -2352,6 +2991,12 @@ async fn set_memory_retrieval_dispositions_with_state(
             .map_err(AppError::from)?;
         (mutations, CanonicalOutboxOwner::MemoryLifecycleStore)
     } else {
+        let _commit_permit = acquire_memory_vector_commit_permit(
+            state,
+            &[GovernedDataImportRecoveryOwner::MemoryStore],
+            None,
+        )
+        .await?;
         let mutations = memory_store
             .set_memory_retrieval_dispositions(&owners, disposition, reason_code)
             .map_err(AppError::from)?;
@@ -2431,13 +3076,14 @@ pub(crate) async fn rebuild_memory_index_with_state(
     let source_snapshot = memory_store
         .vector_rebuild_source_snapshot()
         .map_err(AppError::from)?;
-    let mut job = vector_store
-        .start_or_resume_rebuild(&source_snapshot)
-        .map_err(AppError::from)?;
+    let mut job = commit_vector_store_mutation(state, || {
+        vector_store.start_or_resume_rebuild(&source_snapshot)
+    })
+    .await?;
     if job.status == VectorRebuildJobStatus::CancelRequested {
-        job = vector_store
-            .settle_rebuild_cancel(&job.job_id)
-            .map_err(AppError::from)?;
+        job =
+            commit_vector_store_mutation(state, || vector_store.settle_rebuild_cancel(&job.job_id))
+                .await?;
         return Ok(vector_rebuild_job_report(&job));
     }
 
@@ -2446,9 +3092,10 @@ pub(crate) async fn rebuild_memory_index_with_state(
             .rebuild_cancel_requested(&job.job_id)
             .map_err(AppError::from)?
         {
-            job = vector_store
-                .settle_rebuild_cancel(&job.job_id)
-                .map_err(AppError::from)?;
+            job = commit_vector_store_mutation(state, || {
+                vector_store.settle_rebuild_cancel(&job.job_id)
+            })
+            .await?;
             return Ok(vector_rebuild_job_report(&job));
         }
         let page = memory_store
@@ -2462,14 +3109,19 @@ pub(crate) async fn rebuild_memory_index_with_state(
             let observed_source = memory_store
                 .vector_rebuild_source_snapshot_through(job.source_snapshot.through_memory_id)
                 .map_err(AppError::from)?;
-            job = match vector_store.finalize_rebuild(&job.job_id, &observed_source) {
+            job = match commit_vector_store_mutation(state, || {
+                vector_store.finalize_rebuild(&job.job_id, &observed_source)
+            })
+            .await
+            {
                 Ok(completed) => completed,
                 Err(error) => {
                     let error_digest =
                         openlife_core::persistence_outbox::metadata_digest(&error.to_string());
-                    let failed = vector_store
-                        .fail_rebuild(&job.job_id, &error_digest)
-                        .map_err(AppError::from)?;
+                    let failed = commit_vector_store_mutation(state, || {
+                        vector_store.fail_rebuild(&job.job_id, &error_digest)
+                    })
+                    .await?;
                     return Err(AppError::internal(
                         serde_json::json!({
                             "operation": "rebuild_memory_index",
@@ -2491,9 +3143,10 @@ pub(crate) async fn rebuild_memory_index_with_state(
                 .rebuild_cancel_requested(&job.job_id)
                 .map_err(AppError::from)?
             {
-                job = vector_store
-                    .settle_rebuild_cancel(&job.job_id)
-                    .map_err(AppError::from)?;
+                job = commit_vector_store_mutation(state, || {
+                    vector_store.settle_rebuild_cancel(&job.job_id)
+                })
+                .await?;
                 return Ok(vector_rebuild_job_report(&job));
             }
             let Some(canonical_owner) = source_record.canonical_owner else {
@@ -2523,9 +3176,11 @@ pub(crate) async fn rebuild_memory_index_with_state(
                 {
                     Some(outcome) => outcome,
                     None => {
-                        job = vector_store
-                            .settle_rebuild_cancel_with_remote_unknown(&job.job_id, true)
-                            .map_err(AppError::from)?;
+                        job = commit_vector_store_mutation(state, || {
+                            vector_store
+                                .settle_rebuild_cancel_with_remote_unknown(&job.job_id, true)
+                        })
+                        .await?;
                         return Ok(vector_rebuild_job_report(&job));
                     }
                 };
@@ -2535,9 +3190,10 @@ pub(crate) async fn rebuild_memory_index_with_state(
                     Err(error) => {
                         let error_digest =
                             openlife_core::persistence_outbox::metadata_digest(&error.to_string());
-                        let paused = vector_store
-                            .pause_rebuild(&job.job_id, &error_digest)
-                            .map_err(AppError::from)?;
+                        let paused = commit_vector_store_mutation(state, || {
+                            vector_store.pause_rebuild(&job.job_id, &error_digest)
+                        })
+                        .await?;
                         return Err(AppError::external(
                             serde_json::json!({
                                 "operation": "rebuild_memory_index",
@@ -2574,14 +3230,19 @@ pub(crate) async fn rebuild_memory_index_with_state(
                 cache_hit: receipt.cache_hit,
             });
         }
-        job = match vector_store.stage_rebuild_batch(&job.job_id, &batch) {
+        job = match commit_vector_store_mutation(state, || {
+            vector_store.stage_rebuild_batch(&job.job_id, &batch)
+        })
+        .await
+        {
             Ok(progress) => progress,
             Err(error) => {
                 let error_digest =
                     openlife_core::persistence_outbox::metadata_digest(&error.to_string());
-                let failed = vector_store
-                    .fail_rebuild(&job.job_id, &error_digest)
-                    .map_err(AppError::from)?;
+                let failed = commit_vector_store_mutation(state, || {
+                    vector_store.fail_rebuild(&job.job_id, &error_digest)
+                })
+                .await?;
                 return Err(AppError::internal(
                     serde_json::json!({
                         "operation": "rebuild_memory_index",
@@ -2660,18 +3321,27 @@ pub(crate) async fn cancel_memory_index_rebuild_with_state(
                 .job_id
         }
     };
-    store
-        .request_rebuild_cancel(&target)
-        .map_err(AppError::from)
+    commit_vector_store_mutation(state, || store.request_rebuild_cancel(&target)).await
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ImportedMemoryReplaceReport {
     pub messages_targeted: bool,
     pub vectors_targeted: bool,
     pub supplied_message_count: usize,
     pub applied_message_count: usize,
     pub vectors: PortableVectorImportReport,
+    pub message_outcome: Option<CanonicalMessageReplaceOutcome>,
+    pub vector_outcome: Option<PortableVectorReplaceOutcome>,
+}
+
+/// Owner-local compare-and-swap boundaries captured with the import archive
+/// snapshot. `None` means that owner is not targeted; an empty archive is a
+/// targeted value with the deterministic digest of an empty payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ImportedMemoryExpectedDigests {
+    pub messages: Option<String>,
+    pub vectors: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2679,6 +3349,8 @@ enum ImportedMemoryReplaceFault {
     None,
     #[cfg(test)]
     BeforeVectorCommit,
+    #[cfg(test)]
+    BeforeVectorCommitAfterConcurrentMessage,
 }
 
 pub(crate) async fn replace_imported_memory_with_state(
@@ -2686,11 +3358,77 @@ pub(crate) async fn replace_imported_memory_with_state(
     messages: Option<&[openlife_core::memory::ExportedMessage]>,
     vectors: Option<&[ExportedVectorChunk]>,
 ) -> Result<ImportedMemoryReplaceReport, AppError> {
+    require_persistence_write(state)?;
+    let expected = ImportedMemoryExpectedDigests {
+        messages: if messages.is_some() {
+            Some(
+                state
+                    .memory_store
+                    .lock()
+                    .await
+                    .export_canonical_message_archive()
+                    .map_err(AppError::from)?
+                    .digest,
+            )
+        } else {
+            None
+        },
+        vectors: if vectors.is_some() {
+            Some(
+                state
+                    .vector_store
+                    .lock()
+                    .await
+                    .export_portable_archive()
+                    .map_err(AppError::from)?
+                    .digest,
+            )
+        } else {
+            None
+        },
+    };
     replace_imported_memory_with_state_inner(
         state,
         messages,
         vectors,
+        expected,
         ImportedMemoryReplaceFault::None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn replace_imported_memory_with_state_guarded(
+    state: &Arc<AppState>,
+    messages: Option<&[openlife_core::memory::ExportedMessage]>,
+    vectors: Option<&[ExportedVectorChunk]>,
+    expected: ImportedMemoryExpectedDigests,
+) -> Result<ImportedMemoryReplaceReport, AppError> {
+    replace_imported_memory_with_state_inner(
+        state,
+        messages,
+        vectors,
+        expected,
+        ImportedMemoryReplaceFault::None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn replace_imported_memory_with_state_guarded_for_import_recovery(
+    state: &Arc<AppState>,
+    messages: Option<&[openlife_core::memory::ExportedMessage]>,
+    vectors: Option<&[ExportedVectorChunk]>,
+    expected: ImportedMemoryExpectedDigests,
+    recovery: (&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str),
+) -> Result<ImportedMemoryReplaceReport, AppError> {
+    replace_imported_memory_with_state_inner(
+        state,
+        messages,
+        vectors,
+        expected,
+        ImportedMemoryReplaceFault::None,
+        Some(recovery),
     )
     .await
 }
@@ -2699,15 +3437,36 @@ async fn replace_imported_memory_with_state_inner(
     state: &Arc<AppState>,
     messages: Option<&[openlife_core::memory::ExportedMessage]>,
     vectors: Option<&[ExportedVectorChunk]>,
+    expected: ImportedMemoryExpectedDigests,
     fault: ImportedMemoryReplaceFault,
+    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
 ) -> Result<ImportedMemoryReplaceReport, AppError> {
-    require_persistence_write(state)?;
     let decision = MemoryGateway::decide(MemoryGatewaySubject::ImportedArchive);
     debug_assert!(decision.local_memory_allowed);
+    if messages.is_some() != expected.messages.is_some() {
+        return Err(AppError::internal(
+            "canonical message import target and expected digest must align",
+        ));
+    }
+    if vectors.is_some() != expected.vectors.is_some() {
+        return Err(AppError::internal(
+            "portable vector import target and expected digest must align",
+        ));
+    }
 
-    // This lock serializes destructive archive replacements. Each canonical
-    // store still owns its own SQLite transaction; the explicit compensation
-    // below prevents a vector failure from leaving newly imported messages.
+    let mut owners = Vec::with_capacity(2);
+    if messages.is_some() {
+        owners.push(GovernedDataImportRecoveryOwner::MemoryStore);
+    }
+    if vectors.is_some() {
+        owners.push(GovernedDataImportRecoveryOwner::VectorStore);
+    }
+    let _commit_permit = acquire_memory_vector_commit_permit(state, &owners, recovery).await?;
+
+    // This lock serializes coordinator attempts only. Each canonical store
+    // still owns its own SQLite transaction; a vector failure triggers
+    // owner-local Memory compensation, while its CAS refuses to overwrite a
+    // later Memory write. This is deliberately not cross-owner atomicity.
     let _import_guard = GOVERNED_MEMORY_IMPORT_LOCK.lock().await;
     let memory_store = state.memory_store.lock().await.clone();
     let vector_store = state.vector_store.lock().await.clone();
@@ -2722,51 +3481,97 @@ async fn replace_imported_memory_with_state_inner(
         None => PortableVectorImportReport::default(),
     };
     let previous_messages = if messages.is_some() && vectors.is_some() {
-        Some(memory_store.export_all_messages().map_err(AppError::from)?)
+        Some(
+            memory_store
+                .export_canonical_message_archive()
+                .map_err(AppError::from)?,
+        )
     } else {
         None
     };
 
-    if let Some(messages) = messages {
-        memory_store
-            .replace_all_messages(messages)
-            .map_err(AppError::from)?;
-    }
+    let message_outcome = messages
+        .map(|messages| {
+            memory_store.replace_all_messages_guarded(
+                messages,
+                expected
+                    .messages
+                    .as_deref()
+                    .expect("target/digest alignment checked above"),
+            )
+        })
+        .transpose()
+        .map_err(AppError::from)?;
 
-    let vector_report = if let Some(vectors) = vectors {
+    let vector_outcome = if let Some(vectors) = vectors {
         let vector_result = match fault {
-            ImportedMemoryReplaceFault::None => vector_store.replace_portable_chunks(vectors),
+            ImportedMemoryReplaceFault::None => vector_store.replace_portable_chunks_guarded(
+                vectors,
+                expected
+                    .vectors
+                    .as_deref()
+                    .expect("target/digest alignment checked above"),
+            ),
             #[cfg(test)]
             ImportedMemoryReplaceFault::BeforeVectorCommit => Err(anyhow::anyhow!(
                 "injected portable vector replacement failure"
             )),
+            #[cfg(test)]
+            ImportedMemoryReplaceFault::BeforeVectorCommitAfterConcurrentMessage => {
+                memory_store
+                    .save_message(
+                        "concurrent-import-writer",
+                        &ChatMessage {
+                            role: "user".into(),
+                            content: "LATE_CANONICAL_MESSAGE_MUST_NOT_BE_OVERWRITTEN".into(),
+                        },
+                    )
+                    .map_err(AppError::from)?;
+                Err(anyhow::anyhow!(
+                    "injected portable vector replacement failure after concurrent message"
+                ))
+            }
         };
         match vector_result {
-            Ok(report) => report,
+            Ok(outcome) => Some(outcome),
             Err(vector_error) => {
-                if let Some(previous_messages) = previous_messages.as_deref() {
-                    if let Err(rollback_error) =
-                        memory_store.replace_all_messages(previous_messages)
-                    {
-                        return Err(AppError::internal(format!(
-                            "portable vector replacement failed and canonical message compensation failed: {vector_error}; compensation: {rollback_error}"
-                        )));
+                if let (Some(previous_messages), Some(message_outcome)) =
+                    (previous_messages.as_ref(), message_outcome.as_ref())
+                {
+                    if message_outcome.changed() {
+                        if let Err(rollback_error) = memory_store.replace_all_messages_guarded(
+                            &previous_messages.messages,
+                            &message_outcome.after_digest,
+                        ) {
+                            return Err(AppError::internal(format!(
+                                "portable vector replacement failed; canonical message compensation was refused because the Memory owner changed after import. No late write was overwritten. vector: {vector_error}; compensation: {rollback_error}"
+                            )));
+                        }
                     }
                 }
                 return Err(AppError::from(vector_error));
             }
         }
     } else {
-        PortableVectorImportReport::default()
+        None
     };
+    let vector_report = vector_outcome
+        .as_ref()
+        .map_or_else(PortableVectorImportReport::default, |outcome| {
+            outcome.report
+        });
     debug_assert!(vectors.is_none() || vector_report == vector_preflight);
 
     Ok(ImportedMemoryReplaceReport {
         messages_targeted: messages.is_some(),
         vectors_targeted: vectors.is_some(),
         supplied_message_count: messages.map_or(0, |messages| messages.len()),
-        applied_message_count: messages.map_or(0, |messages| messages.len()),
+        applied_message_count: message_outcome
+            .as_ref()
+            .map_or(0, |outcome| outcome.applied),
         vectors: vector_report,
+        message_outcome,
+        vector_outcome,
     })
 }
 
@@ -2926,7 +3731,10 @@ pub(crate) async fn materialize_memory_proposal_with_state(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
     state: &Arc<AppState>,
     source_task_session_id: String,
@@ -2953,6 +3761,12 @@ pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
     .await
 }
 
+// Explicit Memory admission binds the current task/run/message, typed policy
+// proof, rollback grant, and cancellation epoch as separate authority facts.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn commit_explicit_user_memory_inner(
     state: &Arc<AppState>,
     source_task_session_id: String,
@@ -3435,6 +4249,936 @@ impl MemoryGatewayWriteReportExt for MemoryGatewayWriteReport {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn install_canonical_commit_admission_barrier(
+        state: &Arc<AppState>,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        install_canonical_commit_admission_barrier_after_skips(state, 0)
+    }
+
+    fn install_canonical_commit_admission_barrier_after_skips(
+        state: &Arc<AppState>,
+        remaining_skips: usize,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let key = Arc::as_ptr(&state.persistence_coordinator) as usize;
+        let replaced = CANONICAL_COMMIT_ADMISSION_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key,
+                CanonicalCommitAdmissionBarrier {
+                    remaining_skips,
+                    admitted: admitted_tx,
+                    release: release_rx,
+                },
+            );
+        assert!(replaced.is_none(), "test barrier must have one owner");
+        (admitted_rx, release_tx)
+    }
+
+    fn install_release_like_persistence_coordinator(
+        state: &mut Arc<AppState>,
+    ) -> Arc<crate::persistence_coordinator::PersistenceCoordinator> {
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        assert_eq!(
+            coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+        Arc::get_mut(state)
+            .expect("test state must have one outer owner")
+            .persistence_coordinator = Arc::clone(&coordinator);
+        coordinator
+    }
+
+    #[tokio::test]
+    async fn agent_run_outbox_read_failure_degrades_before_projection_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-run-outbox-read-failure.db");
+        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("test state must have one outer owner")
+            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
+        let coordinator = install_release_like_persistence_coordinator(&mut state);
+
+        let fault = rusqlite::Connection::open(&path).unwrap();
+        fault
+            .execute_batch("DROP TABLE canonical_outbox_deliveries;")
+            .unwrap();
+        drop(fault);
+        let error =
+            load_owner_replayable_deliveries(&state, CanonicalOutboxOwner::AgentRunStore, 10)
+                .await
+                .expect_err("AgentRun outbox DB failure must remain an error");
+        assert!(error.to_ascii_lowercase().contains("no such table"));
+        assert_eq!(
+            coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded
+        );
+        assert!(coordinator.require_effects_allowed().is_err());
+    }
+
+    #[tokio::test]
+    async fn conversation_deletion_projection_rejects_missing_agent_run_owner() {
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("test state must have one outer owner")
+            .agent_run_store = None;
+        let now = chrono::Utc::now();
+        let delivery = ProjectionDelivery {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            aggregate_kind: "conversation".into(),
+            aggregate_id: "missing-agent-run-owner-session".into(),
+            mutation_kind: "deleted".into(),
+            aggregate_revision: 1,
+            payload_digest: format!("sha256:{}", "a".repeat(64)),
+            tombstone_id: Some(uuid::Uuid::new_v4().to_string()),
+            projection_target: "vector_store".into(),
+            state: ProjectionDeliveryState::Pending,
+            attempt_count: 0,
+            last_error_digest: None,
+            terminal_disposition: None,
+            superseded_by_event_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let error = apply_conversation_deletion_projection(
+            &state,
+            &delivery,
+            CanonicalProjectionCommitLane::Normal,
+        )
+        .await
+        .expect_err("missing AgentRun owner cannot be interpreted as an empty reference set");
+        assert!(matches!(
+            error,
+            ProjectionReconciliationError::Failed(ref reason)
+                if reason == "AgentRun store unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_and_vector_gateways_reject_admitted_writes_after_generation_invalidation() {
+        let memory_state = crate::test_utils::test_app_state();
+        let before_messages = memory_state
+            .memory_store
+            .lock()
+            .await
+            .export_canonical_message_archive()
+            .unwrap()
+            .digest;
+        let (memory_admitted, release_memory) =
+            install_canonical_commit_admission_barrier(&memory_state);
+        let late_memory_state = Arc::clone(&memory_state);
+        let memory_write = tokio::spawn(async move {
+            save_turn_user_message_idempotent_with_state(
+                "late-barrier-session",
+                &ChatMessage {
+                    role: "user".into(),
+                    content: "MUST_NOT_COMMIT_AFTER_RECOVERY_FENCE".into(),
+                },
+                &uuid::Uuid::new_v4().hyphenated().to_string(),
+                &late_memory_state,
+            )
+            .await
+        });
+        memory_admitted
+            .await
+            .expect("Memory write must pause after synchronous admission");
+        memory_state
+            .persistence_coordinator
+            .degrade_globally("test_memory_admission_invalidated");
+        release_memory.send(()).unwrap();
+        let memory_error = memory_write
+            .await
+            .unwrap()
+            .expect_err("stale Memory admission must not reach its owner lock");
+        assert!(memory_error.contains("persistence_admission_invalidated"));
+        assert_eq!(
+            memory_state
+                .memory_store
+                .lock()
+                .await
+                .export_canonical_message_archive()
+                .unwrap()
+                .digest,
+            before_messages
+        );
+
+        let vector_state = crate::test_utils::test_app_state();
+        let before_vectors = vector_state
+            .vector_store
+            .lock()
+            .await
+            .export_portable_archive()
+            .unwrap()
+            .digest;
+        let (vector_admitted, release_vector) =
+            install_canonical_commit_admission_barrier(&vector_state);
+        let late_vector_state = Arc::clone(&vector_state);
+        let vector_write = tokio::spawn(async move {
+            run_memory_tier_maintenance_with_state(&late_vector_state).await
+        });
+        vector_admitted
+            .await
+            .expect("Vector write must pause after synchronous admission");
+        vector_state
+            .persistence_coordinator
+            .degrade_globally("test_vector_admission_invalidated");
+        release_vector.send(()).unwrap();
+        let vector_error = vector_write
+            .await
+            .unwrap()
+            .expect_err("stale Vector admission must not reach its owner lock");
+        assert!(vector_error
+            .message()
+            .contains("persistence_admission_invalidated"));
+        assert_eq!(
+            vector_state
+                .vector_store
+                .lock()
+                .await
+                .export_portable_archive()
+                .unwrap()
+                .digest,
+            before_vectors
+        );
+    }
+
+    #[tokio::test]
+    async fn late_vector_access_telemetry_is_skipped_without_losing_search_results() {
+        let state = crate::test_utils::test_app_state();
+        let profile = EmbeddingProfile::new(
+            EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "telemetry-test-v1",
+            "builtin:test",
+            "telemetry-test-artifact-v1",
+            4,
+        )
+        .unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+        let store = state.vector_store.lock().await.clone();
+        store
+            .insert(
+                "telemetry-session",
+                "RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY",
+                &embedding,
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let telemetry_ticket = prepare_vector_search_access_telemetry(&state);
+        let matches = match store.search(&embedding, &profile, 5).unwrap() {
+            VectorSearchOutcome::Matches { matches, .. } => matches,
+            VectorSearchOutcome::RebuildRequired(evidence) => {
+                panic!("test vector profile unexpectedly requires rebuild: {evidence:?}")
+            }
+        };
+        assert_eq!(matches.len(), 1);
+        let before = store.export_portable_archive().unwrap();
+
+        let (telemetry_admitted, release_telemetry) =
+            install_canonical_commit_admission_barrier(&state);
+        let late_state = Arc::clone(&state);
+        let telemetry_matches = matches.clone();
+        let telemetry = tokio::spawn(async move {
+            record_vector_search_access_telemetry_with_state(
+                &telemetry_matches,
+                &late_state,
+                telemetry_ticket,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), telemetry_admitted)
+            .await
+            .expect("telemetry must enter canonical admission")
+            .expect("telemetry admission signal");
+        state
+            .persistence_coordinator
+            .degrade_globally("test_vector_telemetry_admission_invalidated");
+        release_telemetry.send(()).unwrap();
+
+        let evidence = telemetry
+            .await
+            .unwrap()
+            .expect("optional telemetry rejection must remain observable");
+        assert_eq!(evidence.reason_code, "vector_access_telemetry_skipped");
+        assert!(evidence.error_digest.is_some());
+        assert_eq!(
+            matches[0].0.content,
+            "RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY"
+        );
+        assert_eq!(store.export_portable_archive().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn late_memory_access_telemetry_is_skipped_without_losing_search_results() {
+        let state = crate::test_utils::test_app_state();
+        let store = state.memory_store.lock().await.clone();
+        store
+            .save_memory_record(
+                "memory-telemetry-session",
+                "MEMORY_RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY",
+                "note",
+                "manual",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
+        let telemetry_ticket = prepare_memory_search_access_telemetry(&state);
+        let hits = store
+            .search_text_memories(None, "MEMORY_RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        let before_records = serde_json::to_value(store.export_active_memory_records().unwrap())
+            .expect("serialize canonical Memory rows");
+        let before_source = store.vector_rebuild_source_snapshot().unwrap();
+
+        let (telemetry_admitted, release_telemetry) =
+            install_canonical_commit_admission_barrier(&state);
+        let late_state = Arc::clone(&state);
+        let telemetry_hits = hits.clone();
+        let telemetry = tokio::spawn(async move {
+            record_text_search_access_telemetry_with_state(
+                &telemetry_hits,
+                &late_state,
+                telemetry_ticket,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), telemetry_admitted)
+            .await
+            .expect("telemetry must enter canonical admission")
+            .expect("telemetry admission signal");
+        state
+            .persistence_coordinator
+            .degrade_globally("test_memory_telemetry_admission_invalidated");
+        release_telemetry.send(()).unwrap();
+
+        let evidence = telemetry
+            .await
+            .unwrap()
+            .expect("optional telemetry rejection must remain observable");
+        assert_eq!(evidence.reason_code, "memory_access_telemetry_skipped");
+        assert!(evidence.error_digest.is_some());
+        assert_eq!(
+            hits[0].chunk.content,
+            "MEMORY_RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY"
+        );
+        assert_eq!(
+            serde_json::to_value(store.export_active_memory_records().unwrap())
+                .expect("serialize canonical Memory rows"),
+            before_records
+        );
+        assert_eq!(
+            store.vector_rebuild_source_snapshot().unwrap(),
+            before_source
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_completion_invalidates_pre_search_telemetry_tickets() {
+        let mut state = crate::test_utils::test_app_state();
+        let profile = EmbeddingProfile::new(
+            EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "completion-telemetry-v1",
+            "builtin:test",
+            "completion-telemetry-artifact-v1",
+            4,
+        )
+        .unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+        let memory_store = state.memory_store.lock().await.clone();
+        let vector_store = state.vector_store.lock().await.clone();
+        memory_store
+            .save_memory_record(
+                "completion-telemetry-session",
+                "OLD_MEMORY_RESULT_MUST_SURVIVE_IMPORT_COMPLETION",
+                "note",
+                "manual",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
+        vector_store
+            .insert(
+                "completion-telemetry-session",
+                "OLD_VECTOR_RESULT_MUST_SURVIVE_IMPORT_COMPLETION",
+                &embedding,
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let coordinator = install_release_like_persistence_coordinator(&mut state);
+
+        // Both tickets are minted before their corresponding pure read. They
+        // retain no lock while the caller performs later provider work.
+        let memory_ticket = prepare_memory_search_access_telemetry(&state);
+        let memory_hits = memory_store
+            .search_text_memories(None, "OLD_MEMORY_RESULT_MUST_SURVIVE_IMPORT_COMPLETION", 5)
+            .unwrap();
+        let vector_ticket = prepare_vector_search_access_telemetry(&state);
+        let vector_matches = match vector_store.search(&embedding, &profile, 5).unwrap() {
+            VectorSearchOutcome::Matches { matches, .. } => matches,
+            VectorSearchOutcome::RebuildRequired(evidence) => {
+                panic!("test vector profile unexpectedly requires rebuild: {evidence:?}")
+            }
+        };
+        assert_eq!(memory_hits.len(), 1);
+        assert_eq!(vector_matches.len(), 1);
+
+        let before_vectors = vector_store.export_portable_archive().unwrap();
+        let mut replacement = before_vectors.chunks[0].clone();
+        replacement.content = "NEW_VECTOR_IMPORTED_AFTER_OLD_SEARCH".into();
+        replacement.access_count = 0;
+        replacement.last_accessed_at.clear();
+        let replacement = vec![replacement];
+        replace_imported_memory_with_state_guarded(
+            &state,
+            None,
+            Some(&replacement),
+            ImportedMemoryExpectedDigests {
+                messages: None,
+                vectors: Some(before_vectors.digest.clone()),
+            },
+        )
+        .await
+        .expect("governed vector replacement commits before terminalization");
+        let imported_vectors = vector_store.export_portable_archive().unwrap();
+        assert_eq!(imported_vectors.chunks.len(), 1);
+        assert_eq!(
+            imported_vectors.chunks[0].content,
+            "NEW_VECTOR_IMPORTED_AFTER_OLD_SEARCH"
+        );
+        assert_eq!(imported_vectors.chunks[0].access_count, 0);
+        let imported_matches = match vector_store.search(&embedding, &profile, 5).unwrap() {
+            VectorSearchOutcome::Matches { matches, .. } => matches,
+            VectorSearchOutcome::RebuildRequired(evidence) => {
+                panic!("imported vector profile unexpectedly requires rebuild: {evidence:?}")
+            }
+        };
+        assert_eq!(imported_matches.len(), 1);
+        assert_eq!(
+            imported_matches[0].0.content,
+            "NEW_VECTOR_IMPORTED_AFTER_OLD_SEARCH"
+        );
+        assert_eq!(imported_matches[0].0.access_count, 0);
+        assert_ne!(
+            imported_matches[0].0.id, vector_matches[0].0.id,
+            "the production AUTOINCREMENT owner does not reuse a removed portable row id"
+        );
+        let memory_before_telemetry =
+            serde_json::to_value(memory_store.export_active_memory_records().unwrap())
+                .expect("serialize Memory rows before late telemetry");
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal = openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            directory.path().join("telemetry-completion.db"),
+        )
+        .unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let digest = |value: &str| openlife_core::persistence_outbox::metadata_digest(value);
+        let prepared = journal
+            .prepare(
+                openlife_core::persistence_outbox::GovernedDataImportPrepare {
+                    operation_id: operation_id.clone(),
+                    payload_digest: digest("telemetry-completion-payload"),
+                    request_digest: digest("telemetry-completion-request"),
+                    owners: vec![
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
+                            owner: "LifeModelFileStore".into(),
+                            import_target: "life_model".into(),
+                            before_digest: digest("telemetry-lifemodel-before"),
+                            target_digest: digest("telemetry-lifemodel-target"),
+                            item_count: 1,
+                        },
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
+                            owner: "VectorStore".into(),
+                            import_target: "vectors".into(),
+                            before_digest: before_vectors.digest.clone(),
+                            target_digest: imported_vectors.digest.clone(),
+                            item_count: 1,
+                        },
+                    ],
+                },
+            )
+            .unwrap()
+            .receipt;
+        let completion_fence = coordinator
+            .acquire_governed_data_import_completion_fence(&journal, &prepared)
+            .await
+            .expect("healthy governed import enters completion fence");
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::LifeModelApplied,
+                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
+                    owner: "LifeModelFileStore".into(),
+                    status:
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Applied,
+                }],
+                None,
+            )
+            .unwrap();
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::MemoryApplied,
+                &[],
+                None,
+            )
+            .unwrap();
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::VectorApplied,
+                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
+                    owner: "VectorStore".into(),
+                    status:
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Applied,
+                }],
+                None,
+            )
+            .unwrap();
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::StateCommitted,
+                &[],
+                None,
+            )
+            .unwrap();
+        let completed = journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::Completed,
+                &[],
+                None,
+            )
+            .unwrap();
+        drop(completion_fence);
+
+        let memory_evidence =
+            record_text_search_access_telemetry_with_state(&memory_hits, &state, memory_ticket)
+                .await
+                .expect("pre-completion Memory ticket must be rejected");
+        let vector_evidence = record_vector_search_access_telemetry_with_state(
+            &vector_matches,
+            &state,
+            vector_ticket,
+        )
+        .await
+        .expect("pre-completion Vector ticket must be rejected");
+
+        assert_eq!(
+            completed.stage,
+            openlife_core::persistence_outbox::GovernedDataImportStage::Completed
+        );
+        assert_eq!(
+            memory_evidence.reason_code,
+            "memory_access_telemetry_skipped"
+        );
+        assert_eq!(
+            vector_evidence.reason_code,
+            "vector_access_telemetry_skipped"
+        );
+        assert!(memory_evidence.error_digest.is_some());
+        assert!(vector_evidence.error_digest.is_some());
+        assert_eq!(
+            memory_hits[0].chunk.content,
+            "OLD_MEMORY_RESULT_MUST_SURVIVE_IMPORT_COMPLETION"
+        );
+        assert_eq!(
+            vector_matches[0].0.content,
+            "OLD_VECTOR_RESULT_MUST_SURVIVE_IMPORT_COMPLETION"
+        );
+        assert_eq!(
+            serde_json::to_value(memory_store.export_active_memory_records().unwrap())
+                .expect("serialize Memory rows after late telemetry"),
+            memory_before_telemetry
+        );
+        assert_eq!(
+            vector_store.export_portable_archive().unwrap(),
+            imported_vectors
+        );
+        assert_eq!(
+            coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+    }
+
+    #[tokio::test]
+    async fn late_memory_retrieval_materializer_rejects_invalidated_commit_admission() {
+        let state = crate::test_utils::test_app_state();
+        let (_input, owner) =
+            seed_canonical_retrieval_owner(&state, "LATE_MATERIALIZER_MUST_NOT_COMMIT").await;
+        let archived = state
+            .memory_store
+            .lock()
+            .await
+            .set_memory_retrieval_disposition(
+                &owner,
+                MemoryRetrievalDisposition::Archived,
+                "test_generation_fence",
+            )
+            .unwrap();
+        let event_id = archived
+            .canonical_mutation
+            .expect("archive mutation")
+            .event_id;
+        let delivery = state
+            .memory_store
+            .lock()
+            .await
+            .list_replayable_projection_deliveries_for_event(&event_id)
+            .unwrap()
+            .into_iter()
+            .find(|delivery| delivery.projection_target == "vector_store")
+            .expect("VectorStore retrieval delivery");
+        assert!(!state.vector_store.lock().await.export_all_chunks().unwrap()[0].archived);
+
+        let (materializer_admitted, release_materializer) =
+            install_canonical_commit_admission_barrier(&state);
+        let late_state = Arc::clone(&state);
+        let materializer = tokio::spawn(async move {
+            apply_memory_retrieval_projection(
+                &late_state,
+                CanonicalOutboxOwner::MemoryStore,
+                &delivery,
+                CanonicalProjectionCommitLane::Normal,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), materializer_admitted)
+            .await
+            .expect("materializer target commit must enter canonical admission")
+            .expect("materializer admission signal");
+        state
+            .persistence_coordinator
+            .degrade_globally("test_materializer_admission_invalidated");
+        release_materializer.send(()).unwrap();
+
+        let error = materializer
+            .await
+            .unwrap()
+            .expect_err("stale materializer admission must not reach VectorStore");
+        assert!(matches!(
+            error,
+            ProjectionReconciliationError::Deferred(
+                PersistenceGateError::AdmissionInvalidated { .. }
+            )
+        ));
+        assert!(!state.vector_store.lock().await.export_all_chunks().unwrap()[0].archived);
+    }
+
+    #[tokio::test]
+    async fn late_memory_store_outbox_marker_rejects_invalidated_commit_admission() {
+        let state = crate::test_utils::test_app_state();
+        let canonical = state
+            .memory_store
+            .lock()
+            .await
+            .save_knowledge_note_idempotent_with_outbox(
+                &uuid::Uuid::new_v4().to_string(),
+                "late-marker-session",
+                "LATE_OUTBOX_MARKER_MUST_NOT_COMMIT",
+                "knowledge_note",
+                "test",
+                &[],
+                "private",
+            )
+            .unwrap();
+        let event_id = canonical.canonical_mutation.event_id;
+        let delivery = state
+            .memory_store
+            .lock()
+            .await
+            .list_replayable_projection_deliveries_for_event(&event_id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("MemoryStore outbox delivery");
+
+        let (marker_admitted, release_marker) = install_canonical_commit_admission_barrier(&state);
+        let late_state = Arc::clone(&state);
+        let marker = tokio::spawn(async move {
+            mark_owned_projection_applied(
+                &late_state,
+                CanonicalOutboxOwner::MemoryStore,
+                &delivery,
+                CanonicalProjectionCommitLane::Normal,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), marker_admitted)
+            .await
+            .expect("MemoryStore marker must enter canonical admission")
+            .expect("marker admission signal");
+        state
+            .persistence_coordinator
+            .degrade_globally("test_memory_marker_admission_invalidated");
+        release_marker.send(()).unwrap();
+
+        let error = marker
+            .await
+            .unwrap()
+            .expect_err("stale marker admission must not reach MemoryStore");
+        assert!(matches!(
+            error,
+            ProjectionReconciliationError::Deferred(
+                PersistenceGateError::AdmissionInvalidated { .. }
+            )
+        ));
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&event_id)
+                .unwrap()
+                .state(),
+            ProjectionDeliveryState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_fence_defers_stale_marker_without_degrading_and_retry_applies() {
+        const SENTINEL: &str = "COMPLETION_FENCE_MARKER_SENTINEL";
+        let mut state = crate::test_utils::test_app_state();
+        {
+            let memory = state.memory_store.lock().await;
+            memory
+                .create_chat_session("completion-fence-session", "Completion fence")
+                .unwrap();
+            memory
+                .save_message(
+                    "completion-fence-session",
+                    &ChatMessage {
+                        role: "user".into(),
+                        content: SENTINEL.into(),
+                    },
+                )
+                .unwrap();
+        }
+        state
+            .vector_store
+            .lock()
+            .await
+            .insert(
+                "completion-fence-session",
+                SENTINEL,
+                &[0.1, 0.2, 0.3, 0.4],
+                &deletion_test_profile(),
+                "manual_index",
+            )
+            .unwrap();
+        let deletion = state
+            .memory_store
+            .lock()
+            .await
+            .delete_chat_session_with_tombstone(
+                "completion-fence-session",
+                Some("completion_fence_test"),
+            )
+            .unwrap();
+        {
+            let memory = state.memory_store.lock().await;
+            let deliveries = memory
+                .list_replayable_projection_deliveries_for_event(&deletion.event_id)
+                .unwrap();
+            assert_eq!(deliveries.len(), 5);
+            for delivery in deliveries
+                .iter()
+                .filter(|delivery| delivery.projection_target != "vector_store")
+            {
+                memory
+                    .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
+                    .unwrap();
+            }
+            assert_eq!(
+                memory
+                    .projection_summary(&deletion.event_id)
+                    .unwrap()
+                    .pending,
+                1
+            );
+        }
+
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        assert_eq!(
+            coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+        Arc::get_mut(&mut state)
+            .expect("test state must have one outer owner")
+            .persistence_coordinator = Arc::clone(&coordinator);
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal = openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            directory.path().join("completion-fence.db"),
+        )
+        .unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let digest = |value: &str| openlife_core::persistence_outbox::metadata_digest(value);
+        let prepared = journal
+            .prepare(
+                openlife_core::persistence_outbox::GovernedDataImportPrepare {
+                    operation_id: operation_id.clone(),
+                    payload_digest: digest("completion-fence-payload"),
+                    request_digest: digest("completion-fence-request"),
+                    owners: vec![
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
+                            owner: "LifeModelFileStore".into(),
+                            import_target: "life_model".into(),
+                            before_digest: digest("completion-fence-before"),
+                            target_digest: digest("completion-fence-target"),
+                            item_count: 1,
+                        },
+                    ],
+                },
+            )
+            .unwrap()
+            .receipt;
+
+        // The VectorStore target consumes the first admission. Pause the
+        // MemoryStore source marker after its independent old-generation
+        // admission so the completion fence can win exactly that boundary.
+        let (marker_admitted, release_marker) =
+            install_canonical_commit_admission_barrier_after_skips(&state, 1);
+        let late_state = Arc::clone(&state);
+        let event_id = deletion.event_id.clone();
+        let reconciliation = tokio::spawn(async move {
+            reconcile_blocking_canonical_outbox_event_with_state(
+                &late_state,
+                CanonicalOutboxOwner::MemoryStore,
+                &event_id,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), marker_admitted)
+            .await
+            .expect("source marker must pause after target commit")
+            .expect("marker admission signal");
+        assert!(!state
+            .vector_store
+            .lock()
+            .await
+            .export_all_chunks()
+            .unwrap()
+            .iter()
+            .any(|chunk| chunk.content == SENTINEL));
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&deletion.event_id)
+                .unwrap()
+                .pending,
+            1
+        );
+
+        let completion_fence = coordinator
+            .acquire_governed_data_import_completion_fence(&journal, &prepared)
+            .await
+            .expect("healthy runtime completion fence");
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::LifeModelApplied,
+                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
+                    owner: "LifeModelFileStore".into(),
+                    status:
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Applied,
+                }],
+                None,
+            )
+            .unwrap();
+        for stage in [
+            openlife_core::persistence_outbox::GovernedDataImportStage::MemoryApplied,
+            openlife_core::persistence_outbox::GovernedDataImportStage::VectorApplied,
+            openlife_core::persistence_outbox::GovernedDataImportStage::StateCommitted,
+        ] {
+            journal.transition(&operation_id, stage, &[], None).unwrap();
+        }
+        let completed = journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::Completed,
+                &[],
+                None,
+            )
+            .unwrap();
+        drop(completion_fence);
+        release_marker.send(()).unwrap();
+
+        let deferred = reconciliation.await.unwrap().unwrap();
+        assert_eq!(deferred.examined, 1);
+        assert_eq!(deferred.applied, 0);
+        assert!(deferred.backlog_may_remain);
+        assert_eq!(
+            completed.stage,
+            openlife_core::persistence_outbox::GovernedDataImportStage::Completed
+        );
+        assert_eq!(
+            coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+        assert!(coordinator.snapshot().global_reason_codes.is_empty());
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&deletion.event_id)
+                .unwrap()
+                .pending,
+            1
+        );
+
+        let retried = reconcile_blocking_canonical_outbox_event_with_state(
+            &state,
+            CanonicalOutboxOwner::MemoryStore,
+            &deletion.event_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried.examined, 1);
+        assert_eq!(retried.applied, 1);
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&deletion.event_id)
+                .unwrap()
+                .state(),
+            ProjectionDeliveryState::Applied
+        );
+    }
 
     async fn seed_canonical_retrieval_owner(
         state: &Arc<AppState>,
@@ -3976,11 +5720,34 @@ mod tests {
         imported_vector.content = "NEW_VECTOR_MUST_NOT_COMMIT".into();
         let imported_vectors = vec![imported_vector];
 
+        let expected = ImportedMemoryExpectedDigests {
+            messages: Some(
+                state
+                    .memory_store
+                    .lock()
+                    .await
+                    .export_canonical_message_archive()
+                    .unwrap()
+                    .digest,
+            ),
+            vectors: Some(
+                state
+                    .vector_store
+                    .lock()
+                    .await
+                    .export_portable_archive()
+                    .unwrap()
+                    .digest,
+            ),
+        };
+
         let error = replace_imported_memory_with_state_inner(
             &state,
             Some(&imported_messages),
             Some(&imported_vectors),
+            expected,
             ImportedMemoryReplaceFault::BeforeVectorCommit,
+            None,
         )
         .await
         .expect_err("post-message vector failure must be compensated");
@@ -3999,6 +5766,218 @@ mod tests {
         let vectors = state.vector_store.lock().await.export_all_chunks().unwrap();
         assert_eq!(vectors.len(), 1);
         assert_eq!(vectors[0].content, "OLD_PORTABLE_VECTOR_MUST_SURVIVE");
+    }
+
+    #[tokio::test]
+    async fn imported_memory_missing_target_preserves_owner_while_empty_target_replaces_empty() {
+        let state = crate::test_utils::test_app_state();
+        state
+            .memory_store
+            .lock()
+            .await
+            .save_message(
+                "preserved-message",
+                &ChatMessage {
+                    role: "user".into(),
+                    content: "MESSAGE_OWNER_MUST_BE_PRESERVED".into(),
+                },
+            )
+            .unwrap();
+        let profile = EmbeddingProfile::new(
+            EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "empty-target-v1",
+            "builtin:test",
+            "empty-target-artifact-v1",
+            4,
+        )
+        .unwrap();
+        state
+            .vector_store
+            .lock()
+            .await
+            .insert(
+                "vector-to-clear",
+                "VECTOR_EMPTY_TARGET_MUST_CLEAR",
+                &[0.1, 0.2, 0.3, 0.4],
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let vector_before = state
+            .vector_store
+            .lock()
+            .await
+            .export_portable_archive()
+            .unwrap();
+
+        let vector_clear = replace_imported_memory_with_state_guarded(
+            &state,
+            None,
+            Some(&[]),
+            ImportedMemoryExpectedDigests {
+                messages: None,
+                vectors: Some(vector_before.digest),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!vector_clear.messages_targeted);
+        assert!(vector_clear.vectors_targeted);
+        assert!(vector_clear.vector_outcome.unwrap().changed());
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .export_all_messages()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(state
+            .vector_store
+            .lock()
+            .await
+            .export_portable_chunks()
+            .unwrap()
+            .is_empty());
+
+        let message_before = state
+            .memory_store
+            .lock()
+            .await
+            .export_canonical_message_archive()
+            .unwrap();
+        let message_clear = replace_imported_memory_with_state_guarded(
+            &state,
+            Some(&[]),
+            None,
+            ImportedMemoryExpectedDigests {
+                messages: Some(message_before.digest),
+                vectors: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(message_clear.messages_targeted);
+        assert!(!message_clear.vectors_targeted);
+        assert!(message_clear.message_outcome.unwrap().changed());
+        assert!(state
+            .memory_store
+            .lock()
+            .await
+            .export_all_messages()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn vector_failure_compensation_never_overwrites_a_late_memory_owner_write() {
+        let state = crate::test_utils::test_app_state();
+        state
+            .memory_store
+            .lock()
+            .await
+            .save_message(
+                "before",
+                &ChatMessage {
+                    role: "user".into(),
+                    content: "OLD_MESSAGE".into(),
+                },
+            )
+            .unwrap();
+        let profile = EmbeddingProfile::new(
+            EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "late-write-v1",
+            "builtin:test",
+            "late-write-artifact-v1",
+            4,
+        )
+        .unwrap();
+        state
+            .vector_store
+            .lock()
+            .await
+            .insert(
+                "before",
+                "OLD_VECTOR",
+                &[0.1, 0.2, 0.3, 0.4],
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let messages = vec![openlife_core::memory::ExportedMessage {
+            session_id: "imported".into(),
+            role: "assistant".into(),
+            content: "IMPORTED_MESSAGE".into(),
+            created_at: "2026-07-17T00:00:00Z".into(),
+        }];
+        let mut vector = state
+            .vector_store
+            .lock()
+            .await
+            .export_portable_chunks()
+            .unwrap()[0]
+            .clone();
+        vector.content = "IMPORTED_VECTOR_MUST_NOT_COMMIT".into();
+        let vectors = vec![vector];
+        let expected = ImportedMemoryExpectedDigests {
+            messages: Some(
+                state
+                    .memory_store
+                    .lock()
+                    .await
+                    .export_canonical_message_archive()
+                    .unwrap()
+                    .digest,
+            ),
+            vectors: Some(
+                state
+                    .vector_store
+                    .lock()
+                    .await
+                    .export_portable_archive()
+                    .unwrap()
+                    .digest,
+            ),
+        };
+
+        let error = replace_imported_memory_with_state_inner(
+            &state,
+            Some(&messages),
+            Some(&vectors),
+            expected,
+            ImportedMemoryReplaceFault::BeforeVectorCommitAfterConcurrentMessage,
+            None,
+        )
+        .await
+        .expect_err("late owner write must fence compensation");
+        assert!(error.message().contains("No late write was overwritten"));
+
+        let messages_after = state
+            .memory_store
+            .lock()
+            .await
+            .export_all_messages()
+            .unwrap();
+        assert!(messages_after
+            .iter()
+            .any(|message| message.content == "IMPORTED_MESSAGE"));
+        assert!(messages_after.iter().any(|message| {
+            message.content == "LATE_CANONICAL_MESSAGE_MUST_NOT_BE_OVERWRITTEN"
+        }));
+        assert!(!messages_after
+            .iter()
+            .any(|message| message.content == "OLD_MESSAGE"));
+        let vectors_after = state.vector_store.lock().await.export_all_chunks().unwrap();
+        assert!(vectors_after
+            .iter()
+            .any(|chunk| chunk.content == "OLD_VECTOR"));
+        assert!(!vectors_after
+            .iter()
+            .any(|chunk| chunk.content == "IMPORTED_VECTOR_MUST_NOT_COMMIT"));
     }
 
     #[tokio::test]
@@ -4038,9 +6017,13 @@ mod tests {
             .remove_canonical_memory_row_for_corruption_test(write.knowledge_note_id)
             .unwrap();
 
-        assert!(apply_knowledge_note_projection(&state, &delivery)
-            .await
-            .is_err());
+        assert!(apply_knowledge_note_projection(
+            &state,
+            &delivery,
+            CanonicalProjectionCommitLane::Normal,
+        )
+        .await
+        .is_err());
         assert_eq!(
             state.vector_store.lock().await.count_all_chunks().unwrap(),
             1
@@ -4392,6 +6375,29 @@ mod tests {
             .unwrap();
         assert_eq!(unrelated_summary.pending, 1);
 
+        let startup_delete = {
+            let memory = state.memory_store.lock().await;
+            memory
+                .create_chat_session("startup-blocking-session", "Delete during startup")
+                .unwrap();
+            memory
+                .delete_chat_session_with_tombstone(
+                    "startup-blocking-session",
+                    Some("startup_reconciliation_test"),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&startup_delete.event_id)
+                .unwrap()
+                .pending,
+            5
+        );
+
         // Exercise the real pre-seal startup contract, not only the isolated
         // evaluation admission path: ordinary effects are still forbidden,
         // while the bounded BlockingOnly recovery lane is allowed after every
@@ -4407,6 +6413,9 @@ mod tests {
         Arc::get_mut(&mut state)
             .expect("test state must have one outer owner")
             .persistence_coordinator = Arc::clone(&startup_coordinator);
+        let stale_startup_admission = startup_coordinator
+            .admit_startup_reconciliation_writes(&[GovernedDataImportRecoveryOwner::MemoryStore])
+            .expect("healthy pre-seal startup admission");
 
         let startup = tokio::time::timeout(
             std::time::Duration::from_millis(500),
@@ -4415,9 +6424,20 @@ mod tests {
         .await
         .expect("startup BlockingOnly must not await optional embedding")
         .unwrap();
-        assert_eq!(startup.examined, 0);
+        assert_eq!(startup.examined, 5);
+        assert_eq!(startup.applied, 5);
         assert_eq!(startup.blocking_degraded, 0);
         assert!(!startup.blocking_backlog_may_remain);
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&startup_delete.event_id)
+                .unwrap()
+                .state(),
+            ProjectionDeliveryState::Applied
+        );
         assert_eq!(accepted.load(Ordering::SeqCst), 0);
         assert_eq!(
             state
@@ -4429,6 +6449,18 @@ mod tests {
                 .pending,
             1
         );
+        startup_coordinator.seal();
+        assert_eq!(
+            startup_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
+        );
+        assert!(startup_coordinator
+            .acquire_canonical_commit_permit(&stale_startup_admission)
+            .await
+            .is_err());
+        assert!(startup_coordinator
+            .admit_startup_reconciliation_writes(&[GovernedDataImportRecoveryOwner::MemoryStore,])
+            .is_err());
     }
 
     #[tokio::test]
@@ -4626,7 +6658,7 @@ mod tests {
                 .enqueue(
                     &run.task_id,
                     action.clone(),
-                    ExecutionPolicy::default().classify(&action),
+                    ExecutionPolicy.classify(&action),
                 )
                 .unwrap()
         };
@@ -4782,7 +6814,12 @@ mod tests {
         };
         let state_for_reconcile = Arc::clone(&state);
         let reconcile_task = tokio::spawn(async move {
-            reconcile_projection_candidate(&state_for_reconcile, &first_stale).await
+            reconcile_projection_candidate(
+                &state_for_reconcile,
+                &first_stale,
+                CanonicalProjectionCommitLane::Normal,
+            )
+            .await
         });
         applied.notified().await;
         let same_causal_lock = state.persistence_coordinator.agent_run_causal_lock(&run.id);
@@ -4844,6 +6881,7 @@ mod tests {
                         owner: CanonicalOutboxOwner::AgentRunStore,
                         delivery: stale_restore.clone(),
                     },
+                    CanonicalProjectionCommitLane::Normal,
                 )
                 .await
                 .unwrap(),

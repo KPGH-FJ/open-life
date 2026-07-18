@@ -288,7 +288,10 @@ pub(crate) async fn get_system_diagnostics_with_state(
             (0, "unavailable".to_string())
         } else if let Some(ref agent_run_store_arc) = state.agent_run_store {
             let store = agent_run_store_arc.lock().await;
-            match store.run_count() {
+            match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store.run_count().map_err(|error| error.to_string()),
+            ) {
                 Ok(count) => (count as usize, "ok".to_string()),
                 Err(_) => (0, "error".to_string()),
             }

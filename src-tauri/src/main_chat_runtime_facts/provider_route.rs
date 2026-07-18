@@ -122,7 +122,10 @@ pub(crate) fn provider_route_fact_should_block_before_model(
     preflight.status == "blocked"
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn resolve_provider_route_fact_answer(
     user_text: &str,
     state: &Arc<AppState>,
@@ -1169,7 +1172,10 @@ fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool 
     explicit_provider_request
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_runtime_route_evidence_from_snapshots(
     _state: &Arc<AppState>,
     config: &AppConfig,
@@ -1474,7 +1480,10 @@ fn snapshot_to_model_route_trace(snapshot: &ProviderRouteFactSnapshot) -> ModelR
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_fact_binding(
     key: &'static str,
     value_shape: &'static str,
@@ -1557,7 +1566,10 @@ fn provider_route_labels(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_route_reply(
     intent: MainChatProviderRouteIntent,
     configured: &ProviderRouteFactSnapshot,
@@ -1643,7 +1655,13 @@ async fn last_turn_snapshot(
 ) -> Option<ProviderRouteFactSnapshot> {
     let store_arc = state.agent_run_store.as_ref()?;
     let store = store_arc.lock().await;
-    let runs = store.list_runs_for_session(session_id, 5).ok()?;
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .list_runs_for_session(session_id, 5)
+            .map_err(|error| error.to_string()),
+    )
+    .ok()?;
     let run = runs
         .into_iter()
         .find(|run| run.status == AgentRunStatus::Completed)?;
@@ -1663,7 +1681,13 @@ async fn last_completed_generation_snapshot(
 ) -> Option<ProviderRouteFactSnapshot> {
     let store_arc = state.agent_run_store.as_ref()?;
     let store = store_arc.lock().await;
-    let runs = store.list_runs_for_session(session_id, 20).ok()?;
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .list_runs_for_session(session_id, 20)
+            .map_err(|error| error.to_string()),
+    )
+    .ok()?;
     drop(store);
     let event_store_arc = state.main_chat_agent_event_store.as_ref()?;
     let event_store = event_store_arc.lock().await;
@@ -1683,7 +1707,11 @@ async fn last_completed_generation_snapshot_any_session(
 ) -> Option<ProviderRouteFactSnapshot> {
     let store_arc = state.agent_run_store.as_ref()?;
     let store = store_arc.lock().await;
-    let runs = store.list_runs(50, 0).ok()?;
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store.list_runs(50, 0).map_err(|error| error.to_string()),
+    )
+    .ok()?;
     drop(store);
     let event_store_arc = state.main_chat_agent_event_store.as_ref()?;
     let event_store = event_store_arc.lock().await;

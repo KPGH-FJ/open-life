@@ -1221,7 +1221,10 @@ fn create_command_surface_knowledge_asset_root() -> Result<String, String> {
     Ok(root.to_string_lossy().to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn assert_main_chat_command_surface_eval_case(
     scenario: MainChatCommandSurfaceEvalScenario,
     state: &Arc<AppState>,
@@ -3229,7 +3232,10 @@ pub(crate) struct MainChatCommandSurfaceEvalEvidence {
 }
 
 impl MainChatCommandSurfaceEvalEvidence {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub(crate) fn for_case(
         entry_point: MainChatCommandSurfaceEvalEntryPoint,
         scenario: MainChatCommandSurfaceEvalScenario,

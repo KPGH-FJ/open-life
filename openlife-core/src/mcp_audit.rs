@@ -1384,6 +1384,9 @@ fn openlife_default_data_dir() -> std::path::PathBuf {
         })
 }
 
+/// Shareable handle.
+pub type SharedMcpAuditStore = Arc<Mutex<McpAuditStore>>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,10 +1466,12 @@ mod tests {
             .unwrap();
 
         let old_config = store.key_config().clone();
-        let mut new_config = AuditKeyConfig::default();
-        new_config.mode = KeyMode::Passphrase;
-        new_config.salt_b64 = Some(general_purpose::STANDARD.encode(b"newsalt123456789"));
-        new_config.epoch = old_config.epoch + 1;
+        let new_config = AuditKeyConfig {
+            mode: KeyMode::Passphrase,
+            salt_b64: Some(general_purpose::STANDARD.encode(b"newsalt123456789")),
+            epoch: old_config.epoch + 1,
+            ..Default::default()
+        };
         store.rotate_key(new_config.clone());
 
         // New writes use new key
@@ -2209,6 +2214,3 @@ mod tests {
         }
     }
 }
-
-/// Shareable handle.
-pub type SharedMcpAuditStore = Arc<Mutex<McpAuditStore>>;

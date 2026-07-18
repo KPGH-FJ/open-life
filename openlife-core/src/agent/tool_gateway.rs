@@ -480,9 +480,16 @@ fn validate_gateway_request_contract(
             let owner = ctx.agent_run_store.ok_or_else(|| {
                 "internal_read_canonical_run_owner_authority_unavailable".to_string()
             })?;
-            let owner_is_active = owner.has_active_bound_content_owner(run_id).map_err(|_| {
-                "internal_read_canonical_run_owner_authority_unavailable".to_string()
-            })?;
+            let owner_is_active =
+                owner
+                    .has_active_bound_content_owner(run_id)
+                    .map_err(|error| {
+                        // This contract failure is intentionally returned as a typed
+                        // blocker. Observe the raw durable error before that rewrite
+                        // so product persistence health remains truthful.
+                        ctx.observe_durable_store_failure("AgentRunStore", &error);
+                        "internal_read_canonical_run_owner_authority_unavailable".to_string()
+                    })?;
             if !owner_is_active {
                 return Err("internal_read_canonical_run_owner_inactive".into());
             }
@@ -1084,102 +1091,103 @@ mod tests {
         let audit_file = tempfile::NamedTempFile::new().unwrap();
         let audit_store = McpAuditStore::new(audit_file.path());
         let privacy_engine = PrivacyEngine::new();
-        let context = internal_read_test_context(
-            &registry,
-            &permission_store,
-            &audit_store,
-            &privacy_engine,
-            &memory_store,
-            Some(&lifecycle_reader),
-            Some(&owner_store),
-        );
+        {
+            let context = internal_read_test_context(
+                &registry,
+                &permission_store,
+                &audit_store,
+                &privacy_engine,
+                &memory_store,
+                Some(&lifecycle_reader),
+                Some(&owner_store),
+            );
 
-        for (step_index, action_type, target, session_id, query, body) in [
-            (
-                0,
-                "memory_search",
-                "memory.search",
-                "memory-owner-session",
-                "INTERNAL_MEMORY_RECEIPT_BODY",
-                MEMORY_BODY,
-            ),
-            (
-                1,
-                "session_search",
-                "session.search",
-                "conversation-owner-session",
-                "INTERNAL_SESSION_RECEIPT_BODY",
-                SESSION_BODY,
-            ),
-        ] {
-            let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
-                .execute(
-                    AgentActionRequest {
-                        action_type: action_type.into(),
-                        target: target.into(),
-                        input: serde_json::json!({
-                            "query": query,
-                            "session_id": session_id,
-                            "limit": 5,
-                        }),
-                        source_run_id: Some(owner_run.id.clone()),
-                        step_index,
-                    },
-                    &context,
-                )
-                .await
-                .expect("internal read must produce a canonical evidence graph");
+            for (step_index, action_type, target, session_id, query, body) in [
+                (
+                    0,
+                    "memory_search",
+                    "memory.search",
+                    "memory-owner-session",
+                    "INTERNAL_MEMORY_RECEIPT_BODY",
+                    MEMORY_BODY,
+                ),
+                (
+                    1,
+                    "session_search",
+                    "session.search",
+                    "conversation-owner-session",
+                    "INTERNAL_SESSION_RECEIPT_BODY",
+                    SESSION_BODY,
+                ),
+            ] {
+                let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
+                    .execute(
+                        AgentActionRequest {
+                            action_type: action_type.into(),
+                            target: target.into(),
+                            input: serde_json::json!({
+                                "query": query,
+                                "session_id": session_id,
+                                "limit": 5,
+                            }),
+                            source_run_id: Some(owner_run.id.clone()),
+                            step_index,
+                        },
+                        &context,
+                    )
+                    .await
+                    .expect("internal read must produce a canonical evidence graph");
 
-            assert_eq!(result.status, ActionExecutionStatus::Succeeded);
-            assert_eq!(result.action.action_type, target);
-            let scope = result
-                .action
-                .tool_scope
-                .as_ref()
-                .expect("internal read has a typed ToolGateway scope");
-            assert_eq!(scope.tool_name, target);
-            assert_eq!(scope.source, "tool_gateway_internal");
-            assert_eq!(scope.action_type, "read");
-            assert_eq!(scope.capabilities, vec!["read"]);
-            assert!(scope.allowed);
-            let trace = result
-                .action
+                assert_eq!(result.status, ActionExecutionStatus::Succeeded);
+                assert_eq!(result.action.action_type, target);
+                let scope = result
+                    .action
+                    .tool_scope
+                    .as_ref()
+                    .expect("internal read has a typed ToolGateway scope");
+                assert_eq!(scope.tool_name, target);
+                assert_eq!(scope.source, "tool_gateway_internal");
+                assert_eq!(scope.action_type, "read");
+                assert_eq!(scope.capabilities, vec!["read"]);
+                assert!(scope.allowed);
+                let trace = result
+                    .action
+                    .react_trace
+                    .as_ref()
+                    .expect("internal read has an owner-bound trace");
+                assert_eq!(trace.run_id.as_deref(), Some(owner_run.id.as_str()));
+                assert_eq!(trace.action_type, target);
+                assert_eq!(trace.tool_name, target);
+                assert_eq!(trace.tool_source, "tool_gateway_internal");
+                let receipt = trace
+                    .output_receipt
+                    .as_ref()
+                    .expect("adapter-observed internal body has a receipt");
+                assert_eq!(receipt.version(), 2);
+                assert_eq!(receipt.kind(), crate::agent::ContentReceiptKind::ToolOutput);
+                assert!(result.observation.react_trace.is_none());
+                assert!(result.observation.content.contains(body));
+
+                owner_run.actions.push(result.action);
+                owner_run.observations.push(result.observation);
+            }
+            owner_run.step_count = 2;
+            owner_run.tool_call_count = 2;
+            owner_store.update_run(&owner_run).unwrap();
+
+            let stored = owner_store.get_run(&owner_run.id).unwrap().unwrap();
+            assert_eq!(stored.actions.len(), 2);
+            assert_eq!(stored.observations.len(), 2);
+            assert!(stored.actions.iter().all(|action| action
                 .react_trace
                 .as_ref()
-                .expect("internal read has an owner-bound trace");
-            assert_eq!(trace.run_id.as_deref(), Some(owner_run.id.as_str()));
-            assert_eq!(trace.action_type, target);
-            assert_eq!(trace.tool_name, target);
-            assert_eq!(trace.tool_source, "tool_gateway_internal");
-            let receipt = trace
-                .output_receipt
-                .as_ref()
-                .expect("adapter-observed internal body has a receipt");
-            assert_eq!(receipt.version(), 2);
-            assert_eq!(receipt.kind(), crate::agent::ContentReceiptKind::ToolOutput);
-            assert!(result.observation.react_trace.is_none());
-            assert!(result.observation.content.contains(body));
-
-            owner_run.actions.push(result.action);
-            owner_run.observations.push(result.observation);
+                .and_then(|trace| trace.output_receipt.as_ref())
+                .is_some()));
+            let serialized = serde_json::to_string(&stored).unwrap();
+            assert!(!serialized.contains(MEMORY_BODY));
+            assert!(!serialized.contains(SESSION_BODY));
         }
-        owner_run.step_count = 2;
-        owner_run.tool_call_count = 2;
-        owner_store.update_run(&owner_run).unwrap();
 
-        let stored = owner_store.get_run(&owner_run.id).unwrap().unwrap();
-        assert_eq!(stored.actions.len(), 2);
-        assert_eq!(stored.observations.len(), 2);
-        assert!(stored.actions.iter().all(|action| action
-            .react_trace
-            .as_ref()
-            .and_then(|trace| trace.output_receipt.as_ref())
-            .is_some()));
-        let serialized = serde_json::to_string(&stored).unwrap();
-        assert!(!serialized.contains(MEMORY_BODY));
-        assert!(!serialized.contains(SESSION_BODY));
-
-        drop(context);
         drop(owner_store);
         let ledger = rusqlite::Connection::open(&agent_run_path).unwrap();
         let mut statement = ledger
@@ -2119,6 +2127,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_file_is_one_gateway_owned_local_failed_attempt() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "file.read",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::AllowOnce,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::new();
+        let observer = CountingDispatchObserver::default();
+        let safe_root = tempfile::tempdir().unwrap();
+        let safe_paths = vec![safe_root.path().to_string_lossy().into_owned()];
+        let missing_path = safe_root.path().join("missing.txt");
+        let (owner_store, owner_run) = create_tool_execution_owner("file.read");
+        let ctx = ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &safe_paths,
+        )
+        .with_agent_run_store(&owner_store)
+        .with_tool_dispatch_observer(&observer);
+
+        let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "file.read".into(),
+                    input: serde_json::json!({
+                        "arguments": {"path": missing_path.to_string_lossy()}
+                    }),
+                    source_run_id: Some(owner_run.id.clone()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .await
+            .expect("missing file is a typed ToolGateway failure");
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert_eq!(
+            result.stop_reason.as_deref(),
+            Some("filesystem_read_failed")
+        );
+        assert_eq!(observer.count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.execution_receipt.dispatch_kind,
+            crate::tool_execution_receipt::ToolDispatchKind::Local
+        );
+        assert_eq!(
+            result.execution_receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::ResponseObserved
+        );
+        assert_eq!(
+            result.execution_receipt.execution_outcome,
+            crate::tool_execution_receipt::ToolExecutionOutcome::Failed
+        );
+        assert!(result.execution_receipt.is_runtime_bound_to_action(
+            &owner_run.id,
+            &result.action.id,
+            &result.action.action_type,
+            result.action.target.as_deref(),
+            &result.action.input,
+        ));
+    }
+
+    #[tokio::test]
     async fn life_model_read_without_permission_stays_in_ask_before_dependency_access() {
         let registry = McpRegistry::new();
         let permission_store = ToolPermissionStore::new_in_memory().unwrap();
@@ -2399,6 +2482,62 @@ mod tests {
             .list_pending_proposals(10)
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_brave_without_credential_blocks_before_fixture_or_network_dispatch() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::new();
+        let observer = CountingDispatchObserver::default();
+        let network_policy = crate::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        let ctx = ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &[],
+        )
+        .with_network_policy(&network_policy)
+        .with_web_search_fixture_output("must not bypass missing provider requirements")
+        .with_tool_dispatch_observer(&observer);
+
+        let result = ToolGateway::from_executor_config(ActionExecutorConfig {
+            search_provider: crate::agent::action_executor::helpers::SearchProviderConfig {
+                provider: "brave".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "web.search".into(),
+                input: serde_json::json!({"arguments": {"query": "OpenLife"}}),
+                source_run_id: Some("run-search-config-blocked".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .await
+        .expect("missing search credential is a typed blocker");
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(
+            result.stop_reason.as_deref(),
+            Some("web_search_brave_credential_unavailable")
+        );
+        assert_eq!(observer.count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            result.execution_receipt.dispatch_kind,
+            crate::tool_execution_receipt::ToolDispatchKind::NotAttempted
+        );
+        assert_eq!(result.execution_receipt.dispatch_attempt_count, 0);
     }
 
     #[tokio::test]

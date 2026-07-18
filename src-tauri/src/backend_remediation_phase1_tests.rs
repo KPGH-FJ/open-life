@@ -87,9 +87,10 @@ fn ordinary_main_chat_uses_the_prepared_provider_seam() {
         "ordinary Main Chat must bind typed policy provenance after its final privacy filter"
     );
     assert!(
-        client_source.contains(".authorize_derived_payload(")
-            && client_source.contains("ProviderPayloadPurpose::MainChatDirectAnswer"),
-        "ordinary Main Chat must scope the policy capability to its exact pre-filter payload"
+        client_source.contains("let payload_purpose = request.payload_purpose;")
+            && client_source.contains(".authorize_derived_payload(")
+            && client_source.contains("payload_purpose,"),
+        "ordinary Main Chat must propagate the request's typed payload purpose while scoping the policy capability to its exact pre-filter payload"
     );
     assert!(
         client_source.contains(".execute_prepared_with_start_observer("),
@@ -560,7 +561,7 @@ fn provider_settings_test_cannot_reuse_a_masked_secret_across_endpoints() {
 }
 
 #[tokio::test]
-async fn provider_failure_has_a_failed_receipt_and_no_final_answer() {
+async fn provider_dispatch_without_observed_terminal_is_remote_unknown_and_has_no_final_answer() {
     let scheduler = InferenceScheduler::new(
         "openlife-local-model-that-does-not-exist".into(),
         false,
@@ -618,6 +619,10 @@ async fn provider_failure_has_a_failed_receipt_and_no_final_answer() {
     assert!(events
         .events()
         .iter()
+        .any(|event| matches!(event, MainChatKernelEvent::ProviderRemoteUnknown { .. })));
+    assert!(!events
+        .events()
+        .iter()
         .any(|event| matches!(event, MainChatKernelEvent::ProviderFailed { .. })));
     assert!(!events
         .events()
@@ -638,22 +643,10 @@ async fn direct_answer_local_only_never_contacts_cloud_when_local_model_is_unava
     )
     .await;
     {
-        let mut config = state.config.lock().await;
+        let mut config = state.config.lock().await.clone();
         config.local_model = "openlife-local-model-that-does-not-exist".into();
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            config.llm.openai_base.clone(),
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            false,
-        );
+        config.prefer_local_model = false;
+        state.replace_provider_runtime_config(config).await;
     }
 
     let result = crate::main_chat_send::send_message_with_state(
@@ -735,22 +728,10 @@ async fn sensitive_history_escalates_the_selected_provider_context_to_local_only
     )
     .await;
     {
-        let mut config = state.config.lock().await;
+        let mut config = state.config.lock().await.clone();
         config.local_model = "openlife-local-model-that-does-not-exist".into();
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            config.llm.openai_base.clone(),
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            false,
-        );
+        config.prefer_local_model = false;
+        state.replace_provider_runtime_config(config).await;
     }
 
     let result = crate::main_chat_send::send_message_with_state(
@@ -779,7 +760,7 @@ async fn sensitive_history_escalates_the_selected_provider_context_to_local_only
         result
             .blockers
             .iter()
-            .any(|blocker| blocker == "model_generation_failed"),
+            .any(|blocker| blocker == "provider_request_preparation_failed"),
         "the unavailable local route must fail closed instead of silently using cloud: {:?}",
         result.blockers
     );
@@ -869,22 +850,10 @@ async fn direct_answer_policy_allowed_still_uses_configured_cloud_provider() {
             .expect("save wire-privacy LifeModel sentinel");
     }
     {
-        let mut config = state.config.lock().await;
+        let mut config = state.config.lock().await.clone();
         config.local_model = "openlife-local-model-that-does-not-exist".into();
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            config.llm.openai_base.clone(),
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            false,
-        );
+        config.prefer_local_model = false;
+        state.replace_provider_runtime_config(config).await;
     }
 
     let result = crate::main_chat_send::send_message_with_state(
@@ -987,36 +956,32 @@ async fn direct_answer_policy_allowed_still_uses_configured_cloud_provider() {
         .model_route
         .expect("completed provider run has actual route metadata");
     assert_eq!(actual_route.provider, "openai");
-    assert_eq!(actual_route.model, body["model"].as_str().unwrap());
+    assert!(
+        actual_route.model.starts_with("model:bytes=")
+            && actual_route.model.contains(":hmac-sha256:"),
+        "AgentRun must retain only a metadata-safe model receipt; the exact model remains owned by the provider lifecycle event"
+    );
     assert_eq!(actual_route.route_type, "cloud");
-    assert_eq!(actual_route.reason, "provider_adapter_receipt");
+    assert!(
+        actual_route.reason.starts_with("route_reason:bytes=")
+            && actual_route.reason.contains(":hmac-sha256:"),
+        "AgentRun must retain only a metadata-safe route-reason receipt"
+    );
 }
 
 #[tokio::test]
 async fn provider_dispatch_without_observed_response_is_durable_as_remote_unknown() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     {
-        let mut config = state.config.lock().await;
+        let mut config = state.config.lock().await.clone();
         config.local_model = "openlife-local-model-that-does-not-exist".into();
         config.llm.provider = "openai".into();
         config.llm.openai_base = "http://127.0.0.1:9/v1".into();
         config.llm.openai_key = "test-key".into();
         config.llm.chat_model = "gpt-unreachable".into();
         config.system.network_policy.default_decision = "allow".into();
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            config.llm.openai_base.clone(),
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            false,
-        );
+        config.prefer_local_model = false;
+        state.replace_provider_runtime_config(config).await;
     }
 
     let result = crate::main_chat_send::send_message_with_state(

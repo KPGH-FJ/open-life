@@ -2495,6 +2495,12 @@ fn proposal_link_tx(
     .map_err(Into::into)
 }
 
+// The canonical proposal-memory relation is one transactional row whose
+// identity and audit fields remain explicit.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn link_proposal_to_memory_tx(
     tx: &rusqlite::Transaction<'_>,
     proposal_id: &str,
@@ -4159,7 +4165,7 @@ mod tests {
     }
 
     #[test]
-    fn proposal_admission_binds_one_reviewed_task_session_owner() {
+    fn proposal_admission_ignores_untyped_session_fields_and_uses_terminal_origin() {
         let proposal = |after: serde_json::Value, source_detail: Option<&str>| {
             let mut proposal = AgentProposal::new(
                 ProposalType::MemoryWrite,
@@ -4191,32 +4197,51 @@ mod tests {
             "Task-bound reviewed fact".into(),
         )
         .unwrap();
+        assert_eq!(input.source_task_session_id, None);
+
+        let terminal_bound =
+            MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
+                &valid,
+                "Task-bound reviewed fact".into(),
+                "task-session-1",
+                "run-1",
+                "conversation-message:1",
+                "sha256:canonical-user-message",
+            )
+            .unwrap();
         assert_eq!(
-            input.source_task_session_id.as_deref(),
+            terminal_bound.source_task_session_id.as_deref(),
             Some("task-session-1")
         );
+        assert_eq!(terminal_bound.source_run_id.as_deref(), Some("run-1"));
 
         let drift = proposal(
             valid_after.clone(),
             Some("main_chat_agent_task_session:task-session-2;candidate:candidate-1"),
         );
-        assert!(MemoryLifecycleAcceptanceInput::from_memory_proposal(
-            &drift,
-            "Task-bound reviewed fact".into(),
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("disagrees with source marker"));
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &drift,
+                "Task-bound reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "source_detail cannot authorize terminal ownership"
+        );
 
         let mut alias_drift = valid_after;
         alias_drift["session_id"] = json!("task-session-2");
-        assert!(MemoryLifecycleAcceptanceInput::from_memory_proposal(
-            &proposal(alias_drift, None),
-            "Task-bound reviewed fact".into(),
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("reviewed task session ids disagree"));
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &proposal(alias_drift, None),
+                "Task-bound reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "proposal JSON aliases cannot authorize terminal ownership"
+        );
 
         let unbound = proposal(
             json!({

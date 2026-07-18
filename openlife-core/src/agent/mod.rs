@@ -61,9 +61,9 @@ pub use accepted_guidance::{
 };
 pub use action_executor::{
     A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
-    ActionExecutorConfig, AgentActionRequest, DurableToolExecutionOwner,
-    ToolAuditPersistenceObserver, ToolDispatchAttempt, ToolDispatchObserver,
-    ToolStartedTransitionObserver,
+    ActionExecutorConfig, AgentActionRequest, DurableStoreFailureObserver,
+    DurableToolExecutionOwner, ToolAuditPersistenceObserver, ToolDispatchAttempt,
+    ToolDispatchObserver, ToolStartedTransitionObserver,
 };
 pub use agent_loop::apply_react_guidance_to_config;
 pub use agent_loop::{
@@ -230,7 +230,8 @@ pub use proposal_outcome::{
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
 pub use proposal_store::{
-    ArtifactEffectRecord, ArtifactEffectState, ProposalStore, TerminalOwnerOriginBinding,
+    ArtifactEffectRecord, ArtifactEffectState, ProposalStore, ProposalTerminalRelationKind,
+    ProposalTerminalRelationProjectionProof, TerminalOwnerOriginBinding,
 };
 pub use provider_privacy_boundary::{
     build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
@@ -253,7 +254,7 @@ pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
     DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     MaterializedReviewAcceptanceSnapshot, ReviewWorkflow, ReviewWorkflowOutcome,
-    TerminalOwnerReviewOriginProof,
+    TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{
@@ -263,7 +264,11 @@ pub use runtime_strategy_contract::{
     RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,
     StrategySelectionReport,
 };
-pub use store::AgentRunStore;
+pub use store::{
+    issue_agent_run_review_relation_projection_lane, AgentRunReviewRelationProjectionLane,
+    AgentRunReviewRelationProjectionLaneAdmission, AgentRunReviewRelationProjectionOutcome,
+    AgentRunStore, AgentRunTerminalRelationTargetIntentAdmission,
+};
 pub use strategy_runtime::{
     PlanExecuteRuntimeStrategy, ReActRuntimeStrategy, RuntimeStrategy,
     RuntimeStrategyDeclarativeDescriptor, RuntimeStrategyDescriptor,

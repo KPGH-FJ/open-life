@@ -12,9 +12,12 @@ use openlife_core::agent::main_chat_agent_v1::{
     AgentTaskSessionDraft, AgentTaskSessionStore, MainChatAgentStrategy,
 };
 use openlife_core::agent::{
-    AgentProposal, AgentRunReceiptKey, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, MemoryLifecycleStore, ProposalSource, ProposalStatus, ProposalStore,
-    ProposalType, ReviewWorkflow, RiskLevel,
+    issue_agent_run_review_relation_projection_lane, AgentProposal, AgentRun, AgentRunReceiptKey,
+    AgentRunReviewRelationProjectionLane, AgentRunStore, CanonicalWriteAdmission,
+    CanonicalWriteAdmissionRejection, CanonicalWriteAdmissionRequest, CanonicalWritePermit,
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, MemoryLifecycleStore,
+    ProposalSource, ProposalStatus, ProposalStore, ProposalTerminalRelationKind, ProposalType,
+    ReviewWorkflow, RiskLevel,
 };
 use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemoryStore;
@@ -34,6 +37,27 @@ const SENSITIVE_MEMORY_BODY: &str =
 
 fn receipt_key() -> AgentRunReceiptKey {
     AgentRunReceiptKey::from_bytes([0xD5; 32]).expect("non-zero D055 receipt key")
+}
+
+struct D055CanonicalWritePermit;
+
+impl CanonicalWritePermit for D055CanonicalWritePermit {
+    fn finish_committed(self: Box<Self>) {}
+
+    fn finish_failed(self: Box<Self>) {}
+
+    fn finish_noop(self: Box<Self>) {}
+}
+
+struct D055CanonicalWriteAdmission;
+
+impl CanonicalWriteAdmission for D055CanonicalWriteAdmission {
+    fn acquire(
+        &self,
+        _request: CanonicalWriteAdmissionRequest,
+    ) -> Result<Box<dyn CanonicalWritePermit>, CanonicalWriteAdmissionRejection> {
+        Ok(Box::new(D055CanonicalWritePermit))
+    }
 }
 
 fn create_file_backed_task(
@@ -112,6 +136,7 @@ struct SealedReviewScenario {
     owner_at_final_digest: String,
     event_store: crate::main_chat_event_stream::MainChatAgentEventStore,
     task_store: AgentTaskSessionStore,
+    _agent_run_store: AgentRunStore,
     proposal_store: ProposalStore,
     memory_store: MemoryStore,
     memory_lifecycle_store: MemoryLifecycleStore,
@@ -121,6 +146,7 @@ fn setup_sealed_review_scenario(label: &str, request: DurableWriteRequest) -> Se
     let temp = tempfile::tempdir().expect("D055 staged crash temp directory");
     let event_path = temp.path().join(format!("{label}-turn-events.sqlite"));
     let task_path = temp.path().join(format!("{label}-task-owner.sqlite"));
+    let agent_run_path = temp.path().join(format!("{label}-agent-run-owner.sqlite"));
     let proposal_path = temp.path().join(format!("{label}-proposal-owner.sqlite"));
     let conversation_path = temp
         .path()
@@ -134,6 +160,8 @@ fn setup_sealed_review_scenario(label: &str, request: DurableWriteRequest) -> Se
         .expect("real file-backed EventStore");
     let task_store = AgentTaskSessionStore::new_with_receipt_key(&task_path, receipt_key())
         .expect("real file-backed TaskSession store");
+    let agent_run_store = AgentRunStore::new_with_receipt_key(&agent_run_path, receipt_key())
+        .expect("real file-backed AgentRun store");
     let proposal_store =
         ProposalStore::new(&proposal_path).expect("real file-backed ProposalStore");
     let memory_store =
@@ -147,6 +175,20 @@ fn setup_sealed_review_scenario(label: &str, request: DurableWriteRequest) -> Se
         SENSITIVE_MEMORY_BODY,
     );
     let canonical_receipt = canonical_message.receipt().clone();
+    agent_run_store
+        .bind_canonical_memory_store(&memory_store)
+        .expect("AgentRun store binds canonical Conversation owner");
+    let mut agent_run = AgentRun::new_chat_run(&chat_session_id, SENSITIVE_MEMORY_BODY);
+    agent_run.id = operation_id.clone();
+    agent_run.task_id = operation_id.clone();
+    agent_run.input_ref = Some(canonical_receipt.canonical_ref.clone());
+    memory_store
+        .create_agent_run_from_active_conversation_message(
+            &agent_run_store,
+            &agent_run,
+            canonical_message.proof(),
+        )
+        .expect("create canonical Conversation-bound AgentRun owner");
     create_file_backed_task(
         &task_store,
         &operation_id,
@@ -188,10 +230,31 @@ fn setup_sealed_review_scenario(label: &str, request: DurableWriteRequest) -> Se
         origin.canonical_user_message_digest(),
         canonical_receipt.content_digest
     );
+    let target = memory_store
+        .issue_agent_run_terminal_relation_target_intent(&agent_run_store, origin)
+        .expect("issue exact live AgentRun relation target");
     let staged = ReviewWorkflow::new(&proposal_store)
-        .submit_with_terminal_owner_origin(request, origin)
-        .expect("persist Proposal with typed terminal origin");
-    let proposal_id = staged.proposal.id.clone();
+        .submit_product_with_terminal_owner_relation(
+            request,
+            origin,
+            ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            &D055CanonicalWriteAdmission,
+            &target,
+        )
+        .expect("persist Proposal with typed effect-blocking terminal relation");
+    let proposal_id = staged.review().proposal.id.clone();
+    let projection = proposal_store
+        .terminal_relation_projection_proof(&proposal_id)
+        .expect("load typed relation projection")
+        .expect("typed relation projection exists");
+    let projection_lane = issue_agent_run_review_relation_projection_lane(
+        origin,
+        AgentRunReviewRelationProjectionLane::ForegroundOpen,
+    )
+    .expect("issue foreground AgentRun projection lane");
+    agent_run_store
+        .apply_terminal_review_relation_projection(&projection, &projection_lane)
+        .expect("project typed effect-blocking relation into AgentRun");
     let proposal_blocker = format!("proposal:{proposal_id}");
     task_store
         .set_pending_blockers(&operation_id, vec![proposal_blocker.clone()])
@@ -234,12 +297,17 @@ fn setup_sealed_review_scenario(label: &str, request: DurableWriteRequest) -> Se
         owner_at_final_digest,
         event_store,
         task_store,
+        _agent_run_store: agent_run_store,
         proposal_store,
         memory_store,
         memory_lifecycle_store,
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn assert_memory_review_converged(
     event_store: &crate::main_chat_event_stream::MainChatAgentEventStore,
     task_store: &AgentTaskSessionStore,
@@ -356,6 +424,7 @@ async fn run_memory_crash_reconciliation_contract(
         owner_at_final_digest,
         event_store,
         task_store,
+        _agent_run_store,
         proposal_store,
         memory_store,
         memory_lifecycle_store,
@@ -880,10 +949,17 @@ async fn d055_target_terminal_origin_rejects_mismatch_foreign_tombstone_and_rebi
             .expect("canonical replay recovers the existing admission");
         assert!(replayed_admission.replayed());
         assert_eq!(replayed_admission.admission_id(), admission_id);
-        let replayed_epoch = event_store
+        let replay_error = event_store
             .open_terminal_owner_epoch_from_admission(replayed_admission)
-            .expect("sealed replay recovers existing epoch without a new generation");
-        assert!(replayed_epoch.replayed());
+            .expect_err("an initial admission cannot reopen a sealed terminal generation");
+        assert_eq!(
+            replay_error.to_string(),
+            "terminal_owner_review_origin_epoch_not_open"
+        );
+        let replayed_epoch = event_store
+            .terminal_owner_epoch(&operation_id)
+            .expect("read sealed epoch after rejected reopen")
+            .expect("sealed epoch remains present");
         assert_eq!(replayed_epoch.epoch_id(), epoch_id);
         assert_eq!(replayed_epoch.generation(), epoch_generation);
         assert_eq!(replayed_epoch.state(), TerminalOwnerSealState::Sealed);
@@ -913,6 +989,7 @@ async fn d055_target_unknown_external_dispatch_capture_is_not_called_by_restart_
             owner_at_final_digest,
             event_store,
             task_store,
+            _agent_run_store,
             proposal_store,
             memory_store,
             memory_lifecycle_store,
@@ -1139,6 +1216,7 @@ async fn d055_target_file_backed_successor_uses_verified_owner_local_receipt() {
         let task_path = temp.path().join("task-owner.sqlite");
         let proposal_path = temp.path().join("proposal-owner.sqlite");
         let conversation_path = temp.path().join("conversation-owner.sqlite");
+        let agent_run_path = temp.path().join("agent-run-owner.sqlite");
         let memory_lifecycle_path = temp.path().join("memory-lifecycle-owner.sqlite");
         let operation_id = uuid::Uuid::new_v4().to_string();
         let chat_session_id = "d055-file-backed-successor";
@@ -1147,6 +1225,8 @@ async fn d055_target_file_backed_successor_uses_verified_owner_local_receipt() {
             .expect("real file-backed EventStore");
         let task_store = AgentTaskSessionStore::new_with_receipt_key(&task_path, receipt_key())
             .expect("real file-backed TaskSession store");
+        let agent_run_store = AgentRunStore::new_with_receipt_key(&agent_run_path, receipt_key())
+            .expect("real file-backed AgentRun store");
         let proposal_store =
             ProposalStore::new(&proposal_path).expect("real file-backed ProposalStore");
         let memory_store =
@@ -1160,6 +1240,20 @@ async fn d055_target_file_backed_successor_uses_verified_owner_local_receipt() {
             SENSITIVE_MEMORY_BODY,
         );
         let canonical_receipt = canonical_message.receipt().clone();
+        agent_run_store
+            .bind_canonical_memory_store(&memory_store)
+            .expect("AgentRun store binds canonical Conversation");
+        let mut agent_run = AgentRun::new_chat_run(chat_session_id, SENSITIVE_MEMORY_BODY);
+        agent_run.id = operation_id.clone();
+        agent_run.task_id = operation_id.clone();
+        agent_run.input_ref = Some(canonical_receipt.canonical_ref.clone());
+        memory_store
+            .create_agent_run_from_active_conversation_message(
+                &agent_run_store,
+                &agent_run,
+                canonical_message.proof(),
+            )
+            .expect("create exact Conversation-bound AgentRun");
         create_file_backed_task(
             &task_store,
             &operation_id,
@@ -1208,14 +1302,36 @@ async fn d055_target_file_backed_successor_uses_verified_owner_local_receipt() {
             origin_proof.canonical_user_message_digest(),
             canonical_receipt.content_digest
         );
+        let target = memory_store
+            .issue_agent_run_terminal_relation_target_intent(&agent_run_store, origin_proof)
+            .expect("issue exact live AgentRun relation target");
         let staged = ReviewWorkflow::new(&proposal_store)
-            .submit_with_terminal_owner_origin(memory_review_request(), origin_proof)
-            .expect("ReviewWorkflow persists Proposal and typed origin binding");
-        let proposal_id = staged.proposal.id.clone();
-        assert_eq!(staged.proposal.status, ProposalStatus::Pending);
-        assert!(staged.proposal.source_detail.is_none());
-        assert!(staged.proposal.run_id.is_none());
+            .submit_product_with_terminal_owner_relation(
+                memory_review_request(),
+                origin_proof,
+                ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                &D055CanonicalWriteAdmission,
+                &target,
+            )
+            .expect("ReviewWorkflow persists Proposal and typed effect-blocking relation");
+        let proposal_id = staged.review().proposal.id.clone();
+        let projection = proposal_store
+            .terminal_relation_projection_proof(&proposal_id)
+            .expect("load typed relation projection")
+            .expect("typed relation projection exists");
+        let projection_lane = issue_agent_run_review_relation_projection_lane(
+            origin_proof,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        )
+        .expect("issue foreground AgentRun projection lane");
+        agent_run_store
+            .apply_terminal_review_relation_projection(&projection, &projection_lane)
+            .expect("project effect-blocking relation into AgentRun");
+        assert_eq!(staged.review().proposal.status, ProposalStatus::Pending);
+        assert!(staged.review().proposal.source_detail.is_none());
+        assert!(staged.review().proposal.run_id.is_none());
         assert!(staged
+            .review()
             .proposal
             .after
             .get("originatingTaskSessionId")
@@ -1457,6 +1573,7 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
         let task_path = temp.path().join("task-owner.sqlite");
         let proposal_path = temp.path().join("proposal-owner.sqlite");
         let conversation_path = temp.path().join("conversation-owner.sqlite");
+        let agent_run_path = temp.path().join("agent-run-owner.sqlite");
         let memory_lifecycle_path = temp.path().join("memory-lifecycle-owner.sqlite");
         let operation_id = uuid::Uuid::new_v4().to_string();
         let chat_session_id = "d055-cross-store-reconcile";
@@ -1465,6 +1582,8 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
             .expect("real file-backed EventStore");
         let task_store = AgentTaskSessionStore::new_with_receipt_key(&task_path, receipt_key())
             .expect("real file-backed TaskSession store");
+        let agent_run_store = AgentRunStore::new_with_receipt_key(&agent_run_path, receipt_key())
+            .expect("real file-backed AgentRun store");
         let proposal_store =
             ProposalStore::new(&proposal_path).expect("real file-backed ProposalStore");
         let memory_store =
@@ -1478,6 +1597,20 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
             SENSITIVE_MEMORY_BODY,
         );
         let canonical_receipt = canonical_message.receipt().clone();
+        agent_run_store
+            .bind_canonical_memory_store(&memory_store)
+            .expect("AgentRun store binds canonical Conversation");
+        let mut agent_run = AgentRun::new_chat_run(chat_session_id, SENSITIVE_MEMORY_BODY);
+        agent_run.id = operation_id.clone();
+        agent_run.task_id = operation_id.clone();
+        agent_run.input_ref = Some(canonical_receipt.canonical_ref.clone());
+        memory_store
+            .create_agent_run_from_active_conversation_message(
+                &agent_run_store,
+                &agent_run,
+                canonical_message.proof(),
+            )
+            .expect("create exact Conversation-bound AgentRun");
         create_file_backed_task(
             &task_store,
             &operation_id,
@@ -1520,10 +1653,31 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
             origin.canonical_user_message_digest(),
             canonical_receipt.content_digest
         );
+        let target = memory_store
+            .issue_agent_run_terminal_relation_target_intent(&agent_run_store, origin)
+            .expect("issue exact live AgentRun relation target");
         let staged = ReviewWorkflow::new(&proposal_store)
-            .submit_with_terminal_owner_origin(memory_review_request(), origin)
-            .expect("persist Proposal with immutable typed origin");
-        let proposal_id = staged.proposal.id.clone();
+            .submit_product_with_terminal_owner_relation(
+                memory_review_request(),
+                origin,
+                ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                &D055CanonicalWriteAdmission,
+                &target,
+            )
+            .expect("persist typed effect-blocking Proposal relation");
+        let proposal_id = staged.review().proposal.id.clone();
+        let projection = proposal_store
+            .terminal_relation_projection_proof(&proposal_id)
+            .expect("load typed relation projection")
+            .expect("typed relation projection exists");
+        let projection_lane = issue_agent_run_review_relation_projection_lane(
+            origin,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        )
+        .expect("issue foreground AgentRun projection lane");
+        agent_run_store
+            .apply_terminal_review_relation_projection(&projection, &projection_lane)
+            .expect("project effect-blocking relation into AgentRun");
         let blocker = format!("proposal:{proposal_id}");
         task_store
             .set_pending_blockers(&operation_id, vec![blocker.clone()])
@@ -1643,6 +1797,7 @@ async fn d055_target_cross_store_owner_commit_reconciles_successor_exactly_once_
         drop(gateway);
         drop(memory_lifecycle_store);
         drop(memory_store);
+        drop(agent_run_store);
         drop(task_store);
         drop(proposal_store);
         drop(event_store);
@@ -2029,6 +2184,17 @@ async fn d055_target_real_sensitive_memory_accept_defers_during_seal_then_commit
                 .await
                 .expect("post-seal retry is idempotent");
         assert_eq!(replay["success"], true);
+        let owner_after = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner_after.revision(), owner_before.revision() + 1);
+        assert_ne!(owner_after.digest(), owner_before.digest());
         {
             let store = state.proposal_store.as_ref().unwrap().lock().await;
             assert_eq!(
@@ -2066,7 +2232,7 @@ async fn d055_target_real_sensitive_memory_accept_defers_during_seal_then_commit
         .await;
         assert!(
             buffered.is_ok(),
-            "buffered recovery folds successor: {buffered:?}"
+            "buffered replay reuses the sealed final without task-owner drift: {buffered:?}"
         );
         let mut streamed = Vec::new();
         let streaming = crate::main_chat_streaming::start_stream_message_with_operation_state(
@@ -2083,7 +2249,7 @@ async fn d055_target_real_sensitive_memory_accept_defers_during_seal_then_commit
         .await;
         assert!(
             streaming.is_ok(),
-            "streaming recovery folds successor: {streaming:?}"
+            "streaming replay reuses the sealed final without task-owner drift: {streaming:?}"
         );
         assert_eq!(
             streamed
@@ -2128,36 +2294,6 @@ async fn d055_target_real_sensitive_memory_accept_defers_during_seal_then_commit
             sealed_epoch.final_event_payload_digest(),
             Some(final_event[0].payload_digest.as_str())
         );
-        assert_eq!(successor[0].payload["causeRef"], proposal.id);
-        assert_eq!(
-            successor[0].payload["finalEventId"],
-            final_event[0].event_id
-        );
-        assert_eq!(successor[0].payload["ownerKind"], "agent_task_session");
-        assert_eq!(successor[0].payload["ownerId"], operation_id);
-        assert!(
-            successor[0].payload["beforeOwnerRevision"]
-                .as_u64()
-                .unwrap()
-                > 0
-        );
-        assert_eq!(
-            successor[0].payload["afterOwnerRevision"].as_u64().unwrap(),
-            successor[0].payload["beforeOwnerRevision"]
-                .as_u64()
-                .unwrap()
-                + 1
-        );
-        for field in [
-            "beforeOwnerDigest",
-            "afterOwnerDigest",
-            "localTransitionReceiptRef",
-            "localTransitionReceiptDigest",
-        ] {
-            assert!(successor[0].payload[field]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
-        }
     })
     .await
     .expect("D055 real sensitive-memory scenario exceeded its outer timeout");

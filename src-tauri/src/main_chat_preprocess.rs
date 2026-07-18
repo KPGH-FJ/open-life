@@ -17,11 +17,36 @@ use openlife_core::vectors::{
 };
 
 use crate::main_chat_hs_runtime::classify_hs_policy_topic;
+use crate::memory_gateway::{
+    prepare_memory_search_access_telemetry, prepare_vector_search_access_telemetry,
+    record_text_search_access_telemetry_with_state,
+    record_vector_search_access_telemetry_with_state, MemoryVectorDegradedEvidence,
+};
 use crate::AppState;
 
 const MEMORY_LIFECYCLE_SOURCE_PREFIX: &str = "memory_lifecycle:";
 const MEMORY_LIFECYCLE_CANDIDATE_LIMIT: i64 = 25;
 const MEMORY_LIFECYCLE_CONTEXT_LIMIT: usize = 5;
+
+async fn search_session_vectors_with_optional_telemetry(
+    state: &Arc<AppState>,
+    session_id: &str,
+    embedding: &[f32],
+    profile: &EmbeddingProfile,
+    top_k: usize,
+    limit: usize,
+) -> anyhow::Result<(VectorSearchOutcome, Option<MemoryVectorDegradedEvidence>)> {
+    let telemetry_ticket = prepare_vector_search_access_telemetry(state);
+    let store = state.vector_store.lock().await.clone();
+    let outcome = store.search_by_session(session_id, embedding, profile, top_k, limit)?;
+    let telemetry_evidence = match &outcome {
+        VectorSearchOutcome::Matches { matches, .. } => {
+            record_vector_search_access_telemetry_with_state(matches, state, telemetry_ticket).await
+        }
+        VectorSearchOutcome::RebuildRequired(_) => None,
+    };
+    Ok((outcome, telemetry_evidence))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapabilityPrivacyMode {
@@ -286,7 +311,7 @@ fn is_common_cjk_token(token: &str) -> bool {
     )
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(dead_code)]
 /// Shared preprocessing for chat commands:
 /// loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.
@@ -315,7 +340,6 @@ pub(crate) async fn preprocess_chat_input(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Shared preprocessing for chat commands:
 /// loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.
@@ -419,6 +443,7 @@ pub(crate) async fn preprocess_chat_input_with_options(
                 options.capability_privacy_mode,
                 hs_local_only,
             );
+            let text_telemetry_ticket = prepare_memory_search_access_telemetry(state);
             let text_hits = {
                 let store = state.memory_store.lock().await;
                 store
@@ -465,15 +490,20 @@ pub(crate) async fn preprocess_chat_input_with_options(
                             Vec::new()
                         }
                         Ok(embedding) => {
-                            let store = state.vector_store.lock().await.clone();
-                            match store.search_by_session(
+                            match search_session_vectors_with_optional_telemetry(
+                                state,
                                 session_id,
                                 &embedding,
                                 &profile,
                                 memory_top_k,
                                 1000,
-                            ) {
-                                Ok(VectorSearchOutcome::Matches { matches, rebuild }) => {
+                            )
+                            .await
+                            {
+                                Ok((
+                                    VectorSearchOutcome::Matches { matches, rebuild },
+                                    telemetry,
+                                )) => {
                                     if let Some(rebuild) = rebuild {
                                         embed_err = Some(vector_rebuild_evidence(
                                             "vector_memory_search",
@@ -481,9 +511,20 @@ pub(crate) async fn preprocess_chat_input_with_options(
                                             rebuild,
                                         ));
                                     }
+                                    if let Some(telemetry) = telemetry {
+                                        append_runtime_evidence(
+                                            &mut embed_err,
+                                            serde_json::json!({
+                                                "operation": "vector_memory_access_telemetry",
+                                                "status": "skipped",
+                                                "reasonCode": telemetry.reason_code,
+                                                "errorDigest": telemetry.error_digest,
+                                            }),
+                                        );
+                                    }
                                     matches
                                 }
-                                Ok(VectorSearchOutcome::RebuildRequired(rebuild)) => {
+                                Ok((VectorSearchOutcome::RebuildRequired(rebuild), _)) => {
                                     embed_err = Some(vector_rebuild_evidence(
                                         "vector_memory_search",
                                         &receipt,
@@ -507,6 +548,24 @@ pub(crate) async fn preprocess_chat_input_with_options(
                     }
                 }
             };
+
+            if let Some(telemetry) = record_text_search_access_telemetry_with_state(
+                &text_hits,
+                state,
+                text_telemetry_ticket,
+            )
+            .await
+            {
+                append_runtime_evidence(
+                    &mut embed_err,
+                    serde_json::json!({
+                        "operation": "text_memory_access_telemetry",
+                        "status": "skipped",
+                        "reasonCode": telemetry.reason_code,
+                        "errorDigest": telemetry.error_digest,
+                    }),
+                );
+            }
 
             let results = filter_canonical_retrievable_memory_results(
                 merge_memory_hits(vector_hits, text_hits, memory_top_k),
@@ -643,6 +702,22 @@ fn embedding_runtime_evidence(
         "errorDigest": receipt.error_digest,
     })
     .to_string()
+}
+
+fn append_runtime_evidence(target: &mut Option<String>, additional: serde_json::Value) {
+    let Some(existing) = target.take() else {
+        *target = Some(additional.to_string());
+        return;
+    };
+    let existing = serde_json::from_str::<serde_json::Value>(&existing)
+        .unwrap_or(serde_json::Value::String(existing));
+    *target = Some(
+        serde_json::json!({
+            "kind": "runtime_evidence_bundle",
+            "entries": [existing, additional],
+        })
+        .to_string(),
+    );
 }
 
 fn vector_rebuild_evidence(
@@ -1066,5 +1141,105 @@ mod tests {
         let evidence = direct.5.expect("rebuild evidence must reach Main Chat");
         assert!(evidence.contains("rebuild_required"), "{evidence}");
         assert!(evidence.contains("\"unknownProfileCount\":1"), "{evidence}");
+    }
+
+    #[tokio::test]
+    async fn main_chat_session_search_commits_explicit_telemetry_after_the_read() {
+        let state = crate::test_utils::test_app_state();
+        let profile = EmbeddingProfile::new(
+            openlife_core::embedding::EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "main-chat-telemetry-v1",
+            "builtin:test",
+            "main-chat-telemetry-artifact-v1",
+            4,
+        )
+        .unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+        let store = state.vector_store.lock().await.clone();
+        store
+            .insert(
+                "main-chat-telemetry-session",
+                "MAIN_CHAT_RESULT_MUST_SURVIVE_TELEMETRY_FENCE",
+                &embedding,
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let (outcome, telemetry) = search_session_vectors_with_optional_telemetry(
+            &state,
+            "main-chat-telemetry-session",
+            &embedding,
+            &profile,
+            5,
+            100,
+        )
+        .await
+        .expect("pure session search must remain available");
+        let matches = match outcome {
+            VectorSearchOutcome::Matches { matches, .. } => matches,
+            VectorSearchOutcome::RebuildRequired(evidence) => {
+                panic!("test vector profile unexpectedly requires rebuild: {evidence:?}")
+            }
+        };
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].0.content,
+            "MAIN_CHAT_RESULT_MUST_SURVIVE_TELEMETRY_FENCE"
+        );
+        assert!(
+            telemetry.is_none(),
+            "healthy telemetry must not be degraded"
+        );
+        let stored = store.export_all_chunks().unwrap();
+        assert_eq!(stored[0].access_count, 1);
+        assert!(!stored[0].last_accessed_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn main_chat_text_search_commits_explicit_telemetry_after_provider_work() {
+        openlife_core::embedding::clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        state.config.lock().await.llm.embedding_enabled = false;
+        let store = state.memory_store.lock().await.clone();
+        let memory_id = store
+            .save_memory_record(
+                "main-chat-text-telemetry-session",
+                "MAIN_CHAT_TEXT_TELEMETRY_SENTINEL",
+                "note",
+                "manual",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
+        let before = store.vector_rebuild_source_snapshot().unwrap();
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: "MAIN_CHAT_TEXT_TELEMETRY_SENTINEL".into(),
+        }];
+
+        preprocess_chat_input_with_options(
+            "main-chat-text-telemetry-session",
+            &messages,
+            &state,
+            MainChatPreprocessOptions::default(),
+        )
+        .await
+        .expect("text retrieval must survive unavailable optional embeddings");
+
+        let record = store
+            .get_active_memory_record(memory_id)
+            .unwrap()
+            .expect("searched Memory row");
+        assert_eq!(record.access_count, 1);
+        assert!(record.last_accessed_at.is_some());
+        assert_ne!(
+            store
+                .vector_rebuild_source_snapshot()
+                .unwrap()
+                .metadata_digest,
+            before.metadata_digest
+        );
     }
 }

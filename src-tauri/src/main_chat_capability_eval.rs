@@ -822,15 +822,18 @@ fn assert_cf_web_01(
         .response_value
         .get("reasoning_trace")
         .and_then(|trace| trace.get("generation_result"));
+    let reply_has_bound_source_footer = matches!(
+        artifacts
+            .response_value
+            .get("reply")
+            .and_then(serde_json::Value::as_str),
+        Some(reply) if reply.contains("来源（OpenLife 引用已绑定，内容未背书）")
+    );
     if web_generation
         .and_then(|generation| generation.get("scriptedProviderResponse"))
         .and_then(serde_json::Value::as_bool)
         != Some(true)
-        || artifacts
-            .response_value
-            .get("reply")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(|reply| !reply.contains("来源（OpenLife 引用已绑定，内容未背书）"))
+        || !reply_has_bound_source_footer
     {
         report
             .blockers

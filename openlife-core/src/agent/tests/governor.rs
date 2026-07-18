@@ -81,7 +81,7 @@ fn runtime_input(tools_prompt: &str) -> RuntimeInput {
 
 #[test]
 fn high_risk_lifemodel_candidate_requires_confirmation() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_maturation_candidate(&candidate(
         ProposalType::LifeModelUpdate,
         RiskLevel::High,
@@ -98,7 +98,7 @@ fn high_risk_lifemodel_candidate_requires_confirmation() {
 
 #[test]
 fn memory_write_candidate_requires_proposal() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_maturation_candidate(&candidate(
         ProposalType::MemoryWrite,
         RiskLevel::Low,
@@ -111,7 +111,7 @@ fn memory_write_candidate_requires_proposal() {
 
 #[test]
 fn proposal_only_false_candidate_is_blocked() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_maturation_candidate(&candidate(
         ProposalType::PreferenceUpdate,
         RiskLevel::Medium,
@@ -124,7 +124,7 @@ fn proposal_only_false_candidate_is_blocked() {
 
 #[test]
 fn external_write_tool_requires_proposal() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_tool_action(ToolGovernanceInput {
         tool_name: "calendar.create_event".into(),
         action_kind: "write".into(),
@@ -138,7 +138,7 @@ fn external_write_tool_requires_proposal() {
 
 #[test]
 fn read_only_tool_is_allowed() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_tool_action(ToolGovernanceInput {
         tool_name: "memory.search".into(),
         action_kind: "search".into(),
@@ -151,7 +151,7 @@ fn read_only_tool_is_allowed() {
 
 #[test]
 fn broad_tools_prompt_does_not_create_write_governance_decision() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let input = runtime_input("Available tools: file.write, calendar.create_event, email.send");
     let decision = governor.govern_runtime_input(&input, true);
 
@@ -164,7 +164,7 @@ fn broad_tools_prompt_does_not_create_write_governance_decision() {
 
 #[test]
 fn sensitive_runtime_requires_local_only() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_model_route(ModelRouteGovernanceInput {
         hs_packet: Some(sensitive_packet()),
         risk_level: RiskLevel::High,
@@ -180,7 +180,7 @@ fn sensitive_runtime_requires_local_only() {
 
 #[test]
 fn governance_decision_summary_is_metadata_safe() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
     let decision = governor.govern_maturation_candidate(&candidate(
         ProposalType::LifeModelUpdate,
         RiskLevel::High,
@@ -197,7 +197,7 @@ fn governance_decision_summary_is_metadata_safe() {
 
 #[test]
 fn unified_governor_report_classifies_core_decision_types_without_raw_payloads() {
-    let governor = LifeModelGovernor::default();
+    let governor = LifeModelGovernor;
 
     let maturation = governor
         .govern_maturation_candidate(&candidate(

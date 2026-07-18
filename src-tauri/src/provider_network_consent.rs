@@ -11,7 +11,7 @@ pub(crate) enum ProviderNetworkAuthorization {
         network_policy_decision: NetworkPolicyDecision,
         permission_id: Option<String>,
         reviewed_permission:
-            Option<openlife_core::tool_permissions::ConsumedReviewedNetworkPermission>,
+            Option<Box<openlife_core::tool_permissions::ConsumedReviewedNetworkPermission>>,
     },
     ConsentRequired {
         proposal_id: String,
@@ -23,7 +23,7 @@ pub(crate) enum ProviderNetworkAuthorization {
 
 pub(crate) enum ExplicitProviderProbeAuthorization {
     Authorized {
-        grant: openlife_core::network_client::ExplicitProviderProbeGrant,
+        grant: Box<openlife_core::network_client::ExplicitProviderProbeGrant>,
         effective_network_policy_decision_id: String,
         permission_id: Option<String>,
     },
@@ -66,8 +66,27 @@ impl<'a> NetworkConsentSubject<'a> {
 
 #[derive(Clone, Copy)]
 pub(crate) enum NetworkConsentSubmissionScope<'a> {
-    MainChatTurn(&'a dyn openlife_core::agent::CanonicalWriteAdmission),
+    MainChatTurn {
+        origin: &'a openlife_core::agent::TerminalOwnerReviewOriginProof,
+        admission: &'a crate::main_chat_cancellation::MainChatExecutionEpoch,
+        /// Set only for a continuation opened by an accepted network-policy
+        /// Proposal. The continuation may consume that exact AllowOnce and
+        /// must never borrow a scope-equivalent grant or stage a new Proposal.
+        required_proposal_id: Option<&'a str>,
+    },
     ExplicitCommand,
+}
+
+impl<'a> NetworkConsentSubmissionScope<'a> {
+    fn required_proposal_id(&self) -> Option<&'a str> {
+        match self {
+            Self::MainChatTurn {
+                required_proposal_id,
+                ..
+            } => *required_proposal_id,
+            Self::ExplicitCommand => None,
+        }
+    }
 }
 
 fn provider_network_endpoint_fingerprint(url: &str) -> (usize, String) {
@@ -87,6 +106,12 @@ fn provider_network_permission_scope(
     )
 }
 
+// Consent staging binds endpoint, capability, subject, origin, and exact
+// review scope independently so a proposal cannot authorize a broader edge.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn stage_network_consent(
     state: &Arc<AppState>,
     decision: &NetworkPolicyDecision,
@@ -103,10 +128,6 @@ async fn stage_network_consent(
     };
 
     let subject = subject.validate()?;
-    let proposal_store = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| AppError::internal("Proposal store not available"))?;
     let permission_scope = provider_network_permission_scope(capability, decision, endpoint_digest);
     let after = serde_json::json!({
         "permission_action": "grant",
@@ -139,14 +160,20 @@ async fn stage_network_consent(
         "auto_generated": true,
         "directWritesExecuted": false,
     });
-    let _ = originating_task_session_id;
+    if let NetworkConsentSubmissionScope::MainChatTurn { origin, .. } = submission_scope {
+        if originating_task_session_id != Some(origin.task_session_id()) {
+            return Err(AppError::internal(
+                "Main Chat network consent terminal owner does not match the provider task",
+            ));
+        }
+    }
     let affected_path = format!("{}.{}", subject.affected_path_prefix, subject.target);
     let proposal_source = match submission_scope {
-        NetworkConsentSubmissionScope::MainChatTurn(_) => ProposalSource::ChatConversation,
+        NetworkConsentSubmissionScope::MainChatTurn { .. } => ProposalSource::ChatConversation,
         NetworkConsentSubmissionScope::ExplicitCommand => ProposalSource::NetworkConsent,
     };
     let durable_source = match submission_scope {
-        NetworkConsentSubmissionScope::MainChatTurn(_) => DurableWriteSource::MainChat,
+        NetworkConsentSubmissionScope::MainChatTurn { .. } => DurableWriteSource::MainChat,
         NetworkConsentSubmissionScope::ExplicitCommand => DurableWriteSource::NetworkConsent,
     };
     let mut proposal = AgentProposal::new(
@@ -162,32 +189,53 @@ async fn stage_network_consent(
         "{}_network_consent:{}",
         subject.permission_source, decision.decision_id
     ));
-    let outcome = {
-        let store = proposal_store.lock().await;
-        let request = DurableWriteRequest::from_agent_proposal(
-            durable_source,
-            DurableWriteSubject::ToolPermission,
-            proposal,
-            "External network consent is pending Review Center approval.",
+    let request = DurableWriteRequest::from_agent_proposal(
+        durable_source,
+        DurableWriteSubject::ToolPermission,
+        proposal,
+        "External network consent is pending Review Center approval.",
+    )
+    .with_evidence_refs(vec![
+        format!("network_policy_decision:{}", decision.decision_id),
+        format!("network_endpoint:{endpoint_digest}"),
+    ]);
+    match submission_scope {
+        NetworkConsentSubmissionScope::MainChatTurn {
+            origin, admission, ..
+        } => crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+            state,
+            origin,
+            openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite,
+            request,
+            admission,
         )
-        .with_evidence_refs(vec![
-            format!("network_policy_decision:{}", decision.decision_id),
-            format!("network_endpoint:{endpoint_digest}"),
-        ]);
-        let workflow = ReviewWorkflow::new(&store);
-        match submission_scope {
-            NetworkConsentSubmissionScope::MainChatTurn(admission) => {
-                workflow.submit_with_admission(request, admission)
-            }
-            NetworkConsentSubmissionScope::ExplicitCommand => workflow.submit(request),
-        }
+        .await
+        .map(|submission| submission.review().proposal_id().to_string())
         .map_err(|error| {
             AppError::internal(format!("stage external network consent failed: {error}"))
-        })?
-    };
-    Ok(outcome.proposal_id().to_string())
+        }),
+        NetworkConsentSubmissionScope::ExplicitCommand => {
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| AppError::internal("Proposal store not available"))?;
+            let store = proposal_store.lock().await;
+            ReviewWorkflow::new(&store)
+                .submit(request)
+                .map(|outcome| outcome.proposal_id().to_string())
+                .map_err(|error| {
+                    AppError::internal(format!("stage external network consent failed: {error}"))
+                })
+        }
+    }
 }
 
+// Provider authorization keeps the enforced policy decision and review scope
+// explicit at the network dispatch boundary.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn authorize_provider_network_dispatch(
     state: &Arc<AppState>,
     network_policy: &openlife_core::config::NetworkPolicy,
@@ -224,7 +272,6 @@ pub(crate) async fn authorize_provider_network_dispatch(
 /// function first applies ReviewWorkflow/AllowOnce governance, then the core
 /// network layer re-resolves the exact effective decision and final URL before
 /// issuing the consumed in-process capability.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn authorize_explicit_provider_probe(
     state: &Arc<AppState>,
     scheduler: &openlife_core::scheduler::InferenceScheduler,
@@ -268,7 +315,7 @@ pub(crate) async fn authorize_explicit_provider_probe(
                         *network_policy,
                         decision,
                         network_policy_decision,
-                        reviewed_permission,
+                        reviewed_permission.map(|permission| *permission),
                     )
                     .map_err(|error| {
                         AppError::permission(format!(
@@ -277,7 +324,7 @@ pub(crate) async fn authorize_explicit_provider_probe(
                     })?
             };
             Ok(ExplicitProviderProbeAuthorization::Authorized {
-                grant,
+                grant: Box::new(grant),
                 effective_network_policy_decision_id,
                 permission_id,
             })
@@ -291,6 +338,12 @@ pub(crate) async fn authorize_explicit_provider_probe(
     }
 }
 
+// External authorization uses the same explicit endpoint-bound contract as
+// provider dispatch and must not accept a caller-shaped aggregate grant.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn authorize_external_network_dispatch(
     state: &Arc<AppState>,
     network_policy: &openlife_core::config::NetworkPolicy,
@@ -317,22 +370,37 @@ pub(crate) async fn authorize_external_network_dispatch(
                 provider_network_endpoint_fingerprint(url);
             let permission_scope =
                 provider_network_permission_scope(capability, decision, &endpoint_digest);
+            let required_proposal_id = submission_scope.required_proposal_id();
             let reviewed_permission = {
                 let store = state.tool_permission_store.lock().await;
-                store
-                    .consume_reviewed_network_once(
+                let consumed = if let Some(proposal_id) = required_proposal_id {
+                    store.consume_reviewed_network_once_for_proposal(
+                        proposal_id,
                         &permission_scope,
                         subject.permission_source,
                         "high",
                         "network",
                     )
-                    .map_err(|error| {
-                        AppError::internal(format!(
-                            "consume reviewed external network permission failed: {error}"
-                        ))
-                    })?
+                } else {
+                    store.consume_reviewed_network_once(
+                        &permission_scope,
+                        subject.permission_source,
+                        "high",
+                        "network",
+                    )
+                };
+                consumed.map_err(|error| {
+                    AppError::internal(format!(
+                        "consume reviewed external network permission failed: {error}"
+                    ))
+                })?
             };
             let Some(reviewed_permission) = reviewed_permission else {
+                if required_proposal_id.is_some() {
+                    return Err(AppError::permission(
+                        "provider network continuation grant missing, mismatched, or already consumed",
+                    ));
+                }
                 let proposal_id = stage_network_consent(
                     state,
                     decision,
@@ -369,7 +437,7 @@ pub(crate) async fn authorize_external_network_dispatch(
                 network_policy: Box::new(effective_policy),
                 network_policy_decision: effective_decision,
                 permission_id,
-                reviewed_permission: Some(reviewed_permission),
+                reviewed_permission: Some(Box::new(reviewed_permission)),
             })
         }
     }

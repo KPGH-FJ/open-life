@@ -6,25 +6,184 @@
 
 use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
-    LifeModelMaterializerCallerPurpose,
+    LifeModelMaterializerCallerPurpose, STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID,
+};
+use crate::persistence_coordinator::{
+    CanonicalCommitPermit, GovernedDataImportRecoveryAdmission, GovernedDataImportRecoveryOwner,
+    PersistenceGateError,
 };
 use crate::AppState;
+#[cfg(test)]
+use once_cell::sync::Lazy as LazyLock;
 use openlife_core::life_model::{DailyGoal, LifeModel, TimeBlock};
+use openlife_core::persistence_outbox::ProjectionDeliveryState;
 use openlife_core::state_store::{
     DailyTaskStatus, LegacyDailyTaskImportReceipt, LegacyDailyTaskShadowCandidate,
     LegacyDailyTaskShadowReceipt, LegacyStateHistoryShadowCandidate,
     LegacyStateHistoryShadowReceipt, StateProjectionStatus, StateStore,
 };
 use std::sync::Arc;
+#[cfg(test)]
+use std::{collections::HashMap, sync::Mutex as StdMutex};
 
 const STATE_ASSET_PROJECTION_DIGEST_PREFIX: &str = "state-asset-v1:";
 const MAX_PROJECTION_BATCH: usize = 512;
 const MAX_PROJECTION_CAS_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
+pub(crate) enum StateProjectionError {
+    /// An exclusive terminalization fence superseded the marker admission.
+    /// The canonical StateStore delivery remains pending and replayable; this
+    /// is not a durable projection failure.
+    Deferred(PersistenceGateError),
+    Failed(String),
+}
+
+impl StateProjectionError {
+    pub(crate) fn is_deferred(&self) -> bool {
+        matches!(self, Self::Deferred(_))
+    }
+}
+
+impl From<String> for StateProjectionError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for StateProjectionError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.to_string())
+    }
+}
+
+impl std::fmt::Display for StateProjectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Deferred(error) => {
+                write!(formatter, "state projection finalization deferred: {error}")
+            }
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for StateProjectionError {}
+
+#[cfg(test)]
+struct StateProjectionFinalizeBarrier {
+    ready: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static STATE_PROJECTION_FINALIZE_BARRIERS: LazyLock<
+    StdMutex<HashMap<usize, StateProjectionFinalizeBarrier>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// StateStore delivery acknowledgement is itself a canonical StateStore
+/// mutation. The LifeModel projector deliberately releases its LifeModel
+/// permit before returning, so finalization must enter a fresh, short-lived
+/// StateStore commit window instead of extending one permit across the
+/// projection await or recursively acquiring the shared barrier.
+async fn acquire_state_projection_finalize_permit<'state>(
+    state: &'state Arc<AppState>,
+    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
+) -> Result<CanonicalCommitPermit<'state>, StateProjectionError> {
+    let (recovery_admission, operation_id, payload_digest, request_digest) = recovery
+        .map(
+            |(admission, operation_id, payload_digest, request_digest)| {
+                (
+                    Some(admission),
+                    operation_id,
+                    payload_digest,
+                    request_digest,
+                )
+            },
+        )
+        .unwrap_or((None, "", "", ""));
+    let admission = state
+        .persistence_coordinator
+        .require_normal_or_governed_data_import_write(
+            GovernedDataImportRecoveryOwner::StateStore,
+            recovery_admission,
+            operation_id,
+            payload_digest,
+            request_digest,
+        )
+        .map_err(|error| {
+            StateProjectionError::Failed(format!("state projection finalization blocked: {error}"))
+        })?;
+    #[cfg(test)]
+    wait_at_state_projection_finalize_barrier(state).await;
+    state
+        .persistence_coordinator
+        .acquire_canonical_commit_permit(&admission)
+        .await
+        .map_err(|error| match error {
+            PersistenceGateError::AdmissionInvalidated { .. } => {
+                StateProjectionError::Deferred(error)
+            }
+            other => StateProjectionError::Failed(format!(
+                "state projection finalization blocked: {other}"
+            )),
+        })
+}
+
+#[cfg(test)]
+async fn wait_at_state_projection_finalize_barrier(state: &Arc<AppState>) {
+    let coordinator_key = Arc::as_ptr(&state.persistence_coordinator) as usize;
+    let barrier = STATE_PROJECTION_FINALIZE_BARRIERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&coordinator_key);
+    if let Some(barrier) = barrier {
+        let _ = barrier.ready.send(());
+        let _ = barrier.release.await;
+    }
+}
+
+#[cfg(test)]
+fn install_state_projection_finalize_barrier(
+    state: &Arc<AppState>,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let coordinator_key = Arc::as_ptr(&state.persistence_coordinator) as usize;
+    let replaced = STATE_PROJECTION_FINALIZE_BARRIERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            coordinator_key,
+            StateProjectionFinalizeBarrier {
+                ready: ready_tx,
+                release: release_rx,
+            },
+        );
+    assert!(
+        replaced.is_none(),
+        "state projection barrier already installed"
+    );
+    (ready_rx, release_tx)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StateProjectionReport {
     pub(crate) delivery_count: usize,
     pub(crate) status: StateProjectionStatus,
+    /// Present only for the foreground exact-event lane. This is read back
+    /// from the durable outbox after acknowledgement; it is not inferred from
+    /// a successful LifeModel write or from inclusion in the requested batch.
+    pub(crate) required_event: Option<RequiredStateProjectionProof>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequiredStateProjectionProof {
+    pub(crate) event_id: String,
+    pub(crate) delivery_state: ProjectionDeliveryState,
 }
 
 pub(crate) fn is_state_store_projected_daily_goal(goal: &DailyGoal) -> bool {
@@ -235,19 +394,102 @@ pub(crate) fn reconcile_legacy_memory_state_history_shadow(
 
 pub(crate) async fn reconcile_state_store_lifemodel_projection(
     state: &Arc<AppState>,
-) -> Result<StateProjectionReport, String> {
+) -> Result<StateProjectionReport, StateProjectionError> {
+    reconcile_state_store_lifemodel_projection_inner(state, None, None).await
+}
+
+/// Reconcile the normal bounded background batch and one required immutable
+/// event in the same projector pass. The returned report succeeds only after
+/// that exact event's durable delivery row reads back as `applied`.
+pub(crate) async fn reconcile_state_store_lifemodel_projection_for_event(
+    state: &Arc<AppState>,
+    required_event_id: &str,
+) -> Result<StateProjectionReport, StateProjectionError> {
+    reconcile_state_store_lifemodel_projection_inner(state, Some(required_event_id), None).await
+}
+
+/// Recovery-authorized form of the exact-event lane. This reuses the same
+/// projector and recovery admission; it does not introduce a second write
+/// authority or a separate projection implementation.
+pub(crate) async fn reconcile_state_store_lifemodel_projection_for_import_recovery_event(
+    state: &Arc<AppState>,
+    required_event_id: &str,
+    recovery: (&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str),
+) -> Result<StateProjectionReport, StateProjectionError> {
+    reconcile_state_store_lifemodel_projection_inner(state, Some(required_event_id), Some(recovery))
+        .await
+}
+
+async fn reconcile_state_store_lifemodel_projection_inner(
+    state: &Arc<AppState>,
+    required_event_id: Option<&str>,
+    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
+) -> Result<StateProjectionReport, StateProjectionError> {
     let store = state
         .state_store
         .as_ref()
         .ok_or_else(|| "state_store_unavailable_degraded".to_string())?;
-    let deliveries = store
-        .list_replayable_projection_deliveries(MAX_PROJECTION_BATCH)
-        .map_err(|error| format!("load state projection outbox failed: {error}"))?;
+    // A recovery admission is owner- and operation-scoped. It must never be
+    // used to drain unrelated background deliveries while global effects are
+    // blocked. Normal operation keeps its bounded batch semantics; recovery
+    // starts empty and may add only the required receipt event below.
+    let mut deliveries = if recovery.is_some() {
+        if required_event_id.is_none() {
+            return Err(
+                "governed import recovery requires one exact StateStore projection event".into(),
+            );
+        }
+        Vec::new()
+    } else {
+        store
+            .list_replayable_projection_deliveries(MAX_PROJECTION_BATCH)
+            .map_err(|error| format!("load state projection outbox failed: {error}"))?
+    };
+    if let Some(required_event_id) = required_event_id {
+        let required_deliveries = store
+            .list_replayable_projection_deliveries_for_event(required_event_id)
+            .map_err(|error| format!("load required state projection event failed: {error}"))?;
+        for required_delivery in required_deliveries {
+            if !deliveries.iter().any(|delivery| {
+                delivery.event_id == required_delivery.event_id
+                    && delivery.projection_target == required_delivery.projection_target
+            }) {
+                deliveries.push(required_delivery);
+            }
+        }
+        let required_state = store
+            .projection_delivery_state_for_event(required_event_id)
+            .map_err(|error| {
+                format!("load required state projection delivery state failed: {error}")
+            })?;
+        if required_state != ProjectionDeliveryState::Applied
+            && !deliveries
+                .iter()
+                .any(|delivery| delivery.event_id == required_event_id)
+        {
+            return Err(format!(
+                "required state projection event is not replayable: event={required_event_id}, state={required_state:?}"
+            )
+            .into());
+        }
+    }
     if deliveries.is_empty() {
-        return Ok(StateProjectionReport {
-            delivery_count: 0,
-            status: StateProjectionStatus::Applied,
-        });
+        let has_legacy_derived_alerts = !state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .map_err(|error| format!("load LifeModel compatibility view failed: {error}"))?
+            .state
+            .alerts
+            .is_empty();
+        if !has_legacy_derived_alerts {
+            return Ok(StateProjectionReport {
+                delivery_count: 0,
+                status: StateProjectionStatus::Applied,
+                required_event: required_projection_proof(store, required_event_id)?,
+            });
+        }
     }
     // Building the compatibility model outside LifeModelWriteGateway is safe
     // only with compare-and-swap. Concurrent state commits or another
@@ -274,20 +516,37 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
             .goals
             .daily
             .extend(assets.iter().map(projected_daily_goal));
+        // Product alerts are derived on read from canonical StateStore
+        // history plus LifeModel threshold configuration. Legacy Builder
+        // alerts were persisted output and must be removed by this one exact,
+        // auditable compatibility projector rather than kept as stale truth.
+        model.state.alerts.clear();
 
-        projection_result =
+        let caller_context = LifeModelMaterializerCallerContext::new(
+            STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID,
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
+        );
+        projection_result = if let Some(recovery) = recovery {
+            crate::life_model_write_gateway::persist_life_model_with_gateway_expected_for_import_recovery(
+                state,
+                model,
+                false,
+                caller_context,
+                Some(&expected_hash),
+                recovery,
+            )
+            .await
+        } else {
             crate::life_model_write_gateway::persist_life_model_with_gateway_expected(
                 state,
                 model,
                 false,
-                LifeModelMaterializerCallerContext::new(
-                    "state_store_daily_task_compatibility_projection",
-                    LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                    LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-                ),
+                caller_context,
                 Some(&expected_hash),
             )
-            .await;
+            .await
+        };
         match projection_result.as_ref() {
             Ok(_) => break,
             Err(error) if error == "LifeModel changed after required pre-change snapshot" => {
@@ -298,6 +557,7 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
     }
     match projection_result {
         Ok(_) => {
+            let _commit_permit = acquire_state_projection_finalize_permit(state, recovery).await?;
             for delivery in &deliveries {
                 store
                     .mark_projection_applied(&delivery.event_id)
@@ -306,9 +566,22 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
             Ok(StateProjectionReport {
                 delivery_count: deliveries.len(),
                 status: StateProjectionStatus::Applied,
+                required_event: required_projection_proof(store, required_event_id)?,
             })
         }
         Err(error) => {
+            let _commit_permit = acquire_state_projection_finalize_permit(state, recovery)
+                .await
+                .map_err(|permit_error| match permit_error {
+                    StateProjectionError::Deferred(error) => {
+                        StateProjectionError::Deferred(error)
+                    }
+                    StateProjectionError::Failed(permit_error) => StateProjectionError::Failed(
+                        format!(
+                            "state projection failed ({error}); degraded receipt blocked: {permit_error}"
+                        ),
+                    ),
+                })?;
             for delivery in &deliveries {
                 if let Err(mark_error) = store.mark_projection_degraded(
                     &delivery.event_id,
@@ -316,18 +589,46 @@ pub(crate) async fn reconcile_state_store_lifemodel_projection(
                 ) {
                     return Err(format!(
                         "state projection failed ({error}); degraded receipt failed: {mark_error}"
-                    ));
+                    )
+                    .into());
                 }
             }
-            Err(format!("state compatibility projection failed: {error}"))
+            Err(format!("state compatibility projection failed: {error}").into())
         }
     }
+}
+
+fn required_projection_proof(
+    store: &StateStore,
+    required_event_id: Option<&str>,
+) -> Result<Option<RequiredStateProjectionProof>, String> {
+    let Some(required_event_id) = required_event_id else {
+        return Ok(None);
+    };
+    let delivery_state = store
+        .projection_delivery_state_for_event(required_event_id)
+        .map_err(|error| {
+            format!("verify required state projection delivery state failed: {error}")
+        })?;
+    if delivery_state != ProjectionDeliveryState::Applied {
+        return Err(format!(
+            "required state projection event was not applied: event={required_event_id}, state={delivery_state:?}"
+        ));
+    }
+    Ok(Some(RequiredStateProjectionProof {
+        event_id: required_event_id.to_string(),
+        delivery_state,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use openlife_core::life_model::{LifeModel, TimeBlock};
+    use openlife_core::persistence_outbox::ProjectionDeliveryState;
+    use openlife_core::state_store::{
+        CreateDailyTaskCommand, StatePrivacyClass, StateRisk, StateSensitivity, StateSourceKind,
+    };
 
     #[test]
     fn legacy_yaml_shadow_candidates_are_lossless_and_exclude_statestore_projection() {
@@ -375,6 +676,416 @@ mod tests {
         assert_eq!(
             candidates[0].legacy_operation_digest.as_deref(),
             Some("legacy-digest")
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_projector_clears_legacy_persisted_alerts_without_bumping_metadata() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut model = state.life_model_manager.lock().await.load().unwrap();
+        reconcile_and_import_legacy_yaml_daily_tasks(
+            state.state_store.as_ref().unwrap(),
+            &model,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        reconcile_state_store_lifemodel_projection(&state)
+            .await
+            .unwrap();
+        model = state.life_model_manager.lock().await.load().unwrap();
+        model.metadata.version = "7.4.2".into();
+        model.metadata.updated_at = "2026-07-16T00:00:00Z".into();
+        model
+            .state
+            .alerts
+            .push(openlife_core::life_model::StateAlert {
+                dimension_name: "legacy-builder".into(),
+                message: "persisted derived output".into(),
+                ..Default::default()
+            });
+        state.life_model_manager.lock().await.save(&model).unwrap();
+
+        let report = reconcile_state_store_lifemodel_projection(&state)
+            .await
+            .expect("legacy derived alerts must have one exact cleanup owner");
+
+        assert_eq!(report.delivery_count, 0);
+        assert_eq!(report.status, StateProjectionStatus::Applied);
+        let after = state.life_model_manager.lock().await.load().unwrap();
+        assert!(after.state.alerts.is_empty());
+        assert_eq!(after.metadata.version, "7.4.2");
+        assert_eq!(after.metadata.updated_at, "2026-07-16T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn exact_event_projector_applies_required_delivery_outside_bounded_batch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        let store = state.state_store.as_ref().unwrap();
+        reconcile_and_import_legacy_yaml_daily_tasks(store, &model, chrono::Utc::now()).unwrap();
+        reconcile_state_store_lifemodel_projection(&state)
+            .await
+            .unwrap();
+
+        for ordinal in 0..MAX_PROJECTION_BATCH {
+            let now = chrono::Utc::now();
+            store
+                .create_daily_task(CreateDailyTaskCommand {
+                    operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                    request_digest: None,
+                    source_message_ref: format!("conversation://projection-test/{ordinal}"),
+                    title: format!("older delivery {ordinal}"),
+                    due_at: None,
+                    created_at: now,
+                    expires_at: now + chrono::Duration::days(1),
+                    risk: StateRisk::Low,
+                    sensitivity: StateSensitivity::Internal,
+                    source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+                    confidence: 1.0,
+                    privacy_class: StatePrivacyClass::Private,
+                })
+                .unwrap();
+        }
+        let now = chrono::Utc::now();
+        let required = store
+            .create_daily_task(CreateDailyTaskCommand {
+                operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                request_digest: None,
+                source_message_ref: "conversation://projection-test/required".into(),
+                title: "required exact delivery".into(),
+                due_at: None,
+                created_at: now,
+                expires_at: now + chrono::Duration::days(1),
+                risk: StateRisk::Low,
+                sensitivity: StateSensitivity::Internal,
+                source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+                confidence: 1.0,
+                privacy_class: StatePrivacyClass::Private,
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .mark_projection_degraded(&required.outbox_event_id, "required_event_test_ordering")
+            .unwrap();
+
+        let bounded = store
+            .list_replayable_projection_deliveries(MAX_PROJECTION_BATCH)
+            .unwrap();
+        assert_eq!(bounded.len(), 500);
+        assert!(bounded
+            .iter()
+            .all(|delivery| delivery.event_id != required.outbox_event_id));
+
+        let report =
+            reconcile_state_store_lifemodel_projection_for_event(&state, &required.outbox_event_id)
+                .await
+                .unwrap();
+
+        assert_eq!(report.delivery_count, 501);
+        assert_eq!(report.status, StateProjectionStatus::Applied);
+        assert_eq!(
+            report.required_event,
+            Some(RequiredStateProjectionProof {
+                event_id: required.outbox_event_id.clone(),
+                delivery_state: ProjectionDeliveryState::Applied,
+            })
+        );
+        assert_eq!(
+            store
+                .projection_delivery_state_for_event(&required.outbox_event_id)
+                .unwrap(),
+            ProjectionDeliveryState::Applied
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_exact_event_does_not_ack_unrelated_pending_delivery() {
+        use openlife_core::persistence_outbox::{
+            metadata_digest, GovernedDataImportJournal, GovernedDataImportOwnerPlan,
+            GovernedDataImportOwnerStatus, GovernedDataImportOwnerUpdate,
+            GovernedDataImportPrepare, GovernedDataImportStage,
+            GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
+        };
+
+        let isolated_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let model = isolated_state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .unwrap();
+        let store = isolated_state.state_store.as_ref().unwrap();
+        reconcile_and_import_legacy_yaml_daily_tasks(store, &model, chrono::Utc::now()).unwrap();
+        reconcile_state_store_lifemodel_projection(&isolated_state)
+            .await
+            .unwrap();
+
+        let create_task = |title: &str| {
+            let now = chrono::Utc::now();
+            store
+                .create_daily_task(CreateDailyTaskCommand {
+                    operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                    request_digest: None,
+                    source_message_ref: format!(
+                        "conversation://projection-recovery-test/{}",
+                        uuid::Uuid::new_v4()
+                    ),
+                    title: title.into(),
+                    due_at: None,
+                    created_at: now,
+                    expires_at: now + chrono::Duration::days(1),
+                    risk: StateRisk::Low,
+                    sensitivity: StateSensitivity::Internal,
+                    source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+                    confidence: 1.0,
+                    privacy_class: StatePrivacyClass::Private,
+                })
+                .unwrap()
+        };
+        let unrelated = create_task("unrelated pending delivery");
+        let required = create_task("required recovery delivery");
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            GovernedDataImportJournal::new(directory.path().join("import-journal.db")).unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let payload_digest = metadata_digest("projection-recovery-payload");
+        let request_digest = metadata_digest("projection-recovery-request");
+        let plan_digest = |owner: &str, side: &str| {
+            metadata_digest(&format!("projection-recovery-{owner}-{side}"))
+        };
+        let prepared = journal
+            .prepare(GovernedDataImportPrepare {
+                operation_id: operation_id.clone(),
+                payload_digest: payload_digest.clone(),
+                request_digest: request_digest.clone(),
+                owners: vec![
+                    GovernedDataImportOwnerPlan {
+                        owner: "LifeModelFileStore".into(),
+                        import_target: "life_model".into(),
+                        before_digest: plan_digest("lifemodel", "before"),
+                        target_digest: plan_digest("lifemodel", "target"),
+                        item_count: 1,
+                    },
+                    GovernedDataImportOwnerPlan {
+                        owner: "StateStore".into(),
+                        import_target: "state_store".into(),
+                        before_digest: plan_digest("state", "before"),
+                        target_digest: plan_digest("state", "target"),
+                        item_count: 1,
+                    },
+                ],
+            })
+            .unwrap()
+            .receipt;
+        journal
+            .transition(
+                &operation_id,
+                GovernedDataImportStage::LifeModelApplied,
+                &[GovernedDataImportOwnerUpdate {
+                    owner: "LifeModelFileStore".into(),
+                    status: GovernedDataImportOwnerStatus::Applied,
+                }],
+                None,
+            )
+            .unwrap();
+        journal
+            .transition(
+                &operation_id,
+                GovernedDataImportStage::MemoryApplied,
+                &[],
+                None,
+            )
+            .unwrap();
+        journal
+            .transition(
+                &operation_id,
+                GovernedDataImportStage::VectorApplied,
+                &[],
+                None,
+            )
+            .unwrap();
+        let receipt = journal
+            .transition(
+                &operation_id,
+                GovernedDataImportStage::StateCommitted,
+                &[GovernedDataImportOwnerUpdate {
+                    owner: "StateStore".into(),
+                    status: GovernedDataImportOwnerStatus::Applied,
+                }],
+                None,
+            )
+            .unwrap();
+        assert_eq!(prepared.operation_id, receipt.operation_id);
+
+        let coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for expected_store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*expected_store);
+        }
+        coordinator.register_read_write("StateStore");
+        coordinator.degrade_globally(GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON);
+        coordinator.seal();
+        let token = coordinator
+            .mint_governed_data_import_recovery_admission(
+                &journal,
+                &receipt,
+                &operation_id,
+                &payload_digest,
+                &request_digest,
+            )
+            .unwrap();
+        let recovery_state = Arc::new(AppState {
+            persistence_coordinator: Arc::new(coordinator),
+            ..isolated_state.as_ref().clone()
+        });
+
+        let report = reconcile_state_store_lifemodel_projection_for_import_recovery_event(
+            &recovery_state,
+            &required.outbox_event_id,
+            (&token, &operation_id, &payload_digest, &request_digest),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.delivery_count, 1);
+        assert_eq!(
+            report.required_event,
+            Some(RequiredStateProjectionProof {
+                event_id: required.outbox_event_id.clone(),
+                delivery_state: ProjectionDeliveryState::Applied,
+            })
+        );
+        assert_eq!(
+            store
+                .projection_delivery_state_for_event(&required.outbox_event_id)
+                .unwrap(),
+            ProjectionDeliveryState::Applied
+        );
+        assert_eq!(
+            store
+                .projection_delivery_state_for_event(&unrelated.outbox_event_id)
+                .unwrap(),
+            ProjectionDeliveryState::Pending,
+            "the recovery capability must not acknowledge an unrelated delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_state_projection_ack_is_rejected_after_recovery_fence_invalidates_writes() {
+        use openlife_core::persistence_outbox::{
+            metadata_digest, GovernedDataImportJournal, GovernedDataImportOwnerPlan,
+            GovernedDataImportPrepare,
+        };
+
+        let isolated_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let model = isolated_state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .unwrap();
+        let store = isolated_state.state_store.as_ref().unwrap();
+        reconcile_and_import_legacy_yaml_daily_tasks(store, &model, chrono::Utc::now()).unwrap();
+        reconcile_state_store_lifemodel_projection(&isolated_state)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        let required = store
+            .create_daily_task(CreateDailyTaskCommand {
+                operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                request_digest: None,
+                source_message_ref: "conversation://projection-late-ack/required".into(),
+                title: "must not acknowledge after recovery starts".into(),
+                due_at: None,
+                created_at: now,
+                expires_at: now + chrono::Duration::days(1),
+                risk: StateRisk::Low,
+                sensitivity: StateSensitivity::Internal,
+                source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+                confidence: 1.0,
+                privacy_class: StatePrivacyClass::Private,
+            })
+            .unwrap();
+
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for expected_store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*expected_store);
+        }
+        coordinator.register_read_write("StateStore");
+        coordinator.seal();
+        let state = Arc::new(AppState {
+            persistence_coordinator: Arc::clone(&coordinator),
+            ..isolated_state.as_ref().clone()
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            GovernedDataImportJournal::new(directory.path().join("late-ack-journal.db")).unwrap();
+        let digest = |label: &str| metadata_digest(&format!("state-late-ack-{label}"));
+        let receipt = journal
+            .prepare(GovernedDataImportPrepare {
+                operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                payload_digest: digest("payload"),
+                request_digest: digest("request"),
+                owners: vec![
+                    GovernedDataImportOwnerPlan {
+                        owner: "LifeModelFileStore".into(),
+                        import_target: "life_model".into(),
+                        before_digest: digest("lifemodel-before"),
+                        target_digest: digest("lifemodel-target"),
+                        item_count: 1,
+                    },
+                    GovernedDataImportOwnerPlan {
+                        owner: "StateStore".into(),
+                        import_target: "state_store".into(),
+                        before_digest: digest("state-before"),
+                        target_digest: digest("state-target"),
+                        item_count: 1,
+                    },
+                ],
+            })
+            .unwrap()
+            .receipt;
+
+        let (projection_ready, release_projection) =
+            install_state_projection_finalize_barrier(&state);
+        let projection_state = Arc::clone(&state);
+        let required_event_id = required.outbox_event_id.clone();
+        let projection = tokio::spawn(async move {
+            reconcile_state_store_lifemodel_projection_for_event(
+                &projection_state,
+                &required_event_id,
+            )
+            .await
+        });
+        projection_ready
+            .await
+            .expect("projector reached the gap before StateStore acknowledgement");
+
+        let fence = coordinator
+            .acquire_governed_data_import_resolution_fence(&journal, &receipt)
+            .await
+            .expect("recovery fence enters after the LifeModel projection permit is released");
+        release_projection.send(()).unwrap();
+        drop(fence);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), projection)
+            .await
+            .expect("late projector must fail closed after the exclusive fence releases")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_deferred());
+        assert!(error
+            .to_string()
+            .contains("persistence_admission_invalidated"));
+        assert_eq!(
+            store
+                .projection_delivery_state_for_event(&required.outbox_event_id)
+                .unwrap(),
+            ProjectionDeliveryState::Pending,
+            "recovery observation must not be followed by a late durable acknowledgement"
         );
     }
 

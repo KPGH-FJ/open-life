@@ -295,10 +295,14 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 .as_ref()
                 .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
             let store = store_arc.lock().await;
-            store
-                .get_run_for_task_id(&task.id)
-                .map_err(|error| format!("load exact startup AgentRun failed: {error}"))?
-                .ok_or_else(|| format!("startup_main_chat_agent_run_missing:{}", task.id))?
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .get_run_for_task_id(&task.id)
+                    .map_err(|error| error.to_string()),
+            )
+            .map_err(|error| format!("load exact startup AgentRun failed: {error}"))?
+            .ok_or_else(|| format!("startup_main_chat_agent_run_missing:{}", task.id))?
         };
         if run.task_id != task.id {
             return Err("startup_main_chat_agent_run_task_identity_mismatch".into());
@@ -360,7 +364,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
             {
                 let failure_kind = startup_failure_kind_from_terminal(&event)?;
                 crate::main_chat_runtime_support::
-                    finalize_main_chat_task_failure_after_durable_receipt(
+                    finalize_main_chat_task_failure_after_durable_receipt_at_startup_reconciliation(
                         state,
                         failure_kind,
                         "Recovered a terminal Main Chat receipt left unprojected by the previous process.",
@@ -371,7 +375,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 true
             }
             Some(event) if event.event_type == "cancel_requested" => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -383,7 +387,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 true
             }
             Some(event) if event.event_type == "turn.interrupted" => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -401,7 +405,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 ));
             }
             None if pre_dispatch_failure_marker => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -417,17 +421,13 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                     && task.status
                     == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission =>
             {
-                let store_arc = state
-                    .agent_run_store
-                    .as_ref()
-                    .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
-                let store = store_arc.lock().await;
-                let mut waiting = run.clone();
-                waiting.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
-                waiting.finished_at = None;
-                store
-                    .update_run(&waiting)
-                    .map_err(|error| format!("project startup waiting run failed: {error}"))?;
+                crate::terminal_owner_write_gateway::project_agent_run_from_startup_task_owner(
+                    state,
+                    &run.id,
+                    &run.task_id,
+                )
+                .await
+                .map_err(|error| format!("project startup waiting run failed: {error}"))?;
                 false
             }
             None
@@ -445,7 +445,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 ));
             }
             None if run.status == openlife_core::agent::AgentRunStatus::Running => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -546,6 +546,7 @@ fn startup_lifecycle_projection_matches(
             ),
             Some("blocked") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Blocked),
             Some("failed") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed),
+            Some("interrupted") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed),
             Some("cancelled") => (AgentRunStatus::Cancelled, AgentTaskSessionStatus::Cancelled),
             _ => return Err("startup_final_delivery_status_invalid".into()),
         },
@@ -576,8 +577,9 @@ async fn startup_pre_dispatch_failure_marker_exists(
         || marker.run_id != run_id
         || marker.failure_kind
             != openlife_core::agent::main_chat_agent_v1::PRE_DISPATCH_PERSISTENCE_FAILURE_KIND
+        || error_digest_hex.is_none()
         || error_digest_hex
-            .is_none_or(|hex| hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .is_some_and(|hex| hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         return Err("startup_pre_dispatch_persistence_marker_identity_invalid".into());
     }
@@ -595,10 +597,12 @@ async fn verify_startup_terminal_projection(
             .as_ref()
             .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
         let store = store_arc.lock().await;
-        store
-            .get_run(run_id)
-            .map_err(|error| format!("reload startup recovered run failed: {error}"))?
-            .ok_or_else(|| format!("startup_recovered_run_missing:{run_id}"))?
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store.get_run(run_id).map_err(|error| error.to_string()),
+        )
+        .map_err(|error| format!("reload startup recovered run failed: {error}"))?
+        .ok_or_else(|| format!("startup_recovered_run_missing:{run_id}"))?
     };
     if run.task_id != task_session_id {
         return Err("startup_recovered_run_task_identity_mismatch".into());
@@ -661,34 +665,20 @@ async fn project_startup_final_delivery_receipt(
         .get("status")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "startup_final_delivery_status_missing".to_string())?;
-    {
-        let store_arc = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        let mut projected = run.clone();
-        match status {
-            "completed" => {
-                projected.status = openlife_core::agent::AgentRunStatus::Completed;
-                projected.finished_at = Some(event.created_at);
-            }
-            "completed_with_pending_items" => {
-                projected.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
-                projected.finished_at = None;
-            }
-            "blocked" | "failed" => projected.fail(openlife_core::agent::AgentRunError {
-                message: "Recovered terminal status from a durable final-delivery receipt.".into(),
-                phase: "startup_projection_recovery".into(),
-                recoverable: status == "blocked",
-            }),
-            "cancelled" => projected.cancel(),
-            _ => return Err("startup_final_delivery_status_invalid".into()),
-        }
-        store
-            .update_run(&projected)
-            .map_err(|error| format!("project startup final AgentRun failed: {error}"))?;
+    if !matches!(
+        status,
+        "completed"
+            | "completed_with_pending_items"
+            | "blocked"
+            | "failed"
+            | "interrupted"
+            | "cancelled"
+    ) {
+        return Err("startup_final_delivery_status_invalid".into());
     }
+    crate::terminal_owner_write_gateway::project_agent_run_from_startup_durable_event(state, event)
+        .await
+        .map_err(|error| format!("project startup final AgentRun failed: {error}"))?;
     let store_arc = state
         .main_chat_agent_session_store
         .as_ref()
@@ -703,7 +693,7 @@ async fn project_startup_final_delivery_receipt(
             &task.id,
             "Recovered blocked state from durable final-delivery receipt.",
         ),
-        "failed" => store.fail_session(
+        "failed" | "interrupted" => store.fail_session(
             &task.id,
             "Recovered failed state from durable final-delivery receipt.",
         ),
@@ -1698,13 +1688,6 @@ fn bootstrap_with_secret_store(
     // Apply system configuration
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
 
-    // Initialize web search provider configuration
-    openlife_core::agent::action_executor::helpers::set_search_config(
-        &config.system.search_provider,
-        &config.system.search_provider_key,
-        &config.system.searxng_url,
-    );
-
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
     match life_model_manager.load() {
         Ok(_) => persistence.register_read_write("LifeModelFileStore"),
@@ -1724,6 +1707,52 @@ fn bootstrap_with_secret_store(
             &error.to_string(),
         ),
     }
+    let governed_data_import_journal =
+        match openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            life_model_manager.mutation_journal_path(),
+        ) {
+            Ok(journal) => {
+                let journal = Arc::new(journal);
+                match journal.recovery_requirement() {
+                    Ok(Some(receipt)) => {
+                        persistence.register_read_write("GovernedDataImportJournal");
+                        persistence.degrade_globally(
+                        openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
+                    );
+                        startup_warnings.borrow_mut().push(format!(
+                        "governed data import recovery required before effects may resume: operation={} stage={}",
+                        receipt.operation_id,
+                        receipt.stage.as_str(),
+                    ));
+                    }
+                    Ok(None) => persistence.register_read_write("GovernedDataImportJournal"),
+                    Err(error) => {
+                        persistence.register_unavailable(
+                            "GovernedDataImportJournal",
+                            "data_import_journal_read_failed",
+                            &error.to_string(),
+                        );
+                        persistence.degrade_globally("data_import_journal_unavailable");
+                        startup_warnings.borrow_mut().push(format!(
+                        "governed data-import journal could not be inspected; effects remain fail-closed: {error}"
+                    ));
+                    }
+                }
+                Some(journal)
+            }
+            Err(error) => {
+                persistence.register_unavailable(
+                    "GovernedDataImportJournal",
+                    "data_import_journal_open_failed",
+                    &error.to_string(),
+                );
+                persistence.degrade_globally("data_import_journal_unavailable");
+                startup_warnings.borrow_mut().push(format!(
+                "governed data-import journal could not be opened; effects remain fail-closed: {error}"
+            ));
+                None
+            }
+        };
 
     let db_path = data_dir.join("memory.db");
     let memory_store = init_store(
@@ -2745,6 +2774,7 @@ fn bootstrap_with_secret_store(
 
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
+        governed_data_import_journal,
         config: Arc::new(Mutex::new(config)),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
@@ -3151,6 +3181,131 @@ mod tests {
             self.values.lock().unwrap().remove(secret_ref);
             Ok(())
         }
+    }
+
+    fn seed_governed_import_journal(
+        data_dir: &Path,
+    ) -> (
+        openlife_core::persistence_outbox::GovernedDataImportJournal,
+        String,
+        String,
+    ) {
+        let manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
+        let journal = openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            manager.mutation_journal_path(),
+        )
+        .unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let owner = "LifeModelFileStore".to_string();
+        journal
+            .prepare(
+                openlife_core::persistence_outbox::GovernedDataImportPrepare {
+                    operation_id: operation_id.clone(),
+                    payload_digest: openlife_core::persistence_outbox::metadata_digest(
+                        "bootstrap data import payload",
+                    ),
+                    request_digest: openlife_core::persistence_outbox::metadata_digest(
+                        "bootstrap governed request",
+                    ),
+                    owners: vec![
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
+                            owner: owner.clone(),
+                            import_target: "life_model".into(),
+                            before_digest: openlife_core::persistence_outbox::metadata_digest(
+                                "bootstrap before",
+                            ),
+                            target_digest: openlife_core::persistence_outbox::metadata_digest(
+                                "bootstrap target",
+                            ),
+                            item_count: 1,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        (journal, operation_id, owner)
+    }
+
+    #[test]
+    fn startup_fails_closed_when_governed_data_import_requires_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_journal, operation_id, _owner) = seed_governed_import_journal(directory.path());
+
+        let result = bootstrap_with_secret_store_for_test(
+            directory.path().to_path_buf(),
+            &TestSecretStore::default(),
+        );
+        let health = result.state.persistence_coordinator.snapshot();
+        assert!(result.state.governed_data_import_journal.is_some());
+        assert!(health.global_reason_codes.iter().any(|reason| {
+            reason
+                == openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON
+        }));
+        assert!(!health.canonical_writes_allowed);
+        assert!(!health.provider_dispatch_allowed);
+        assert!(!health.tool_dispatch_allowed);
+        assert!(result.state.startup_warnings.iter().any(|warning| {
+            warning.contains(&operation_id) && warning.contains("stage=prepared")
+        }));
+    }
+
+    #[test]
+    fn startup_accepts_terminal_governed_data_import_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let (journal, operation_id, owner) = seed_governed_import_journal(directory.path());
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::Compensated,
+                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
+                    owner,
+                    status:
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Compensated,
+                }],
+                Some(&openlife_core::persistence_outbox::metadata_digest(
+                    "no owner effect was committed",
+                )),
+            )
+            .unwrap();
+        drop(journal);
+
+        let result = bootstrap_with_secret_store_for_test(
+            directory.path().to_path_buf(),
+            &TestSecretStore::default(),
+        );
+        let health = result.state.persistence_coordinator.snapshot();
+        assert!(result.state.governed_data_import_journal.is_some());
+        assert!(!health.global_reason_codes.iter().any(|reason| {
+            reason
+                == openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON
+        }));
+        assert!(!result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("governed data import recovery required")));
+    }
+
+    #[test]
+    fn governed_import_journal_open_failure_has_no_runtime_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = LifeModelManager::new(directory.path().join("life-model").join("current"));
+        std::fs::create_dir_all(manager.mutation_journal_path()).unwrap();
+
+        let result = bootstrap_with_secret_store_for_test(
+            directory.path().to_path_buf(),
+            &TestSecretStore::default(),
+        );
+        let health = result.state.persistence_coordinator.snapshot();
+
+        assert!(result.state.governed_data_import_journal.is_none());
+        assert!(health
+            .global_reason_codes
+            .iter()
+            .any(|reason| reason == "data_import_journal_unavailable"));
+        assert!(!health.canonical_writes_allowed);
+        assert!(!health.provider_dispatch_allowed);
+        assert!(!health.tool_dispatch_allowed);
     }
 
     fn d057_key_config(epoch: u64) -> openlife_core::mcp_audit::AuditKeyConfig {
@@ -4098,10 +4253,392 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_never_completes_open_provider_consent_epoch_from_empty_action_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let preparation = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        {
+            let manager = preparation.state.life_model_manager.lock().await;
+            let heuristic_store = preparation.state.heuristic_store.lock().await;
+            let registry = openlife_core::agent::HSAssetAuthorityRegistry::new(
+                manager.hs_asset_authority_registry_path(),
+            )
+            .expect("restart test HS authority registry");
+            let revision = registry
+                .authority(openlife_core::agent::HSAssetCategory::CollaborationGuidance)
+                .expect("restart test HS authority")
+                .revision;
+            let scenario = registry
+                .record_product_scenario(
+                    openlife_core::agent::HSAssetCategory::CollaborationGuidance,
+                    revision,
+                    "test-fixture:provider-consent-restart",
+                    openlife_core::agent::HSAssetOwner::AcceptedHsStore,
+                    &[openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.into()],
+                    openlife_core::agent::digest_string("provider-consent-restart-runtime-audit"),
+                )
+                .expect("restart test product receipt shape");
+            let model = manager.load().expect("restart test LifeModel");
+            let report = openlife_core::agent::complete_collaboration_guidance_cutover(
+                &registry,
+                &model,
+                &heuristic_store,
+                &scenario,
+            )
+            .expect("restart test HS cutover fixture");
+            manager
+                .save_hs_compatibility_view(&report.projection.yaml)
+                .expect("restart test HS compatibility view");
+        }
+        drop(preparation);
+
+        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        assert!(first.state.startup_warnings.is_empty());
+        first.state.persistence_coordinator.seal();
+
+        let mut config = first.state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = "http://127.0.0.1:9/v1".into();
+        config.llm.openai_key = "sk-provider-restart-test".into();
+        config.llm.chat_model = "gpt-provider-restart-test".into();
+        config.prefer_local_model = false;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        first.state.replace_provider_runtime_config(config).await;
+
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let initial = crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(&first.state)
+            .run_buffered(crate::main_chat_turn_runtime::OpenLifeTurnInput {
+                operation_id: operation_id.clone(),
+                session_id: "provider-consent-restart-chat".into(),
+                messages: vec![openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: "Draft a concise roadshow opening.".into(),
+                }],
+                selected_skill_id: None,
+                stream_mode: crate::main_chat_turn_runtime::MainChatTurnStreamMode::Buffered,
+            })
+            .await
+            .expect("initial provider turn stages consent");
+        let proposal_id = initial.terminal.proposals[0]
+            .strip_prefix("proposal:")
+            .unwrap_or(&initial.terminal.proposals[0])
+            .to_string();
+        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &first.state)
+            .await
+            .expect("accept exact provider consent");
+
+        let waiting_session = first
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load waiting task")
+            .expect("waiting task exists");
+        let replay_admission = crate::terminal_owner_write_gateway::issue_terminal_owner_provider_consent_replay_admission(
+            &first.state,
+            &waiting_session,
+            &proposal_id,
+        )
+        .await
+        .expect("issue exact provider replay admission");
+        let replay_epoch = first
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
+            .expect("open provider replay epoch");
+        let replay_run_id = replay_epoch.run_id().to_string();
+        assert_eq!(replay_epoch.generation(), 2);
+        let replay_start = first
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .latest_terminal_owner_replay_start(&operation_id, &replay_run_id)
+            .expect("load replay start")
+            .expect("replay start exists");
+        assert_eq!(
+            replay_start.payload["replayCause"],
+            "accepted_provider_network_consent"
+        );
+        crate::terminal_owner_write_gateway::write_task_session(
+            &first.state,
+            &operation_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::ResumeAfterResolvedBlocker(
+                format!("proposal:{proposal_id}"),
+            ),
+        )
+        .await
+        .expect("simulate continuation task activation");
+        crate::terminal_owner_write_gateway::begin_main_chat_agent_run_replay(
+            &first.state,
+            &replay_run_id,
+            &operation_id,
+        )
+        .await
+        .expect("simulate continuation run activation");
+        assert!(first
+            .state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(&operation_id)
+            .expect("list actions")
+            .is_empty());
+        drop(first);
+
+        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        assert!(
+            crate::main_chat_turn_runtime::reconcile_orphaned_openlife_replay_epoch_after_restart(
+                &restarted.state,
+                &operation_id,
+                &replay_run_id,
+            )
+            .await
+            .expect("reconcile orphaned provider continuation")
+        );
+        restarted.state.persistence_coordinator.seal();
+
+        let recovered_task = restarted
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load recovered task")
+            .expect("recovered task exists");
+        assert_eq!(
+            recovered_task.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        );
+        let final_event = restarted
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .terminal_owner_final_event(&operation_id)
+            .expect("load final")
+            .expect("final exists");
+        assert_eq!(final_event.payload["status"], "failed");
+        assert_eq!(final_event.payload["toolInvoked"], false);
+        assert_eq!(final_event.payload["modelInvoked"], false);
+        assert_eq!(
+            final_event.payload["providerInvocationStatus"],
+            "not_attempted"
+        );
+        assert_eq!(final_event.payload["requiresProvider"], true);
+        assert_eq!(final_event.payload["requiresToolLoop"], false);
+        let events = restarted
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list recovered events");
+        let restart_failure = events
+            .iter()
+            .find(|event| event.source == "bootstrap.orphan_open_replay_epoch")
+            .expect("startup failure receipt exists");
+        assert_eq!(
+            restart_failure.payload["providerAttemptState"],
+            "not_attempted"
+        );
+        assert_eq!(
+            restart_failure.payload["remoteProviderState"],
+            "not_attempted"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_projects_interrupted_final_delivery_to_failed_run_and_task_at_event_time() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, MainChatAgentStrategy,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let chat_session_id = format!("restart-interrupted-final:{operation_id}");
+        let user_goal = "Recover an interrupted final delivery without inventing cancellation.";
+        first
+            .state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session(&chat_session_id, "Interrupted restart fixture")
+            .unwrap();
+        let task = first
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_session_with_id(
+                operation_id.clone(),
+                AgentTaskSessionDraft {
+                    chat_session_id: chat_session_id.clone(),
+                    user_goal: user_goal.into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                },
+            )
+            .unwrap();
+        let canonical_message = first
+            .state
+            .memory_store
+            .lock()
+            .await
+            .save_message_idempotent_with_proof(
+                &chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: user_goal.into(),
+                },
+                &operation_id,
+            )
+            .unwrap();
+        let admission = {
+            let store = first
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .bind_session_canonical_user_message(
+                    &task.id,
+                    &canonical_message.receipt().canonical_ref,
+                    user_goal,
+                )
+                .unwrap();
+            store
+                .issue_terminal_owner_epoch_admission(&task.id, &operation_id, canonical_message)
+                .unwrap()
+        };
+        let mut run = openlife_core::agent::AgentRun::new_chat_run(&chat_session_id, user_goal);
+        run.id = operation_id.clone();
+        run.task_id = task.id.clone();
+        first
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        let head = first
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&task.id)
+            .unwrap()
+            .unwrap();
+        let interrupted_event = {
+            let event_store = first
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            let epoch = event_store
+                .open_terminal_owner_epoch_from_admission(admission)
+                .unwrap();
+            event_store
+                .begin_terminal_owner_seal(&task.id, &run.id, epoch.generation())
+                .unwrap();
+            event_store
+                .append_terminal_final_and_seal(
+                    crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                        task_session_id: task.id.clone(),
+                        run_id: run.id.clone(),
+                        epoch_generation: epoch.generation(),
+                        delivery_id: format!("interrupted-final:{}", run.id),
+                        expected_task_owner_revision: head.revision(),
+                        expected_task_owner_digest: head.digest().to_string(),
+                        status: "interrupted".into(),
+                    },
+                )
+                .unwrap()
+        };
+        drop(first);
+
+        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        assert_eq!(
+            reconcile_startup_orphaned_main_chat_runs(&restarted.state)
+                .await
+                .expect("restart projects exact interrupted final delivery"),
+            1
+        );
+        let recovered_run = restarted
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered_run.status,
+            openlife_core::agent::AgentRunStatus::Failed
+        );
+        assert_eq!(
+            recovered_run.finished_at,
+            Some(interrupted_event.created_at)
+        );
+        let recovered_task = restarted
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_session(&task.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered_task.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn restart_repairs_both_directions_of_partial_terminal_projection() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
         let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        // Seed the durable terminal through the same release-like admission
+        // used by normal product effects. The restart below is the only phase
+        // that may use startup reconciliation while the coordinator is still
+        // Initializing.
+        first.state.persistence_coordinator.seal();
         let (run_terminal_task_running, run_terminal_id) =
             seed_failed_main_chat_owner_fixture(&first.state, "restart-run-terminal").await;
         let (run_running_task_terminal, task_terminal_run_id) =

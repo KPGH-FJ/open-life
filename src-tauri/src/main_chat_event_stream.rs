@@ -85,7 +85,7 @@ impl TerminalOwnerSealState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct TerminalOwnerEpoch {
     epoch_id: String,
     task_session_id: String,
@@ -143,8 +143,8 @@ impl TerminalOwnerEpoch {
 
     pub(crate) fn review_origin_proof(
         &self,
-    ) -> Option<openlife_core::agent::TerminalOwnerReviewOriginProof> {
-        self.review_origin.clone()
+    ) -> Option<&openlife_core::agent::TerminalOwnerReviewOriginProof> {
+        self.review_origin.as_ref()
     }
 }
 
@@ -652,10 +652,10 @@ impl MainChatAgentEventStore {
     pub(crate) fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(test)]
         {
-            return Self::new_with_digest_key(
+            Self::new_with_digest_key(
                 db_path,
                 MainChatEventDigestKey::from_key_material(&[0x5a; 32])?,
-            );
+            )
         }
         #[cfg(not(test))]
         {
@@ -723,32 +723,39 @@ impl MainChatAgentEventStore {
         admission: openlife_core::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission,
     ) -> Result<TerminalOwnerEpoch> {
         admission.validate()?;
+        let task_session_id = admission.task_session_id().to_string();
+        let run_id = admission.run_id().to_string();
+        let canonical_user_message_ref = admission.canonical_user_message_ref().to_string();
+        let canonical_user_message_digest = admission.canonical_user_message_digest().to_string();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = select_terminal_owner_epoch(&tx, admission.task_session_id())?;
         if let Some(mut existing) = existing {
-            let stored_admission_id = tx.query_row(
-                "SELECT admission_id FROM terminal_owner_epochs WHERE epoch_id = ?1",
+            if existing.state != TerminalOwnerSealState::Open {
+                anyhow::bail!("terminal_owner_review_origin_epoch_not_open");
+            }
+            let (stored_admission_id, stored_canonical_store_identity) = tx.query_row(
+                "SELECT admission_id, canonical_store_identity
+                 FROM terminal_owner_epochs WHERE epoch_id = ?1",
                 [&existing.epoch_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?;
             if existing.run_id != admission.run_id()
                 || stored_admission_id != admission.admission_id()
                 || existing.canonical_user_message_ref != admission.canonical_user_message_ref()
                 || existing.canonical_user_message_digest
                     != admission.canonical_user_message_digest()
+                || stored_canonical_store_identity != admission.canonical_store_identity()
             {
                 anyhow::bail!("terminal_owner_epoch_admission_conflict");
             }
             existing.replayed = true;
-            existing.review_origin = Some(
-                openlife_core::agent::TerminalOwnerReviewOriginProof::from_epoch_admission(
-                    &admission,
-                    &existing.epoch_id,
-                    existing.generation,
-                )?,
-            );
             tx.commit()?;
+            existing.review_origin = Some(issue_opened_epoch_review_origin(
+                admission,
+                existing.epoch_id.clone(),
+                existing.generation,
+            )?);
             return Ok(existing);
         }
         let epoch_id = format!("terminal-epoch:{}", uuid::Uuid::new_v4());
@@ -770,19 +777,16 @@ impl MainChatAgentEventStore {
                 now,
             ],
         )?;
-        let review_origin =
-            openlife_core::agent::TerminalOwnerReviewOriginProof::from_epoch_admission(
-                &admission, &epoch_id, 1,
-            )?;
         tx.commit()?;
+        let review_origin = issue_opened_epoch_review_origin(admission, epoch_id.clone(), 1)?;
         Ok(TerminalOwnerEpoch {
             epoch_id,
-            task_session_id: admission.task_session_id().to_string(),
-            run_id: admission.run_id().to_string(),
+            task_session_id,
+            run_id,
             generation: 1,
             state: TerminalOwnerSealState::Open,
-            canonical_user_message_ref: admission.canonical_user_message_ref().to_string(),
-            canonical_user_message_digest: admission.canonical_user_message_digest().to_string(),
+            canonical_user_message_ref,
+            canonical_user_message_digest,
             final_event_id: None,
             final_event_payload_digest: None,
             replayed: false,
@@ -796,6 +800,55 @@ impl MainChatAgentEventStore {
     ) -> Result<Option<TerminalOwnerEpoch>> {
         let conn = self.lock_conn()?;
         select_terminal_owner_epoch(&conn, task_session_id)
+    }
+
+    /// Re-read the durable epoch immediately before a typed Review relation is
+    /// submitted. A proof issued while the epoch was Open is not authority if
+    /// sealing won the race before ProposalStore admission.
+    pub(crate) fn revalidate_open_review_origin(
+        &self,
+        origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
+    ) -> Result<()> {
+        origin.validate()?;
+        let conn = self.lock_conn()?;
+        let row = conn
+            .query_row(
+                "SELECT epoch_id, task_session_id, run_id, generation, state,
+                        admission_id, canonical_user_message_ref,
+                        canonical_user_message_digest, canonical_store_identity
+                 FROM terminal_owner_epochs WHERE task_session_id = ?1",
+                [origin.task_session_id()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("terminal_owner_review_origin_epoch_missing")?;
+        let generation =
+            u64::try_from(row.3).context("terminal owner review origin generation invalid")?;
+        if row.0 != origin.epoch_id()
+            || row.1 != origin.task_session_id()
+            || row.2 != origin.run_id()
+            || generation != origin.epoch_generation()
+            || row.4 != TerminalOwnerSealState::Open.as_str()
+            || row.5 != origin.admission_id()
+            || row.6 != origin.canonical_user_message_ref()
+            || row.7 != origin.canonical_user_message_digest()
+            || row.8 != origin.canonical_store_identity()
+        {
+            anyhow::bail!("terminal_owner_review_origin_not_current_open_epoch");
+        }
+        Ok(())
     }
 
     pub(crate) fn terminal_owner_final_event(
@@ -900,7 +953,11 @@ impl MainChatAgentEventStore {
                     "status": "started",
                     "requestId": admission.action_id(),
                     "policyRoute": "governed_replay_successor",
-                    "selectedStrategy": "react_tool_execution",
+                    "selectedStrategy": match admission.cause() {
+                        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => "direct_answer",
+                        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry
+                        | crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission => "react_tool_execution",
+                    },
                     "replayCause": admission.cause().as_str(),
                     "replayCauseRef": admission.cause_ref(),
                     "rawUserTextStored": false,
@@ -1016,6 +1073,44 @@ impl MainChatAgentEventStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub(crate) fn terminal_owner_staged_final_status(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let Some(epoch) = select_terminal_owner_epoch(&conn, task_session_id)? else {
+            return Ok(None);
+        };
+        let payload_json = conn
+            .query_row(
+                "SELECT payload_json FROM terminal_owner_final_payloads WHERE epoch_id = ?1",
+                [epoch.epoch_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload_json) = payload_json else {
+            return Ok(None);
+        };
+        let payload: Value = serde_json::from_str(&payload_json)?;
+        let status = payload
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| {
+                matches!(
+                    *status,
+                    "completed"
+                        | "completed_with_pending_items"
+                        | "waiting_permission"
+                        | "blocked"
+                        | "failed"
+                        | "interrupted"
+                        | "cancelled"
+                )
+            })
+            .context("terminal_owner_staged_final_status_invalid")?;
+        Ok(Some(status.to_string()))
     }
 
     pub(crate) fn append_terminal_final_and_seal(
@@ -2806,6 +2901,68 @@ impl MainChatAgentEventStore {
         self.latest_provider_event_for_run_matching(run_id, None)
     }
 
+    pub(crate) fn latest_terminal_owner_replay_start(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<MainChatAgentDurableEvent>> {
+        let conn = self.lock_conn()?;
+        validate_task_sequence_domain(&conn, task_session_id)?;
+        validate_task_run_binding(&conn, task_session_id)?;
+        conn.query_row(
+            "SELECT event_id, task_session_id, run_id, sequence, event_type, object_type,
+                    object_id, created_at, source, payload_digest, payload_json, backfilled,
+                    payload_minimized_version
+             FROM main_chat_agent_events
+             WHERE task_session_id = ?1 AND run_id = ?2
+               AND event_type = 'turn_started'
+               AND source = 'openlife_turn_runtime.replay_epoch'
+               AND backfilled = 0
+             ORDER BY sequence DESC
+             LIMIT 1",
+            params![task_session_id, run_id],
+            row_to_event,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Return the latest adapter-edge provider fact observed after one exact
+    /// replay start. This is a startup-reconciliation read only: it never
+    /// invents a provider terminal when the last durable fact is `started`.
+    pub(crate) fn latest_provider_event_after_replay_start(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        replay_start_sequence: u64,
+    ) -> Result<Option<MainChatAgentDurableEvent>> {
+        let conn = self.lock_conn()?;
+        validate_task_sequence_domain(&conn, task_session_id)?;
+        validate_task_run_binding(&conn, task_session_id)?;
+        validate_persisted_provider_lifecycles_for_task(&conn, task_session_id)?;
+        let replay_start_sequence = i64::try_from(replay_start_sequence)
+            .map_err(|_| MainChatAgentEventStoreFault::SequenceExhausted)?;
+        conn.query_row(
+            "SELECT event_id, task_session_id, run_id, sequence, event_type, object_type,
+                    object_id, created_at, source, payload_digest, payload_json, backfilled,
+                    payload_minimized_version
+             FROM main_chat_agent_events
+             WHERE task_session_id = ?1 AND run_id = ?2 AND sequence > ?3
+               AND event_type IN ('provider.started', 'provider.completed', 'provider.failed', 'provider.remote_unknown')
+               AND backfilled = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM main_chat_agent_event_fact_quarantine quarantine
+                   WHERE quarantine.event_id = main_chat_agent_events.event_id
+               )
+             ORDER BY sequence DESC
+             LIMIT 1",
+            params![task_session_id, run_id, replay_start_sequence],
+            row_to_event,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub(crate) fn latest_completed_provider_event_for_run(
         &self,
         run_id: &str,
@@ -3429,7 +3586,7 @@ fn migrate_legacy_event_identities(
     {
         return Ok(());
     }
-    if current_version < 0 || current_version > DURABLE_EVENT_IDENTITY_VERSION {
+    if !(0..=DURABLE_EVENT_IDENTITY_VERSION).contains(&current_version) {
         return Err(MainChatAgentEventStoreFault::CorruptRow {
             field: "event_identity_version",
             reason: "unsupported",
@@ -3936,16 +4093,19 @@ fn collect_provider_tasks_missing_policy_evidence(
         let (task_session_id, object_id, payload_json) = row?;
         let payload = serde_json::from_str::<Value>(&payload_json).ok();
         let object = payload.as_ref().and_then(Value::as_object);
-        let missing = object.is_none_or(|object| {
-            REQUIRED_POLICY_FIELDS
-                .iter()
-                .any(|field| !object.contains_key(*field))
-                || object.get("rawLifeModelIncluded").and_then(Value::as_bool) != Some(false)
-                || object
-                    .get("rawUnboundedMemoryIncluded")
-                    .and_then(Value::as_bool)
-                    != Some(false)
-        });
+        let missing = match object {
+            None => true,
+            Some(object) => {
+                REQUIRED_POLICY_FIELDS
+                    .iter()
+                    .any(|field| !object.contains_key(*field))
+                    || object.get("rawLifeModelIncluded").and_then(Value::as_bool) != Some(false)
+                    || object
+                        .get("rawUnboundedMemoryIncluded")
+                        .and_then(Value::as_bool)
+                        != Some(false)
+            }
+        };
         if missing {
             invalid
                 .entry(task_session_id)
@@ -6654,23 +6814,27 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
         .payload
         .get("declaredPayloadCategories")
         .and_then(Value::as_array);
-    if declared_payload_categories.is_none_or(|categories| {
-        categories.is_empty()
-            || categories.iter().any(|category| {
-                category.as_str().is_none_or(|value| {
-                    ![
-                        "current_user_conversation",
-                        "runtime_compiled_messages",
-                        "frozen_evaluation_input",
-                        "main_chat_react_candidate_ranking",
-                        "a2a_authenticated_user_message",
-                        "explicit_provider_probe",
-                        "privacy_policy_masked",
-                    ]
-                    .contains(&value)
+    let declared_payload_categories_valid = match declared_payload_categories {
+        None => false,
+        Some(categories) => {
+            !categories.is_empty()
+                && categories.iter().all(|category| {
+                    matches!(
+                        category.as_str(),
+                        Some(
+                            "current_user_conversation"
+                                | "runtime_compiled_messages"
+                                | "frozen_evaluation_input"
+                                | "main_chat_react_candidate_ranking"
+                                | "a2a_authenticated_user_message"
+                                | "explicit_provider_probe"
+                                | "privacy_policy_masked"
+                        )
+                    )
                 })
-            })
-    }) {
+        }
+    };
+    if !declared_payload_categories_valid {
         return Err(persisted_provider_lifecycle_unverified(
             "declared_payload_categories_invalid",
             &event.object_id,
@@ -6946,6 +7110,7 @@ enum PayloadValueSchema {
     MetadataStringArray,
     ContextReferenceArray,
     OpaqueDigestArray,
+    ToolOwnerBindingArray,
     MetadataStringArrayOrRedacted,
     ReadExecutionOrNull,
     ChildWorkflowProvenance,
@@ -6996,6 +7161,12 @@ const TURN_STARTED_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("requestId", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("policyRoute", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("selectedStrategy", PayloadValueSchema::MetadataString),
+    // Replay identity must remain queryable after payload minimization. Startup
+    // reconciliation uses this typed cause to distinguish a ToolGateway replay
+    // from a provider-consent continuation; treating an empty ActionQueue as a
+    // completed provider continuation would otherwise fabricate success.
+    PayloadFieldSchema::optional("replayCause", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::optional("replayCauseRef", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("rawUserTextStored", PayloadValueSchema::Bool),
 ];
 const TURN_TERMINAL_FIELDS: &[PayloadFieldSchema] = &[
@@ -7597,6 +7768,11 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
         PayloadValueSchema::OpaqueDigestArray,
     ),
     PayloadFieldSchema::optional("toolReceiptRefs", PayloadValueSchema::MetadataStringArray),
+    PayloadFieldSchema::optional("toolOwnerBindingsVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional(
+        "toolOwnerBindings",
+        PayloadValueSchema::ToolOwnerBindingArray,
+    ),
     PayloadFieldSchema::optional(
         "toolTerminalEventRefs",
         PayloadValueSchema::MetadataStringArray,
@@ -8382,6 +8558,9 @@ fn normalize_schema_field_value(
                 .then(|| value.clone())
                 .ok_or_else(invalid)
         }
+        Schema::ToolOwnerBindingArray => {
+            normalize_tool_owner_binding_array(value).ok_or_else(invalid)
+        }
         Schema::MetadataStringArrayOrRedacted => {
             normalize_metadata_string_array_or_redacted(value, digest_key).ok_or_else(invalid)
         }
@@ -8500,6 +8679,33 @@ fn normalize_metadata_string_array(value: &Value) -> Option<Value> {
         .map(bounded_metadata_string)
         .collect::<Option<Vec<_>>>()
         .map(Value::Array)
+}
+
+fn normalize_tool_owner_binding_array(value: &Value) -> Option<Value> {
+    const FIELDS: [&str; 4] = [
+        "actionQueueId",
+        "receiptId",
+        "terminalEventId",
+        "terminalEventDigest",
+    ];
+    let bindings = value.as_array()?;
+    if bindings.len() > MAX_METADATA_ARRAY_ITEMS {
+        return None;
+    }
+    for binding in bindings {
+        let object = binding.as_object()?;
+        if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+            return None;
+        }
+        for field in &FIELDS[..3] {
+            bounded_metadata_string(object.get(*field)?)?;
+        }
+        let digest = object.get("terminalEventDigest")?.as_str()?;
+        if digest.chars().count() > MAX_METADATA_STRING_CHARS || !is_exact_metadata_digest(digest) {
+            return None;
+        }
+    }
+    Some(value.clone())
 }
 
 fn normalize_context_reference_array(value: &Value) -> Option<Value> {
@@ -9232,6 +9438,14 @@ fn select_event_by_id(
     Ok(event)
 }
 
+fn issue_opened_epoch_review_origin(
+    admission: openlife_core::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission,
+    epoch_id: String,
+    epoch_generation: u64,
+) -> Result<openlife_core::agent::TerminalOwnerReviewOriginProof> {
+    admission.into_opened_epoch_review_origin(epoch_id, epoch_generation)
+}
+
 fn select_terminal_owner_epoch(
     conn: &Connection,
     task_session_id: &str,
@@ -9945,7 +10159,10 @@ pub(crate) async fn append_main_chat_tool_receipt_events(
     Ok(durable)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn append_main_chat_agent_runtime_event(
     state: &Arc<AppState>,
     task_session_id: impl Into<String>,
@@ -11688,7 +11905,7 @@ mod tests {
             );
         let inputs = main_chat_tool_receipt_event_inputs(
             "run-regular-tool-timeout",
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
             "openlife_turn_runtime.regular_tool_receipt",
         )
         .expect("materialize regular tool receipt inputs");
@@ -11729,7 +11946,7 @@ mod tests {
 
         let inputs = main_chat_tool_receipt_event_inputs(
             "run-regular-ambiguous-attempt",
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
             "openlife_turn_runtime.regular_tool_receipt",
         )
         .expect("materialize ambiguous regular receipt inputs");
@@ -13332,6 +13549,10 @@ mod tests {
         draft
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn synthetic_provider_pair(
         task_session_id: &str,
         run_id: &str,

@@ -468,6 +468,26 @@ fn bounded_prompt_summary(summary: &str) -> String {
     }
 }
 
+fn native_prompt_scope_count_labels(ticket: &NativePromptTicket) -> (String, String) {
+    if ticket.action_type == "data_import_overwrite"
+        && ticket.affected_count == 0
+        && ticket.target_count == 0
+    {
+        // Import preflight intentionally runs before the user-selected file is
+        // parsed. Zero would falsely claim an empty overwrite; the final
+        // native prompt is still bound to the validated payload digest and
+        // governed request through `arguments_digest`.
+        return (
+            "未在预检阶段枚举（以已校验备份内容为准）".into(),
+            "未在预检阶段枚举（最多四类 canonical owner）".into(),
+        );
+    }
+    (
+        ticket.affected_count.to_string(),
+        ticket.target_count.to_string(),
+    )
+}
+
 async fn show_native_confirmation<R: Runtime>(
     window: &tauri::WebviewWindow<R>,
     ticket: &NativePromptTicket,
@@ -475,12 +495,13 @@ async fn show_native_confirmation<R: Runtime>(
     arguments_summary: &str,
 ) -> Result<bool, AppError> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
+    let (affected_count, target_count) = native_prompt_scope_count_labels(ticket);
     let message = format!(
         "OpenLife 请求执行高风险动作。\n\n动作：{}\n范围：{}\n影响数量：{}\n目标数量：{}\n参数：{}\n\n只有此系统对话框中的确认会授权动作；网页文字和确认短语不会授权。",
         ticket.action_type,
         bounded_prompt_summary(scope_summary),
-        ticket.affected_count,
-        ticket.target_count,
+        affected_count,
+        target_count,
         bounded_prompt_summary(arguments_summary),
     );
     window
@@ -577,6 +598,25 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn data_import_native_prompt_never_describes_unparsed_scope_as_zero() {
+        let ticket = NativePromptTicket {
+            challenge_id: "danger-challenge:test".into(),
+            ticket_id: "ticket-test".into(),
+            requested_target: SINGLETON_TARGET.into(),
+            action_type: "data_import_overwrite".into(),
+            affected_count: 0,
+            target_count: 0,
+            arguments_digest: "sha256:test".into(),
+        };
+
+        let (affected, targets) = native_prompt_scope_count_labels(&ticket);
+        assert!(affected.contains("未在预检阶段枚举"));
+        assert!(targets.contains("未在预检阶段枚举"));
+        assert_ne!(affected, "0");
+        assert_ne!(targets, "0");
+    }
 
     fn test_authority() -> DangerActionGrantAuthority {
         DangerActionGrantAuthority {

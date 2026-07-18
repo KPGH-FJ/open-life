@@ -126,7 +126,7 @@ fn w131_generates_low_risk_candidates_from_graph_clusters_across_supported_domai
         assert_eq!(candidate.risk_level, RiskLevel::Low);
         assert!(candidate.proposal_required);
         assert!(candidate.candidate_only);
-        assert!(candidate.support_evidence_ids.len() >= 1);
+        assert!(!candidate.support_evidence_ids.is_empty());
         assert_eq!(candidate.linked_agent_run_ids, vec![run_id.to_string()]);
         assert!(candidate.source_cluster_id.starts_with("egc_"));
         assert_eq!(candidate.source_cluster_hash.len(), 64);

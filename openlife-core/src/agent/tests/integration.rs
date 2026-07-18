@@ -9,7 +9,8 @@
 
 use crate::agent::{
     ActionExecutionContext, ActionExecutorConfig, AgentExecutionBudget, AgentLoop, AgentLoopConfig,
-    AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind, ToolGateway,
+    AgentLoopRunRequest, AgentObservation, AgentRun, AgentRunStatus, AgentRunStore, AgentTask,
+    AgentTaskKind, ToolGateway,
 };
 use crate::layer::Layer;
 use crate::life_model::LifeModel;
@@ -84,9 +85,11 @@ fn test_agent_execution_budget_defaults() {
 /// Test 3: Budget can be customized
 #[test]
 fn test_agent_execution_budget_customization() {
-    let mut budget = AgentExecutionBudget::default();
-    budget.max_steps = 2;
-    budget.max_tool_calls = 1;
+    let budget = AgentExecutionBudget {
+        max_steps: 2,
+        max_tool_calls: 1,
+        ..Default::default()
+    };
     assert_eq!(budget.max_steps, 2);
     assert_eq!(budget.max_tool_calls, 1);
 }
@@ -140,6 +143,7 @@ fn test_action_parser_final_envelope() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -183,6 +187,7 @@ fn test_action_parser_actions_envelope() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -233,6 +238,7 @@ fn test_action_parser_direct_read_actions_keep_executor_input_shape() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -281,6 +287,7 @@ fn test_action_parser_legacy_tool_calls() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -324,6 +331,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -368,6 +376,7 @@ fn test_action_parser_no_json() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -411,6 +420,7 @@ fn test_action_parser_final_with_actions() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -501,6 +511,7 @@ fn test_max_tool_calls_stop_reason() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -546,6 +557,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -594,6 +606,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -637,6 +650,9 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
     let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
     let memory_lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
     let memory_lifecycle_retrieval_reader = memory_lifecycle_store.retrieval_reader();
+    let agent_run_store = AgentRunStore::new_in_memory().unwrap();
+    let canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
+    agent_run_store.create_run(&canonical_run).unwrap();
     memory_store
         .save_message(
             "session-multistep",
@@ -657,14 +673,15 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         memory_store: Some(&memory_store),
         memory_lifecycle_retrieval_reader: Some(&memory_lifecycle_retrieval_reader),
         proposal_store: None,
-        agent_run_store: None,
-        bound_content_receipt_issuer: None,
+        agent_run_store: Some(&agent_run_store),
+        bound_content_receipt_issuer: Some(&agent_run_store),
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -672,14 +689,20 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         ),
     };
 
+    let life_model = LifeModel::default();
+    let mut provider_observer = |_| Ok(());
     let result = loop_instance
-        .run(
-            &task,
-            &LifeModel::default(),
-            "Available tools: memory.search",
-            None,
-            privacy_engine.clone(),
-            &action_ctx,
+        .run_existing_with_provider_observer(
+            AgentLoopRunRequest::new(
+                &task,
+                &life_model,
+                "Available tools: memory.search",
+                None,
+                privacy_engine.clone(),
+                &action_ctx,
+            ),
+            canonical_run,
+            &mut provider_observer,
         )
         .await
         .unwrap();
@@ -689,7 +712,7 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
     assert_eq!(result.stop_reason, "no_tools");
     assert!(result.final_response.contains("low energy planning"));
     assert_eq!(result.run.actions.len(), 1);
-    assert_eq!(result.run.actions[0].action_type, "memory_search");
+    assert_eq!(result.run.actions[0].action_type, "memory.search");
     assert_eq!(result.run.observations.len(), 1);
     assert!(result.run.observations[0]
         .content
@@ -892,6 +915,9 @@ async fn dispatched_memory_tool_failure_has_one_failed_terminal_truth() {
     let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
     let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
     let lifecycle_reader = lifecycle_store.retrieval_reader();
+    let agent_run_store = AgentRunStore::new_in_memory().unwrap();
+    let canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
+    agent_run_store.create_run(&canonical_run).unwrap();
     let dispatch_fault = BreakLifecycleReadAfterDispatch {
         reader: lifecycle_reader.clone(),
     };
@@ -904,16 +930,23 @@ async fn dispatched_memory_tool_failure_has_one_failed_terminal_truth() {
     )
     .with_memory_store(&memory_store)
     .with_memory_lifecycle_retrieval_reader(&lifecycle_reader)
+    .with_agent_run_store(&agent_run_store)
     .with_tool_dispatch_observer(&dispatch_fault);
 
+    let life_model = LifeModel::default();
+    let mut provider_observer = |_| Ok(());
     let result = loop_instance
-        .run(
-            &task,
-            &LifeModel::default(),
-            "Available tools: memory.search",
-            None,
-            privacy_engine.clone(),
-            &action_ctx,
+        .run_existing_with_provider_observer(
+            AgentLoopRunRequest::new(
+                &task,
+                &life_model,
+                "Available tools: memory.search",
+                None,
+                privacy_engine.clone(),
+                &action_ctx,
+            ),
+            canonical_run,
+            &mut provider_observer,
         )
         .await
         .unwrap();
@@ -1005,6 +1038,9 @@ async fn agent_loop_retains_one_live_receipt_per_action_in_stable_order() {
     let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
     let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
     let lifecycle_reader = lifecycle_store.retrieval_reader();
+    let agent_run_store = AgentRunStore::new_in_memory().unwrap();
+    let canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
+    agent_run_store.create_run(&canonical_run).unwrap();
     let dispatch_fault = BreakLifecycleReadOnSecondDispatch {
         reader: lifecycle_reader.clone(),
         dispatch_count: std::sync::atomic::AtomicUsize::new(0),
@@ -1018,16 +1054,23 @@ async fn agent_loop_retains_one_live_receipt_per_action_in_stable_order() {
     )
     .with_memory_store(&memory_store)
     .with_memory_lifecycle_retrieval_reader(&lifecycle_reader)
+    .with_agent_run_store(&agent_run_store)
     .with_tool_dispatch_observer(&dispatch_fault);
 
+    let life_model = LifeModel::default();
+    let mut provider_observer = |_| Ok(());
     let result = loop_instance
-        .run(
-            &task,
-            &LifeModel::default(),
-            "Available tools: memory.search",
-            None,
-            privacy_engine.clone(),
-            &action_ctx,
+        .run_existing_with_provider_observer(
+            AgentLoopRunRequest::new(
+                &task,
+                &life_model,
+                "Available tools: memory.search",
+                None,
+                privacy_engine.clone(),
+                &action_ctx,
+            ),
+            canonical_run,
+            &mut provider_observer,
         )
         .await
         .unwrap();
@@ -1086,13 +1129,14 @@ async fn test_proposal_tool_bypass_permission_blocking() {
     // Create a temp dir as safe_path so the filesystem precheck passes
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let safe_paths = [safe_path];
 
     let ctx = ActionExecutionContext {
         registry: &registry,
         permission_store: &permission_store,
         audit_store: &audit_store,
         privacy_engine: &privacy_engine,
-        safe_paths: &[safe_path.clone()],
+        safe_paths: &safe_paths,
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
@@ -1106,6 +1150,7 @@ async fn test_proposal_tool_bypass_permission_blocking() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1186,6 +1231,7 @@ async fn test_permission_check_tool() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(
@@ -1250,6 +1296,7 @@ async fn test_memory_propose_write_creates_proposal() {
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
         a2a_outbound_authorization: None,
         action_bound_tool_permission: None,
         canonical_write_admission: Some(

@@ -79,7 +79,7 @@ fn plan_input_with_source_run(
 
 #[test]
 fn draft_plan_creates_read_only_step_for_simple_question() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let plan = service.draft_plan(&plan_input("What should I focus on today?", 4));
 
     assert_eq!(plan.steps.len(), 1);
@@ -92,7 +92,7 @@ fn draft_plan_creates_read_only_step_for_simple_question() {
 
 #[test]
 fn draft_plan_marks_write_like_intent_without_executing() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let plan = service.draft_plan(&plan_input("Create a calendar event for tomorrow.", 4));
 
     assert_eq!(plan.steps.len(), 1);
@@ -105,8 +105,8 @@ fn draft_plan_marks_write_like_intent_without_executing() {
 
 #[test]
 fn plan_step_uses_governor_before_execution() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let output = service.execute_plan(plan_input("Update my calendar.", 4), &governor);
 
     assert_eq!(output.traces.len(), 1);
@@ -120,8 +120,8 @@ fn plan_step_uses_governor_before_execution() {
 
 #[test]
 fn write_like_step_requires_proposal_and_is_not_executed() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let output = service.execute_plan(plan_input("Send an email to Alice.", 4), &governor);
 
     assert_eq!(output.traces.len(), 1);
@@ -132,8 +132,8 @@ fn write_like_step_requires_proposal_and_is_not_executed() {
 
 #[test]
 fn read_only_step_is_allowed() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let output = service.execute_plan(
         plan_input("Search my notes for project context.", 4),
         &governor,
@@ -149,8 +149,8 @@ fn read_only_step_is_allowed() {
 
 #[test]
 fn plan_execute_v1_report_summarizes_governed_vertical_slice() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let output = service.execute_plan(
         plan_input_with_source_run(
             "Search notes for Alice and then update the calendar with alice@example.com.",
@@ -178,8 +178,8 @@ fn plan_execute_v1_report_summarizes_governed_vertical_slice() {
 
 #[test]
 fn read_only_step_execution_produces_metadata_safe_observation_summary() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let output = service.execute_plan(
         plan_input(
             "Search memory for Alice's private note alice@example.com and raw draft text.",
@@ -200,11 +200,11 @@ fn read_only_step_execution_produces_metadata_safe_observation_summary() {
 
 #[test]
 fn plan_execution_respects_max_steps() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let input = plan_input("Search my notes and then create a calendar event.", 1);
 
     let plan = service.draft_plan(&input);
-    let output = service.execute_plan(input, &LifeModelGovernor::default());
+    let output = service.execute_plan(input, &LifeModelGovernor);
 
     assert_eq!(plan.steps.len(), 1);
     assert_eq!(output.plan.steps.len(), 1);
@@ -213,8 +213,8 @@ fn plan_execution_respects_max_steps() {
 
 #[test]
 fn plan_trace_is_metadata_safe() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let output = service.execute_plan(
         plan_input(
             "Search for Alice's note, alice@example.com, and send her the full draft.",
@@ -234,8 +234,8 @@ fn plan_trace_is_metadata_safe() {
 
 #[test]
 fn plan_execute_does_not_write_lifemodel_memory_or_proposal_store() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
 
     let output = service.execute_plan(plan_input("Create a new reminder.", 4), &governor);
@@ -250,8 +250,8 @@ fn plan_execute_does_not_write_lifemodel_memory_or_proposal_store() {
 
 #[test]
 fn write_intents_for_sensitive_surfaces_are_proposal_required_without_direct_apply() {
-    let service = PlanExecuteService::default();
-    let governor = LifeModelGovernor::default();
+    let service = PlanExecuteService;
+    let governor = LifeModelGovernor;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
 
     for user_text in [
@@ -283,7 +283,7 @@ fn write_intents_for_sensitive_surfaces_are_proposal_required_without_direct_app
 
 #[test]
 fn weekly_planning_product_contract_is_ready_for_clean_plan_draft() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
         &plan_input(
@@ -406,7 +406,7 @@ fn plan_execute_product_contract_debug_output_excludes_raw_content() {
 #[test]
 fn plan_execute_session_store_creates_gets_and_lists_draft_sessions() {
     let store = PlanExecuteSessionStore::new_in_memory().unwrap();
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
         &plan_input(
@@ -440,7 +440,7 @@ fn plan_execute_session_store_creates_gets_and_lists_draft_sessions() {
 
 #[test]
 fn draft_session_can_be_edited_and_finalized_but_not_after_finalization() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
         &plan_input(
@@ -486,7 +486,7 @@ fn draft_session_can_be_edited_and_finalized_but_not_after_finalization() {
 
 #[test]
 fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_like_steps() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
@@ -515,25 +515,13 @@ fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_li
         .clone();
 
     let read_result = session
-        .execute_step(
-            &read_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&read_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
     let write_result = session
-        .execute_step(
-            &write_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&write_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
     let duplicate_write_result = session
-        .execute_step(
-            &write_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&write_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
 
     assert_eq!(read_result.step_status, PlanStepStatus::Executed);
@@ -550,7 +538,7 @@ fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_li
 
 #[test]
 fn phase4_plan_execute_returns_reused_review_workflow_outcome_id() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
     let fixed_session_id = "phase4-plan-outcome-session";
 
@@ -584,11 +572,7 @@ fn phase4_plan_execute_returns_reused_review_workflow_outcome_id() {
         .step_id
         .clone();
     let first_result = first_session
-        .execute_step(
-            &write_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&write_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
     let reused_id = first_result
         .linked_proposal_id
@@ -597,11 +581,7 @@ fn phase4_plan_execute_returns_reused_review_workflow_outcome_id() {
 
     let mut second_session = build_finalized_session("phase4-plan-run-b");
     let second_result = second_session
-        .execute_step(
-            &write_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&write_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
 
     assert_eq!(second_result.linked_proposal_id, Some(reused_id.clone()));
@@ -615,7 +595,7 @@ fn phase4_plan_execute_returns_reused_review_workflow_outcome_id() {
 
 #[test]
 fn phase_c_write_like_steps_are_proposal_first_without_direct_writes() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
@@ -637,11 +617,7 @@ fn phase_c_write_like_steps_are_proposal_first_without_direct_writes() {
         .clone();
 
     let write_result = session
-        .execute_step(
-            &write_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&write_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
 
     assert_eq!(write_result.step_status, PlanStepStatus::RequiresProposal);
@@ -672,7 +648,7 @@ fn phase_c_write_like_steps_are_proposal_first_without_direct_writes() {
 
 #[test]
 fn phase_c_cancel_marks_remaining_steps_cancelled_with_evidence() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
@@ -693,11 +669,7 @@ fn phase_c_cancel_marks_remaining_steps_cancelled_with_evidence() {
         .step_id
         .clone();
     session
-        .execute_step(
-            &read_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&read_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
     let cancel_revision = session.revision;
 
@@ -732,7 +704,7 @@ fn phase_c_cancel_marks_remaining_steps_cancelled_with_evidence() {
 
 #[test]
 fn phase_c_review_summary_separates_evidence_backed_outcomes() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
@@ -753,11 +725,7 @@ fn phase_c_review_summary_separates_evidence_backed_outcomes() {
         .step_id
         .clone();
     session
-        .execute_step(
-            &read_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&read_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
     let write_step_id = session
         .steps
@@ -767,11 +735,7 @@ fn phase_c_review_summary_separates_evidence_backed_outcomes() {
         .step_id
         .clone();
     session
-        .execute_step(
-            &write_step_id,
-            &LifeModelGovernor::default(),
-            &proposal_store,
-        )
+        .execute_step(&write_step_id, &LifeModelGovernor, &proposal_store)
         .unwrap();
     let remaining_step_id = session
         .steps
@@ -816,7 +780,7 @@ fn phase_c_review_summary_separates_evidence_backed_outcomes() {
 
 #[test]
 fn phase_c_plan_session_tracks_revisions_step_links_and_skip_evidence() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let proposal_store = ProposalStore::new_in_memory().unwrap();
     let contract = PlanExecuteProductContract::weekly_planning();
     let draft = service.draft_product_plan(
@@ -881,7 +845,7 @@ fn phase_c_plan_session_tracks_revisions_step_links_and_skip_evidence() {
     let stale_execute = session.execute_step_at_revision(
         &first_step_id,
         confirmed_revision - 1,
-        &LifeModelGovernor::default(),
+        &LifeModelGovernor,
         &proposal_store,
     );
     assert!(stale_execute.unwrap_err().to_string().contains("stale"));
@@ -890,7 +854,7 @@ fn phase_c_plan_session_tracks_revisions_step_links_and_skip_evidence() {
         .execute_step_at_revision(
             &first_step_id,
             confirmed_revision,
-            &LifeModelGovernor::default(),
+            &LifeModelGovernor,
             &proposal_store,
         )
         .unwrap();

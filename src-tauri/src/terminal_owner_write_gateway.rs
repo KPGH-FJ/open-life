@@ -1,30 +1,114 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use openlife_core::agent::main_chat_agent_v1::{
-    ActionQueueStore, ActionReplayClaim, AgentTaskSession, AgentTaskSessionStore, ExecutionAction,
-    ExecutionPolicyDecision, ExecutionQueueStatus, ExecutionTranscriptEntry,
-    ExecutionTranscriptEntryDraft, QueuedExecutionAction, VerifiedTerminalOwnerTransitionReceipt,
+    ActionQueueStore, ActionReplayClaim, AgentTaskSession, AgentTaskSessionStatus,
+    AgentTaskSessionStore, ExecutionAction, ExecutionPolicyDecision, ExecutionQueueStatus,
+    ExecutionTranscriptEntry, ExecutionTranscriptEntryDraft, QueuedExecutionAction,
+    VerifiedTerminalOwnerTransitionReceipt,
 };
 use openlife_core::agent::proposal_store::TerminalOwnerOriginBinding;
 use openlife_core::agent::review_workflow::{
     ClaimedReviewAcceptanceSnapshot, MaterializedReviewAcceptanceSnapshot,
 };
 use openlife_core::agent::{
-    AgentRun, MemoryLifecycleAcceptanceInput, MemoryLifecycleStore, ProposalStore, ProposalType,
-    ReviewWorkflow,
+    AgentAction, AgentLoopPhase, AgentLoopStatusUpdate, AgentObservation, AgentRun, AgentRunError,
+    AgentRunReviewRelationProjectionLane, AgentRunReviewRelationProjectionOutcome, AgentRunStatus,
+    AgentRunStore, CanonicalWriteAdmission, CanonicalWriteAdmissionRequest, ContextSummary,
+    DurableWriteRequest, HSBehaviorCheckSummary, HSSelectionAudit, MemoryLifecycleAcceptanceInput,
+    MemoryLifecycleStore, ModelRouteTrace, PlanExecuteSession, PlanExecuteSessionStatus,
+    ProposalStatus, ProposalStore, ProposalTerminalRelationKind, ProposalType, ReasoningTrace,
+    RedactionLevel, ReviewWorkflow, TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
 };
 use openlife_core::persistence_outbox::CanonicalMutationReceipt;
 
+use crate::main_chat_cancellation::{MainChatCanonicalCommitRejection, MainChatExecutionEpoch};
 use crate::main_chat_event_stream::{
     MainChatAgentDurableEvent, MainChatAgentEventStore, TerminalOwnerSealState,
 };
 use crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope;
+use crate::persistence_coordinator::AgentRunCanonicalWriteAdmission;
 use crate::AppState;
 
 fn terminal_owner_task_fences() -> &'static Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>> {
     static FENCES: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     FENCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+struct AgentRunLifecycleCommitTestBarrier {
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+fn agent_run_lifecycle_commit_test_barriers(
+) -> &'static Mutex<HashMap<String, AgentRunLifecycleCommitTestBarrier>> {
+    static BARRIERS: OnceLock<Mutex<HashMap<String, AgentRunLifecycleCommitTestBarrier>>> =
+        OnceLock::new();
+    BARRIERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn install_agent_run_lifecycle_commit_test_barrier(
+    run_id: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let replaced = agent_run_lifecycle_commit_test_barriers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            run_id.to_string(),
+            AgentRunLifecycleCommitTestBarrier {
+                reached: reached_tx,
+                release: release_rx,
+            },
+        );
+    assert!(
+        replaced.is_none(),
+        "AgentRun lifecycle barrier already installed"
+    );
+    (reached_rx, release_tx)
+}
+
+#[cfg(test)]
+pub(crate) async fn wait_at_agent_run_lifecycle_commit_test_barrier(run_id: &str) {
+    let barrier = agent_run_lifecycle_commit_test_barriers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(run_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached.send(());
+        let _ = barrier.release.await;
+    }
+}
+
+/// Ensures a pre-commit test failure cannot leave the barrier's `reached`
+/// sender parked in the global registry forever. On the normal commit path
+/// `wait_at_agent_run_lifecycle_commit_test_barrier` removes the entry first,
+/// so this drop becomes a no-op.
+#[cfg(test)]
+struct AgentRunLifecycleCommitTestBarrierScope(String);
+
+#[cfg(test)]
+impl AgentRunLifecycleCommitTestBarrierScope {
+    fn enter(run_id: &str) -> Self {
+        Self(run_id.to_string())
+    }
+}
+
+#[cfg(test)]
+impl Drop for AgentRunLifecycleCommitTestBarrierScope {
+    fn drop(&mut self) {
+        agent_run_lifecycle_commit_test_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
 }
 
 fn terminal_owner_task_fence(task_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -66,10 +150,131 @@ async fn acquire_open_turn_write_fence(
     Ok(fence)
 }
 
+/// Sole Main Chat product seam for Proposal creation with an explicit typed
+/// lifecycle relation to the currently open terminal owner. This is a
+/// projection coordinator, not a second runtime: ReviewWorkflow owns the
+/// canonical Proposal/relation transaction, ProposalStore owns the outbox,
+/// and AgentRunStore owns only the derived lifecycle link.
+pub(crate) async fn submit_main_chat_terminal_review_relation(
+    state: &Arc<AppState>,
+    origin: &TerminalOwnerReviewOriginProof,
+    relation_kind: ProposalTerminalRelationKind,
+    request: DurableWriteRequest,
+    execution_epoch: &MainChatExecutionEpoch,
+) -> Result<TerminalOwnerReviewSubmission, String> {
+    origin
+        .validate()
+        .map_err(|error| format!("terminal owner review origin invalid: {error}"))?;
+    if relation_kind == ProposalTerminalRelationKind::LegacyUnclassified {
+        return Err("main_chat_legacy_review_relation_forbidden".into());
+    }
+
+    // Clone connection owners before entering the run/task critical section;
+    // no shared Tokio store guard is held across the synchronous cross-store
+    // proof and projection protocol below.
+    let agent_run_store = clone_agent_run_store(state).await?;
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?
+        .lock()
+        .await
+        .clone();
+
+    let causal_lock = state
+        .persistence_coordinator
+        .agent_run_causal_lock(origin.run_id());
+    let _causal_guard = causal_lock.lock().await;
+    let _terminal_fence = acquire_open_turn_write_fence(state, origin.task_session_id()).await?;
+    {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .revalidate_open_review_origin(origin)
+            .map_err(|error| {
+                format!("terminal owner review origin revalidation failed: {error}")
+            })?;
+    }
+
+    let target = {
+        let memory_store = state.memory_store.lock().await;
+        memory_store
+            .issue_agent_run_terminal_relation_target_intent(&agent_run_store, origin)
+            .map_err(|error| format!("issue AgentRun review target failed: {error}"))?
+    };
+    let submission = ReviewWorkflow::new(&proposal_store)
+        .submit_product_with_terminal_owner_relation(
+            request,
+            origin,
+            relation_kind,
+            execution_epoch,
+            &target,
+        )
+        .map_err(|error| format!("submit typed Main Chat review relation failed: {error}"))?;
+
+    if !submission.owns_terminal_relation() {
+        return Ok(submission);
+    }
+
+    let proposal_id = submission.review().proposal_id();
+    let projection = proposal_store
+        .terminal_relation_projection_proof(proposal_id)
+        .map_err(|error| format!("load typed Main Chat review projection failed: {error}"))?
+        .ok_or_else(|| "typed_main_chat_review_projection_missing".to_string())?;
+    let lane = openlife_core::agent::issue_agent_run_review_relation_projection_lane(
+        origin,
+        AgentRunReviewRelationProjectionLane::ForegroundOpen,
+    )
+    .map_err(|error| format!("issue foreground review projection lane failed: {error}"))?;
+    let projection_permit = execution_epoch
+        .acquire(CanonicalWriteAdmissionRequest::new(
+            "agent_run_review_relation_projection",
+            format!("proposal:{proposal_id}"),
+        ))
+        .map_err(|error| format!("review relation projection admission rejected: {error}"))?;
+    let projection_result = register_agent_run_store_result(
+        state,
+        agent_run_store
+            .apply_terminal_review_relation_projection(&projection, &lane)
+            .map_err(|error| error.to_string()),
+    );
+    match projection_result {
+        Ok(AgentRunReviewRelationProjectionOutcome::Applied) => {
+            projection_permit.finish_committed();
+        }
+        Ok(AgentRunReviewRelationProjectionOutcome::AlreadyApplied) => {
+            projection_permit.finish_noop();
+        }
+        Err(error) => {
+            projection_permit.finish_failed();
+            let degraded = proposal_store
+                .mark_terminal_relation_projection_degraded(&projection, &error)
+                .map_err(|degrade_error| {
+                    format!(
+                        "{error}; mark typed Main Chat review projection degraded failed: {degrade_error}"
+                    )
+                });
+            return match degraded {
+                Ok(()) => Err(error),
+                Err(combined) => Err(combined),
+            };
+        }
+    }
+    proposal_store
+        .mark_terminal_relation_projection_applied(&projection)
+        .map_err(|error| format!("finalize typed Main Chat review projection failed: {error}"))?;
+    Ok(submission)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalOwnerReplayCause {
     AutomaticRetry,
     AcceptedToolPermission,
+    AcceptedProviderNetworkConsent,
 }
 
 impl TerminalOwnerReplayCause {
@@ -77,6 +282,7 @@ impl TerminalOwnerReplayCause {
         match self {
             Self::AutomaticRetry => "automatic_retry",
             Self::AcceptedToolPermission => "accepted_tool_permission",
+            Self::AcceptedProviderNetworkConsent => "accepted_provider_network_consent",
         }
     }
 }
@@ -102,7 +308,7 @@ pub(crate) struct TerminalOwnerReplayEpochAdmission {
     canonical_user_message_digest: String,
     cause: TerminalOwnerReplayCause,
     cause_ref: String,
-    retry_proof: openlife_core::agent::tool_gateway::ToolAutomaticRetryProof,
+    retry_proof: Option<openlife_core::agent::tool_gateway::ToolAutomaticRetryProof>,
     authority: TerminalOwnerReplayEpochAuthority,
 }
 
@@ -171,8 +377,9 @@ impl TerminalOwnerReplayEpochAdmission {
 
     pub(crate) fn into_retry_proof(
         self,
-    ) -> openlife_core::agent::tool_gateway::ToolAutomaticRetryProof {
+    ) -> Result<openlife_core::agent::tool_gateway::ToolAutomaticRetryProof, String> {
         self.retry_proof
+            .ok_or_else(|| "terminal_owner_tool_replay_retry_proof_missing".to_string())
     }
 }
 
@@ -206,7 +413,6 @@ fn successor_owner_head(successor: &MainChatAgentDurableEvent) -> Result<(u64, S
     Ok((revision, digest.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
     state: &Arc<AppState>,
     session: &AgentTaskSession,
@@ -308,6 +514,10 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
             let dispatch_state = proposal_store
                 .dispatch_state(&authorization.proposal_id)
                 .map_err(|error| error.to_string())?;
+            let relation_kind = proposal_store
+                .terminal_relation_projection_proof(&authorization.proposal_id)
+                .map_err(|error| error.to_string())?
+                .map(|proof| proof.relation_kind());
             if proposal.status != openlife_core::agent::ProposalStatus::Accepted
                 || proposal.proposal_type != ProposalType::ToolPermission
                 || dispatch_state.as_deref() != Some("confirmed")
@@ -321,33 +531,47 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
                 return Err("terminal_owner_permission_replay_origin_mismatch".into());
             }
             drop(proposal_store);
-            let successor = state
-                .main_chat_agent_event_store
-                .as_ref()
-                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
-                .lock()
-                .await
-                .get_immutable_event(
-                    &session.id,
-                    "terminal_owner.successor_confirmed",
-                    &format!("successor:{}", authorization.proposal_id),
-                )
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "terminal_owner_permission_replay_successor_missing".to_string())?;
-            if successor
-                .payload
-                .get("causeRef")
-                .and_then(serde_json::Value::as_str)
-                != Some(authorization.proposal_id.as_str())
-                || successor
+            if let Some(relation_kind) = relation_kind {
+                if relation_kind
+                    != openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+                {
+                    return Err("terminal_owner_permission_replay_relation_mismatch".into());
+                }
+                final_owner_head(&final_event)?
+            } else {
+                let successor = state
+                    .main_chat_agent_event_store
+                    .as_ref()
+                    .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                    .lock()
+                    .await
+                    .get_immutable_event(
+                        &session.id,
+                        "terminal_owner.successor_confirmed",
+                        &format!("successor:{}", authorization.proposal_id),
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "terminal_owner_permission_replay_successor_missing".to_string()
+                    })?;
+                if successor
                     .payload
-                    .get("finalEventId")
+                    .get("causeRef")
                     .and_then(serde_json::Value::as_str)
-                    != Some(final_event.event_id.as_str())
-            {
-                return Err("terminal_owner_permission_replay_successor_mismatch".into());
+                    != Some(authorization.proposal_id.as_str())
+                    || successor
+                        .payload
+                        .get("finalEventId")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(final_event.event_id.as_str())
+                {
+                    return Err("terminal_owner_permission_replay_successor_mismatch".into());
+                }
+                successor_owner_head(&successor)?
             }
-            successor_owner_head(&successor)?
+        }
+        TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => {
+            return Err("provider consent requires provider replay admission issuer".into());
         }
     };
     let owner_head = state
@@ -369,6 +593,9 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
             .expect("permission replay checked above")
             .proposal_id
             .clone(),
+        TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => {
+            unreachable!("provider consent is rejected by the tool replay admission issuer")
+        }
     };
     Ok(TerminalOwnerReplayEpochAdmission {
         admission_id: format!("terminal-replay-admission:{}", uuid::Uuid::new_v4()),
@@ -382,7 +609,162 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
         canonical_user_message_digest: epoch.canonical_user_message_digest().to_string(),
         cause,
         cause_ref,
-        retry_proof,
+        retry_proof: Some(retry_proof),
+        authority: TerminalOwnerReplayEpochAuthority::VerifiedByTerminalOwnerWriteGateway,
+    })
+}
+
+/// Issue one continuation epoch for the exact accepted provider-network
+/// Proposal that blocked the prior generation. This is deliberately separate
+/// from action replay: it has no ActionQueue identity or ToolGateway retry
+/// proof, while retaining the same single terminal-owner epoch CAS.
+pub(crate) async fn issue_terminal_owner_provider_consent_replay_admission(
+    state: &Arc<AppState>,
+    session: &AgentTaskSession,
+    proposal_id: &str,
+) -> Result<TerminalOwnerReplayEpochAdmission, String> {
+    use openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus;
+    use openlife_core::agent::{ProposalStatus, ProposalTerminalRelationKind, ProposalType};
+
+    if proposal_id.trim().is_empty() || session.status != AgentTaskSessionStatus::WaitingPermission
+    {
+        return Err("terminal_owner_provider_replay_not_waiting_permission".into());
+    }
+    let _fence = acquire_terminal_owner_task_fence(&session.id).await;
+    let (epoch, final_event) = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let epoch = event_store
+            .terminal_owner_epoch(&session.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "terminal_owner_provider_replay_epoch_missing".to_string())?;
+        if epoch.state() != TerminalOwnerSealState::Sealed {
+            return Err("terminal_owner_provider_replay_requires_sealed_epoch".into());
+        }
+        let final_event = event_store
+            .terminal_owner_final_event(&session.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "terminal_owner_provider_replay_final_event_missing".to_string())?;
+        if epoch.final_event_id() != Some(final_event.event_id.as_str()) {
+            return Err("terminal_owner_provider_replay_final_identity_mismatch".into());
+        }
+        (epoch, final_event)
+    };
+    let (proposal, origin, relation_kind, dispatch_state) = {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let proposal = proposal_store
+            .get_proposal(proposal_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "terminal_owner_provider_replay_proposal_missing".to_string())?;
+        let origin = proposal_store
+            .terminal_owner_origin_binding(proposal_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "terminal_owner_provider_replay_origin_missing".to_string())?;
+        let relation_kind = proposal_store
+            .terminal_relation_projection_proof(proposal_id)
+            .map_err(|error| error.to_string())?
+            .map(|proof| proof.relation_kind());
+        let dispatch_state = proposal_store
+            .dispatch_state(proposal_id)
+            .map_err(|error| error.to_string())?;
+        (proposal, origin, relation_kind, dispatch_state)
+    };
+    let after_string = |key: &str| proposal.after.get(key).and_then(serde_json::Value::as_str);
+    let canonical_scope = proposal.after.get("canonical_scope");
+    let scope_string = |key: &str| {
+        canonical_scope
+            .and_then(|scope| scope.get(key))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| after_string(key))
+    };
+    let permission_scope = scope_string("tool_name")
+        .ok_or_else(|| "terminal_owner_provider_replay_scope_missing".to_string())?;
+    if proposal.status != ProposalStatus::Accepted
+        || proposal.proposal_type != ProposalType::ToolPermission
+        || !matches!(
+            proposal.source,
+            openlife_core::agent::ProposalSource::ChatConversation
+        )
+        || dispatch_state.as_deref() != Some("confirmed")
+        || relation_kind != Some(ProposalTerminalRelationKind::ActionResumePrerequisite)
+        || after_string("permission_scope_kind") != Some("network_policy")
+        || after_string("permission") != Some("allow_once")
+        || scope_string("source") != Some("provider")
+        || scope_string("risk_level") != Some("high")
+        || scope_string("action_type") != Some("network")
+        || !proposal
+            .affected_path
+            .starts_with("tool_permission.provider.")
+    {
+        return Err("terminal_owner_provider_replay_proposal_contract_mismatch".into());
+    }
+    if origin.task_session_id() != session.id
+        || origin.run_id() != epoch.run_id()
+        || origin.epoch_id() != epoch.epoch_id()
+        || origin.epoch_generation() != epoch.generation()
+        || origin.canonical_user_message_ref() != epoch.canonical_user_message_ref()
+        || origin.canonical_user_message_digest() != epoch.canonical_user_message_digest()
+    {
+        return Err("terminal_owner_provider_replay_origin_mismatch".into());
+    }
+    let run_store = clone_agent_run_store(state).await?;
+    let run = load_live_agent_run(state, &run_store, origin.run_id())?;
+    if run.task_id != session.id || run.status != AgentRunStatus::WaitingPermission {
+        return Err("terminal_owner_provider_replay_run_not_waiting_permission".into());
+    }
+    let permission_available = state
+        .tool_permission_store
+        .lock()
+        .await
+        .reviewed_network_once_available_for_proposal(
+            proposal_id,
+            permission_scope,
+            "provider",
+            "high",
+            "network",
+        )
+        .map_err(|error| error.to_string())?;
+    if !permission_available {
+        return Err("terminal_owner_provider_replay_grant_missing_or_consumed".into());
+    }
+    let expected_owner = final_owner_head(&final_event)?;
+    let owner_head = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+        .lock()
+        .await
+        .canonical_owner_head(&session.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminal_owner_provider_replay_task_owner_missing".to_string())?;
+    if owner_head.revision() != expected_owner.0 || owner_head.digest() != expected_owner.1 {
+        return Err("terminal_owner_provider_replay_task_owner_drift".into());
+    }
+    Ok(TerminalOwnerReplayEpochAdmission {
+        admission_id: format!(
+            "terminal-provider-replay-admission:{}",
+            uuid::Uuid::new_v4()
+        ),
+        task_session_id: session.id.clone(),
+        run_id: origin.run_id().to_string(),
+        action_id: proposal_id.to_string(),
+        prior_epoch_id: epoch.epoch_id().to_string(),
+        prior_epoch_generation: epoch.generation(),
+        prior_final_event_id: final_event.event_id,
+        canonical_user_message_ref: epoch.canonical_user_message_ref().to_string(),
+        canonical_user_message_digest: epoch.canonical_user_message_digest().to_string(),
+        cause: TerminalOwnerReplayCause::AcceptedProviderNetworkConsent,
+        cause_ref: proposal_id.to_string(),
+        retry_proof: None,
         authority: TerminalOwnerReplayEpochAuthority::VerifiedByTerminalOwnerWriteGateway,
     })
 }
@@ -396,6 +778,7 @@ pub(crate) enum TaskSessionWrite {
     Complete(String),
     Fail(String),
     Resume,
+    ResumeAfterResolvedBlocker(String),
     Cancel(String),
     RecordActionQueueId(String),
     RecordContextSnapshotRef(String),
@@ -441,6 +824,9 @@ fn apply_task_session_write(
         TaskSessionWrite::Complete(summary) => store.complete_session(task_session_id, &summary),
         TaskSessionWrite::Fail(summary) => store.fail_session(task_session_id, &summary),
         TaskSessionWrite::Resume => store.resume_session(task_session_id),
+        TaskSessionWrite::ResumeAfterResolvedBlocker(blocker) => {
+            store.resume_session_after_resolved_blocker(task_session_id, &blocker)
+        }
         TaskSessionWrite::Cancel(summary) => store.cancel_session(task_session_id, &summary),
         TaskSessionWrite::RecordActionQueueId(action_id) => {
             store.record_action_queue_id(task_session_id, &action_id)
@@ -515,24 +901,1508 @@ pub(crate) async fn append_task_transcript(
         .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn update_agent_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
-    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
-    state
+#[cfg(test)]
+pub(crate) async fn replace_agent_run_for_test(
+    state: &Arc<AppState>,
+    run: &AgentRun,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(&run.id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let canonical_task_id = load_live_agent_run(state, &store, &run.id)?.task_id;
+    if canonical_task_id != run.task_id {
+        return Err("agent_run_update_canonical_task_identity_mismatch".into());
+    }
+    let _fence = acquire_open_turn_write_fence(state, &canonical_task_id).await?;
+    let admission = state
+        .persistence_coordinator
+        .admit_agent_run_write()
+        .map_err(|error| error.to_string())?;
+    commit_agent_run_update(state, &store, run, &admission).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRunWriteLane {
+    Normal,
+    StartupReconciliation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRunProposalStagingKind {
+    Builder,
+    Calibration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentRunProposalStagingReceipt {
+    pub kind: AgentRunProposalStagingKind,
+    pub requested_count: usize,
+    pub failed_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRunMainChatFailureKind {
+    Timeout,
+    Cancelled,
+    Interrupted,
+    ProviderError,
+    ToolError,
+    PolicyBlocker,
+    UnknownError,
+}
+
+impl AgentRunMainChatFailureKind {
+    fn error_phase(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::ProviderError => "provider_error",
+            Self::ToolError => "tool_error",
+            Self::PolicyBlocker => "policy_blocker",
+            Self::UnknownError => "unknown_error",
+        }
+    }
+
+    fn recoverable(self) -> bool {
+        !matches!(self, Self::Cancelled | Self::Interrupted)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRunReplayProjection {
+    CompletedAllActions,
+    WaitingForAnotherAction,
+    WaitingForPermission,
+    FailedUnresolvedAction,
+}
+
+pub(crate) struct MainChatGenerationProjection {
+    pub context_summary: ContextSummary,
+    pub model_route: ModelRouteTrace,
+    pub output_preview: String,
+    pub reasoning_strategy: Option<String>,
+    pub reasoning_trace: ReasoningTrace,
+    pub terminal_owner_generation: u64,
+    pub actions: Vec<AgentAction>,
+    pub observations: Vec<AgentObservation>,
+    pub hs_selection_audit: Option<HSSelectionAudit>,
+    pub behavior_checks: Vec<HSBehaviorCheckSummary>,
+    pub step_count: u32,
+    pub tool_call_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainChatBlockedDisposition {
+    WaitingPermission,
+    TerminalFailurePendingDurableReceipt,
+}
+
+pub(crate) struct MainChatBlockedProjection {
+    pub reasoning_strategy: Option<String>,
+    pub reasoning_trace: ReasoningTrace,
+    pub actions: Vec<AgentAction>,
+    pub observations: Vec<AgentObservation>,
+    pub step_count: u32,
+    pub tool_call_count: u32,
+    pub disposition: MainChatBlockedDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CanonicalAgentRunReviewCounts {
+    confirmed: usize,
+    rejected: usize,
+    expired: usize,
+    waiting: usize,
+    claimed: usize,
+    unknown: usize,
+    failed_before_effect: usize,
+    projection_pending: usize,
+    terminal_evidence_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl CanonicalAgentRunReviewCounts {
+    fn terminal_without_unknown_or_waiting(self) -> bool {
+        self.waiting == 0 && self.claimed == 0 && self.unknown == 0
+    }
+
+    fn declined(self) -> usize {
+        self.rejected.saturating_add(self.expired)
+    }
+
+    fn effect_unknown(self) -> usize {
+        self.claimed.saturating_add(self.unknown)
+    }
+
+    fn observe_evidence_time(&mut self, observed_at: chrono::DateTime<chrono::Utc>) {
+        self.terminal_evidence_time = Some(
+            self.terminal_evidence_time
+                .map_or(observed_at, |current| std::cmp::max(current, observed_at)),
+        );
+    }
+}
+
+fn admit_agent_run_write(
+    state: &Arc<AppState>,
+    lane: AgentRunWriteLane,
+) -> Result<AgentRunCanonicalWriteAdmission, String> {
+    match lane {
+        AgentRunWriteLane::Normal => state.persistence_coordinator.admit_agent_run_write(),
+        AgentRunWriteLane::StartupReconciliation => state
+            .persistence_coordinator
+            .admit_startup_agent_run_write(),
+    }
+    .map_err(|error| error.to_string())
+}
+
+async fn clone_agent_run_store(state: &Arc<AppState>) -> Result<AgentRunStore, String> {
+    Ok(state
         .agent_run_store
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?
         .lock()
         .await
-        .update_run(run)
-        .map_err(|error| error.to_string())
+        .clone())
+}
+
+/// Sole physical AgentRun update seam. Callers retain their distinct
+/// persistence-admission and execution-epoch semantics, but every accepted
+/// mutation reaches the store and the durable-failure classifier exactly once.
+fn write_agent_run_update_once(
+    state: &Arc<AppState>,
+    store: &AgentRunStore,
+    run: &AgentRun,
+) -> Result<(), String> {
+    register_agent_run_store_result(
+        state,
+        store.update_run(run).map_err(|error| error.to_string()),
+    )
+}
+
+async fn commit_agent_run_update(
+    state: &Arc<AppState>,
+    store: &AgentRunStore,
+    run: &AgentRun,
+    admission: &AgentRunCanonicalWriteAdmission,
+) -> Result<(), String> {
+    #[cfg(test)]
+    wait_at_agent_run_lifecycle_commit_test_barrier(&run.id).await;
+    let permit = state
+        .persistence_coordinator
+        .acquire_agent_run_commit_permit(admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = write_agent_run_update_once(state, store, run);
+    drop(permit);
+    result
+}
+
+fn main_chat_agent_run_commit_rejection(rejection: MainChatCanonicalCommitRejection) -> String {
+    let reason = match rejection {
+        MainChatCanonicalCommitRejection::CancelRequested => "cancel_requested",
+        MainChatCanonicalCommitRejection::TerminalizationDegraded => "terminalization_degraded",
+        MainChatCanonicalCommitRejection::InvalidDomain => "invalid_domain",
+        MainChatCanonicalCommitRejection::InvalidObjectReference => "invalid_object_reference",
+    };
+    format!("main_chat_agent_run_commit_rejected:{reason}")
+}
+
+async fn commit_main_chat_agent_run_update(
+    state: &Arc<AppState>,
+    store: &AgentRunStore,
+    run: &AgentRun,
+    admission: &AgentRunCanonicalWriteAdmission,
+    execution_epoch: &MainChatExecutionEpoch,
+) -> Result<(), String> {
+    // This barrier represents the last pre-commit scheduling point. The
+    // persistence permit may still wait, so acquire it before the non-Send
+    // execution-epoch permit. The epoch permit is then created immediately
+    // before the synchronous owner transaction: cancel-first rejects, while
+    // commit-first becomes an in-flight fact terminalization must observe.
+    #[cfg(test)]
+    wait_at_agent_run_lifecycle_commit_test_barrier(&run.id).await;
+    let persistence_permit = state
+        .persistence_coordinator
+        .acquire_agent_run_commit_permit(admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    let epoch_permit = execution_epoch
+        .begin_canonical_commit("agent_run", &run.id)
+        .map_err(main_chat_agent_run_commit_rejection)?;
+    let result = write_agent_run_update_once(state, store, run);
+    drop(persistence_permit);
+    match result {
+        Ok(()) => {
+            epoch_permit.finish_committed();
+            Ok(())
+        }
+        Err(error) => {
+            epoch_permit.finish_failed();
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn register_agent_run_store_result<T>(
+    state: &Arc<AppState>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if let Err(error) = &result {
+        state
+            .persistence_coordinator
+            .register_runtime_durable_failure("AgentRunStore", error);
+    }
+    result
+}
+
+/// Classifies an AgentRunStore failure that crossed a cloned-store execution
+/// boundary (for example ToolGateway/AgentLoop). This is synchronous and must
+/// be called before the outer path turns the error into a blocker or warning;
+/// non-durable validation/policy failures are ignored by the coordinator's
+/// durable-failure classifier.
+pub(crate) fn register_agent_run_store_error(state: &Arc<AppState>, error: impl ToString) {
+    let _ = register_agent_run_store_result::<()>(state, Err(error.to_string()));
+}
+
+async fn project_agent_run_from_typed_delta<F>(
+    state: &Arc<AppState>,
+    run_id: &str,
+    expected_task_id: &str,
+    apply: F,
+) -> Result<AgentRun, String>
+where
+    F: FnOnce(&AgentRunStore, &mut AgentRun) -> Result<(), String>,
+{
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    // The test barrier scope is deliberately created only after this run's
+    // causal lock is owned. A second typed delta that is waiting on (or
+    // cancelled before acquiring) the same lock therefore cannot remove the
+    // active operation's run-keyed barrier.
+    #[cfg(test)]
+    let _test_barrier_scope = AgentRunLifecycleCommitTestBarrierScope::enter(run_id);
+    let store = clone_agent_run_store(state).await?;
+    let mut run = load_live_agent_run(state, &store, run_id)?;
+    if run.task_id != expected_task_id {
+        return Err("agent_run_typed_delta_task_identity_mismatch".into());
+    }
+    let _fence = acquire_open_turn_write_fence(state, expected_task_id).await?;
+    let before = serde_json::to_vec(&run).map_err(|error| error.to_string())?;
+    apply(&store, &mut run)?;
+    if serde_json::to_vec(&run).map_err(|error| error.to_string())? == before {
+        return Ok(run);
+    }
+    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
+    commit_agent_run_update(state, &store, &run, &admission).await?;
+    Ok(run)
+}
+
+async fn project_main_chat_agent_run_from_typed_delta<F>(
+    state: &Arc<AppState>,
+    run_id: &str,
+    expected_task_id: &str,
+    execution_epoch: &MainChatExecutionEpoch,
+    apply: F,
+) -> Result<AgentRun, String>
+where
+    F: FnOnce(&AgentRunStore, &mut AgentRun) -> Result<(), String>,
+{
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    #[cfg(test)]
+    let _test_barrier_scope = AgentRunLifecycleCommitTestBarrierScope::enter(run_id);
+    let store = clone_agent_run_store(state).await?;
+    let canonical = load_live_agent_run(state, &store, run_id)?;
+    if canonical.task_id != expected_task_id {
+        return Err("agent_run_typed_delta_task_identity_mismatch".into());
+    }
+    let _fence = acquire_open_turn_write_fence(state, expected_task_id).await?;
+
+    if matches!(
+        canonical.status,
+        AgentRunStatus::Cancelled | AgentRunStatus::Completed | AgentRunStatus::Failed
+    ) {
+        // A terminal owner is immutable. Build the replay candidate away from
+        // canonical state, then accept only exact semantic replay after the
+        // store's receipt/digest normalization. No commit permit or revision
+        // is consumed for that no-op.
+        let mut candidate = canonical.clone();
+        if apply(&store, &mut candidate).is_err() {
+            return Err("main_chat_agent_run_terminal_delta_conflict".into());
+        }
+        return match store.typed_projection_matches_canonical(&candidate, &canonical) {
+            Ok(true) => Ok(canonical),
+            Ok(false) | Err(_) => Err("main_chat_agent_run_terminal_delta_conflict".into()),
+        };
+    }
+
+    if !matches!(
+        canonical.status,
+        AgentRunStatus::Running | AgentRunStatus::WaitingPermission | AgentRunStatus::RemoteUnknown
+    ) {
+        return Err("main_chat_agent_run_projection_state_invalid".into());
+    }
+
+    let mut candidate = canonical.clone();
+    apply(&store, &mut candidate)?;
+    if store
+        .typed_projection_matches_canonical(&candidate, &canonical)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(canonical);
+    }
+    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
+    commit_main_chat_agent_run_update(state, &store, &candidate, &admission, execution_epoch)
+        .await?;
+    Ok(candidate)
+}
+
+pub(crate) async fn project_main_chat_agent_run_failure(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    failure: AgentRunMainChatFailureKind,
+    safe_reason: &str,
+) -> Result<(), String> {
+    project_agent_run_from_typed_delta(state, run_id, task_session_id, |_store, run| {
+        if run.status == AgentRunStatus::Completed {
+            return Ok(());
+        }
+        if failure == AgentRunMainChatFailureKind::Cancelled {
+            if run.status != AgentRunStatus::Cancelled {
+                run.cancel();
+            }
+        } else {
+            run.fail(AgentRunError {
+                message: safe_reason.to_string(),
+                phase: failure.error_phase().to_string(),
+                recoverable: failure.recoverable(),
+            });
+        }
+        Ok(())
+    })
+    .await
+    .map(|_| ())
+}
+
+fn merge_main_chat_action_observation_delta(
+    store: &AgentRunStore,
+    run: &mut AgentRun,
+    actions: Vec<AgentAction>,
+    observations: Vec<AgentObservation>,
+) -> Result<(), String> {
+    // Persisted identities are already canonical receipts/references, whereas
+    // new typed deltas still carry their producer identity. Keep a separate
+    // canonical ownership set so same-turn observations can bind to a newly
+    // supplied action without writing a pre-minimized receipt back through the
+    // untrusted-input minimizer (which would hash it a second time).
+    let persisted_action_owners = run
+        .actions
+        .iter()
+        .map(|action| action.id.clone())
+        .collect::<HashSet<_>>();
+    let mut canonical_action_owners = persisted_action_owners.clone();
+    let persisted_action_count = run.actions.len();
+    let mut new_action_positions = HashMap::<String, usize>::new();
+    for action in actions {
+        if action.id.trim().is_empty() {
+            return Err("main_chat_agent_run_action_identity_missing".into());
+        }
+        // A receipt-looking ID is trusted only when it exactly names an owner
+        // loaded from this canonical run. Producer IDs still cross the
+        // store-scoped identity boundary; arbitrary caller-supplied receipt
+        // strings are therefore never accepted as canonical on shape alone.
+        let canonical_action_id = if persisted_action_owners.contains(&action.id) {
+            action.id.clone()
+        } else {
+            store.canonical_action_identity(&action.id)
+        };
+        if let Some(existing) = run.actions[..persisted_action_count]
+            .iter()
+            .find(|existing| existing.id == canonical_action_id)
+        {
+            if !store
+                .action_delta_matches_canonical(&action, existing)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("main_chat_agent_run_action_identity_conflict".into());
+            }
+            continue;
+        }
+        if let Some(existing_position) = new_action_positions.get(&canonical_action_id) {
+            if !store.action_deltas_match(&action, &run.actions[*existing_position]) {
+                return Err("main_chat_agent_run_action_identity_conflict".into());
+            }
+            continue;
+        }
+        if !canonical_action_owners.insert(canonical_action_id.clone()) {
+            return Err("main_chat_agent_run_action_identity_conflict".into());
+        }
+        new_action_positions.insert(canonical_action_id, run.actions.len());
+        run.actions.push(action);
+    }
+
+    let persisted_observation_owners = run
+        .observations
+        .iter()
+        .map(|observation| observation.id.clone())
+        .collect::<HashSet<_>>();
+    let mut canonical_observation_owners = persisted_observation_owners.clone();
+    let persisted_observation_count = run.observations.len();
+    let mut new_observation_positions = HashMap::<String, usize>::new();
+    for observation in observations {
+        if observation.id.trim().is_empty() {
+            return Err("main_chat_agent_run_observation_identity_missing".into());
+        }
+        let canonical_observation_id = if persisted_observation_owners.contains(&observation.id) {
+            observation.id.clone()
+        } else {
+            store.canonical_observation_identity(&observation.id)
+        };
+        if let Some(existing) = run.observations[..persisted_observation_count]
+            .iter()
+            .find(|existing| existing.id == canonical_observation_id)
+        {
+            if !store.observation_delta_matches_canonical(&observation, existing) {
+                return Err("main_chat_agent_run_observation_identity_conflict".into());
+            }
+            continue;
+        }
+        if let Some(existing_position) = new_observation_positions.get(&canonical_observation_id) {
+            if !store.observation_deltas_match(&observation, &run.observations[*existing_position])
+            {
+                return Err("main_chat_agent_run_observation_identity_conflict".into());
+            }
+            continue;
+        }
+        if !canonical_observation_owners.insert(canonical_observation_id.clone()) {
+            return Err("main_chat_agent_run_observation_identity_conflict".into());
+        }
+        match observation.action_id.as_deref() {
+            Some(action_id) => {
+                let canonical_owner_id = if persisted_action_owners.contains(action_id) {
+                    action_id.to_string()
+                } else {
+                    store.canonical_action_identity(action_id)
+                };
+                if !canonical_action_owners.contains(&canonical_owner_id) {
+                    return Err("main_chat_agent_run_observation_action_owner_missing".into());
+                }
+            }
+            None if observation.source != "agent_loop"
+                || observation.react_trace.is_some()
+                || observation
+                    .structured_result
+                    .as_ref()
+                    .and_then(|value| value.get("error"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("max_tool_calls exceeded") =>
+            {
+                return Err("main_chat_agent_run_supplemental_observation_contract_invalid".into());
+            }
+            _ => {}
+        }
+        new_observation_positions.insert(canonical_observation_id, run.observations.len());
+        run.observations.push(observation);
+    }
+    Ok(())
+}
+
+pub(crate) async fn project_main_chat_generation_result(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    execution_epoch: &MainChatExecutionEpoch,
+    projection: MainChatGenerationProjection,
+) -> Result<(), String> {
+    project_main_chat_agent_run_from_typed_delta(
+        state,
+        run_id,
+        task_session_id,
+        execution_epoch,
+        move |store, run| {
+            merge_main_chat_action_observation_delta(
+                store,
+                run,
+                projection.actions,
+                projection.observations,
+            )?;
+            run.context_summary = Some(projection.context_summary);
+            run.model_route = Some(projection.model_route);
+            run.output_preview = Some(projection.output_preview);
+            run.reasoning_strategy = projection.reasoning_strategy;
+            if projection.terminal_owner_generation == 1 {
+                run.reasoning_trace = Some(projection.reasoning_trace);
+            } else {
+                // AgentRun reasoning_trace is immutable evidence for the first
+                // generation. Continuation truth lives in ordered provider and
+                // final-delivery events; replacing the original digest would
+                // make a same-Run replay look like rewritten history.
+                run.status_updates.push(AgentLoopStatusUpdate {
+                    phase: AgentLoopPhase::Completed,
+                    message: format!(
+                        "Provider continuation generation {} completed under OpenLifeTurnRuntime.",
+                        projection.terminal_owner_generation
+                    ),
+                    step_index: projection.step_count,
+                    tool_call_index: None,
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+            run.hs_selection_audit = projection.hs_selection_audit;
+            run.behavior_checks = projection.behavior_checks;
+            run.step_count = projection.step_count;
+            run.tool_call_count = projection.tool_call_count;
+            match run.status {
+                AgentRunStatus::Running => {
+                    run.status = AgentRunStatus::Completed;
+                    run.finished_at = Some(chrono::Utc::now());
+                }
+                AgentRunStatus::WaitingPermission | AgentRunStatus::RemoteUnknown => {
+                    run.finished_at = None;
+                }
+                _ => {}
+            }
+            Ok(())
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn project_main_chat_kernel_evidence(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    execution_epoch: &MainChatExecutionEpoch,
+    projection: MainChatBlockedProjection,
+) -> Result<(), String> {
+    project_main_chat_agent_run_from_typed_delta(
+        state,
+        run_id,
+        task_session_id,
+        execution_epoch,
+        move |store, run| {
+            merge_main_chat_action_observation_delta(
+                store,
+                run,
+                projection.actions,
+                projection.observations,
+            )?;
+            run.reasoning_strategy = projection.reasoning_strategy;
+            run.reasoning_trace = Some(projection.reasoning_trace);
+            run.tool_call_count = projection.tool_call_count;
+            run.step_count = projection.step_count;
+            if projection.disposition == MainChatBlockedDisposition::WaitingPermission {
+                run.status = AgentRunStatus::WaitingPermission;
+                run.finished_at = None;
+                run.error = None;
+            }
+            Ok(())
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn begin_main_chat_agent_run_replay(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+) -> Result<(), String> {
+    project_agent_run_from_typed_delta(state, run_id, task_session_id, |_store, run| {
+        if !matches!(
+            run.status,
+            AgentRunStatus::Failed | AgentRunStatus::WaitingPermission
+        ) {
+            return Err(format!("canonical_replay_run_not_resumable:{}", run.status));
+        }
+        run.status = AgentRunStatus::Running;
+        run.finished_at = None;
+        run.error = None;
+        run.status_updates.push(AgentLoopStatusUpdate {
+            phase: AgentLoopPhase::ExecutingTool,
+            message: "Governed replay execution started under OpenLifeTurnRuntime.".into(),
+            step_index: run.step_count,
+            tool_call_index: Some(run.tool_call_count),
+            timestamp: chrono::Utc::now(),
+        });
+        Ok(())
+    })
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn project_main_chat_agent_run_replay(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    projection: AgentRunReplayProjection,
+) -> Result<(), String> {
+    project_agent_run_from_typed_delta(state, run_id, task_session_id, move |_store, run| {
+        if run.status != AgentRunStatus::Running {
+            return Err(format!(
+                "canonical_replay_run_terminal_transition_conflict:{}",
+                run.status
+            ));
+        }
+        let (status, phase, message) = match projection {
+            AgentRunReplayProjection::CompletedAllActions => (
+                AgentRunStatus::Completed,
+                AgentLoopPhase::Completed,
+                "All governed replay actions completed.",
+            ),
+            AgentRunReplayProjection::WaitingForAnotherAction => (
+                AgentRunStatus::WaitingPermission,
+                AgentLoopPhase::WaitingPermission,
+                "A replay action completed; another action is waiting for permission.",
+            ),
+            AgentRunReplayProjection::WaitingForPermission => (
+                AgentRunStatus::WaitingPermission,
+                AgentLoopPhase::WaitingPermission,
+                "Governed replay is waiting for permission.",
+            ),
+            AgentRunReplayProjection::FailedUnresolvedAction => (
+                AgentRunStatus::Failed,
+                AgentLoopPhase::Failed,
+                "A replay action completed; another required action remains unresolved.",
+            ),
+        };
+        run.status = status;
+        run.finished_at = matches!(
+            status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+        )
+        .then(chrono::Utc::now);
+        if projection == AgentRunReplayProjection::FailedUnresolvedAction {
+            run.error = Some(AgentRunError {
+                message: "replay_action_unresolved".into(),
+                phase: "tool_error".into(),
+                recoverable: true,
+            });
+        }
+        run.status_updates.push(AgentLoopStatusUpdate {
+            phase,
+            message: message.into(),
+            step_index: run.step_count,
+            tool_call_index: Some(run.tool_call_count),
+            timestamp: chrono::Utc::now(),
+        });
+        Ok(())
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Project a pre-existing AgentRun from the canonical startup task owner. The
+/// caller supplies only identity; this gateway derives the transition while
+/// holding the task fence and mutates lifecycle fields only.
+pub(crate) async fn project_agent_run_from_startup_task_owner(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let _fence = acquire_terminal_owner_task_fence(task_session_id).await;
+    let task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+        .lock()
+        .await
+        .load_session(task_session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?;
+    let store = clone_agent_run_store(state).await?;
+    let mut run = register_agent_run_store_result(
+        state,
+        store.get_run(run_id).map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    if run.task_id != task_session_id || task.id != task_session_id {
+        return Err("startup_agent_run_task_owner_identity_mismatch".into());
+    }
+    if task.status != AgentTaskSessionStatus::WaitingPermission {
+        return Err("startup_agent_run_task_owner_requires_waiting_permission".into());
+    }
+    run.status = AgentRunStatus::WaitingPermission;
+    run.finished_at = None;
+    run.error = None;
+    let admission = state
+        .persistence_coordinator
+        .admit_startup_agent_run_write()
+        .map_err(|error| error.to_string())?;
+    commit_agent_run_update(state, &store, &run, &admission).await
+}
+
+/// Project a pre-existing AgentRun from an exact durable startup event. The
+/// event is re-read by id under the task fence; caller-shaped event values or
+/// arbitrary AgentRun mutations cannot authorize this lane.
+pub(crate) async fn project_agent_run_from_startup_durable_event(
+    state: &Arc<AppState>,
+    evidence: &MainChatAgentDurableEvent,
+) -> Result<(), String> {
+    let causal_lock = state
+        .persistence_coordinator
+        .agent_run_causal_lock(&evidence.run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let _fence = acquire_terminal_owner_task_fence(&evidence.task_session_id).await;
+    let (stored_evidence, lifecycle) = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let stored_evidence = event_store
+            .event_by_id(&evidence.event_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "startup_agent_run_durable_evidence_missing".to_string())?;
+        let lifecycle = event_store
+            .turn_lifecycle_snapshot(&evidence.task_session_id)
+            .map_err(|error| error.to_string())?;
+        (stored_evidence, lifecycle)
+    };
+    if stored_evidence != *evidence {
+        return Err("startup_agent_run_durable_evidence_mismatch".into());
+    }
+    if lifecycle.bound_run_id.as_deref() != Some(evidence.run_id.as_str())
+        || lifecycle
+            .lifecycle_event
+            .as_ref()
+            .map(|event| (event.event_id.as_str(), event.sequence))
+            != Some((evidence.event_id.as_str(), evidence.sequence))
+    {
+        return Err("startup_agent_run_durable_evidence_stale".into());
+    }
+    let store = clone_agent_run_store(state).await?;
+    let mut run = register_agent_run_store_result(
+        state,
+        store
+            .get_run(&evidence.run_id)
+            .map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{}", evidence.run_id))?;
+    if run.task_id != evidence.task_session_id {
+        return Err("startup_agent_run_durable_evidence_identity_mismatch".into());
+    }
+    let status = evidence
+        .payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_agent_run_durable_evidence_status_missing".to_string())?;
+    match (
+        evidence.event_type.as_str(),
+        evidence.object_type.as_str(),
+        status,
+    ) {
+        ("final_delivery.created", "final_delivery", "completed") => {
+            run.status = AgentRunStatus::Completed;
+            run.finished_at = Some(evidence.created_at);
+            run.error = None;
+        }
+        ("final_delivery.created", "final_delivery", "completed_with_pending_items") => {
+            run.status = AgentRunStatus::WaitingPermission;
+            run.finished_at = None;
+            run.error = None;
+        }
+        ("final_delivery.created", "final_delivery", "cancelled")
+        | ("local_aborted", "turn", "local_aborted") => run.cancel(),
+        ("final_delivery.created", "final_delivery", "blocked")
+        | ("final_delivery.created", "final_delivery", "failed")
+        | ("final_delivery.created", "final_delivery", "interrupted")
+        | ("failed", "turn", "failed")
+        | ("interrupted", "turn", "interrupted") => {
+            run.fail(AgentRunError {
+                message: "Recovered terminal lifecycle from an exact durable startup receipt."
+                    .into(),
+                phase: "startup_durable_event_projection".into(),
+                recoverable: status == "blocked" || status == "failed",
+            });
+        }
+        _ => return Err("startup_agent_run_durable_evidence_transition_invalid".into()),
+    }
+    if status != "completed_with_pending_items" {
+        run.finished_at = Some(evidence.created_at);
+    }
+    let admission = state
+        .persistence_coordinator
+        .admit_startup_agent_run_write()
+        .map_err(|error| error.to_string())?;
+    commit_agent_run_update(state, &store, &run, &admission).await
 }
 
 pub(crate) async fn update_agent_run_after_review_reconciliation(
     state: &Arc<AppState>,
     proposal_id: &str,
-    run: &AgentRun,
+    run_id: &str,
 ) -> Result<(), String> {
-    let _fence = acquire_terminal_owner_task_fence(&run.task_id).await;
+    update_agent_run_after_review_reconciliation_inner(
+        state,
+        proposal_id,
+        run_id,
+        AgentRunWriteLane::Normal,
+    )
+    .await
+}
+
+pub(crate) async fn update_agent_run_after_startup_review_reconciliation(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    update_agent_run_after_review_reconciliation_inner(
+        state,
+        proposal_id,
+        run_id,
+        AgentRunWriteLane::StartupReconciliation,
+    )
+    .await
+}
+
+/// Finalizes Builder/Calibration proposal staging from canonical owners. The
+/// producer may supply only newly returned Proposal references and numeric
+/// staging counts; it cannot submit a caller-shaped AgentRun status or body.
+/// The per-run causal lock is acquired before re-reading the canonical row, so
+/// a review that wins the race cannot be overwritten by a stale full-row save.
+pub(crate) async fn project_agent_run_from_proposal_staging(
+    state: &Arc<AppState>,
+    run_id: &str,
+    proposal_ids: &[String],
+    staging: AgentRunProposalStagingReceipt,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let mut run = load_live_agent_run(state, &store, run_id)?;
+    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
+    for proposal_id in proposal_ids {
+        let proposal_id = proposal_id.trim();
+        if proposal_id.is_empty() {
+            return Err("agent_run_proposal_staging_empty_reference".into());
+        }
+        if !run
+            .generated_proposals
+            .iter()
+            .any(|item| item == proposal_id)
+        {
+            run.generated_proposals.push(proposal_id.to_string());
+        }
+    }
+    apply_staging_receipt(&mut run, staging)?;
+    project_canonical_review_lifecycle(state, &store, &mut run, AgentRunWriteLane::Normal).await?;
+    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
+    commit_agent_run_update(state, &store, &run, &admission).await
+}
+
+/// Re-projects a Planning AgentRun from the canonical PlanExecuteSession and
+/// canonical linked Proposal owners. Mutable session fields are never accepted
+/// from the caller.
+pub(crate) async fn project_agent_run_from_plan_execute_session(
+    state: &Arc<AppState>,
+    run_id: &str,
+    plan_session_id: &str,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let mut run = load_live_agent_run(state, &store, run_id)?;
+    if run.kind != openlife_core::agent::AgentTaskKind::Planning {
+        // A Main Chat AgentRun may be immutable lineage for a Plan session. It
+        // is not the Planning lifecycle owner and must not be reshaped here.
+        return Ok(());
+    }
+    if run.task_id != plan_session_id {
+        return Err("plan_execute_agent_run_task_identity_mismatch".into());
+    }
+    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
+    let session = load_plan_execute_session(state, plan_session_id).await?;
+    if session.source_agent_run_id.as_deref() != Some(run_id) {
+        return Err("plan_execute_agent_run_source_identity_mismatch".into());
+    }
+    for proposal_id in &session.linked_proposal_ids {
+        if !run
+            .generated_proposals
+            .iter()
+            .any(|item| item == proposal_id)
+        {
+            run.generated_proposals.push(proposal_id.clone());
+        }
+    }
+    run.step_count = u32::try_from(session.step_count).unwrap_or(u32::MAX);
+    run.tool_call_count = 0;
+    run.context_summary = Some(plan_execute_context_summary());
+    project_canonical_review_lifecycle_with_plan(
+        state,
+        &store,
+        &mut run,
+        AgentRunWriteLane::Normal,
+        Some(session),
+    )
+    .await?;
+    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
+    commit_agent_run_update(state, &store, &run, &admission).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRunOwnedFailure {
+    BuilderProposalSubmission,
+    PlanSessionCreate,
+    PlanCreatedEventProjection,
+}
+
+/// Applies a bounded owner failure to a freshly created AgentRun without
+/// accepting a mutable AgentRun row from the product caller.
+pub(crate) async fn fail_agent_run_from_owned_phase(
+    state: &Arc<AppState>,
+    run_id: &str,
+    failure: AgentRunOwnedFailure,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let mut run = load_live_agent_run(state, &store, run_id)?;
+    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
+    let (message, phase) = match failure {
+        AgentRunOwnedFailure::BuilderProposalSubmission => {
+            ("builder_proposal_submission_failed", "review_staging")
+        }
+        AgentRunOwnedFailure::PlanSessionCreate => {
+            ("plan_execute_session_create_failed", "execution")
+        }
+        AgentRunOwnedFailure::PlanCreatedEventProjection => {
+            ("plan_execute_created_event_failed", "finalize")
+        }
+    };
+    run.fail(AgentRunError {
+        message: message.into(),
+        phase: phase.into(),
+        recoverable: true,
+    });
+    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
+    commit_agent_run_update(state, &store, &run, &admission).await
+}
+
+fn load_live_agent_run(
+    state: &Arc<AppState>,
+    store: &AgentRunStore,
+    run_id: &str,
+) -> Result<AgentRun, String> {
+    let run = register_agent_run_store_result(
+        state,
+        store.get_run(run_id).map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    if run.deleted_at.is_some() {
+        return Err("agent_run_review_projection_owner_inactive".into());
+    }
+    Ok(run)
+}
+
+async fn load_plan_execute_session(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<PlanExecuteSession, String> {
+    state
+        .plan_execute_session_store
+        .as_ref()
+        .ok_or_else(|| "plan_execute_session_store_unavailable".to_string())?
+        .lock()
+        .await
+        .get_session(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "agent_run_review_projection_plan_session_missing".to_string())
+}
+
+fn apply_staging_receipt(
+    run: &mut AgentRun,
+    staging: AgentRunProposalStagingReceipt,
+) -> Result<(), String> {
+    let expected_kind = match staging.kind {
+        AgentRunProposalStagingKind::Builder => openlife_core::agent::AgentTaskKind::Builder,
+        AgentRunProposalStagingKind::Calibration => {
+            openlife_core::agent::AgentTaskKind::Calibration
+        }
+    };
+    if run.kind != expected_kind {
+        return Err("agent_run_proposal_staging_kind_mismatch".into());
+    }
+    if staging.failed_count > staging.requested_count {
+        return Err("agent_run_proposal_staging_count_invalid".into());
+    }
+    if staging.failed_count > 0 {
+        run.error = Some(AgentRunError {
+            message: "proposal_staging_partial_or_failed".into(),
+            phase: if run.generated_proposals.is_empty() {
+                "review_staging"
+            } else {
+                "review_staging_partial"
+            }
+            .into(),
+            recoverable: true,
+        });
+    } else if run
+        .error
+        .as_ref()
+        .is_some_and(|error| error.phase == "review_staging_partial")
+    {
+        run.error = None;
+    }
+    run.status_updates.push(AgentLoopStatusUpdate {
+        phase: if staging.failed_count > 0 {
+            AgentLoopPhase::Failed
+        } else if run.generated_proposals.is_empty() {
+            AgentLoopPhase::Completed
+        } else {
+            AgentLoopPhase::WaitingPermission
+        },
+        message: "proposal_staging_count_receipt".into(),
+        step_index: u32::try_from(staging.requested_count).unwrap_or(u32::MAX),
+        tool_call_index: Some(u32::try_from(staging.failed_count).unwrap_or(u32::MAX)),
+        timestamp: chrono::Utc::now(),
+    });
+    Ok(())
+}
+
+fn plan_execute_context_summary() -> ContextSummary {
+    ContextSummary {
+        life_model_empty: false,
+        included_life_model_sections: vec![
+            "goal_priority".into(),
+            "energy_current_state".into(),
+            "planning_intensity".into(),
+            "privacy_model_route".into(),
+            "proposal_boundaries".into(),
+        ],
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: true,
+        redaction_applied: true,
+        redaction_level: RedactionLevel::Strict,
+    }
+}
+
+fn review_owned_error(error: &AgentRunError) -> bool {
+    matches!(
+        error.phase.as_str(),
+        "review_staging"
+            | "review_staging_partial"
+            | "review_partial_effect"
+            | "review_effect_unknown"
+            | "review_failed_before_effect"
+            | "review_projection_pending"
+    )
+}
+
+fn clear_review_owned_error(run: &mut AgentRun) {
+    if run.error.as_ref().is_some_and(review_owned_error) {
+        run.error = None;
+    }
+}
+
+fn upsert_review_count_receipt(
+    store: &AgentRunStore,
+    run: &mut AgentRun,
+    message: &str,
+    primary_count: usize,
+    secondary_count: usize,
+) {
+    let primary_count = u32::try_from(primary_count).unwrap_or(u32::MAX);
+    let secondary_count = u32::try_from(secondary_count).unwrap_or(u32::MAX);
+    if run.status_updates.last().is_some_and(|update| {
+        update.phase == AgentLoopPhase::Failed
+            && store.status_update_message_matches(&update.message, message)
+            && update.step_index == primary_count
+            && update.tool_call_index == Some(secondary_count)
+    }) {
+        return;
+    }
+    run.status_updates.push(AgentLoopStatusUpdate {
+        phase: AgentLoopPhase::Failed,
+        message: message.into(),
+        step_index: primary_count,
+        tool_call_index: Some(secondary_count),
+        timestamp: chrono::Utc::now(),
+    });
+}
+
+async fn canonical_agent_run_review_counts(
+    state: &Arc<AppState>,
+    proposal_ids: &[String],
+) -> Result<CanonicalAgentRunReviewCounts, String> {
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?
+        .lock()
+        .await;
+    let mut counts = CanonicalAgentRunReviewCounts::default();
+    for proposal_id in proposal_ids {
+        let Some(proposal) = proposal_store
+            .get_proposal(proposal_id)
+            .map_err(|error| error.to_string())?
+        else {
+            counts.unknown = counts.unknown.saturating_add(1);
+            continue;
+        };
+        let evidence_time = match proposal.status {
+            ProposalStatus::Expired => proposal
+                .resolved_at
+                .unwrap_or(proposal.expires_at.unwrap_or(proposal.created_at)),
+            _ => proposal.resolved_at.unwrap_or(proposal.created_at),
+        };
+        counts.observe_evidence_time(evidence_time);
+        let dispatch_state = proposal_store
+            .dispatch_state(proposal_id)
+            .map_err(|error| error.to_string())?;
+        match dispatch_state.as_deref() {
+            Some("claimed") => {
+                counts.claimed = counts.claimed.saturating_add(1);
+            }
+            Some("unknown") | None => {
+                counts.unknown = counts.unknown.saturating_add(1);
+            }
+            Some("failed_before_effect") => {
+                counts.failed_before_effect = counts.failed_before_effect.saturating_add(1);
+            }
+            Some("confirmed_projection_pending") => {
+                counts.projection_pending = counts.projection_pending.saturating_add(1);
+            }
+            Some("confirmed") if proposal.status == ProposalStatus::Accepted => {
+                counts.confirmed = counts.confirmed.saturating_add(1);
+                let resolved_at = proposal.resolved_at.ok_or_else(|| {
+                    "agent_run_review_projection_resolution_time_missing".to_string()
+                })?;
+                counts.observe_evidence_time(resolved_at);
+            }
+            Some("confirmed") => {
+                // A confirmed external effect without an accepted canonical
+                // Proposal projection is not a decline and not completion.
+                counts.projection_pending = counts.projection_pending.saturating_add(1);
+            }
+            Some("unclaimed") => match proposal.status {
+                ProposalStatus::Rejected => {
+                    counts.rejected = counts.rejected.saturating_add(1);
+                }
+                ProposalStatus::Expired => {
+                    counts.expired = counts.expired.saturating_add(1);
+                }
+                ProposalStatus::Pending
+                | ProposalStatus::Postponed
+                | ProposalStatus::Edited
+                | ProposalStatus::Accepted => {
+                    counts.waiting = counts.waiting.saturating_add(1);
+                }
+            },
+            Some(_) => {
+                // New or corrupt dispatch states are not safe to reinterpret
+                // as either unclaimed or confirmed.
+                counts.unknown = counts.unknown.saturating_add(1);
+            }
+        }
+    }
+    Ok(counts)
+}
+
+async fn unresolved_agent_run_action_count(
+    state: &Arc<AppState>,
+    task_id: &str,
+) -> Result<usize, String> {
+    let Some(action_queue_store) = state.main_chat_action_queue_store.as_ref() else {
+        return Ok(0);
+    };
+    Ok(action_queue_store
+        .lock()
+        .await
+        .list_for_session(task_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|action| action.status != ExecutionQueueStatus::Completed)
+        .count())
+}
+
+fn terminal_review_projection_time(
+    lane: AgentRunWriteLane,
+    counts: CanonicalAgentRunReviewCounts,
+) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    match lane {
+        AgentRunWriteLane::Normal => Ok(chrono::Utc::now()),
+        AgentRunWriteLane::StartupReconciliation => counts
+            .terminal_evidence_time
+            .ok_or_else(|| "agent_run_startup_review_projection_time_evidence_missing".into()),
+    }
+}
+
+fn has_exact_review_failure(
+    store: &AgentRunStore,
+    run: &AgentRun,
+    status: AgentRunStatus,
+    message: &str,
+    phase: &str,
+    recoverable: bool,
+) -> bool {
+    run.status == status
+        && run.finished_at.is_some()
+        && run.error.as_ref().is_some_and(|error| {
+            error.phase == phase
+                && error.recoverable == recoverable
+                && store.run_error_message_matches(&error.message, message)
+        })
+}
+
+fn set_review_failure(
+    run: &mut AgentRun,
+    status: AgentRunStatus,
+    finished_at: chrono::DateTime<chrono::Utc>,
+    message: &str,
+    phase: &str,
+    recoverable: bool,
+) {
+    run.status = status;
+    run.finished_at = Some(finished_at);
+    run.error = Some(AgentRunError {
+        message: message.into(),
+        phase: phase.into(),
+        recoverable,
+    });
+}
+
+async fn project_canonical_review_lifecycle(
+    state: &Arc<AppState>,
+    store: &AgentRunStore,
+    run: &mut AgentRun,
+    lane: AgentRunWriteLane,
+) -> Result<(), String> {
+    let plan = if run.kind == openlife_core::agent::AgentTaskKind::Planning {
+        Some(load_plan_execute_session(state, &run.task_id).await?)
+    } else {
+        None
+    };
+    project_canonical_review_lifecycle_with_plan(state, store, run, lane, plan).await
+}
+
+async fn project_canonical_review_lifecycle_with_plan(
+    state: &Arc<AppState>,
+    store: &AgentRunStore,
+    run: &mut AgentRun,
+    lane: AgentRunWriteLane,
+    plan: Option<PlanExecuteSession>,
+) -> Result<(), String> {
+    let counts = canonical_agent_run_review_counts(state, &run.generated_proposals).await?;
+    let unresolved_action_count = unresolved_agent_run_action_count(state, &run.task_id).await?;
+    let staging_failed = run
+        .error
+        .as_ref()
+        .is_some_and(|error| error.phase == "review_staging_partial");
+    // A failure owned by another phase is canonical and must not be erased by
+    // review projection. Proposal links still commit from the re-read row.
+    if run.status == AgentRunStatus::Failed
+        && run
+            .error
+            .as_ref()
+            .is_some_and(|error| !review_owned_error(error))
+    {
+        return Ok(());
+    }
+
+    let plan_cancelled = plan
+        .as_ref()
+        .is_some_and(|session| session.status == PlanExecuteSessionStatus::Cancelled);
+    if counts.effect_unknown() > 0 {
+        if !has_exact_review_failure(
+            store,
+            run,
+            AgentRunStatus::RemoteUnknown,
+            "review_effect_state_unknown",
+            "review_effect_unknown",
+            true,
+        ) {
+            set_review_failure(
+                run,
+                AgentRunStatus::RemoteUnknown,
+                terminal_review_projection_time(lane, counts)?,
+                "review_effect_state_unknown",
+                "review_effect_unknown",
+                true,
+            );
+        }
+        upsert_review_count_receipt(
+            store,
+            run,
+            "review_effect_unknown_count_receipt",
+            counts.unknown,
+            counts.claimed,
+        );
+    } else if counts.projection_pending > 0 {
+        if !has_exact_review_failure(
+            store,
+            run,
+            AgentRunStatus::Failed,
+            "review_projection_pending",
+            "review_projection_pending",
+            true,
+        ) {
+            set_review_failure(
+                run,
+                AgentRunStatus::Failed,
+                terminal_review_projection_time(lane, counts)?,
+                "review_projection_pending",
+                "review_projection_pending",
+                true,
+            );
+        }
+        upsert_review_count_receipt(
+            store,
+            run,
+            "review_projection_pending_count_receipt",
+            counts.projection_pending,
+            counts.confirmed,
+        );
+    } else if counts.failed_before_effect > 0 && counts.confirmed == 0 {
+        if !has_exact_review_failure(
+            store,
+            run,
+            AgentRunStatus::Failed,
+            "review_failed_before_effect",
+            "review_failed_before_effect",
+            true,
+        ) {
+            set_review_failure(
+                run,
+                AgentRunStatus::Failed,
+                terminal_review_projection_time(lane, counts)?,
+                "review_failed_before_effect",
+                "review_failed_before_effect",
+                true,
+            );
+        }
+        upsert_review_count_receipt(
+            store,
+            run,
+            "review_failed_before_effect_count_receipt",
+            counts.failed_before_effect,
+            counts.waiting,
+        );
+    } else if counts.waiting == 0
+        && counts.confirmed > 0
+        && (counts.declined() > 0 || counts.failed_before_effect > 0 || staging_failed)
+    {
+        debug_assert!(counts.terminal_without_unknown_or_waiting());
+        if !has_exact_review_failure(
+            store,
+            run,
+            AgentRunStatus::Failed,
+            "review_partial_effect",
+            "review_partial_effect",
+            false,
+        ) {
+            set_review_failure(
+                run,
+                AgentRunStatus::Failed,
+                terminal_review_projection_time(lane, counts)?,
+                "review_partial_effect",
+                "review_partial_effect",
+                false,
+            );
+        }
+        upsert_review_count_receipt(
+            store,
+            run,
+            "review_partial_effect_count_receipt",
+            counts.confirmed,
+            counts
+                .declined()
+                .saturating_add(counts.failed_before_effect)
+                .saturating_add(usize::from(staging_failed)),
+        );
+    } else if plan_cancelled {
+        run.cancel();
+        clear_review_owned_error(run);
+    } else if counts.waiting > 0 {
+        run.status = AgentRunStatus::WaitingPermission;
+        run.finished_at = None;
+        if !staging_failed {
+            clear_review_owned_error(run);
+        }
+    } else if counts.confirmed > 0 {
+        debug_assert!(counts.terminal_without_unknown_or_waiting());
+        match plan.as_ref().map(|session| session.status) {
+            Some(PlanExecuteSessionStatus::Cancelled) => {
+                run.cancel();
+                run.finished_at = Some(terminal_review_projection_time(lane, counts)?);
+                clear_review_owned_error(run);
+            }
+            Some(status) if status != PlanExecuteSessionStatus::Completed => {
+                run.status = AgentRunStatus::Running;
+                run.finished_at = None;
+                clear_review_owned_error(run);
+            }
+            _ if unresolved_action_count > 0 => {
+                run.status = AgentRunStatus::WaitingPermission;
+                run.finished_at = None;
+                clear_review_owned_error(run);
+            }
+            _ => {
+                run.status = AgentRunStatus::Completed;
+                run.finished_at = Some(terminal_review_projection_time(lane, counts)?);
+                clear_review_owned_error(run);
+            }
+        }
+    } else if counts.declined() > 0 {
+        debug_assert!(counts.terminal_without_unknown_or_waiting());
+        if staging_failed {
+            run.status = AgentRunStatus::Failed;
+            if run.finished_at.is_none() {
+                run.finished_at = Some(terminal_review_projection_time(lane, counts)?);
+            }
+        } else {
+            run.cancel();
+            run.finished_at = Some(terminal_review_projection_time(lane, counts)?);
+            clear_review_owned_error(run);
+        }
+    } else if let Some(plan) = plan.as_ref() {
+        match plan.status {
+            PlanExecuteSessionStatus::Cancelled => run.cancel(),
+            PlanExecuteSessionStatus::Completed if unresolved_action_count == 0 => {
+                run.status = AgentRunStatus::Completed;
+                run.finished_at = Some(chrono::Utc::now());
+                clear_review_owned_error(run);
+            }
+            PlanExecuteSessionStatus::Completed => {
+                run.status = AgentRunStatus::WaitingPermission;
+                run.finished_at = None;
+                clear_review_owned_error(run);
+            }
+            _ => {
+                run.status = AgentRunStatus::Running;
+                run.finished_at = None;
+                clear_review_owned_error(run);
+            }
+        }
+    } else if run.error.as_ref().is_some_and(review_owned_error) {
+        run.status = AgentRunStatus::Failed;
+        run.finished_at = Some(chrono::Utc::now());
+    } else {
+        run.status = AgentRunStatus::Completed;
+        run.finished_at = Some(chrono::Utc::now());
+        run.error = None;
+    }
+    Ok(())
+}
+
+async fn update_agent_run_after_review_reconciliation_inner(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    run_id: &str,
+    lane: AgentRunWriteLane,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let mut run = load_live_agent_run(state, &store, run_id)?;
+    let canonical_task_id = run.task_id.clone();
+    let _fence = acquire_terminal_owner_task_fence(&canonical_task_id).await;
     let epoch = match state.main_chat_agent_event_store.as_ref() {
         Some(store) => store
             .lock()
@@ -600,27 +2470,17 @@ pub(crate) async fn update_agent_run_after_review_reconciliation(
             }
         }
     }
-    state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?
-        .lock()
-        .await
-        .update_run(run)
-        .map_err(|error| error.to_string())
-}
 
-async fn agent_run_task_id(state: &Arc<AppState>, run_id: &str) -> Result<String, String> {
-    state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?
-        .lock()
-        .await
-        .get_run(run_id)
-        .map_err(|error| error.to_string())?
-        .map(|run| run.task_id)
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))
+    if !run.generated_proposals.iter().any(|id| id == proposal_id) {
+        return Err("agent_run_review_projection_proposal_not_linked".into());
+    }
+    let before_projection = serde_json::to_vec(&run).map_err(|error| error.to_string())?;
+    project_canonical_review_lifecycle(state, &store, &mut run, lane).await?;
+    if serde_json::to_vec(&run).map_err(|error| error.to_string())? == before_projection {
+        return Ok(());
+    }
+    let admission = admit_agent_run_write(state, lane)?;
+    commit_agent_run_update(state, &store, &run, &admission).await
 }
 
 async fn reject_agent_run_lifecycle_race_with_sealing(
@@ -641,58 +2501,179 @@ async fn reject_agent_run_lifecycle_race_with_sealing(
     Ok(())
 }
 
+/// The only Tauri-side entry for creating an AgentRun that has no canonical
+/// Conversation input proof. The process-local causal and task fences close
+/// duplicate in-flight creates; the generation-bound persistence permit is
+/// acquired immediately before the synchronous owner transaction.
+pub(crate) async fn create_agent_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(&run.id);
+    let _causal_guard = causal_lock.lock().await;
+    let _task_fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
+
+    // Clone the synchronous owner behind a short Tokio guard. No owner guard
+    // may cross the admission/permit awaits below.
+    let store = {
+        state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+            .lock()
+            .await
+            .clone()
+    };
+    let admission = state
+        .persistence_coordinator
+        .admit_agent_run_write()
+        .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    wait_at_agent_run_lifecycle_commit_test_barrier(&run.id).await;
+    let _commit_permit = state
+        .persistence_coordinator
+        .acquire_agent_run_commit_permit(&admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    register_agent_run_store_result(
+        state,
+        store.create_run(run).map_err(|error| error.to_string()),
+    )
+}
+
+/// Main Chat AgentRun creation keeps the canonical Conversation proof seam in
+/// Core while sharing the same Tauri persistence admission and lock order as
+/// every other AgentRun create. The final synchronous helper owns the existing
+/// MemoryStore connection -> AgentRunStore connection order.
+pub(crate) async fn create_conversation_bound_agent_run(
+    state: &Arc<AppState>,
+    run: &AgentRun,
+    message_commit: &openlife_core::memory::CanonicalConversationMessageCommit,
+) -> Result<(), String> {
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(&run.id);
+    let _causal_guard = causal_lock.lock().await;
+    let _task_fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
+
+    // Clone both synchronous owners with non-overlapping Tokio guards. The
+    // Core proof seam performs no await while holding either SQLite owner.
+    let memory_store = { state.memory_store.lock().await.clone() };
+    let store = {
+        state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+            .lock()
+            .await
+            .clone()
+    };
+    let admission = state
+        .persistence_coordinator
+        .admit_agent_run_write()
+        .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    wait_at_agent_run_lifecycle_commit_test_barrier(&run.id).await;
+    let _commit_permit = state
+        .persistence_coordinator
+        .acquire_agent_run_commit_permit(&admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    register_agent_run_store_result(
+        state,
+        memory_store
+            .create_agent_run_from_active_conversation_message(&store, run, message_commit.proof())
+            .map_err(|error| error.to_string()),
+    )
+}
+
 pub(crate) async fn delete_agent_run_with_tombstone(
     state: &Arc<AppState>,
     run_id: &str,
     reason: Option<&str>,
+    admission: &AgentRunCanonicalWriteAdmission,
 ) -> Result<CanonicalMutationReceipt, String> {
-    let task_session_id = agent_run_task_id(state, run_id).await?;
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let task_session_id = register_agent_run_store_result(
+        state,
+        store
+            .lifecycle_task_id(run_id)
+            .map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
     let _fence = acquire_terminal_owner_task_fence(&task_session_id).await;
     reject_agent_run_lifecycle_race_with_sealing(state, &task_session_id).await?;
-    let store = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?
-        .lock()
-        .await;
-    let current = store
-        .get_run(run_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    let current = register_agent_run_store_result(
+        state,
+        store.get_run(run_id).map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
     if current.task_id != task_session_id {
         return Err("agent_run_lifecycle_task_binding_changed".into());
     }
-    store
-        .delete_run_with_tombstone(run_id, reason)
-        .map_err(|error| error.to_string())
+    #[cfg(test)]
+    wait_at_agent_run_lifecycle_commit_test_barrier(run_id).await;
+    let commit_permit = state
+        .persistence_coordinator
+        .acquire_agent_run_commit_permit(admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = register_agent_run_store_result(
+        state,
+        store
+            .delete_run_with_tombstone(run_id, reason)
+            .map_err(|error| error.to_string()),
+    );
+    drop(commit_permit);
+    result
 }
 
 pub(crate) async fn restore_agent_run_with_receipt(
     state: &Arc<AppState>,
     run_id: &str,
+    admission: &AgentRunCanonicalWriteAdmission,
 ) -> Result<CanonicalMutationReceipt, String> {
-    let task_session_id = agent_run_task_id(state, run_id).await?;
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let memory_store = { state.memory_store.lock().await.clone() };
+    let task_session_id = register_agent_run_store_result(
+        state,
+        store
+            .lifecycle_task_id(run_id)
+            .map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
     let _fence = acquire_terminal_owner_task_fence(&task_session_id).await;
     reject_agent_run_lifecycle_race_with_sealing(state, &task_session_id).await?;
-    let store = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?
-        .lock()
-        .await;
-    let current = store
-        .get_run(run_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
-    if current.task_id != task_session_id {
+    let current_task_id = register_agent_run_store_result(
+        state,
+        store
+            .lifecycle_task_id(run_id)
+            .map_err(|error| error.to_string()),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
+    if current_task_id != task_session_id {
         return Err("agent_run_lifecycle_task_binding_changed".into());
     }
-    store
-        .restore_run_with_receipt(run_id)
-        .map_err(|error| error.to_string())
+    #[cfg(test)]
+    wait_at_agent_run_lifecycle_commit_test_barrier(run_id).await;
+    let commit_permit = state
+        .persistence_coordinator
+        .acquire_agent_run_commit_permit(admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = register_agent_run_store_result(
+        state,
+        memory_store
+            .restore_agent_run_with_parent_conversation_fence(&store, run_id)
+            .map_err(|error| error.to_string()),
+    );
+    drop(commit_permit);
+    result
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn append_runtime_event(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -760,7 +2741,10 @@ pub(crate) async fn claim_action_replay(
         .map_err(|error| error.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn transition_claimed_action_replay(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -789,7 +2773,10 @@ pub(crate) async fn transition_claimed_action_replay(
         .map_err(|error| error.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn fail_and_release_action_replay_before_dispatch(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -818,7 +2805,10 @@ pub(crate) async fn fail_and_release_action_replay_before_dispatch(
         .map_err(|error| error.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn fail_claimed_action_replay(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -945,6 +2935,11 @@ pub(crate) async fn complete_claimed_action_replay_with_commit_admission(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// "After" names the precise durable crash boundary used by recovery tests.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
+)]
 pub(crate) enum TerminalOwnerCrashPoint {
     AfterClaimPersistedBeforeEffect,
     AfterMemoryCommittedBeforeTaskOwner,
@@ -1360,6 +3355,112 @@ impl TerminalOwnerWriteGateway {
         Ok(transition)
     }
 
+    /// Converges a typed Review acceptance whose relation explicitly does not
+    /// mutate the originating TaskSession at acceptance time.
+    ///
+    /// `NonBlockingSuccessor` belongs to an already-independent turn, while
+    /// `ActionResumePrerequisite` keeps the task waiting until the user starts
+    /// the separately governed replay. Neither relation may be forced through
+    /// the legacy proposal-blocker transition merely because it has a terminal
+    /// owner origin.
+    pub(crate) async fn apply_claimed_review_without_task_transition(
+        &self,
+        acceptance: ClaimedReviewAcceptanceSnapshot,
+    ) -> anyhow::Result<openlife_core::agent::ProposalTerminalRelationKind> {
+        acceptance.validate()?;
+        let proposal = acceptance.proposal().clone();
+        let proposal_id = proposal.id.clone();
+        let projection = self
+            .proposal_store
+            .terminal_relation_projection_proof(&proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("typed_terminal_owner_relation_missing"))?;
+        let relation_kind = projection.relation_kind();
+        if !matches!(
+            relation_kind,
+            openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
+                | openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+        ) {
+            anyhow::bail!("typed_terminal_owner_relation_requires_task_transition");
+        }
+        let origin = acceptance
+            .terminal_owner_origin()
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_origin_binding_missing"))?;
+        if projection.task_session_id() != origin.task_session_id()
+            || projection.run_id() != origin.run_id()
+        {
+            anyhow::bail!("typed_terminal_owner_relation_origin_mismatch");
+        }
+        let claim_id = self
+            .proposal_store
+            .dispatch_claim_id(&proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_dispatch_claim_missing"))?;
+        self.crash_if_selected(
+            &proposal_id,
+            TerminalOwnerCrashPoint::AfterClaimPersistedBeforeEffect,
+        )?;
+        let mut dispatch_state = self
+            .proposal_store
+            .dispatch_state(&proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_dispatch_state_missing"))?;
+        if proposal.proposal_type == ProposalType::ExternalWriteAction
+            && dispatch_state == "claimed"
+        {
+            anyhow::bail!("terminal_owner_external_effect_requires_artifact_materializer");
+        }
+        if proposal.proposal_type == ProposalType::MemoryWrite {
+            if self
+                .memory_store
+                .get_record_by_proposal_id(&proposal_id)?
+                .is_none()
+            {
+                self.execution_capture.record(&proposal_id, "memory_effect");
+                let content = proposal
+                    .after
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
+                let input =
+                    MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
+                        &proposal,
+                        content.to_string(),
+                        origin.task_session_id(),
+                        origin.run_id(),
+                        origin.canonical_user_message_ref(),
+                        origin.canonical_user_message_digest(),
+                    )?;
+                self.memory_store.accept_memory_proposal(input)?;
+            }
+            self.crash_if_selected(
+                &proposal_id,
+                TerminalOwnerCrashPoint::AfterMemoryCommittedBeforeTaskOwner,
+            )?;
+            if dispatch_state == "claimed" {
+                if !self
+                    .proposal_store
+                    .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)?
+                {
+                    anyhow::bail!("terminal_owner_proposal_checkpoint_cas_lost");
+                }
+                dispatch_state = "confirmed_projection_pending".into();
+            }
+        } else if dispatch_state != "confirmed_projection_pending" {
+            anyhow::bail!("terminal_owner_non_memory_effect_not_materialized");
+        }
+        if dispatch_state == "confirmed_projection_pending" {
+            let mut accepted = proposal;
+            accepted.accept();
+            self.execution_capture
+                .record(&proposal_id, "proposal_projection");
+            if !self
+                .proposal_store
+                .project_confirmed_effect(&accepted, &claim_id)?
+            {
+                anyhow::bail!("terminal_owner_proposal_projection_cas_lost");
+            }
+        }
+        Ok(relation_kind)
+    }
+
     pub(crate) async fn apply_materialized_review_successor(
         &self,
         acceptance: MaterializedReviewAcceptanceSnapshot,
@@ -1395,6 +3496,15 @@ impl TerminalOwnerWriteGateway {
         let mut before_memory = 0;
         let mut before_task = 0;
         for (proposal, claim_id, _) in &candidates {
+            let relation_kind = self
+                .proposal_store
+                .terminal_relation_projection_proof(&proposal.id)?
+                .map(|proof| proof.relation_kind());
+            let requires_task_transition = relation_kind.is_none()
+                || relation_kind
+                    == Some(
+                        openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                    );
             if proposal.proposal_type == ProposalType::MemoryWrite
                 && self
                     .memory_store
@@ -1403,16 +3513,29 @@ impl TerminalOwnerWriteGateway {
             {
                 before_memory += 1;
             }
-            if self
-                .task_store
-                .terminal_owner_transition_receipt_for_claim(&proposal.id, claim_id)?
-                .is_none()
+            if requires_task_transition
+                && self
+                    .task_store
+                    .terminal_owner_transition_receipt_for_claim(&proposal.id, claim_id)?
+                    .is_none()
             {
                 before_task += 1;
             }
         }
         let mut before_successors = 0;
         for (proposal, _, _) in &candidates {
+            let relation_kind = self
+                .proposal_store
+                .terminal_relation_projection_proof(&proposal.id)?
+                .map(|proof| proof.relation_kind());
+            if relation_kind.is_some()
+                && relation_kind
+                    != Some(
+                        openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                    )
+            {
+                continue;
+            }
             let origin = self
                 .proposal_store
                 .terminal_owner_origin_binding(&proposal.id)?
@@ -1432,7 +3555,22 @@ impl TerminalOwnerWriteGateway {
         for (proposal, claim_id, _) in &candidates {
             let acceptance = ReviewWorkflow::new(&self.proposal_store)
                 .claimed_acceptance_snapshot(&proposal.id, claim_id)?;
-            self.apply_claimed_review_acceptance(acceptance).await?;
+            let relation_kind = self
+                .proposal_store
+                .terminal_relation_projection_proof(&proposal.id)?
+                .map(|proof| proof.relation_kind());
+            if matches!(
+                relation_kind,
+                Some(openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor)
+                    | Some(
+                        openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+                    )
+            ) {
+                self.apply_claimed_review_without_task_transition(acceptance)
+                    .await?;
+            } else {
+                self.apply_claimed_review_acceptance(acceptance).await?;
+            }
         }
         Ok(TerminalOwnerReconciliationReport {
             canonical_effects_executed: before_memory,

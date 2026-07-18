@@ -1099,6 +1099,7 @@ impl ToolExecutionReceiptTracker {
         self.mark_typed_dispatch_observed(ToolDispatchKind::Local);
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn mark_network_dispatched(&self) {
         self.mark_typed_dispatched(ToolDispatchKind::Network);
     }
@@ -1115,6 +1116,7 @@ impl ToolExecutionReceiptTracker {
         self.mark_typed_dispatched(ToolDispatchKind::McpStdio);
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_a2a_dispatched(&self) {
         self.mark_typed_dispatched(ToolDispatchKind::A2a);
     }

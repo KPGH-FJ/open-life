@@ -25,11 +25,12 @@ pub struct NetworkClientPolicy {
     /// reject private, link-local and reserved networks. This must never be
     /// enabled for a hostname merely because DNS happened to return loopback.
     pub allow_loopback: bool,
-    /// Allows the macOS user-configured loopback HTTP proxy for an HTTPS
-    /// endpoint that the caller owns as a fixed, official service target, and
-    /// only when every local DNS answer is in RFC 2544 fake-IP space. Generic
-    /// fetches and caller-configurable endpoints must leave this disabled.
-    pub allow_system_proxy_for_official_fake_ip_endpoint: bool,
+    /// Exact/domain-suffix rules whose HTTPS destinations may use the macOS
+    /// user-configured loopback HTTP proxy when every local DNS answer is in
+    /// RFC 2544 fake-IP space. Adapters must bind this to their fixed endpoint
+    /// or to the user's explicit NetworkPolicy domain allowlist; an empty list
+    /// keeps generic/caller-selected hosts fail closed.
+    pub fake_ip_proxy_domain_allowlist: Vec<String>,
     pub max_redirects: usize,
     pub max_body_bytes: usize,
     pub connect_timeout: Duration,
@@ -42,7 +43,7 @@ impl Default for NetworkClientPolicy {
         Self {
             require_https: false,
             allow_loopback: false,
-            allow_system_proxy_for_official_fake_ip_endpoint: false,
+            fake_ip_proxy_domain_allowlist: Vec::new(),
             max_redirects: DEFAULT_MAX_REDIRECTS,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -1253,7 +1254,7 @@ fn configured_system_proxy_url(destination_scheme: &str) -> Result<Option<Url>> 
         key: &str,
     ) -> Option<i32> {
         proxies
-            .find(&CFString::new(key))
+            .find(CFString::new(key))
             .and_then(|value| value.downcast::<CFNumber>())
             .and_then(|value| value.to_i32())
     }
@@ -1263,7 +1264,7 @@ fn configured_system_proxy_url(destination_scheme: &str) -> Result<Option<Url>> 
         key: &str,
     ) -> Option<String> {
         proxies
-            .find(&CFString::new(key))
+            .find(CFString::new(key))
             .and_then(|value| value.downcast::<CFString>())
             .map(|value| value.to_string())
     }
@@ -1298,7 +1299,7 @@ fn select_network_egress_route(
     host: &str,
     addresses: Vec<SocketAddr>,
     allow_loopback: bool,
-    allow_system_proxy_for_official_fake_ip_endpoint: bool,
+    fake_ip_proxy_domain_allowlist: &[String],
     destination_is_https: bool,
     configured_proxy: Option<Url>,
 ) -> Result<NetworkEgressRoute> {
@@ -1321,7 +1322,9 @@ fn select_network_egress_route(
         return Ok(NetworkEgressRoute::DirectPinned(addresses));
     }
     let host_is_name = host_without_ipv6_brackets(host).parse::<IpAddr>().is_err();
-    if allow_system_proxy_for_official_fake_ip_endpoint
+    if fake_ip_proxy_domain_allowlist
+        .iter()
+        .any(|rule| domain_matches(host, rule))
         && destination_is_https
         && host_is_name
         && addresses
@@ -1358,7 +1361,10 @@ async fn resolve_network_egress_route(
         .context("network_dns_failed")?
         .collect::<Vec<_>>()
     };
-    let needs_proxy_lookup = policy.allow_system_proxy_for_official_fake_ip_endpoint
+    let needs_proxy_lookup = policy
+        .fake_ip_proxy_domain_allowlist
+        .iter()
+        .any(|rule| domain_matches(host, rule))
         && addresses
             .iter()
             .any(|address| is_private_or_reserved_ip(address.ip()));
@@ -1371,7 +1377,7 @@ async fn resolve_network_egress_route(
         host,
         addresses,
         policy.allow_loopback,
-        policy.allow_system_proxy_for_official_fake_ip_endpoint,
+        &policy.fake_ip_proxy_domain_allowlist,
         url.scheme() == "https",
         configured_proxy,
     )
@@ -1423,11 +1429,12 @@ mod tests {
         let fake_v4 = SocketAddr::new("198.18.0.93".parse().unwrap(), 443);
         let fake_v6 = SocketAddr::new("::ffff:0:c612:5d".parse().unwrap(), 443);
         let proxy = validated_loopback_proxy_url("127.0.0.1", 1082).unwrap();
+        let allowed_domains = vec!["example.com".into()];
         let route = select_network_egress_route(
             "api.example.com",
             vec![fake_v4, fake_v6],
             false,
-            true,
+            &allowed_domains,
             true,
             Some(proxy.clone()),
         )
@@ -1441,7 +1448,7 @@ mod tests {
             "api.example.com",
             vec![fake_v4],
             false,
-            false,
+            &[],
             true,
             Some(proxy.clone()),
         )
@@ -1450,7 +1457,7 @@ mod tests {
             "api.example.com",
             vec![fake_v4],
             false,
-            true,
+            &allowed_domains,
             true,
             None,
         )
@@ -1459,7 +1466,7 @@ mod tests {
             "api.example.com",
             vec![fake_v4],
             false,
-            true,
+            &allowed_domains,
             false,
             Some(proxy),
         )
@@ -1469,11 +1476,12 @@ mod tests {
     #[test]
     fn fake_ip_proxy_does_not_admit_literal_private_or_mixed_dns_targets() {
         let proxy = validated_loopback_proxy_url("127.0.0.1", 1082).unwrap();
+        let allowed_domains = vec!["example.com".into()];
         assert!(select_network_egress_route(
             "192.168.1.2",
             vec![SocketAddr::new("192.168.1.2".parse().unwrap(), 443)],
             false,
-            true,
+            &["192.168.1.2".into()],
             true,
             Some(proxy.clone()),
         )
@@ -1485,9 +1493,18 @@ mod tests {
                 SocketAddr::new("8.8.8.8".parse().unwrap(), 443),
             ],
             false,
-            true,
+            &allowed_domains,
             true,
             Some(proxy),
+        )
+        .is_err());
+        assert!(select_network_egress_route(
+            "attacker.example.net",
+            vec![SocketAddr::new("198.18.0.93".parse().unwrap(), 443)],
+            false,
+            &allowed_domains,
+            true,
+            Some(validated_loopback_proxy_url("127.0.0.1", 1082).unwrap()),
         )
         .is_err());
         assert!(validated_loopback_proxy_url("192.168.1.10", 1082).is_err());
@@ -1945,16 +1962,18 @@ mod tests {
         let terminal = tracker.snapshot();
         assert_eq!(response.body, "ok");
         assert_eq!(terminal.dispatch_attempt_count, 2);
-        let starts = durable_observer
-            .starts
-            .lock()
-            .expect("durable start observer mutex");
-        assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].dispatch_attempt_count, 1);
-        assert_eq!(
-            starts[0].transport_status,
-            crate::tool_execution_receipt::ToolTransportStatus::Dispatched
-        );
+        {
+            let starts = durable_observer
+                .starts
+                .lock()
+                .expect("durable start observer mutex");
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].dispatch_attempt_count, 1);
+            assert_eq!(
+                starts[0].transport_status,
+                crate::tool_execution_receipt::ToolTransportStatus::Dispatched
+            );
+        }
         server.await.unwrap();
     }
 

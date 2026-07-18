@@ -7,6 +7,8 @@ use crate::main_chat_runtime_facts::{
 use async_trait::async_trait;
 use chrono::TimeZone;
 use futures::StreamExt;
+#[cfg(test)]
+use once_cell::sync::Lazy as LazyLock;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AllowedCapability, CompiledContext, ContextCompiler,
     ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionQueueStatus,
@@ -46,6 +48,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 
 use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
 use crate::main_chat_context_loader::{
@@ -82,6 +86,7 @@ use crate::main_chat_runtime_support::{
     finalize_main_chat_task_failure, transition_main_chat_action, MainChatAgentTurn,
     MainChatTaskFailureKind,
 };
+use crate::persistence_coordinator::{CanonicalCommitPermit, GovernedDataImportRecoveryOwner};
 use crate::provider_network_consent::{
     authorize_provider_network_dispatch, NetworkConsentSubmissionScope,
     ProviderNetworkAuthorization,
@@ -98,6 +103,17 @@ const MAX_TOOL_OBSERVATION_PREVIEW_CHARS: usize = 700;
 const MAX_TOOL_QUERY_CHARS: usize = 180;
 const GENERATED_ARTIFACT_MAX_SIZE: usize = 100 * 1024;
 const KERNEL_MCP_CANDIDATE_LIMIT: usize = 8;
+
+#[cfg(test)]
+struct StateCommitAdmissionBarrier {
+    admitted: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static STATE_COMMIT_ADMISSION_BARRIERS: LazyLock<
+    StdMutex<HashMap<usize, StateCommitAdmissionBarrier>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -475,6 +491,32 @@ pub trait MainChatEventSink: Send {
 
     fn emit(&mut self, event: MainChatKernelEvent);
 
+    /// Fallible only at the real provider adapter-start edge. Runtime wrappers
+    /// use this synchronous seam to linearize start against cancellation before
+    /// the HTTP adapter enters `.send()`; ordinary late events remain
+    /// best-effort projections through `emit`.
+    fn emit_provider_started(
+        &mut self,
+        request_id: String,
+        provider: String,
+        model: String,
+        started_at: chrono::DateTime<chrono::Utc>,
+        policy_evidence: ProviderPolicyReceiptEvidence,
+    ) -> Result<(), String> {
+        self.emit(MainChatKernelEvent::ProviderStarted {
+            request_id: request_id.clone(),
+            provider,
+            model,
+            started_at,
+            policy_evidence: policy_evidence.clone(),
+        });
+        self.emit(MainChatKernelEvent::ProviderPolicyEvidence {
+            request_id,
+            policy_evidence,
+        });
+        Ok(())
+    }
+
     fn events(&self) -> &[MainChatKernelEvent] {
         &[]
     }
@@ -626,7 +668,7 @@ struct MainChatKernelReadToolExecution {
     observation_metadata: Value,
     output_preview: String,
     blocker_reason: Option<String>,
-    execution_receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt,
+    execution_receipt: Option<openlife_core::tool_execution_receipt::ToolExecutionReceipt>,
     canonical_tool_graph: Option<KernelCanonicalToolGraph>,
     product_react_trace: Option<crate::product_agent_dto::ProductReactActionTrace>,
     product_tool_projection: Option<crate::product_agent_dto::VerifiedProductToolCallProjection>,
@@ -845,6 +887,9 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         .with_tool_audit_persistence_observer(
             resources.governed.shared.persistence_coordinator.as_ref(),
         )
+        .with_durable_store_failure_observer(
+            resources.governed.shared.persistence_coordinator.as_ref(),
+        )
         .with_memory_store(&resources.governed.memory_store)
         .with_agent_run_store(&resources.agent_run_store)
         .with_network_policy(&network_policy)
@@ -885,6 +930,7 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         match openlife_core::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
             allow_writes: false,
             allow_cloud: true,
+            search_provider: resources.governed.search_provider.clone(),
             ..Default::default()
         })
         .with_receipt_registration_sink(move |registration| {
@@ -896,12 +942,18 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             Ok(result) => {
                 kernel_read_tool_execution_from_action_result(decision, result, canonical_run_id)
             }
-            Err(error) => blocked_kernel_read_tool_execution(
-                decision,
-                "read_tool_gateway_failed",
-                &format!("ToolGateway failed: {error}"),
-                None,
-            ),
+            Err(error) => {
+                crate::terminal_owner_write_gateway::register_agent_run_store_error(
+                    &self.state,
+                    &error,
+                );
+                blocked_kernel_read_tool_execution(
+                    decision,
+                    "read_tool_gateway_failed",
+                    &format!("ToolGateway failed: {error}"),
+                    None,
+                )
+            }
         }
     }
 }
@@ -1400,6 +1452,7 @@ fn typed_kernel_read_policy_code(value: Option<&str>) -> Option<&'static str> {
         }
         Some("filesystem_path_traversal_blocked") => Some("filesystem_path_traversal_blocked"),
         Some("filesystem_read_blocked") => Some("filesystem_read_blocked"),
+        Some("filesystem_read_failed") => Some("filesystem_read_failed"),
         Some("hs_external_write_proposal_first") => Some("hs_external_write_proposal_first"),
         Some("mcp_read_tool_not_governed_read_only") => {
             Some("mcp_read_tool_not_governed_read_only")
@@ -1489,7 +1542,8 @@ fn typed_kernel_read_failure_code(result: &ActionExecutionResult) -> Option<Stri
                             .and_then(|structured| structured.get("permission_decision"))
                             .and_then(Value::as_str)
                     })
-                    .or(result.action.permission_decision.as_deref()),
+                    .or(result.action.permission_decision.as_deref())
+                    .or(result.action.error.as_deref()),
             ) {
                 return Some(policy_code.to_string());
             }
@@ -1560,20 +1614,24 @@ fn kernel_read_tool_execution_from_action_result(
         // metadata. Preserve only the typed blocker category and the exact
         // allowlisted NetworkPolicy reason already owned by the canonical
         // action so the projection remains truthful and metadata-safe.
-        let exact_network_policy_reason = result.stop_reason.as_deref().filter(|reason| {
-            matches!(
-                *reason,
-                "network_policy_disabled"
-                    | "network_policy_default_deny"
-                    | "network_policy_override_deny"
-                    | "network_policy_override_invalid"
-                    | "network_domain_denied"
-                    | "network_domain_not_allowlisted"
-                    | "network_policy_permission_denied"
-                    | "network_private_or_reserved_address_blocked"
-                    | "network_url_scheme_blocked"
-            )
-        });
+        let exact_network_policy_reason = result
+            .stop_reason
+            .as_deref()
+            .or(result.action.error.as_deref())
+            .filter(|reason| {
+                matches!(
+                    *reason,
+                    "network_policy_disabled"
+                        | "network_policy_default_deny"
+                        | "network_policy_override_deny"
+                        | "network_policy_override_invalid"
+                        | "network_domain_denied"
+                        | "network_domain_not_allowlisted"
+                        | "network_policy_permission_denied"
+                        | "network_private_or_reserved_address_blocked"
+                        | "network_url_scheme_blocked"
+                )
+            });
         Some(serde_json::json!({
             "success": false,
             "status": status_label,
@@ -1630,7 +1688,7 @@ fn kernel_read_tool_execution_from_action_result(
         observation_metadata: metadata,
         output_preview,
         blocker_reason,
-        execution_receipt: tool_execution_receipt,
+        execution_receipt: Some(tool_execution_receipt),
         canonical_tool_graph,
         product_react_trace,
         product_tool_projection,
@@ -1655,16 +1713,6 @@ fn blocked_kernel_read_tool_execution(
     if let (Some(object), Some(extra)) = (structured.as_object_mut(), extra_metadata) {
         object.insert("details".into(), extra);
     }
-    let (request_length_bytes, request_hash) =
-        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&governed_input);
-    let tool_execution_receipt =
-        openlife_core::tool_execution_receipt::ToolExecutionReceipt::failed_before_dispatch(
-            None,
-            Some(decision.tool_name.clone()),
-            format!("bytes:{request_length_bytes}:hash:{request_hash}"),
-            openlife_core::tool_execution_receipt::ToolActionEffect::ReadOnly,
-            openlife_core::tool_manifest::ToolIdempotencyContract::Unspecified,
-        );
     let mut metadata = serde_json::json!({
         "kernelBackedReadOnlyToolLoop": true,
         "actionExecutorBacked": false,
@@ -1685,7 +1733,8 @@ fn blocked_kernel_read_tool_execution(
         "blockerReason": blocker,
         "stopReason": blocker,
         "structuredResult": structured,
-        "toolExecutionReceipt": tool_execution_receipt.clone(),
+        "toolExecutionCredit": false,
+        "preGatewayBlocker": true,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
     });
@@ -1708,7 +1757,7 @@ fn blocked_kernel_read_tool_execution(
         observation_metadata: metadata,
         output_preview,
         blocker_reason: Some(blocker.to_string()),
-        execution_receipt: tool_execution_receipt,
+        execution_receipt: None,
         canonical_tool_graph: None,
         product_react_trace: None,
         product_tool_projection: None,
@@ -1822,7 +1871,17 @@ pub(crate) struct MainChatKernelExecutionInput<'a> {
     pub(crate) provider_durability_scope:
         &'a crate::main_chat_turn_runtime::MainChatProviderDurabilityScope,
     pub(crate) execution_epoch: &'a crate::main_chat_cancellation::MainChatExecutionEpoch,
+    pub(crate) terminal_owner_review_origin:
+        &'a openlife_core::agent::TerminalOwnerReviewOriginProof,
+    pub(crate) required_network_consent_proposal_id: Option<&'a str>,
     pub(crate) event_sink_label: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum KernelReviewRelationContext<'a> {
+    Product(&'a openlife_core::agent::TerminalOwnerReviewOriginProof),
+    #[cfg(test)]
+    UnboundUnitFixture,
 }
 
 pub(crate) async fn run_main_chat_kernel_direct_answer_with_state<S>(
@@ -1842,6 +1901,8 @@ where
         canonical_run_id,
         provider_durability_scope,
         execution_epoch,
+        terminal_owner_review_origin,
+        required_network_consent_proposal_id,
         event_sink_label,
     } = input;
     main_chat_agent_turn
@@ -2088,7 +2149,11 @@ where
             direct_reply.clone(),
         )
         .with_consent_state(Arc::clone(state))
-        .with_canonical_write_admission(execution_epoch.clone()),
+        .with_canonical_write_admission(execution_epoch.clone())
+        .with_terminal_owner_review_origin(Arc::new(terminal_owner_review_origin.clone()))
+        .with_required_network_consent_proposal_id(
+            required_network_consent_proposal_id.map(ToOwned::to_owned),
+        ),
     )
     .with_context_config(MainChatKernelContextConfig {
         load_workspace_knowledge: true,
@@ -2113,13 +2178,14 @@ where
         session_id,
     )));
 
-    if main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
-        &main_chat_agent_turn.decision.policy_decision,
-        &messages,
-        provider_runtime,
-    )
-    .await
-    {
+    let use_agent_loop = runtime_fact_answer.is_none()
+        && main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+            &main_chat_agent_turn.decision.policy_decision,
+            &messages,
+            provider_runtime,
+        )
+        .await;
+    if use_agent_loop {
         let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
         let (_, privacy_map) = privacy_engine.desensitize_batch(
             &messages
@@ -2129,65 +2195,8 @@ where
         );
         let agent_loop_attempt = {
             let progress_session_id = session_id.to_string();
-            let mut emit_progress = |progress| match progress {
-                MainChatModelProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                } => emit_provider_started_with_policy(
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                    event_sink,
-                ),
-                MainChatModelProgress::Token { request_id, chunk } => {
-                    event_sink.emit(MainChatKernelEvent::ProviderToken {
-                        session_id: progress_session_id.clone(),
-                        request_id,
-                        chunk,
-                    })
-                }
-                MainChatModelProgress::Completed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                }),
-                MainChatModelProgress::Failed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    error_digest,
-                } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    error_digest,
-                }),
-                MainChatModelProgress::RemoteUnknown {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    reason_digest,
-                } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    reason_digest,
-                }),
+            let mut emit_progress = |progress| {
+                emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
             };
             try_run_main_chat_react_agent_loop(
                 state,
@@ -2208,7 +2217,7 @@ where
             .await?
         };
         for receipt in &agent_loop_attempt.provider_receipts {
-            emit_provider_receipt(receipt, false, event_sink);
+            emit_provider_receipt(receipt, event_sink)?;
         }
         execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
         let provider_durability_proofs = agent_loop_attempt.provider_durability_proofs.clone();
@@ -2221,6 +2230,7 @@ where
                 &task_session_id,
                 canonical_run_id,
                 execution_epoch,
+                terminal_owner_review_origin,
                 state,
                 main_chat_agent_turn,
                 execution_transcript,
@@ -2238,6 +2248,7 @@ where
             &user_text,
             canonical_run_id,
             execution_epoch,
+            terminal_owner_review_origin,
             state,
             main_chat_agent_turn,
             execution_transcript,
@@ -2297,6 +2308,7 @@ where
             &user_text,
             canonical_run_id,
             execution_epoch,
+            terminal_owner_review_origin,
             state,
             main_chat_agent_turn,
             execution_transcript,
@@ -2317,6 +2329,7 @@ where
             &task_session_id,
             canonical_run_id,
             execution_epoch,
+            terminal_owner_review_origin,
             state,
             main_chat_agent_turn,
             execution_transcript,
@@ -2335,6 +2348,7 @@ where
         &user_text,
         canonical_run_id,
         execution_epoch,
+        terminal_owner_review_origin,
         state,
         main_chat_agent_turn,
         execution_transcript,
@@ -2360,6 +2374,42 @@ fn transient_state_projection_status_label(
         openlife_core::state_store::StateProjectionStatus::Degraded => "degraded",
         openlife_core::state_store::StateProjectionStatus::Applied => "applied",
     }
+}
+
+/// StateGateway may expire due rows even for a read-shaped intent. Enter its
+/// complete synchronous execution under the same shared commit barrier used by
+/// the other import-observed owners, then release it before LifeModel
+/// projection to avoid a recursive read lock under Tokio writer preference.
+async fn acquire_state_store_commit_permit<'state>(
+    state: &'state Arc<AppState>,
+) -> Result<CanonicalCommitPermit<'state>, String> {
+    let admission = state
+        .persistence_coordinator
+        .admit_normal_or_governed_data_import_writes(
+            &[GovernedDataImportRecoveryOwner::StateStore],
+            None,
+            "",
+            "",
+            "",
+        )
+        .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    {
+        let key = Arc::as_ptr(&state.persistence_coordinator) as usize;
+        let barrier = STATE_COMMIT_ADMISSION_BARRIERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+        if let Some(barrier) = barrier {
+            let _ = barrier.admitted.send(());
+            let _ = barrier.release.await;
+        }
+    }
+    state
+        .persistence_coordinator
+        .acquire_canonical_commit_permit(&admission)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn resolve_transient_state_execution_context(
@@ -2468,7 +2518,10 @@ fn synthesize_transient_state_reply(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_kernel_transient_state_command_surface_result<S>(
     session_id: &str,
     canonical_run_id: &str,
@@ -2534,9 +2587,11 @@ where
         )
         .await;
     }
+    let state_commit_permit = acquire_state_store_commit_permit(state).await?;
     let mut outcome = openlife_core::state_store::StateGateway::new((**state_store).clone())
         .execute_with_admission(grant, execution_context, execution_epoch)
         .map_err(|error| format!("transient_state_gateway_failed:{error}"))?;
+    drop(state_commit_permit);
     if let Some(receipt) = outcome.receipt.as_ref() {
         let replayed = receipt.replayed;
         outcome.receipt = match receipt.asset_kind {
@@ -2545,14 +2600,21 @@ where
                     crate::state_projection::reconcile_state_store_lifemodel_projection(state).await
                 {
                     log::warn!("[StateProjection] {error}");
-                    state_store
-                        .mark_projection_degraded(
-                            &receipt.outbox_event_id,
-                            "state_projection_reconciliation_failed",
-                        )
-                        .map_err(|mark_error| {
-                            format!("mark transient state projection degraded failed: {mark_error}")
-                        })?;
+                    if !error.is_deferred() {
+                        let projection_status_permit =
+                            acquire_state_store_commit_permit(state).await?;
+                        state_store
+                            .mark_projection_degraded(
+                                &receipt.outbox_event_id,
+                                "state_projection_reconciliation_failed",
+                            )
+                            .map_err(|mark_error| {
+                                format!(
+                                    "mark transient state projection degraded failed: {mark_error}"
+                                )
+                            })?;
+                        drop(projection_status_permit);
+                    }
                 }
                 state_store
                     .receipt_for_operation(canonical_run_id, replayed)
@@ -2723,6 +2785,7 @@ where
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
+        execution_epoch,
         state,
     )
     .await?;
@@ -2882,7 +2945,10 @@ fn extract_resource_daily_task_drafts(
     Ok(tasks)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_kernel_resource_daily_task_batch_result<S>(
     session_id: &str,
     canonical_run_id: &str,
@@ -2930,29 +2996,36 @@ where
         .map_err(|error| format!("resource_daily_task_batch_join_failed:{error}"))?
         .map_err(|error| format!("resource_daily_task_batch_load_failed:{error}"))?;
         let drafts = extract_resource_daily_task_drafts(chunks)?;
-        gateway
+        let state_commit_permit = acquire_state_store_commit_permit(state).await?;
+        let receipt = gateway
             .execute_resource_task_batch_with_admission(
                 grant,
                 drafts,
                 execution_context,
                 execution_epoch,
             )
-            .map_err(|error| format!("resource_task_batch_gateway_failed:{error}"))?
+            .map_err(|error| format!("resource_task_batch_gateway_failed:{error}"))?;
+        drop(state_commit_permit);
+        receipt
     };
 
     if let Err(error) =
         crate::state_projection::reconcile_state_store_lifemodel_projection(state).await
     {
         log::warn!("[StateProjection] {error}");
-        for asset in &receipt.assets {
-            state_store
-                .mark_projection_degraded(
-                    &asset.outbox_event_id,
-                    "state_projection_reconciliation_failed",
-                )
-                .map_err(|mark_error| {
-                    format!("mark resource task projection degraded failed: {mark_error}")
-                })?;
+        if !error.is_deferred() {
+            let projection_status_permit = acquire_state_store_commit_permit(state).await?;
+            for asset in &receipt.assets {
+                state_store
+                    .mark_projection_degraded(
+                        &asset.outbox_event_id,
+                        "state_projection_reconciliation_failed",
+                    )
+                    .map_err(|mark_error| {
+                        format!("mark resource task projection degraded failed: {mark_error}")
+                    })?;
+            }
+            drop(projection_status_permit);
         }
     }
     receipt = state_store
@@ -3112,6 +3185,7 @@ where
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
+        execution_epoch,
         state,
     )
     .await?;
@@ -3616,7 +3690,7 @@ pub enum MainChatModelProgress {
         provider: String,
         model: String,
         started_at: chrono::DateTime<chrono::Utc>,
-        policy_evidence: ProviderPolicyReceiptEvidence,
+        policy_evidence: Box<ProviderPolicyReceiptEvidence>,
     },
     Token {
         request_id: String,
@@ -3648,14 +3722,12 @@ pub enum MainChatModelProgress {
 pub struct MainChatModelGeneration {
     pub content: String,
     pub provider_receipt: Option<ProviderInvocationReceipt>,
-    pub provider_started_emitted: bool,
 }
 
 #[derive(Debug)]
 pub struct MainChatModelFailure {
     pub message: String,
     pub provider_receipt: Option<ProviderInvocationReceipt>,
-    pub provider_started_emitted: bool,
     pub blocker_code: Option<String>,
     pub proposal_ids: Vec<String>,
 }
@@ -3665,7 +3737,7 @@ pub trait MainChatModelClient: Send + Sync {
     async fn generate_direct_answer(
         &self,
         request: MainChatModelRequest,
-        emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+        emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
     ) -> Result<MainChatModelGeneration, MainChatModelFailure>;
 
     fn route_metadata(&self) -> MainChatRouteMetadata;
@@ -3673,32 +3745,36 @@ pub trait MainChatModelClient: Send + Sync {
 
 fn emit_provider_receipt<S>(
     receipt: &ProviderInvocationReceipt,
-    started_already_emitted: bool,
     event_sink: &mut S,
-) where
+) -> Result<(), String>
+where
     S: MainChatEventSink + ?Sized,
 {
     if receipt.simulated {
-        return;
+        return Ok(());
     }
-    let start_seen = started_already_emitted
-        || event_sink.events().iter().any(|event| {
-            matches!(
-                event,
-                MainChatKernelEvent::ProviderStarted { request_id, .. }
-                    if request_id == &receipt.request_id
-            )
-        });
+    let policy_evidence = receipt
+        .policy_evidence
+        .as_ref()
+        .ok_or_else(|| "provider_receipt_policy_evidence_missing".to_string())?;
+    let start_seen = event_sink.events().iter().any(|event| {
+        matches!(
+            event,
+            MainChatKernelEvent::ProviderStarted {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence: observed_policy_evidence,
+            } if request_id == &receipt.request_id
+                && provider == &receipt.provider
+                && model == &receipt.model
+                && started_at == &receipt.started_at
+                && observed_policy_evidence == policy_evidence
+        )
+    });
     if !start_seen {
-        if let Some(policy_evidence) = receipt.policy_evidence.clone() {
-            event_sink.emit(MainChatKernelEvent::ProviderStarted {
-                request_id: receipt.request_id.clone(),
-                provider: receipt.provider.clone(),
-                model: receipt.model.clone(),
-                started_at: receipt.started_at,
-                policy_evidence,
-            });
-        }
+        return Err("provider_receipt_observed_start_missing".into());
     }
     if let Some(policy_evidence) = receipt.policy_evidence.clone() {
         let evidence_seen = event_sink.events().iter().any(|event| {
@@ -3727,7 +3803,7 @@ fn emit_provider_receipt<S>(
         )
     });
     if terminal_seen {
-        return;
+        return Ok(());
     }
     match receipt.status {
         ProviderInvocationStatus::Completed => {
@@ -3763,6 +3839,7 @@ fn emit_provider_receipt<S>(
             });
         }
     }
+    Ok(())
 }
 
 fn emit_provider_started_with_policy<S>(
@@ -3772,20 +3849,92 @@ fn emit_provider_started_with_policy<S>(
     started_at: chrono::DateTime<chrono::Utc>,
     policy_evidence: ProviderPolicyReceiptEvidence,
     event_sink: &mut S,
-) where
+) -> Result<(), String>
+where
     S: MainChatEventSink + ?Sized,
 {
-    event_sink.emit(MainChatKernelEvent::ProviderStarted {
-        request_id: request_id.clone(),
-        provider,
-        model,
-        started_at,
-        policy_evidence: policy_evidence.clone(),
-    });
-    event_sink.emit(MainChatKernelEvent::ProviderPolicyEvidence {
-        request_id,
-        policy_evidence,
-    });
+    event_sink.emit_provider_started(request_id, provider, model, started_at, policy_evidence)
+}
+
+fn emit_main_chat_model_progress<S>(
+    progress: MainChatModelProgress,
+    session_id: &str,
+    event_sink: &mut S,
+) -> anyhow::Result<()>
+where
+    S: MainChatEventSink + ?Sized,
+{
+    match progress {
+        MainChatModelProgress::Started {
+            request_id,
+            provider,
+            model,
+            started_at,
+            policy_evidence,
+        } => emit_provider_started_with_policy(
+            request_id,
+            provider,
+            model,
+            started_at,
+            *policy_evidence,
+            event_sink,
+        )
+        .map_err(anyhow::Error::msg),
+        MainChatModelProgress::Token { request_id, chunk } => {
+            event_sink.emit(MainChatKernelEvent::ProviderToken {
+                session_id: session_id.to_string(),
+                request_id,
+                chunk,
+            });
+            Ok(())
+        }
+        MainChatModelProgress::Completed {
+            request_id,
+            provider,
+            model,
+            finished_at,
+        } => {
+            event_sink.emit(MainChatKernelEvent::ProviderCompleted {
+                request_id,
+                provider,
+                model,
+                finished_at,
+            });
+            Ok(())
+        }
+        MainChatModelProgress::Failed {
+            request_id,
+            provider,
+            model,
+            finished_at,
+            error_digest,
+        } => {
+            event_sink.emit(MainChatKernelEvent::ProviderFailed {
+                request_id,
+                provider,
+                model,
+                finished_at,
+                error_digest,
+            });
+            Ok(())
+        }
+        MainChatModelProgress::RemoteUnknown {
+            request_id,
+            provider,
+            model,
+            finished_at,
+            reason_digest,
+        } => {
+            event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
+                request_id,
+                provider,
+                model,
+                finished_at,
+                reason_digest,
+            });
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4127,6 +4276,8 @@ pub struct SchedulerMainChatModelClient {
     network_policy: NetworkPolicy,
     consent_state: Option<Arc<AppState>>,
     canonical_write_admission: Option<crate::main_chat_cancellation::MainChatExecutionEpoch>,
+    terminal_owner_review_origin: Option<Arc<openlife_core::agent::TerminalOwnerReviewOriginProof>>,
+    required_network_consent_proposal_id: Option<String>,
 }
 
 impl SchedulerMainChatModelClient {
@@ -4141,6 +4292,8 @@ impl SchedulerMainChatModelClient {
             network_policy,
             consent_state: None,
             canonical_write_admission: None,
+            terminal_owner_review_origin: None,
+            required_network_consent_proposal_id: None,
         }
     }
 
@@ -4154,6 +4307,22 @@ impl SchedulerMainChatModelClient {
         admission: crate::main_chat_cancellation::MainChatExecutionEpoch,
     ) -> Self {
         self.canonical_write_admission = Some(admission);
+        self
+    }
+
+    pub fn with_terminal_owner_review_origin(
+        mut self,
+        origin: Arc<openlife_core::agent::TerminalOwnerReviewOriginProof>,
+    ) -> Self {
+        self.terminal_owner_review_origin = Some(origin);
+        self
+    }
+
+    pub fn with_required_network_consent_proposal_id(
+        mut self,
+        proposal_id: Option<String>,
+    ) -> Self {
+        self.required_network_consent_proposal_id = proposal_id;
         self
     }
 }
@@ -4199,7 +4368,6 @@ fn resource_context_failure(error: impl std::fmt::Display) -> MainChatModelFailu
     MainChatModelFailure {
         message: error.to_string(),
         provider_receipt: None,
-        provider_started_emitted: false,
         blocker_code: Some("resource_context_preparation_failed".into()),
         proposal_ids: Vec::new(),
     }
@@ -4264,7 +4432,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
     async fn generate_direct_answer(
         &self,
         request: MainChatModelRequest,
-        emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+        emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
     ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
         let requested_stream_provider_tokens = request.stream_provider_tokens;
         let payload_purpose = request.payload_purpose;
@@ -4278,7 +4446,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
             .ok_or_else(|| MainChatModelFailure {
                 message: "Main Chat provider request is missing its current user subject".into(),
                 provider_receipt: None,
-                provider_started_emitted: false,
                 blocker_code: Some("provider_current_user_subject_missing".into()),
                 proposal_ids: Vec::new(),
             })?;
@@ -4410,7 +4577,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
             .map_err(|error| MainChatModelFailure {
                 message: error.to_string(),
                 provider_receipt: None,
-                provider_started_emitted: false,
                 blocker_code: Some("provider_payload_authorization_failed".into()),
                 proposal_ids: Vec::new(),
             })?;
@@ -4470,7 +4636,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                     ),
                     message,
                     provider_receipt: None,
-                    provider_started_emitted: false,
                     proposal_ids: Vec::new(),
                 }
             })?;
@@ -4487,13 +4652,25 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                     MainChatModelFailure {
                         message: "Main Chat provider network consent has no execution-owned canonical write admission".into(),
                         provider_receipt: None,
-                        provider_started_emitted: false,
                         blocker_code: Some(
                             "provider_network_consent_admission_unavailable".into(),
                         ),
                         proposal_ids: Vec::new(),
                     }
                 })?;
+                let review_origin =
+                    self.terminal_owner_review_origin
+                        .as_deref()
+                        .ok_or_else(|| {
+                            MainChatModelFailure {
+                        message:
+                            "Main Chat provider network consent has no terminal-owner Review origin"
+                                .into(),
+                        provider_receipt: None,
+                        blocker_code: Some("provider_network_consent_origin_unavailable".into()),
+                        proposal_ids: Vec::new(),
+                    }
+                        })?;
                 let url = openlife_core::llm::chat_completions_url(
                     &prepared.provider_target,
                     &self.scheduler.openai_base,
@@ -4507,13 +4684,16 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                     &capability,
                     &prepared.provider_target,
                     task_session_id.as_deref(),
-                    NetworkConsentSubmissionScope::MainChatTurn(admission),
+                    NetworkConsentSubmissionScope::MainChatTurn {
+                        origin: review_origin,
+                        admission,
+                        required_proposal_id: self.required_network_consent_proposal_id.as_deref(),
+                    },
                 )
                 .await
                 .map_err(|error| MainChatModelFailure {
                     message: error.to_string(),
                     provider_receipt: None,
-                    provider_started_emitted: false,
                     blocker_code: Some("provider_network_consent_error".into()),
                     proposal_ids: Vec::new(),
                 })?;
@@ -4531,7 +4711,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                             message: "provider network consent is pending Review Center approval"
                                 .into(),
                             provider_receipt: None,
-                            provider_started_emitted: false,
                             blocker_code: Some("network_policy_consent_required".into()),
                             proposal_ids: vec![proposal_id],
                         });
@@ -4540,7 +4719,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                         return Err(MainChatModelFailure {
                             message: reason_code.clone(),
                             provider_receipt: None,
-                            provider_started_emitted: false,
                             blocker_code: Some(reason_code),
                             proposal_ids: Vec::new(),
                         });
@@ -4551,20 +4729,18 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
 
         if stream_provider_tokens && self.scheduler.scripted_generation_response.is_none() {
             let request_id = prepared.context_manifest.request_id.clone();
-            let mut provider_started_emitted = false;
             let mut stream = self
                 .scheduler
                 .generate_prepared_stream_with_start_observer(
                     prepared,
                     |request_id, provider, model, observed_at, observed_policy_evidence| {
-                        provider_started_emitted = true;
                         emit_progress(MainChatModelProgress::Started {
                             request_id: request_id.to_string(),
                             provider: provider.to_string(),
                             model: model.to_string(),
                             started_at: observed_at,
-                            policy_evidence: observed_policy_evidence.clone(),
-                        });
+                            policy_evidence: Box::new(observed_policy_evidence.clone()),
+                        })?;
                         Ok(())
                     },
                 )
@@ -4572,7 +4748,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 .map_err(|error| MainChatModelFailure {
                     message: error.to_string(),
                     provider_receipt: None,
-                    provider_started_emitted,
                     blocker_code: None,
                     proposal_ids: Vec::new(),
                 })?;
@@ -4580,10 +4755,17 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
             while let Some(event) = stream.next().await {
                 match event {
                     PreparedProviderStreamEvent::Token(chunk) => {
-                        emit_progress(MainChatModelProgress::Token {
+                        if let Err(error) = emit_progress(MainChatModelProgress::Token {
                             request_id: request_id.clone(),
                             chunk: chunk.clone(),
-                        });
+                        }) {
+                            return Err(MainChatModelFailure {
+                                message: error.to_string(),
+                                provider_receipt: None,
+                                blocker_code: Some("provider_progress_emission_failed".into()),
+                                proposal_ids: Vec::new(),
+                            });
+                        }
                         content.push_str(&chunk);
                     }
                     PreparedProviderStreamEvent::Terminal(
@@ -4592,7 +4774,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                         return Err(MainChatModelFailure {
                             message: "real provider stream returned not_attempted terminal".into(),
                             provider_receipt: None,
-                            provider_started_emitted,
                             blocker_code: Some("provider_stream_not_attempted".into()),
                             proposal_ids: Vec::new(),
                         });
@@ -4609,13 +4790,11 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                         ) {
                             Ok(content) => Ok(MainChatModelGeneration {
                                 content,
-                                provider_receipt: Some(receipt),
-                                provider_started_emitted,
+                                provider_receipt: Some(*receipt),
                             }),
                             Err(message) => Err(MainChatModelFailure {
                                 message,
-                                provider_receipt: Some(receipt),
-                                provider_started_emitted,
+                                provider_receipt: Some(*receipt),
                                 blocker_code: Some("resource_citation_validation_failed".into()),
                                 proposal_ids: Vec::new(),
                             }),
@@ -4627,8 +4806,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                     ) => {
                         return Err(MainChatModelFailure {
                             message: error,
-                            provider_receipt: Some(receipt),
-                            provider_started_emitted,
+                            provider_receipt: Some(*receipt),
                             blocker_code: None,
                             proposal_ids: Vec::new(),
                         });
@@ -4638,7 +4816,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
             return Err(MainChatModelFailure {
                 message: "prepared provider stream ended without its typed terminal event".into(),
                 provider_receipt: None,
-                provider_started_emitted,
                 blocker_code: Some("provider_stream_terminal_missing".into()),
                 proposal_ids: Vec::new(),
             });
@@ -4656,14 +4833,13 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                             provider: provider.to_string(),
                             model: model.to_string(),
                             started_at,
-                            policy_evidence: policy_evidence.clone(),
-                        });
+                            policy_evidence: Box::new(policy_evidence.clone()),
+                        })?;
                     }
                     Ok(())
                 },
             )
             .await;
-        let provider_started_emitted = outcome.receipt.is_some() && !simulated;
         match outcome.result {
             Ok(content) => {
                 let reconstructed = self.privacy_engine.reconstruct(&content, &privacy_map);
@@ -4676,12 +4852,10 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                     Ok(content) => Ok(MainChatModelGeneration {
                         content,
                         provider_receipt: outcome.receipt,
-                        provider_started_emitted,
                     }),
                     Err(message) => Err(MainChatModelFailure {
                         message,
                         provider_receipt: outcome.receipt,
-                        provider_started_emitted,
                         blocker_code: Some("resource_citation_validation_failed".into()),
                         proposal_ids: Vec::new(),
                     }),
@@ -4696,7 +4870,6 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 Err(MainChatModelFailure {
                     message,
                     provider_receipt: outcome.receipt,
-                    provider_started_emitted,
                     blocker_code,
                     proposal_ids: Vec::new(),
                 })
@@ -4787,6 +4960,8 @@ struct CommandSurfaceDirectAnswerModelClient {
     direct_reply: Option<CommandSurfaceDirectReply>,
     consent_state: Option<Arc<AppState>>,
     canonical_write_admission: Option<crate::main_chat_cancellation::MainChatExecutionEpoch>,
+    terminal_owner_review_origin: Option<Arc<openlife_core::agent::TerminalOwnerReviewOriginProof>>,
+    required_network_consent_proposal_id: Option<String>,
 }
 
 impl CommandSurfaceDirectAnswerModelClient {
@@ -4803,6 +4978,8 @@ impl CommandSurfaceDirectAnswerModelClient {
             direct_reply,
             consent_state: None,
             canonical_write_admission: None,
+            terminal_owner_review_origin: None,
+            required_network_consent_proposal_id: None,
         }
     }
 
@@ -4818,6 +4995,19 @@ impl CommandSurfaceDirectAnswerModelClient {
         self.canonical_write_admission = Some(admission);
         self
     }
+
+    fn with_terminal_owner_review_origin(
+        mut self,
+        origin: Arc<openlife_core::agent::TerminalOwnerReviewOriginProof>,
+    ) -> Self {
+        self.terminal_owner_review_origin = Some(origin);
+        self
+    }
+
+    fn with_required_network_consent_proposal_id(mut self, proposal_id: Option<String>) -> Self {
+        self.required_network_consent_proposal_id = proposal_id;
+        self
+    }
 }
 
 #[async_trait]
@@ -4825,13 +5015,12 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
     async fn generate_direct_answer(
         &self,
         request: MainChatModelRequest,
-        emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+        emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
     ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
         if let Some(reply) = self.direct_reply.as_ref() {
             return Ok(MainChatModelGeneration {
                 content: reply.content.clone(),
                 provider_receipt: None,
-                provider_started_emitted: false,
             });
         }
 
@@ -4843,6 +5032,12 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
         if let Some(admission) = self.canonical_write_admission.as_ref() {
             client = client.with_canonical_write_admission(admission.clone());
         }
+        if let Some(origin) = self.terminal_owner_review_origin.as_ref() {
+            client = client.with_terminal_owner_review_origin(Arc::clone(origin));
+        }
+        client = client.with_required_network_consent_proposal_id(
+            self.required_network_consent_proposal_id.clone(),
+        );
         if let Some(state) = self.consent_state.as_ref() {
             client
                 .with_consent_state(Arc::clone(state))
@@ -5104,9 +5299,10 @@ where
                 .await;
         }
 
-        if !input
-            .policy_decision
-            .allows(AllowedCapability::ProviderGeneration)
+        if !input.runtime_fact_direct_answer
+            && !input
+                .policy_decision
+                .allows(AllowedCapability::ProviderGeneration)
         {
             return self.governed_blocker(
                 "policy_provider_generation_not_allowed",
@@ -5145,65 +5341,8 @@ where
 
         let progress_session_id = request.session_id.clone();
         let generation_result = {
-            let mut emit_progress = |progress| match progress {
-                MainChatModelProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                } => emit_provider_started_with_policy(
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                    event_sink,
-                ),
-                MainChatModelProgress::Token { request_id, chunk } => {
-                    event_sink.emit(MainChatKernelEvent::ProviderToken {
-                        session_id: progress_session_id.clone(),
-                        request_id,
-                        chunk,
-                    })
-                }
-                MainChatModelProgress::Completed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                }),
-                MainChatModelProgress::Failed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    error_digest,
-                } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    error_digest,
-                }),
-                MainChatModelProgress::RemoteUnknown {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    reason_digest,
-                } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    reason_digest,
-                }),
+            let mut emit_progress = |progress| {
+                emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
             };
             self.model_client
                 .generate_direct_answer(request, &mut emit_progress)
@@ -5214,7 +5353,11 @@ where
             Ok(generation) if !generation.content.trim().is_empty() => {
                 if let Some(receipt) = generation.provider_receipt.as_ref() {
                     route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
-                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                    if let Err(blocked) =
+                        self.require_provider_receipt_lifecycle(receipt, event_sink)
+                    {
+                        return blocked;
+                    }
                 }
                 let reply = generation.content;
                 let (reply, blockers) =
@@ -5255,13 +5398,21 @@ where
             }
             Ok(generation) => {
                 if let Some(receipt) = generation.provider_receipt.as_ref() {
-                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                    if let Err(blocked) =
+                        self.require_provider_receipt_lifecycle(receipt, event_sink)
+                    {
+                        return blocked;
+                    }
                 }
                 self.blocked("model_generation_empty", event_sink)
             }
             Err(failure) => {
                 if let Some(receipt) = failure.provider_receipt.as_ref() {
-                    emit_provider_receipt(receipt, failure.provider_started_emitted, event_sink);
+                    if let Err(blocked) =
+                        self.require_provider_receipt_lifecycle(receipt, event_sink)
+                    {
+                        return blocked;
+                    }
                 }
                 let blocker = failure
                     .blocker_code
@@ -5293,6 +5444,24 @@ where
     {
         event_sink.emit(MainChatKernelEvent::Blocker { code: code.into() });
         MainChatTurnResult::blocked(code)
+    }
+
+    // Returning the complete fail-closed turn keeps blocker construction in one
+    // authority and avoids a second lossy error-to-result translation.
+    #[expect(
+        clippy::result_large_err,
+        reason = "owner=backend-runtime; expires=2026-10-01; preserve one fail-closed terminalization authority"
+    )]
+    fn require_provider_receipt_lifecycle<S>(
+        &self,
+        receipt: &ProviderInvocationReceipt,
+        event_sink: &mut S,
+    ) -> Result<(), MainChatTurnResult>
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        emit_provider_receipt(receipt, event_sink)
+            .map_err(|_| self.blocked("provider_receipt_lifecycle_invalid", event_sink))
     }
 
     fn governed_blocker<S>(
@@ -5419,7 +5588,7 @@ where
                 output_preview: Some(execution.output_preview.clone()),
                 blocker: execution.blocker_reason.clone(),
                 observation_metadata: Some(execution.observation_metadata.clone()),
-                execution_receipt: Some(execution.execution_receipt.clone()),
+                execution_receipt: execution.execution_receipt.clone(),
                 model_arguments_ignored: execution.decision.model_arguments_ignored,
                 react_trace: execution.product_react_trace.clone(),
                 product_projection: execution.product_tool_projection.clone(),
@@ -5628,65 +5797,8 @@ where
             };
             let progress_session_id = request.session_id.clone();
             let generation_result = {
-                let mut emit_progress = |progress| match progress {
-                    MainChatModelProgress::Started {
-                        request_id,
-                        provider,
-                        model,
-                        started_at,
-                        policy_evidence,
-                    } => emit_provider_started_with_policy(
-                        request_id,
-                        provider,
-                        model,
-                        started_at,
-                        policy_evidence,
-                        event_sink,
-                    ),
-                    MainChatModelProgress::Token { request_id, chunk } => {
-                        event_sink.emit(MainChatKernelEvent::ProviderToken {
-                            session_id: progress_session_id.clone(),
-                            request_id,
-                            chunk,
-                        })
-                    }
-                    MainChatModelProgress::Completed {
-                        request_id,
-                        provider,
-                        model,
-                        finished_at,
-                    } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
-                        request_id,
-                        provider,
-                        model,
-                        finished_at,
-                    }),
-                    MainChatModelProgress::Failed {
-                        request_id,
-                        provider,
-                        model,
-                        finished_at,
-                        error_digest,
-                    } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
-                        request_id,
-                        provider,
-                        model,
-                        finished_at,
-                        error_digest,
-                    }),
-                    MainChatModelProgress::RemoteUnknown {
-                        request_id,
-                        provider,
-                        model,
-                        finished_at,
-                        reason_digest,
-                    } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
-                        request_id,
-                        provider,
-                        model,
-                        finished_at,
-                        reason_digest,
-                    }),
+                let mut emit_progress = |progress| {
+                    emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
                 };
                 self.model_client
                     .generate_direct_answer(request, &mut emit_progress)
@@ -5697,11 +5809,11 @@ where
                     if let Some(receipt) = generation.provider_receipt.as_ref() {
                         route_metadata =
                             route_metadata_from_provider_receipt(route_metadata, receipt);
-                        emit_provider_receipt(
-                            receipt,
-                            generation.provider_started_emitted,
-                            event_sink,
-                        );
+                        if let Err(blocked) =
+                            self.require_provider_receipt_lifecycle(receipt, event_sink)
+                        {
+                            return blocked;
+                        }
                     }
                     match citation_set
                         .validate_and_render_model_output(canonical_run_id, &generation.content)
@@ -5753,11 +5865,11 @@ where
                     if let Some(receipt) = generation.provider_receipt.as_ref() {
                         route_metadata =
                             route_metadata_from_provider_receipt(route_metadata, receipt);
-                        emit_provider_receipt(
-                            receipt,
-                            generation.provider_started_emitted,
-                            event_sink,
-                        );
+                        if let Err(blocked) =
+                            self.require_provider_receipt_lifecycle(receipt, event_sink)
+                        {
+                            return blocked;
+                        }
                     }
                     let code = "model_generation_empty".to_string();
                     event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
@@ -5780,11 +5892,11 @@ where
                     if let Some(receipt) = failure.provider_receipt.as_ref() {
                         route_metadata =
                             route_metadata_from_provider_receipt(route_metadata, receipt);
-                        emit_provider_receipt(
-                            receipt,
-                            failure.provider_started_emitted,
-                            event_sink,
-                        );
+                        if let Err(blocked) =
+                            self.require_provider_receipt_lifecycle(receipt, event_sink)
+                        {
+                            return blocked;
+                        }
                     }
                     let code = failure
                         .blocker_code
@@ -5834,6 +5946,12 @@ where
         }
     }
 
+    // Artifact generation keeps policy, terminal-owner admission, execution
+    // epoch, and event sink explicit at the only governed write boundary.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn run_generated_artifact_write_turn<S>(
         &self,
         input: MainChatTurnInput,
@@ -5959,65 +6077,8 @@ where
         };
         let progress_session_id = request.session_id.clone();
         let generation_result = {
-            let mut emit_progress = |progress| match progress {
-                MainChatModelProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                } => emit_provider_started_with_policy(
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                    event_sink,
-                ),
-                MainChatModelProgress::Token { request_id, chunk } => {
-                    event_sink.emit(MainChatKernelEvent::ProviderToken {
-                        session_id: progress_session_id.clone(),
-                        request_id,
-                        chunk,
-                    })
-                }
-                MainChatModelProgress::Completed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                }),
-                MainChatModelProgress::Failed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    error_digest,
-                } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    error_digest,
-                }),
-                MainChatModelProgress::RemoteUnknown {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    reason_digest,
-                } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
-                    request_id,
-                    provider,
-                    model,
-                    finished_at,
-                    reason_digest,
-                }),
+            let mut emit_progress = |progress| {
+                emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
             };
             self.model_client
                 .generate_direct_answer(request, &mut emit_progress)
@@ -6027,7 +6088,11 @@ where
             Ok(generation) if !generation.content.trim().is_empty() => {
                 if let Some(receipt) = generation.provider_receipt.as_ref() {
                     route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
-                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                    if let Err(blocked) =
+                        self.require_provider_receipt_lifecycle(receipt, event_sink)
+                    {
+                        return blocked;
+                    }
                 }
                 let artifacts = match parse_generated_artifact_envelope_with_web_citations(
                     &generation.content,
@@ -6098,7 +6163,11 @@ where
             Ok(generation) => {
                 if let Some(receipt) = generation.provider_receipt.as_ref() {
                     route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
-                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                    if let Err(blocked) =
+                        self.require_provider_receipt_lifecycle(receipt, event_sink)
+                    {
+                        return blocked;
+                    }
                 }
                 let code = "artifact_generation_empty".to_string();
                 event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
@@ -6120,7 +6189,11 @@ where
             Err(failure) => {
                 if let Some(receipt) = failure.provider_receipt.as_ref() {
                     route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
-                    emit_provider_receipt(receipt, failure.provider_started_emitted, event_sink);
+                    if let Err(blocked) =
+                        self.require_provider_receipt_lifecycle(receipt, event_sink)
+                    {
+                        return blocked;
+                    }
                 }
                 let code = failure
                     .blocker_code
@@ -6370,12 +6443,24 @@ fn kernel_turn_result_from_react_agent_loop_attempt(
         })
         .unwrap_or_else(|| preview_text(&reply, MAX_TOOL_OBSERVATION_PREVIEW_CHARS));
     let tool_calls = if attempt.tool_calls.is_empty() {
+        let pre_execution_blocker = blocker.clone();
+        let blocker_code = pre_execution_blocker
+            .clone()
+            .unwrap_or_else(|| "agent_loop_tool_action_missing".into());
         let mut missing_metadata = metadata.clone();
         if let Some(object) = missing_metadata.as_object_mut() {
-            object.insert(
-                "receiptInvariantViolation".into(),
-                serde_json::json!("agent_loop_tool_action_missing"),
-            );
+            if pre_execution_blocker.is_some() {
+                object.insert(
+                    "preExecutionGovernanceBlock".into(),
+                    serde_json::json!(true),
+                );
+                object.remove("receiptInvariantViolation");
+            } else {
+                object.insert(
+                    "receiptInvariantViolation".into(),
+                    serde_json::json!("agent_loop_tool_action_missing"),
+                );
+            }
             object.insert("noAdapterReceipt".into(), serde_json::json!(true));
             object.insert("agentLoopSucceeded".into(), serde_json::json!(false));
         }
@@ -6384,9 +6469,13 @@ fn kernel_turn_result_from_react_agent_loop_attempt(
             action_type: action_type.clone(),
             target: selected_target.clone(),
             governed_input: plan.arguments.clone(),
-            status: "failed".into(),
+            status: if pre_execution_blocker.is_some() {
+                "blocked".into()
+            } else {
+                "failed".into()
+            },
             output_preview: Some(terminal_output_preview.clone()),
-            blocker: Some("agent_loop_tool_action_missing".into()),
+            blocker: Some(blocker_code),
             observation_metadata: Some(missing_metadata),
             execution_receipt: None,
             model_arguments_ignored: true,
@@ -6506,7 +6595,7 @@ fn kernel_turn_result_from_react_agent_loop_attempt(
             .collect()
     };
     let blockers = if attempt.tool_calls.is_empty() {
-        vec!["agent_loop_tool_action_missing".into()]
+        vec![blocker.unwrap_or_else(|| "agent_loop_tool_action_missing".into())]
     } else {
         blocker.into_iter().collect()
     };
@@ -6575,15 +6664,65 @@ async fn load_existing_canonical_main_chat_agent_run(
     task_session_id: &str,
     chat_session_id: &str,
 ) -> Result<AgentRun, String> {
+    let run = load_existing_canonical_main_chat_agent_run_owner(
+        state,
+        run_id,
+        task_session_id,
+        chat_session_id,
+    )
+    .await?;
+    if run.status != AgentRunStatus::Running {
+        return Err(format!(
+            "canonical_main_chat_agent_run_not_running: run {run_id} is {}",
+            run.status
+        ));
+    }
+    Ok(run)
+}
+
+async fn load_existing_canonical_main_chat_agent_run_for_blocked_result(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    chat_session_id: &str,
+) -> Result<AgentRun, String> {
+    let run = load_existing_canonical_main_chat_agent_run_owner(
+        state,
+        run_id,
+        task_session_id,
+        chat_session_id,
+    )
+    .await?;
+    if !matches!(
+        run.status,
+        AgentRunStatus::Running | AgentRunStatus::WaitingPermission
+    ) {
+        return Err(format!(
+            "canonical_main_chat_blocked_run_not_active: run {run_id} is {}",
+            run.status
+        ));
+    }
+    Ok(run)
+}
+
+async fn load_existing_canonical_main_chat_agent_run_owner(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    chat_session_id: &str,
+) -> Result<AgentRun, String> {
     let store_arc = state
         .agent_run_store
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let store = store_arc.lock().await;
-    let run = store
-        .get_run(run_id)
-        .map_err(|err| format!("load canonical Main Chat AgentRun failed: {err}"))?
-        .ok_or_else(|| format!("canonical_main_chat_agent_run_missing: {run_id}"))?;
+    let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run(run_id)
+            .map_err(|err| format!("load canonical Main Chat AgentRun failed: {err}")),
+    )?
+    .ok_or_else(|| format!("canonical_main_chat_agent_run_missing: {run_id}"))?;
     if run.task_id != task_session_id {
         return Err(format!(
             "canonical_main_chat_agent_run_task_mismatch: run {run_id} owns {}, expected {task_session_id}",
@@ -6596,21 +6735,19 @@ async fn load_existing_canonical_main_chat_agent_run(
             run.session_id
         ));
     }
-    if run.status != AgentRunStatus::Running {
-        return Err(format!(
-            "canonical_main_chat_agent_run_not_running: run {run_id} is {}",
-            run.status
-        ));
-    }
     Ok(run)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_successful_kernel_command_surface_result(
     session_id: &str,
     user_text: &str,
     canonical_run_id: &str,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
@@ -6894,7 +7031,6 @@ async fn build_successful_kernel_command_surface_result(
     agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
     let mut pending_proposal_ids = Vec::new();
     let mut deferred_review_proposal_ids = Vec::new();
-    let mut terminal_owner_proposal_ids = Vec::new();
     let mut memory_governance_metadata = empty_memory_governance_metadata();
     if let Some(routing) = kernel_result.memory_governance.as_ref() {
         let materialized = materialize_kernel_memory_governance(
@@ -6906,11 +7042,11 @@ async fn build_successful_kernel_command_surface_result(
             main_chat_agent_turn.decision.intent_frame.source_kind,
             user_text,
             &mut execution_transcript,
+            terminal_owner_review_origin,
             execution_epoch,
         )
         .await?;
         memory_governance_metadata = materialized.metadata;
-        terminal_owner_proposal_ids.extend(materialized.new_pending_proposal_ids.clone());
         if memory_governance_is_terminal_action {
             pending_proposal_ids.extend(materialized.new_pending_proposal_ids.clone());
             deferred_review_proposal_ids.extend(materialized.reused_pending_proposal_ids.clone());
@@ -6993,6 +7129,21 @@ async fn build_successful_kernel_command_surface_result(
         std::mem::take(&mut kernel_result.canonical_supplemental_observations),
     )?;
     validate_kernel_tool_call_observation_bindings(&agent_run, &kernel_result.tool_calls)?;
+    // Persist the governed tool outcome before terminalizing the run. A tool
+    // that needs confirmation creates an ActionResumePrerequisite relation,
+    // which atomically projects the canonical AgentRun to WaitingPermission.
+    // Finalization deliberately preserves that status; performing this after
+    // finalization would try to attach a resume prerequisite to Completed.
+    let tool_calls = record_kernel_tool_call_evidence(
+        state,
+        task_session_id,
+        &kernel_result.tool_calls,
+        &agent_run.id,
+        KernelReviewRelationContext::Product(terminal_owner_review_origin),
+        execution_epoch,
+        &mut execution_transcript,
+    )
+    .await?;
     agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
     agent_run.step_count = agent_run.tool_call_count;
     agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
@@ -7023,16 +7174,8 @@ async fn build_successful_kernel_command_surface_result(
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
-        state,
-    )
-    .await?;
-    let tool_calls = record_kernel_tool_call_evidence(
-        state,
-        task_session_id,
-        &kernel_result.tool_calls,
-        &agent_run.id,
         execution_epoch,
-        &mut execution_transcript,
+        state,
     )
     .await?;
     if let Some(proposal) = stage_conditional_observation_memory_review(
@@ -7040,11 +7183,11 @@ async fn build_successful_kernel_command_surface_result(
         task_session_id,
         &main_chat_agent_turn.decision.policy_decision,
         &tool_calls,
+        terminal_owner_review_origin,
         execution_epoch,
     )
     .await?
     {
-        terminal_owner_proposal_ids.push(proposal.id.clone());
         deferred_review_proposal_ids.push(proposal.id.clone());
         let proposal_metadata = serde_json::json!({
             "policyConditionalObservationReview": true,
@@ -7070,24 +7213,7 @@ async fn build_successful_kernel_command_surface_result(
             )
             .await,
         );
-        let store_arc = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-        let mut canonical_run = {
-            let store = store_arc.lock().await;
-            store
-                .get_run(&agent_run.id)
-                .map_err(|error| format!("reload conditional proposal AgentRun failed: {error}"))?
-                .ok_or_else(|| "conditional proposal AgentRun missing".to_string())?
-        };
-        canonical_run.add_generated_proposal(&proposal.id);
-        crate::terminal_owner_write_gateway::update_agent_run(state, &canonical_run)
-            .await
-            .map_err(|error| {
-                format!("persist conditional proposal AgentRun reference failed: {error}")
-            })?;
-        agent_run = canonical_run;
+        agent_run.add_generated_proposal(&proposal.id);
     }
     let pending_permission_blockers = tool_calls
         .iter()
@@ -7194,10 +7320,6 @@ async fn build_successful_kernel_command_surface_result(
                 serde_json::json!(visible_proposal_ids.clone()),
             );
             object.insert(
-                "terminalOwnerProposalIds".into(),
-                serde_json::json!(terminal_owner_proposal_ids.clone()),
-            );
-            object.insert(
                 "deferredReviewProposalIds".into(),
                 serde_json::json!(deferred_review_proposal_ids.clone()),
             );
@@ -7237,7 +7359,6 @@ async fn build_successful_kernel_command_surface_result(
                 "agentLoopActionCount": if read_tool_loop_used { kernel_result.tool_calls.len() } else { 0 },
                 "agentLoopObservationCount": read_tool_loop_observation_count,
                 "proposalIds": visible_proposal_ids,
-                "terminalOwnerProposalIds": terminal_owner_proposal_ids,
                 "deferredReviewProposalIds": deferred_review_proposal_ids,
                 "memoryGovernance": memory_governance_metadata.clone(),
                 "directWritesExecuted": memory_governance_metadata
@@ -7330,6 +7451,7 @@ async fn stage_conditional_observation_memory_review(
     operation_id: &str,
     policy_decision: &PolicyDecision,
     recorded_tool_calls: &[ToolCallResult],
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<Option<openlife_core::agent::AgentProposal>, String> {
     let conditional_planned = policy_decision
@@ -7344,10 +7466,13 @@ async fn stage_conditional_observation_memory_review(
             .as_ref()
             .ok_or_else(|| "conditional observation AgentRunStore unavailable".to_string())?;
         let store = store_arc.lock().await;
-        store
-            .get_run(operation_id)
-            .map_err(|error| format!("load canonical observation run failed: {error}"))?
-            .ok_or_else(|| "conditional observation canonical run missing".to_string())?
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .get_run(operation_id)
+                .map_err(|error| format!("load canonical observation run failed: {error}")),
+        )?
+        .ok_or_else(|| "conditional observation canonical run missing".to_string())?
     };
     if canonical_run.id != operation_id || canonical_run.task_id != operation_id {
         return Err("conditional observation canonical operation owner mismatch".into());
@@ -7474,17 +7599,23 @@ async fn stage_conditional_observation_memory_review(
         else {
             continue;
         };
-        let store_arc = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(|| "Proposal store not available".to_string())?;
-        let store = store_arc.lock().await;
-        let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
-            .submit_conditional_observation_memory_review(grant, execution_epoch)
+        let request =
+            openlife_core::agent::ReviewWorkflow::prepare_conditional_observation_memory_review(
+                grant,
+            );
+        let submission =
+            crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+                state,
+                terminal_owner_review_origin,
+                openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor,
+                request,
+                execution_epoch,
+            )
+            .await
             .map_err(|error| {
                 format!("conditional observation ReviewWorkflow submission failed: {error}")
             })?;
-        return Ok(Some(outcome.proposal));
+        return Ok(Some(submission.review().proposal.clone()));
     }
 
     Ok(None)
@@ -7493,8 +7624,19 @@ async fn stage_conditional_observation_memory_review(
 #[derive(Debug)]
 enum KernelWriteProposalAdmission {
     Pending {
-        proposal: openlife_core::agent::AgentProposal,
+        proposal: Box<openlife_core::agent::AgentProposal>,
         created_for_turn: bool,
+    },
+    AlreadyCanonical {
+        memory_id: String,
+        fact_key: String,
+    },
+}
+
+enum KernelWriteProposalPreparation {
+    Pending {
+        request: Box<openlife_core::agent::DurableWriteRequest>,
+        relation_kind: openlife_core::agent::ProposalTerminalRelationKind,
     },
     AlreadyCanonical {
         memory_id: String,
@@ -7610,15 +7752,14 @@ async fn active_canonical_memory_owner(
         .map_err(|error| format!("canonical Memory fact lookup failed: {error}"))
 }
 
-async fn create_kernel_write_proposal(
+async fn prepare_kernel_write_proposal(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
     outcome: &MainChatKernelWriteOutcome,
     user_text: &str,
     policy_decision: &PolicyDecision,
-    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
-) -> Result<KernelWriteProposalAdmission, String> {
+) -> Result<KernelWriteProposalPreparation, String> {
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
     let (proposal_type, affected_path, reason, risk_level, after, memory_fact) = match outcome.kind
@@ -7769,7 +7910,7 @@ async fn create_kernel_write_proposal(
             .fact_key()
             .map_err(|error| format!("Memory proposal fact identity rejected: {error}"))?;
         if let Some(existing) = active_canonical_memory_owner(state, fact).await? {
-            return Ok(KernelWriteProposalAdmission::AlreadyCanonical {
+            return Ok(KernelWriteProposalPreparation::AlreadyCanonical {
                 memory_id: existing.memory_id,
                 fact_key,
             });
@@ -7810,11 +7951,6 @@ async fn create_kernel_write_proposal(
     )
     .await?;
 
-    let store_arc = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| "Proposal store not available".to_string())?;
-    let store = store_arc.lock().await;
     let mut request = openlife_core::agent::DurableWriteRequest::from_agent_proposal(
         openlife_core::agent::DurableWriteSource::MainChat,
         openlife_core::agent::DurableWriteSubject::from_proposal_type(proposal.proposal_type),
@@ -7825,16 +7961,132 @@ async fn create_kernel_write_proposal(
     if let Some(idempotency_key) = review_idempotency_key {
         request = request.with_idempotency_key(idempotency_key);
     }
-    openlife_core::agent::ReviewWorkflow::new(&store)
-        .submit_with_admission(request, execution_epoch)
-        .map(|outcome| KernelWriteProposalAdmission::Pending {
-            created_for_turn: matches!(
-                outcome.decision.kind,
-                openlife_core::agent::DurableWriteDecisionKind::CreatePendingProposal
-            ),
-            proposal: outcome.proposal,
-        })
-        .map_err(|err| format!("create kernel write proposal failed: {err}"))
+    let relation_kind = match outcome.kind {
+        MainChatKernelWriteOutcomeKind::MemoryProposal
+        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+            if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite =>
+        {
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+        }
+        MainChatKernelWriteOutcomeKind::MemoryProposal
+        | MainChatKernelWriteOutcomeKind::LifeModelProposal => {
+            openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
+        }
+        MainChatKernelWriteOutcomeKind::FileWriteProposal => {
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+        }
+        MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
+        | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+            return Err("kernel blocker outcome cannot create proposal".into())
+        }
+    };
+    Ok(KernelWriteProposalPreparation::Pending {
+        request: Box::new(request),
+        relation_kind,
+    })
+}
+
+// Proposal creation binds current task/run, policy, terminal owner, and
+// cancellation epoch independently; none is optional authority.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
+async fn create_kernel_write_proposal(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    outcome: &MainChatKernelWriteOutcome,
+    user_text: &str,
+    policy_decision: &PolicyDecision,
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<KernelWriteProposalAdmission, String> {
+    match prepare_kernel_write_proposal(
+        state,
+        task_session_id,
+        run_id,
+        outcome,
+        user_text,
+        policy_decision,
+    )
+    .await?
+    {
+        KernelWriteProposalPreparation::AlreadyCanonical {
+            memory_id,
+            fact_key,
+        } => Ok(KernelWriteProposalAdmission::AlreadyCanonical {
+            memory_id,
+            fact_key,
+        }),
+        KernelWriteProposalPreparation::Pending {
+            request,
+            relation_kind,
+        } => {
+            let submission =
+                crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+                    state,
+                    terminal_owner_review_origin,
+                    relation_kind,
+                    *request,
+                    execution_epoch,
+                )
+                .await
+                .map_err(|err| format!("create kernel write proposal failed: {err}"))?;
+            Ok(KernelWriteProposalAdmission::Pending {
+                created_for_turn: submission.owns_terminal_relation(),
+                proposal: Box::new(submission.review().proposal.clone()),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+async fn create_kernel_write_proposal_without_terminal_owner_for_unit_test(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    outcome: &MainChatKernelWriteOutcome,
+    user_text: &str,
+    policy_decision: &PolicyDecision,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<KernelWriteProposalAdmission, String> {
+    match prepare_kernel_write_proposal(
+        state,
+        task_session_id,
+        run_id,
+        outcome,
+        user_text,
+        policy_decision,
+    )
+    .await?
+    {
+        KernelWriteProposalPreparation::AlreadyCanonical {
+            memory_id,
+            fact_key,
+        } => Ok(KernelWriteProposalAdmission::AlreadyCanonical {
+            memory_id,
+            fact_key,
+        }),
+        KernelWriteProposalPreparation::Pending { request, .. } => {
+            let store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| "Proposal store not available".to_string())?
+                .lock()
+                .await;
+            openlife_core::agent::ReviewWorkflow::new(&store)
+                .submit_with_admission(*request, execution_epoch)
+                .map(|outcome| KernelWriteProposalAdmission::Pending {
+                    created_for_turn: matches!(
+                        outcome.decision.kind,
+                        openlife_core::agent::DurableWriteDecisionKind::CreatePendingProposal
+                    ),
+                    proposal: Box::new(outcome.proposal),
+                })
+                .map_err(|err| format!("create unit-test kernel write proposal failed: {err}"))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -7893,6 +8145,12 @@ pub(crate) fn test_policy_memory_admission_context(
     (policy, candidate, fact, proof)
 }
 
+// The materializer receives independently verified routing, policy, owner, and
+// execution facts rather than a caller-shaped authority bundle.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn materialize_kernel_memory_governance(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -7902,6 +8160,7 @@ async fn materialize_kernel_memory_governance(
     source_kind: IntentSourceKind,
     source_user_message: &str,
     execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<MainChatMemoryGovernanceMaterialization, String> {
     let life_event_ids: Vec<String> = Vec::new();
@@ -8197,6 +8456,7 @@ async fn materialize_kernel_memory_governance(
             run_id,
             candidate,
             policy_decision,
+            terminal_owner_review_origin,
             execution_epoch,
         )
         .await?;
@@ -8204,7 +8464,7 @@ async fn materialize_kernel_memory_governance(
             KernelMemoryGovernanceProposalAdmission::Pending {
                 proposal,
                 created_for_turn,
-            } => (proposal, created_for_turn),
+            } => (*proposal, created_for_turn),
             KernelMemoryGovernanceProposalAdmission::AlreadyCanonical {
                 memory_id,
                 fact_key,
@@ -8331,7 +8591,7 @@ async fn materialize_kernel_memory_governance(
 #[derive(Debug)]
 enum KernelMemoryGovernanceProposalAdmission {
     Pending {
-        proposal: openlife_core::agent::AgentProposal,
+        proposal: Box<openlife_core::agent::AgentProposal>,
         created_for_turn: bool,
     },
     AlreadyCanonical {
@@ -8346,6 +8606,7 @@ async fn create_kernel_memory_governance_proposal(
     run_id: &str,
     candidate: &MainChatMemoryCandidate,
     policy_decision: &PolicyDecision,
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<KernelMemoryGovernanceProposalAdmission, String> {
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType};
@@ -8464,11 +8725,6 @@ async fn create_kernel_memory_governance_proposal(
     )
     .await?;
 
-    let store_arc = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| "Proposal store not available".to_string())?;
-    let store = store_arc.lock().await;
     let mut request = openlife_core::agent::DurableWriteRequest::from_agent_proposal(
         openlife_core::agent::DurableWriteSource::MainChat,
         openlife_core::agent::DurableWriteSubject::from_proposal_type(proposal.proposal_type),
@@ -8482,18 +8738,33 @@ async fn create_kernel_memory_governance_proposal(
     if let Some(idempotency_key) = memory_review_idempotency_key {
         request = request.with_idempotency_key(idempotency_key);
     }
-    openlife_core::agent::ReviewWorkflow::new(&store)
-        .submit_with_admission(request, execution_epoch)
-        .map(|outcome| KernelMemoryGovernanceProposalAdmission::Pending {
-            created_for_turn: matches!(
-                outcome.decision.kind,
-                openlife_core::agent::DurableWriteDecisionKind::CreatePendingProposal
-            ),
-            proposal: outcome.proposal,
-        })
-        .map_err(|err| format!("create memory governance proposal failed: {err}"))
+    let relation_kind = if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite {
+        openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+    } else {
+        openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
+    };
+    let submission =
+        crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+            state,
+            terminal_owner_review_origin,
+            relation_kind,
+            request,
+            execution_epoch,
+        )
+        .await
+        .map_err(|err| format!("create memory governance proposal failed: {err}"))?;
+    Ok(KernelMemoryGovernanceProposalAdmission::Pending {
+        created_for_turn: submission.owns_terminal_relation(),
+        proposal: Box::new(submission.review().proposal.clone()),
+    })
 }
 
+// This projection lists each independently counted governance outcome so no
+// opaque accumulator can relabel pending work as completed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn memory_governance_metadata(
     routing: &MainChatMemoryRoutingResult,
     life_event_ids: &[String],
@@ -8746,12 +9017,16 @@ fn push_unique_string(values: &mut Vec<String>, value: &str) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_kernel_write_outcome_command_surface_result(
     session_id: &str,
     user_text: &str,
     canonical_run_id: &str,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
@@ -8786,6 +9061,7 @@ async fn build_kernel_write_outcome_command_surface_result(
                 task_session_id,
                 canonical_run_id,
                 execution_epoch,
+                terminal_owner_review_origin,
                 state,
                 main_chat_agent_turn,
                 execution_transcript,
@@ -8878,6 +9154,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         task_session_id,
         &kernel_result.tool_calls,
         &agent_run.id,
+        KernelReviewRelationContext::Product(terminal_owner_review_origin),
         execution_epoch,
         &mut execution_transcript,
     )
@@ -8901,7 +9178,6 @@ async fn build_kernel_write_outcome_command_surface_result(
         .ok_or_else(|| "Main Chat kernel write outcome expansion was empty".to_string())?;
     let mut pending_blockers = Vec::new();
     let mut generated_proposals = Vec::new();
-    let mut terminal_owner_proposal_ids = Vec::new();
 
     if is_kernel_proposal_outcome(outcome.kind) {
         for (expanded_outcome, queued) in expanded_outcomes.iter().zip(&queued_actions) {
@@ -8914,6 +9190,7 @@ async fn build_kernel_write_outcome_command_surface_result(
                 expanded_outcome,
                 user_text,
                 &main_chat_agent_turn.decision.policy_decision,
+                terminal_owner_review_origin,
                 execution_epoch,
             )
             .await?;
@@ -8925,7 +9202,6 @@ async fn build_kernel_write_outcome_command_surface_result(
                     generated_proposals.push(proposal.id.clone());
                     agent_run.add_generated_proposal(&proposal.id);
                     if created_for_turn {
-                        terminal_owner_proposal_ids.push(proposal.id.clone());
                         pending_blockers.push(format!("proposal:{}", proposal.id));
                     }
                     let proposal_metadata = serde_json::json!({
@@ -9157,7 +9433,6 @@ async fn build_kernel_write_outcome_command_surface_result(
         "toolCalled": !tool_calls.is_empty(),
         "writeOutcomeKind": outcome.kind.as_str(),
         "proposalIds": generated_proposals,
-        "terminalOwnerProposalIds": terminal_owner_proposal_ids.clone(),
         "pendingBlockerCount": pending_blockers.len(),
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
@@ -9194,6 +9469,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
+        execution_epoch,
         state,
     )
     .await?;
@@ -9211,7 +9487,6 @@ async fn build_kernel_write_outcome_command_surface_result(
                 "kernelBackedProposalOnlyWrite": true,
                 "writeOutcomeKind": outcome.kind.as_str(),
                 "proposalIds": agent_run.generated_proposals.clone(),
-                "terminalOwnerProposalIds": terminal_owner_proposal_ids,
                 "pendingBlockerCount": pending_blockers.len(),
                 "hardBlocked": outcome.hard_blocked,
             }),
@@ -9239,12 +9514,16 @@ async fn build_kernel_write_outcome_command_surface_result(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_blocked_kernel_command_surface_result(
     session_id: &str,
     task_session_id: &str,
     canonical_run_id: &str,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    terminal_owner_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
@@ -9257,7 +9536,7 @@ async fn build_blocked_kernel_command_surface_result(
     event_sink_label: &'static str,
     kernel_events: Vec<MainChatKernelEvent>,
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
-    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+    let mut agent_run = load_existing_canonical_main_chat_agent_run_for_blocked_result(
         state,
         canonical_run_id,
         task_session_id,
@@ -9472,6 +9751,7 @@ async fn build_blocked_kernel_command_surface_result(
         task_session_id,
         &kernel_result.tool_calls,
         &agent_run.id,
+        KernelReviewRelationContext::Product(terminal_owner_review_origin),
         execution_epoch,
         &mut execution_transcript,
     )
@@ -9490,7 +9770,25 @@ async fn build_blocked_kernel_command_surface_result(
         );
     }
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
-    crate::terminal_owner_write_gateway::update_agent_run(state, &agent_run)
+    crate::terminal_owner_write_gateway::project_main_chat_kernel_evidence(
+        state,
+        &agent_run.id,
+        task_session_id,
+        execution_epoch,
+        crate::terminal_owner_write_gateway::MainChatBlockedProjection {
+            reasoning_strategy: agent_run.reasoning_strategy.clone(),
+            reasoning_trace: reasoning_trace.clone(),
+            actions: agent_run.actions.clone(),
+            observations: agent_run.observations.clone(),
+            step_count: agent_run.step_count,
+            tool_call_count: agent_run.tool_call_count,
+            disposition: if waiting_for_user {
+                crate::terminal_owner_write_gateway::MainChatBlockedDisposition::WaitingPermission
+            } else {
+                crate::terminal_owner_write_gateway::MainChatBlockedDisposition::TerminalFailurePendingDurableReceipt
+            },
+        },
+    )
         .await
         .map_err(|err| format!("update blocked canonical AgentRun failed: {err}"))?;
     let preterminal_agent_state =
@@ -9654,6 +9952,7 @@ async fn record_kernel_tool_call_evidence(
     task_session_id: &str,
     kernel_tool_calls: &[MainChatKernelToolCall],
     run_id: &str,
+    review_relation_context: KernelReviewRelationContext<'_>,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
 ) -> Result<Vec<ToolCallResult>, String> {
@@ -9698,6 +9997,7 @@ async fn record_kernel_tool_call_evidence(
             run_id,
             &queued.id,
             call,
+            review_relation_context,
             execution_epoch,
             metadata,
         )
@@ -9708,86 +10008,98 @@ async fn record_kernel_tool_call_evidence(
             "blocked" => ActionExecutionStatus::Blocked,
             _ => ActionExecutionStatus::Failed,
         };
-        let (receipt, execution_status, projection_error) = match call.execution_receipt.clone() {
-            Some(receipt) => {
-                if let Some(object) = metadata.as_object_mut() {
-                    if call.product_projection.is_some() {
-                        object.insert(
-                            "toolExecutionReceipt".into(),
-                            serde_json::json!(receipt.clone()),
-                        );
-                    } else {
-                        // A resolver or policy blocker that stopped before the
-                        // ToolGateway boundary is a domain fact, not tool
-                        // execution credit. Keep the ActionQueue blocker but
-                        // do not let recovery reinterpret a caller-shaped
-                        // receipt as a durable ToolGateway terminal.
-                        object.remove("toolExecutionReceipt");
-                        object.insert("toolExecutionCredit".into(), serde_json::json!(false));
-                        object.insert(
-                            "preDispatchBlockerReceiptDigest".into(),
-                            serde_json::json!(
-                                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-                                    &serde_json::json!(receipt.clone())
-                                )
-                                .1
-                            ),
-                        );
-                    }
-                }
-                let terminal_error = matches!(
-                    declared_execution_status,
-                    ActionExecutionStatus::Failed | ActionExecutionStatus::Blocked
-                )
-                .then(|| call.blocker.clone())
-                .flatten();
-                (receipt, declared_execution_status, terminal_error)
-            }
-            None => {
-                let receipt =
-                    openlife_core::tool_execution_receipt::ToolExecutionReceipt::failed_before_dispatch(
-                        Some(run_id.to_string()),
-                        Some(call.name.clone()),
-                        format!("missing-receipt:action:{}", queued.id),
-                        openlife_core::tool_execution_receipt::ToolActionEffect::Unknown,
-                        openlife_core::tool_manifest::ToolIdempotencyContract::Unspecified,
-                    );
-                if let Some(object) = metadata.as_object_mut() {
-                    object.remove("toolExecutionReceipt");
-                    object.insert("toolExecutionCredit".into(), serde_json::json!(false));
-                    object.insert(
-                        "receiptInvariantViolation".into(),
-                        serde_json::json!("kernel_tool_execution_receipt_missing_or_invalid"),
-                    );
-                }
-                (
-                    receipt,
-                    ActionExecutionStatus::Failed,
-                    Some("kernel_tool_execution_receipt_missing_or_invalid".into()),
-                )
-            }
-        };
+        let receipt = call.execution_receipt.clone();
         let projected = {
             let queue_arc = state
                 .main_chat_action_queue_store
                 .as_ref()
                 .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
             let queue = queue_arc.lock().await;
-            queue
-                .project_initial_tool_execution_receipt(
-                    &queued.id,
-                    queued.status,
-                    queued.revision,
-                    InitialToolExecutionProjection {
-                        execution_status,
-                        receipt: &receipt,
-                        observation_metadata: Some(metadata.clone()),
-                        error: projection_error,
-                    },
-                )
-                .map_err(|error| {
-                    format!("project MainChatKernel typed tool receipt failed: {error}")
-                })?
+            match receipt.as_ref() {
+                Some(receipt) => {
+                    if let Some(object) = metadata.as_object_mut() {
+                        if call.product_projection.is_some() {
+                            object.insert(
+                                "toolExecutionReceipt".into(),
+                                serde_json::json!(receipt.clone()),
+                            );
+                        } else {
+                            // A resolver or policy blocker that stopped before the
+                            // ToolGateway boundary is a domain fact, not tool
+                            // execution credit. Keep the ActionQueue blocker but
+                            // do not let recovery reinterpret a caller-shaped
+                            // receipt as a durable ToolGateway terminal.
+                            object.remove("toolExecutionReceipt");
+                            object.insert("toolExecutionCredit".into(), serde_json::json!(false));
+                            object.insert(
+                                "preDispatchBlockerReceiptDigest".into(),
+                                serde_json::json!(
+                                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                                    &serde_json::json!(receipt.clone())
+                                )
+                                .1
+                            ),
+                            );
+                        }
+                    }
+                    let terminal_error = matches!(
+                        declared_execution_status,
+                        ActionExecutionStatus::Failed | ActionExecutionStatus::Blocked
+                    )
+                    .then(|| call.blocker.clone())
+                    .flatten();
+                    queue
+                        .project_initial_tool_execution_receipt(
+                            &queued.id,
+                            queued.status,
+                            queued.revision,
+                            InitialToolExecutionProjection {
+                                execution_status: declared_execution_status,
+                                receipt,
+                                observation_metadata: Some(metadata.clone()),
+                                error: terminal_error,
+                            },
+                        )
+                        .map_err(|error| {
+                            format!("project MainChatKernel typed tool receipt failed: {error}")
+                        })?
+                }
+                None => {
+                    let blocker = if call.status == "blocked" {
+                        call.blocker
+                            .clone()
+                            .unwrap_or_else(|| "kernel_pre_gateway_blocked".into())
+                    } else {
+                        "kernel_tool_execution_receipt_missing_or_invalid".into()
+                    };
+                    if let Some(object) = metadata.as_object_mut() {
+                        object.remove("toolExecutionReceipt");
+                        object.insert("toolExecutionCredit".into(), serde_json::json!(false));
+                        object.insert("noAdapterReceipt".into(), serde_json::json!(true));
+                        if call.status == "blocked" {
+                            object.insert("preGatewayBlocker".into(), serde_json::json!(true));
+                        } else {
+                            object.insert(
+                                "receiptInvariantViolation".into(),
+                                serde_json::json!(
+                                    "kernel_tool_execution_receipt_missing_or_invalid"
+                                ),
+                            );
+                        }
+                    }
+                    queue
+                        .fail_expected(
+                            &queued.id,
+                            queued.status,
+                            queued.revision,
+                            blocker,
+                            Some(metadata.clone()),
+                        )
+                        .map_err(|error| {
+                            format!("project MainChatKernel pre-gateway blocker failed: {error}")
+                        })?
+                }
+            }
         };
         let status = match projected.status {
             ExecutionQueueStatus::Completed => ToolCallStatus::Success,
@@ -9855,6 +10167,9 @@ async fn record_kernel_tool_call_evidence(
         if call.product_projection.is_none() {
             continue;
         }
+        let receipt = receipt.ok_or_else(|| {
+            "kernel_product_tool_projection_missing_execution_receipt".to_string()
+        })?;
         tool_calls.push(ToolCallResult {
             name: call.name.clone(),
             arguments: call.governed_input.clone(),
@@ -9935,8 +10250,9 @@ async fn attach_kernel_replay_execution_envelope(
                     |manifest_id| manifest.id == manifest_id,
                 )
             })
-            .filter(|manifest| {
-                declared_manifest_source.is_none_or(|source| manifest.source.to_string() == source)
+            .filter(|manifest| match declared_manifest_source {
+                None => true,
+                Some(source) => manifest.source.to_string() == source,
             })
             .collect::<Vec<_>>();
         let [manifest] = candidates.as_slice() else {
@@ -9963,12 +10279,19 @@ async fn attach_kernel_replay_execution_envelope(
     envelope.attach_to_metadata(metadata)
 }
 
+// Permission proposal identity is bound to the full current execution and
+// manifest contract at this single gateway edge.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn attach_kernel_tool_permission_proposal_identity(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
     queued_action_id: &str,
     call: &MainChatKernelToolCall,
+    review_relation_context: KernelReviewRelationContext<'_>,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     mut metadata: Value,
 ) -> Result<Value, String> {
@@ -10100,38 +10423,52 @@ async fn attach_kernel_tool_permission_proposal_identity(
         openlife_core::agent::ProposalSource::ChatConversation,
     );
     proposal.run_id = Some(run_id.to_string());
-    let proposal_store_arc = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| "kernel ToolPermission Proposal store unavailable".to_string())?;
-    let outcome = {
-        let proposal_store = proposal_store_arc.lock().await;
-        openlife_core::agent::ReviewWorkflow::new(&proposal_store)
-            .submit_with_admission(
-                openlife_core::agent::DurableWriteRequest::from_agent_proposal(
-                    openlife_core::agent::DurableWriteSource::MainChat,
-                    openlife_core::agent::DurableWriteSubject::ToolPermission,
-                    proposal,
-                    "Main Chat tool permission is pending exact action review.",
-                )
-                .with_idempotency_key(format!(
-                    "main_chat_tool_permission:{}:{}:{}:{}",
-                    task_session_id,
-                    queued_action_id,
-                    envelope.manifest_contract_digest,
-                    envelope.input_hash,
-                ))
-                .with_evidence_refs(vec![
-                    format!("main_chat_task_session:{task_session_id}"),
-                    format!("main_chat_action:{queued_action_id}"),
-                ]),
+    let request = openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+        openlife_core::agent::DurableWriteSource::MainChat,
+        openlife_core::agent::DurableWriteSubject::ToolPermission,
+        proposal,
+        "Main Chat tool permission is pending exact action review.",
+    )
+    .with_idempotency_key(format!(
+        "main_chat_tool_permission:{}:{}:{}:{}",
+        task_session_id, queued_action_id, envelope.manifest_contract_digest, envelope.input_hash,
+    ))
+    .with_evidence_refs(vec![
+        format!("main_chat_task_session:{task_session_id}"),
+        format!("main_chat_action:{queued_action_id}"),
+    ]);
+    let outcome = match review_relation_context {
+        KernelReviewRelationContext::Product(origin) => {
+            crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+                state,
+                origin,
+                openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite,
+                request,
                 execution_epoch,
             )
+            .await
             .map_err(|error| {
                 format!("create exact kernel ToolPermission proposal failed: {error}")
             })?
+            .review()
+            .clone()
+        }
+        #[cfg(test)]
+        KernelReviewRelationContext::UnboundUnitFixture => {
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| "kernel ToolPermission Proposal store unavailable".to_string())?
+                .lock()
+                .await;
+            openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+                .submit_with_admission(request, execution_epoch)
+                .map_err(|error| {
+                    format!("create exact kernel ToolPermission proposal failed: {error}")
+                })?
+        }
     };
-    if outcome.proposal.after != after || outcome.proposal.run_id.as_deref() != Some(run_id) {
+    if outcome.proposal.after != after {
         return Err("reused kernel ToolPermission Proposal provenance mismatch".into());
     }
     let proposal_id = outcome.proposal.id;
@@ -11973,7 +12310,10 @@ fn context_summary_from_kernel_result(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn build_kernel_plan_execute_command_surface_result<C, S>(
     session_id: &str,
     user_text: &str,
@@ -12258,6 +12598,7 @@ where
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
+        execution_epoch,
         state,
     )
     .await?;
@@ -12460,13 +12801,13 @@ fn requested_count_before_suffix(text: &str, suffixes: &[&str]) -> Option<usize>
                     .any(|label| {
                         let needle = format!("{label}{suffix}");
                         compact.match_indices(&needle).any(|(offset, _)| {
-                            compact[..offset]
-                                .chars()
-                                .next_back()
-                                .is_none_or(|preceding| {
+                            match compact[..offset].chars().next_back() {
+                                None => true,
+                                Some(preceding) => {
                                     !preceding.is_ascii_digit()
                                         && !"一二三四五六七八九十".contains(preceding)
-                                })
+                                }
+                            }
                         })
                     })
             })
@@ -12611,6 +12952,197 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    async fn create_open_terminal_review_fixture(
+        state: &Arc<AppState>,
+        task: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    ) -> (String, crate::main_chat_event_stream::TerminalOwnerEpoch) {
+        let mut run =
+            openlife_core::agent::AgentRun::new_chat_run(&task.chat_session_id, &task.user_goal);
+        run.id = task.id.clone();
+        run.task_id = task.id.clone();
+        let run_id = run.id.clone();
+        let canonical_message = {
+            let memory_store = state.memory_store.lock().await;
+            memory_store
+                .save_message_idempotent_with_proof(
+                    &task.chat_session_id,
+                    &ChatMessage {
+                        role: "user".into(),
+                        content: task.user_goal.clone(),
+                    },
+                    &run_id,
+                )
+                .expect("commit terminal Review fixture user message")
+        };
+        run.input_ref = Some(canonical_message.receipt().canonical_ref.clone());
+        {
+            let memory_store = state.memory_store.lock().await;
+            let task_store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("terminal Review fixture task store")
+                .lock()
+                .await;
+            task_store
+                .bind_canonical_memory_store(&memory_store)
+                .expect("bind terminal Review fixture Conversation owner");
+            task_store
+                .bind_session_canonical_user_message(
+                    &task.id,
+                    canonical_message.receipt().canonical_ref.as_str(),
+                    &task.user_goal,
+                )
+                .expect("bind terminal Review fixture user message");
+        }
+        crate::terminal_owner_write_gateway::create_conversation_bound_agent_run(
+            state,
+            &run,
+            &canonical_message,
+        )
+        .await
+        .expect("create terminal Review fixture AgentRun");
+        let admission = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("terminal Review fixture task store")
+            .lock()
+            .await
+            .issue_terminal_owner_epoch_admission(&task.id, &run_id, canonical_message)
+            .expect("issue terminal Review fixture epoch admission");
+        let epoch = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("terminal Review fixture event store")
+            .lock()
+            .await
+            .open_terminal_owner_epoch_from_admission(admission)
+            .expect("open terminal Review fixture epoch");
+        (run_id, epoch)
+    }
+
+    async fn seal_terminal_review_fixture(
+        state: &Arc<AppState>,
+        task_session_id: &str,
+        run_id: &str,
+        epoch_generation: u64,
+    ) {
+        let owner = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("terminal Review fixture task store")
+            .lock()
+            .await
+            .canonical_owner_head(task_session_id)
+            .expect("load terminal Review fixture owner")
+            .expect("terminal Review fixture owner exists");
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("terminal Review fixture event store")
+            .lock()
+            .await;
+        event_store
+            .begin_terminal_owner_seal(task_session_id, run_id, epoch_generation)
+            .expect("begin terminal Review fixture seal");
+        event_store
+            .append_terminal_final_and_seal(
+                crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                    task_session_id: task_session_id.to_string(),
+                    run_id: run_id.to_string(),
+                    epoch_generation,
+                    delivery_id: format!("delivery:{task_session_id}:{run_id}"),
+                    expected_task_owner_revision: owner.revision(),
+                    expected_task_owner_digest: owner.digest().to_string(),
+                    status: "waiting_permission".into(),
+                },
+            )
+            .expect("seal terminal Review fixture");
+    }
+
+    #[tokio::test]
+    async fn state_gateway_commit_window_rejects_admission_invalidated_before_owner_commit() {
+        let state = crate::test_utils::test_app_state();
+        let state_store = state.state_store.as_ref().expect("test StateStore");
+        let observed_at = chrono::Utc::now();
+        let current_model = state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .expect("test LifeModel");
+        crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+            state_store,
+            &current_model,
+            observed_at,
+        )
+        .expect("initialize StateStore product owner before barrier test");
+        let before = state_store
+            .export_portable_daily_tasks(observed_at)
+            .unwrap()
+            .canonical_digest;
+        let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let key = Arc::as_ptr(&state.persistence_coordinator) as usize;
+        assert!(STATE_COMMIT_ADMISSION_BARRIERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key,
+                StateCommitAdmissionBarrier {
+                    admitted: admitted_tx,
+                    release: release_rx,
+                },
+            )
+            .is_none());
+
+        let late_state = Arc::clone(&state);
+        let late_write = tokio::spawn(async move {
+            let permit = acquire_state_store_commit_permit(&late_state).await?;
+            let now = chrono::Utc::now();
+            let result = late_state
+                .state_store
+                .as_ref()
+                .expect("test StateStore")
+                .create_daily_task(openlife_core::state_store::CreateDailyTaskCommand {
+                    operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                    request_digest: None,
+                    source_message_ref: "state-barrier-test-message".into(),
+                    title: "MUST_NOT_COMMIT_AFTER_RECOVERY_FENCE".into(),
+                    due_at: Some(now + chrono::Duration::hours(1)),
+                    created_at: now,
+                    expires_at: now + chrono::Duration::days(1),
+                    risk: openlife_core::state_store::StateRisk::Low,
+                    sensitivity: openlife_core::state_store::StateSensitivity::Internal,
+                    source_kind:
+                        openlife_core::state_store::StateSourceKind::CurrentAuthenticatedUserMessage,
+                    confidence: 1.0,
+                    privacy_class: openlife_core::state_store::StatePrivacyClass::Private,
+                })
+                .map_err(|error| error.to_string());
+            drop(permit);
+            result
+        });
+        admitted_rx
+            .await
+            .expect("State write must pause after synchronous admission");
+        state
+            .persistence_coordinator
+            .degrade_globally("test_state_admission_invalidated");
+        release_tx.send(()).unwrap();
+        let error = late_write
+            .await
+            .unwrap()
+            .expect_err("stale State admission must not enter its owner transaction");
+        assert!(error.contains("persistence_admission_invalidated"));
+        assert_eq!(
+            state_store
+                .export_portable_daily_tasks(observed_at)
+                .unwrap()
+                .canonical_digest,
+            before
+        );
+    }
+
     #[test]
     fn direct_answer_structure_contract_preserves_explicit_counts_and_budget() {
         let prompt = "把下面介绍改写成适合路演开场的三段话，然后给出一个五步执行计划。";
@@ -12727,7 +13259,7 @@ mod tests {
             stream_provider_tokens: true,
         };
 
-        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let mut no_progress = |_progress: MainChatModelProgress| Ok(());
         let failure = client
             .generate_direct_answer(request, &mut no_progress)
             .await
@@ -12744,7 +13276,31 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let task_session_id = uuid::Uuid::new_v4().to_string();
+        let user_text = "Summarize the claim and risk in the attachment.";
         let state = isolated_state_with_bound_resource(&task_session_id);
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("resource provider task store")
+                .lock()
+                .await;
+            store
+                .create_session_with_id(
+                    task_session_id.clone(),
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: "resource-local-provider-chat".into(),
+                        user_goal: user_text.into(),
+                        selected_strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer,
+                        current_plan_summary: Some(
+                            "Answer from the canonical imported resource.".into(),
+                        ),
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .expect("create resource provider task")
+        };
+        let (_run_id, terminal_epoch) = create_open_terminal_review_fixture(&state, &task).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -12822,7 +13378,6 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let user_text = "Summarize the claim and risk in the attachment.";
         let mut router = ModelRouter::new();
         router.providers.insert(
             "openai".into(),
@@ -12859,7 +13414,13 @@ mod tests {
             },
         )
         .with_consent_state(state)
-        .with_canonical_write_admission(registration.execution_epoch());
+        .with_canonical_write_admission(registration.execution_epoch())
+        .with_terminal_owner_review_origin(Arc::new(
+            terminal_epoch
+                .review_origin_proof()
+                .expect("resource provider terminal Review origin")
+                .clone(),
+        ));
         let mut provider_authorization = MainChatProviderAuthorization::test_fixture_for_user_text(
             "resource-local-provider",
             true,
@@ -12888,7 +13449,8 @@ mod tests {
         let progress_capture = Arc::clone(&progress);
         let generation = client
             .generate_direct_answer(request, &mut move |event| {
-                progress_capture.lock().unwrap().push(event)
+                progress_capture.lock().unwrap().push(event);
+                Ok(())
             })
             .await
             .unwrap();
@@ -13021,23 +13583,45 @@ mod tests {
         async fn generate_direct_answer(
             &self,
             request: MainChatModelRequest,
-            _emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+            emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
         ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompts
                 .lock()
                 .expect("prompts lock")
                 .push(request.system_prompt);
+            if let Some(receipt) = self.provider_receipt.as_ref() {
+                let Some(policy_evidence) = receipt.policy_evidence.clone() else {
+                    return Err(MainChatModelFailure {
+                        message: "test provider receipt policy evidence missing".into(),
+                        provider_receipt: None,
+                        blocker_code: Some("provider_receipt_lifecycle_invalid".into()),
+                        proposal_ids: Vec::new(),
+                    });
+                };
+                if let Err(error) = emit_progress(MainChatModelProgress::Started {
+                    request_id: receipt.request_id.clone(),
+                    provider: receipt.provider.clone(),
+                    model: receipt.model.clone(),
+                    started_at: receipt.started_at,
+                    policy_evidence: Box::new(policy_evidence),
+                }) {
+                    return Err(MainChatModelFailure {
+                        message: error.to_string(),
+                        provider_receipt: None,
+                        blocker_code: Some("provider_start_observer_rejected".into()),
+                        proposal_ids: Vec::new(),
+                    });
+                }
+            }
             match self.response.clone() {
                 Ok(content) => Ok(MainChatModelGeneration {
                     content,
                     provider_receipt: self.provider_receipt.clone(),
-                    provider_started_emitted: false,
                 }),
                 Err(message) => Err(MainChatModelFailure {
                     message,
                     provider_receipt: self.provider_receipt.clone(),
-                    provider_started_emitted: false,
                     blocker_code: None,
                     proposal_ids: Vec::new(),
                 }),
@@ -13125,7 +13709,7 @@ mod tests {
                 }),
                 output_preview: observation,
                 blocker_reason: None,
-                execution_receipt: receipt,
+                execution_receipt: Some(receipt),
                 canonical_tool_graph: None,
                 product_react_trace: None,
                 product_tool_projection: None,
@@ -13228,7 +13812,7 @@ mod tests {
                 observation_metadata: metadata,
                 output_preview: observation_content,
                 blocker_reason: None,
-                execution_receipt: tool_execution_receipt,
+                execution_receipt: Some(tool_execution_receipt),
                 canonical_tool_graph: None,
                 product_react_trace: None,
                 product_tool_projection: None,
@@ -13482,6 +14066,25 @@ mod tests {
     }
 
     #[test]
+    fn real_provider_receipt_without_observed_start_cannot_synthesize_adapter_truth() {
+        let model = ScriptedModelClient::ok("unused")
+            .with_provider_receipt(ProviderInvocationStatus::Completed);
+        let receipt = model
+            .provider_receipt
+            .as_ref()
+            .expect("test provider receipt");
+        let mut events = BufferedMainChatEventSink::default();
+
+        assert_eq!(
+            emit_provider_receipt(receipt, &mut events)
+                .expect_err("missing observed start must fail closed"),
+            "provider_receipt_observed_start_missing"
+        );
+
+        assert!(events.events().is_empty(), "a terminal receipt cannot backfill the adapter-start authority after the physical edge");
+    }
+
+    #[test]
     fn provider_attempt_receipts_are_joined_only_with_the_same_request_identity() {
         let started_at = chrono::Utc::now();
         let failed_at = started_at + chrono::Duration::milliseconds(5);
@@ -13673,9 +14276,29 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: "provider-consent-chat".into(),
+                        user_goal: "hello".into(),
+                        selected_strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer,
+                        current_plan_summary: Some("Wait for exact provider network consent.".into()),
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .expect("create provider consent task")
+        };
+        let (run_id, terminal_epoch) = create_open_terminal_review_fixture(&state, &task).await;
         let cancellation_registry =
             crate::main_chat_cancellation::MainChatCancellationRegistry::default();
-        let registration = cancellation_registry.register("provider-consent-task");
+        let registration = cancellation_registry.register(&task.id);
         let execution_epoch = registration.execution_epoch();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -13695,13 +14318,19 @@ mod tests {
             NetworkPolicy::default(),
         )
         .with_consent_state(Arc::clone(&state))
-        .with_canonical_write_admission(execution_epoch.clone());
+        .with_canonical_write_admission(execution_epoch.clone())
+        .with_terminal_owner_review_origin(Arc::new(
+            terminal_epoch
+                .review_origin_proof()
+                .expect("provider consent terminal Review origin")
+                .clone(),
+        ));
         let mut provider_authorization = MainChatProviderAuthorization::test_fixture_for_user_text(
             "provider-consent",
             true,
             "hello",
         );
-        provider_authorization.task_session_id = Some("provider-consent-task".into());
+        provider_authorization.task_session_id = Some(task.id.clone());
         let request = MainChatModelRequest {
             session_id: "provider-consent-chat".into(),
             messages: vec![ChatMessage {
@@ -13719,7 +14348,7 @@ mod tests {
             payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: false,
         };
-        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let mut no_progress = |_progress: MainChatModelProgress| Ok(());
         let pending = client
             .generate_direct_answer(request.clone(), &mut no_progress)
             .await
@@ -13742,19 +14371,54 @@ mod tests {
             pending_proposal.source,
             openlife_core::agent::ProposalSource::ChatConversation
         );
-        assert_eq!(execution_epoch.snapshot().committed_fact_count(), 1);
+        {
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .expect("proposal store")
+                .lock()
+                .await;
+            let projection = proposal_store
+                .terminal_relation_projection_proof(&pending.proposal_ids[0])
+                .expect("load provider consent typed relation")
+                .expect("provider consent owns typed terminal relation");
+            assert_eq!(
+                projection.relation_kind(),
+                openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+            );
+            assert_eq!(projection.task_session_id(), task.id);
+            assert_eq!(projection.run_id(), run_id);
+        }
+        let committed = execution_epoch.snapshot();
+        assert_eq!(committed.committed_fact_count(), 2);
+        assert_eq!(committed.commit_facts.len(), 2);
+        assert_eq!(
+            committed.commit_facts[0].domain,
+            "proposal_terminal_relation"
+        );
+        assert_eq!(
+            committed.commit_facts[1].domain,
+            "agent_run_review_relation_projection"
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(75), listener.accept())
                 .await
                 .is_err()
         );
 
-        crate::commands::proposal::accept_proposal_with_state(
+        seal_terminal_review_fixture(&state, &task.id, &run_id, terminal_epoch.generation()).await;
+        let acceptance = crate::commands::proposal::accept_proposal_with_state(
             pending.proposal_ids[0].clone(),
             &state,
         )
         .await
         .unwrap();
+        assert_eq!(
+            acceptance
+                .get("proposal_projection_status")
+                .and_then(Value::as_str),
+            Some("confirmed")
+        );
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut input = [0_u8; 8192];
@@ -13767,8 +14431,9 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let mut no_progress = |_progress: MainChatModelProgress| Ok(());
         let completed = client
+            .with_required_network_consent_proposal_id(Some(pending.proposal_ids[0].clone()))
             .generate_direct_answer(request, &mut no_progress)
             .await
             .unwrap();
@@ -13779,7 +14444,27 @@ mod tests {
     #[tokio::test]
     async fn main_chat_provider_ask_cancel_winner_stages_no_review_and_never_dispatches() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let task_id = "provider-consent-cancel-wins-task";
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: "provider-consent-cancel-wins-chat".into(),
+                        user_goal: "hello".into(),
+                        selected_strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer,
+                        current_plan_summary: Some("Cancel before provider consent staging.".into()),
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .expect("create cancelled provider consent task")
+        };
+        let (_run_id, terminal_epoch) = create_open_terminal_review_fixture(&state, &task).await;
+        let task_id = task.id.as_str();
         let cancellation_registry =
             crate::main_chat_cancellation::MainChatCancellationRegistry::default();
         let registration = cancellation_registry.register(task_id);
@@ -13804,7 +14489,13 @@ mod tests {
             NetworkPolicy::default(),
         )
         .with_consent_state(Arc::clone(&state))
-        .with_canonical_write_admission(execution_epoch.clone());
+        .with_canonical_write_admission(execution_epoch.clone())
+        .with_terminal_owner_review_origin(Arc::new(
+            terminal_epoch
+                .review_origin_proof()
+                .expect("cancelled provider consent terminal Review origin")
+                .clone(),
+        ));
         let mut provider_authorization = MainChatProviderAuthorization::test_fixture_for_user_text(
             "provider-consent-cancel-wins",
             true,
@@ -13829,7 +14520,7 @@ mod tests {
             stream_provider_tokens: false,
         };
 
-        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let mut no_progress = |_progress: MainChatModelProgress| Ok(());
         let blocked = client
             .generate_direct_answer(request, &mut no_progress)
             .await
@@ -13862,8 +14553,8 @@ mod tests {
         assert_eq!(snapshot.committed_fact_count(), 0);
         assert_eq!(snapshot.commit_facts.len(), 1);
         assert_eq!(
-            snapshot.commit_facts[0].domain, "proposal",
-            "the rejected fact must identify the canonical Proposal boundary"
+            snapshot.commit_facts[0].domain, "proposal_terminal_relation",
+            "the rejected fact must identify the atomic Proposal relation boundary"
         );
         assert_eq!(
             snapshot.commit_facts[0].outcome,
@@ -13876,7 +14567,7 @@ mod tests {
         use openlife_core::agent::main_chat_agent_v1::{
             AgentTaskSessionDraft, ExecutionQueueStatus, MainChatAgentStrategy,
         };
-        use openlife_core::agent::{AgentRun, AgentRunStatus, ProposalSource, ProposalStatus};
+        use openlife_core::agent::{AgentRunStatus, ProposalSource, ProposalStatus};
         use openlife_core::tool_permissions::ActionBoundToolPermissionScope;
 
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -13899,20 +14590,7 @@ mod tests {
                 })
                 .expect("create task")
         };
-        let run_id = {
-            let mut run = AgentRun::new_chat_run(&task.chat_session_id, &task.user_goal);
-            run.task_id = task.id.clone();
-            run.status = AgentRunStatus::Running;
-            let run_id = run.id.clone();
-            let store = state
-                .agent_run_store
-                .as_ref()
-                .expect("agent run store")
-                .lock()
-                .await;
-            store.create_run(&run).expect("create canonical AgentRun");
-            run_id
-        };
+        let (run_id, terminal_epoch) = create_open_terminal_review_fixture(&state, &task).await;
 
         let cancellation_registry =
             crate::main_chat_cancellation::MainChatCancellationRegistry::default();
@@ -13976,7 +14654,7 @@ mod tests {
             output_preview: Some(execution.output_preview.clone()),
             blocker: execution.blocker_reason.clone(),
             observation_metadata: Some(execution.observation_metadata.clone()),
-            execution_receipt: Some(execution.execution_receipt.clone()),
+            execution_receipt: execution.execution_receipt.clone(),
             model_arguments_ignored: execution.decision.model_arguments_ignored,
             react_trace: execution.product_react_trace.clone(),
             product_projection: execution.product_tool_projection.clone(),
@@ -13987,6 +14665,11 @@ mod tests {
             &task.id,
             &[call],
             &run_id,
+            KernelReviewRelationContext::Product(
+                terminal_epoch
+                    .review_origin_proof()
+                    .expect("ToolPermission terminal Review origin"),
+            ),
             &execution_epoch,
             &mut transcript,
         )
@@ -14076,7 +14759,7 @@ mod tests {
         };
         assert_eq!(proposal.status, ProposalStatus::Pending);
         assert_eq!(proposal.source, ProposalSource::ChatConversation);
-        assert_eq!(proposal.run_id.as_deref(), Some(run_id.as_str()));
+        assert!(proposal.run_id.is_none());
         assert_eq!(
             proposal
                 .after
@@ -14105,6 +14788,23 @@ mod tests {
             .peek_action_bound(&proposal_id, &scope)
             .expect("peek pending permission")
             .is_none());
+
+        {
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .expect("proposal store")
+                .lock()
+                .await;
+            let projection = proposal_store
+                .terminal_relation_projection_proof(&proposal_id)
+                .expect("load ToolPermission terminal relation")
+                .expect("ToolPermission owns a typed terminal relation");
+            assert_eq!(
+                projection.relation_kind(),
+                openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+            );
+        }
 
         {
             let store = state
@@ -14137,9 +14837,63 @@ mod tests {
                 .update_run(&run)
                 .expect("mark canonical AgentRun waiting permission");
         }
-        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+        seal_terminal_review_fixture(&state, &task.id, &run_id, terminal_epoch.generation()).await;
+        let owner_before_accept = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
             .await
-            .expect("accept exact ToolPermission proposal");
+            .canonical_owner_head(&task.id)
+            .expect("load task owner before ToolPermission accept")
+            .expect("task owner exists before ToolPermission accept");
+        let acceptance =
+            crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+                .await
+                .expect("accept exact ToolPermission proposal");
+        assert_eq!(
+            acceptance
+                .get("proposal_projection_status")
+                .and_then(Value::as_str),
+            Some("confirmed"),
+            "ToolPermission effect and Proposal truth diverged: {acceptance}"
+        );
+        let owner_after_accept = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .canonical_owner_head(&task.id)
+            .expect("load task owner after ToolPermission accept")
+            .expect("task owner exists after ToolPermission accept");
+        assert_eq!(
+            owner_after_accept, owner_before_accept,
+            "ActionResumePrerequisite acceptance must not mutate the task before explicit resume"
+        );
+        assert!(state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .get_immutable_event(
+                &task.id,
+                "terminal_owner.successor_confirmed",
+                &format!("successor:{proposal_id}"),
+            )
+            .expect("query terminal successor after ToolPermission accept")
+            .is_none());
+        let accepted_proposal = state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .expect("load accepted ToolPermission")
+            .expect("accepted ToolPermission exists");
+        assert_eq!(accepted_proposal.status, ProposalStatus::Accepted);
         assert!(state
             .tool_permission_store
             .lock()
@@ -14147,6 +14901,14 @@ mod tests {
             .peek_action_bound(&proposal_id, &scope)
             .expect("peek accepted permission")
             .is_some());
+
+        assert_eq!(
+            crate::main_chat_task_controls::
+                main_chat_pending_action_permission_diagnostic_for_test(&state, &task, &queued)
+                .await
+                .expect("diagnose accepted ToolPermission replay"),
+            "ready"
+        );
 
         crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(&task.id, &state)
             .await
@@ -14334,12 +15096,12 @@ mod tests {
             output_preview: Some(success.output_preview.clone()),
             blocker: None,
             observation_metadata: Some(success.observation_metadata.clone()),
-            execution_receipt: Some(success.execution_receipt.clone()),
+            execution_receipt: success.execution_receipt.clone(),
             model_arguments_ignored: success.decision.model_arguments_ignored,
             react_trace: success.product_react_trace.clone(),
             product_projection: success.product_tool_projection.clone(),
         };
-        validate_kernel_tool_call_observation_bindings(&run, &[success_call.clone()])
+        validate_kernel_tool_call_observation_bindings(&run, std::slice::from_ref(&success_call))
             .expect("exact adapter body and live receipt binding");
         let serde_receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt =
             serde_json::from_value(serde_json::to_value(&success.execution_receipt).unwrap())
@@ -14467,6 +15229,7 @@ mod tests {
             &task.id,
             &[success_call],
             "kernel-receipt-run",
+            KernelReviewRelationContext::UnboundUnitFixture,
             &execution_epoch,
             &mut transcript,
         )
@@ -14511,6 +15274,7 @@ mod tests {
             &task.id,
             &[missing_receipt_call],
             "kernel-receipt-run",
+            KernelReviewRelationContext::UnboundUnitFixture,
             &execution_epoch,
             &mut transcript,
         )
@@ -14536,8 +15300,12 @@ mod tests {
         assert_eq!(missing_action.status, ExecutionQueueStatus::Failed);
         assert_eq!(
             missing_action.replay_effect_certainty,
-            ActionReplayEffectCertainty::DispatchedUnknown
+            ActionReplayEffectCertainty::NotDispatched
         );
+        assert!(missing_action
+            .observation_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("toolExecutionReceipt").is_none()));
         assert_eq!(
             missing_action
                 .observation_metadata
@@ -14772,6 +15540,7 @@ mod tests {
             &task.id,
             &kernel_result.tool_calls,
             &run_id,
+            KernelReviewRelationContext::UnboundUnitFixture,
             &execution_epoch,
             &mut transcript,
         )
@@ -15018,6 +15787,7 @@ mod tests {
             &task.id,
             &kernel_result.tool_calls,
             &run_id,
+            KernelReviewRelationContext::UnboundUnitFixture,
             &execution_epoch,
             &mut transcript,
         )
@@ -17571,7 +18341,7 @@ mod tests {
             "Please remember this private health fact: coffee causes heart palpitations.";
         let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
 
-        let proposal = match create_kernel_write_proposal(
+        let proposal = match create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             task_session_id,
             "run-proposal-typed-fact",
@@ -17633,7 +18403,7 @@ mod tests {
             "Please remember this private health fact: coffee causes heart palpitations.";
         let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
 
-        let first = create_kernel_write_proposal(
+        let first = create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             "proposal-fact-dedup-first",
             "run-proposal-fact-dedup-first",
@@ -17644,7 +18414,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let second = create_kernel_write_proposal(
+        let second = create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             "proposal-fact-dedup-second",
             "run-proposal-fact-dedup-second",
@@ -17698,7 +18468,7 @@ mod tests {
         let user_text =
             "Please remember this private health fact: coffee causes heart palpitations.";
         let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
-        let first = match create_kernel_write_proposal(
+        let first = match create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             "proposal-active-fact-first",
             "run-proposal-active-fact-first",
@@ -17730,7 +18500,7 @@ mod tests {
             .accept_memory_proposal(acceptance)
             .unwrap();
 
-        let second = create_kernel_write_proposal(
+        let second = create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             "proposal-active-fact-second",
             "run-proposal-active-fact-second",
@@ -17788,7 +18558,7 @@ mod tests {
         policy.risk = IntentRiskLevel::High;
         policy.sensitivity = openlife_core::agent::main_chat_agent_v1::PolicySensitivity::Internal;
 
-        let proposal = match create_kernel_write_proposal(
+        let proposal = match create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             task_session_id,
             "run-proposal-conservative-governance",
@@ -17832,7 +18602,7 @@ mod tests {
             "Please remember this private health fact: coffee causes heart palpitations.";
         let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
 
-        let error = create_kernel_write_proposal(
+        let error = create_kernel_write_proposal_without_terminal_owner_for_unit_test(
             &state,
             task_session_id,
             "run-proposal-cancel",

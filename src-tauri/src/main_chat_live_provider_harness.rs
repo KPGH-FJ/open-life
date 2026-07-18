@@ -1168,7 +1168,10 @@ fn distinct_registered_mcp_candidate_metadata_trace_present(
         && candidate_targets == action_targets
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_ranked_registered_mcp_selection_metadata_trace_present(
     scenario: main_chat_final_gate::MainChatLiveProviderEvalHarnessScenario,
     expected_provider: &str,
