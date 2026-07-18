@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "backend_capability_freeze_in_progress_current_provider_stream_live_fetch_deepseek_live_search_rc04_and_quality_gates_green_independent_review_and_final_freeze_hash_pending_roadshow_phase7_v4_not_complete",
+  "status": "backend_capability_freeze_verified_at_c9e75c8_frontend_handoff_in_progress_roadshow_phase7_v4_not_complete",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -31,7 +31,7 @@
     "last_reestimated_phase": "H0_FACTS_AND_FREEZE"
   },
   "backend_capability_freeze": {
-    "status": "in_progress",
+    "status": "verified_frozen_at_c9e75c8",
     "scope": {
       "included": [
         "backend_runtime_truth",
@@ -69,11 +69,15 @@
       "roadshow_rc06_rc07": "passed_current_code_review_before_materialize_and_idempotent_acceptance",
       "roadshow_rc08": "passed_current_code_external_provider_cancel_remote_unknown_no_late_commit_then_new_operation_retry_fixture_web_only",
       "deepseek_search_adapter_commit": "930ce33e76583371e6fe067940042d89fb9c2f59",
-      "deepseek_search_stability_fix_commit": "81d972635933a6908842090ecb63d74bfcd92141"
+      "deepseek_search_stability_fix_commit": "81d972635933a6908842090ecb63d74bfcd92141",
+      "independent_freeze_review_date": "2026-07-18",
+      "independent_freeze_review_commit": "c9e75c8cc90475c7a1df09e1f40e3657dedfc625",
+      "independent_freeze_review_mechanical_gates": "workspace_check_single_system_39_main_chat_runtime_30_main_chat_kernel_53_frozen_scenarios_15_resource_21_state_store_59_command_surface_97_and_tauri_test_target_check_passed",
+      "annotated_freeze_tag": "backend-freeze-c9e75c8"
     },
     "open_blockers": {
-      "independent_read_only_review": "pending and must rerun mechanical evidence from source, not review this summary only",
-      "final_freeze_hash": "pending until independent read-only review reruns source and mechanical gates"
+      "independent_read_only_review": "resolved_for_bounded_backend_freeze_only_on_2026_07_18_global_finding_reviews_remain_separate",
+      "final_freeze_hash": "c9e75c8cc90475c7a1df09e1f40e3657dedfc625"
     },
     "anti_hallucination_non_claims": [
       "fixture-backed Web evidence is not external live Web credit",
@@ -193,8 +197,10 @@
     },
     {
       "id": "BACKEND_CAPABILITY_FREEZE",
-      "status": "in_progress_provider_stream_fetch_deepseek_live_search_rc04_and_mechanical_gates_green_independent_review_and_final_freeze_hash_pending",
-      "completion_claim": "no_completion_claim_current_backend_evidence_only",
+      "status": "verified_frozen_at_c9e75c8_after_independent_mechanical_rerun",
+      "completion_claim": "bounded_backend_freeze_only_roadshow_phase7_and_global_v4_not_complete",
+      "commit": "c9e75c8cc90475c7a1df09e1f40e3657dedfc625",
+      "tag": "backend-freeze-c9e75c8",
       "evidence": "backend_capability_freeze"
     }
   ],
