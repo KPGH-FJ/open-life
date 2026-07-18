@@ -18,15 +18,15 @@ fn policy_privacy_route_cannot_be_relaxed_by_selected_heuristic() {
         }),
     });
 
-    assert_eq!(decision.route, ModelRoutePolicy::LocalOnly);
-    assert!(decision.hard_boundary);
-    assert_eq!(decision.policy_id, "policy.sensitive_topics.local_only");
-    assert_eq!(decision.conflicts.len(), 1);
+    assert_eq!(decision.route(), ModelRoutePolicy::LocalOnly);
+    assert!(decision.hard_boundary());
+    assert_eq!(decision.policy_id(), "policy.sensitive_topics.local_only");
+    assert_eq!(decision.conflicts().len(), 1);
     assert_eq!(
-        decision.conflicts[0].heuristic_id.as_deref(),
+        decision.conflicts()[0].heuristic_id.as_deref(),
         Some("hr_relax_health")
     );
-    assert!(decision.conflicts[0].policy_won);
+    assert!(decision.conflicts()[0].policy_won);
 }
 
 #[test]

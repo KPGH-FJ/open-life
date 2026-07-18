@@ -443,12 +443,12 @@ export default function BuilderPatchReview({
         })}
       </div>
 
-      {/* Assumptions */}
+      {/* Backend-owned review context */}
       {summary.assumptions.length > 0 && (
         <div className="bg-blue-50 border border-blue-100 rounded-lg p-4">
           <div className="flex items-center gap-2 text-blue-800 font-medium mb-2">
             <Info size={16} />
-            <span>AI 做出的假设</span>
+            <span>本轮审阅依据</span>
           </div>
           <ul className="text-sm text-blue-700 space-y-1">
             {summary.assumptions.map((a, i) => (

@@ -13,6 +13,7 @@ use tauri::State;
 pub struct LifeStateProjection {
     pub version: String,
     pub generated_at: String,
+    pub persistence: crate::persistence_coordinator::PersistenceHealthSnapshot,
     pub pending: LifePendingProjection,
     pub readiness: LifeReadinessProjection,
     pub task_state: LifeTaskStateProjection,
@@ -145,6 +146,7 @@ pub(crate) async fn get_life_state_projection_with_state(
     Ok(LifeStateProjection {
         version: "life_state_projection_v1".into(),
         generated_at: Utc::now().to_rfc3339(),
+        persistence: diagnostics.persistence_health.clone(),
         pending,
         readiness,
         task_state,
@@ -163,13 +165,27 @@ pub(crate) async fn get_life_state_projection_with_state(
 }
 
 async fn build_pending_projection(state: &Arc<AppState>) -> LifePendingProjection {
+    if state
+        .persistence_coordinator
+        .require_trusted_read("ProposalStore")
+        .is_err()
+    {
+        return LifePendingProjection {
+            pending_proposal_count: 0,
+            edited_proposal_count: 0,
+            total_review_required_count: 0,
+            high_risk_review_required_count: 0,
+            proposal_store_status: "unavailable".into(),
+            requires_user_action: false,
+        };
+    }
     let Some(store_arc) = state.proposal_store.as_ref() else {
         return LifePendingProjection {
             pending_proposal_count: 0,
             edited_proposal_count: 0,
             total_review_required_count: 0,
             high_risk_review_required_count: 0,
-            proposal_store_status: "disabled".into(),
+            proposal_store_status: "unavailable".into(),
             requires_user_action: false,
         };
     };
@@ -215,9 +231,19 @@ fn pending_projection_from_counts(
 }
 
 async fn build_task_state_projection(state: &Arc<AppState>) -> LifeTaskStateProjection {
+    if state
+        .persistence_coordinator
+        .require_trusted_read("MainChatAgentSessionStore")
+        .is_err()
+    {
+        return LifeTaskStateProjection {
+            task_store_status: "unavailable".into(),
+            ..LifeTaskStateProjection::default()
+        };
+    }
     let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
         return LifeTaskStateProjection {
-            task_store_status: "disabled".into(),
+            task_store_status: "unavailable".into(),
             ..LifeTaskStateProjection::default()
         };
     };
@@ -288,6 +314,13 @@ fn build_safe_mode_projection(
 }
 
 async fn build_tool_permission_projection(state: &Arc<AppState>) -> LifeToolPermissionProjection {
+    if state
+        .persistence_coordinator
+        .require_trusted_read("ToolPermissionStore")
+        .is_err()
+    {
+        return LifeToolPermissionProjection::default();
+    }
     let store = state.tool_permission_store.lock().await;
     let records = store.list().unwrap_or_default();
     let now = Utc::now();

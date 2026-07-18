@@ -38,18 +38,12 @@ import {
   getSchedulerConfig,
   setSchedulerConfig,
   saveFeedback,
-  saveChatMessage,
   logAnalyticsEvent,
   getLifeModel,
   listChatSessions,
   createChatSession,
   renameChatSession,
   deleteChatSession,
-  getDailyGoals,
-  addDailyGoal,
-  toggleDailyGoal,
-  recordState,
-  indexMemoryChunk,
   listAgentRunsForSession,
   getAgentRun,
   getPendingProposals,
@@ -59,10 +53,10 @@ import {
   draftEditMemoryProposal,
   postponeProposal,
   getMainChatAgentTaskState,
+  getTasksViewModel,
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
-  replayAgentAction,
   listMainChatAgentTasks,
   getMainChatAgentTaskDetail,
   refreshMainChatAgentTaskContext,
@@ -95,6 +89,8 @@ import type {
   MainChatAgentTaskState,
   MainChatTaskSummary,
   MainChatTaskDetail,
+  TaskControl,
+  TaskViewModelItem,
   MainChatAgentStateSnapshot,
   MainChatAgentDurableEvent,
   MainChatKernelEvent,
@@ -102,8 +98,9 @@ import type {
   MainChatSkillDetail,
   MainChatSelectedSkill,
   MainChatToolCandidateList,
-  MainChatMemoryGovernanceEvidence,
+  ProductRunEvidenceView,
   LifeStateProjection,
+  AcceptProposalResult,
 } from "../tauri";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import {
@@ -113,7 +110,6 @@ import {
   type CapabilityTone,
   type CapabilityStatusViewModel,
 } from "../utils/capabilityStatus";
-import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
 import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
@@ -126,6 +122,7 @@ import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
+import { useChatResources } from "./chat/useChatResources";
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -242,22 +239,30 @@ function buildCompanionInitialAssistantMessage(
 
 function CompanionTaskControlStrip({
   taskState,
+  taskViewItem,
   busy,
   error,
+  canResume,
+  canRetry,
+  canCancel,
   onResume,
   onRetry,
   onCancel,
   onRefresh,
 }: {
   taskState: MainChatAgentTaskState | null;
+  taskViewItem: TaskViewModelItem | null;
   busy: boolean;
   error: string | null;
+  canResume: boolean;
+  canRetry: boolean;
+  canCancel: boolean;
   onResume: () => void;
   onRetry: () => void;
   onCancel: () => void;
   onRefresh: () => void;
 }) {
-  const status = taskState?.session?.status?.replace(/_/g, " ") ?? "读取任务状态";
+  const status = taskViewItem?.lifecycleStatus.replace(/_/g, " ") ?? "evidence unavailable";
   const activeToolCount = taskState?.activeToolCount ?? 0;
   const pendingApprovalCount = taskState?.pendingApprovalCount ?? 0;
   const displayError = error ? boundedProductText(error) || "Action failed" : "";
@@ -278,7 +283,7 @@ function CompanionTaskControlStrip({
             type="button"
             aria-label="Resume task"
             title="Resume task"
-            disabled={!taskState?.canResume || busy}
+            disabled={!canResume || busy}
             onClick={onResume}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -288,7 +293,7 @@ function CompanionTaskControlStrip({
             type="button"
             aria-label="Retry failed action"
             title="Retry failed action"
-            disabled={!taskState?.canRetry || busy}
+            disabled={!canRetry || busy}
             onClick={onRetry}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -298,7 +303,7 @@ function CompanionTaskControlStrip({
             type="button"
             aria-label="Cancel task"
             title="Cancel task"
-            disabled={!taskState?.canCancel || busy}
+            disabled={!canCancel || busy}
             onClick={onCancel}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -316,8 +321,8 @@ function CompanionTaskControlStrip({
           </button>
         </div>
       </div>
-      {taskState?.session?.currentPlanSummary && (
-        <div className="mt-2 truncate text-stone-600">{taskState.session.currentPlanSummary}</div>
+      {taskState?.session?.hasPlanSummary && (
+        <div className="mt-2 truncate text-stone-600">Plan state is available in the trace.</div>
       )}
       {displayError && (
         <div className="mt-2 rounded-md bg-rose-50 px-2 py-1 text-rose-800">{displayError}</div>
@@ -350,6 +355,70 @@ function taskContinuityFinalDeliverySections(
     recordArrayLength(metrics, "durableChanges") > 0 ? "Durable changes" : null,
     recordArrayLength(metrics, "nextSteps") > 0 ? "Next steps" : null,
   ].filter((section): section is string => Boolean(section));
+}
+
+function taskContinuityFinalDeliveryStatus(
+  value: Record<string, unknown> | null | undefined
+): string {
+  if (!value) return "missing_status";
+  const metadata = value.metadata;
+  const metadataStatus =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>).status
+      : undefined;
+  const status = value.status ?? metadataStatus;
+  return typeof status === "string" && status.trim() ? status : "missing_status";
+}
+
+function taskContinuityFinalDeliveryStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    completed: "Completed",
+    delivered: "Delivered",
+    completed_with_pending_items: "Pending review items",
+    blocked: "Blocked",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    missing_status: "Missing status evidence",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function taskContinuityFinalDeliveryClass(status: string): string {
+  if (status === "completed" || status === "delivered") {
+    return "border-emerald-300 bg-white/80 text-emerald-900";
+  }
+  if (status === "blocked" || status === "failed" || status === "cancelled") {
+    return "border-rose-300 bg-rose-50 text-rose-900";
+  }
+  return "border-amber-300 bg-amber-50 text-amber-900";
+}
+
+function TaskContinuityFinalDeliveryPanel({ value }: { value: Record<string, unknown> }) {
+  const status = taskContinuityFinalDeliveryStatus(value);
+  const sections = taskContinuityFinalDeliverySections(value);
+  return (
+    <div
+      data-testid="task-continuity-final-delivery"
+      data-final-delivery-status={status}
+      data-final-delivery-section-titles={sections.join("|")}
+      className={`mt-2 border-l px-2 py-1 ${taskContinuityFinalDeliveryClass(status)}`}
+    >
+      <div className="font-semibold">Final delivery</div>
+      <div className="mt-1 flex flex-wrap gap-1 text-xs">
+        <span className="inline-flex h-5 items-center rounded-md border border-current/30 bg-white/70 px-1.5 font-medium">
+          {taskContinuityFinalDeliveryStatusLabel(status)}
+        </span>
+        {sections.map(section => (
+          <span
+            key={section}
+            className="inline-flex h-5 items-center rounded-md border border-current/20 bg-white/60 px-1.5"
+          >
+            {section}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function isStreamDonePayload(value: unknown): value is StreamMessageDonePayload {
@@ -505,6 +574,7 @@ function classNames(...classes: (string | false | undefined)[]) {
 
 type MainChatAgentProductStatus =
   | "completed"
+  | "cancelled"
   | "running"
   | "waiting_for_user"
   | "restricted"
@@ -534,6 +604,7 @@ type MainChatAgentStatusView = {
   memoryGovernanceLabels: string[];
   actions: MainChatAgentProductAction[];
   taskSessionId?: string;
+  evidenceSummary?: string;
 };
 
 function boundedProductLabel(value: unknown, maxLength = 88): string {
@@ -556,14 +627,6 @@ function boundedProductLabel(value: unknown, maxLength = 88): string {
   return label.slice(0, maxLength);
 }
 
-function productStringArray(value: unknown, maxItems = 6): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map(item => boundedProductLabel(item))
-    .filter(Boolean)
-    .slice(0, maxItems);
-}
-
 function boundedProductText(value: unknown, maxLength = 180): string {
   if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
     return "";
@@ -577,44 +640,26 @@ function boundedProductText(value: unknown, maxLength = 180): string {
     .slice(0, maxLength);
 }
 
-function productCount(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return Math.max(0, parsed);
-  }
-  return 0;
-}
-
-function memoryGovernanceStatusLabels(
-  governance: MainChatMemoryGovernanceEvidence | null | undefined
-): string[] {
-  if (!governance || typeof governance !== "object") return [];
-  const labels: string[] = [];
-  if (
-    governance.localLifeEventCaptureExecuted === true ||
-    productStringArray(governance.lifeEventIds).length > 0
-  ) {
-    labels.push("已记录到本地生活事件");
-  }
-  if (productStringArray(governance.memoryProposalIds).length > 0) {
-    labels.push("待确认记忆");
-  }
-  if (productStringArray(governance.lifeModelProposalIds).length > 0) {
-    labels.push("待确认 LifeModel 更新");
-  }
-  return labels;
-}
-
-function includesAnyControl(controls: string[], candidates: string[]): boolean {
-  const normalized = new Set(controls.map(control => control.trim().toLowerCase()));
-  return candidates.some(candidate => normalized.has(candidate));
+function hasCurrentTaskContinuityEvidence(detail: MainChatTaskDetail | null): boolean {
+  if (!detail) return false;
+  const evidence = detail.evidenceView;
+  return Boolean(
+    evidence &&
+    evidence.taskSessionId === detail.taskSession.id &&
+    boundedProductText(evidence.title) &&
+    boundedProductLabel(evidence.lifecycleState) &&
+    ["active", "consistent", "projected"].includes(evidence.projectionState) &&
+    evidence.identityState === "consistent" &&
+    evidence.snapshotState === "stable"
+  );
 }
 
 function productStatusLabel(status: MainChatAgentProductStatus): string {
   switch (status) {
     case "completed":
       return "Completed";
+    case "cancelled":
+      return "Canceled";
     case "running":
       return "Running";
     case "waiting_for_user":
@@ -638,6 +683,8 @@ function productStatusTone(status: MainChatAgentProductStatus): MainChatAgentSta
   switch (status) {
     case "completed":
       return "success";
+    case "cancelled":
+      return "warning";
     case "running":
       return "info";
     case "restricted":
@@ -653,16 +700,114 @@ function productStatusTone(status: MainChatAgentProductStatus): MainChatAgentSta
   }
 }
 
-function isRestrictedEvidence(uiStatus: string, blockerLabels: string[]): boolean {
-  if (uiStatus === "restricted") return true;
-  return blockerLabels.some(label =>
-    /(policy|permission|provider|network|mcp|web|restricted|not_allowed|blocked_by)/i.test(label)
+function taskLifecycleMatchesRunEvidence(
+  taskStatus: TaskViewModelItem["lifecycleStatus"],
+  evidenceStatus: string
+): boolean {
+  switch (taskStatus) {
+    case "running":
+      return evidenceStatus === "running";
+    case "waiting_permission":
+      return evidenceStatus === "waiting_permission" || evidenceStatus === "waiting_for_user";
+    case "blocked":
+      return evidenceStatus === "blocked";
+    case "failed":
+      return ["failed", "timed_out", "interrupted"].includes(evidenceStatus);
+    case "cancelled":
+      return evidenceStatus === "cancelled";
+    case "completed":
+      return evidenceStatus === "completed";
+    case "completed_with_pending_review":
+      return evidenceStatus === "completed_with_pending_items";
+    case "completed_needs_evidence":
+      return ["completed", "partial_or_unknown"].includes(evidenceStatus);
+    case "unknown":
+      return evidenceStatus === "partial_or_unknown" || evidenceStatus === "unknown";
+    default:
+      return false;
+  }
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  const normalize = (values: string[]) => Array.from(new Set(values)).sort();
+  const normalizedLeft = normalize(left);
+  const normalizedRight = normalize(right);
+  return (
+    normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((value, index) => value === normalizedRight[index])
+  );
+}
+
+function taskControlMatchesTaskAuthority(
+  taskViewItem: TaskViewModelItem,
+  control: TaskControl
+): boolean {
+  const taskSessionId = taskViewItem.taskSessionId;
+  return Boolean(
+    taskSessionId &&
+    taskViewItem.canonicalTaskId === taskSessionId &&
+    control.targetTaskId === taskSessionId
+  );
+}
+
+export function selectAuthoritativeTaskViewItem(
+  items: TaskViewModelItem[],
+  taskSessionId: string | undefined,
+  sourceSessionId: string | undefined
+): TaskViewModelItem | null {
+  if (taskSessionId) {
+    return items.find(task => task.taskSessionId === taskSessionId) ?? null;
+  }
+  return (
+    items.find(task => Boolean(sourceSessionId) && task.conversationId === sourceSessionId) ?? null
+  );
+}
+
+function hasVerifiedTaskRunEvidence(
+  taskViewItem: TaskViewModelItem | null | undefined,
+  runEvidence: ProductRunEvidenceView | null | undefined
+): taskViewItem is TaskViewModelItem {
+  if (!taskViewItem?.taskSessionId || !runEvidence) return false;
+  if (taskViewItem.canonicalTaskId !== taskViewItem.taskSessionId) return false;
+  if (runEvidence.taskSessionId !== taskViewItem.taskSessionId) return false;
+  if (!["active", "consistent", "projected"].includes(runEvidence.projectionState)) return false;
+  if (runEvidence.identityState !== "consistent") return false;
+  if (runEvidence.snapshotState !== "stable") return false;
+  if (runEvidence.redactionState !== "metadata_only") return false;
+  if (!taskLifecycleMatchesRunEvidence(taskViewItem.lifecycleStatus, runEvidence.lifecycleState)) {
+    return false;
+  }
+  if (
+    taskViewItem.relatedRunIds.length > 0 &&
+    (!runEvidence.runId || !taskViewItem.relatedRunIds.includes(runEvidence.runId))
+  ) {
+    return false;
+  }
+  if (
+    runEvidence.durableSequenceBefore !== null &&
+    runEvidence.durableSequenceAfter !== null &&
+    runEvidence.durableSequenceAfter < runEvidence.durableSequenceBefore
+  ) {
+    return false;
+  }
+  if (
+    taskViewItem.allowedControls.some(
+      control => control.enabled && !taskControlMatchesTaskAuthority(taskViewItem, control)
+    )
+  ) {
+    return false;
+  }
+  return sameStringSet(
+    taskViewItem.allowedControls.filter(control => control.enabled).map(control => control.kind),
+    runEvidence.allowedControls
   );
 }
 
 export function buildMainChatAgentStatusView({
   reasoningTrace,
   taskState,
+  taskViewItem,
+  runEvidence,
   agentState,
   pendingProposals,
   sending,
@@ -670,131 +815,146 @@ export function buildMainChatAgentStatusView({
 }: {
   reasoningTrace: ReasoningTrace | null;
   taskState: MainChatAgentTaskState | null;
+  taskViewItem?: TaskViewModelItem | null;
+  runEvidence?: ProductRunEvidenceView | null;
   agentState: MainChatAgentStateSnapshot | null;
   pendingProposals: AgentProposal[];
   sending: boolean;
   canCancel: boolean;
 }): MainChatAgentStatusView | null {
-  const generation =
-    reasoningTrace?.generation_result &&
-    typeof reasoningTrace.generation_result === "object" &&
-    !Array.isArray(reasoningTrace.generation_result)
-      ? reasoningTrace.generation_result
-      : null;
-  const taskStatus = boundedProductLabel(
-    generation?.taskStatus || taskState?.session?.status || agentState?.task.status
+  const hasDiagnostics = Boolean(reasoningTrace || taskState?.session || agentState || sending);
+  const unverifiedTaskSessionId = taskViewItem?.taskSessionId;
+  const evidenceVerified = hasVerifiedTaskRunEvidence(taskViewItem, runEvidence);
+  if (!evidenceVerified) {
+    if (!hasDiagnostics && !taskViewItem && !runEvidence) return null;
+    return {
+      status: "trace_gap",
+      label: productStatusLabel("trace_gap"),
+      detail: "Required task evidence is missing, so OpenLife will not infer what happened.",
+      sourceLabel: "Task evidence unavailable",
+      tone: productStatusTone("trace_gap"),
+      blockerLabels: [],
+      pendingProposalCount: 0,
+      pendingPermissionCount: 0,
+      memoryGovernanceLabels: [],
+      actions: [],
+      taskSessionId: unverifiedTaskSessionId,
+    };
+  }
+
+  // These inputs remain available to diagnostic surfaces, but must never
+  // authorize product status, counts, or controls.
+  void reasoningTrace;
+  void taskState;
+  void agentState;
+  void pendingProposals;
+  void sending;
+  void canCancel;
+  const sourceLabel = "TasksViewModel + ProductRunEvidenceView";
+  const taskSessionId = taskViewItem.taskSessionId;
+  const taskStatus = taskViewItem.lifecycleStatus;
+  const deliveryStatus = taskViewItem.terminalDeliveryStatus;
+  const pendingProposalCount = taskViewItem.pendingReviewItemRefs.length;
+  const pendingPermissionCount = taskStatus === "waiting_permission" ? 1 : 0;
+  const memoryGovernanceLabels: string[] = [];
+  const taskControls = taskViewItem.allowedControls.filter(control => control.enabled);
+  const blockerLabels = Array.from(new Set(taskViewItem.pendingBlockers.filter(Boolean))).slice(
+    0,
+    4
   );
-  const runStatus = boundedProductLabel(generation?.runStatus);
-  const deliveryStatus = boundedProductLabel(
-    generation?.deliveryStatus || agentState?.finalDelivery?.status
-  );
-  const uiStatus = boundedProductLabel(generation?.uiStatus);
-  const sourceLabel =
-    boundedProductLabel(generation?.uiPrimarySourceChip) ||
-    boundedProductLabel(generation?.sourceType) ||
-    (agentState?.route.strategy ? formatMainChatStrategy(agentState.route.strategy as any) : "") ||
-    (taskState?.session?.selectedStrategy
-      ? formatMainChatStrategy(taskState.session.selectedStrategy)
-      : "") ||
-    "Structured task evidence";
-  const taskSessionId = currentTaskSessionIdFromView(taskState, agentState);
-  const runId = agentState?.task.runId;
-  const matchingPendingProposalCount = pendingProposals.filter(
-    proposal =>
-      proposal.status === "pending" &&
-      ((taskSessionId && proposal.sourceDetail === taskSessionId) ||
-        (runId && proposal.runId === runId))
-  ).length;
-  const pendingProposalCount = Math.max(
-    productCount(generation?.pendingProposalCount),
-    matchingPendingProposalCount,
-    agentState?.proposals.filter(proposal => proposal.status === "pending").length ?? 0
-  );
-  const pendingPermissionCount = Math.max(
-    productCount(generation?.pendingPermissionCount),
-    taskState?.pendingApprovalCount ?? 0,
-    taskState?.actions.filter(action => action.status === "pending_permission").length ?? 0,
-    agentState?.proposals.filter(
-      proposal => proposal.status === "pending" && proposal.proposalType === "tool_permission"
-    ).length ?? 0
-  );
-  const memoryGovernanceLabels = memoryGovernanceStatusLabels(generation?.memoryGovernance);
-  const safeNextControls = productStringArray(generation?.safeNextControls);
-  const taskControls = [
-    ...(agentState?.task.controls ?? []),
-    ...safeNextControls,
-    ...(taskState?.canResume ? ["resume"] : []),
-    ...(taskState?.canRetry ? ["retry"] : []),
-    ...(canCancel ? ["cancel"] : []),
-  ];
-  const blockerLabels = Array.from(
-    new Set(
-      [
-        ...productStringArray(generation?.blockerCodes),
-        ...productStringArray(taskState?.session?.pendingBlockers),
-        ...(agentState?.blockers ?? []).map(blocker => boundedProductLabel(blocker.reasonCode)),
-      ].filter(Boolean)
-    )
-  ).slice(0, 4);
-  const hasTraceGap = generation?.runtimeFactTraceGap === true || Boolean(generation?.traceGapCode);
   const hasCompletedEvidence =
-    generation?.completedResponse === true ||
-    generation?.finalDeliveryEvidence === true ||
-    taskStatus === "completed" ||
-    runStatus === "completed" ||
-    deliveryStatus === "delivered" ||
-    deliveryStatus === "completed" ||
-    agentState?.finalDelivery?.status === "delivered";
+    taskStatus === "completed" &&
+    taskViewItem.finalDeliveryEvidencePresent &&
+    taskViewItem.pendingReviewItemRefs.length === 0 &&
+    deliveryStatus === "delivered";
+  const hasCancelledEvidence = taskStatus === "cancelled" && deliveryStatus === "cancelled";
+  const latestResultPreview = taskViewItem.latestResultPreview;
+  const evidenceSummary =
+    latestResultPreview && latestResultPreview.status === taskViewItem?.terminalDeliveryStatus
+      ? boundedProductText(latestResultPreview.preview)
+      : "";
 
   let status: MainChatAgentProductStatus | null = null;
   if (pendingPermissionCount > 0) {
     status = "permission_pending";
-  } else if (pendingProposalCount > 0) {
+  } else if (taskStatus === "completed_with_pending_review" || pendingProposalCount > 0) {
     status = "proposal_pending";
-  } else if (hasTraceGap) {
+  } else if (taskStatus === "completed_needs_evidence") {
     status = "trace_gap";
-  } else if (isRestrictedEvidence(uiStatus, blockerLabels)) {
-    status = "restricted";
-  } else if (taskStatus === "blocked" || blockerLabels.length > 0) {
+  } else if (hasCancelledEvidence) {
+    status = "cancelled";
+  } else if (taskStatus === "cancelled") {
+    status = "trace_gap";
+  } else if (taskStatus === "blocked" || taskStatus === "failed") {
     status = "blocked";
-  } else if (taskStatus === "waiting_permission" || taskStatus === "waiting_for_user") {
-    status = "waiting_for_user";
-  } else if (sending || taskStatus === "running" || runStatus === "running") {
+  } else if (taskStatus === "running") {
     status = "running";
   } else if (hasCompletedEvidence) {
     status = "completed";
   }
 
-  if (!status && !generation && !taskState?.session && !agentState) return null;
   const resolvedStatus = status ?? "trace_gap";
   const actions: MainChatAgentProductAction[] = [];
-  if (pendingProposalCount > 0) actions.push("review_proposal");
-  if (pendingPermissionCount > 0) actions.push("review_permission");
-  if (includesAnyControl(taskControls, ["resume", "resume_task", "resume_agent_task"])) {
+  if (
+    taskControls.some(
+      control => control.kind === "resume" && control.effect === "task_resume_request"
+    )
+  ) {
     actions.push("resume");
   }
-  if (includesAnyControl(taskControls, ["retry", "retry_action", "retry_failed_action"])) {
+  if (
+    taskControls.some(
+      control => control.kind === "retry" && control.effect === "task_retry_request"
+    )
+  ) {
     actions.push("retry");
   }
-  if (includesAnyControl(taskControls, ["cancel", "cancel_task"])) {
+  if (
+    taskControls.some(
+      control => control.kind === "cancel" && control.effect === "task_cancel_request"
+    )
+  ) {
     actions.push("cancel");
   }
-  if (taskSessionId && includesAnyControl(taskControls, ["refresh_context"])) {
+  if (
+    taskSessionId &&
+    taskControls.some(
+      control => control.kind === "refresh_context" && control.effect === "task_refresh_request"
+    )
+  ) {
     actions.push("refresh_context");
   }
-  if (reasoningTrace) actions.push("show_trace");
+  if (
+    taskControls.some(
+      control =>
+        control.kind === "open_review_item" &&
+        (control.effect === "navigation_only" || control.effect === "evidence_only")
+    )
+  ) {
+    if (pendingPermissionCount > 0) actions.push("review_permission");
+    if (pendingProposalCount > pendingPermissionCount) actions.push("review_proposal");
+  }
+  if (
+    taskControls.some(
+      control =>
+        control.kind === "open_trace" &&
+        (control.effect === "navigation_only" || control.effect === "evidence_only")
+    )
+  ) {
+    actions.push("show_trace");
+  }
 
   const detail =
     resolvedStatus === "completed"
       ? "Structured run or delivery evidence says this task is complete."
-      : resolvedStatus === "running"
-        ? "The agent is still executing or streaming; no completion claim yet."
-        : resolvedStatus === "permission_pending"
-          ? "A tool or action needs explicit permission before it can continue."
-          : resolvedStatus === "proposal_pending"
-            ? "A proposed durable change is waiting for review; it is not written yet."
-            : resolvedStatus === "restricted"
-              ? "Policy, provider, web, or MCP availability blocked part of this task."
+      : resolvedStatus === "cancelled"
+        ? "Canonical task and terminal-delivery evidence agree that this task was canceled."
+        : resolvedStatus === "running"
+          ? "The agent is still executing or streaming; no completion claim yet."
+          : resolvedStatus === "permission_pending"
+            ? "A tool or action needs explicit permission before it can continue."
+            : resolvedStatus === "proposal_pending"
+              ? "A proposed durable change is waiting for review; it is not written yet."
               : resolvedStatus === "blocked"
                 ? "The task cannot progress without a supported recovery action."
                 : resolvedStatus === "trace_gap"
@@ -813,14 +973,24 @@ export function buildMainChatAgentStatusView({
     memoryGovernanceLabels,
     actions: Array.from(new Set(actions)),
     taskSessionId,
+    evidenceSummary: evidenceSummary || undefined,
   };
 }
 
-function currentTaskSessionIdFromView(
-  taskState: MainChatAgentTaskState | null,
-  agentState: MainChatAgentStateSnapshot | null
-): string | undefined {
-  return taskState?.session?.id ?? agentState?.task.taskId;
+function enabledTaskViewControl(
+  taskViewItem: TaskViewModelItem | null | undefined,
+  kind: TaskControl["kind"],
+  effect: TaskControl["effect"]
+): TaskControl | null {
+  return (
+    taskViewItem?.allowedControls.find(
+      control =>
+        control.enabled &&
+        control.kind === kind &&
+        control.effect === effect &&
+        taskControlMatchesTaskAuthority(taskViewItem, control)
+    ) ?? null
+  );
 }
 
 function mainChatAgentStatusClass(tone: MainChatAgentStatusView["tone"]): string {
@@ -898,6 +1068,11 @@ function MainChatAgentStatusSurface({
               ))}
             </div>
             <div className="mt-1 leading-5">{view.detail}</div>
+            {view.evidenceSummary && (
+              <div className="mt-1 rounded-md border border-white/70 bg-white/60 px-2 py-1 leading-5">
+                {view.evidenceSummary}
+              </div>
+            )}
             {view.blockerLabels.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {view.blockerLabels.map(label => (
@@ -1051,20 +1226,6 @@ function formatTranscriptKind(kind: MainChatExecutionTranscriptEntry["kind"]): s
   }
 }
 
-function formatMainChatMetadataEntries(metadata?: Record<string, unknown>): string[] {
-  if (!metadata) return [];
-  return Object.entries(metadata).flatMap(([key, value]) => {
-    if (value === undefined || value === null) return [];
-    if (["string", "number", "boolean"].includes(typeof value)) {
-      return [`${key}: ${String(value)}`];
-    }
-    if (Array.isArray(value)) {
-      return [`${key}: ${value.length} items`];
-    }
-    return [`${key}: ${typeof value}`];
-  });
-}
-
 function mainChatActionStatusClass(status: string): string {
   switch (status) {
     case "observed":
@@ -1127,7 +1288,14 @@ function inferStageFromText(text: string): AgentStageState | null {
 }
 
 function inferStageFromToolCalls(toolCalls: ToolCallResult[]): AgentStageState | null {
-  if (toolCalls.some(call => call.requires_confirmation || call.permission_level === "high")) {
+  if (
+    toolCalls.some(
+      call =>
+        call.requiresConfirmation ||
+        call.executionReceipt?.actionEffect === "external_mutation" ||
+        call.executionReceipt?.actionEffect === "unknown"
+    )
+  ) {
     return "privacy";
   }
   if (toolCalls.length > 0) return "tool";
@@ -1167,6 +1335,17 @@ function readablePreviewError(error: unknown): string {
     }
   }
   return String(error);
+}
+
+function proposalAcceptancePendingReason(result: AcceptProposalResult): string | null {
+  const persistence = result.memoryPersistence;
+  if (persistence?.canonicalCommitted && persistence.projectionState !== "applied") {
+    return `Memory 已写入 canonical store，但派生视图仍为 ${persistence.projectionState}；完成状态保持等待。`;
+  }
+  if (result.proposalProjectionStatus !== "confirmed") {
+    return "副作用已确认，但审阅状态仍在后端对账；系统不会重复执行，完成状态保持等待。";
+  }
+  return null;
 }
 
 export default function ChatPage({
@@ -1219,6 +1398,9 @@ export default function ChatPage({
   const [currentAgentTaskState, setCurrentAgentTaskState] = useState<MainChatAgentTaskState | null>(
     null
   );
+  const [currentTaskViewItem, setCurrentTaskViewItem] = useState<TaskViewModelItem | null>(null);
+  const [currentProductRunEvidence, setCurrentProductRunEvidence] =
+    useState<ProductRunEvidenceView | null>(null);
   const [taskContinuitySummaries, setTaskContinuitySummaries] = useState<MainChatTaskSummary[]>([]);
   const [taskContinuityDetail, setTaskContinuityDetail] = useState<MainChatTaskDetail | null>(null);
   const [taskContinuityBusy, setTaskContinuityBusy] = useState(false);
@@ -1246,7 +1428,14 @@ export default function ChatPage({
   const currentAgentTaskSessionIdRef = useRef<string | null>(null);
   const currentKernelEventSessionRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
+  const pendingTurnOperationRef = useRef<{
+    sessionId: string;
+    userContent: string;
+    operationId: string;
+  } | null>(null);
+  const activeTurnOperationRef = useRef<{ sessionId: string; operationId: string } | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
+  const taskAuthorityLoadGenerationRef = useRef(0);
   const projectionSurface = companionMode ? "companion" : "chat";
   const projectionPendingReviewCount = reviewRequiredCountFromProjection(
     lifeStateProjection,
@@ -1256,6 +1445,21 @@ export default function ChatPage({
     () => buildCompanionInitialAssistantMessage(diagnostics, projectionPendingReviewCount),
     [diagnostics, projectionPendingReviewCount]
   );
+  const {
+    currentDraft: currentResourceDraft,
+    currentResources,
+    importBusy: resourceImportBusy,
+    currentError: currentResourceImportError,
+    currentNotice: currentResourceImportNotice,
+    removingResourceIds,
+    attachResources: handleAttachResources,
+    cancelImport: handleCancelResourceImport,
+    removeResource: handleRemoveResource,
+    completeTurn: completeResourceTurn,
+  } = useChatResources({
+    sessionId: currentSessionId,
+    interactionBlocked: sending || activeTurnOperationRef.current?.sessionId === currentSessionId,
+  });
 
   const applyMainChatAgentStateSnapshot = useCallback(
     (
@@ -1475,6 +1679,8 @@ export default function ChatPage({
   ) => {
     if (!taskSessionId) {
       setCurrentAgentTaskState(null);
+      setCurrentProductRunEvidence(null);
+      void loadCurrentTaskViewItem(undefined, sourceSessionId);
       return;
     }
     try {
@@ -1489,6 +1695,54 @@ export default function ChatPage({
       if (currentSessionIdRef.current === sourceSessionId) {
         setCurrentAgentTaskState(null);
       }
+    }
+    void loadCurrentTaskViewItem(taskSessionId, sourceSessionId);
+  };
+
+  const loadCurrentTaskViewItem = async (
+    taskSessionId: string | undefined,
+    sourceSessionId = currentSessionIdRef.current
+  ): Promise<TaskViewModelItem | null> => {
+    const loadGeneration = ++taskAuthorityLoadGenerationRef.current;
+    try {
+      const envelope = await getTasksViewModel();
+      const item = selectAuthoritativeTaskViewItem(
+        envelope.data?.items ?? [],
+        taskSessionId,
+        sourceSessionId
+      );
+      let runEvidence: ProductRunEvidenceView | null = null;
+      if (item?.taskSessionId) {
+        try {
+          const detail = await getMainChatAgentTaskDetail(item.taskSessionId);
+          if (
+            detail?.taskSession?.id === item.taskSessionId &&
+            detail.evidenceView?.taskSessionId === item.taskSessionId
+          ) {
+            runEvidence = detail.evidenceView;
+          }
+        } catch {
+          runEvidence = null;
+        }
+      }
+      if (
+        currentSessionIdRef.current !== sourceSessionId ||
+        taskAuthorityLoadGenerationRef.current !== loadGeneration
+      ) {
+        return null;
+      }
+      setCurrentTaskViewItem(item);
+      setCurrentProductRunEvidence(runEvidence);
+      return hasVerifiedTaskRunEvidence(item, runEvidence) ? item : null;
+    } catch {
+      if (
+        currentSessionIdRef.current === sourceSessionId &&
+        taskAuthorityLoadGenerationRef.current === loadGeneration
+      ) {
+        setCurrentTaskViewItem(null);
+        setCurrentProductRunEvidence(null);
+      }
+      return null;
     }
   };
 
@@ -1811,6 +2065,9 @@ export default function ChatPage({
             ]);
             setStreamingReply("");
             setSending(false);
+            if (activeTurnOperationRef.current?.sessionId === event.payload.session_id) {
+              activeTurnOperationRef.current = null;
+            }
             setReasoningTrace(event.payload.reasoning_trace ?? null);
             setCurrentRunId(event.payload.run_id);
             setToolCalls(
@@ -1853,6 +2110,17 @@ export default function ChatPage({
           });
           setStreamingReply("");
           setSending(false);
+          const completedTurnOperation =
+            activeTurnOperationRef.current?.sessionId === event.payload.session_id
+              ? activeTurnOperationRef.current.operationId
+              : null;
+          if (completedTurnOperation) {
+            activeTurnOperationRef.current = null;
+            if (pendingTurnOperationRef.current?.operationId === completedTurnOperation) {
+              pendingTurnOperationRef.current = null;
+            }
+            completeResourceTurn(event.payload.session_id, completedTurnOperation);
+          }
           setReasoningTrace(event.payload.reasoning_trace ?? null);
           setCurrentRunId(event.payload.run_id);
           setToolCalls(
@@ -1890,6 +2158,9 @@ export default function ChatPage({
             streamErrorHandledRef.current = true;
             setStreamingReply("");
             setSending(false);
+            if (activeTurnOperationRef.current?.sessionId === event.payload.session_id) {
+              activeTurnOperationRef.current = null;
+            }
             setStreamInterrupted(true);
             applyMainChatAgentStateSnapshot(null);
             emitCompanionStage("error");
@@ -1911,6 +2182,7 @@ export default function ChatPage({
     };
   }, [
     applyMainChatAgentStateSnapshot,
+    completeResourceTurn,
     currentSessionId,
     emitCompanionStage,
     handleMainChatAgentEvent,
@@ -1973,152 +2245,17 @@ export default function ChatPage({
     }
   }, [editingId, editingTitle]);
 
-  const handleExecuteToolCall = useCallback(
-    async (index: number) => {
-      const call = toolCalls[index];
-      if (!call?.requires_confirmation) return;
-      if (!call.run_id || !call.action_id) {
-        console.error("Tool call missing run_id or action_id");
-        return;
-      }
-      try {
-        const result = await replayAgentAction(call.run_id, call.action_id);
-        setToolCalls(prev =>
-          prev.map((item, idx) =>
-            idx === index
-              ? {
-                  ...item,
-                  success: result.status === "succeeded",
-                  status: result.status as any,
-                  requires_confirmation: false,
-                  output: result.output?.text,
-                }
-              : item
-          )
-        );
-        loadAgentRunForSession(call.run_id, currentSessionIdRef.current);
-        refreshAgentRuns(currentSessionIdRef.current);
-      } catch (e) {
-        const errMsg = String(e);
-        // 如果是因为未授权，保持 pending 状态，不改为 error
-        if (errMsg.includes("not authorized") || errMsg.includes("Mailbox")) {
-          // 保持 requires_confirmation: true，让用户去 Mailbox 授权
-          console.warn("Tool call still needs authorization:", errMsg);
-          throw e; // 抛出错误让 ToolCallCard 显示提示
-        }
-        // 其他错误才标记为失败
-        setToolCalls(prev =>
-          prev.map((item, idx) =>
-            idx === index
-              ? {
-                  ...item,
-                  success: false,
-                  error: errMsg,
-                  status: "error",
-                  requires_confirmation: false,
-                }
-              : item
-          )
-        );
-      }
-    },
-    [toolCalls]
-  );
-
-  const tryHandleQuickCommand = useCallback(async (text: string): Promise<string | null> => {
-    const t = text.trim();
-    if (t.startsWith("/goal")) {
-      try {
-        const goals = await getDailyGoals();
-        const renderGoals = (items: typeof goals) => {
-          const completed = items.filter(g => g.done).length;
-          const list =
-            items.map((g, i) => `${i + 1}. ${g.done ? "[x]" : "[ ]"} ${g.name}`).join("\n") ||
-            "暂无今日目标。";
-          return `📋 今日目标 (${completed}/${items.length} 完成)：\n\n${list}`;
-        };
-        const findGoalIndex = (query: string) => {
-          const normalized = query.trim().toLowerCase();
-          return goals.findIndex(goal => {
-            const name = goal.name.toLowerCase();
-            return name === normalized || name.includes(normalized) || normalized.includes(name);
-          });
-        };
-        const command = t.replace("/goal", "").trim();
-        if (!command) {
-          return renderGoals(goals);
-        }
-        if (command === "help") {
-          return [
-            "📌 /goal 用法：",
-            "/goal",
-            "/goal add 目标名",
-            "/goal done 目标名",
-            "/goal undo 目标名",
-          ].join("\n");
-        }
-        if (command.startsWith("add ")) {
-          const goalName = command.slice(4).trim();
-          if (!goalName) return "请在 /goal add 后面补充目标名称。";
-          const guard = inspectDailyGoalName(goalName);
-          if (!guard.valid) {
-            return `没有添加今日目标：${guard.reason}\n${guard.recoveryAction ?? "请改成一个可执行目标。"}`;
-          }
-          await addDailyGoal(goalName);
-          return `✅ 已添加今日目标：${goalName}`;
-        }
-        if (command.startsWith("done ") || command.startsWith("finish ")) {
-          const query = command.replace(/^done\s+|^finish\s+/, "").trim();
-          const idx = findGoalIndex(query);
-          if (idx < 0) return `没有找到名为“${query}”的今日目标。`;
-          if (!goals[idx].done) {
-            await toggleDailyGoal(idx);
-          }
-          const refreshed = await getDailyGoals();
-          return `✅ 已完成今日目标：${refreshed[idx]?.name ?? query}\n\n${renderGoals(refreshed)}`;
-        }
-        if (command.startsWith("undo ")) {
-          const query = command.slice(5).trim();
-          const idx = findGoalIndex(query);
-          if (idx < 0) return `没有找到名为“${query}”的今日目标。`;
-          if (goals[idx].done) {
-            await toggleDailyGoal(idx);
-          }
-          const refreshed = await getDailyGoals();
-          return `↩️ 已恢复今日目标：${refreshed[idx]?.name ?? query}\n\n${renderGoals(refreshed)}`;
-        }
-        return "无法识别 /goal 子命令。输入 `/goal help` 查看可用操作。";
-      } catch {
-        return "获取今日目标失败。";
-      }
-    }
-    if (t.startsWith("/state")) {
-      const rest = t.replace("/state", "").trim();
-      if (!rest) {
-        return "📝 用法：/state 维度名 数值 单位\n示例：/state 专注度 7.5 分";
-      }
-      const parts = rest.split(/\s+/);
-      if (parts.length < 2) {
-        return "格式不正确。用法：/state 维度名 数值 单位";
-      }
-      const name = parts[0];
-      const val = parseFloat(parts[1]);
-      if (Number.isNaN(val)) {
-        return "数值无法解析，请检查输入。";
-      }
-      const unit = parts[2] || "单位";
-      try {
-        await recordState(name, val, unit, undefined, undefined, undefined, undefined);
-        return `✅ 已记录状态：${name} = ${val} ${unit}`;
-      } catch {
-        return "记录状态失败。";
-      }
-    }
-    return null;
-  }, []);
-
   const handleSend = useCallback(async () => {
-    if (!input.trim() || sending) return;
+    const resourceDraft = currentResourceDraft;
+    const resources = resourceDraft?.resources ?? [];
+    if (
+      (!input.trim() && resources.length === 0) ||
+      sending ||
+      resourceImportBusy ||
+      activeTurnOperationRef.current?.sessionId === currentSessionId
+    ) {
+      return;
+    }
     if (!currentSessionId || typeof currentSessionId !== "string") {
       emitCompanionStage("error");
       setMessages(prev => [
@@ -2127,36 +2264,12 @@ export default function ChatPage({
       ]);
       return;
     }
-    const text = input.trim();
+    const text = input.trim() || "请总结这些附件，并在结论后标注对应来源。";
     const userMsg: ChatMessage = { role: "user", content: text };
     const nextMessages = [...messages, userMsg];
     lastUserMessageRef.current = userMsg;
     setMessages(nextMessages);
     setInput("");
-
-    const quickReply = await tryHandleQuickCommand(text);
-    if (quickReply) {
-      const assistantMsg: ChatMessage = { role: "assistant", content: quickReply };
-      try {
-        await saveChatMessage(currentSessionId, userMsg);
-        await saveChatMessage(currentSessionId, assistantMsg);
-        await loadSessions();
-      } catch (e) {
-        console.error("保存快捷指令消息失败", e);
-      }
-      setMessages([...nextMessages, assistantMsg]);
-      return;
-    }
-
-    if (diagnostics && !diagnostics.chat_ready) {
-      emitCompanionStage("error");
-      const assistantMsg: ChatMessage = {
-        role: "assistant",
-        content: formatChatRuntimeError("chat not ready", diagnostics),
-      };
-      setMessages([...nextMessages, assistantMsg]);
-      return;
-    }
 
     setSending(true);
     streamErrorHandledRef.current = false;
@@ -2171,16 +2284,42 @@ export default function ChatPage({
     setShowMainChatDiagnostics(false);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
+    taskAuthorityLoadGenerationRef.current += 1;
+    setCurrentTaskViewItem(null);
+    setCurrentProductRunEvidence(null);
     setAgentTaskControlError(null);
     emitCompanionStage("sorting");
 
+    let invokedTurnOperationId: string | null = null;
     try {
       const selectedSkillOption = selectedSkillId.trim() || undefined;
+      const pendingTurnOperation = pendingTurnOperationRef.current;
+      const turnOperationId = resourceDraft?.turnOperationId
+        ? resourceDraft.turnOperationId
+        : pendingTurnOperation?.sessionId === currentSessionId &&
+            pendingTurnOperation.userContent === text
+          ? pendingTurnOperation.operationId
+          : crypto.randomUUID();
+      pendingTurnOperationRef.current = {
+        sessionId: currentSessionId,
+        userContent: text,
+        operationId: turnOperationId,
+      };
+      invokedTurnOperationId = turnOperationId;
       // The streaming backend persists the user message before model execution.
       // Saving it here as well creates duplicate user rows in history and memory retrieval.
-      const browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
+      let browserE2eDone: StreamMessageDonePayload;
+      activeTurnOperationRef.current = {
+        sessionId: currentSessionId,
+        operationId: turnOperationId,
+      };
+      browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
+        operationId: turnOperationId,
         selectedSkillId: selectedSkillOption,
       });
+      if (activeTurnOperationRef.current?.operationId === turnOperationId) {
+        activeTurnOperationRef.current = null;
+      }
       if (!isStreamDonePayload(browserE2eDone) || browserE2eDone.session_id !== currentSessionId) {
         flushStreaming();
         setMessages(prev => [
@@ -2267,6 +2406,10 @@ export default function ChatPage({
       applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
       setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
       setStreamInterrupted(false);
+      pendingTurnOperationRef.current = null;
+      if (resourceDraft?.turnOperationId === turnOperationId) {
+        completeResourceTurn(currentSessionId, turnOperationId);
+      }
       emitCompanionStage(nextStage);
       await loadMainChatTaskState(
         browserE2eDone.agent_ingress?.agentTaskSessionId,
@@ -2277,6 +2420,12 @@ export default function ChatPage({
       logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
       await loadSessions();
     } catch (e) {
+      if (
+        invokedTurnOperationId &&
+        activeTurnOperationRef.current?.operationId === invokedTurnOperationId
+      ) {
+        activeTurnOperationRef.current = null;
+      }
       flushStreaming();
       if (!streamErrorHandledRef.current) {
         setMessages(prev => [
@@ -2295,7 +2444,9 @@ export default function ChatPage({
     messages,
     diagnostics,
     selectedSkillId,
-    tryHandleQuickCommand,
+    currentResourceDraft,
+    resourceImportBusy,
+    completeResourceTurn,
     emitCompanionStage,
     applyMainChatAgentStateSnapshot,
   ]);
@@ -2310,7 +2461,14 @@ export default function ChatPage({
   const handleContinueStream = useCallback(async () => {
     const lastUser =
       lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
-    if (!lastUser || sending) return;
+    if (
+      !lastUser ||
+      sending ||
+      resourceImportBusy ||
+      activeTurnOperationRef.current?.sessionId === currentSessionId
+    ) {
+      return;
+    }
     const lastUserIndex = messages.map(m => m.role).lastIndexOf("user");
     const retryMessages = lastUserIndex >= 0 ? messages.slice(0, lastUserIndex + 1) : [lastUser];
     setStreamInterrupted(false);
@@ -2326,13 +2484,44 @@ export default function ChatPage({
     setShowMainChatDiagnostics(false);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
+    taskAuthorityLoadGenerationRef.current += 1;
+    setCurrentTaskViewItem(null);
+    setCurrentProductRunEvidence(null);
     setAgentTaskControlError(null);
     emitCompanionStage("sorting");
+    let invokedTurnOperationId: string | null = null;
     try {
       const selectedSkillOption = selectedSkillId.trim() || undefined;
-      const retryDone = await startStreamMessage(currentSessionId, retryMessages, {
+      const lastUserContent = lastUser.content;
+      const pendingTurnOperation = pendingTurnOperationRef.current;
+      const turnOperationId =
+        pendingTurnOperation?.sessionId === currentSessionId &&
+        pendingTurnOperation.userContent === lastUserContent
+          ? pendingTurnOperation.operationId
+          : null;
+      if (!turnOperationId) {
+        throw new Error(
+          "turn_operation_identity_unavailable: cannot safely retry without the original operation id"
+        );
+      }
+      pendingTurnOperationRef.current = {
+        sessionId: currentSessionId,
+        userContent: lastUserContent,
+        operationId: turnOperationId,
+      };
+      invokedTurnOperationId = turnOperationId;
+      let retryDone: StreamMessageDonePayload;
+      activeTurnOperationRef.current = {
+        sessionId: currentSessionId,
+        operationId: turnOperationId,
+      };
+      retryDone = await startStreamMessage(currentSessionId, retryMessages, {
+        operationId: turnOperationId,
         selectedSkillId: selectedSkillOption,
       });
+      if (activeTurnOperationRef.current?.operationId === turnOperationId) {
+        activeTurnOperationRef.current = null;
+      }
       if (!isStreamDonePayload(retryDone) || retryDone.session_id !== currentSessionId) {
         flushStreaming();
         setMessages(prev => [
@@ -2417,6 +2606,8 @@ export default function ChatPage({
       applyMainChatAgentStateSnapshot(retryDone.agent_state ?? null);
       setCurrentExecutionTranscript(retryDone.execution_transcript ?? []);
       setStreamInterrupted(false);
+      pendingTurnOperationRef.current = null;
+      completeResourceTurn(currentSessionId, turnOperationId);
       emitCompanionStage(nextStage);
       await loadMainChatTaskState(
         retryDone.agent_ingress?.agentTaskSessionId,
@@ -2426,6 +2617,12 @@ export default function ChatPage({
       refreshAgentRuns(retryDone.session_id);
       await loadSessions();
     } catch (e) {
+      if (
+        invokedTurnOperationId &&
+        activeTurnOperationRef.current?.operationId === invokedTurnOperationId
+      ) {
+        activeTurnOperationRef.current = null;
+      }
       flushStreaming();
       if (!streamErrorHandledRef.current) {
         setMessages(prev => [
@@ -2443,6 +2640,8 @@ export default function ChatPage({
     messages,
     selectedSkillId,
     sending,
+    resourceImportBusy,
+    completeResourceTurn,
     emitCompanionStage,
     applyMainChatAgentStateSnapshot,
   ]);
@@ -2558,6 +2757,13 @@ export default function ChatPage({
     [applyMainChatAgentStateSnapshot, loadTaskContinuityList]
   );
 
+  const authoritativeCurrentTaskViewItem = hasVerifiedTaskRunEvidence(
+    currentTaskViewItem,
+    currentProductRunEvidence
+  )
+    ? currentTaskViewItem
+    : null;
+
   const handleRefreshCurrentMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
     if (!taskSessionId || agentTaskControlBusy) return;
@@ -2575,6 +2781,16 @@ export default function ChatPage({
   const handleRefreshCurrentMainChatTaskContext = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
     if (!taskSessionId || agentTaskControlBusy) return;
+    if (
+      !enabledTaskViewControl(
+        authoritativeCurrentTaskViewItem,
+        "refresh_context",
+        "task_refresh_request"
+      )
+    ) {
+      setAgentTaskControlError("Context refresh is not enabled by verified task evidence.");
+      return;
+    }
     setAgentTaskControlBusy(true);
     setAgentTaskControlError(null);
     try {
@@ -2589,6 +2805,7 @@ export default function ChatPage({
     }
   }, [
     agentTaskControlBusy,
+    authoritativeCurrentTaskViewItem,
     currentMainChatTaskSessionId,
     loadMainChatTaskState,
     loadTaskContinuityList,
@@ -2613,7 +2830,16 @@ export default function ChatPage({
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
+    const resumeControl = enabledTaskViewControl(
+      authoritativeCurrentTaskViewItem,
+      "resume",
+      "task_resume_request"
+    );
     if (!taskSessionId || agentTaskControlBusy) return;
+    if (!resumeControl) {
+      setAgentTaskControlError("Resume is not enabled by the backend task read model.");
+      return;
+    }
     setAgentTaskControlBusy(true);
     setAgentTaskControlError(null);
     try {
@@ -2621,16 +2847,31 @@ export default function ChatPage({
       setCurrentAgentTaskState(state);
       setCurrentExecutionTranscript(state.transcript ?? []);
       await refreshPendingProposals();
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
     } catch (e) {
       setAgentTaskControlError(`Resume failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
-  }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
+  }, [
+    agentTaskControlBusy,
+    currentMainChatTaskSessionId,
+    authoritativeCurrentTaskViewItem,
+    loadMainChatTaskState,
+  ]);
 
   const handleCancelMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
+    const cancelControl = enabledTaskViewControl(
+      authoritativeCurrentTaskViewItem,
+      "cancel",
+      "task_cancel_request"
+    );
     if (!taskSessionId || agentTaskControlBusy) return;
+    if (!cancelControl) {
+      setAgentTaskControlError("Cancel is not enabled by the backend task read model.");
+      return;
+    }
     setAgentTaskControlBusy(true);
     setAgentTaskControlError(null);
     try {
@@ -2640,40 +2881,52 @@ export default function ChatPage({
       setSending(false);
       setStreamingReply("");
       setStreamInterrupted(false);
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
     } catch (e) {
       setAgentTaskControlError(`Cancel failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
-  }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
+  }, [
+    agentTaskControlBusy,
+    currentMainChatTaskSessionId,
+    authoritativeCurrentTaskViewItem,
+    loadMainChatTaskState,
+  ]);
 
-  const handleRetryMainChatAction = useCallback(
-    async (target?: { actionId?: string }) => {
-      const taskSessionId = currentMainChatTaskSessionId();
-      const actionId =
-        target?.actionId ??
-        currentAgentState?.blockers.find(blocker => blocker.affectedActionId)?.affectedActionId ??
-        currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
-      if (!taskSessionId || !actionId || agentTaskControlBusy) return;
-      setAgentTaskControlBusy(true);
-      setAgentTaskControlError(null);
-      try {
-        const state = await retryMainChatAgentAction(taskSessionId, actionId);
-        setCurrentAgentTaskState(state);
-        setCurrentExecutionTranscript(state.transcript ?? []);
-      } catch (e) {
-        setAgentTaskControlError(`Retry failed: ${readablePreviewError(e)}`);
-      } finally {
-        setAgentTaskControlBusy(false);
-      }
-    },
-    [
-      agentTaskControlBusy,
-      currentAgentState?.blockers,
-      currentMainChatTaskSessionId,
-      currentAgentTaskState?.actions,
-    ]
-  );
+  const handleRetryMainChatAction = useCallback(async () => {
+    const taskSessionId = currentMainChatTaskSessionId();
+    const retryControl = enabledTaskViewControl(
+      authoritativeCurrentTaskViewItem,
+      "retry",
+      "task_retry_request"
+    );
+    const actionId = retryControl?.targetActionId;
+    if (!taskSessionId || agentTaskControlBusy) return;
+    if (!retryControl || !actionId) {
+      setAgentTaskControlError(
+        "Retry is not enabled with an exact action target by the backend task read model."
+      );
+      return;
+    }
+    setAgentTaskControlBusy(true);
+    setAgentTaskControlError(null);
+    try {
+      const state = await retryMainChatAgentAction(taskSessionId, actionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
+    } catch (e) {
+      setAgentTaskControlError(`Retry failed: ${readablePreviewError(e)}`);
+    } finally {
+      setAgentTaskControlBusy(false);
+    }
+  }, [
+    agentTaskControlBusy,
+    authoritativeCurrentTaskViewItem,
+    currentMainChatTaskSessionId,
+    loadMainChatTaskState,
+  ]);
 
   const handleRefreshTaskContinuityContext = useCallback(async () => {
     const taskSessionId = taskContinuityDetail?.taskSession.id;
@@ -2716,10 +2969,12 @@ export default function ChatPage({
 
   const handleRetryTaskContinuityDetail = useCallback(async () => {
     const taskSessionId = taskContinuityDetail?.taskSession.id;
-    const actionId =
-      taskContinuityDetail?.lastSafeResumePoint ??
-      taskContinuityDetail?.actions.find(action => action.status === "failed")?.id;
-    if (!taskSessionId || !actionId || taskContinuityBusy) return;
+    const actionId = taskContinuityDetail?.retryTargetActionId;
+    if (!taskSessionId || taskContinuityBusy) return;
+    if (!actionId) {
+      setTaskContinuityError("Backend task detail did not provide an exact retry action target.");
+      return;
+    }
     setTaskContinuityBusy(true);
     setTaskContinuityError(null);
     try {
@@ -2737,8 +2992,7 @@ export default function ChatPage({
     loadTaskContinuityDetail,
     loadTaskContinuityList,
     taskContinuityBusy,
-    taskContinuityDetail?.actions,
-    taskContinuityDetail?.lastSafeResumePoint,
+    taskContinuityDetail?.retryTargetActionId,
     taskContinuityDetail?.taskSession.id,
   ]);
 
@@ -2802,13 +3056,30 @@ export default function ChatPage({
       setTaskContinuityBusy(true);
       setTaskContinuityError(null);
       try {
-        await acceptProposal(proposalId);
+        const acceptance = await acceptProposal(proposalId);
+        await refreshPendingProposals();
+        const pendingReason = proposalAcceptancePendingReason(acceptance);
+        if (pendingReason) {
+          await loadTaskContinuityDetail(taskSessionId);
+          await loadTaskContinuityList();
+          setTaskContinuityError(pendingReason);
+          return;
+        }
+        const refreshedTaskViewItem = await loadCurrentTaskViewItem(
+          taskSessionId,
+          currentSessionIdRef.current
+        );
+        if (!enabledTaskViewControl(refreshedTaskViewItem, "resume", "task_resume_request")) {
+          throw new Error(
+            "Backend task read model did not enable resume after proposal acceptance."
+          );
+        }
         const state = await resumeMainChatAgentTask(taskSessionId);
         setCurrentAgentTaskState(state);
         setCurrentExecutionTranscript(state.transcript ?? []);
+        await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
         await loadTaskContinuityDetail(taskSessionId);
         await loadTaskContinuityList();
-        await refreshPendingProposals();
       } catch (e) {
         setTaskContinuityError(`Accept proposal failed: ${readablePreviewError(e)}`);
       } finally {
@@ -2818,6 +3089,8 @@ export default function ChatPage({
     [
       loadTaskContinuityDetail,
       loadTaskContinuityList,
+      loadCurrentTaskViewItem,
+      loadMainChatTaskState,
       refreshPendingProposals,
       taskContinuityBusy,
       taskContinuityDetail?.proposals,
@@ -2857,7 +3130,22 @@ export default function ChatPage({
       setAgentTaskControlBusy(true);
       setAgentTaskControlError(null);
       try {
-        await acceptProposal(target.proposalId);
+        const acceptance = await acceptProposal(target.proposalId);
+        const pendingReason = proposalAcceptancePendingReason(acceptance);
+        if (pendingReason) {
+          await refreshMainChatControlState(taskSessionId);
+          setAgentTaskControlError(pendingReason);
+          return;
+        }
+        const refreshedTaskViewItem = await loadCurrentTaskViewItem(
+          taskSessionId,
+          currentSessionIdRef.current
+        );
+        if (!enabledTaskViewControl(refreshedTaskViewItem, "resume", "task_resume_request")) {
+          throw new Error(
+            "Backend task read model did not enable resume after permission approval."
+          );
+        }
         const state = await resumeMainChatAgentTask(taskSessionId);
         setCurrentAgentTaskState(state);
         setCurrentExecutionTranscript(state.transcript ?? []);
@@ -2868,7 +3156,12 @@ export default function ChatPage({
         setAgentTaskControlBusy(false);
       }
     },
-    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
+    [
+      agentTaskControlBusy,
+      currentMainChatTaskSessionId,
+      loadCurrentTaskViewItem,
+      refreshMainChatControlState,
+    ]
   );
 
   const handleDenyMainChatControl = useCallback(
@@ -2915,12 +3208,27 @@ export default function ChatPage({
       setAgentTaskControlBusy(true);
       setAgentTaskControlError(null);
       try {
-        await acceptProposal(proposalId);
+        const acceptance = await acceptProposal(proposalId);
+        const pendingReason = proposalAcceptancePendingReason(acceptance);
+        if (pendingReason) {
+          await refreshMainChatControlState(taskSessionId);
+          setAgentTaskControlError(pendingReason);
+          return;
+        }
         if (
           proposal?.proposalType === "tool_permission" &&
           proposal.actionIds.length > 0 &&
           taskSessionId
         ) {
+          const refreshedTaskViewItem = await loadCurrentTaskViewItem(
+            taskSessionId,
+            currentSessionIdRef.current
+          );
+          if (!enabledTaskViewControl(refreshedTaskViewItem, "resume", "task_resume_request")) {
+            throw new Error(
+              "Backend task read model did not enable resume after proposal acceptance."
+            );
+          }
           const state = await resumeMainChatAgentTask(taskSessionId);
           setCurrentAgentTaskState(state);
           setCurrentExecutionTranscript(state.transcript ?? []);
@@ -2936,6 +3244,7 @@ export default function ChatPage({
       agentTaskControlBusy,
       currentAgentState?.proposals,
       currentMainChatTaskSessionId,
+      loadCurrentTaskViewItem,
       refreshMainChatControlState,
     ]
   );
@@ -3291,57 +3600,6 @@ export default function ChatPage({
     { key: "free", label: "自由聊天", icon: <MessageSquare size={14} />, prompt: "" },
   ];
 
-  const handleSaveAsDailyGoal = useCallback(async (content: string) => {
-    const name = content
-      .split(/[。！？\n]/)[0]
-      .slice(0, 30)
-      .trim();
-    if (!name) return;
-    const guard = inspectDailyGoalName(name);
-    if (!guard.valid) {
-      setMessages(prev => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `没有保存为今日目标：${guard.reason}\n${guard.recoveryAction ?? "请改成一个可执行目标。"}`,
-        },
-      ]);
-      return;
-    }
-    try {
-      await addDailyGoal(name);
-    } catch (e) {
-      console.error("保存今日目标失败", e);
-    }
-  }, []);
-
-  const handleIndexMemory = useCallback(
-    async (content: string) => {
-      emitCompanionStage(lifeStateProjection?.safeMode.active ? "privacy" : "memory");
-      if (lifeStateProjection?.safeMode.active) {
-        setMessages(prev => [
-          ...prev,
-          {
-            role: "assistant",
-            content: `当前处于 Safe Mode，${lifeStateProjection.safeMode.reason} 建议先去设置页恢复控制台处理数据风险，再执行"加入记忆"。`,
-          },
-        ]);
-        return;
-      }
-      try {
-        await indexMemoryChunk(currentSessionId, content, "chat");
-      } catch (e) {
-        console.error("加入记忆失败", e);
-      }
-    },
-    [
-      lifeStateProjection?.safeMode.active,
-      lifeStateProjection?.safeMode.reason,
-      currentSessionId,
-      emitCompanionStage,
-    ]
-  );
-
   const handleInputChange = useCallback(
     (value: string) => {
       setInput(value);
@@ -3393,16 +3651,22 @@ export default function ChatPage({
     currentExecutionTranscript.length > 0 ||
     Boolean(agentEventStreamState?.events.length) ||
     toolCalls.length > 0;
+  const canResumeCurrentMainChatTask = Boolean(
+    enabledTaskViewControl(authoritativeCurrentTaskViewItem, "resume", "task_resume_request")
+  );
+  const canRetryCurrentMainChatTask = Boolean(
+    enabledTaskViewControl(authoritativeCurrentTaskViewItem, "retry", "task_retry_request")
+  );
   const canCancelCurrentMainChatTask = Boolean(
-    currentAgentTaskState?.canCancel ||
-    currentAgentState?.task.controls.includes("cancel_task") ||
-    currentAgentState?.task.controls.includes("cancel")
+    enabledTaskViewControl(authoritativeCurrentTaskViewItem, "cancel", "task_cancel_request")
   );
   const mainChatAgentStatusView = useMemo(
     () =>
       buildMainChatAgentStatusView({
         reasoningTrace,
         taskState: currentAgentTaskState,
+        taskViewItem: currentTaskViewItem,
+        runEvidence: currentProductRunEvidence,
         agentState: currentAgentState,
         pendingProposals,
         sending,
@@ -3412,6 +3676,8 @@ export default function ChatPage({
       canCancelCurrentMainChatTask,
       currentAgentState,
       currentAgentTaskState,
+      currentProductRunEvidence,
+      currentTaskViewItem,
       pendingProposals,
       reasoningTrace,
       sending,
@@ -3420,6 +3686,13 @@ export default function ChatPage({
   const safeAgentTaskControlError = agentTaskControlError
     ? boundedProductText(agentTaskControlError) || "Action failed"
     : null;
+  const taskContinuityEvidenceCurrent = hasCurrentTaskContinuityEvidence(taskContinuityDetail);
+  const taskContinuityEvidenceTitle = taskContinuityEvidenceCurrent
+    ? boundedProductText(taskContinuityDetail?.evidenceView.title) || "Task evidence unavailable"
+    : "Task evidence unavailable";
+  const taskContinuityAllowedControls = taskContinuityEvidenceCurrent
+    ? (taskContinuityDetail?.evidenceView.allowedControls ?? [])
+    : [];
 
   return (
     <div
@@ -3723,22 +3996,22 @@ export default function ChatPage({
                 >
                   <Hammer size={16} /> 工具调用 {showToolCalls ? "▲" : "▼"}
                 </button>
-                {toolCalls.some(c => c.permission_level === "high") && (
+                {toolCalls.some(
+                  call =>
+                    call.executionReceipt?.actionEffect === "external_mutation" ||
+                    call.executionReceipt?.actionEffect === "unknown"
+                ) && (
                   <div className="mb-3 rounded-md bg-orange-50 border border-orange-100 p-2 text-xs text-orange-700 flex items-center gap-2">
                     <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-200 text-orange-700 font-bold">
                       !
                     </span>
-                    检测到高风险 MCP 操作，请在下方的卡片中逐条确认后再查看结果。
+                    检测到高风险 MCP 操作，请先在 Mailbox 完成审查，再通过任务控制继续。
                   </div>
                 )}
                 {showToolCalls && (
                   <div className="space-y-2">
                     {toolCalls.map((call, idx) => (
-                      <ToolCallCard
-                        key={idx}
-                        call={call}
-                        onExecute={() => handleExecuteToolCall(idx)}
-                      />
+                      <ToolCallCard key={idx} call={call} />
                     ))}
                   </div>
                 )}
@@ -3928,18 +4201,15 @@ export default function ChatPage({
                         {!companionMode && (
                           <>
                             <button
-                              onClick={() => handleSaveAsDailyGoal(displayContent)}
+                              onClick={() =>
+                                fillPrompt(
+                                  "请把上一条助手回复中值得保留的内容整理成一条记忆提案；不要直接写入，先让我审核。"
+                                )
+                              }
                               className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                              title="将回复首句保存为今日目标"
+                              title="基于助手回复草拟记忆提案，审核后再写入"
                             >
-                              <CheckCircle2 size={12} /> 设为今日目标
-                            </button>
-                            <button
-                              onClick={() => handleIndexMemory(displayContent)}
-                              className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                              title="将这条回复加入长期记忆"
-                            >
-                              <Sparkles size={12} /> 加入记忆
+                              <Sparkles size={12} /> 草拟记忆提案
                             </button>
                           </>
                         )}
@@ -4034,8 +4304,12 @@ export default function ChatPage({
           {companionMode && (sending || currentAgentTaskState) && (
             <CompanionTaskControlStrip
               taskState={currentAgentTaskState}
+              taskViewItem={authoritativeCurrentTaskViewItem}
               busy={agentTaskControlBusy}
               error={safeAgentTaskControlError}
+              canResume={canResumeCurrentMainChatTask}
+              canRetry={canRetryCurrentMainChatTask}
+              canCancel={canCancelCurrentMainChatTask}
               onResume={handleResumeMainChatTask}
               onRetry={() => handleRetryMainChatAction()}
               onCancel={handleCancelMainChatTask}
@@ -4047,9 +4321,9 @@ export default function ChatPage({
               <AgentControlPlane
                 state={currentAgentState}
                 busy={agentTaskControlBusy}
-                canResume={Boolean(currentAgentTaskState?.canResume)}
-                canRetry={Boolean(currentAgentTaskState?.canRetry)}
-                canCancel={Boolean(currentAgentTaskState?.canCancel)}
+                canResume={canResumeCurrentMainChatTask}
+                canRetry={canRetryCurrentMainChatTask}
+                canCancel={canCancelCurrentMainChatTask}
                 eventStream={agentEventStreamState ?? undefined}
                 onResume={handleResumeMainChatTask}
                 onRetry={handleRetryMainChatAction}
@@ -4126,24 +4400,20 @@ export default function ChatPage({
                         from AgentIngress and task detail only.
                       </div>
                       <div className="mt-2 grid gap-2 md:grid-cols-2">
-                        {currentAgentTaskState?.session?.userGoal && (
+                        {currentAgentTaskState?.session && (
                           <div className="min-w-0">
                             <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                              Goal
+                              Task
                             </div>
-                            <div className="truncate text-stone-900">
-                              {currentAgentTaskState.session.userGoal}
-                            </div>
+                            <div className="truncate text-stone-900">Main Chat task</div>
                           </div>
                         )}
-                        {currentAgentTaskState?.session?.currentPlanSummary && (
+                        {currentAgentTaskState?.session?.hasPlanSummary && (
                           <div className="min-w-0">
                             <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
                               Current plan
                             </div>
-                            <div className="truncate text-stone-900">
-                              {currentAgentTaskState.session.currentPlanSummary}
-                            </div>
+                            <div className="truncate text-stone-900">Available in task trace</div>
                           </div>
                         )}
                       </div>
@@ -4154,7 +4424,7 @@ export default function ChatPage({
                           type="button"
                           aria-label="Resume task"
                           title="Resume task"
-                          disabled={!currentAgentTaskState.canResume || agentTaskControlBusy}
+                          disabled={!canResumeCurrentMainChatTask || agentTaskControlBusy}
                           onClick={handleResumeMainChatTask}
                           className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -4164,7 +4434,7 @@ export default function ChatPage({
                           type="button"
                           aria-label="Retry failed action"
                           title="Retry failed action"
-                          disabled={!currentAgentTaskState.canRetry || agentTaskControlBusy}
+                          disabled={!canRetryCurrentMainChatTask || agentTaskControlBusy}
                           onClick={() => handleRetryMainChatAction()}
                           className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -4174,7 +4444,7 @@ export default function ChatPage({
                           type="button"
                           aria-label="Cancel task"
                           title="Cancel task"
-                          disabled={!currentAgentTaskState.canCancel || agentTaskControlBusy}
+                          disabled={!canCancelCurrentMainChatTask || agentTaskControlBusy}
                           onClick={handleCancelMainChatTask}
                           className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -4195,9 +4465,6 @@ export default function ChatPage({
                       </div>
                       <div className="divide-y divide-stone-200 border-y border-stone-200 bg-white/75">
                         {currentAgentTaskState.actions.map(action => {
-                          const metadataEntries = formatMainChatMetadataEntries(
-                            action.observationMetadata
-                          );
                           const needsReview =
                             action.policy.requiresProposal || action.policy.requiresConfirmation;
                           return (
@@ -4208,7 +4475,7 @@ export default function ChatPage({
                               <div className="min-w-0 px-2">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <span className="font-semibold text-stone-950">
-                                    {action.action.actionType}
+                                    {action.actionType}
                                   </span>
                                   <span
                                     className={classNames(
@@ -4245,22 +4512,10 @@ export default function ChatPage({
                                   )}
                                 </div>
                                 <div className="mt-1 text-stone-700">
-                                  {action.action.description}
+                                  {action.policy.reasonCode}
                                 </div>
-                                {metadataEntries.length > 0 && (
-                                  <div className="mt-1 flex flex-wrap gap-1">
-                                    {metadataEntries.map(entry => (
-                                      <span
-                                        key={`${action.id}-${entry}`}
-                                        className="inline-flex h-5 items-center rounded-md bg-stone-100 px-1.5 text-stone-600"
-                                      >
-                                        {entry}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                                {action.error && (
-                                  <div className="mt-1 text-rose-700">{action.error}</div>
+                                {action.failureCode && (
+                                  <div className="mt-1 text-rose-700">{action.failureCode}</div>
                                 )}
                               </div>
                               <div className="px-2 text-right text-stone-500">
@@ -4625,13 +4880,20 @@ export default function ChatPage({
                       data-task-strategy={taskContinuityDetail.taskSession.selectedStrategy}
                       data-task-status={taskContinuityDetail.taskSession.status}
                       data-next-control={taskContinuityDetail.nextRecommendedControl}
+                      data-evidence-state={taskContinuityEvidenceCurrent ? "current" : "unknown"}
                       className="min-w-0 border-y border-stone-200 bg-stone-50/80 px-2 py-2"
                     >
                       <div className="flex flex-wrap items-start gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="truncate font-semibold text-stone-950">
-                            {taskContinuityDetail.taskSession.userGoal}
+                            {taskContinuityEvidenceTitle}
                           </div>
+                          {!taskContinuityEvidenceCurrent && (
+                            <div className="mt-1 text-amber-800">
+                              Product run evidence is missing or does not match this task. Controls
+                              stay disabled until the backend projection is current.
+                            </div>
+                          )}
                           <div className="mt-1 flex flex-wrap gap-1">
                             <span
                               className={classNames(
@@ -4655,7 +4917,7 @@ export default function ChatPage({
                           </div>
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-1">
-                          {taskContinuityDetail.allowedControls.includes("resume") && (
+                          {taskContinuityAllowedControls.includes("resume") && (
                             <button
                               type="button"
                               aria-label="Resume task from continuity detail"
@@ -4666,18 +4928,19 @@ export default function ChatPage({
                               <Play size={14} />
                             </button>
                           )}
-                          {taskContinuityDetail.allowedControls.includes("retry") && (
-                            <button
-                              type="button"
-                              aria-label="Retry task action"
-                              disabled={taskContinuityBusy}
-                              onClick={handleRetryTaskContinuityDetail}
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                              <RotateCw size={14} />
-                            </button>
-                          )}
-                          {taskContinuityDetail.allowedControls.includes("cancel") && (
+                          {taskContinuityAllowedControls.includes("retry") &&
+                            taskContinuityDetail.retryTargetActionId && (
+                              <button
+                                type="button"
+                                aria-label="Retry task action"
+                                disabled={taskContinuityBusy}
+                                onClick={handleRetryTaskContinuityDetail}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                <RotateCw size={14} />
+                              </button>
+                            )}
+                          {taskContinuityAllowedControls.includes("cancel") && (
                             <button
                               type="button"
                               aria-label="Cancel task from continuity detail"
@@ -4688,7 +4951,7 @@ export default function ChatPage({
                               <Ban size={14} />
                             </button>
                           )}
-                          {taskContinuityDetail.allowedControls.includes("refresh_context") && (
+                          {taskContinuityAllowedControls.includes("refresh_context") && (
                             <button
                               type="button"
                               aria-label="Refresh task context"
@@ -4749,7 +5012,7 @@ export default function ChatPage({
                             <div key={action.id} className="grid gap-1 px-2 py-1">
                               <div className="flex min-w-0 flex-wrap items-center gap-2">
                                 <span className="font-semibold text-stone-900">
-                                  {action.action.actionType}
+                                  {action.actionType}
                                 </span>
                                 <span
                                   className={classNames(
@@ -4761,7 +5024,7 @@ export default function ChatPage({
                                 </span>
                               </div>
                               <div className="truncate text-stone-600">
-                                {action.action.description}
+                                {action.policy.reasonCode}
                               </div>
                             </div>
                           ))}
@@ -4782,8 +5045,10 @@ export default function ChatPage({
                                   {proposal.status.replace(/_/g, " ")}
                                 </span>
                               </div>
-                              <div className="truncate text-stone-600">{proposal.reason}</div>
-                              {proposal.status === "pending" && (
+                              <div className="truncate text-stone-600">
+                                {proposal.source.replace(/_/g, " ")} · {proposal.riskLevel} risk
+                              </div>
+                              {taskContinuityEvidenceCurrent && proposal.status === "pending" && (
                                 <div className="flex flex-wrap gap-1">
                                   {proposal.proposalType === "tool_permission" && (
                                     <button
@@ -4820,32 +5085,9 @@ export default function ChatPage({
                         </div>
                       )}
                       {taskContinuityDetail.finalDelivery && (
-                        <div
-                          data-testid="task-continuity-final-delivery"
-                          data-final-delivery-section-titles={taskContinuityFinalDeliverySections(
-                            taskContinuityDetail.finalDelivery
-                          ).join("|")}
-                          className="mt-2 border-l border-emerald-300 bg-white/80 px-2 py-1"
-                        >
-                          <div className="font-semibold text-stone-950">Final delivery</div>
-                          <div className="mt-1 flex flex-wrap gap-1 text-stone-600">
-                            {taskContinuityFinalDeliverySections(taskContinuityDetail.finalDelivery)
-                              .length > 0 ? (
-                              taskContinuityFinalDeliverySections(
-                                taskContinuityDetail.finalDelivery
-                              ).map(section => (
-                                <span
-                                  key={section}
-                                  className="inline-flex h-5 items-center rounded-md border border-emerald-200 bg-emerald-50 px-1.5 text-emerald-900"
-                                >
-                                  {section}
-                                </span>
-                              ))
-                            ) : (
-                              <span>Recorded</span>
-                            )}
-                          </div>
-                        </div>
+                        <TaskContinuityFinalDeliveryPanel
+                          value={taskContinuityDetail.finalDelivery}
+                        />
                       )}
                     </div>
                   )}
@@ -4873,8 +5115,16 @@ export default function ChatPage({
           streamInterrupted={streamInterrupted}
           diagnostics={diagnostics}
           selectedSkillId={selectedSkillId}
+          attachments={currentResources}
+          resourceImportBusy={resourceImportBusy}
+          resourceImportError={currentResourceImportError}
+          resourceImportNotice={currentResourceImportNotice}
+          removingResourceIds={removingResourceIds}
           onInputChange={handleInputChange}
           onSelectedSkillIdChange={setSelectedSkillId}
+          onAttachResources={handleAttachResources}
+          onCancelResourceImport={handleCancelResourceImport}
+          onRemoveResource={handleRemoveResource}
           onComposerFocus={() => emitCompanionStage("listening")}
           onSend={handleSend}
           canCancel={canCancelCurrentMainChatTask}

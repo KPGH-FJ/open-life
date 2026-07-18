@@ -7,17 +7,17 @@ use crate::agent::policy_store::{
     BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
 };
 use crate::agent::{
-    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentActionRequest, AgentRun,
-    AgentRunStore, AgentRuntime, AgentRuntimeConfig, AgentTask, AgentTaskKind,
-    GovernanceDecisionClassification, HSBehaviorCheckSummary, HSSelectionAudit, HeuristicStore,
-    ModelRouter, ProviderAvailability, RiskLevel, TaskType,
+    ActionExecutionContext, ActionExecutorConfig, AgentActionRequest, AgentRun, AgentRunStore,
+    AgentRuntime, AgentRuntimeConfig, AgentTask, AgentTaskKind, GovernanceDecisionClassification,
+    HSBehaviorCheckSummary, HSSelectionAudit, HeuristicStore, ModelRouter, ProviderAvailability,
+    RiskLevel, TaskType, ToolGateway,
 };
 use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
-use crate::tool_manifest::{ToolManifest, ToolSource};
+use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
 use crate::tool_permissions::ToolPermissionPolicy;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -33,7 +33,7 @@ fn seeded_packet(
     let policy_store = PolicyStore::mvp_builtin();
     let heuristic_store = HeuristicStore::new_in_memory().unwrap();
     heuristic_store.seed_mvp_heuristics().unwrap();
-    HSSelector::default()
+    HSSelector
         .select(
             &policy_store,
             &heuristic_store,
@@ -50,6 +50,14 @@ fn seeded_packet(
             },
         )
         .unwrap()
+}
+
+fn canonical_tool_owner() -> (AgentRunStore, String) {
+    let store = AgentRunStore::new_in_memory().unwrap();
+    let run = AgentRun::new_tool_execution_run("runtime-integration");
+    let run_id = run.id.clone();
+    store.create_run(&run).unwrap();
+    (store, run_id)
 }
 
 #[test]
@@ -177,6 +185,9 @@ fn hs_model_router_enforces_local_only_from_audit_ids_and_removes_cloud_fallback
             estimated_tokens: 8,
             token_budget: 128,
         },
+        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::TestFixture,
+        ),
     };
 
     let decision = test_router_with_latencies(true, true, 5_000, 10)
@@ -232,6 +243,9 @@ fn hs_model_router_fails_closed_when_local_only_audit_id_has_no_local_model() {
             estimated_tokens: 8,
             token_budget: 128,
         },
+        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::TestFixture,
+        ),
     };
 
     let result = test_router_with_latencies(false, true, 5_000, 10).route_with_hs_packet(
@@ -377,14 +391,23 @@ fn agent_run_store_persists_metadata_safe_hs_audit_and_behavior_checks() {
     let fetched = store.get_run(&run.id).unwrap().unwrap();
 
     let audit = fetched.hs_selection_audit.expect("audit should persist");
-    assert!(audit
+    assert!(packet
+        .audit
+        .selected_policy_ids
+        .contains(&BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.to_string()));
+    assert_eq!(audit.selected_policy_ids.len(), 1);
+    assert!(audit.selected_policy_ids[0].starts_with("policy_id:bytes="));
+    assert!(!audit
         .selected_policy_ids
         .contains(&BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.to_string()));
     assert_eq!(fetched.behavior_checks.len(), 1);
     assert_eq!(
-        fetched.behavior_checks[0].label,
+        run.behavior_checks[0].label,
         "External writes stay reviewable"
     );
+    assert!(fetched.behavior_checks[0]
+        .label
+        .starts_with("behavior_check_label:bytes="));
 
     let serialized = serde_json::to_string(&serde_json::json!({
         "audit": audit,
@@ -395,8 +418,8 @@ fn agent_run_store_persists_metadata_safe_hs_audit_and_behavior_checks() {
     assert!(!serialized.contains("external write action must create"));
 }
 
-#[test]
-fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
+#[tokio::test]
+async fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
     let packet = seeded_packet(
         AgentTaskKind::ToolExecution,
         PolicyTopic::General,
@@ -424,6 +447,7 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
             enabled: true,
             declarative_only: false,
             action_type: "write".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec!["execution".into()],
         },
         Box::new(|_| Ok("direct write should not run".into())),
@@ -446,14 +470,25 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&proposal_store),
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -469,6 +504,7 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -486,8 +522,8 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
     assert_eq!(proposals.len(), 1);
 }
 
-#[test]
-fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_execution() {
+#[tokio::test]
+async fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_execution() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_builtin(
         ToolManifest {
@@ -506,6 +542,7 @@ fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_execution() {
             enabled: true,
             declarative_only: false,
             action_type: "write".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec![],
         },
         Box::new(|_| Ok("unsupported plugin executor must not run".into())),
@@ -532,7 +569,7 @@ fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_execution() {
         &[],
     );
 
-    let result = ActionExecutor::new(ActionExecutorConfig {
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig {
         consume_allow_once: false,
         ..Default::default()
     })
@@ -550,35 +587,29 @@ fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_execution() {
         },
         &ctx,
     )
+    .await
     .unwrap();
 
     assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
     assert_eq!(
         result.stop_reason.as_deref(),
-        Some("unsupported_tool_source")
+        Some("tool_gateway_source_executor_unavailable")
     );
-    let report = result
-        .governance_report
-        .as_ref()
-        .expect("blocked tool should include governor report");
-    assert_eq!(
-        report.classification,
-        GovernanceDecisionClassification::Block
-    );
-    assert!(report.blocked);
-    assert!(!serde_json::to_string(report)
+    assert!(result.governance_report.is_none());
+    assert!(!serde_json::to_string(&result.execution_receipt)
         .unwrap()
         .contains("raw plugin payload"));
 }
 
-#[test]
-fn calendar_propose_event_creates_scheduled_task_never_external_write_action() {
+#[tokio::test]
+async fn calendar_propose_event_creates_scheduled_task_never_external_write_action() {
     let registry = crate::mcp::McpRegistry::new();
     let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
     let audit_file = tempfile::NamedTempFile::new().unwrap();
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
@@ -586,9 +617,13 @@ fn calendar_propose_event_creates_scheduled_task_never_external_write_action() {
         &privacy_engine,
         &[],
     )
-    .with_proposal_store(&proposal_store);
+    .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
+    .with_canonical_write_admission(
+        &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+    );
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -600,11 +635,12 @@ fn calendar_propose_event_creates_scheduled_task_never_external_write_action() {
                         "description": "Review results"
                     }
                 }),
-                source_run_id: Some("run-calendar-proposal".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -640,14 +676,15 @@ fn calendar_propose_event_creates_scheduled_task_never_external_write_action() {
     assert!(external.is_empty());
 }
 
-#[test]
-fn email_propose_draft_creates_data_export_never_external_write_action() {
+#[tokio::test]
+async fn email_propose_draft_creates_data_export_never_external_write_action() {
     let registry = crate::mcp::McpRegistry::new();
     let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
     let audit_file = tempfile::NamedTempFile::new().unwrap();
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
@@ -655,9 +692,13 @@ fn email_propose_draft_creates_data_export_never_external_write_action() {
         &privacy_engine,
         &[],
     )
-    .with_proposal_store(&proposal_store);
+    .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
+    .with_canonical_write_admission(
+        &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+    );
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -669,11 +710,12 @@ fn email_propose_draft_creates_data_export_never_external_write_action() {
                         "body": "Draft body"
                     }
                 }),
-                source_run_id: Some("run-email-proposal".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -704,14 +746,15 @@ fn email_propose_draft_creates_data_export_never_external_write_action() {
     assert!(external.is_empty());
 }
 
-#[test]
-fn file_write_proposal_rejects_oversized_content_before_proposal_insertion() {
+#[tokio::test]
+async fn file_write_proposal_rejects_oversized_content_before_proposal_insertion() {
     let registry = crate::mcp::McpRegistry::new();
     let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
     let audit_file = tempfile::NamedTempFile::new().unwrap();
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
     let safe_paths = vec![safe_path];
@@ -724,9 +767,13 @@ fn file_write_proposal_rejects_oversized_content_before_proposal_insertion() {
         &privacy_engine,
         &safe_paths,
     )
-    .with_proposal_store(&proposal_store);
+    .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
+    .with_canonical_write_admission(
+        &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+    );
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -737,11 +784,12 @@ fn file_write_proposal_rejects_oversized_content_before_proposal_insertion() {
                         "content": oversized_content
                     }
                 }),
-                source_run_id: Some("run-oversized-file-proposal".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(result.status, crate::agent::ActionExecutionStatus::Failed);
@@ -753,8 +801,8 @@ fn file_write_proposal_rejects_oversized_content_before_proposal_insertion() {
     assert_eq!(proposal_store.pending_count().unwrap(), 0);
 }
 
-#[test]
-fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion() {
+#[tokio::test]
+async fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion() {
     let packet = seeded_packet(
         AgentTaskKind::ToolExecution,
         PolicyTopic::General,
@@ -777,6 +825,7 @@ fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion(
             enabled: true,
             declarative_only: false,
             action_type: "write".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec!["execution".into()],
         },
         Box::new(|_| Ok("direct write should not run".into())),
@@ -799,9 +848,12 @@ fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion(
         &safe_paths,
     )
     .with_proposal_store(&proposal_store)
+    .with_canonical_write_admission(
+        &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+    )
     .with_hs_runtime_packet(&packet);
 
-    let err = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -817,14 +869,24 @@ fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion(
             },
             &ctx,
         )
-        .unwrap_err();
+        .await
+        .unwrap();
 
-    assert!(err.to_string().contains("exceeds maximum allowed"));
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Failed);
+    assert!(result
+        .action
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("exceeds maximum allowed")));
+    assert_eq!(
+        result.execution_receipt.execution_outcome,
+        crate::tool_execution_receipt::ToolExecutionOutcome::Failed
+    );
     assert_eq!(proposal_store.pending_count().unwrap(), 0);
 }
 
-#[test]
-fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_insertion() {
+#[tokio::test]
+async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_insertion() {
     let packet = seeded_packet(
         AgentTaskKind::ToolExecution,
         PolicyTopic::General,
@@ -847,6 +909,7 @@ fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_inser
             enabled: true,
             declarative_only: false,
             action_type: "write".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec![],
         },
         Box::new(|_| Ok("wrapped direct write should not run".into())),
@@ -867,6 +930,7 @@ fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_inser
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
     let safe_paths = vec![safe_path];
@@ -879,9 +943,13 @@ fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_inser
         &safe_paths,
     )
     .with_proposal_store(&proposal_store)
+    .with_agent_run_store(&agent_run_store)
+    .with_canonical_write_admission(
+        &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+    )
     .with_hs_runtime_packet(&packet);
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -895,11 +963,12 @@ fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_inser
                         }
                     }
                 }),
-                source_run_id: Some("run-oversized-wrapped-write".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(result.status, crate::agent::ActionExecutionStatus::Failed);
@@ -911,8 +980,8 @@ fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_inser
     assert_eq!(proposal_store.pending_count().unwrap(), 0);
 }
 
-#[test]
-fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
+#[tokio::test]
+async fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
     let packet = seeded_packet(
         AgentTaskKind::ToolExecution,
         PolicyTopic::General,
@@ -938,6 +1007,7 @@ fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
             enabled: true,
             declarative_only: false,
             action_type: "write".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec![],
         },
         Box::new(move |_| {
@@ -974,14 +1044,25 @@ fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&proposal_store),
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -997,6 +1078,7 @@ fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1031,8 +1113,8 @@ fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
     );
 }
 
-#[test]
-fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() {
+#[tokio::test]
+async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() {
     let packet = seeded_packet(
         AgentTaskKind::ToolExecution,
         PolicyTopic::General,
@@ -1058,6 +1140,7 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
             enabled: true,
             declarative_only: false,
             action_type: "write".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec![],
         },
         Box::new(move |_| {
@@ -1092,6 +1175,7 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
     let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let (agent_run_store, run_id) = canonical_tool_owner();
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
     let file_path = safe_dir
@@ -1108,14 +1192,25 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&proposal_store),
-        agent_run_store: None,
+        agent_run_store: Some(&agent_run_store),
+        bound_content_receipt_issuer: Some(&agent_run_store),
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        tool_audit_persistence_observer: None,
+        durable_store_failure_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
-    let result = ActionExecutor::new(ActionExecutorConfig::default())
+    let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
             AgentActionRequest {
                 action_type: "mcp_tool".into(),
@@ -1131,11 +1226,12 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
                         }
                     }
                 }),
-                source_run_id: Some("run-runtime".into()),
+                source_run_id: Some(run_id.clone()),
                 step_index: 0,
             },
             &ctx,
         )
+        .await
         .unwrap();
 
     assert_eq!(

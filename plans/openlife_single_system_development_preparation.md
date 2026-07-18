@@ -88,8 +88,8 @@ Observed direct product-shaped proposal writers include:
 
 - `src-tauri/src/commands/builder.rs`
 - `src-tauri/src/commands/calibration.rs`
-- `src-tauri/src/main_chat_proposal_support.rs`
 - `src-tauri/src/main_chat_kernel.rs`
+- `src-tauri/src/provider_network_consent.rs`
 - `src-tauri/src/main_chat_generation_support.rs`
 - `src-tauri/src/commands/agent.rs`
 - `src-tauri/src/commands/execution.rs`
@@ -99,9 +99,13 @@ Observed direct product-shaped proposal writers include:
 - `openlife-core/src/agent/maturation.rs`
 - `openlife-core/src/agent/plan_execute.rs`
 
-`openlife-core/src/agent/proposal_engine.rs` also contains placeholder
-generators that explicitly say Builder and Calibration create proposals
-elsewhere. That is evidence that the abstraction is not the authority.
+The former `openlife-core/src/agent/proposal_engine.rs` made this split more
+obvious: it was wired into `AppState`, bootstrap, ordinary Main Chat
+finalization, and AgentRun replay, so it was not dead code. It was deleted with
+those consumers because raw-output generators created caller-shaped proposals
+without PolicyRouter authorization before ReviewWorkflow submission. The
+remaining direct writers above still have to converge on PolicyRouter proof
+consumed by ReviewWorkflow.
 
 ### 3.4 Memory and LifeModel state have too many product entrypoints
 
@@ -115,7 +119,7 @@ Observed stores and product-facing access points:
 - `HotMemoryCache`
 - `LifeModelManager`
 - `PatchStore`
-- `index_memory_chunk`
+- `create_knowledge_note` (typed KnowledgeNote asset; not accepted long-term Memory truth)
 - `save_life_model`
 - state/daily-goal compatibility writes
 - proposal accept/materialization writes
@@ -420,16 +424,19 @@ It is the root fix for memory/proposal confusion.
 Problems to solve:
 
 - Many modules create proposals directly.
-- ProposalEngine exists but is not the authority.
+- The former product-wired ProposalEngine and its post-hoc Main Chat/replay
+  consumers have been deleted; no replacement proposal authority may be
+  introduced beside PolicyRouter and ReviewWorkflow.
 - ToolPermission, LifeModelUpdate, Memory, Builder, Calibration, Maturation,
   PlanExecute, and Proactive proposals are created by different code paths.
 - Assistant text can imply "done" when the durable change is only pending.
 
 Objects to inspect before coding:
 
-- `openlife-core/src/agent/proposal_engine.rs`
 - `openlife-core/src/agent/proposal_store.rs`
-- `src-tauri/src/main_chat_proposal_support.rs`
+- `openlife-core/src/agent/review_workflow.rs`
+- `src-tauri/src/main_chat_kernel.rs`
+- `src-tauri/src/provider_network_consent.rs`
 - `src-tauri/src/commands/proposal.rs`
 - `src-tauri/src/commands/builder.rs`
 - `src-tauri/src/commands/calibration.rs`
@@ -475,7 +482,9 @@ Problems to solve:
 
 - MemoryStore, VectorStore, MemoryLifecycleStore, LifeEventStore, EvidenceStore,
   HotMemoryCache, and LifeModelManager are all reachable from product code.
-- `index_memory_chunk` can write memory directly.
+- The retired `index_memory_chunk` direct-Memory route must remain absent;
+  `create_knowledge_note` owns only private KnowledgeNote assets, while durable
+  user facts remain governed by MemoryLifecycle/ReviewWorkflow.
 - `save_life_model`, state/daily-goal writes, proposal accept, restore/import,
   and auto-checkin all interact with LifeModel persistence.
 - It is unclear which user statements become memory, which become proposal, and

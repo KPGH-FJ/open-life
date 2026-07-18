@@ -4,10 +4,18 @@ use crate::agent::reasoning::{
     ReasoningStrategy, ReasoningTrace,
 };
 use crate::life_model::LifeModel;
-use crate::llm::ChatMessage;
+use crate::llm::{
+    BoundedContextBlock, ChatMessage, ContextManifest, PreparedProviderOutcome,
+    PreparedProviderRequest, ProviderInvocationReceipt, ProviderLocalOnlyReason,
+    ProviderPayloadPurpose, ProviderPolicyAuthorization,
+};
+use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
 use serde_json::json;
 // use tokio::time::{timeout, Duration};
+
+const MAX_LAYERED_LIFE_GUIDANCE_ITEMS: usize = 6;
+const MAX_LAYERED_LIFE_GUIDANCE_CHARS: usize = 2_048;
 
 /// Layered reasoning strategy: three-phase sequential reasoning.
 /// Layered reasoning strategy with meaning, strategy, and generation phases.
@@ -15,6 +23,11 @@ pub struct LayeredReasoner {
     scheduler: InferenceScheduler,
     life_model: LifeModel,
     config: ReasoningConfig,
+    network_policy: crate::config::NetworkPolicy,
+    provider_authorization: ProviderPolicyAuthorization,
+    provider_subject_text: Option<String>,
+    privacy_engine: PrivacyEngine,
+    policy_provenance_refs: Vec<crate::llm::ProviderPolicyProvenanceRef>,
 }
 
 impl LayeredReasoner {
@@ -23,6 +36,13 @@ impl LayeredReasoner {
             scheduler,
             life_model,
             config: ReasoningConfig::default(),
+            network_policy: crate::config::NetworkPolicy::default(),
+            provider_authorization: ProviderPolicyAuthorization::local_only_fail_closed(
+                ProviderLocalOnlyReason::MissingCanonicalPolicy,
+            ),
+            provider_subject_text: None,
+            privacy_engine: PrivacyEngine::new(),
+            policy_provenance_refs: Vec::new(),
         }
     }
 
@@ -35,7 +55,209 @@ impl LayeredReasoner {
             scheduler,
             life_model,
             config,
+            network_policy: crate::config::NetworkPolicy::default(),
+            provider_authorization: ProviderPolicyAuthorization::local_only_fail_closed(
+                ProviderLocalOnlyReason::MissingCanonicalPolicy,
+            ),
+            provider_subject_text: None,
+            privacy_engine: PrivacyEngine::new(),
+            policy_provenance_refs: Vec::new(),
         }
+    }
+
+    pub fn with_network_policy(mut self, network_policy: crate::config::NetworkPolicy) -> Self {
+        self.network_policy = network_policy;
+        self
+    }
+
+    pub fn with_provider_policy_context(
+        mut self,
+        provider_authorization: ProviderPolicyAuthorization,
+        policy_provenance_refs: Vec<crate::llm::ProviderPolicyProvenanceRef>,
+    ) -> Self {
+        self.provider_authorization = provider_authorization;
+        self.policy_provenance_refs = policy_provenance_refs;
+        self
+    }
+
+    pub fn with_provider_subject_text(mut self, provider_subject_text: String) -> Self {
+        self.provider_subject_text = Some(provider_subject_text);
+        self
+    }
+
+    pub fn with_privacy_engine(mut self, privacy_engine: PrivacyEngine) -> Self {
+        self.privacy_engine = privacy_engine;
+        self
+    }
+
+    fn truncate_to_chars(value: String, max_chars: usize) -> String {
+        if value.chars().count() <= max_chars {
+            value
+        } else {
+            value.chars().take(max_chars).collect()
+        }
+    }
+
+    fn selected_life_guidance(&self) -> Option<String> {
+        let mut guidance = self
+            .life_model
+            .identity
+            .values
+            .iter()
+            .take(3)
+            .map(|value| format!("value: {} — {}", value.name, value.description))
+            .collect::<Vec<_>>();
+        guidance.extend(
+            self.life_model
+                .goals
+                .short_term
+                .iter()
+                .chain(self.life_model.goals.medium_term.iter())
+                .chain(self.life_model.goals.long_term.iter())
+                .chain(self.life_model.goals.life_goals.iter())
+                .filter(|goal| goal.priority >= 3)
+                .take(MAX_LAYERED_LIFE_GUIDANCE_ITEMS.saturating_sub(guidance.len()))
+                .map(|goal| {
+                    format!(
+                        "goal(priority={}): {} — {}",
+                        goal.priority, goal.name, goal.description
+                    )
+                }),
+        );
+        if guidance.is_empty() {
+            None
+        } else {
+            Some(Self::truncate_to_chars(
+                guidance.join("\n"),
+                MAX_LAYERED_LIFE_GUIDANCE_CHARS,
+            ))
+        }
+    }
+
+    fn prepare_phase_payload(
+        &self,
+        phase: &str,
+        messages: Vec<ChatMessage>,
+        system_prompt: &str,
+    ) -> (Vec<ChatMessage>, Vec<BoundedContextBlock>, ContextManifest) {
+        let mut context_blocks = vec![BoundedContextBlock {
+            source_ref: format!("layered_reasoning.{phase}"),
+            category: "reasoning_instruction".into(),
+            content: system_prompt.to_string(),
+        }];
+        if let Some(content) = self.selected_life_guidance() {
+            context_blocks.push(BoundedContextBlock {
+                source_ref: "life_model.selected_guidance".into(),
+                category: "selected_life_guidance".into(),
+                content,
+            });
+        }
+
+        // One batch keeps placeholders unique across messages and context blocks.
+        let raw_payload = messages
+            .iter()
+            .map(|message| message.content.clone())
+            .chain(context_blocks.iter().map(|block| block.content.clone()))
+            .collect::<Vec<_>>();
+        let (masked_payload, _) = self.privacy_engine.desensitize_batch(&raw_payload);
+        let message_count = messages.len();
+        let messages = messages
+            .into_iter()
+            .zip(masked_payload.iter().take(message_count))
+            .map(|(mut message, masked)| {
+                message.content = masked.clone();
+                message
+            })
+            .collect::<Vec<_>>();
+        for (block, masked) in context_blocks
+            .iter_mut()
+            .zip(masked_payload.into_iter().skip(message_count))
+        {
+            block.content = if block.category == "selected_life_guidance" {
+                Self::truncate_to_chars(masked, MAX_LAYERED_LIFE_GUIDANCE_CHARS)
+            } else {
+                masked
+            };
+        }
+
+        let mut selected_context_refs = context_blocks
+            .iter()
+            .map(|block| block.source_ref.clone())
+            .collect::<Vec<_>>();
+        selected_context_refs.sort();
+        selected_context_refs.dedup();
+        let mut included_context_categories = context_blocks
+            .iter()
+            .map(|block| block.category.clone())
+            .collect::<Vec<_>>();
+        included_context_categories.sort();
+        included_context_categories.dedup();
+        let manifest = ContextManifest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            privacy_decision_id: self.provider_authorization.decision_id().to_string(),
+            selected_context_refs,
+            included_context_categories,
+            declared_payload_categories: vec![
+                crate::llm::ProviderPayloadCategory::RuntimeCompiledMessages,
+            ],
+            policy_provenance_refs: self.policy_provenance_refs.clone(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+        };
+        (messages, context_blocks, manifest)
+    }
+
+    async fn prepare_phase_request(
+        &self,
+        phase: &str,
+        messages: Vec<ChatMessage>,
+        system_prompt: &str,
+    ) -> anyhow::Result<PreparedProviderRequest> {
+        let (messages, context_blocks, manifest) =
+            self.prepare_phase_payload(phase, messages, system_prompt);
+        let provider_authorization = self
+            .provider_authorization
+            .clone()
+            .authorize_derived_payload(
+                ProviderPayloadPurpose::LayeredReasoningPhase,
+                self.provider_subject_text.as_deref().unwrap_or_default(),
+                &messages,
+                &context_blocks,
+            )?;
+        self.scheduler
+            .prepare_chat_request_with_authorization(
+                messages,
+                context_blocks,
+                manifest,
+                provider_authorization,
+                self.network_policy.clone(),
+                false,
+            )
+            .await
+    }
+
+    async fn generate_phase(
+        &self,
+        phase: &str,
+        messages: Vec<ChatMessage>,
+        system_prompt: &str,
+    ) -> anyhow::Result<PreparedProviderOutcome> {
+        let prepared = self
+            .prepare_phase_request(phase, messages, system_prompt)
+            .await?;
+        let outcome = self.scheduler.execute_prepared(prepared).await;
+        self.scheduler.verify_prepared_outcome_receipt(&outcome)?;
+        Ok(outcome)
+    }
+
+    fn attach_provider_receipt(
+        mut phase_result: serde_json::Value,
+        receipt: Option<ProviderInvocationReceipt>,
+    ) -> serde_json::Value {
+        if let Some(receipt) = receipt {
+            phase_result["provider_invocation_receipt"] = json!(receipt);
+        }
+        phase_result
     }
 }
 
@@ -147,41 +369,22 @@ impl LayeredReasoner {
         let start = std::time::Instant::now();
         let user_text = &input.user_text;
 
-        let mut values: Vec<String> = self
-            .life_model
-            .identity
-            .values
-            .iter()
-            .map(|v| v.name.clone())
-            .collect();
-        if values.is_empty() {
-            values.push("成长".to_string());
-            values.push("真诚".to_string());
-        }
-
         let forbidden = self.detect_forbidden_topics(user_text);
         let risk_level = if forbidden.is_empty() { "low" } else { "high" };
 
-        let aligned_values = values
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
         let text = if forbidden.is_empty() {
-            format!("本次回应应体现以下核心价值观: {}", aligned_values)
+            "本次回应应与已选择并经过隐私过滤的个人指导保持一致。".to_string()
         } else {
             format!(
-                "本次请求触及敏感主题: {}。应以关怀、不评判、鼓励寻求专业帮助的方式回应，同时体现核心价值观: {}",
-                forbidden.join(", "),
-                aligned_values
+                "本次请求触及敏感主题: {}。应以关怀、不评判、鼓励寻求专业帮助的方式回应。",
+                forbidden.join(", ")
             )
         };
 
         let result = json!({
             "text": text,
             "forbidden_keywords": forbidden,
-            "aligned_values": values,
+            "personal_guidance_source": "context_manifest",
             "risk_level": risk_level,
         });
 
@@ -229,23 +432,6 @@ impl LayeredReasoner {
             input.task_kind, user_text
         );
 
-        let active_goals: Vec<String> = self
-            .life_model
-            .goals
-            .short_term
-            .iter()
-            .chain(self.life_model.goals.medium_term.iter())
-            .chain(self.life_model.goals.long_term.iter())
-            .chain(self.life_model.goals.life_goals.iter())
-            .filter(|g| g.priority >= 3)
-            .map(|g| format!("- [{}] {} (优先级{})", g.name, g.description, g.priority))
-            .collect();
-        if !active_goals.is_empty() {
-            prompt.push_str("\n用户高优先级目标:\n");
-            prompt.push_str(&active_goals.join("\n"));
-            prompt.push('\n');
-        }
-
         if !context.tools_prompt.is_empty() {
             prompt.push_str("\n可用工具: 是。若策略需要外部数据，请标记 needs_tools=true。");
         }
@@ -264,41 +450,48 @@ impl LayeredReasoner {
         }];
 
         let result = match self
-            .scheduler
-            .generate_raw(
+            .generate_phase(
+                "strategy",
                 messages,
-                Some("你是一个严谨的策略规划助手，只输出合法 JSON。"),
+                "你是一个严谨的策略规划助手，只输出合法 JSON。",
             )
             .await
         {
-            Ok(raw) => {
-                let cleaned = raw
-                    .trim()
-                    .trim_start_matches("```json")
-                    .trim_start_matches("```")
-                    .trim_end_matches("```")
-                    .trim();
-                match serde_json::from_str::<serde_json::Value>(cleaned) {
-                    Ok(mut v) => {
-                        if v.get("text").is_none() {
-                            v["text"] = json!("继续作为人生伴侣进行深度对话。");
+            Ok(outcome) => {
+                let receipt = outcome.receipt;
+                let phase_result = match outcome.result {
+                    Ok(raw) => {
+                        let cleaned = raw
+                            .trim()
+                            .trim_start_matches("```json")
+                            .trim_start_matches("```")
+                            .trim_end_matches("```")
+                            .trim();
+                        match serde_json::from_str::<serde_json::Value>(cleaned) {
+                            Ok(mut v) => {
+                                if v.get("text").is_none() {
+                                    v["text"] = json!("继续作为人生伴侣进行深度对话。");
+                                }
+                                if v.get("plan_steps").is_none() {
+                                    v["plan_steps"] = json!(["先理解问题，再给出下一步建议"]);
+                                }
+                                if v.get("needs_tools").is_none() {
+                                    v["needs_tools"] = json!(false);
+                                }
+                                if v.get("suggested_tools").is_none() {
+                                    v["suggested_tools"] = json!([]);
+                                }
+                                if v.get("conflict_flags").is_none() {
+                                    v["conflict_flags"] = json!([]);
+                                }
+                                v
+                            }
+                            Err(_) => self.fallback_strategy(user_text),
                         }
-                        if v.get("plan_steps").is_none() {
-                            v["plan_steps"] = json!(["先理解问题，再给出下一步建议"]);
-                        }
-                        if v.get("needs_tools").is_none() {
-                            v["needs_tools"] = json!(false);
-                        }
-                        if v.get("suggested_tools").is_none() {
-                            v["suggested_tools"] = json!([]);
-                        }
-                        if v.get("conflict_flags").is_none() {
-                            v["conflict_flags"] = json!([]);
-                        }
-                        v
                     }
                     Err(_) => self.fallback_strategy(user_text),
-                }
+                };
+                Self::attach_provider_receipt(phase_result, receipt)
             }
             Err(_) => self.fallback_strategy(user_text),
         };
@@ -318,30 +511,7 @@ impl LayeredReasoner {
             "结合人生模型给出一条可执行建议".to_string(),
         ];
 
-        let mut required_keywords = vec!["下一步".to_string()];
-        let mut aligned_goals = Vec::new();
-
-        for goal in self
-            .life_model
-            .goals
-            .short_term
-            .iter()
-            .chain(self.life_model.goals.medium_term.iter())
-            .chain(self.life_model.goals.long_term.iter())
-            .chain(self.life_model.goals.life_goals.iter())
-            .filter(|g| g.priority >= 6)
-            .take(3)
-        {
-            aligned_goals.push(goal.name.clone());
-        }
-        if !aligned_goals.is_empty() {
-            plan_steps.insert(
-                0,
-                format!("优先围绕目标\"{}\"组织回应", aligned_goals.join("、")),
-            );
-            required_keywords.push(aligned_goals[0].clone());
-        }
-
+        let required_keywords = vec!["下一步".to_string()];
         let needs_tools = user_text.contains("搜索")
             || user_text.contains("查")
             || user_text.contains("文件")
@@ -370,7 +540,7 @@ impl LayeredReasoner {
             "text": "围绕用户目标给出清晰、可执行、与人生模型一致的回应。",
             "plan_steps": plan_steps,
             "required_keywords": required_keywords,
-            "aligned_goals": aligned_goals,
+            "personal_guidance_source": "context_manifest",
             "needs_tools": needs_tools,
             "suggested_tools": suggested_tools,
             "conflict_flags": conflict_flags,
@@ -433,14 +603,34 @@ impl LayeredReasoner {
         }
 
         let result = match self
-            .scheduler
-            .generate_raw(messages.to_vec(), Some(&system_prompt))
+            .generate_phase("generation", messages.to_vec(), &system_prompt)
             .await
         {
-            Ok(text) => json!({
-                "text": text,
-                "used_strategy": strategy.clone(),
-            }),
+            Ok(outcome) => {
+                let receipt = outcome.receipt;
+                match outcome.result {
+                    Ok(text) => Self::attach_provider_receipt(
+                        json!({
+                            "text": text,
+                            "used_strategy": strategy.clone(),
+                        }),
+                        receipt,
+                    ),
+                    Err(error) => {
+                        if let Some(receipt) = receipt {
+                            trace.set_layer_result(
+                                ReasoningPhaseKind::Generation,
+                                json!({ "provider_invocation_receipt": receipt }),
+                            );
+                        }
+                        return Err(ReasoningError {
+                            phase: "generation".to_string(),
+                            message: format!("Generation phase LLM call failed: {error}"),
+                            recoverable: false,
+                        });
+                    }
+                }
+            }
             Err(e) => {
                 return Err(ReasoningError {
                     phase: "generation".to_string(),
@@ -578,6 +768,129 @@ impl SafetyChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn layered_local_only_route_is_bound_before_provider_execution() {
+        let scheduler = InferenceScheduler::new(
+            "local-model".into(),
+            false,
+            "openai".into(),
+            "https://capture.invalid/v1".into(),
+            "sk-capture".into(),
+            "cloud-model".into(),
+            String::new(),
+            false,
+        )
+        .with_scripted_generation_response("fixture");
+        let reasoner = LayeredReasoner::new(scheduler, LifeModel::default())
+            .with_provider_policy_context(
+                crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+                    crate::llm::ProviderLocalOnlyReason::TestFixture,
+                ),
+                Vec::new(),
+            );
+
+        let prepared = reasoner
+            .prepare_phase_request(
+                "strategy",
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "plan".into(),
+                }],
+                "instruction",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            prepared.data_route,
+            crate::llm::ProviderDataRoute::LocalOnly
+        );
+        assert_eq!(prepared.provider_target, "ollama");
+        assert_eq!(prepared.model_target, "local-model");
+    }
+
+    #[test]
+    fn layered_life_guidance_is_bounded_privacy_filtered_and_manifested() {
+        let scheduler = InferenceScheduler::new(
+            "local-model".into(),
+            true,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "sk-test".into(),
+            "cloud-model".into(),
+            String::new(),
+            false,
+        )
+        .with_scripted_generation_response("fixture");
+        let mut life_model = LifeModel::default();
+        life_model
+            .goals
+            .short_term
+            .push(crate::life_model::GoalItem {
+                name: "Contact private@example.com".into(),
+                description: "Call 13812345678 and then continue ".repeat(400),
+                priority: 9,
+                ..Default::default()
+            });
+        let reasoner = LayeredReasoner::new(scheduler, life_model);
+
+        let (messages, blocks, manifest) = reasoner.prepare_phase_payload(
+            "strategy",
+            vec![ChatMessage {
+                role: "user".into(),
+                content: "My email is user@example.com".into(),
+            }],
+            "Use the selected guidance only.",
+        );
+        let serialized = serde_json::to_string(&(messages, &blocks)).unwrap();
+
+        assert!(!serialized.contains("private@example.com"));
+        assert!(!serialized.contains("user@example.com"));
+        assert!(!serialized.contains("13812345678"));
+        assert!(serialized.contains("<EMAIL_"));
+        let guidance = blocks
+            .iter()
+            .find(|block| block.category == "selected_life_guidance")
+            .expect("selected LifeModel guidance must be an explicit bounded block");
+        assert!(guidance.content.chars().count() <= MAX_LAYERED_LIFE_GUIDANCE_CHARS);
+        assert!(manifest
+            .included_context_categories
+            .contains(&"selected_life_guidance".to_string()));
+        assert!(manifest
+            .selected_context_refs
+            .contains(&"life_model.selected_guidance".to_string()));
+        assert!(!manifest.raw_life_model_included);
+    }
+
+    #[test]
+    fn layered_phase_trace_retains_the_typed_provider_receipt() {
+        let started_at = chrono::Utc::now();
+        let receipt = ProviderInvocationReceipt {
+            request_id: "layered-request".into(),
+            provider: "ollama".into(),
+            model: "local-model".into(),
+            status: crate::llm::ProviderInvocationStatus::Completed,
+            started_at,
+            finished_at: started_at,
+            error_digest: None,
+            simulated: false,
+            policy_evidence: None,
+        };
+
+        let traced = LayeredReasoner::attach_provider_receipt(
+            json!({ "text": "bounded result" }),
+            Some(receipt.clone()),
+        );
+
+        assert_eq!(
+            serde_json::from_value::<ProviderInvocationReceipt>(
+                traced["provider_invocation_receipt"].clone()
+            )
+            .unwrap(),
+            receipt
+        );
+    }
 
     #[test]
     fn test_safety_checker_pass() {

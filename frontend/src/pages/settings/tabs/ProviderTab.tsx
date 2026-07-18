@@ -3,15 +3,20 @@ import type {
   AppConfig,
   ModelRouterStatus,
   PolicyRouterStatus,
+  ProviderPrivacyBoundarySummary,
   SystemDiagnostics,
 } from "../../../tauri";
-import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
-import { buildProviderReadinessView } from "../../../utils/providerReadiness";
+import {
+  CapabilityCard,
+  StatusChip,
+  type ProductTone,
+} from "../../../components/product/ProductPrimitives";
 
 interface ProviderTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   diagnostics: SystemDiagnostics | null;
+  providerPrivacyBoundary?: ProviderPrivacyBoundarySummary | null;
   policyRouterStatus: PolicyRouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug?: boolean;
@@ -26,16 +31,45 @@ function activeMode(config: AppConfig, diagnostics: SystemDiagnostics | null): M
   return "auto";
 }
 
+function boundaryTone(boundary: ProviderPrivacyBoundarySummary | null): ProductTone {
+  if (!boundary) return "warning";
+  if (boundary.blockedReason) return "warning";
+  if (boundary.risk === "high" || boundary.risk === "critical") return "danger";
+  if (boundary.risk === "medium" || boundary.externalTransmission === "possible") return "info";
+  if (boundary.risk === "low" || boundary.risk === "none") return "ready";
+  return "warning";
+}
+
+function routeLabel(boundary: ProviderPrivacyBoundarySummary | null): string {
+  if (!boundary) return "route unknown";
+  return boundary.routeType.replace(/_/g, " ");
+}
+
+function transmissionLabel(boundary: ProviderPrivacyBoundarySummary | null): string {
+  if (!boundary) return "external unknown";
+  switch (boundary.externalTransmission) {
+    case "not_sent":
+      return "not sent";
+    case "sent":
+      return "sent";
+    case "possible":
+      return "possible";
+    case "unknown":
+      return "unknown";
+  }
+}
+
 export default function ProviderTab({
   config,
   setConfig,
   diagnostics,
+  providerPrivacyBoundary = null,
   policyRouterStatus,
   modelRouterStatus,
   onProviderValidationChanged,
 }: ProviderTabProps) {
   const mode = activeMode(config, diagnostics);
-  const providerReadiness = buildProviderReadinessView(diagnostics);
+  const providerBoundaryTone = boundaryTone(providerPrivacyBoundary);
   const localAvailable = Boolean(diagnostics?.ollama_online);
 
   function setMode(nextMode: ModelMode) {
@@ -117,23 +151,24 @@ export default function ProviderTab({
           />
         </CapabilityCard>
         <CapabilityCard
-          title="云端模型"
-          description={providerReadiness.detail}
-          tone={providerReadiness.tone}
-          meta={providerReadiness.statusLabel}
+          title="模型边界"
+          description={
+            providerPrivacyBoundary?.blockedReason ??
+            providerPrivacyBoundary?.privacyLabel ??
+            "Provider/privacy boundary is loading."
+          }
+          tone={providerBoundaryTone}
+          meta={providerPrivacyBoundary?.risk ?? "unknown"}
         >
           <div className="flex flex-wrap gap-1.5">
             <StatusChip
-              label={providerReadiness.providerLabel || config.llm?.provider || "cloud"}
-              tone={providerReadiness.tone}
+              label={providerPrivacyBoundary?.providerLabel || config.llm?.provider || "provider"}
+              tone={providerBoundaryTone}
             />
+            <StatusChip label={routeLabel(providerPrivacyBoundary)} tone={providerBoundaryTone} />
             <StatusChip
-              label={providerReadiness.actualRouteLabel}
-              tone={providerReadiness.actualRouteTone}
-            />
-            <StatusChip
-              label={providerReadiness.externalTransmissionLabel}
-              tone={providerReadiness.externalTransmissionTone}
+              label={transmissionLabel(providerPrivacyBoundary)}
+              tone={providerBoundaryTone}
             />
           </div>
         </CapabilityCard>

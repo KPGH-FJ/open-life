@@ -33,7 +33,7 @@ type PlanControlTarget = {
 
 type ControlHandlers = {
   onResume?: () => void;
-  onRetry?: (target?: ControlTarget) => void;
+  onRetry?: () => void;
   onCancel?: () => void;
   onApproveOnce?: (
     target: Required<Pick<ControlTarget, "proposalId" | "actionId" | "blockerId">>
@@ -1242,15 +1242,6 @@ export default function AgentControlPlane({
                                 actionId,
                                 blockerId: blocker.blockerId,
                               }),
-                          })}
-                        {blocker.controls.includes("retry") &&
-                          blocker.affectedActionId &&
-                          onRetry &&
-                          inlineControlButton({
-                            label: "Retry",
-                            icon: <RotateCw size={13} />,
-                            disabled: busy,
-                            onClick: () => onRetry({ actionId: blocker.affectedActionId }),
                           })}
                         {blocker.controls.includes("cancel") &&
                           onCancel &&

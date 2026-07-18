@@ -1,6 +1,6 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-07-07
+> Last updated: 2026-07-18
 > Status: active authority map for the single-system Phase7 cleanup pass
 
 This file is the active plan index for Agents. Its purpose is to keep old
@@ -12,10 +12,35 @@ planning documents from steering new work.
 2. `plans/README.md`
 3. `plans/openlife_single_system_deletion_manifest.md`
 4. `plans/openlife_single_system_development_preparation.md`
+5. `plans/openlife_backend_remediation_v4.md` for the currently approved backend
+   remediation work package, always subordinate to items 1-4.
+6. `plans/openlife_roadshow_core_capability_execution.md` for the time-bounded
+   roadshow execution order only. It is subordinate to items 1-5 and cannot
+   close a Phase7 or backend-remediation finding without that finding's own
+   required evidence.
 
 All older Goal, Stage, Beta, dogfood, eval, adapter, and route-transition
 documents are historical reference only unless a future user task explicitly
 names one as input and keeps it subordinate to this single-system contract.
+
+## Frontend Refactor Readiness Convergence
+
+The protected remote `main` branch is the only long-term product authority.
+The roadshow branch is a frozen integration input and audit surface, not a
+second product mainline. Its independently rerun backend input is fixed at
+`c9e75c8cc90475c7a1df09e1f40e3657dedfc625` by the annotated
+`backend-freeze-c9e75c8` tag.
+
+The frontend-readiness convergence branch must start from the latest
+`origin/main`, merge that frozen input through ordinary Git history, preserve
+only source-backed frontend work missing from the merged baseline, and pass
+backend, frontend, and isolated product-start checks before it can be proposed
+for `main`. Candidate readiness is not final readiness: only merged, CI-green,
+and reverified `origin/main` may be called `FRONTEND_REFACTOR_READY`.
+
+Backend Remediation v4 is paused. Its existing inventory, discovered findings,
+and traceability files remain the backlog authority; open or partial findings
+must not be inferred closed from the bounded roadshow backend freeze.
 
 ## Phase7 Contract
 
@@ -38,9 +63,26 @@ The shipped product must have:
 - `plans/openlife_single_system_deletion_manifest.md`
 - `plans/openlife_single_system_development_preparation.md`
 - `plans/openlife_single_system_phase1_inventory.json`
+- `plans/openlife_backend_remediation_v4.md`
+- `plans/openlife_backend_remediation_v4_inventory.json`
+- `plans/openlife_backend_remediation_v4_traceability.json`
+- `plans/openlife_backend_remediation_v4_scenarios.json`
+- `plans/openlife_backend_remediation_v4_scenario_waivers.json`
+- `plans/openlife_backend_remediation_v4_phase0_evidence.md`
+- `plans/openlife_backend_d055_terminal_owner_red_matrix.md` (D055 production
+  terminal-owner contract and executable regression evidence; global closure
+  still requires the recorded independent read-only review)
+- `plans/adr/0014-explicit-user-memory-write-lane.md`
+- `plans/adr/0015-transient-state-command-lane.md`
+- `plans/openlife_roadshow_core_capability_execution.md`
+- `plans/openlife_roadshow_core_capability_scenarios.json`
+- `plans/openlife_roadshow_core_capability_state.json`
+- `plans/openlife_roadshow_core_capability_waivers.json`
 
 These documents define the current cleanup scope, deletion manifest, and
-acceptance gates. The deletion manifest is a contract artifact: objects marked
+acceptance gates. The backend remediation work package implements the Phase7
+single-system contract; it does not supersede or create a second authority.
+The deletion manifest is a contract artifact: objects marked
 `not-done` are blockers, and objects marked `done` must be absent from product
 build, product UI, product bridge, and active docs.
 

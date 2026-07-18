@@ -388,6 +388,26 @@ impl EvidenceStore {
         Ok(store)
     }
 
+    pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
+        let db_path = db_path.into();
+        let conn = crate::sqlite_migration::open_existing_read_only(
+            &db_path,
+            "evidence_store",
+            &["evidence_records"],
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn unavailable_sentinel() -> Result<Self> {
+        Ok(Self {
+            conn: Mutex::new(crate::sqlite_migration::unavailable_read_only_sentinel(
+                "evidence_store",
+            )?),
+        })
+    }
+
     fn init_tables(&self) -> Result<()> {
         let conn = self
             .conn

@@ -10,7 +10,10 @@ use crate::agent::{
 };
 use crate::layer::Layer;
 use crate::life_model::LifeModel;
-use crate::llm::ChatMessage;
+use crate::llm::{
+    BoundedContextBlock, ChatMessage, ContextManifest, ProviderLocalOnlyReason,
+    ProviderPayloadPurpose, ProviderPolicyAuthorization, ProviderPolicyProvenanceRef,
+};
 use crate::scheduler::InferenceScheduler;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,7 +45,28 @@ pub struct AgentRuntime {
     context_assembler: CompositeAssembler,
     reasoning_strategies: HashMap<String, Box<dyn ReasoningStrategy>>,
     scheduler: InferenceScheduler,
+    network_policy: crate::config::NetworkPolicy,
     config: AgentRuntimeConfig,
+}
+
+fn layered_provider_policy_context(
+    hs_packet: Option<&RuntimeHSPacket>,
+    _session_id: &str,
+) -> (
+    ProviderPolicyAuthorization,
+    Vec<ProviderPolicyProvenanceRef>,
+) {
+    let provider_authorization = hs_packet
+        .map(|packet| packet.provider_authorization().clone())
+        .unwrap_or_else(|| {
+            ProviderPolicyAuthorization::local_only_fail_closed(
+                ProviderLocalOnlyReason::MissingCanonicalPolicy,
+            )
+        });
+    let policy_provenance_refs = hs_packet
+        .map(RuntimeHSPacket::provider_policy_provenance_refs)
+        .unwrap_or_default();
+    (provider_authorization, policy_provenance_refs)
 }
 
 impl AgentRuntime {
@@ -51,22 +75,32 @@ impl AgentRuntime {
         scheduler: InferenceScheduler,
         app_config: &crate::config::AppConfig,
     ) -> Self {
-        let mut strategies: HashMap<String, Box<dyn ReasoningStrategy>> = HashMap::new();
-
-        // Register LayeredReasoner (default)
-        let layered = LayeredReasoner::with_config(
-            scheduler.clone(),
-            life_model.clone(),
-            ReasoningConfig {
+        Self::new_with_runtime_config(
+            life_model,
+            scheduler,
+            app_config.system.network_policy.clone(),
+            AgentRuntimeConfig {
+                default_strategy: app_config.reasoning.default_strategy.clone(),
                 meaning_timeout_ms: app_config.reasoning.meaning_timeout_ms,
                 strategy_timeout_ms: app_config.reasoning.strategy_timeout_ms,
                 generation_timeout_ms: app_config.reasoning.generation_timeout_ms,
-                max_retries: 1,
             },
-        );
-        strategies.insert("layered".to_string(), Box::new(layered));
+        )
+    }
 
-        // Register DirectReasoner (fallback)
+    /// Build a runtime from the exact provider-safe configuration fields it
+    /// consumes. Product callers can therefore avoid retaining an `AppConfig`
+    /// snapshot (and any unrelated hydrated credentials) across execution.
+    pub fn new_with_runtime_config(
+        _life_model: LifeModel,
+        scheduler: InferenceScheduler,
+        network_policy: crate::config::NetworkPolicy,
+        config: AgentRuntimeConfig,
+    ) -> Self {
+        let mut strategies: HashMap<String, Box<dyn ReasoningStrategy>> = HashMap::new();
+
+        // Direct reasoning is stateless. Layered reasoning is constructed per turn
+        // only after the outer HS data-route decision has been resolved.
         let direct = DirectReasoner::new();
         strategies.insert("direct".to_string(), Box::new(direct));
 
@@ -78,12 +112,8 @@ impl AgentRuntime {
                 .with(Box::new(crate::agent::ToolsAssembler)),
             reasoning_strategies: strategies,
             scheduler,
-            config: AgentRuntimeConfig {
-                default_strategy: app_config.reasoning.default_strategy.clone(),
-                meaning_timeout_ms: app_config.reasoning.meaning_timeout_ms,
-                strategy_timeout_ms: app_config.reasoning.strategy_timeout_ms,
-                generation_timeout_ms: app_config.reasoning.generation_timeout_ms,
-            },
+            network_policy,
+            config,
         }
     }
 
@@ -138,6 +168,8 @@ impl AgentRuntime {
         &self,
         input: RuntimeInput,
     ) -> Result<RuntimeOutput, AgentRuntimeError> {
+        let (provider_authorization, policy_provenance_refs) =
+            layered_provider_policy_context(input.hs_packet.as_ref(), &input.task.session_id);
         let params = input.agent_runtime_params();
         let runtime_output = self
             .execute_task_with_hs_packet_and_guidance_mode(
@@ -152,30 +184,62 @@ impl AgentRuntime {
             )
             .await?;
 
-        let tools_prompt = if input.tools_prompt.trim().is_empty() {
-            None
+        let tools_required = !input.tools_prompt.trim().is_empty();
+        let context_blocks = if tools_required {
+            vec![BoundedContextBlock {
+                source_ref: "tool_gateway.manifest".into(),
+                category: "typed_tool_contract".into(),
+                content: input.tools_prompt.clone(),
+            }]
         } else {
-            Some(input.tools_prompt.as_str())
+            Vec::new()
         };
-        let user_output = if let Some(ref packet) = input.hs_packet {
-            self.scheduler
-                .generate_with_hs_packet(
-                    runtime_output.final_messages.clone(),
-                    &input.life_model_compat,
-                    tools_prompt,
-                    packet,
-                )
-                .await
-        } else {
-            self.scheduler
-                .generate(
-                    runtime_output.final_messages.clone(),
-                    &input.life_model_compat,
-                    tools_prompt,
-                )
-                .await
-        }
-        .map_err(|e| AgentRuntimeError::Generation(e.to_string()))?;
+        let provider_authorization = provider_authorization
+            .authorize_derived_payload(
+                ProviderPayloadPurpose::AgentRuntimeGeneration,
+                &input.task.user_text,
+                &runtime_output.final_messages,
+                &context_blocks,
+            )
+            .map_err(|e| AgentRuntimeError::Generation(e.to_string()))?;
+        let selected_context_refs = context_blocks
+            .iter()
+            .map(|block| block.source_ref.clone())
+            .collect::<Vec<_>>();
+        let included_context_categories = context_blocks
+            .iter()
+            .map(|block| block.category.clone())
+            .collect::<Vec<_>>();
+        let prepared = self
+            .scheduler
+            .prepare_chat_request_with_authorization(
+                runtime_output.final_messages.clone(),
+                context_blocks,
+                ContextManifest {
+                    request_id: Uuid::new_v4().to_string(),
+                    privacy_decision_id: provider_authorization.decision_id().to_string(),
+                    selected_context_refs,
+                    included_context_categories,
+                    declared_payload_categories: vec![
+                        crate::llm::ProviderPayloadCategory::RuntimeCompiledMessages,
+                    ],
+                    policy_provenance_refs,
+                    raw_life_model_included: false,
+                    raw_unbounded_memory_included: false,
+                },
+                provider_authorization,
+                self.network_policy.clone(),
+                tools_required,
+            )
+            .await
+            .map_err(|e| AgentRuntimeError::Generation(e.to_string()))?;
+        let provider_outcome = self.scheduler.execute_prepared(prepared).await;
+        self.scheduler
+            .verify_prepared_outcome_receipt(&provider_outcome)
+            .map_err(|e| AgentRuntimeError::Generation(e.to_string()))?;
+        let user_output = provider_outcome
+            .result
+            .map_err(AgentRuntimeError::Generation)?;
 
         Ok(RuntimeOutput {
             run_id: Some(runtime_output.run_id),
@@ -188,7 +252,10 @@ impl AgentRuntime {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn execute_task_with_hs_packet(
         &self,
         task: &AgentTask,
@@ -212,7 +279,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn execute_task_with_hs_packet_and_guidance_mode(
         &self,
         task: &AgentTask,
@@ -237,7 +307,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn execute_task_inner(
         &self,
         task: &AgentTask,
@@ -249,6 +322,12 @@ impl AgentRuntime {
         hs_packet: Option<RuntimeHSPacket>,
         guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        // Resolve the outer data route synchronously before a layered reasoner
+        // can perform provider selection, health probing, or dispatch.
+        let (provider_authorization, selected_policy_refs) =
+            layered_provider_policy_context(hs_packet.as_ref(), &task.session_id);
+        let layered_privacy_engine = privacy_engine.clone();
+
         // 1. Build AssembleInput
         let input = AssembleInput {
             session_id: task.session_id.clone(),
@@ -267,38 +346,44 @@ impl AgentRuntime {
             .assemble(&input)
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
-        // 3. Select reasoning strategy based on layer
-        let strategy = if task.layer == Layer::L3 {
-            self.reasoning_strategies.get("layered")
-        } else {
-            self.reasoning_strategies.get("direct")
-        }
-        .ok_or_else(|| {
-            AgentRuntimeError::StrategyNotFound(
-                if task.layer == Layer::L3 {
-                    "layered"
-                } else {
-                    "direct"
-                }
-                .to_string(),
-            )
-        })?;
-
-        // 4. Build reasoning input
+        // 3. Build reasoning input
         let reasoning_input = ReasoningInput {
             task_kind: task.kind,
             user_text: task.user_text.clone(),
             session_id: task.session_id.clone(),
         };
 
-        // 5. Execute reasoning
+        // 4. Execute reasoning. The LayeredReasoner is per-turn so no default
+        // PolicyAllowed instance can race ahead of the outer decision.
         let run_id = Uuid::new_v4().to_string();
-        let reasoning_output = strategy
+        let reasoning_output = if task.layer == Layer::L3 {
+            LayeredReasoner::with_config(
+                self.scheduler.clone(),
+                life_model.clone(),
+                ReasoningConfig {
+                    meaning_timeout_ms: self.config.meaning_timeout_ms,
+                    strategy_timeout_ms: self.config.strategy_timeout_ms,
+                    generation_timeout_ms: self.config.generation_timeout_ms,
+                    max_retries: 1,
+                },
+            )
+            .with_network_policy(self.network_policy.clone())
+            .with_provider_policy_context(provider_authorization, selected_policy_refs)
+            .with_provider_subject_text(task.user_text.clone())
+            .with_privacy_engine(layered_privacy_engine)
             .reason(&reasoning_input, &context, &run_id)
             .await
-            .map_err(AgentRuntimeError::Reasoning)?;
+            .map_err(AgentRuntimeError::Reasoning)?
+        } else {
+            self.reasoning_strategies
+                .get("direct")
+                .ok_or_else(|| AgentRuntimeError::StrategyNotFound("direct".to_string()))?
+                .reason(&reasoning_input, &context, &run_id)
+                .await
+                .map_err(AgentRuntimeError::Reasoning)?
+        };
 
-        // 6. Build final messages with system prompt
+        // 5. Build final messages with system prompt
         let mut final_messages = context.desensitized_messages.to_vec();
         if !reasoning_output.system_prompt.is_empty() {
             final_messages.insert(
@@ -361,7 +446,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn generate_direct_with_hs_packet(
         &self,
         task: &AgentTask,
@@ -385,7 +473,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn generate_direct_with_hs_packet_and_guidance_mode(
         &self,
         task: &AgentTask,
@@ -410,7 +501,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn generate_direct_inner(
         &self,
         task: &AgentTask,
@@ -552,6 +646,51 @@ mod tests {
             session_id: "test-session".to_string(),
             layer: Layer::L3,
         }
+    }
+
+    #[test]
+    fn hs_local_only_policy_is_resolved_before_layered_reasoning() {
+        let packet = RuntimeHSPacket {
+            selected_policies: vec![crate::agent::SelectedPolicyRef {
+                policy_id: "policy.local-only".into(),
+                reason: "sensitive route".into(),
+                route: Some(crate::agent::ModelRoutePolicy::LocalOnly),
+                digest: "policy-digest".into(),
+            }],
+            selected_heuristics: Vec::new(),
+            guidance_refs: Vec::new(),
+            estimated_tokens: 0,
+            audit: crate::agent::HSSelectionAudit {
+                agent_task_id: Some("task-local".into()),
+                agent_run_id: None,
+                input_digest: "outer-policy-decision".into(),
+                selected_policy_ids: vec!["policy.local-only".into()],
+                selected_heuristic_ids: Vec::new(),
+                selected_guidance_ids: Vec::new(),
+                selected_guidance_refs: Vec::new(),
+                excluded_assets: Vec::new(),
+                estimated_tokens: 0,
+                token_budget: 128,
+            },
+            provider_authorization: ProviderPolicyAuthorization::local_only_fail_closed(
+                ProviderLocalOnlyReason::TestFixture,
+            ),
+        };
+
+        let (authorization, refs) = layered_provider_policy_context(Some(&packet), "session-local");
+
+        assert_eq!(
+            authorization.data_route(),
+            crate::llm::ProviderDataRoute::LocalOnly
+        );
+        assert!(refs.iter().any(|reference| {
+            reference.kind() == crate::llm::ProviderPolicyProvenanceKind::HsPolicy
+                && reference.reference_id() == "policy.local-only"
+        }));
+        assert!(refs.iter().any(|reference| {
+            reference.kind() == crate::llm::ProviderPolicyProvenanceKind::FailClosedRouteDecision
+                && reference.reference_id() == authorization.decision_id()
+        }));
     }
 
     #[tokio::test]

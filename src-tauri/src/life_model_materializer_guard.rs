@@ -1,6 +1,8 @@
+pub(crate) const STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID: &str =
+    "state_store_daily_task_compatibility_projection";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LifeModelMaterializerCallerKind {
-    OrdinaryChatAutoCheckinSourceData,
     GovernedManualOverride,
     SourceDataCompatibilityMaterialization,
     AcceptedProposalApply,
@@ -101,8 +103,7 @@ fn caller_pair_allowed(context: &LifeModelMaterializerCallerContext) -> bool {
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ) | (
-            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization
-                | LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
             LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
         ) | (
             LifeModelMaterializerCallerKind::AcceptedProposalApply,

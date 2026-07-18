@@ -1,7 +1,6 @@
 use openlife_core::agent::main_chat_agent_v1::{
-    main_chat_action_type_supports_automatic_retry, AgentTaskSession, AgentTaskSessionStatus,
-    ExecutionQueueStatus, ExecutionTranscriptEntry, ExecutionTranscriptEntryKind,
-    QueuedExecutionAction,
+    AgentTaskSession, AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntry,
+    ExecutionTranscriptEntryKind, QueuedExecutionAction,
 };
 use openlife_core::agent::{AgentProposal, AgentRun, AgentRunStatus, ProposalStatus};
 use serde_json::Value;
@@ -232,14 +231,32 @@ async fn agent_self_state_snapshot(
     };
     let run_id = match transcript_run_id(&transcript) {
         Some(run_id) => Some(run_id),
-        None => latest_matching_run_id_from_store(state, chat_session_id, &target_session).await,
+        None => match latest_matching_run_id_from_store(state, chat_session_id, &target_session)
+            .await
+        {
+            Ok(run_id) => run_id,
+            Err(_) => {
+                return missing_agent_self_state_snapshot(chat_session_id, "agent_run_list_failed");
+            }
+        },
     };
     let run = if let (Some(run_store_arc), Some(run_id)) =
         (state.agent_run_store.as_ref(), run_id.as_deref())
     {
         let run_store = run_store_arc.lock().await;
-        run_store.get_run(run_id).ok().flatten()
+        match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            run_store.get_run(run_id).map_err(|error| error.to_string()),
+        ) {
+            Ok(run) => run,
+            Err(_) => {
+                return missing_agent_self_state_snapshot(chat_session_id, "agent_run_load_failed");
+            }
+        }
     } else {
+        if run_id.is_some() {
+            return missing_agent_self_state_snapshot(chat_session_id, "agent_run_store_missing");
+        }
         None
     };
     let proposals = load_self_state_proposals(
@@ -337,7 +354,15 @@ fn agent_self_state_snapshot_from_evidence(
         .filter(|proposal| proposal.status == ProposalStatus::Pending)
         .count();
     let run_status = run.as_ref().map(|run| run.status.to_string());
+    let final_delivery_override = transcript.iter().rev().find_map(|entry| {
+        entry
+            .metadata
+            .get("finalDeliveryStatus")
+            .or_else(|| entry.metadata.get("final_delivery_status"))
+            .and_then(Value::as_str)
+    });
     let final_delivery_evidence = final_result_count > 0
+        && final_delivery_override != Some("failed")
         && run.as_ref().is_some_and(|run| {
             run.status == AgentRunStatus::Completed && run.output_preview.is_some()
         });
@@ -346,7 +371,9 @@ fn agent_self_state_snapshot_from_evidence(
             session.status,
             AgentTaskSessionStatus::Completed | AgentTaskSessionStatus::WaitingPermission
         );
-    let delivery_status = if final_delivery_evidence && pending_proposal_count > 0 {
+    let delivery_status = if let Some(status) = final_delivery_override {
+        status
+    } else if final_delivery_evidence && pending_proposal_count > 0 {
         "response_delivered_pending_review"
     } else if final_delivery_evidence {
         "delivered"
@@ -432,6 +459,9 @@ fn agent_self_state_snapshot_from_evidence(
     if !proposals.is_empty() {
         evidence_labels.push("proposal_store".to_string());
     }
+    if final_delivery_override.is_some() {
+        evidence_labels.push("terminal_delivery_receipt".to_string());
+    }
     evidence_labels.sort();
     evidence_labels.dedup();
 
@@ -493,8 +523,11 @@ fn agent_self_state_safe_next_controls(
         controls.push("review_proposal".to_string());
     }
     if actions.iter().any(|action| {
-        action.status == ExecutionQueueStatus::Failed
-            && main_chat_action_type_supports_automatic_retry(&action.action.action_type)
+        let decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_action_retry(
+            Some(session),
+            Some(action),
+        );
+        decision.allowed && !decision.manual_blocker_required
     }) {
         controls.push("retry_failed_action".to_string());
     }
@@ -520,19 +553,26 @@ async fn latest_matching_run_id_from_store(
     state: &Arc<AppState>,
     chat_session_id: &str,
     session: &AgentTaskSession,
-) -> Option<String> {
-    let run_store_arc = state.agent_run_store.as_ref()?;
+) -> Result<Option<String>, String> {
+    let run_store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let run_store = run_store_arc.lock().await;
-    run_store
-        .list_runs_for_session(chat_session_id, 20)
-        .ok()?
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        run_store
+            .list_runs_for_session(chat_session_id, 20)
+            .map_err(|error| error.to_string()),
+    )?;
+    Ok(runs
         .into_iter()
         .find(|run| {
             run.user_input.as_deref() == Some(session.user_goal.as_str())
                 && classify_agent_self_state_query(run.user_input.as_deref().unwrap_or_default())
                     .is_none()
         })
-        .map(|run| run.id)
+        .map(|run| run.id))
 }
 
 async fn load_self_state_proposals(
@@ -555,14 +595,11 @@ async fn load_self_state_proposals(
         .unwrap_or_default()
         .into_iter()
         .filter(|proposal| {
-            proposal
-                .source_detail
-                .as_deref()
-                .is_some_and(|source_detail| {
-                    source_detail == task_session_id
-                        || source_detail
-                            == format!("main_chat_agent_task_session:{task_session_id}")
-                })
+            proposal_store
+                .terminal_owner_origin_binding(&proposal.id)
+                .ok()
+                .flatten()
+                .is_some_and(|origin| origin.task_session_id() == task_session_id)
                 || run_id
                     .map(|run_id| proposal.run_id.as_deref() == Some(run_id))
                     .unwrap_or(false)
@@ -893,4 +930,139 @@ pub(crate) fn classify_agent_self_state_query(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::agent::main_chat_agent_v1::{
+        ActionQueueStore, ActionReplayEffectCertainty, AgentTaskSessionDraft,
+        AgentTaskSessionStore, ExecutionAction, ExecutionPolicy, ExecutionQueueStatus,
+        InitialToolExecutionProjection, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{ActionExecutionStatus, ToolActionEffect};
+    use openlife_core::tool_execution_receipt::ToolExecutionReceipt;
+    use openlife_core::tool_manifest::ToolIdempotencyContract;
+
+    #[test]
+    fn dispatched_unknown_failure_never_becomes_a_safe_retry_control() {
+        let sessions = AgentTaskSessionStore::new_in_memory().expect("task sessions");
+        let session = sessions
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "agent-self-unknown-effect".into(),
+                user_goal: "Read without duplicating an uncertain effect.".into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create task session");
+        let actions = ActionQueueStore::new_in_memory().expect("action queue");
+        let action = ExecutionAction::new("file.read", "Read one governed resource.");
+        let queued = actions
+            .enqueue(
+                &session.id,
+                action.clone(),
+                ExecutionPolicy.classify(&action),
+            )
+            .expect("enqueue action");
+        let receipt = ToolExecutionReceipt::test_remote_unknown(
+            Some("run-agent-self-unknown-effect".into()),
+            Some("file.read".into()),
+            "agent-self-unknown-effect".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        let failed = actions
+            .project_initial_tool_execution_receipt(
+                &queued.id,
+                queued.status,
+                queued.revision,
+                InitialToolExecutionProjection {
+                    execution_status: ActionExecutionStatus::Failed,
+                    receipt: &receipt,
+                    observation_metadata: Some(serde_json::json!({
+                        "toolExecutionReceipt": receipt,
+                    })),
+                    error: Some("remote effect unknown".into()),
+                },
+            )
+            .expect("persist unknown effect");
+        assert_eq!(
+            failed.replay_effect_certainty,
+            ActionReplayEffectCertainty::DispatchedUnknown
+        );
+
+        let controls = agent_self_state_safe_next_controls(&session, &[failed], 0);
+        assert!(!controls
+            .iter()
+            .any(|control| control == "retry_failed_action"));
+    }
+
+    #[test]
+    fn non_idempotent_pre_dispatch_failure_is_manual_only_not_an_automatic_control() {
+        let sessions = AgentTaskSessionStore::new_in_memory().expect("task sessions");
+        let session = sessions
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "agent-self-non-idempotent-pre-dispatch".into(),
+                user_goal: "Do not replay a non-idempotent tool automatically.".into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create task session");
+        let actions = ActionQueueStore::new_in_memory().expect("action queue");
+        let action = ExecutionAction::new("mcp.read_only", "Opaque tool name is not authority.");
+        let queued = actions
+            .enqueue(
+                &session.id,
+                action.clone(),
+                ExecutionPolicy.classify(&action),
+            )
+            .expect("enqueue action");
+        let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
+            Some("run-agent-self-non-idempotent".into()),
+            Some("manifest-agent-self-non-idempotent".into()),
+            "agent-self-non-idempotent-pre-dispatch".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::NonIdempotent,
+        );
+        let failed = actions
+            .project_initial_tool_execution_receipt(
+                &queued.id,
+                queued.status,
+                queued.revision,
+                InitialToolExecutionProjection {
+                    execution_status: ActionExecutionStatus::Failed,
+                    receipt: &receipt,
+                    observation_metadata: None,
+                    error: Some("failed before dispatch".into()),
+                },
+            )
+            .expect("project typed pre-dispatch receipt");
+        assert_eq!(
+            failed.replay_effect_certainty,
+            ActionReplayEffectCertainty::EffectNotAttempted
+        );
+        let decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_action_retry(
+            Some(&session),
+            Some(&failed),
+        );
+        assert!(decision.allowed);
+        assert!(decision.manual_blocker_required);
+
+        let chat_session_id = session.chat_session_id.clone();
+        let snapshot = agent_self_state_snapshot_from_evidence(
+            &chat_session_id,
+            session,
+            Vec::new(),
+            vec![failed],
+            None,
+            Vec::new(),
+        );
+        assert!(!snapshot
+            .safe_next_controls
+            .iter()
+            .any(|control| control == "retry_failed_action"));
+        assert!(!snapshot.safe_automatic_control_available);
+    }
 }

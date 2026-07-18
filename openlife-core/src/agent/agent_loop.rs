@@ -7,9 +7,17 @@ use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunSta
 use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
 use crate::layer::Layer;
 use crate::life_model::LifeModel;
-use crate::llm::ChatMessage;
+#[cfg(test)]
+use crate::llm::ProviderInvocationStatus;
+use crate::llm::{
+    BoundedContextBlock, ChatMessage, ContextManifest, PreparedProviderRequest,
+    ProviderLocalOnlyReason, ProviderPayloadPurpose, ProviderPolicyAuthorization,
+};
 use crate::privacy::PrivacyEngine;
-use crate::scheduler::InferenceScheduler;
+use crate::scheduler::{
+    InferenceScheduler, PreparedProviderStream, PreparedProviderStreamEvent,
+    PreparedProviderStreamTerminal, ProviderInvocationProgress, ScheduledInferenceScheduler,
+};
 use anyhow::Result;
 use futures::StreamExt;
 use serde_json::Value;
@@ -110,16 +118,88 @@ pub fn apply_react_guidance_to_config(
     config
 }
 
-/// Bundles the 5 shared task/life-model/tools/privacy/memory parameters
-/// that flow through the entire agent loop, reducing argument counts below clippy limits.
+fn intersect_provider_authorizations(
+    explicit: Option<ProviderPolicyAuthorization>,
+    hs_policy: Option<ProviderPolicyAuthorization>,
+) -> ProviderPolicyAuthorization {
+    match (explicit, hs_policy) {
+        (Some(explicit), Some(_))
+            if explicit.data_route() == crate::llm::ProviderDataRoute::LocalOnly =>
+        {
+            explicit
+        }
+        (Some(explicit), Some(hs_policy))
+            if hs_policy.data_route() == crate::llm::ProviderDataRoute::LocalOnly =>
+        {
+            explicit.restrict_to_local(ProviderLocalOnlyReason::CanonicalRouteIntersection)
+        }
+        (Some(explicit), Some(_)) | (Some(explicit), None) => explicit,
+        (None, Some(hs_policy)) => hs_policy,
+        (None, None) => ProviderPolicyAuthorization::local_only_fail_closed(
+            ProviderLocalOnlyReason::MissingCanonicalPolicy,
+        ),
+    }
+}
+
+/// Bundles the correlated runtime and policy inputs that flow through the
+/// entire agent loop, reducing argument counts below clippy limits while
+/// keeping canonical policy subject truth separate from compiled prompt text.
 struct AgentLoopContext<'a> {
     pub task: &'a AgentTask,
+    /// Canonical current-user text bound by the policy authority before any
+    /// prompt-hardening transform. `task.user_text` may be wrapped or otherwise
+    /// compiled for model consumption and must never be reused as policy truth.
+    pub provider_subject_text: &'a str,
     pub life_model: &'a LifeModel,
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
     pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub provider_authorization: Option<ProviderPolicyAuthorization>,
+    pub network_policy: crate::config::NetworkPolicy,
     pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+}
+
+/// Typed execution boundary for one AgentLoop invocation. Keeping these
+/// correlated inputs together prevents observer-enabled product paths from
+/// growing a parallel positional API as runtime facts are added.
+pub struct AgentLoopRunRequest<'a> {
+    task: &'a AgentTask,
+    life_model: &'a LifeModel,
+    tools_prompt: &'a str,
+    memory_context: Option<String>,
+    privacy_engine: PrivacyEngine,
+    action_ctx: &'a ActionExecutionContext<'a>,
+    provider_authorization: Option<ProviderPolicyAuthorization>,
+}
+
+impl<'a> AgentLoopRunRequest<'a> {
+    pub fn new(
+        task: &'a AgentTask,
+        life_model: &'a LifeModel,
+        tools_prompt: &'a str,
+        memory_context: Option<String>,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &'a ActionExecutionContext<'a>,
+    ) -> Self {
+        Self {
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            privacy_engine,
+            action_ctx,
+            provider_authorization: None,
+        }
+    }
+
+    pub fn with_provider_authorization(
+        mut self,
+        authorization: ProviderPolicyAuthorization,
+    ) -> Self {
+        self.provider_authorization = Some(authorization);
+        self
+    }
 }
 
 /// Boundary markers for prompt injection defense.
@@ -162,14 +242,77 @@ pub trait StreamingCallback: Send + Sync {
 }
 
 /// Result of running the agent loop.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentLoopResult {
     pub run: AgentRun,
     pub final_response: String,
     pub stop_reason: String,
+    pub terminal_disposition: AgentLoopTerminalDisposition,
     pub tool_call_count: u32,
     pub step_count: u32,
     pub status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate>,
+}
+
+impl std::fmt::Debug for AgentLoopResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentLoopResult")
+            .field("run_id", &self.run.id)
+            .field("terminal_disposition", &self.terminal_disposition)
+            .field("tool_call_count", &self.tool_call_count)
+            .field("step_count", &self.step_count)
+            .field("status_update_count", &self.status_updates.len())
+            .field("final_response", &"[REDACTED]")
+            .field("stop_reason", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// The one terminal classification consumed by persistence and product
+/// projections. A tool failure must never be reinterpreted as a completed run
+/// by a downstream adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentLoopTerminalDisposition {
+    Succeeded,
+    WaitingPermission,
+    Failed,
+    RemoteUnknown,
+    Cancelled,
+}
+
+impl AgentLoopTerminalDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::WaitingPermission => "waiting_permission",
+            Self::Failed => "failed",
+            Self::RemoteUnknown => "remote_unknown",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_success(self) -> bool {
+        self == Self::Succeeded
+    }
+}
+
+fn classify_agent_loop_terminal(
+    run_status: AgentRunStatus,
+    stop_reason: &str,
+) -> AgentLoopTerminalDisposition {
+    match run_status {
+        AgentRunStatus::Failed => AgentLoopTerminalDisposition::Failed,
+        AgentRunStatus::RemoteUnknown => AgentLoopTerminalDisposition::RemoteUnknown,
+        AgentRunStatus::Cancelled => AgentLoopTerminalDisposition::Cancelled,
+        AgentRunStatus::WaitingPermission => AgentLoopTerminalDisposition::WaitingPermission,
+        AgentRunStatus::Completed if matches!(stop_reason, "no_tools" | "no_observations") => {
+            AgentLoopTerminalDisposition::Succeeded
+        }
+        AgentRunStatus::Running if matches!(stop_reason, "no_tools" | "no_observations") => {
+            AgentLoopTerminalDisposition::Succeeded
+        }
+        AgentRunStatus::Running | AgentRunStatus::Completed => AgentLoopTerminalDisposition::Failed,
+    }
 }
 
 /// Result of a single step in the agent loop.
@@ -186,11 +329,13 @@ struct StepResult {
 /// Context for executing a single step of the agent loop.
 struct StepContext<'a> {
     pub task: &'a AgentTask,
+    pub provider_subject_text: &'a str,
     pub life_model: &'a LifeModel,
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
     pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub provider_authorization: Option<ProviderPolicyAuthorization>,
     pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     pub action_ctx: &'a ActionExecutionContext<'a>,
     pub run: &'a mut AgentRun,
@@ -206,10 +351,25 @@ struct StepContext<'a> {
 /// The loop continues until stop_reason indicates completion, permission
 /// required, an error, or max_steps/max_tool_calls are exhausted.
 /// Configurable via AgentLoopConfig (max_steps default: 4, max_tool_calls default: 6).
+enum AgentLoopProviderScheduler {
+    General(InferenceScheduler),
+    Scheduled(ScheduledInferenceScheduler),
+}
+
+#[cfg(test)]
+impl AgentLoopProviderScheduler {
+    fn provider_receipts_snapshot(&self) -> Vec<crate::llm::ProviderInvocationReceipt> {
+        match self {
+            Self::General(scheduler) => scheduler.provider_receipts_snapshot(),
+            Self::Scheduled(scheduler) => scheduler.inner_provider_receipts_snapshot_for_test(),
+        }
+    }
+}
+
 pub struct AgentLoop {
     runtime: AgentRuntime,
     tool_gateway: ToolGateway,
-    scheduler: InferenceScheduler,
+    scheduler: AgentLoopProviderScheduler,
     config: AgentLoopConfig,
     scripted_replies: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
@@ -224,7 +384,24 @@ impl AgentLoop {
         Self {
             runtime,
             tool_gateway,
-            scheduler,
+            scheduler: AgentLoopProviderScheduler::General(scheduler),
+            config,
+            scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+        }
+    }
+
+    pub fn new_scheduled(
+        runtime: AgentRuntime,
+        tool_gateway: ToolGateway,
+        scheduler: ScheduledInferenceScheduler,
+        config: AgentLoopConfig,
+    ) -> Self {
+        Self {
+            runtime,
+            tool_gateway,
+            scheduler: AgentLoopProviderScheduler::Scheduled(scheduler),
             config,
             scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
@@ -238,6 +415,90 @@ impl AgentLoop {
                 std::collections::VecDeque::from(replies),
             )),
             ..self
+        }
+    }
+
+    async fn prepare_provider_request(
+        &self,
+        actx: &AgentLoopContext<'_>,
+        messages: Vec<ChatMessage>,
+    ) -> Result<PreparedProviderRequest> {
+        let provider_authorization = intersect_provider_authorizations(
+            actx.provider_authorization.clone(),
+            actx.hs_runtime_packet
+                .as_ref()
+                .map(|packet| packet.provider_authorization().clone()),
+        );
+        let provider_authorization = if self.config.allow_cloud {
+            provider_authorization
+        } else {
+            provider_authorization.restrict_to_local(ProviderLocalOnlyReason::CloudDisabled)
+        };
+        let context_blocks = (!actx.tools_prompt.trim().is_empty())
+            .then(|| BoundedContextBlock {
+                source_ref: "tool_gateway.manifest".into(),
+                category: "typed_tool_contract".into(),
+                content: actx.tools_prompt.to_string(),
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let selected_context_refs = context_blocks
+            .iter()
+            .map(|block| block.source_ref.clone())
+            .collect::<Vec<_>>();
+        let included_context_categories = context_blocks
+            .iter()
+            .map(|block| block.category.clone())
+            .collect::<Vec<_>>();
+        let policy_provenance_refs = actx
+            .hs_runtime_packet
+            .as_ref()
+            .map(RuntimeHSPacket::provider_policy_provenance_refs)
+            .unwrap_or_default();
+        let provider_authorization = provider_authorization.authorize_derived_payload(
+            ProviderPayloadPurpose::AgentLoopStep,
+            actx.provider_subject_text,
+            &messages,
+            &context_blocks,
+        )?;
+
+        let context_manifest = ContextManifest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            privacy_decision_id: provider_authorization.decision_id().to_string(),
+            selected_context_refs,
+            included_context_categories,
+            declared_payload_categories: vec![
+                crate::llm::ProviderPayloadCategory::RuntimeCompiledMessages,
+            ],
+            policy_provenance_refs,
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+        };
+        match &self.scheduler {
+            AgentLoopProviderScheduler::General(scheduler) => {
+                scheduler
+                    .prepare_chat_request_with_authorization(
+                        messages,
+                        context_blocks,
+                        context_manifest,
+                        provider_authorization,
+                        actx.network_policy.clone(),
+                        !actx.tools_prompt.trim().is_empty(),
+                    )
+                    .await
+            }
+            AgentLoopProviderScheduler::Scheduled(scheduler) => {
+                scheduler
+                    .prepare_scheduled_chat_request(
+                        messages,
+                        context_blocks,
+                        context_manifest,
+                        provider_authorization,
+                        actx.network_policy.clone(),
+                        !actx.tools_prompt.trim().is_empty(),
+                    )
+                    .await
+            }
         }
     }
 
@@ -276,6 +537,7 @@ impl AgentLoop {
         action_ctx: &ActionExecutionContext<'_>,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
     ) -> Result<ParsedAgentReply> {
         let mut repair_task = actx.task.clone();
         repair_task.messages.push(ChatMessage {
@@ -285,15 +547,21 @@ impl AgentLoop {
 
         let repair_actx = AgentLoopContext {
             task: &repair_task,
+            provider_subject_text: actx.provider_subject_text,
             life_model: actx.life_model,
             tools_prompt: actx.tools_prompt,
             memory_context: actx.memory_context.clone(),
             privacy_engine: actx.privacy_engine.clone(),
             hs_runtime_packet: actx.hs_runtime_packet.clone(),
+            provider_authorization: actx.provider_authorization.clone(),
+            network_policy: actx.network_policy.clone(),
             guidance_consumption_mode: actx.guidance_consumption_mode,
         };
 
-        match self.generate_response(&repair_actx).await {
+        match self
+            .generate_response(&repair_actx, provider_progress)
+            .await
+        {
             Ok(repaired_gen) => {
                 let parsed =
                     self.parse_agent_reply(&repaired_gen.reply, action_ctx, run, tool_call_count)?;
@@ -325,11 +593,12 @@ impl AgentLoop {
         &self,
         actx: &AgentLoopContext<'_>,
         action_ctx: &ActionExecutionContext<'_>,
+        mut run: AgentRun,
         callback: Option<Arc<dyn StreamingCallback>>,
         config: &AgentLoopConfig,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
-        let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
         run.user_input = Some(actx.task.user_text.clone());
         let mut current_hs_packet = actx.hs_runtime_packet.clone();
         let guided_config = apply_react_guidance_to_config(
@@ -351,6 +620,7 @@ impl AgentLoop {
         let mut current_task = actx.task.clone();
         wrap_user_content(&mut current_task);
         let mut current_tools_prompt = actx.tools_prompt.to_string();
+        let current_memory_context = actx.memory_context.clone();
         // Append role-specific instruction if applicable
         if let Some(role_instruction) = config.role_system_instruction() {
             if !current_tools_prompt.is_empty() {
@@ -358,7 +628,6 @@ impl AgentLoop {
             }
             current_tools_prompt.push_str(role_instruction);
         }
-        let current_memory_context = actx.memory_context.clone();
         let current_privacy_engine = actx.privacy_engine.clone();
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
@@ -411,18 +680,41 @@ impl AgentLoop {
             }
 
             // Search memory for relevant context
-            let memory_context = if let Some(memory_store) = action_ctx.memory_store {
-                search_memory_for_context(
-                    memory_store,
+            let memory_context = match action_ctx.memory_store {
+                Some(_) => match search_memory_for_context(
+                    action_ctx,
                     &current_task.user_text,
                     &actx.task.session_id,
-                )
-                .unwrap_or_else(|e| {
-                    eprintln!("[AgentLoop] Memory search failed: {}", e);
-                    current_memory_context.clone()
-                })
-            } else {
-                current_memory_context.clone()
+                ) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        eprintln!("[AgentLoop] canonical Memory retrieval degraded: {error}");
+                        run.status = AgentRunStatus::Failed;
+                        run.error = Some(AgentRunError {
+                            message: "memory_retrieval_degraded".into(),
+                            phase: "context_retrieval".into(),
+                            recoverable: true,
+                        });
+                        run.warnings.push("memory_retrieval_degraded".into());
+                        stop_reason = "memory_retrieval_degraded".into();
+                        final_response =
+                            "记忆检索状态暂时无法确认，本次执行已停止，以避免将未知状态当作空结果。".into();
+                        break;
+                    }
+                },
+                None if current_tools_prompt.contains("memory.search") => {
+                    run.status = AgentRunStatus::Failed;
+                    run.error = Some(AgentRunError {
+                        message: "memory_store_unavailable".into(),
+                        phase: "context_retrieval".into(),
+                        recoverable: true,
+                    });
+                    run.warnings.push("memory_retrieval_degraded".into());
+                    stop_reason = "memory_retrieval_degraded".into();
+                    final_response = "记忆存储状态暂时无法确认，本次执行已停止。".into();
+                    break;
+                }
+                None => current_memory_context.clone(),
             };
 
             // Execute single step (catch parse errors to preserve run.actions)
@@ -430,11 +722,13 @@ impl AgentLoop {
                 .run_single_step(
                     StepContext {
                         task: &current_task,
+                        provider_subject_text: actx.provider_subject_text,
                         life_model: actx.life_model,
                         tools_prompt: &current_tools_prompt,
                         memory_context,
                         privacy_engine: current_privacy_engine.clone(),
                         hs_runtime_packet: current_hs_packet.clone(),
+                        provider_authorization: actx.provider_authorization.clone(),
                         guidance_consumption_mode: actx.guidance_consumption_mode,
                         action_ctx,
                         run: &mut run,
@@ -442,6 +736,7 @@ impl AgentLoop {
                     },
                     callback.clone(),
                     &guided_config,
+                    provider_progress,
                 )
                 .await
             {
@@ -487,27 +782,80 @@ impl AgentLoop {
             // current_tools_prompt.clear(); // REMOVED: was causing step 2+ to lose tools
         }
 
-        // Emit final status
-        if run.status == AgentRunStatus::Failed {
-            self.emit_status(
-                &mut status_updates,
-                crate::agent::types::AgentLoopPhase::Failed,
-                format!("Execution failed: {}", stop_reason),
-                step_count,
-                None,
-            );
-        } else {
-            self.emit_status(
-                &mut status_updates,
-                crate::agent::types::AgentLoopPhase::Completed,
-                format!("Execution completed: {}", stop_reason),
-                step_count,
-                None,
-            );
-        }
-
-        if run.status == AgentRunStatus::Running {
-            run.status = AgentRunStatus::Completed;
+        let terminal_disposition = classify_agent_loop_terminal(run.status, &stop_reason);
+        let (terminal_phase, terminal_message, terminal_status) = match terminal_disposition {
+            AgentLoopTerminalDisposition::Succeeded => {
+                run.status = AgentRunStatus::Completed;
+                (
+                    crate::agent::types::AgentLoopPhase::Completed,
+                    format!("Execution completed: {}", stop_reason),
+                    "completed",
+                )
+            }
+            AgentLoopTerminalDisposition::WaitingPermission => {
+                run.status = AgentRunStatus::WaitingPermission;
+                (
+                    crate::agent::types::AgentLoopPhase::WaitingPermission,
+                    "Execution paused for permission".into(),
+                    "waiting_permission",
+                )
+            }
+            AgentLoopTerminalDisposition::Failed => {
+                run.status = AgentRunStatus::Failed;
+                if run.error.is_none() {
+                    run.error = Some(AgentRunError {
+                        message: format!("agent_loop_terminal:{stop_reason}"),
+                        phase: match stop_reason.as_str() {
+                            "tool_execution_failed" => "tool_execution",
+                            "tool_allowlist_blocked" => "policy",
+                            "max_steps_reached" | "max_tool_calls_reached" => "budget",
+                            _ => "execution",
+                        }
+                        .into(),
+                        recoverable: stop_reason == "tool_execution_failed",
+                    });
+                }
+                (
+                    crate::agent::types::AgentLoopPhase::Failed,
+                    format!("Execution failed: {}", stop_reason),
+                    "failed",
+                )
+            }
+            AgentLoopTerminalDisposition::RemoteUnknown => {
+                run.status = AgentRunStatus::RemoteUnknown;
+                if run.error.is_none() {
+                    run.error = Some(AgentRunError {
+                        message: "agent_loop_remote_terminal_unknown".into(),
+                        phase: "interrupted".into(),
+                        recoverable: false,
+                    });
+                }
+                (
+                    crate::agent::types::AgentLoopPhase::Failed,
+                    "Execution stopped locally; remote terminal state is unknown".into(),
+                    "remote_unknown",
+                )
+            }
+            AgentLoopTerminalDisposition::Cancelled => {
+                run.status = AgentRunStatus::Cancelled;
+                (
+                    crate::agent::types::AgentLoopPhase::Failed,
+                    "Execution cancelled locally".into(),
+                    "cancelled",
+                )
+            }
+        };
+        self.emit_status(
+            &mut status_updates,
+            terminal_phase,
+            terminal_message.clone(),
+            step_count,
+            None,
+        );
+        if let Some(ref callback) = callback {
+            callback
+                .on_status(terminal_status, &terminal_message, step_count)
+                .await;
         }
         run.output_preview = Some(preview_text(&final_response, 200));
         run.finished_at = Some(chrono::Utc::now());
@@ -516,6 +864,7 @@ impl AgentLoop {
             run,
             final_response,
             stop_reason,
+            terminal_disposition,
             tool_call_count,
             step_count,
             status_updates,
@@ -532,17 +881,114 @@ impl AgentLoop {
         privacy_engine: PrivacyEngine,
         action_ctx: &ActionExecutionContext<'_>,
     ) -> Result<AgentLoopResult> {
-        let actx = AgentLoopContext {
+        let mut ignore_provider_progress = |_: ProviderInvocationProgress| Ok(());
+        self.run_with_provider_observer(
+            AgentLoopRunRequest::new(
+                task,
+                life_model,
+                tools_prompt,
+                memory_context,
+                privacy_engine,
+                action_ctx,
+            ),
+            &mut ignore_provider_progress,
+        )
+        .await
+    }
+
+    /// Run the AgentLoop while exposing adapter-edge provider lifecycle facts
+    /// synchronously to the owning runtime.
+    pub async fn run_with_provider_observer(
+        &self,
+        request: AgentLoopRunRequest<'_>,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
+    ) -> Result<AgentLoopResult> {
+        let AgentLoopRunRequest {
             task,
             life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
+            action_ctx,
+            provider_authorization,
+        } = request;
+        let actx = AgentLoopContext {
+            task,
+            provider_subject_text: &task.user_text,
+            life_model,
+            tools_prompt,
+            memory_context,
+            privacy_engine,
             hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            provider_authorization,
+            network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
             guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
-        self.run_loop_core(&actx, action_ctx, None, &self.config)
-            .await
+        self.run_loop_core(
+            &actx,
+            action_ctx,
+            AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text),
+            None,
+            &self.config,
+            provider_progress,
+        )
+        .await
+    }
+
+    /// Runs the loop as a subordinate of an already-persisted canonical run.
+    /// Product runtimes must use this path so tool/proposal/trace facts cannot
+    /// acquire a second randomly generated execution identity.
+    pub async fn run_existing_with_provider_observer(
+        &self,
+        request: AgentLoopRunRequest<'_>,
+        canonical_run: AgentRun,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
+    ) -> Result<AgentLoopResult> {
+        let AgentLoopRunRequest {
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            privacy_engine,
+            action_ctx,
+            provider_authorization,
+        } = request;
+        if canonical_run.id.trim().is_empty() || canonical_run.task_id.trim().is_empty() {
+            anyhow::bail!("agent_loop_canonical_run_identity_missing");
+        }
+        if canonical_run.session_id.as_deref() != Some(task.session_id.as_str()) {
+            anyhow::bail!("agent_loop_canonical_run_session_mismatch");
+        }
+        if canonical_run.status != AgentRunStatus::Running {
+            anyhow::bail!("agent_loop_canonical_run_not_running");
+        }
+        let actx = AgentLoopContext {
+            task,
+            provider_subject_text: &task.user_text,
+            life_model,
+            tools_prompt,
+            memory_context,
+            privacy_engine,
+            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            provider_authorization,
+            network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
+        };
+        // Keep the product AgentLoop seam stack-bounded. `run_loop_core`
+        // contains the full iterative provider/tool state machine; inlining
+        // that future into every upstream Main Chat poll chain can exhaust a
+        // normal Tokio test/runtime thread before this async body is entered.
+        // Boxing the single subordinate future preserves one runtime owner and
+        // changes neither execution nor cancellation semantics.
+        Box::pin(self.run_loop_core(
+            &actx,
+            action_ctx,
+            canonical_run,
+            None,
+            &self.config,
+            provider_progress,
+        ))
+        .await
     }
 
     fn config_with_runtime_budget(&self, input: &RuntimeInput) -> AgentLoopConfig {
@@ -573,26 +1019,49 @@ impl AgentLoop {
             safe_paths: action_ctx.safe_paths,
             life_model: action_ctx.life_model,
             memory_store: action_ctx.memory_store,
+            memory_lifecycle_retrieval_reader: action_ctx.memory_lifecycle_retrieval_reader,
             proposal_store: action_ctx.proposal_store,
             agent_run_store: action_ctx.agent_run_store,
+            bound_content_receipt_issuer: action_ctx.bound_content_receipt_issuer,
             network_policy: action_ctx.network_policy,
             hs_runtime_packet,
+            tool_dispatch_observer: action_ctx.tool_dispatch_observer,
+            tool_started_transition_observer: action_ctx.tool_started_transition_observer,
+            tool_audit_persistence_observer: action_ctx.tool_audit_persistence_observer,
+            durable_store_failure_observer: action_ctx.durable_store_failure_observer,
+            a2a_outbound_authorization: action_ctx.a2a_outbound_authorization,
+            canonical_write_admission: action_ctx.canonical_write_admission,
+            action_bound_tool_permission: action_ctx.action_bound_tool_permission,
             calendar_ics_paths: action_ctx.calendar_ics_paths,
             web_search_fixture_output: action_ctx.web_search_fixture_output,
         };
         let actx = AgentLoopContext {
             task: &input.task,
+            provider_subject_text: &input.task.user_text,
             life_model: &input.life_model_compat,
             tools_prompt: &input.tools_prompt,
             memory_context: input.memory_context.clone(),
             privacy_engine,
             hs_runtime_packet: runtime_action_ctx.hs_runtime_packet.cloned(),
+            provider_authorization: None,
+            network_policy: runtime_action_ctx
+                .network_policy
+                .cloned()
+                .unwrap_or_default(),
             guidance_consumption_mode: input.guidance_consumption_mode,
         };
         let config = self.config_with_runtime_budget(input);
 
-        self.run_loop_core(&actx, &runtime_action_ctx, None, &config)
-            .await
+        let mut ignore_provider_progress = |_: ProviderInvocationProgress| Ok(());
+        self.run_loop_core(
+            &actx,
+            &runtime_action_ctx,
+            AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text),
+            None,
+            &config,
+            &mut ignore_provider_progress,
+        )
+        .await
     }
 
     /// Run the iterative loop through RuntimeInput and return the converged
@@ -611,7 +1080,10 @@ impl AgentLoop {
 
     /// Streaming variant of run(). Same logic but forwards token chunks
     /// through the callback as they arrive from the model.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn run_streaming(
         &self,
         task: &AgentTask,
@@ -624,15 +1096,26 @@ impl AgentLoop {
     ) -> Result<AgentLoopResult> {
         let actx = AgentLoopContext {
             task,
+            provider_subject_text: &task.user_text,
             life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
             hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            provider_authorization: None,
+            network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
             guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
-        self.run_loop_core(&actx, action_ctx, Some(callback), &self.config)
-            .await
+        let mut ignore_provider_progress = |_: ProviderInvocationProgress| Ok(());
+        self.run_loop_core(
+            &actx,
+            action_ctx,
+            AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text),
+            Some(callback),
+            &self.config,
+            &mut ignore_provider_progress,
+        )
+        .await
     }
 
     /// Execute a single step of the agent loop.
@@ -642,6 +1125,7 @@ impl AgentLoop {
         mut ctx: StepContext<'_>,
         callback: Option<Arc<dyn StreamingCallback>>,
         config: &AgentLoopConfig,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
     ) -> Result<StepResult> {
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
@@ -654,17 +1138,21 @@ impl AgentLoop {
         let generated = {
             let actx = AgentLoopContext {
                 task: ctx.task,
+                provider_subject_text: ctx.provider_subject_text,
                 life_model: ctx.life_model,
                 tools_prompt: ctx.tools_prompt,
                 memory_context: ctx.memory_context.clone(),
                 privacy_engine: ctx.privacy_engine.clone(),
                 hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                provider_authorization: ctx.provider_authorization.clone(),
+                network_policy: ctx.action_ctx.network_policy.cloned().unwrap_or_default(),
                 guidance_consumption_mode: ctx.guidance_consumption_mode,
             };
             if let Some(ref cb) = callback {
-                self.generate_response_streaming(&actx, cb.clone()).await
+                self.generate_response_streaming(&actx, cb.clone(), provider_progress)
+                    .await
             } else {
-                self.generate_response(&actx).await
+                self.generate_response(&actx, provider_progress).await
             }
         };
 
@@ -714,16 +1202,24 @@ impl AgentLoop {
                         .try_json_self_repair(
                             &AgentLoopContext {
                                 task: ctx.task,
+                                provider_subject_text: ctx.provider_subject_text,
                                 life_model: ctx.life_model,
                                 tools_prompt: ctx.tools_prompt,
                                 memory_context: memory_ctx.clone(),
                                 privacy_engine: privacy.clone(),
                                 hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                                provider_authorization: ctx.provider_authorization.clone(),
+                                network_policy: ctx
+                                    .action_ctx
+                                    .network_policy
+                                    .cloned()
+                                    .unwrap_or_default(),
                                 guidance_consumption_mode: ctx.guidance_consumption_mode,
                             },
                             ctx.action_ctx,
                             ctx.run,
                             &mut ctx.tool_call_count,
+                            provider_progress,
                         )
                         .await?;
                 }
@@ -735,21 +1231,6 @@ impl AgentLoop {
                     ctx.run.warnings.push(format!(
                         "Tool selection blocked: disallowed_tool_count={rejected_tool_count}"
                     ));
-                    self.emit_status(
-                        &mut status_updates,
-                        crate::agent::types::AgentLoopPhase::Failed,
-                        "Model selected a tool outside the configured allowlist",
-                        0,
-                        None,
-                    );
-                    if let Some(ref cb) = callback {
-                        cb.on_status(
-                            "failed",
-                            "Model selected a tool outside the configured allowlist",
-                            0,
-                        )
-                        .await;
-                    }
                     return Ok(StepResult {
                         stop_reason: "tool_allowlist_blocked".into(),
                         final_response: final_text,
@@ -833,17 +1314,6 @@ impl AgentLoop {
                     phase: "model".into(),
                     recoverable: false,
                 });
-                self.emit_status(
-                    &mut status_updates,
-                    crate::agent::types::AgentLoopPhase::Failed,
-                    format!("Model generation failed: {}", e),
-                    0,
-                    None,
-                );
-                if let Some(ref cb) = callback {
-                    cb.on_status("failed", &format!("Model generation failed: {}", e), 0)
-                        .await;
-                }
                 Ok(StepResult {
                     stop_reason: "model_error".into(),
                     final_response: format!("模型生成失败: {}", e),
@@ -859,6 +1329,7 @@ impl AgentLoop {
     async fn generate_response(
         &self,
         actx: &AgentLoopContext<'_>,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
     ) -> Result<GeneratedAgentResponse> {
         let memory_hits = Vec::new();
         let runtime_output = self
@@ -883,30 +1354,26 @@ impl AgentLoop {
             });
         }
 
-        let tools_prompt = if actx.tools_prompt.trim().is_empty() {
-            None
-        } else {
-            Some(actx.tools_prompt)
+        let prepared = self
+            .prepare_provider_request(actx, runtime_output.final_messages.clone())
+            .await?;
+        let provider_outcome = match &self.scheduler {
+            AgentLoopProviderScheduler::General(scheduler) => {
+                let outcome = scheduler
+                    .execute_prepared_with_observer(prepared, provider_progress)
+                    .await;
+                scheduler.verify_prepared_outcome_receipt(&outcome)?;
+                outcome
+            }
+            AgentLoopProviderScheduler::Scheduled(scheduler) => {
+                let outcome = scheduler.execute_scheduled_provider_request(prepared).await;
+                scheduler.verify_scheduled_outcome(&outcome)?;
+                outcome
+            }
         };
-        let reply = if let Some(ref packet) = actx.hs_runtime_packet {
-            self.scheduler
-                .generate_with_hs_packet(
-                    runtime_output.final_messages.clone(),
-                    actx.life_model,
-                    tools_prompt,
-                    packet,
-                )
-                .await
-        } else {
-            self.scheduler
-                .generate(
-                    runtime_output.final_messages.clone(),
-                    actx.life_model,
-                    tools_prompt,
-                )
-                .await
-        }
-        .map_err(|e| anyhow::anyhow!("model generation failed: {}", e))?;
+        let reply = provider_outcome
+            .result
+            .map_err(|e| anyhow::anyhow!("model generation failed: {e}"))?;
 
         Ok(GeneratedAgentResponse {
             runtime_output,
@@ -914,12 +1381,14 @@ impl AgentLoop {
         })
     }
 
-    /// Streaming variant of generate_response. Uses scheduler.generate_stream()
-    /// and forwards each chunk through the callback.
+    /// Streaming variant of generate_response. It forwards transient token
+    /// events and the scheduler-owned typed terminal without reconstructing
+    /// provider receipts in the loop.
     async fn generate_response_streaming(
         &self,
         actx: &AgentLoopContext<'_>,
         callback: Arc<dyn StreamingCallback>,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
     ) -> Result<GeneratedAgentResponse> {
         let memory_hits = Vec::new();
         let runtime_output = self
@@ -945,51 +1414,76 @@ impl AgentLoop {
             });
         }
 
-        let tools_prompt = if actx.tools_prompt.trim().is_empty() {
-            None
-        } else {
-            Some(actx.tools_prompt)
+        let prepared = self
+            .prepare_provider_request(actx, runtime_output.final_messages.clone())
+            .await?;
+        let AgentLoopProviderScheduler::General(scheduler) = &self.scheduler else {
+            anyhow::bail!("scheduled provider execution does not expose a streaming bypass");
         };
-
-        let mut stream = if let Some(ref packet) = actx.hs_runtime_packet {
-            self.scheduler
-                .generate_stream_with_hs_packet(
-                    runtime_output.final_messages.clone(),
-                    actx.life_model,
-                    tools_prompt,
-                    packet,
-                )
-                .await
-        } else {
-            self.scheduler
-                .generate_stream(
-                    runtime_output.final_messages.clone(),
-                    actx.life_model,
-                    tools_prompt,
-                )
-                .await
-        }
-        .map_err(|e| anyhow::anyhow!("stream generation failed: {}", e))?;
-
-        let mut reply = String::new();
-        loop {
-            match stream.next().await {
-                Some(Ok(chunk)) => {
-                    callback.on_chunk(&chunk, 0, "generating").await;
-                    reply.push_str(&chunk);
-                }
-                Some(Err(e)) => {
-                    eprintln!("[AgentLoop] Stream chunk error: {}", e);
-                    break;
-                }
-                None => break,
-            }
-        }
+        let stream = scheduler
+            .generate_prepared_stream_with_start_observer(
+                prepared,
+                |request_id, provider, model, observed_at, observed_policy_evidence| {
+                    provider_progress(ProviderInvocationProgress::Started {
+                        request_id: request_id.to_string(),
+                        provider: provider.to_string(),
+                        model: model.to_string(),
+                        started_at: observed_at,
+                        policy_evidence: observed_policy_evidence.clone(),
+                    })?;
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("stream generation failed: {error}"))?;
+        let reply = self
+            .consume_provider_stream(stream, callback, provider_progress)
+            .await?;
 
         Ok(GeneratedAgentResponse {
             runtime_output,
             reply,
         })
+    }
+
+    async fn consume_provider_stream(
+        &self,
+        mut stream: PreparedProviderStream,
+        callback: Arc<dyn StreamingCallback>,
+        provider_progress: &mut (dyn FnMut(ProviderInvocationProgress) -> Result<()> + Send),
+    ) -> Result<String> {
+        let mut reply = String::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                PreparedProviderStreamEvent::Token(chunk) => {
+                    callback.on_chunk(&chunk, 0, "generating").await;
+                    reply.push_str(&chunk);
+                }
+                PreparedProviderStreamEvent::Terminal(
+                    PreparedProviderStreamTerminal::NotAttempted,
+                ) => return Ok(reply),
+                PreparedProviderStreamEvent::Terminal(
+                    PreparedProviderStreamTerminal::Completed(receipt),
+                ) => {
+                    provider_progress(ProviderInvocationProgress::Completed(*receipt))?;
+                    return Ok(reply);
+                }
+                PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::Failed {
+                    receipt,
+                    error,
+                }) => {
+                    provider_progress(ProviderInvocationProgress::Failed(*receipt))?;
+                    return Err(anyhow::anyhow!("stream generation failed: {error}"));
+                }
+                PreparedProviderStreamEvent::Terminal(
+                    PreparedProviderStreamTerminal::RemoteUnknown { receipt, error },
+                ) => {
+                    provider_progress(ProviderInvocationProgress::RemoteUnknown(*receipt))?;
+                    return Err(anyhow::anyhow!("stream generation failed: {error}"));
+                }
+            }
+        }
+        anyhow::bail!("prepared provider stream ended without its typed terminal event")
     }
 
     /// Parse model response for JSON envelope.
@@ -1144,7 +1638,25 @@ impl AgentLoop {
                     "mcp_tool".to_string()
                 });
             let input = match action_type.as_str() {
-                "memory_search" | "session_search" => args.clone(),
+                "memory_search" => args.clone(),
+                "session_search" => {
+                    let mut governed = args.clone();
+                    if let (Some(object), Some(current_session_id)) =
+                        (governed.as_object_mut(), run.session_id.as_deref())
+                    {
+                        // Current conversation identity is canonical run
+                        // state, never a model-authorized search target. A
+                        // model-supplied session id cannot narrow the search
+                        // back to the triggering conversation and manufacture
+                        // its own "prior" evidence.
+                        object.remove("session_id");
+                        object.insert(
+                            "exclude_session_id".into(),
+                            Value::String(current_session_id.to_string()),
+                        );
+                    }
+                    governed
+                }
                 _ => serde_json::json!({ "arguments": args }),
             };
 
@@ -1259,7 +1771,10 @@ impl AgentLoop {
 
     /// Execute a batch of tool actions, collecting observations and status updates.
     /// Returns (all_succeeded, executed_count, budget_exceeded, observations).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn execute_tool_batch(
         &self,
         tool_actions: &[AgentActionRequest],
@@ -1276,7 +1791,10 @@ impl AgentLoop {
         let mut budget_exceeded = false;
 
         for (idx, action_request) in tool_actions.iter().enumerate() {
-            if *tool_call_count + executed_this_step >= config.max_tool_calls {
+            // `tool_call_count` is advanced after every dispatched action below.
+            // Adding `executed_this_step` here counted the current batch twice and
+            // incorrectly rejected the second action when the budget was exactly 2.
+            if *tool_call_count >= config.max_tool_calls {
                 let obs = self.create_budget_exceeded_observation(
                     run,
                     *tool_call_count,
@@ -1312,6 +1830,7 @@ impl AgentLoop {
             let exec_result = match self
                 .tool_gateway
                 .execute(action_request.clone(), action_ctx)
+                .await
             {
                 Ok(r) => r,
                 Err(e) => {
@@ -1333,6 +1852,7 @@ impl AgentLoop {
                         timestamp: now,
                         tool_scope: None,
                         react_trace: None,
+                        runtime_execution_receipt: None,
                     };
                     let obs = AgentObservation {
                         id: format!("obs-fail-{}", now.timestamp_nanos_opt().unwrap_or_default()),
@@ -1441,7 +1961,10 @@ impl AgentLoop {
 
     /// Handle step completion after tool batch execution:
     /// budget exceeded / partial failure / no observations / continue.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn handle_step_completion(
         &self,
         budget_exceeded: bool,
@@ -1454,6 +1977,12 @@ impl AgentLoop {
         config: &AgentLoopConfig,
     ) -> StepResult {
         if budget_exceeded {
+            run.status = AgentRunStatus::Failed;
+            run.error = Some(AgentRunError {
+                message: "agent_loop_terminal:max_tool_calls_reached".into(),
+                phase: "budget".into(),
+                recoverable: false,
+            });
             let final_response = format!(
                 "已达到最大工具调用次数 ({})。已完成的观察结果：\n{}",
                 config.max_tool_calls,
@@ -1474,26 +2003,37 @@ impl AgentLoop {
         }
 
         if !all_succeeded {
-            let pending_count = run
+            // Classify only the actions produced by this batch. Historical pending
+            // actions must not mask a current failure, and a mixed pending+failed
+            // batch is a failure because at least one terminal failure was observed.
+            let current_actions = run
                 .actions
                 .iter()
-                .filter(|a| a.status == "needs_confirmation")
+                .rev()
+                .take(executed_this_step as usize)
+                .collect::<Vec<_>>();
+            let pending_count = current_actions
+                .iter()
+                .filter(|action| action.status == "needs_confirmation")
                 .count();
-            let final_response = if pending_count > 0 {
+            let has_failure = current_actions.iter().any(|action| {
+                action.status != "succeeded" && action.status != "needs_confirmation"
+            });
+            let waiting_only = pending_count > 0 && !has_failure;
+            let final_response = if waiting_only {
                 run.status = AgentRunStatus::WaitingPermission;
-                self.emit_status(
-                    status_updates,
-                    crate::agent::types::AgentLoopPhase::WaitingPermission,
-                    "Waiting for user permission to continue",
-                    0,
-                    None,
-                );
                 "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。".into()
             } else {
+                run.status = AgentRunStatus::Failed;
+                run.error = Some(AgentRunError {
+                    message: "agent_loop_terminal:tool_execution_failed".into(),
+                    phase: "tool_execution".into(),
+                    recoverable: true,
+                });
                 "工具执行过程中出现错误，请检查配置或稍后重试。".into()
             };
             return StepResult {
-                stop_reason: if pending_count > 0 {
+                stop_reason: if waiting_only {
                     "needs_confirmation".into()
                 } else {
                     "tool_execution_failed".into()
@@ -1553,11 +2093,17 @@ impl AgentLoop {
         }
     }
 
+    // Assemble independently audited terminal facts without a second mutable accumulator.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn build_result(
         &self,
         mut run: AgentRun,
         final_response: String,
         stop_reason: String,
+        terminal_disposition: AgentLoopTerminalDisposition,
         tool_call_count: u32,
         step_count: u32,
         status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate>,
@@ -1569,6 +2115,7 @@ impl AgentLoop {
             run,
             final_response,
             stop_reason,
+            terminal_disposition,
             tool_call_count,
             step_count,
             status_updates,
@@ -1634,16 +2181,57 @@ fn preview_text(text: &str, max_len: usize) -> String {
     }
 }
 
+/// Search memory store for relevant context and format as a string.
+fn search_memory_for_context(
+    action_ctx: &ActionExecutionContext<'_>,
+    query: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    if query.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let memory_store = action_ctx
+        .memory_store
+        .ok_or_else(|| anyhow::anyhow!("MemoryStore unavailable for AgentLoop context"))?;
+    let hits = action_ctx.filter_retrievable_memory_hits(memory_store.search_text_memories(
+        Some(session_id),
+        query,
+        5,
+    )?)?;
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = String::from("以下是与当前话题相关的历史记忆：\n\n");
+    for (idx, hit) in hits.iter().enumerate() {
+        context.push_str(&format!(
+            "[记忆 {}] {} (相关度: {:.2})\n{}\n\n",
+            idx + 1,
+            hit.chunk.source,
+            hit.relevance_score,
+            hit.chunk.content
+        ));
+    }
+
+    Ok(Some(context))
+}
+
+/// Extract JSON object from text.
+fn try_extract_json(text: &str) -> Option<&str> {
+    crate::json_utils::extract_first_json_object(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::action_executor::ActionExecutorConfig;
     use crate::agent::runtime::AgentRuntime;
     use crate::agent::tool_gateway::ToolGateway;
-    use crate::agent::types::{AgentObservation, AgentRun};
+    use crate::agent::types::{AgentObservation, AgentRun, AgentTaskKind};
     use crate::config::AppConfig;
     use crate::life_model::LifeModel;
-    use crate::llm::ChatMessage;
+    use crate::llm::{ChatMessage, ProviderInvocationReceipt};
     use crate::mcp::McpRegistry;
     use crate::mcp_audit::McpAuditStore;
     use crate::privacy::PrivacyEngine;
@@ -1669,6 +2257,186 @@ mod tests {
         let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
         let config = AgentLoopConfig::default();
         AgentLoop::new(runtime, gateway, scheduler, config)
+    }
+
+    fn terminal_test_action(id: &str, status: &str) -> crate::agent::types::AgentAction {
+        let now = chrono::Utc::now();
+        crate::agent::types::AgentAction {
+            id: id.to_string(),
+            action_type: "mcp_tool".into(),
+            target: Some("fixture.tool".into()),
+            input: serde_json::json!({}),
+            output: None,
+            status: status.into(),
+            error: None,
+            permission_decision: None,
+            started_at: Some(now),
+            finished_at: Some(now),
+            timestamp: now,
+            tool_scope: None,
+            react_trace: None,
+            runtime_execution_receipt: None,
+        }
+    }
+
+    #[test]
+    fn mixed_permission_and_failure_batch_fails_instead_of_masking_failure() {
+        let agent = make_test_agent_loop();
+        let mut run = AgentRun::new_chat_run("session-mixed", "run mixed actions");
+        run.actions
+            .push(terminal_test_action("pending-action", "needs_confirmation"));
+        run.actions
+            .push(terminal_test_action("failed-action", "failed"));
+        let mut status_updates = Vec::new();
+
+        let result = agent.handle_step_completion(
+            false,
+            false,
+            Vec::new(),
+            2,
+            String::new(),
+            &mut run,
+            &mut status_updates,
+            &AgentLoopConfig::default(),
+        );
+
+        assert_eq!(result.stop_reason, "tool_execution_failed");
+        assert_eq!(run.status, AgentRunStatus::Failed);
+        assert_eq!(
+            run.error.as_ref().map(|error| error.message.as_str()),
+            Some("agent_loop_terminal:tool_execution_failed")
+        );
+    }
+
+    #[test]
+    fn historical_pending_action_does_not_mask_current_batch_failure() {
+        let agent = make_test_agent_loop();
+        let mut run = AgentRun::new_chat_run("session-history", "run failing action");
+        run.actions
+            .push(terminal_test_action("old-pending", "needs_confirmation"));
+        run.actions
+            .push(terminal_test_action("current-failure", "failed"));
+        let mut status_updates = Vec::new();
+
+        let result = agent.handle_step_completion(
+            false,
+            false,
+            Vec::new(),
+            1,
+            String::new(),
+            &mut run,
+            &mut status_updates,
+            &AgentLoopConfig::default(),
+        );
+
+        assert_eq!(result.stop_reason, "tool_execution_failed");
+        assert_eq!(run.status, AgentRunStatus::Failed);
+    }
+
+    #[test]
+    fn main_chat_cloud_authorization_cannot_override_hs_local_only_policy() {
+        let ingress = crate::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "provider-intersection-session",
+            "Explain focused work.",
+            None,
+            AgentTaskKind::Conversation,
+        );
+        let main_chat = ProviderPolicyAuthorization::from_main_chat_ingress(&ingress).unwrap();
+        let main_chat_decision_id = main_chat.decision_id().to_string();
+        assert_eq!(
+            main_chat.data_route(),
+            crate::llm::ProviderDataRoute::PolicyAllowed
+        );
+
+        let hs_decision = crate::agent::PolicyStore::mvp_builtin().evaluate_context_policy(
+            crate::agent::PolicyEvaluationRequest {
+                topic: crate::agent::PolicyTopic::Health,
+                requested_route: crate::agent::ModelRoutePolicy::CloudAllowed,
+                heuristic_effect: None,
+            },
+        );
+        let hs_local = ProviderPolicyAuthorization::from_hs_context_decision(
+            &hs_decision,
+            "hs-local-intersection-decision",
+        )
+        .unwrap();
+
+        let intersected = intersect_provider_authorizations(Some(main_chat), Some(hs_local));
+        assert_eq!(
+            intersected.data_route(),
+            crate::llm::ProviderDataRoute::LocalOnly
+        );
+        assert_eq!(
+            intersected.authority(),
+            crate::llm::ProviderPolicyAuthority::MainChatPolicyRouter
+        );
+        assert_eq!(intersected.decision_id(), main_chat_decision_id);
+        assert_eq!(
+            intersected.effective_local_restriction(),
+            Some(crate::llm::ProviderLocalOnlyReason::CanonicalRouteIntersection)
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_wrapping_preserves_the_canonical_provider_policy_subject() {
+        let user_text = "Use the governed read-only tool.";
+        let ingress = crate::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "provider-subject-session",
+            user_text,
+            None,
+            AgentTaskKind::Conversation,
+        );
+        let authorization = ProviderPolicyAuthorization::from_main_chat_ingress(&ingress).unwrap();
+        let mut task = AgentTask {
+            kind: AgentTaskKind::Conversation,
+            session_id: "provider-subject-session".into(),
+            user_text: user_text.into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: user_text.into(),
+            }],
+            layer: crate::layer::Layer::L2,
+        };
+        wrap_user_content(&mut task);
+        assert_ne!(task.user_text, user_text);
+
+        let agent = make_test_agent_loop();
+        let life_model = LifeModel::default();
+        let network_policy = crate::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        let context = AgentLoopContext {
+            task: &task,
+            provider_subject_text: user_text,
+            life_model: &life_model,
+            tools_prompt: "",
+            memory_context: None,
+            privacy_engine: PrivacyEngine::new(),
+            hs_runtime_packet: None,
+            provider_authorization: Some(authorization.clone()),
+            network_policy: network_policy.clone(),
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
+        };
+
+        let prepared = agent
+            .prepare_provider_request(&context, task.messages.clone())
+            .await
+            .expect("compiled prompt remains derived from the canonical policy subject");
+        assert!(prepared.messages.iter().any(|message| {
+            message.role == "user" && message.content.starts_with(USER_REQUEST_START)
+        }));
+
+        let rebound_context = AgentLoopContext {
+            provider_subject_text: &task.user_text,
+            provider_authorization: Some(authorization),
+            ..context
+        };
+        let error = agent
+            .prepare_provider_request(&rebound_context, task.messages.clone())
+            .await
+            .expect_err("compiled prompt text cannot rebind the canonical policy subject");
+        assert!(error.to_string().contains("subject mismatch"));
     }
 
     /// Create a minimal ActionExecutionContext backed by tempfile-based stores.
@@ -1701,14 +2469,328 @@ mod tests {
                 safe_paths: &self.safe_paths,
                 life_model: None,
                 memory_store: None,
+                memory_lifecycle_retrieval_reader: None,
                 proposal_store: None,
                 agent_run_store: None,
+                bound_content_receipt_issuer: None,
                 network_policy: None,
                 web_search_fixture_output: None,
                 hs_runtime_packet: None,
+                tool_dispatch_observer: None,
+                tool_started_transition_observer: None,
+                tool_audit_persistence_observer: None,
+                durable_store_failure_observer: None,
+                a2a_outbound_authorization: None,
+                canonical_write_admission: Some(
+                    &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+                ),
+                action_bound_tool_permission: None,
                 calendar_ics_paths: &[],
             }
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingStreamingCallback {
+        chunks: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingCallback for RecordingStreamingCallback {
+        async fn on_chunk(&self, chunk: &str, _step: u32, _phase: &str) {
+            self.chunks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(chunk.to_string());
+        }
+
+        async fn on_tool_start(&self, _tool_name: &str, _step: u32) {}
+
+        async fn on_tool_result(&self, _tool_name: &str, _success: bool, _step: u32) {}
+
+        async fn on_proposal(&self, _proposal_type: &str, _proposal_id: &str) {}
+
+        async fn on_status(&self, _status: &str, _message: &str, _step: u32) {}
+    }
+
+    fn observed_provider_receipt(status: ProviderInvocationStatus) -> ProviderInvocationReceipt {
+        ProviderInvocationReceipt {
+            request_id: "stream-request-1".into(),
+            provider: "openai".into(),
+            model: "gpt-test".into(),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            status,
+            error_digest: (status != ProviderInvocationStatus::Completed)
+                .then(|| format!("sha256:{}", "5".repeat(64))),
+            simulated: false,
+            policy_evidence: Some(crate::llm::ProviderPolicyReceiptEvidence {
+                decision_id: "test-stream-policy".into(),
+                policy_version: "test-policy-v1".into(),
+                issuing_authority: crate::llm::ProviderPolicyAuthority::LocalOnlyFailClosed,
+                effective_data_route: crate::llm::ProviderDataRoute::LocalOnly,
+                effective_local_restriction: Some(crate::llm::ProviderLocalOnlyReason::TestFixture),
+                subject_scope_digest: format!("sha256:{}", "0".repeat(64)),
+                payload_purpose: Some(crate::llm::ProviderPayloadPurpose::AgentLoopStep),
+                unfiltered_payload_digest: Some(format!("sha256:{}", "2".repeat(64))),
+                context_manifest_digest: format!("sha256:{}", "1".repeat(64)),
+                prepared_envelope_digest: Some(format!("sha256:{}", "3".repeat(64))),
+                provider_config_generation: "test-provider-generation".into(),
+                network_policy_decision_digest: format!("sha256:{}", "4".repeat(64)),
+                selected_context_refs: Vec::new(),
+                included_context_categories: Vec::new(),
+                declared_payload_categories: vec![
+                    crate::llm::ProviderPayloadCategory::FrozenEvaluationInput,
+                ],
+                policy_provenance_refs: Vec::new(),
+                raw_life_model_included: false,
+                raw_unbounded_memory_included: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn streaming_consumer_forwards_terminal_seam_truth_without_receipt_synthesis() {
+        let source = include_str!("agent_loop.rs");
+        let consumer = source
+            .split("async fn consume_provider_stream")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Parse model response").next())
+            .expect("stream consumer source slice");
+
+        assert!(!consumer.contains("ProviderInvocationReceipt {"));
+        assert!(!consumer.contains("provider_error_terminal_status"));
+        assert!(!consumer.contains("chrono::Utc::now"));
+        for removed in [
+            ["emit_stream_", "terminal_receipt"].concat(),
+            ["StartedProvider", "Stream"].concat(),
+            ["retain_stream_", "terminal_receipt"].concat(),
+        ] {
+            assert!(
+                !source.contains(&removed),
+                "old synthesis route remains: {removed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_stream_terminal_remains_not_attempted_without_provider_progress() {
+        let agent = make_test_agent_loop();
+        let callback = Arc::new(RecordingStreamingCallback::default());
+        let stream: PreparedProviderStream = Box::pin(futures::stream::iter(vec![
+            PreparedProviderStreamEvent::Token("scripted".into()),
+            PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::NotAttempted),
+        ]));
+        let mut progress = Vec::new();
+        let mut observer = |event| {
+            progress.push(event);
+            Ok(())
+        };
+
+        let reply = agent
+            .consume_provider_stream(stream, callback, &mut observer)
+            .await
+            .expect("scripted not-attempted stream");
+
+        assert_eq!(reply, "scripted");
+        assert!(progress.is_empty());
+        assert!(agent.scheduler.provider_receipts_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_stream_error_is_failed_receipt_not_success_reply() {
+        let agent = make_test_agent_loop();
+        let callback = Arc::new(RecordingStreamingCallback::default());
+        let stream: PreparedProviderStream = Box::pin(futures::stream::iter(vec![
+            PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::Failed {
+                receipt: Box::new(observed_provider_receipt(ProviderInvocationStatus::Failed)),
+                error: "provider_reasoning_without_final_content".into(),
+            }),
+        ]));
+        let mut progress = Vec::new();
+        let mut observer = |event| {
+            progress.push(event);
+            Ok(())
+        };
+
+        let error = agent
+            .consume_provider_stream(stream, callback, &mut observer)
+            .await
+            .expect_err("reasoning-only stream must fail");
+
+        assert!(error
+            .to_string()
+            .contains("provider_reasoning_without_final_content"));
+        assert!(matches!(
+            progress.as_slice(),
+            [ProviderInvocationProgress::Failed(receipt)]
+                if receipt.status == ProviderInvocationStatus::Failed
+                    && receipt.error_digest.is_some()
+        ));
+        assert!(
+            agent.scheduler.provider_receipts_snapshot().is_empty(),
+            "a manually supplied stream terminal must not fabricate a second scheduler receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_error_never_promotes_partial_reply_to_success() {
+        let agent = make_test_agent_loop();
+        let callback = Arc::new(RecordingStreamingCallback::default());
+        let stream: PreparedProviderStream = Box::pin(futures::stream::iter(vec![
+            PreparedProviderStreamEvent::Token("partial".to_string()),
+            PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::RemoteUnknown {
+                receipt: Box::new(observed_provider_receipt(
+                    ProviderInvocationStatus::RemoteUnknown,
+                )),
+                error: "provider transport reset".into(),
+            }),
+        ]));
+        let mut progress = Vec::new();
+        let mut observer = |event| {
+            progress.push(event);
+            Ok(())
+        };
+
+        let result = agent
+            .consume_provider_stream(stream, callback.clone(), &mut observer)
+            .await;
+
+        assert!(result.is_err(), "partial output cannot become an Ok reply");
+        assert_eq!(
+            callback
+                .chunks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            ["partial"]
+        );
+        assert!(matches!(
+            progress.as_slice(),
+            [ProviderInvocationProgress::RemoteUnknown(receipt)]
+                if receipt.status == ProviderInvocationStatus::RemoteUnknown
+        ));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, ProviderInvocationProgress::Completed(_))));
+    }
+
+    #[tokio::test]
+    async fn successful_stream_retains_completed_terminal_receipt() {
+        let agent = make_test_agent_loop();
+        let callback = Arc::new(RecordingStreamingCallback::default());
+        let expected_receipt = observed_provider_receipt(ProviderInvocationStatus::Completed);
+        let stream: PreparedProviderStream = Box::pin(futures::stream::iter(vec![
+            PreparedProviderStreamEvent::Token("hello ".to_string()),
+            PreparedProviderStreamEvent::Token("world".to_string()),
+            PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::Completed(
+                Box::new(expected_receipt.clone()),
+            )),
+        ]));
+        let mut progress = Vec::new();
+        let mut observer = |event| {
+            progress.push(event);
+            Ok(())
+        };
+
+        let reply = agent
+            .consume_provider_stream(stream, callback, &mut observer)
+            .await
+            .expect("successful stream");
+
+        assert_eq!(reply, "hello world");
+        assert!(matches!(
+            progress.as_slice(),
+            [ProviderInvocationProgress::Completed(receipt)]
+                if receipt == &expected_receipt
+        ));
+    }
+
+    #[tokio::test]
+    async fn existing_canonical_run_identity_is_reused_by_agent_loop() {
+        let agent = make_test_agent_loop()
+            .with_scripted_replies(vec![r#"{"final":"canonical result"}"#.into()]);
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let task = AgentTask {
+            kind: AgentTaskKind::Conversation,
+            session_id: "canonical-session".into(),
+            user_text: "hello".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            layer: crate::layer::Layer::L2,
+        };
+        let mut canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
+        canonical_run.id = "canonical-persisted-run".into();
+        canonical_run.task_id = "canonical-persisted-task".into();
+        let mut progress = Vec::new();
+        let mut observer = |event| {
+            progress.push(event);
+            Ok(())
+        };
+
+        let result = agent
+            .run_existing_with_provider_observer(
+                AgentLoopRunRequest::new(
+                    &task,
+                    &LifeModel::default(),
+                    "",
+                    None,
+                    PrivacyEngine::new(),
+                    &action_ctx,
+                ),
+                canonical_run,
+                &mut observer,
+            )
+            .await
+            .expect("canonical run should drive the AgentLoop");
+
+        assert_eq!(result.run.id, "canonical-persisted-run");
+        assert_eq!(result.run.task_id, "canonical-persisted-task");
+        assert!(
+            progress.is_empty(),
+            "scripted reply performs no provider I/O"
+        );
+    }
+
+    #[test]
+    fn existing_canonical_run_future_remains_stack_bounded() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let task = AgentTask {
+            kind: AgentTaskKind::Conversation,
+            session_id: "bounded-agent-loop-session".into(),
+            user_text: "hello".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            layer: crate::layer::Layer::L2,
+        };
+        let life_model = LifeModel::default();
+        let canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
+        let mut observer = |_: ProviderInvocationProgress| Ok(());
+        let future = agent.run_existing_with_provider_observer(
+            AgentLoopRunRequest::new(
+                &task,
+                &life_model,
+                "",
+                None,
+                PrivacyEngine::new(),
+                &action_ctx,
+            ),
+            canonical_run,
+            &mut observer,
+        );
+        let future_size = std::mem::size_of_val(&future);
+
+        assert!(
+            future_size <= 8 * 1024,
+            "canonical AgentLoop seam regressed to an oversized inline future: {future_size} bytes"
+        );
     }
 
     // ── parse_agent_reply tests ──────────────────────────────────────────
@@ -1772,6 +2854,45 @@ mod tests {
         // step_index should start from tool_call_count (0)
         assert_eq!(result.actions[0].step_index, 0);
         assert_eq!(result.actions[1].step_index, 1);
+    }
+
+    #[test]
+    fn parse_session_search_binds_current_conversation_as_excluded_owner() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("current-conversation", "find prior context");
+        let mut tool_call_count = 0;
+
+        let result = agent
+            .parse_agent_reply(
+                r#"{
+                    "final": "I will search prior conversations.",
+                    "actions": [{
+                        "name": "session.search",
+                        "action_type": "session_search",
+                        "arguments": {
+                            "query": "Agent memory",
+                            "session_id": "model-selected-session",
+                            "limit": 5
+                        }
+                    }]
+                }"#,
+                &action_ctx,
+                &mut run,
+                &mut tool_call_count,
+            )
+            .unwrap();
+
+        assert_eq!(result.actions.len(), 1);
+        assert_eq!(
+            result.actions[0]
+                .input
+                .get("exclude_session_id")
+                .and_then(Value::as_str),
+            Some("current-conversation")
+        );
+        assert!(result.actions[0].input.get("session_id").is_none());
     }
 
     #[test]
@@ -2115,38 +3236,4 @@ mod tests {
         let preview = preview_text(&text, 200);
         assert!(preview.ends_with("😀..."));
     }
-}
-
-/// Search memory store for relevant context and format as a string.
-fn search_memory_for_context(
-    memory_store: &crate::memory::MemoryStore,
-    query: &str,
-    session_id: &str,
-) -> Result<Option<String>> {
-    if query.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let hits = memory_store.search_text_memories(Some(session_id), query, 5)?;
-    if hits.is_empty() {
-        return Ok(None);
-    }
-
-    let mut context = String::from("以下是与当前话题相关的历史记忆：\n\n");
-    for (idx, hit) in hits.iter().enumerate() {
-        context.push_str(&format!(
-            "[记忆 {}] {} (相关度: {:.2})\n{}\n\n",
-            idx + 1,
-            hit.chunk.source,
-            hit.relevance_score,
-            hit.chunk.content
-        ));
-    }
-
-    Ok(Some(context))
-}
-
-/// Extract JSON object from text.
-fn try_extract_json(text: &str) -> Option<&str> {
-    crate::json_utils::extract_first_json_object(text)
 }

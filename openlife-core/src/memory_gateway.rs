@@ -2,10 +2,11 @@ use crate::agent::AgentProposal;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryLane {
     TurnContext,
+    KnowledgeNote,
     EpisodicLifeEvent,
     SemanticFactPreference,
     ProceduralRule,
@@ -17,6 +18,7 @@ impl MemoryLane {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TurnContext => "turn_context",
+            Self::KnowledgeNote => "knowledge_note",
             Self::EpisodicLifeEvent => "episodic_life_event",
             Self::SemanticFactPreference => "semantic_fact_preference",
             Self::ProceduralRule => "procedural_rule",
@@ -30,6 +32,7 @@ impl MemoryLane {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryGatewayWriteStatus {
     ContextOnly,
+    KnowledgeNoteWritten,
     LocalMemoryWritten,
     ProposalRequired,
     CanonicalLifeModelWritten,
@@ -40,6 +43,7 @@ impl MemoryGatewayWriteStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ContextOnly => "context_only",
+            Self::KnowledgeNoteWritten => "knowledge_note_written",
             Self::LocalMemoryWritten => "local_memory_written",
             Self::ProposalRequired => "proposal_required",
             Self::CanonicalLifeModelWritten => "canonical_lifemodel_written",
@@ -59,7 +63,7 @@ pub enum MemoryGatewaySubject {
     FuturePlanRule,
     Evidence,
     CanonicalLifeModel,
-    ManualIndexedNote,
+    KnowledgeNote,
     ImportedArchive,
 }
 
@@ -145,12 +149,12 @@ impl MemoryGatewayRequest {
                     Some("proposal_review_required".into()),
                     None,
                 ),
-                MemoryGatewaySubject::ManualIndexedNote => (
+                MemoryGatewaySubject::KnowledgeNote => (
                     Some("manual".into()),
-                    Some("memory_write".into()),
-                    Some("memory.manual_indexed_note".into()),
-                    Some("manual_indexed_note".into()),
-                    Some("local_memory_materialization".into()),
+                    Some("knowledge_note_write".into()),
+                    Some("knowledge.note".into()),
+                    Some("knowledge_note".into()),
+                    Some("knowledge_note_materialization".into()),
                     None,
                 ),
                 MemoryGatewaySubject::ImportedArchive => (
@@ -208,6 +212,8 @@ pub struct MemoryGatewayDecision {
     pub lane: MemoryLane,
     pub status: MemoryGatewayWriteStatus,
     pub local_memory_allowed: bool,
+    #[serde(default)]
+    pub knowledge_note_allowed: bool,
     pub evidence_required: bool,
     pub proposal_required: bool,
     pub approval_required: bool,
@@ -225,6 +231,7 @@ impl MemoryGatewayDecision {
             lane,
             status,
             local_memory_allowed: false,
+            knowledge_note_allowed: false,
             evidence_required: false,
             proposal_required: false,
             approval_required: false,
@@ -235,6 +242,11 @@ impl MemoryGatewayDecision {
 
     fn local(mut self) -> Self {
         self.local_memory_allowed = true;
+        self
+    }
+
+    fn knowledge_note(mut self) -> Self {
+        self.knowledge_note_allowed = true;
         self
     }
 
@@ -259,6 +271,8 @@ impl MemoryGatewayDecision {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryGatewayReadModel {
     pub remembered_what: Vec<String>,
+    #[serde(default)]
+    pub knowledge_notes: Vec<String>,
     pub context_only: Vec<String>,
     pub proposal_required: Vec<String>,
     pub canonical_lifemodel_written: Vec<String>,
@@ -268,6 +282,7 @@ impl MemoryGatewayReadModel {
     pub fn from_decisions(decisions: &[MemoryGatewayDecision]) -> Self {
         let mut model = Self {
             remembered_what: Vec::new(),
+            knowledge_notes: Vec::new(),
             context_only: Vec::new(),
             proposal_required: Vec::new(),
             canonical_lifemodel_written: Vec::new(),
@@ -277,6 +292,14 @@ impl MemoryGatewayReadModel {
             let label = format!("{}:{}", decision.lane.as_str(), decision.reason_code);
             match decision.status {
                 MemoryGatewayWriteStatus::ContextOnly => model.context_only.push(label),
+                MemoryGatewayWriteStatus::KnowledgeNoteWritten
+                    if decision.lane == MemoryLane::KnowledgeNote
+                        && decision.knowledge_note_allowed
+                        && !decision.local_memory_allowed =>
+                {
+                    model.knowledge_notes.push(label)
+                }
+                MemoryGatewayWriteStatus::KnowledgeNoteWritten => {}
                 MemoryGatewayWriteStatus::LocalMemoryWritten => model.remembered_what.push(label),
                 MemoryGatewayWriteStatus::ProposalRequired => model.proposal_required.push(label),
                 MemoryGatewayWriteStatus::CanonicalLifeModelWritten => {
@@ -304,6 +327,27 @@ impl MemoryGateway {
             .user_intent_kind
             .as_deref()
             .is_some_and(|intent| intent == "accepted_proposal_materialization");
+
+        // KnowledgeNote is an independent canonical asset, not an accepted
+        // fact about the user. Route the exact typed contract before any
+        // content heuristic can reinterpret note prose as preference, health,
+        // routine, or other long-term Memory truth. Partial attempts fail
+        // closed instead of falling through to the semantic-fact default.
+        if has_knowledge_note_marker(request) {
+            if is_exact_knowledge_note_request(request) {
+                return MemoryGatewayDecision::new(
+                    MemoryLane::KnowledgeNote,
+                    MemoryGatewayWriteStatus::KnowledgeNoteWritten,
+                    "knowledge_note_canonical_asset_written",
+                )
+                .knowledge_note();
+            }
+            return MemoryGatewayDecision::new(
+                MemoryLane::KnowledgeNote,
+                MemoryGatewayWriteStatus::Blocked,
+                "knowledge_note_contract_incomplete",
+            );
+        }
 
         if is_chat_turn(request) {
             return MemoryGatewayDecision::new(
@@ -456,6 +500,33 @@ impl MemoryGateway {
         .evidence()
         .canonical()
     }
+}
+
+fn has_knowledge_note_marker(request: &MemoryGatewayRequest) -> bool {
+    request
+        .proposal_type
+        .as_deref()
+        .is_some_and(|value| value == "knowledge_note_write")
+        || request
+            .affected_path
+            .as_deref()
+            .is_some_and(|value| value == "knowledge.note")
+        || request
+            .payload_kind
+            .as_deref()
+            .is_some_and(|value| value == "knowledge_note")
+        || request
+            .user_intent_kind
+            .as_deref()
+            .is_some_and(|value| value == "knowledge_note_materialization")
+}
+
+fn is_exact_knowledge_note_request(request: &MemoryGatewayRequest) -> bool {
+    request.source.as_deref() == Some("manual")
+        && request.proposal_type.as_deref() == Some("knowledge_note_write")
+        && request.affected_path.as_deref() == Some("knowledge.note")
+        && request.payload_kind.as_deref() == Some("knowledge_note")
+        && request.user_intent_kind.as_deref() == Some("knowledge_note_materialization")
 }
 
 fn payload_kind(value: &serde_json::Value) -> &'static str {
@@ -647,6 +718,7 @@ mod memory_gateway_tests {
     fn memory_gateway_read_model_answers_memory_status_categories() {
         let decisions = vec![
             MemoryGateway::decide(MemoryGatewaySubject::ChatTurn),
+            MemoryGateway::decide(MemoryGatewaySubject::KnowledgeNote),
             MemoryGateway::decide(MemoryGatewaySubject::Preference),
             MemoryGateway::decide(MemoryGatewaySubject::FuturePlanRule),
             MemoryGateway::canonical_write_materialized(),
@@ -655,9 +727,46 @@ mod memory_gateway_tests {
         let read_model = MemoryGatewayReadModel::from_decisions(&decisions);
 
         assert_eq!(read_model.context_only.len(), 1);
+        assert_eq!(read_model.knowledge_notes.len(), 1);
         assert_eq!(read_model.remembered_what.len(), 1);
         assert_eq!(read_model.proposal_required.len(), 1);
         assert_eq!(read_model.canonical_lifemodel_written.len(), 1);
+    }
+
+    #[test]
+    fn knowledge_note_is_never_reinterpreted_as_a_user_fact() {
+        let request = MemoryGatewayRequest::from_subject(MemoryGatewaySubject::KnowledgeNote)
+            .with_payload_text("我喜欢咖啡；以后做计划时提醒我");
+        let decision = MemoryGateway::decide_request(&request);
+        assert_eq!(decision.lane, MemoryLane::KnowledgeNote);
+        assert_eq!(
+            decision.status,
+            MemoryGatewayWriteStatus::KnowledgeNoteWritten
+        );
+        assert!(decision.knowledge_note_allowed);
+        assert!(!decision.local_memory_allowed);
+
+        let read_model = MemoryGatewayReadModel::from_decisions(&[decision]);
+        assert_eq!(read_model.knowledge_notes.len(), 1);
+        assert!(read_model.remembered_what.is_empty());
+
+        let mut contradictory = MemoryGateway::decide(MemoryGatewaySubject::KnowledgeNote);
+        contradictory.lane = MemoryLane::SemanticFactPreference;
+        let read_model = MemoryGatewayReadModel::from_decisions(&[contradictory]);
+        assert!(read_model.knowledge_notes.is_empty());
+        assert!(read_model.remembered_what.is_empty());
+    }
+
+    #[test]
+    fn partial_knowledge_note_contract_fails_closed_before_content_heuristics() {
+        let mut request = MemoryGatewayRequest::from_subject(MemoryGatewaySubject::KnowledgeNote)
+            .with_payload_text("preference routine health");
+        request.affected_path = Some("memory.preference".into());
+        let decision = MemoryGateway::decide_request(&request);
+        assert_eq!(decision.lane, MemoryLane::KnowledgeNote);
+        assert_eq!(decision.status, MemoryGatewayWriteStatus::Blocked);
+        assert!(!decision.knowledge_note_allowed);
+        assert!(!decision.local_memory_allowed);
     }
 
     #[test]

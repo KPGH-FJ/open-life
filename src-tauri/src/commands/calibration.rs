@@ -153,8 +153,6 @@ pub async fn generate_calibration_report(
 pub async fn generate_micro_evolution_changes(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
-
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
@@ -163,15 +161,6 @@ pub async fn generate_micro_evolution_changes(
     let signal_summary = signals.summary();
     let mut after_model = model.clone();
     let _ = MicroEvolutionEngine::apply_changes(&mut after_model, &result.changes);
-
-    // Complete AgentRun
-    agent_run.output_preview = Some(result.message.clone());
-    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-    agent_run.finished_at = Some(chrono::Utc::now());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
-    }
 
     Ok(serde_json::json!({
         "applied": result.applied,
@@ -253,23 +242,24 @@ async fn calibration_create_proposals_with_state(
     changes: Vec<EvolutionChange>,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    // Create AgentRun for this calibration
-    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
-    let run_id = agent_run.id.clone();
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
-    }
-
+    let requested_count = changes.len();
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
     drop(manager);
 
-    let proposal_store_opt = state.proposal_store.clone();
-    let store = proposal_store_opt
-        .as_ref()
+    let proposal_store = state
+        .proposal_store
+        .clone()
         .ok_or_else(|| "Proposal store 不可用".to_string())?;
-    let store = store.lock().await;
+
+    // Create the AgentRun only after every non-mutating dependency preflight
+    // succeeds, so an unavailable model/proposal store cannot leave a fake
+    // Running projection behind.
+    let agent_run = openlife_core::agent::AgentRun::new_calibration_run();
+    let run_id = agent_run.id.clone();
+    crate::terminal_owner_write_gateway::create_agent_run(state, &agent_run)
+        .await
+        .map_err(|error| AppError::db_with_hint(error, "read_only_degraded"))?;
 
     let mut created_ids = Vec::new();
     let mut errors = Vec::new();
@@ -289,6 +279,7 @@ async fn calibration_create_proposals_with_state(
                     errors.push(format!("{}: {}", proposal.affected_path, e));
                     continue;
                 }
+                let store = proposal_store.lock().await;
                 match ReviewWorkflow::new(&store).submit(
                     DurableWriteRequest::from_agent_proposal(
                         DurableWriteSource::Calibration,
@@ -308,24 +299,49 @@ async fn calibration_create_proposals_with_state(
         }
     }
 
-    // Update AgentRun with generated proposal IDs and mark as completed
-    for pid in &created_ids {
-        agent_run.add_generated_proposal(pid);
-    }
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-        agent_run.finished_at = Some(chrono::Utc::now());
-        let _ = store.update_run(&agent_run);
-    }
+    let result_state = if created_ids.is_empty() && !errors.is_empty() {
+        "failed"
+    } else if !created_ids.is_empty() {
+        if errors.is_empty() {
+            "waiting_permission"
+        } else {
+            "partial_waiting_permission"
+        }
+    } else {
+        "no_op"
+    };
+    crate::terminal_owner_write_gateway::project_agent_run_from_proposal_staging(
+        state,
+        &run_id,
+        &created_ids,
+        crate::terminal_owner_write_gateway::AgentRunProposalStagingReceipt {
+            kind: crate::terminal_owner_write_gateway::AgentRunProposalStagingKind::Calibration,
+            requested_count,
+            failed_count: errors.len(),
+        },
+    )
+    .await
+    .map_err(|error| {
+        AppError::db(format!(
+            "Calibration Proposals were processed, but AgentRun projection is degraded: {error}"
+        ))
+    })?;
+    let warnings = if result_state == "partial_waiting_permission" {
+        errors.clone()
+    } else {
+        Vec::new()
+    };
 
     Ok(serde_json::json!({
-        "success": true,
+        "success": errors.is_empty(),
+        "result_state": result_state,
+        "requested_count": requested_count,
         "created_count": created_ids.len(),
         "created_ids": created_ids,
         "run_id": run_id,
         "error_count": errors.len(),
         "errors": errors,
+        "warnings": warnings,
         "message": format!("已创建 {} 个 Proposal 到 Mailbox", created_ids.len()),
     }))
 }
@@ -363,6 +379,34 @@ mod tests {
         }
     }
 
+    fn invalid_calibration_test_change() -> EvolutionChange {
+        EvolutionChange {
+            dimension: "missing.calibration.dimension".into(),
+            target_name: "missing-target".into(),
+            old_value: 0.0,
+            new_value: 1.0,
+            reason: "metadata-safe invalid-path fixture".into(),
+            confidence: 0.5,
+            sources: Vec::new(),
+        }
+    }
+
+    async fn stored_calibration_run(
+        state: &Arc<AppState>,
+        result: &serde_json::Value,
+    ) -> openlife_core::agent::AgentRun {
+        let run_id = result["run_id"].as_str().expect("Calibration run id");
+        state
+            .agent_run_store
+            .as_ref()
+            .expect("AgentRun store")
+            .lock()
+            .await
+            .get_run(run_id)
+            .unwrap()
+            .expect("Calibration AgentRun")
+    }
+
     async fn seed_calibration_target(state: &Arc<AppState>) {
         let manager = state.life_model_manager.lock().await;
         let mut model = manager.load().unwrap();
@@ -398,6 +442,14 @@ mod tests {
 
         assert_eq!(result["created_count"], 1);
         assert_eq!(result["success"], true);
+        assert_eq!(result["result_state"], "waiting_permission");
+        let run = stored_calibration_run(&state, &result).await;
+        assert_eq!(
+            run.status,
+            openlife_core::agent::AgentRunStatus::WaitingPermission
+        );
+        assert!(run.finished_at.is_none());
+        assert_eq!(run.generated_proposals.len(), 1);
         let proposals = state
             .proposal_store
             .as_ref()
@@ -411,6 +463,82 @@ mod tests {
 
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert!(model.is_effectively_empty());
+    }
+
+    #[tokio::test]
+    async fn calibration_full_staging_failure_is_failed_not_completed() {
+        let state = crate::test_utils::test_app_state();
+
+        let result =
+            apply_calibration_with_state(vec![invalid_calibration_test_change()], None, &state)
+                .await
+                .unwrap();
+
+        assert_eq!(result["success"], false);
+        assert_eq!(result["result_state"], "failed");
+        assert_eq!(result["requested_count"], 1);
+        assert_eq!(result["created_count"], 0);
+        assert_eq!(result["error_count"], 1);
+        let run = stored_calibration_run(&state, &result).await;
+        assert_eq!(run.status, openlife_core::agent::AgentRunStatus::Failed);
+        assert!(run.finished_at.is_some());
+        assert!(run.generated_proposals.is_empty());
+        assert_eq!(
+            run.status_updates.last().map(|update| update.step_index),
+            Some(1)
+        );
+        assert_eq!(
+            run.status_updates
+                .last()
+                .and_then(|update| update.tool_call_index),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn calibration_partial_staging_waits_for_review_and_reports_warning() {
+        let state = crate::test_utils::test_app_state();
+
+        let result = apply_calibration_with_state(
+            vec![calibration_test_change(), invalid_calibration_test_change()],
+            None,
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["success"], false);
+        assert_eq!(result["result_state"], "partial_waiting_permission");
+        assert_eq!(result["requested_count"], 2);
+        assert_eq!(result["created_count"], 1);
+        assert_eq!(result["error_count"], 1);
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        let run = stored_calibration_run(&state, &result).await;
+        assert_eq!(
+            run.status,
+            openlife_core::agent::AgentRunStatus::WaitingPermission
+        );
+        assert!(run.finished_at.is_none());
+        assert_eq!(run.generated_proposals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn calibration_empty_request_is_explicit_completed_no_op() {
+        let state = crate::test_utils::test_app_state();
+
+        let result = apply_calibration_with_state(Vec::new(), None, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["result_state"], "no_op");
+        assert_eq!(result["requested_count"], 0);
+        assert_eq!(result["created_count"], 0);
+        assert_eq!(result["error_count"], 0);
+        let run = stored_calibration_run(&state, &result).await;
+        assert_eq!(run.status, openlife_core::agent::AgentRunStatus::Completed);
+        assert!(run.finished_at.is_some());
+        assert!(run.generated_proposals.is_empty());
     }
 
     #[tokio::test]

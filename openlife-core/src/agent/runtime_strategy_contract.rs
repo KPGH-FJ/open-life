@@ -324,7 +324,10 @@ fn selection_report(context: SelectionReportContext<'_>) -> StrategySelectionRep
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn react_candidate(
     selected_kind: RuntimeStrategyKind,
     intent: StrategyIntent,
@@ -361,7 +364,10 @@ fn react_candidate(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn plan_execute_candidate(
     selected_kind: RuntimeStrategyKind,
     intent: StrategyIntent,

@@ -25,11 +25,7 @@ function normalizedStatus(evidence: RuntimeRouteEvidence | null | undefined): st
 
 function fallbackStatus(diagnostics: SystemDiagnostics | null): string {
   if (!diagnostics?.cloud_api_configured) return "unconfigured";
-  if (diagnostics.cloud_api_validation_status === "validated") return "validated";
-  if (diagnostics.cloud_api_validation_status === "failed") return "failed";
-  if (diagnostics.cloud_api_validation_status === "stale") return "stale";
-  if (isScriptedProofStatus(diagnostics.cloud_api_validation_status))
-    return "scripted_provider_probe";
+  if (diagnostics.cloud_api_validation_status) return diagnostics.cloud_api_validation_status;
   if (diagnostics.cloud_api_validated === true) return "validated";
   return "unvalidated";
 }
@@ -143,6 +139,73 @@ export function buildProviderReadinessView(
       statusLabel: "Local test proof only",
       detail: "当前只有脚本化开发 proof，不是 external cloud ready。",
       tone: "info",
+      cloudReady: false,
+      configured: true,
+      actualRouteLabel: actual.label,
+      actualRouteTone: actual.tone,
+      externalTransmissionLabel: external.label,
+      externalTransmissionTone: external.tone,
+    };
+  }
+
+  if (status === "remote_unknown") {
+    return {
+      providerLabel,
+      status,
+      statusLabel: "Remote state unknown",
+      detail: "本地无法确认远端终态；不能当作成功、失败或已远端取消。",
+      tone: "warning",
+      cloudReady: false,
+      configured: true,
+      actualRouteLabel: actual.label,
+      actualRouteTone: actual.tone,
+      externalTransmissionLabel: external.label,
+      externalTransmissionTone: external.tone,
+    };
+  }
+
+  if (status === "runtime_generation_incoherent") {
+    return {
+      providerLabel,
+      status,
+      statusLabel: "Runtime generation incoherent",
+      detail: "Provider 配置与执行适配器不属于同一运行代；系统已失败关闭。",
+      tone: "danger",
+      cloudReady: false,
+      configured: true,
+      actualRouteLabel: actual.label,
+      actualRouteTone: actual.tone,
+      externalTransmissionLabel: external.label,
+      externalTransmissionTone: external.tone,
+    };
+  }
+
+  if (status === "validation_record_corrupt" || status === "validation_record_io_error") {
+    return {
+      providerLabel,
+      status,
+      statusLabel:
+        status === "validation_record_corrupt"
+          ? "Validation record corrupt"
+          : "Validation record unreadable",
+      detail: "持久化验证证据不可用；当前状态保持 unknown，不能当作 cloud-ready。",
+      tone: "danger",
+      cloudReady: false,
+      configured: true,
+      actualRouteLabel: actual.label,
+      actualRouteTone: actual.tone,
+      externalTransmissionLabel: external.label,
+      externalTransmissionTone: external.tone,
+    };
+  }
+
+  if (status === "unknown") {
+    return {
+      providerLabel,
+      status,
+      statusLabel: "Provider state unknown",
+      detail: "现有证据不足以确认 Provider 可用。",
+      tone: "neutral",
       cloudReady: false,
       configured: true,
       actualRouteLabel: actual.label,

@@ -43,8 +43,14 @@ describe("RunsPage contract", () => {
                   riskLevel: "low",
                   status: "succeeded",
                   outputPreview: "40 bytes redacted",
-                  outputHash: "sha256:run1",
-                  outputByteCount: 40,
+                  outputReceipt: {
+                    version: 2,
+                    kind: "tool_output",
+                    provenance: "observed_tool_adapter_body",
+                    byteCount: 40,
+                    digest: `sha256:${"a".repeat(64)}`,
+                    verified: true,
+                  },
                   metadataSafe: true,
                 },
               },
@@ -154,6 +160,159 @@ describe("RunsPage contract", () => {
             startedAt: new Date().toISOString(),
           },
         ]);
+      }
+      if (cmd === "get_tasks_view_model") {
+        const now = new Date().toISOString();
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                canonicalTaskId: "task-1",
+                taskSessionId: null,
+                relatedRunIds: ["run-1"],
+                conversationId: "session-1",
+                title: "camel case user input",
+                strategy: "conversation",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_trace",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "camel case user input",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-sensitive-1",
+                taskSessionId: "task-session-sensitive",
+                relatedRunIds: ["run-sensitive-1"],
+                conversationId: "session-sensitive",
+                title: "Sensitive running task",
+                strategy: "direct_answer",
+                lifecycleStatus: "failed",
+                terminalDeliveryStatus: "failed",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: ["provider_timed_out"],
+                pendingReviewItemRefs: [],
+                allowedControls: [
+                  {
+                    id: "task-session-sensitive:open_trace",
+                    label: "Open trace",
+                    kind: "open_trace",
+                    effect: "evidence_only",
+                    enabled: true,
+                    targetTaskId: "task-session-sensitive",
+                    completionProofAfterDispatch: false,
+                  },
+                ],
+                nextRecommendedControl: "open_trace",
+                latestResultPreview: {
+                  status: "failed",
+                  label: "failed",
+                  preview: "Provider timed out",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-preview-1",
+                taskSessionId: null,
+                relatedRunIds: ["run-preview-1"],
+                conversationId: "session-preview",
+                title: "Multi-strategy preview",
+                strategy: "multi_strategy_preview",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_run",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "Multi-strategy preview: planExecute / warn",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-plan-1",
+                taskSessionId: null,
+                relatedRunIds: ["run-plan-1"],
+                conversationId: "workspace_weekly_planning",
+                title: "weekly_planning · 3 步 · 待确认 1",
+                strategy: "plan_execute_product",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_run",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "weekly_planning · 3 步 · 待确认 1",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-2",
+                taskSessionId: null,
+                relatedRunIds: ["run-2"],
+                title: "deleted run",
+                strategy: "builder",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_run",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "deleted run",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+            ],
+            summary: {
+              total: 5,
+              activeCount: 0,
+              waitingPermissionCount: 0,
+              blockedCount: 0,
+              pendingReviewCount: 0,
+              completedCount: 0,
+              completedNeedsEvidenceCount: 4,
+              failedCount: 1,
+              cancelledCount: 0,
+              byLifecycleStatus: { completed_needs_evidence: 4, failed: 1 },
+            },
+            sourceRefs: [],
+            contractLimitations: [],
+          },
+          status: "ready",
+          lastUpdatedAt: now,
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
       }
       if (cmd === "list_main_chat_agent_tasks") {
         return Promise.resolve([
@@ -279,6 +438,91 @@ describe("RunsPage contract", () => {
     vi.clearAllMocks();
   });
 
+  it("labels remote unknown runs as uncertainty and never as failed", async () => {
+    const now = new Date().toISOString();
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-remote-unknown",
+            taskId: "task-remote-unknown",
+            status: "remote_unknown",
+            kind: "tool_execution",
+            userInput: "A2A outbound task",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            error: {
+              message: "remote_state_unknown",
+              phase: "startup_projection_recovery",
+              recoverable: false,
+            },
+            startedAt: now,
+            finishedAt: now,
+          },
+        ]);
+      }
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                canonicalTaskId: "task-remote-unknown",
+                taskSessionId: null,
+                relatedRunIds: ["run-remote-unknown"],
+                conversationId: null,
+                title: "A2A outbound task",
+                strategy: "tool_execution",
+                lifecycleStatus: "remote_unknown",
+                terminalDeliveryStatus: "unknown",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_trace",
+                latestResultPreview: null,
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+            ],
+            summary: {
+              total: 1,
+              activeCount: 0,
+              waitingPermissionCount: 0,
+              blockedCount: 0,
+              pendingReviewCount: 0,
+              completedCount: 0,
+              completedNeedsEvidenceCount: 0,
+              failedCount: 0,
+              cancelledCount: 0,
+              byLifecycleStatus: { remote_unknown: 1 },
+            },
+            sourceRefs: [],
+            contractLimitations: [],
+          },
+          status: "ready",
+          lastUpdatedAt: now,
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect((await screen.findAllByText("任务远端状态未知")).length).toBeGreaterThan(0);
+    expect(screen.getByText("远端状态未知，未自动重试")).toBeInTheDocument();
+    expect(screen.queryByText("任务失败")).not.toBeInTheDocument();
+    expect(screen.queryByText("run_failed")).not.toBeInTheDocument();
+  });
+
   it("uses metadata-safe AgentRun fields for search, preview, proposals, and trash filtering", async () => {
     render(
       <MemoryRouter>
@@ -290,13 +534,9 @@ describe("RunsPage contract", () => {
     expect(screen.getByText("camel case output preview")).toBeInTheDocument();
     expect(screen.queryByText(/qa@example\.com/)).not.toBeInTheDocument();
     expect(screen.queryByText(/sk-sensitive-token/)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/\[email\]/).length).toBeGreaterThan(0);
-    expect(screen.getByText("任务已超时")).toBeInTheDocument();
-    expect(screen.getByText("下一步：查看记录")).toBeInTheDocument();
+    expect(screen.getByText("任务失败")).toBeInTheDocument();
+    expect(screen.getAllByText("下一步：查看记录").length).toBeGreaterThan(0);
     expect(screen.getByText("连续性需复核")).toBeInTheDocument();
-    expect(screen.getByText("证据：1 action / 2 observation")).toBeInTheDocument();
-    expect(screen.getByText("脱敏：metadata_only")).toBeInTheDocument();
-    expect(screen.getAllByText(/云端路线 · deepseek/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
     expect(screen.queryByText("策略预览")).not.toBeInTheDocument();
     expect(screen.queryByText("策略：planExecute")).not.toBeInTheDocument();
@@ -330,6 +570,151 @@ describe("RunsPage contract", () => {
     await waitFor(() => {
       expect(screen.getByText("deleted run")).toBeInTheDocument();
     });
+  });
+
+  it("does not present legacy route, output, or tool metadata as observed truth", async () => {
+    const updatedAt = new Date().toISOString();
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "legacy-run-1",
+            taskId: "legacy-task-1",
+            status: "failed",
+            kind: "conversation",
+            legacyPayloadUnverified: true,
+            outputPreview: `run_output:bytes=1:sha256:${"a".repeat(64)}`,
+            modelRoute: {
+              provider: "forged-provider",
+              model: "forged-model",
+              routeType: "cloud",
+              preferLocal: false,
+              localModel: "forged-local",
+              reason: "forged actual route",
+              privacyLevel: "none",
+              retryCount: 4,
+            },
+            generatedProposals: ["legacy-proposal-ref"],
+            error: {
+              message: "LEGACY_RUN_ERROR_MUST_NOT_RENDER",
+              phase: "provider",
+              recoverable: true,
+            },
+            actions: [
+              {
+                id: "legacy-action",
+                actionType: "tool",
+                input: {},
+                status: "succeeded",
+                timestamp: updatedAt,
+              },
+            ],
+            observations: [],
+            startedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                canonicalTaskId: "legacy-task-1",
+                relatedRunIds: ["legacy-run-1"],
+                title: "Legacy migrated task",
+                strategy: "conversation",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: ["LEGACY_BLOCKER_MUST_NOT_RENDER"],
+                pendingReviewItemRefs: [
+                  { id: "legacy-review", kind: "proposal", label: "legacy proposal" },
+                ],
+                allowedControls: [
+                  {
+                    id: "legacy-retry",
+                    label: "重试此任务",
+                    kind: "retry",
+                    effect: "task_retry_request",
+                    enabled: true,
+                    targetTaskId: "legacy-task-1",
+                    targetActionId: "legacy-action",
+                    completionProofAfterDispatch: false,
+                  },
+                  {
+                    id: "legacy-cancel",
+                    label: "取消此任务",
+                    kind: "cancel",
+                    effect: "task_cancel_request",
+                    enabled: true,
+                    targetTaskId: "legacy-task-1",
+                    completionProofAfterDispatch: false,
+                  },
+                ],
+                nextRecommendedControl: "retry",
+                latestResultPreview: {
+                  status: "completed",
+                  label: "completed",
+                  preview: "LEGACY_RESULT_MUST_NOT_RENDER",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt,
+              },
+            ],
+            summary: {
+              total: 1,
+              activeCount: 0,
+              waitingPermissionCount: 0,
+              blockedCount: 0,
+              pendingReviewCount: 0,
+              completedCount: 0,
+              completedNeedsEvidenceCount: 1,
+              failedCount: 0,
+              cancelledCount: 0,
+              byLifecycleStatus: { completed_needs_evidence: 1 },
+            },
+            sourceRefs: [],
+            contractLimitations: [],
+          },
+          status: "ready",
+          lastUpdatedAt: updatedAt,
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("旧版执行元数据未验证")).toBeInTheDocument();
+    expect(screen.getByText(/receipt、route 与 digest 均不可作为已观察事实/)).toBeInTheDocument();
+    expect(screen.getAllByText("路线未验证").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("工具调用未验证").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/forged-provider/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/forged actual route/)).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(`sha256:${"a".repeat(64)}`))).not.toBeInTheDocument();
+    expect(screen.getByText("任务未知")).toBeInTheDocument();
+    expect(screen.getByText("下一步：查看记录")).toBeInTheDocument();
+    expect(screen.getByText("交付：未知")).toBeInTheDocument();
+    expect(screen.getAllByText("状态未记录").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("阻断状态未验证").length).toBeGreaterThan(0);
+    expect(screen.queryByText("任务缺少完成证据")).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_RESULT_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_RUN_ERROR_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_BLOCKER_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText("待审核：1")).not.toBeInTheDocument();
+    expect(screen.queryByText("待确认 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("连续性需复核")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试此任务" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消此任务" })).not.toBeInTheDocument();
   });
 
   it("preflights selected run deletion before calling the final delete command", async () => {

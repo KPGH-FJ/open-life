@@ -117,6 +117,7 @@ fn runtime_output_carries_current_runtime_results_with_empty_life_event_candidat
         timestamp: chrono::Utc::now(),
         tool_scope: None,
         react_trace: None,
+        runtime_execution_receipt: None,
     };
     let observation = AgentObservation {
         id: "observation-1".into(),

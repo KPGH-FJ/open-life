@@ -171,7 +171,7 @@ describe("ProviderTab", () => {
 
     expect(screen.getByText("Local test proof only")).toBeInTheDocument();
     expect(screen.getByText(/不是 external cloud ready/)).toBeInTheDocument();
-    expect(screen.getByText(/外发记录未接入/)).toBeInTheDocument();
+    expect(screen.getByText(/实际云端传输状态仍为 unknown/)).toBeInTheDocument();
   });
 
   it("lets users opt into capability-first beta without changing the default mode", async () => {

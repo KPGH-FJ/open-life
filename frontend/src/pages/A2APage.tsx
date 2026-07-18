@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Network, Send, RefreshCw, Shield, Sparkles, Play, Square } from "lucide-react";
 import {
   a2aDiscoverAgent,
@@ -8,11 +8,25 @@ import {
   a2aBridgeLocal,
   a2aRestartSidecar,
   a2aStopSidecar,
+  getRuntimeBuildInfo,
+  type RuntimeBuildInfo,
 } from "../tauri";
 import ErrorBanner from "../components/ErrorBanner";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 
-type PendingA2AAction = "discover" | "send" | "restart" | "stop";
+type PendingA2AAction =
+  | { kind: "discover"; url: string }
+  | {
+      kind: "send";
+      url: string;
+      requestId: string;
+      taskText: string;
+      taskSkill: string;
+      pairingToken?: string;
+    }
+  | { kind: "restart" }
+  | { kind: "stop" };
+type PendingA2AActionKind = PendingA2AAction["kind"];
 
 function isLoopbackOrPrivateUrl(value: string): boolean {
   try {
@@ -83,14 +97,18 @@ function StructuredJsonResult({ value }: { value: string }) {
 }
 
 export default function A2APage() {
+  const [runtimeBuildInfo, setRuntimeBuildInfo] = useState<RuntimeBuildInfo | null>(null);
+  const [runtimeBuildInfoLoaded, setRuntimeBuildInfoLoaded] = useState(false);
   const [agentUrl, setAgentUrl] = useState("http://127.0.0.1:8080");
   const [agentCard, setAgentCard] = useState<any | null>(null);
   const [loadingDiscover, setLoadingDiscover] = useState(false);
 
   const [taskText, setTaskText] = useState("");
   const [taskSkill, setTaskSkill] = useState("");
+  const [pairingToken, setPairingToken] = useState("");
   const [taskResult, setTaskResult] = useState<string | null>(null);
   const [loadingTask, setLoadingTask] = useState(false);
+  const sendTaskInFlight = useRef(false);
 
   const [localCard, setLocalCard] = useState<any | null>(null);
   const [localResult, setLocalResult] = useState<string | null>(null);
@@ -105,22 +123,49 @@ export default function A2APage() {
   const [pageError, setPageError] = useState<string>("");
   const [pendingAction, setPendingAction] = useState<PendingA2AAction | null>(null);
 
+  const a2aCapabilityEnabled =
+    runtimeBuildInfo?.devExtensionsEnabled === true &&
+    runtimeBuildInfo.authenticatedDevA2aEnabled === true;
+
   useEffect(() => {
+    let active = true;
+    getRuntimeBuildInfo()
+      .then(info => {
+        if (active) setRuntimeBuildInfo(info);
+      })
+      .catch(() => {
+        if (active) setRuntimeBuildInfo(null);
+      })
+      .finally(() => {
+        if (active) setRuntimeBuildInfoLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!a2aCapabilityEnabled) {
+      setLocalCard(null);
+      return;
+    }
     a2aLocalAgentCard()
       .then(setLocalCard)
       .catch(() => {});
-  }, []);
+  }, [a2aCapabilityEnabled]);
 
   const refreshLocalCard = async () => {
+    if (!a2aCapabilityEnabled) return;
     const card = await a2aLocalAgentCard();
     setLocalCard(card);
   };
 
-  const runDiscover = async () => {
+  const runDiscover = async (url: string) => {
+    if (!a2aCapabilityEnabled) return;
     setLoadingDiscover(true);
     setPageError("");
     try {
-      const card = await a2aDiscoverAgent(agentUrl);
+      const card = await a2aDiscoverAgent(url);
       setAgentCard(card);
     } catch (e) {
       setAgentCard(null);
@@ -131,49 +176,70 @@ export default function A2APage() {
   };
 
   const handleDiscover = async () => {
-    if (!isLoopbackOrPrivateUrl(agentUrl)) {
-      setPendingAction("discover");
+    if (!a2aCapabilityEnabled) return;
+    const url = agentUrl.trim();
+    if (!isLoopbackOrPrivateUrl(url)) {
+      setPendingAction({ kind: "discover", url });
       return;
     }
-    await runDiscover();
+    await runDiscover(url);
   };
 
-  const runSendTask = async () => {
-    if (!taskText.trim()) return;
+  const runSendTask = async (pending: Extract<PendingA2AAction, { kind: "send" }>) => {
+    if (!a2aCapabilityEnabled || !pending.taskText.trim() || sendTaskInFlight.current) return;
+    sendTaskInFlight.current = true;
     setLoadingTask(true);
     try {
       const req = {
-        id: crypto.randomUUID(),
+        id: pending.requestId,
         sessionId: null,
         message: {
           role: "user",
-          parts: [{ type: "text", text: taskText }],
-          metadata: taskSkill ? { skill: taskSkill } : undefined,
+          parts: [{ type: "text", text: pending.taskText }],
+          metadata: pending.taskSkill ? { skill: pending.taskSkill } : undefined,
         },
         acceptedOutputModes: ["text"],
         pushNotification: null,
         historyLength: null,
-        metadata: taskSkill ? { skill: taskSkill } : null,
+        metadata: pending.taskSkill ? { skill: pending.taskSkill } : null,
       };
-      const resp = await a2aSendTask(agentUrl, JSON.stringify(req));
+      const resp = await a2aSendTask(pending.url, JSON.stringify(req), pending.pairingToken);
       setTaskResult(resp);
+      setPairingToken("");
     } catch (e) {
       setTaskResult("错误: " + String(e));
     } finally {
       setLoadingTask(false);
+      sendTaskInFlight.current = false;
     }
   };
 
   const handleSendTask = async () => {
-    if (!taskText.trim()) return;
-    if (!isLoopbackOrPrivateUrl(agentUrl)) {
-      setPendingAction("send");
+    if (!a2aCapabilityEnabled || !taskText.trim()) return;
+    const url = agentUrl.trim();
+    const remote = !isLoopbackOrPrivateUrl(url);
+    const token = pairingToken.trim();
+    if (remote && (token.length < 32 || token.length > 4096)) {
+      setTaskResult("错误: 远端 A2A 发送需要 32..=4096 字符的配对凭证。");
       return;
     }
-    await runSendTask();
+    const pending: Extract<PendingA2AAction, { kind: "send" }> = {
+      kind: "send",
+      url,
+      requestId: crypto.randomUUID(),
+      taskText: taskText.trim(),
+      taskSkill: taskSkill.trim(),
+      pairingToken: remote ? token : undefined,
+    };
+    if (remote) {
+      setPendingAction(pending);
+      return;
+    }
+    await runSendTask(pending);
   };
 
   const handleLocalService = async (skill: string, text: string) => {
+    if (!a2aCapabilityEnabled) return;
     setLoadingLocal(true);
     setActiveLocalSkill(skill);
     try {
@@ -201,7 +267,7 @@ export default function A2APage() {
   };
 
   const handleBridge = async () => {
-    if (!bridgeInput.trim()) return;
+    if (!a2aCapabilityEnabled || !bridgeInput.trim()) return;
     setBridgeLoading(true);
     try {
       const result = await a2aBridgeLocal(
@@ -219,6 +285,7 @@ export default function A2APage() {
   };
 
   const runRestartSidecar = async () => {
+    if (!a2aCapabilityEnabled) return;
     try {
       await a2aRestartSidecar();
       setSidecarMsg("A2A sidecar 已重启");
@@ -229,6 +296,7 @@ export default function A2APage() {
   };
 
   const runStopSidecar = async () => {
+    if (!a2aCapabilityEnabled) return;
     try {
       await a2aStopSidecar();
       setSidecarMsg("A2A sidecar 已停止");
@@ -239,15 +307,16 @@ export default function A2APage() {
 
   const confirmPendingAction = async () => {
     const action = pendingAction;
+    if (!action) return;
     setPendingAction(null);
-    if (action === "discover") await runDiscover();
-    if (action === "send") await runSendTask();
-    if (action === "restart") await runRestartSidecar();
-    if (action === "stop") await runStopSidecar();
+    if (action.kind === "discover") await runDiscover(action.url);
+    if (action.kind === "send") await runSendTask(action);
+    if (action.kind === "restart") await runRestartSidecar();
+    if (action.kind === "stop") await runStopSidecar();
   };
 
   const pendingCopy: Record<
-    PendingA2AAction,
+    PendingA2AActionKind,
     { title: string; description: string; label: string }
   > = {
     discover: {
@@ -271,7 +340,48 @@ export default function A2APage() {
       label: "停止 Sidecar",
     },
   };
-  const pending = pendingAction ? pendingCopy[pendingAction] : null;
+  const pending = pendingAction
+    ? {
+        ...pendingCopy[pendingAction.kind],
+        description:
+          pendingAction.kind === "discover"
+            ? `将向 ${pendingAction.url} 发起网络请求读取 Agent Card。`
+            : pendingAction.kind === "send"
+              ? `将向 ${pendingAction.url} 发送已冻结的任务请求 ${pendingAction.requestId}。请确认目标 Agent 可信。`
+              : pendingCopy[pendingAction.kind].description,
+      }
+    : null;
+
+  if (!runtimeBuildInfoLoaded || !a2aCapabilityEnabled) {
+    const capabilityStatus = runtimeBuildInfoLoaded
+      ? (runtimeBuildInfo?.a2aStatus ?? "unavailable")
+      : "checking";
+    return (
+      <div className="h-full overflow-auto bg-white p-6">
+        <div className="max-w-4xl mx-auto space-y-8">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <Network className="text-indigo-600" size={22} />
+            A2A 协议适配
+          </h2>
+          <section className="rounded-xl border border-amber-200 bg-amber-50 p-5">
+            <div className="flex items-start gap-3">
+              <Shield className="mt-0.5 shrink-0 text-amber-700" size={18} aria-hidden="true" />
+              <div>
+                <h3 className="text-sm font-semibold text-amber-950">A2A 开发能力不可用</h3>
+                <p className="mt-1 text-sm leading-6 text-amber-900">
+                  当前构建未开放经过认证的 A2A 开发扩展，因此不会发现
+                  Agent、启动本地服务或执行桥接命令。
+                </p>
+                <div className="mt-3 font-mono text-xs font-semibold text-amber-800">
+                  {capabilityStatus}
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full overflow-auto bg-white p-6">
@@ -280,7 +390,7 @@ export default function A2APage() {
         title={pending?.title ?? ""}
         description={pending?.description ?? ""}
         confirmLabel={pending?.label ?? "确认"}
-        severity={pendingAction === "stop" ? "danger" : "warning"}
+        severity={pendingAction?.kind === "stop" ? "danger" : "warning"}
         busy={loadingDiscover || loadingTask || bridgeLoading || loadingLocal}
         onConfirm={() => void confirmPendingAction()}
         onCancel={() => setPendingAction(null)}
@@ -370,6 +480,16 @@ export default function A2APage() {
               发送
             </button>
           </div>
+          {!isLoopbackOrPrivateUrl(agentUrl) && (
+            <input
+              type="password"
+              value={pairingToken}
+              onChange={e => setPairingToken(e.target.value)}
+              placeholder="远端配对凭证（32 字符以上）"
+              autoComplete="off"
+              className="w-full border rounded-lg px-3 py-2 text-sm"
+            />
+          )}
           {taskResult && <StructuredJsonResult value={taskResult} />}
         </section>
 
@@ -377,13 +497,13 @@ export default function A2APage() {
           <h3 className="text-sm font-semibold text-gray-700">A2A Server - OpenLife 本地服务</h3>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setPendingAction("restart")}
+              onClick={() => setPendingAction({ kind: "restart" })}
               className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
             >
               <Play size={16} /> 重启 Sidecar
             </button>
             <button
-              onClick={() => setPendingAction("stop")}
+              onClick={() => setPendingAction({ kind: "stop" })}
               className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
             >
               <Square size={16} /> 停止 Sidecar

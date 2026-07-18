@@ -9,8 +9,16 @@ pub struct LlmConfig {
     pub provider: String,
     #[serde(default = "default_openai_base")]
     pub openai_base: String,
-    #[serde(default)]
+    /// Runtime-only secret hydrated from the OS credential store or environment.
+    /// Legacy plaintext is still accepted on read so startup can migrate it.
+    #[serde(default, skip_serializing)]
     pub openai_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_key_ref: Option<String>,
+    /// Non-secret identity version for invalidating provider validation when the bound
+    /// credential or endpoint changes. The secret itself is never hashed into config.
+    #[serde(default)]
+    pub credential_version: u64,
     #[serde(default = "default_embedding_model")]
     pub embedding_model: String,
     #[serde(default = "default_chat_model")]
@@ -25,6 +33,8 @@ impl Default for LlmConfig {
             provider: default_provider(),
             openai_base: default_openai_base(),
             openai_key: String::new(),
+            openai_key_ref: None,
+            credential_version: 0,
             embedding_model: default_embedding_model(),
             chat_model: default_chat_model(),
             embedding_enabled: default_embedding_enabled(),
@@ -50,34 +60,6 @@ fn default_chat_model() -> String {
 
 fn default_embedding_enabled() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ChatProposalConfig {
-    #[serde(default = "default_enable_chat_proposals")]
-    pub enabled: bool,
-    #[serde(default = "default_confidence_threshold")]
-    pub confidence_threshold: f32,
-    #[serde(default = "default_min_message_length")]
-    pub min_message_length: usize,
-    #[serde(default = "default_cooldown_seconds")]
-    pub cooldown_seconds: i64,
-}
-
-fn default_enable_chat_proposals() -> bool {
-    true
-}
-
-fn default_confidence_threshold() -> f32 {
-    0.6
-}
-
-fn default_min_message_length() -> usize {
-    10
-}
-
-fn default_cooldown_seconds() -> i64 {
-    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +101,7 @@ fn default_generation_timeout_ms() -> u64 {
     30000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPolicy {
     #[serde(default = "default_network_enabled")]
     pub enabled: bool,
@@ -186,12 +168,14 @@ pub struct SystemConfig {
     /// Proactive engine: days before a pending proposal triggers a reminder
     #[serde(default = "default_proposal_reminder_days")]
     pub proposal_reminder_days: i64,
-    /// Web search provider: "duckduckgo" (default), "brave", or "searxng"
+    /// Web search provider: "duckduckgo" (default), "brave", "deepseek", or "searxng"
     #[serde(default = "default_search_provider")]
     pub search_provider: String,
-    /// API key for the web search provider (Brave API key or empty)
-    #[serde(default)]
+    /// Runtime-only API key for the web search provider.
+    #[serde(default, skip_serializing)]
     pub search_provider_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_provider_key_ref: Option<String>,
     /// Base URL for SearXNG instance (e.g. "https://searx.example.com")
     #[serde(default)]
     pub searxng_url: String,
@@ -216,6 +200,7 @@ impl Default for SystemConfig {
             proposal_reminder_days: default_proposal_reminder_days(),
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
+            search_provider_key_ref: None,
             searxng_url: String::new(),
             knowledge_roots: Vec::new(),
         }
@@ -274,8 +259,6 @@ pub struct AppConfig {
     #[serde(default = "default_local_model")]
     pub local_model: String,
     #[serde(default)]
-    pub chat_proposal: ChatProposalConfig,
-    #[serde(default)]
     pub experimental_context_assembler: bool,
     /// Use AgentLoop for chat execution instead of inline logic.
     /// Capability-first runtime path with governed fallback reporting.
@@ -294,7 +277,6 @@ impl Default for AppConfig {
             runtime_mode: AgentRuntimeMode::default(),
             prefer_local_model: true,
             local_model: default_local_model(),
-            chat_proposal: ChatProposalConfig::default(),
             experimental_context_assembler: false,
             use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
@@ -368,30 +350,28 @@ impl AppConfig {
         }
     }
 
-    /// Get effective OpenAI base URL (env var overrides config file)
+    /// Get the configured provider base URL.
+    ///
+    /// `OPENAI_API_BASE` used to redirect provider execution independently of
+    /// the canonical config and credential identity. That made it possible for
+    /// an official environment credential to follow a custom endpoint. Custom
+    /// endpoints remain supported through the explicit Settings/config field.
     pub fn effective_openai_base(&self) -> String {
-        std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| self.llm.openai_base.clone())
+        self.llm.openai_base.clone()
     }
 
-    /// Get effective OpenAI API key (env var overrides config file)
+    /// Get the explicit configured key, or the provider-specific environment
+    /// key only when the configured endpoint is that provider's official one.
     pub fn effective_openai_key(&self) -> String {
         self.effective_cloud_api_key()
     }
 
     pub fn effective_cloud_api_key(&self) -> String {
-        if !self.llm.openai_key.trim().is_empty() {
-            return self.llm.openai_key.clone();
-        }
-        match self.llm.provider.as_str() {
-            "deepseek" => std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
-            "openrouter" => std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
-            "openai" => std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-            "siliconflow" => std::env::var("SILICONFLOW_API_KEY").unwrap_or_default(),
-            "moonshot" => std::env::var("MOONSHOT_API_KEY").unwrap_or_default(),
-            "dashscope" => std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
-            "zhipu" => std::env::var("ZHIPU_API_KEY").unwrap_or_default(),
-            _ => String::new(),
-        }
+        crate::llm::effective_api_key_for_endpoint(
+            &self.llm.provider,
+            &self.llm.openai_base,
+            &self.llm.openai_key,
+        )
     }
 
     pub fn effective_provider_label(&self) -> String {
@@ -432,11 +412,13 @@ mod tests {
     #[test]
     fn config_save_and_load_roundtrip() {
         let file = NamedTempFile::new().unwrap();
-        let config = AppConfig {
+        let mut config = AppConfig {
             llm: LlmConfig {
                 provider: "custom".into(),
                 openai_base: "https://custom.com/v1".into(),
                 openai_key: "sk-test".into(),
+                openai_key_ref: Some("keychain://com.openlife.desktop/provider-api-key".into()),
+                credential_version: 1,
                 embedding_model: "text-embedding-3-large".into(),
                 chat_model: "gpt-4".into(),
                 embedding_enabled: false,
@@ -444,17 +426,19 @@ mod tests {
             runtime_mode: AgentRuntimeMode::CapabilityFirst,
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
-            chat_proposal: ChatProposalConfig::default(),
             experimental_context_assembler: false,
             use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         };
+        config.system.search_provider_key = "sk-search-test".into();
+        config.system.search_provider_key_ref =
+            Some("keychain://com.openlife.desktop/search-provider-api-key".into());
         config.save(file.path()).unwrap();
         let loaded = AppConfig::load(file.path()).unwrap();
         assert_eq!(loaded.llm.openai_base, config.llm.openai_base);
         assert_eq!(loaded.llm.provider, config.llm.provider);
-        assert_eq!(loaded.llm.openai_key, config.llm.openai_key);
+        assert!(loaded.llm.openai_key.is_empty());
         assert_eq!(loaded.llm.embedding_model, config.llm.embedding_model);
         assert_eq!(loaded.llm.chat_model, config.llm.chat_model);
         assert_eq!(loaded.llm.embedding_enabled, config.llm.embedding_enabled);
@@ -464,6 +448,14 @@ mod tests {
         ));
         assert_eq!(loaded.prefer_local_model, config.prefer_local_model);
         assert_eq!(loaded.local_model, config.local_model);
+
+        let saved = fs::read_to_string(file.path()).unwrap();
+        assert!(!saved.contains("sk-test"));
+        assert!(!saved.contains("sk-search-test"));
+        assert!(!saved.contains("openai_key:"));
+        assert!(saved.contains("openai_key_ref:"));
+        assert!(!saved.contains("search_provider_key:"));
+        assert!(saved.contains("search_provider_key_ref:"));
     }
 
     #[test]
@@ -488,6 +480,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_chat_proposal_config_is_ignored_and_not_reserialized() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "chat_proposal:\n  enabled: true\n  confidence_threshold: 0.9\n  min_message_length: 5\n  cooldown_seconds: 30\n",
+        )
+        .unwrap();
+
+        let loaded = AppConfig::load(file.path()).expect("legacy config remains readable");
+        loaded.save(file.path()).expect("save current config shape");
+
+        let saved = std::fs::read_to_string(file.path()).unwrap();
+        assert!(!saved.contains("chat_proposal"));
+        assert!(!saved.contains("confidence_threshold"));
+        assert!(!saved.contains("cooldown_seconds"));
+    }
+
+    #[test]
     fn config_load_or_default_uses_default_when_missing() {
         let path = "/tmp/nonexistent_openlife_config.yaml";
         let config = AppConfig::load_or_default(path);
@@ -495,14 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn config_effective_openai_base_env_override() {
+    fn config_effective_openai_base_ignores_ambient_redirect() {
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let config = AppConfig::default();
         std::env::set_var("OPENAI_API_BASE", "https://env.override.com/v1");
-        assert_eq!(
-            config.effective_openai_base(),
-            "https://env.override.com/v1"
-        );
+        assert_eq!(config.effective_openai_base(), config.llm.openai_base);
         std::env::remove_var("OPENAI_API_BASE");
         assert_eq!(config.effective_openai_base(), config.llm.openai_base);
     }
@@ -523,9 +530,25 @@ mod tests {
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let mut config = AppConfig::default();
         config.llm.provider = "deepseek".into();
+        config.llm.openai_base = crate::llm::default_base_for_provider("deepseek").into();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
         assert_eq!(config.effective_cloud_api_key(), "sk-deepseek");
         std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+
+    #[test]
+    fn official_environment_credential_never_follows_custom_endpoint() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        let mut config = AppConfig::default();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = "https://custom.example/v1".into();
+        std::env::set_var("OPENAI_API_KEY", "sk-official-only");
+
+        assert!(config.effective_cloud_api_key().is_empty());
+
+        config.llm.openai_key = "sk-explicit-custom".into();
+        assert_eq!(config.effective_cloud_api_key(), "sk-explicit-custom");
+        std::env::remove_var("OPENAI_API_KEY");
     }
 
     #[test]

@@ -3,7 +3,9 @@ import type {
   MainChatAgentIngressDecision,
   MainChatAgentTaskState,
   MainChatTaskSummary,
-  RunEvidenceView,
+  ProductRouteEvidence,
+  ProductRouteIdentity,
+  ProductRunEvidenceView,
   RuntimeRouteEvidence,
   RouteIdentity,
 } from "../tauri";
@@ -43,13 +45,18 @@ function runtimeRouteEvidenceFromRun(run: AgentRun | null): RuntimeRouteEvidence
   return raw as RuntimeRouteEvidence;
 }
 
-function primaryEvidenceRoute(evidence?: RuntimeRouteEvidence | null): RouteIdentity | null {
+type DisclosureRouteEvidence = RuntimeRouteEvidence | ProductRouteEvidence;
+type DisclosureRouteIdentity = RouteIdentity | ProductRouteIdentity;
+
+function primaryEvidenceRoute(
+  evidence?: DisclosureRouteEvidence | null
+): DisclosureRouteIdentity | null {
   return (
     evidence?.actual_route ?? evidence?.last_completed_route ?? evidence?.planned_route ?? null
   );
 }
 
-function boundaryFromEvidence(evidence?: RuntimeRouteEvidence | null): {
+function boundaryFromEvidence(evidence?: DisclosureRouteEvidence | null): {
   label: string;
   tone: ProductTone;
 } | null {
@@ -104,7 +111,7 @@ function boundaryLabel(
 function blockerCount(
   taskState?: MainChatAgentTaskState | null,
   taskSummary?: MainChatTaskSummary | null,
-  evidenceView?: RunEvidenceView | null
+  evidenceView?: ProductRunEvidenceView | null
 ): number {
   if (evidenceView) return evidenceView.blockers?.length ?? 0;
   const stateCount = taskState?.session?.pendingBlockers?.length ?? 0;
@@ -115,7 +122,7 @@ function blockerCount(
 function proposalCount(
   run: AgentRun | null,
   taskSummary?: MainChatTaskSummary | null,
-  evidenceView?: RunEvidenceView | null
+  evidenceView?: ProductRunEvidenceView | null
 ): number {
   if (evidenceView) return evidenceView.proposals?.length ?? 0;
   return Math.max(run?.generatedProposals?.length ?? 0, taskSummary?.pendingProposalCount ?? 0);
@@ -125,7 +132,7 @@ function nextAction(
   run: AgentRun | null,
   taskState?: MainChatAgentTaskState | null,
   taskSummary?: MainChatTaskSummary | null,
-  evidenceView?: RunEvidenceView | null
+  evidenceView?: ProductRunEvidenceView | null
 ): string {
   if (evidenceView?.nextRecommendedControl) {
     return evidenceView.nextRecommendedControl.replace(/_/g, " ");
@@ -146,18 +153,20 @@ export function buildRuntimeDisclosure(
   options: {
     taskState?: MainChatAgentTaskState | null;
     taskSummary?: MainChatTaskSummary | null;
-    evidenceView?: RunEvidenceView | null;
+    evidenceView?: ProductRunEvidenceView | null;
     ingress?: MainChatAgentIngressDecision | null;
-    runtimeRouteEvidence?: RuntimeRouteEvidence | null;
+    runtimeRouteEvidence?: DisclosureRouteEvidence | null;
     strictRuntimeRouteEvidence?: boolean;
   } = {}
 ): RuntimeDisclosureView {
+  const legacyPayloadUnverified = run?.legacyPayloadUnverified === true;
   const runtimeRouteEvidence =
     options.runtimeRouteEvidence ??
     options.evidenceView?.routeEvidence ??
-    runtimeRouteEvidenceFromRun(run);
+    (legacyPayloadUnverified ? null : runtimeRouteEvidenceFromRun(run));
+  const legacyUnknown = legacyPayloadUnverified && !options.evidenceView;
   const strictRuntimeRouteEvidence =
-    options.strictRuntimeRouteEvidence || Boolean(options.evidenceView);
+    options.strictRuntimeRouteEvidence || Boolean(options.evidenceView) || legacyPayloadUnverified;
   const evidenceRoute = primaryEvidenceRoute(runtimeRouteEvidence);
   const route = routeTypeLabel(
     evidenceRoute?.route_type ??
@@ -168,11 +177,14 @@ export function buildRuntimeDisclosure(
     (strictRuntimeRouteEvidence
       ? { label: "外发记录未接入", tone: "neutral" as ProductTone }
       : boundaryLabel(run, options.ingress));
-  const outcome = statusLabel(options.evidenceView?.lifecycleState ?? run?.status);
+  const outcome = statusLabel(
+    options.evidenceView?.lifecycleState ?? (legacyUnknown ? undefined : run?.status)
+  );
   const tools =
     options.evidenceView?.actionCount ?? run?.toolCallCount ?? run?.actions?.length ?? 0;
-  const toolsLabel =
-    tools > 0
+  const toolsLabel = legacyUnknown
+    ? "工具调用未验证"
+    : tools > 0
       ? `工具 ${tools}`
       : run?.contextSummary?.usedToolsPrompt
         ? "工具提示已注入"
@@ -185,25 +197,36 @@ export function buildRuntimeDisclosure(
       ? "provider 未验证"
       : run?.modelRoute?.provider) ||
     "provider 未验证";
+  const productRouteUsesRefs = Boolean(evidenceRoute && "model_ref" in evidenceRoute);
   const modelLabel =
-    evidenceRoute?.model ||
+    (evidenceRoute && "model_ref" in evidenceRoute
+      ? `ref ${evidenceRoute.model_ref}`
+      : evidenceRoute?.model) ||
     (runtimeRouteEvidence || strictRuntimeRouteEvidence
       ? "model 未验证"
       : run?.modelRoute?.model) ||
     "model 未验证";
   const memoryHits = run?.contextSummary?.memoryHitCount ?? 0;
   const routeReason =
-    evidenceRoute?.reason ||
+    (evidenceRoute && "reason_ref" in evidenceRoute
+      ? `reason ref ${evidenceRoute.reason_ref}`
+      : evidenceRoute?.reason) ||
     (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.reason) ||
     options.ingress?.reasonSummary;
+  const evidenceFallback = runtimeRouteEvidence?.fallback;
   const fallbackReason =
-    runtimeRouteEvidence?.fallback?.reason ||
+    (evidenceFallback && "reason_ref" in evidenceFallback
+      ? `reason ref ${evidenceFallback.reason_ref}`
+      : evidenceFallback?.reason) ||
     (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.fallbackReason);
   const technicalRows = [
     { label: "Run ID", value: run?.id ?? "未记录" },
     { label: "Provider", value: providerLabel },
-    { label: "Model", value: modelLabel },
-    { label: "Route reason", value: routeReason || "未记录" },
+    { label: productRouteUsesRefs ? "Model ref" : "Model", value: modelLabel },
+    {
+      label: productRouteUsesRefs ? "Route reason ref" : "Route reason",
+      value: routeReason || "未记录",
+    },
     {
       label: "Route confidence",
       value: runtimeRouteEvidence?.truth_confidence ?? "未记录",
@@ -217,8 +240,9 @@ export function buildRuntimeDisclosure(
       label: "Pending blockers",
       value:
         options.evidenceView?.blockers?.join(", ") ||
-        options.taskState?.session?.pendingBlockers?.join(", ") ||
-        `${blockers}`,
+        (legacyUnknown
+          ? "未验证"
+          : options.taskState?.session?.pendingBlockers?.join(", ") || `${blockers}`),
     },
   ];
 
@@ -243,14 +267,20 @@ export function buildRuntimeDisclosure(
     outcomeLabel: outcome.label,
     outcomeTone: outcome.tone,
     toolsLabel,
-    proposalsLabel: proposals > 0 ? `待确认 ${proposals}` : "无新提案",
-    blockersLabel: blockers > 0 ? `阻断 ${blockers}` : "无阻断",
-    nextActionLabel: nextAction(run, options.taskState, options.taskSummary, options.evidenceView),
+    proposalsLabel: legacyUnknown
+      ? "提案引用未验证"
+      : proposals > 0
+        ? `待确认 ${proposals}`
+        : "无新提案",
+    blockersLabel: legacyUnknown ? "阻断状态未验证" : blockers > 0 ? `阻断 ${blockers}` : "无阻断",
+    nextActionLabel: legacyUnknown
+      ? "查看详情"
+      : nextAction(run, options.taskState, options.taskSummary, options.evidenceView),
     providerLabel,
     modelLabel,
     routeReason,
     fallbackReason,
-    memoryLabel: `参考记忆 ${memoryHits} 条`,
+    memoryLabel: legacyUnknown ? "记忆引用未验证" : `参考记忆 ${memoryHits} 条`,
     technicalRows,
   };
 }

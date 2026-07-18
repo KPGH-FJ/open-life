@@ -228,12 +228,15 @@ const MANUAL_SNAPSHOT_RESTORE_REQUEST = {
   createPreChangeSnapshot: true,
 } as const;
 
-const MANUAL_DATA_IMPORT_REQUEST = {
-  purpose: "manual_restore",
-  explicitUserIntent: true,
-  createPreChangeSnapshot: true,
-  importTargets: ["life_model", "messages", "vectors"],
-} as const;
+function manualDataImportRequest(operationId: string) {
+  return {
+    operationId,
+    purpose: "manual_restore",
+    explicitUserIntent: true,
+    createPreChangeSnapshot: true,
+    importTargets: ["life_model", "messages", "vectors", "state_store"],
+  } as const;
+}
 
 export async function saveLifeModel(model: LifeModel): Promise<void> {
   return safeInvoke("save_life_model", {
@@ -243,20 +246,20 @@ export async function saveLifeModel(model: LifeModel): Promise<void> {
   });
 }
 
-export interface ChatProposalConfig {
-  enabled?: boolean;
-  confidence_threshold?: number;
-  min_message_length?: number;
-  cooldown_seconds?: number;
-}
-
 export type AgentRuntimeMode = "local_first_default" | "capability_first";
 export type CloudApiValidationStatus =
   | "unconfigured"
   | "unvalidated"
   | "validated"
   | "failed"
-  | "stale";
+  | "stale"
+  | "unknown"
+  | "remote_unknown"
+  | "runtime_generation_incoherent"
+  | "validation_record_corrupt"
+  | "validation_record_io_error"
+  | "scripted_provider_probe"
+  | "scripted_dogfood";
 
 export interface AppConfig {
   llm: {
@@ -271,6 +274,7 @@ export interface AppConfig {
       | "custom";
     openai_base: string;
     openai_key: string;
+    credential_version?: number;
     embedding_model: string;
     chat_model: string;
     embedding_enabled?: boolean;
@@ -278,13 +282,15 @@ export interface AppConfig {
   runtime_mode?: AgentRuntimeMode;
   prefer_local_model: boolean;
   local_model: string;
-  chat_proposal?: ChatProposalConfig;
   experimental_context_assembler?: boolean;
   use_agent_loop?: boolean;
   system?: {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     safe_paths?: string[];
+    search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
+    search_provider_key?: string;
+    searxng_url?: string;
     network_policy?: NetworkPolicy;
   };
 }
@@ -305,17 +311,35 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   return safeInvoke("save_config", { config });
 }
 
+export interface CredentialRecoveryItem {
+  purpose: "agent_run_receipts" | "main_chat_events" | "action_queue" | "task_store";
+  status: "available" | "created" | "missing_existing_data" | "invalid" | "unavailable";
+}
+
+export interface CredentialRecoveryReport {
+  items: CredentialRecoveryItem[];
+  allRequiredCredentialsReady: boolean;
+  restartRequired: boolean;
+}
+
+export async function recoverRequiredCredentialAccess(): Promise<CredentialRecoveryReport> {
+  return safeInvoke<CredentialRecoveryReport>("recover_required_credential_access");
+}
+
 // DEPRECATED: use sendMessageV2 for full trace support
 export interface MainChatMessageOptions {
+  operationId: string;
   selectedSkillId?: string;
 }
 
 export async function sendMessage(
   sessionId: string,
   messages: ChatMessage[],
-  options: MainChatMessageOptions = {}
+  options: MainChatMessageOptions
 ): Promise<string> {
   const result = await safeInvoke<SendMessageResult>("send_message", {
+    operationId: options.operationId,
+    operation_id: options.operationId,
     ...sessionArgs(sessionId),
     messages,
     ...selectedSkillArgs(options.selectedSkillId),
@@ -325,32 +349,98 @@ export async function sendMessage(
 
 export type ToolCallStatus = "success" | "error" | "pending" | "blocked" | "needs_confirmation";
 
-export interface ToolCallResult {
-  name: string;
-  arguments: Record<string, any>;
-  sanitized_arguments?: Record<string, any>;
-  success: boolean;
-  output?: string;
-  error?: string;
-  permission_level?: string;
-  status?: ToolCallStatus;
-  requires_confirmation?: boolean;
-  pii_found?: boolean;
-  privacy_warnings?: string[];
-  action_id?: string;
-  run_id?: string;
-  permission_decision?: string;
-  react_trace?: ReactActionTraceEnvelope;
-  replayable?: boolean;
+export type ProductToolCallStatus =
+  | "success"
+  | "failed"
+  | "effect_unknown"
+  | "not_dispatched"
+  | "locally_aborted"
+  | "remote_unknown"
+  | "unknown";
+
+export interface ProductToolReference {
+  id: string;
+  source: string;
 }
 
-export interface ReactActionTraceEnvelope {
-  runId?: string;
+export type ToolActionEffect =
+  | "read_only"
+  | "local_mutation"
+  | "external_mutation"
+  | "proposal_only"
+  | "unknown";
+
+export type ToolIdempotencyContract = "unspecified" | "non_idempotent" | "idempotent";
+
+export type ToolDispatchKind =
+  | "not_attempted"
+  | "local"
+  | "network"
+  | "mcp_stdio"
+  | "a2a"
+  | "simulated"
+  | "unknown";
+
+export type ToolTransportStatus =
+  | "not_attempted"
+  | "dispatched"
+  | "response_observed"
+  | "local_aborted"
+  | "remote_unknown";
+
+export type ToolEffectStatus = "not_attempted" | "confirmed" | "unknown";
+export type ToolExecutionOutcome = "not_observed" | "succeeded" | "failed" | "unknown";
+export type ToolAuditPersistenceStatus =
+  | "not_required"
+  | "pending"
+  | "committed"
+  | "failed"
+  | "unknown";
+
+export interface ProductToolExecutionReceipt {
+  receiptRef: string;
+  requestDigest: string;
+  actionEffect: ToolActionEffect;
+  idempotencyContract: ToolIdempotencyContract;
+  dispatchKind: ToolDispatchKind;
+  dispatchAttemptCount: number;
+  dispatchObserved: boolean;
+  transportStatus: ToolTransportStatus;
+  effectStatus: ToolEffectStatus;
+  outcome: ToolExecutionOutcome;
+  auditPersistenceStatus: ToolAuditPersistenceStatus;
+  verified: boolean;
+}
+
+export type ProductToolFailureCode =
+  | "tool_failed"
+  | "tool_effect_unknown"
+  | "tool_remote_state_unknown"
+  | "tool_locally_aborted"
+  | "tool_not_dispatched"
+  | "tool_state_unknown"
+  | "tool_evidence_unverified";
+
+export interface ProductToolCallResult {
+  toolRef: ProductToolReference;
+  actionRef: string;
+  runRef?: string;
+  status: ProductToolCallStatus;
+  requiresConfirmation: boolean;
+  failureCode?: ProductToolFailureCode;
+  privacyWarningCount: number;
+  proposalRef?: string;
+  executionReceipt?: ProductToolExecutionReceipt;
+  outputReceipt?: ContentReceipt;
+}
+
+export type ToolCallResult = ProductToolCallResult;
+
+export interface ProductReactActionTrace {
   actionId: string;
   stepIndex: number;
   toolCallIndex: number;
   actionType: string;
-  toolId: string;
   toolName: string;
   toolSource: string;
   actionCategory: string;
@@ -359,14 +449,32 @@ export interface ReactActionTraceEnvelope {
   status: string;
   proposalId?: string;
   observationId?: string;
-  observationStatus?: string;
   outputPreview?: string;
-  outputHash?: string;
-  outputByteCount?: number;
-  outputItemCount?: number;
+  outputReceipt?: ContentReceipt;
   startedAt?: string;
   finishedAt?: string;
   metadataSafe: boolean;
+}
+
+/**
+ * Client-only compatibility shape for historical fixtures and archived views.
+ * Shipped commands return ProductReactActionTrace and do not promise these
+ * legacy optional fields.
+ */
+export interface ReactActionTraceEnvelope extends ProductReactActionTrace {
+  runId?: string;
+  toolId?: string;
+  observationStatus?: string;
+  outputItemCount?: number;
+}
+
+export interface ContentReceipt {
+  version: number;
+  kind: "tool_output" | "tool_error";
+  provenance: "observed_tool_adapter_body";
+  byteCount: number;
+  digest: string;
+  verified: boolean;
 }
 
 export interface ReasoningTrace {
@@ -482,7 +590,7 @@ export interface HSEvidenceSummary {
 
 export interface SendMessageResult {
   reply: string;
-  status?: "completed" | "failed";
+  status?: MainChatTurnStatus;
   blockers?: string[];
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
@@ -490,20 +598,116 @@ export interface SendMessageResult {
   agent_ingress?: MainChatAgentIngressDecision;
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
+  provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
+  turn_terminal?: OpenLifeTurnTerminal;
+}
+
+export interface ImportedResourceReceipt {
+  resourceId: string;
+  bindingId: string;
+  filename: string;
+  digest: string;
+  byteCount: number;
+  chunkCount: number;
+  reusedExisting: boolean;
+  eventId?: string | null;
+}
+
+export interface ResourceImportReceipt {
+  operationId: string;
+  messageId: string;
+  resources: ImportedResourceReceipt[];
+  committedAt: string;
+}
+
+export interface ResourceImportSelectionResult {
+  cancelled: boolean;
+  receipt: ResourceImportReceipt | null;
+}
+
+export interface ResourceImportStatus {
+  status: "active" | "committed" | "not_found";
+  receipt: ResourceImportReceipt | null;
+}
+
+export interface ResourceDetachReceipt {
+  operationId: string;
+  messageId: string;
+  resourceId: string;
+  bindingRemoved: boolean;
+  resourceDeleted: boolean;
+  eventId: string;
+  committedAt: string;
+}
+
+export type ProviderInvocationStatus =
+  | "not_attempted"
+  | "started"
+  | "completed"
+  | "failed"
+  | "locally_aborted"
+  | "remote_unknown"
+  | "invalid";
+
+export type MainChatTurnStatus =
+  | "completed"
+  | "completed_with_pending_items"
+  | "blocked"
+  | "failed"
+  | "remote_unknown"
+  | "cancelled"
+  | "interrupted";
+
+export interface OpenLifeTurnTerminal {
+  runtimeOwner: string;
+  status: MainChatTurnStatus;
+  state: string;
+  runId?: string | null;
+  taskSessionId?: string | null;
+  blockers: string[];
+  proposals: string[];
+  legacyFallbackUsed: boolean;
+  legacyRuntimeInvoked: boolean;
+  singleStepFallbackUsed: boolean;
+  directWritesExecuted: boolean;
+  providerInvocationStatus: ProviderInvocationStatus;
+  modelInvoked: boolean;
+  toolInvoked: boolean;
+  finalDelivery: ProductFinalDeliveryView;
+}
+
+export interface ProductFinalDeliveryView {
+  deliveryRef: string;
+  taskRef: string;
+  runRef: string;
+  status: MainChatTurnStatus | "unknown";
+  completedActionCount: number;
+  observationCount: number;
+  proposalCount: number;
+  blockerCount: number;
+  pendingUserActionCount: number;
+  durableChangeCount: number;
+  nextStepCount: number;
+  traceAvailable: boolean;
+  kernelEventCount: number | null;
+  durableEventCount: number;
+  hasAssistantMessage: boolean;
+  toolCallCount: number;
 }
 
 export interface StreamMessageStartPayload {
   session_id: string;
   run_id: string;
-  status?: "completed" | "failed";
+  status?: MainChatTurnStatus;
   blockers?: string[];
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
+  provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
 }
@@ -512,8 +716,9 @@ export interface StreamMessageDonePayload {
   session_id: string;
   run_id: string;
   reply: string;
-  status?: "completed" | "failed";
+  status?: MainChatTurnStatus;
   blockers?: string[];
+  provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
   reasoning_trace: ReasoningTrace;
@@ -521,6 +726,7 @@ export interface StreamMessageDonePayload {
   agent_ingress?: MainChatAgentIngressDecision;
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
+  turn_terminal?: OpenLifeTurnTerminal;
 }
 
 export type MainChatKernelEvent =
@@ -697,6 +903,7 @@ export interface MainChatAgentStateSnapshot {
     provider: string;
     model: string;
     routeType: string;
+    providerConfigGeneration?: string;
     reason: string;
     evidenceId: string;
   };
@@ -880,7 +1087,6 @@ export interface MainChatExecutionTranscriptEntry {
   sessionId: string;
   kind: MainChatExecutionTranscriptKind;
   summary: string;
-  metadata?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -902,12 +1108,7 @@ export type MainChatExecutionQueueStatus =
   | "cancelled"
   | "completed";
 
-export interface MainChatExecutionAction {
-  actionType: string;
-  description: string;
-}
-
-export interface MainChatExecutionPolicyDecision {
+export interface ProductExecutionPolicyDecision {
   level: string;
   reasonCode: string;
   executionAllowed: boolean;
@@ -917,43 +1118,55 @@ export interface MainChatExecutionPolicyDecision {
   silentWriteAllowed: boolean;
 }
 
-export interface MainChatQueuedExecutionAction {
+export interface ProductQueuedExecutionAction {
   id: string;
   sessionId: string;
-  action: MainChatExecutionAction;
-  policy: MainChatExecutionPolicyDecision;
+  actionType: string;
+  policy: ProductExecutionPolicyDecision;
   status: MainChatExecutionQueueStatus;
   attempts: number;
-  observationMetadata?: Record<string, unknown>;
-  error?: string;
+  revision: number;
+  failureCode?: "action_failed" | "action_blocked";
   createdAt: string;
   updatedAt: string;
 }
 
-export interface MainChatAgentTaskSession {
+export interface ProductTaskSession {
   id: string;
   chatSessionId: string;
-  userGoal: string;
   selectedStrategy: MainChatAgentStrategy;
   status: MainChatAgentTaskStatus;
-  currentPlanSummary?: string;
   actionQueueIds: string[];
   pendingBlockers: string[];
-  contextSnapshotRefs: string[];
+  contextSnapshotCount: number;
+  hasPlanSummary: boolean;
+  hasFinalSummary: boolean;
   createdAt: string;
   updatedAt: string;
-  finalSummary?: string;
+}
+
+export interface ProductTaskProposal {
+  id: string;
+  runRef?: string;
+  proposalType: ProposalType;
+  source: ProposalSource;
+  riskLevel: RiskLevel;
+  status: ProposalStatus;
+  createdAt: string;
+  resolvedAt?: string;
+  expiresAt?: string;
 }
 
 export interface MainChatAgentTaskState {
-  session?: MainChatAgentTaskSession | null;
-  actions: MainChatQueuedExecutionAction[];
+  session?: ProductTaskSession | null;
+  actions: ProductQueuedExecutionAction[];
   transcript: MainChatExecutionTranscriptEntry[];
   pendingApprovalCount: number;
   activeToolCount: number;
   canResume: boolean;
   canCancel: boolean;
   canRetry: boolean;
+  cancellationPending: boolean;
 }
 
 export interface MainChatAgentTaskFilter {
@@ -983,8 +1196,8 @@ export interface MainChatTaskSummary {
   observationCount?: number;
   allowedControls?: string[];
   redactionState?: string;
-  routeEvidence?: RuntimeRouteEvidence | null;
-  evidenceView?: RunEvidenceView;
+  routeEvidence: ProductRouteEvidence | null;
+  evidenceView: ProductRunEvidenceView;
 }
 
 export interface MainChatContinuityDiagnostics {
@@ -1002,20 +1215,21 @@ export interface MainChatContinuityDiagnostics {
 }
 
 export interface MainChatTaskDetail {
-  taskSession: MainChatAgentTaskSession;
-  actions: MainChatQueuedExecutionAction[];
+  taskSession: ProductTaskSession;
+  actions: ProductQueuedExecutionAction[];
   transcript: MainChatExecutionTranscriptEntry[];
-  proposals: AgentProposal[];
+  proposals: ProductTaskProposal[];
   blockers: string[];
   finalDelivery?: Record<string, unknown> | null;
   continuityDiagnostics: MainChatContinuityDiagnostics;
   allowedControls: string[];
   nextRecommendedControl: string;
   lastSafeResumePoint?: string | null;
+  retryTargetActionId?: string | null;
   contextDigest: string;
   selectedSkillDigest?: string | null;
   toolManifestDigest: string;
-  evidenceView?: RunEvidenceView;
+  evidenceView: ProductRunEvidenceView;
 }
 
 export interface RunEvidenceTimelineEvent {
@@ -1028,12 +1242,30 @@ export interface RunEvidenceTimelineEvent {
   sourceRef?: string | null;
 }
 
-export interface RunEvidenceView {
-  runId?: string | null;
+export interface DurableTurnLifecycleReceiptView {
+  eventId: string;
+  runId: string;
+  sequence: number;
+  eventType: string;
+  sourceRef: string;
+  lifecycleState: string;
+  failureKind: string | null;
+  createdAt: string;
+  payloadDigest: string;
+}
+
+export interface ProductRunEvidenceView {
+  runId: string | null;
   taskSessionId: string;
   title: string;
   lifecycleState: string;
-  routeEvidence?: RuntimeRouteEvidence | null;
+  projectionState: string;
+  identityState: string;
+  snapshotState: string;
+  durableSequenceBefore: number | null;
+  durableSequenceAfter: number | null;
+  durableLifecycleReceipt: DurableTurnLifecycleReceiptView | null;
+  routeEvidence: ProductRouteEvidence | null;
   eventTimeline: RunEvidenceTimelineEvent[];
   actionCount: number;
   observationCount: number;
@@ -1196,9 +1428,11 @@ export async function listMainChatToolCandidates(
 export async function sendMessageV2(
   sessionId: string,
   messages: ChatMessage[],
-  options: MainChatMessageOptions = {}
+  options: MainChatMessageOptions
 ): Promise<SendMessageResult> {
   return safeInvoke<SendMessageResult>("send_message", {
+    operationId: options.operationId,
+    operation_id: options.operationId,
     ...sessionArgs(sessionId),
     messages,
     ...selectedSkillArgs(options.selectedSkillId),
@@ -1367,9 +1601,11 @@ export async function getMainChatRuntimeStatus(): Promise<MainChatRuntimeStatus>
 export async function startStreamMessage(
   sessionId: string,
   messages: ChatMessage[],
-  options: MainChatMessageOptions = {}
+  options: MainChatMessageOptions
 ): Promise<StreamMessageDonePayload> {
   const payload = {
+    operationId: options.operationId,
+    operation_id: options.operationId,
     ...sessionArgs(sessionId),
     messages,
     ...selectedSkillArgs(options.selectedSkillId),
@@ -1380,14 +1616,64 @@ export async function startStreamMessage(
   });
 }
 
+export async function pickAndImportResources(
+  importOperationId: string,
+  turnOperationId: string
+): Promise<ResourceImportSelectionResult> {
+  return safeInvoke<ResourceImportSelectionResult>("pick_and_import_resources", {
+    importOperationId,
+    import_operation_id: importOperationId,
+    turnOperationId,
+    turn_operation_id: turnOperationId,
+  });
+}
+
+export async function cancelResourceImport(operationId: string): Promise<boolean> {
+  return safeInvoke<boolean>("cancel_resource_import", {
+    operationId,
+    operation_id: operationId,
+  });
+}
+
+export async function getResourceImportStatus(operationId: string): Promise<ResourceImportStatus> {
+  return safeInvoke<ResourceImportStatus>("get_resource_import_status", {
+    operationId,
+    operation_id: operationId,
+  });
+}
+
+export async function detachResourceFromTurn(
+  operationId: string,
+  turnOperationId: string,
+  resourceId: string
+): Promise<ResourceDetachReceipt> {
+  return safeInvoke<ResourceDetachReceipt>("detach_resource_from_turn", {
+    operationId,
+    operation_id: operationId,
+    turnOperationId,
+    turn_operation_id: turnOperationId,
+    resourceId,
+    resource_id: resourceId,
+  });
+}
+
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
 
 export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
   return safeInvoke<ChatMessage[]>("get_chat_history", sessionArgs(sessionId));
 }
 
-export async function saveChatMessage(sessionId: string, message: ChatMessage): Promise<void> {
-  return safeInvoke("save_chat_message", { ...sessionArgs(sessionId), message });
+export async function saveChatMessage(
+  sessionId: string,
+  message: ChatMessage,
+  operationId: string
+): Promise<void> {
+  return safeInvoke("save_chat_message", {
+    ...sessionArgs(sessionId),
+    message,
+    operationId,
+    operation_id: operationId,
+  });
 }
 
 export async function checkOllamaStatus(): Promise<boolean> {
@@ -1408,10 +1694,6 @@ export async function getPolicyRouterStatus(): Promise<PolicyRouterStatus> {
 
 export async function getModelRouterStatus(): Promise<ModelRouterStatus> {
   return safeInvoke<ModelRouterStatus>("get_model_router_status");
-}
-
-export async function replayAgentAction(runId: string, actionId: string): Promise<AgentAction> {
-  return safeInvoke<AgentAction>("replay_agent_action", { runId, actionId });
 }
 
 export interface BuilderCompletion {
@@ -1451,6 +1733,10 @@ export interface RuntimeBuildInfo {
   dataDir: string;
   a2aPort: number;
   a2aStatus: string;
+  devExtensionsEnabled: boolean;
+  authenticatedDevA2aEnabled: boolean;
+  unauthenticatedDevA2aEnabled: boolean;
+  arbitraryMcpRegistrationEnabled: boolean;
   bundleIdentifier: string;
   productName: string;
 }
@@ -1462,6 +1748,58 @@ export interface RouteIdentity {
   privacy_level: string;
   reason: string;
   provider_health_is_estimated: boolean;
+}
+
+export interface ProductRouteIdentity {
+  provider: string;
+  model_ref: string;
+  route_type: string;
+  privacy_level: string;
+  reason_ref: string;
+  provider_health_is_estimated: boolean;
+}
+
+export interface ProductProviderReadiness {
+  configured: boolean;
+  credential_present: boolean;
+  validated: boolean;
+  validation_status: string;
+  preferred: string;
+  actually_used: string | null;
+  stale: boolean;
+  failed: boolean;
+  last_checked_at: string | null;
+}
+
+export interface ProductFallbackEvidence {
+  from_route: ProductRouteIdentity | null;
+  to_route: ProductRouteIdentity | null;
+  reason_ref: string;
+  blocker_codes: string[];
+}
+
+export interface ProductRouteSourceRef {
+  source: string;
+  ref_id: string | null;
+  status: string | null;
+  route_type: string | null;
+}
+
+export interface ProductRouteEvidence {
+  evidence_id: string;
+  generated_at: string;
+  conversation_id: string | null;
+  run_id: string | null;
+  task_session_id: string | null;
+  answer_scope: string;
+  planned_route: ProductRouteIdentity | null;
+  actual_route: ProductRouteIdentity | null;
+  last_completed_route: ProductRouteIdentity | null;
+  provider_readiness: ProductProviderReadiness;
+  fallback: ProductFallbackEvidence | null;
+  external_transmission: string;
+  source_refs: ProductRouteSourceRef[];
+  truth_confidence: string;
 }
 
 export interface ProviderReadiness {
@@ -1545,7 +1883,30 @@ export interface ProviderTransmissionHistoryItem {
   finished_at?: string | null;
 }
 
+export interface PersistenceHealthSnapshot {
+  mode:
+    | "initializing"
+    | "read_write"
+    | "read_only_degraded"
+    | "unavailable_degraded"
+    | "ephemeral_development"
+    | "isolated_evaluation";
+  canonicalWritesAllowed: boolean;
+  providerDispatchAllowed: boolean;
+  toolDispatchAllowed: boolean;
+  liveOrCanonicalCreditEligible: boolean;
+  sealed: boolean;
+  stores: Array<{
+    store: string;
+    mode: "read_write_canonical" | "read_only_canonical" | "unavailable" | "ephemeral_development";
+    reasonCode?: string | null;
+    errorDigest?: string | null;
+  }>;
+  globalReasonCodes: string[];
+}
+
 export interface SystemDiagnostics {
+  persistence_health?: PersistenceHealthSnapshot;
   policy_router: PolicyRouterStatus;
   mcp_server_count: number;
   mcp_tool_count: number;
@@ -1553,6 +1914,8 @@ export interface SystemDiagnostics {
   mcp_recent_pii_count: number;
   memory_chunk_count: number;
   vector_corrupt_embedding_count?: number;
+  vector_unknown_profile_count?: number;
+  vector_profile_dimension_mismatch_count?: number;
   unfinished_builder_sessions: number;
   pending_builder_review_sessions?: number;
   ollama_service_online?: boolean;
@@ -1564,7 +1927,7 @@ export interface SystemDiagnostics {
   cloud_provider?: string;
   cloud_api_validated?: boolean;
   cloud_api_last_error?: string | null;
-  cloud_api_validation_status?: CloudApiValidationStatus | string;
+  cloud_api_validation_status?: CloudApiValidationStatus;
   cloud_api_validated_at?: string | null;
   cloud_api_failed_at?: string | null;
   cloud_api_validation_source?: string | null;
@@ -1664,6 +2027,7 @@ export interface LifeSurfaceProjection {
 export interface LifeStateProjection {
   version: string;
   generatedAt: string;
+  persistence: PersistenceHealthSnapshot;
   pending: LifePendingProjection;
   readiness: LifeReadinessProjection;
   taskState: LifeTaskStateProjection;
@@ -1677,6 +2041,565 @@ export interface LifeStateProjection {
 export async function getLifeStateProjection(): Promise<LifeStateProjection> {
   return safeInvoke<LifeStateProjection>("get_life_state_projection");
 }
+
+// Backend-owned shared product read-model contract.
+// Canonical Rust owner: openlife-core/src/agent/product_read_model.rs.
+export type ViewModelStatus = "loading" | "ready" | "empty" | "error" | "stale";
+
+export type EvidenceSource =
+  | "backend-readmodel"
+  | "audit"
+  | "task"
+  | "review"
+  | "memory"
+  | "lifemodel"
+  | "settings"
+  | "provider";
+
+export type EvidenceSensitivity = "public" | "local_private" | "sensitive" | "redacted";
+
+export type EvidenceRef = {
+  id: string;
+  label: string;
+  source: EvidenceSource;
+  sensitivity?: EvidenceSensitivity;
+};
+
+export type ViewModelWarningSeverity = "info" | "warning" | "error";
+
+export type ViewModelWarning = {
+  code: string;
+  message: string;
+  severity: ViewModelWarningSeverity;
+  evidenceRefs?: EvidenceRef[];
+};
+
+export type ProductActionKind =
+  | "open"
+  | "start"
+  | "continue"
+  | "retry"
+  | "cancel"
+  | "refresh"
+  | "inspect"
+  | "configure";
+
+export type ProductAction = {
+  id: string;
+  label: string;
+  kind: ProductActionKind;
+  enabled: boolean;
+  disabledReason?: string;
+  targetRef?: string;
+};
+
+export type ReviewItemMaterializationStatus =
+  | "not_applicable"
+  | "not_started"
+  | "applying"
+  | "applied"
+  | "failed"
+  | "rolled_back"
+  | "unknown";
+
+export type ReviewActionBase = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  disabledReason?: string;
+  requiresConfirmation?: boolean;
+  targetReviewItemId: string;
+  expectedMaterializationStatusAfterDispatch?: ReviewItemMaterializationStatus;
+};
+
+export type ReviewActionKindEffectInvariant =
+  | { kind: "approve" | "reject" | "edit" | "later" | "revoke"; effect: "decision_only" }
+  | { kind: "apply"; effect: "materialization_request" }
+  | { kind: "resume"; effect: "task_resume_request" }
+  | { kind: "view_evidence"; effect: "evidence_only" };
+
+export type ReviewAction = ReviewActionBase & ReviewActionKindEffectInvariant;
+
+export type DebugAction = {
+  id: string;
+  label: string;
+  kind: "raw_trace" | "raw_json" | "export" | "provider_health" | "route_evidence" | "transcript";
+  enabled: boolean;
+  developerOnly?: boolean;
+  targetRef?: string;
+};
+
+export type ViewModelEnvelope<T> = {
+  data: T | null;
+  status: ViewModelStatus;
+  lastUpdatedAt: string | null;
+  source: "backend-readmodel";
+  evidenceRefs?: EvidenceRef[];
+  warnings?: ViewModelWarning[];
+  actions: {
+    primary: ProductAction[];
+    review?: ReviewAction[];
+    debugOnly?: DebugAction[];
+  };
+};
+
+export type ProductRiskLevel = "none" | "low" | "medium" | "high" | "critical" | "unknown";
+
+export type ProviderPrivacyBoundarySummary = {
+  routeType: "local" | "cloud" | "hybrid" | "auto" | "unknown";
+  externalTransmission: "not_sent" | "sent" | "possible" | "unknown";
+  providerLabel: string;
+  modelLabel: string;
+  privacyLabel: string;
+  risk: ProductRiskLevel;
+  localOnlyRequired: boolean;
+  blockedReason?: string;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type MemoryLane =
+  | "turn_context"
+  | "episodic_life_event"
+  | "semantic_fact_preference"
+  | "procedural_rule"
+  | "evidence_record"
+  | "canonical_lifemodel_truth";
+
+export type BackendEntityRef = {
+  id: string;
+  kind:
+    | "task"
+    | "run"
+    | "conversation"
+    | "review_item"
+    | "memory"
+    | "lifemodel"
+    | "proposal"
+    | "tool_permission"
+    | "evidence"
+    | "external_resource"
+    | "schedule"
+    | "policy";
+  label: string;
+  href?: string;
+};
+
+export type ReviewItemType =
+  | "goal_update"
+  | "state_update"
+  | "preference_update"
+  | "capability_update"
+  | "memory_write"
+  | "memory_archive"
+  | "tool_permission"
+  | "plugin_permission"
+  | "scheduled_task"
+  | "external_write_action"
+  | "model_policy_change"
+  | "data_export"
+  | "schedule_checkin"
+  | "life_model_update"
+  | "unsupported";
+
+export type ReviewItemDecisionStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "edited"
+  | "deferred"
+  | "unknown";
+
+export type ReviewItemSource = {
+  kind: "proposal";
+  proposalId: string;
+  proposalSource: string;
+  sourceDetail?: string;
+  runId?: string;
+};
+
+export type ReviewItemTaskResumeRelation = {
+  taskSessionId: string;
+  resumeRequiresMaterialization?: boolean;
+  canRequestResume: boolean;
+  resumeActionId?: string;
+  blockedReason?: string;
+};
+
+export type ReviewItem = {
+  id: string;
+  type: ReviewItemType;
+  source: ReviewItemSource;
+  status: ReviewItemDecisionStatus;
+  materializationStatus: ReviewItemMaterializationStatus;
+  allowedActions: ReviewAction[];
+  risk: ProductRiskLevel;
+  expiresAt?: string;
+  evidenceRefs: EvidenceRef[];
+  targetRefs: BackendEntityRef[];
+  taskResumeRelation?: ReviewItemTaskResumeRelation;
+};
+
+export type ReviewCenterSummary = {
+  total: number;
+  actionRequiredCount: number;
+  blockedActionCount: number;
+  byStatus: Record<string, number>;
+  byRisk: Record<string, number>;
+  byMaterializationStatus: Record<string, number>;
+};
+
+export type ReviewBatchDomain =
+  | "memory"
+  | "life_model"
+  | "tool_permission"
+  | "external_action"
+  | "other";
+
+export type ReviewBatch = {
+  id: string;
+  domain: ReviewBatchDomain;
+  sessionId?: string;
+  itemIds: string[];
+  actionRequiredCount: number;
+  highestRisk: ProductRiskLevel;
+};
+
+export type ReviewCenterViewModel = {
+  batches: ReviewBatch[];
+  items: ReviewItem[];
+  summary: ReviewCenterSummary;
+};
+
+// Backend-owned LifeModel read-model contract.
+// Canonical Rust owner: openlife-core/src/agent/life_model_view_model.rs.
+export type LifeModelTruthMode =
+  | "canonical"
+  | "current_compatibility"
+  | "candidate"
+  | "pending_review"
+  | "manual_override"
+  | "unknown"
+  | "unavailable";
+
+export type LifeModelDimensionId = "identity" | "goals" | "capabilities" | "state";
+
+export type LifeModelConfidence = "low" | "medium" | "high" | "unknown";
+
+export type LifeModelOwnerStatus = "PARTIAL" | "PHASE_2_REQUIRED" | "UNKNOWN";
+
+export type LifeModelProvenance = "limited" | "unknown" | "PHASE_2_REQUIRED";
+
+export type LifeModelReviewItemRef = BackendEntityRef & {
+  kind: "review_item";
+};
+
+export type LifeModelCanonicalSummary = {
+  lifeModelRef: BackendEntityRef;
+  title: string;
+  summary: string;
+  versionLabel: string;
+  lastMaterializedAt: string | null;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type LifeModelCurrentViewSummary = {
+  currentViewRef: BackendEntityRef;
+  compatibilityMode: boolean;
+  label: string;
+  summary: string;
+  divergenceFromCanonical: "none" | "minor" | "material" | "unknown";
+  evidenceRefs: EvidenceRef[];
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelDimensionSummary = {
+  id: LifeModelDimensionId;
+  label: string;
+  summary: string;
+  confidence: LifeModelConfidence;
+  stale: boolean;
+  pendingReviewItemRefs: LifeModelReviewItemRef[];
+  evidenceRefs: EvidenceRef[];
+  provenance: LifeModelProvenance;
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelTrustQualityState = {
+  readiness: "not_built" | "limited" | "usable_with_limits" | "ready" | "stale" | "unknown";
+  completionScore: number | null;
+  missingDimensionCount: number;
+  staleDimensionCount: number;
+  warningRefs: EvidenceRef[];
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelPendingUpdateCounts = {
+  candidate: number;
+  pendingReview: number;
+  approvedNotApplied: number;
+  failedMaterialization: number;
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelCandidateChange = {
+  changeRef: BackendEntityRef;
+  title: string;
+  changeKind: "add" | "update" | "remove" | "merge" | "manual_override" | "unknown";
+  affectedDimensionIds: string[];
+  reviewItemRefs: LifeModelReviewItemRef[];
+  evidenceRefs: EvidenceRef[];
+  decisionStatus: "pending" | "accepted" | "edited" | "postponed" | "unknown";
+};
+
+export type LifeModelMaterializedChange = {
+  changeRef: BackendEntityRef;
+  title: string;
+  materializationStatus: ReviewItemMaterializationStatus;
+  materializedAt: string | null;
+  rollbackAvailable: boolean;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type LifeModelManualOverrideState = {
+  active: boolean;
+  blockedReason?: string;
+  draftRef: BackendEntityRef | null;
+  saveAction: ProductAction | null;
+  reviewItemRefs: LifeModelReviewItemRef[];
+  evidenceRefs: EvidenceRef[];
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelMemoryLinkageSummary = {
+  linkedMemoryCount: number;
+  candidateMemoryCount: number;
+  materializedMemoryCount: number;
+  conflictCount: number;
+  memoryRefs: BackendEntityRef[];
+  evidenceRefs: EvidenceRef[];
+  linkageStatus: "partial" | "unknown";
+  tierSummary: {
+    total: number | null;
+    tier1: number | null;
+    tier2: number | null;
+    tier3: number | null;
+    archived: number | null;
+  };
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelViewModel = {
+  truthMode: LifeModelTruthMode;
+  canonicalSummary: LifeModelCanonicalSummary | null;
+  currentViewSummary: LifeModelCurrentViewSummary | null;
+  dimensionSummaries: LifeModelDimensionSummary[];
+  trustQualityState: LifeModelTrustQualityState;
+  pendingUpdateCounts: LifeModelPendingUpdateCounts;
+  provenanceRefs: EvidenceRef[];
+  candidateChanges: LifeModelCandidateChange[];
+  materializedChanges: LifeModelMaterializedChange[];
+  manualOverrideState: LifeModelManualOverrideState | null;
+  relatedReviewItemRefs: LifeModelReviewItemRef[];
+  memoryLinkage: LifeModelMemoryLinkageSummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
+// Backend-owned task and workspace read-model contracts.
+// Canonical Rust owner: openlife-core/src/agent/tasks_view_model.rs.
+export type TaskLifecycleStatus =
+  | "running"
+  | "waiting_permission"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "completed"
+  | "completed_with_pending_review"
+  | "completed_needs_evidence"
+  | "unknown";
+
+export type TaskTerminalDeliveryStatus =
+  | "not_terminal"
+  | "delivered"
+  | "missing_final_delivery_evidence"
+  | "completed_with_pending_review"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+export type TaskControlKind =
+  | "resume"
+  | "retry"
+  | "cancel"
+  | "refresh_context"
+  | "open_trace"
+  | "open_run"
+  | "open_review_item"
+  | "view_evidence";
+
+export type TaskControlEffect =
+  | "task_resume_request"
+  | "task_retry_request"
+  | "task_cancel_request"
+  | "task_refresh_request"
+  | "navigation_only"
+  | "evidence_only";
+
+export type TaskControl = {
+  id: string;
+  label: string;
+  kind: TaskControlKind;
+  effect: TaskControlEffect;
+  enabled: boolean;
+  disabledReason?: string;
+  requiresConfirmation?: boolean;
+  targetTaskId: string;
+  targetActionId?: string;
+  completionProofAfterDispatch?: boolean;
+};
+
+export type TaskLatestResultPreview = {
+  status: TaskTerminalDeliveryStatus;
+  label: string;
+  preview?: string;
+  finalDeliveryRef?: BackendEntityRef;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type TaskViewModelItem = {
+  canonicalTaskId: string;
+  taskSessionId?: string;
+  relatedRunIds: string[];
+  conversationId?: string;
+  title: string;
+  strategy: string;
+  lifecycleStatus: TaskLifecycleStatus;
+  terminalDeliveryStatus: TaskTerminalDeliveryStatus;
+  finalDeliveryEvidencePresent: boolean;
+  pendingBlockers: string[];
+  pendingReviewItemRefs: BackendEntityRef[];
+  allowedControls: TaskControl[];
+  nextRecommendedControl: string;
+  latestResultPreview?: TaskLatestResultPreview;
+  evidenceRefs: EvidenceRef[];
+  updatedAt?: string;
+};
+
+export type TasksViewModelSummary = {
+  total: number;
+  activeCount: number;
+  waitingPermissionCount: number;
+  blockedCount: number;
+  pendingReviewCount: number;
+  completedCount: number;
+  completedNeedsEvidenceCount: number;
+  failedCount: number;
+  cancelledCount: number;
+  byLifecycleStatus: Record<string, number>;
+};
+
+export type TasksViewModel = {
+  items: TaskViewModelItem[];
+  summary: TasksViewModelSummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
+export type WorkspaceTimelineItem = {
+  id: string;
+  label: string;
+  status: TaskLifecycleStatus;
+  evidenceRefs: EvidenceRef[];
+  updatedAt?: string;
+};
+
+export type WorkspaceViewModel = {
+  activeTaskRef?: BackendEntityRef;
+  recentTaskRefs: BackendEntityRef[];
+  pendingReviewItemRefs: BackendEntityRef[];
+  timeline: WorkspaceTimelineItem[];
+  providerPrivacyBoundarySummary: ProviderPrivacyBoundarySummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
+export type MemoryTierSummary = {
+  total: number;
+  tier1: number;
+  tier2: number;
+  tier3: number;
+  archived: number;
+};
+
+export type MemoryLifecycleSummary = {
+  candidateCount: number;
+  pendingReviewCount: number;
+  editedPendingReviewCount: number;
+  acceptedCount: number;
+  confirmedCount: number;
+  pendingMaterializationCount: number;
+  materializedCount: number;
+  materializationFailedCount: number;
+  rejectedCount: number;
+  deferredCount: number;
+  supersededCount: number;
+  rolledBackCount: number;
+  expiredCount: number;
+  archivedCount: number;
+  byStatus: Record<string, number>;
+  byMaterializationStatus: Record<string, number>;
+};
+
+export type MemoryLaneSummary = {
+  lane: MemoryLane;
+  label: string;
+  totalCount: number;
+  activeCount: number;
+  candidateCount: number;
+  pendingReviewCount: number;
+  confirmedCount: number;
+  materializedCount: number;
+  rolledBackCount: number;
+  archivedCount: number;
+  reviewItemRefs: BackendEntityRef[];
+  evidenceRefs: EvidenceRef[];
+};
+
+export type MemoryLifeModelLinkageSummary = {
+  linkedMemoryCount: number;
+  candidateMemoryCount: number;
+  materializedMemoryCount: number;
+  conflictCount: number;
+  boundaryMemoryCount: number;
+  linkageStatus: "partial" | "unknown";
+  memoryRefs: BackendEntityRef[];
+  evidenceRefs: EvidenceRef[];
+};
+
+export type MemoryViewModelSummary = {
+  totalLifecycleRecords: number;
+  activeMemoryCount: number;
+  reviewRequiredCount: number;
+  materializedCount: number;
+  pendingMaterializationCount: number;
+  failedMaterializationCount: number;
+  rolledBackCount: number;
+  archivedVectorCount: number;
+  conflictCount: number;
+  tierSummary?: MemoryTierSummary;
+};
+
+export type MemoryViewModel = {
+  summary: MemoryViewModelSummary;
+  lifecycleSummary: MemoryLifecycleSummary;
+  laneSummaries: MemoryLaneSummary[];
+  recentMemoryRefs: BackendEntityRef[];
+  reviewItemRefs: BackendEntityRef[];
+  lifeModelLinkage: MemoryLifeModelLinkageSummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
 
 export async function getRuntimeBuildInfo(): Promise<RuntimeBuildInfo> {
   return safeInvoke<RuntimeBuildInfo>("get_runtime_build_info");
@@ -1727,9 +2650,10 @@ export async function registerMcpServer(
   name: string,
   command: string,
   args: string[],
+  manifests: ToolManifest[],
   env?: Record<string, string>
 ): Promise<void> {
-  return safeInvoke("register_mcp_server", { name, command, args, env });
+  return safeInvoke("register_mcp_server", { name, command, args, env, manifests });
 }
 
 export async function unregisterMcpServer(name: string): Promise<void> {
@@ -1782,6 +2706,7 @@ export interface McpTemplate {
   required_args: string[];
   arg_labels?: Record<string, string>;
   env?: Record<string, string>;
+  manifests?: ToolManifest[];
   tags?: string[];
 }
 
@@ -1807,6 +2732,7 @@ export interface ToolManifest {
   enabled: boolean;
   declarative_only: boolean;
   action_type: string;
+  idempotency_contract: ToolIdempotencyContract;
   tags: string[];
 }
 
@@ -2050,6 +2976,11 @@ export async function rebuildMemoryIndex(
   processed: number;
   indexed: number;
   skipped: number;
+  embeddingProfileId?: string | null;
+  embeddingProfileRoute?: string | null;
+  embeddingDimension?: number | null;
+  providerInvocations?: number;
+  cacheHits?: number;
 }> {
   return safeInvoke("rebuild_memory_index", {
     ...(confirmationEvidence
@@ -2071,37 +3002,142 @@ export async function logAnalyticsEvent(
   });
 }
 
-export async function indexMemoryChunk(
+export async function createKnowledgeNote(
   sessionId: string,
   content: string,
-  source: string
-): Promise<number> {
-  return safeInvoke("index_memory_chunk", { ...sessionArgs(sessionId), content, source });
+  source: string,
+  operationId: string
+): Promise<{
+  operationId: string;
+  replayed: boolean;
+  embeddingId?: number;
+  embeddingProfile?: {
+    id: string;
+    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
+    provider: string;
+    model: string;
+    deploymentIdentity: string;
+    modelArtifactIdentity: string;
+    dimension: number;
+  };
+  embeddingReceipt?: {
+    requestId: string;
+    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
+    profileId: string;
+    status: "not_attempted" | "completed" | "failed";
+    source: string;
+    routeReasonCode: string;
+    cacheHit: boolean;
+    errorDigest?: string | null;
+    providerDispatches: Array<{
+      kind: "model_manifest" | "embedding";
+      startedAt: string;
+    }>;
+  };
+  knowledgeNoteId: number;
+  outboxEventId: string;
+  canonicalCommitted: boolean;
+  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
+}> {
+  return safeInvoke("create_knowledge_note", {
+    ...sessionArgs(sessionId),
+    content,
+    source,
+    operationId,
+    operation_id: operationId,
+  });
 }
 
 export async function searchMemory(
   query: string,
   topK: number
-): Promise<
-  Array<{
+): Promise<{
+  hits: Array<{
     chunk: { id: number; session_id: string; content: string; source: string; created_at: string };
     score: number;
-  }>
-> {
-  const raw: Array<[any, number]> = await safeInvoke("search_memory", {
+  }>;
+  embeddingProfile: {
+    id: string;
+    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
+    provider: string;
+    model: string;
+    deploymentIdentity: string;
+    modelArtifactIdentity: string;
+    dimension: number;
+  };
+  embeddingReceipt: {
+    requestId: string;
+    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
+    profileId: string;
+    status: "not_attempted" | "completed" | "failed";
+    source: string;
+    routeReasonCode: string;
+    cacheHit: boolean;
+    errorDigest?: string | null;
+    providerDispatches: Array<{
+      kind: "model_manifest" | "embedding";
+      startedAt: string;
+    }>;
+  };
+  vectorStatus: "ready" | "rebuild_required" | "embedding_failed" | "vector_search_failed";
+  routeQuality:
+    | "semantic_model_verified"
+    | "deterministic_hash_approximation"
+    | "identity_unknown"
+    | "unavailable";
+  rebuild?: {
+    expectedProfileId: string;
+    expectedDimension: number;
+    incompatibleProfiles: string[];
+    unknownProfileCount: number;
+    profileMismatchCount: number;
+    dimensionMismatchCount: number;
+    corruptEmbeddingCount: number;
+  };
+  degradedEvidence?: {
+    reasonCode: string;
+    errorDigest?: string | null;
+  };
+}> {
+  const raw: {
+    hits: Array<[any, number]>;
+    embeddingProfile: any;
+    embeddingReceipt: any;
+    vectorStatus: "ready" | "rebuild_required" | "embedding_failed" | "vector_search_failed";
+    routeQuality:
+      | "semantic_model_verified"
+      | "deterministic_hash_approximation"
+      | "identity_unknown"
+      | "unavailable";
+    rebuild?: any;
+    degradedEvidence?: any;
+  } = await safeInvoke("search_memory", {
     query,
     topK,
     top_k: topK,
   });
-  return raw.map(([chunk, score]) => ({ chunk, score }));
+  return {
+    ...raw,
+    hits: raw.hits.map(([chunk, score]) => ({ chunk, score })),
+  };
 }
 
 export async function a2aDiscoverAgent(url: string): Promise<any> {
   return safeInvoke("a2a_discover_agent", { url });
 }
 
-export async function a2aSendTask(url: string, requestJson: string): Promise<string> {
-  return safeInvoke<string>("a2a_send_task", { url, requestJson, request_json: requestJson });
+export async function a2aSendTask(
+  url: string,
+  requestJson: string,
+  pairingToken?: string
+): Promise<string> {
+  return safeInvoke<string>("a2a_send_task", {
+    url,
+    requestJson,
+    request_json: requestJson,
+    ...optionalDualArg("pairingToken", "pairing_token", pairingToken),
+  });
 }
 
 export async function a2aLocalAgentCard(): Promise<any> {
@@ -2153,7 +3189,7 @@ export interface BuilderSignal {
   id: string;
   source_step: number;
   source_question_id: string;
-  dimension: string;
+  dimension: "Identity" | "Goals" | "Capabilities" | "State";
   affected_path: string;
   proposed_value: unknown;
   confidence: number;
@@ -2172,6 +3208,25 @@ export interface BuilderSummary {
   recommended_next_steps: string[];
 }
 
+export interface BuilderPendingSignalsView {
+  session_id: string;
+  signals: BuilderSignal[];
+  summary: BuilderSummary;
+  finished: boolean;
+}
+
+export interface BuilderTurnResponse {
+  prompt: string;
+  finished: boolean;
+  progress: BuilderProgress;
+  analysis?: BuilderAnalysis;
+  review?: BuilderPendingSignalsView | null;
+  waiting_for_review?: boolean;
+  durable_lifemodel_write?: false;
+  mode?: string;
+  target_dimension?: string;
+}
+
 export interface BuilderPatchReview {
   signals: BuilderSignal[];
   summary: BuilderSummary;
@@ -2184,15 +3239,7 @@ export async function builderStart(
   mode: "quick" | "incremental" | "socratic",
   sessionId: string,
   targetDimension?: "identity" | "goals" | "capabilities" | "state"
-): Promise<{
-  prompt: string;
-  progress: BuilderProgress;
-  analysis?: BuilderAnalysis;
-  finished?: boolean;
-  pending_signals?: BuilderSignal[];
-  mode?: string;
-  target_dimension?: string;
-}> {
+): Promise<BuilderTurnResponse> {
   return safeInvoke("builder_start", {
     mode,
     ...sessionArgs(sessionId),
@@ -2203,16 +3250,7 @@ export async function builderStart(
 export async function builderStep(
   sessionId: string,
   userReply: string
-): Promise<{
-  prompt: string;
-  finished: boolean;
-  model?: LifeModel;
-  progress: BuilderProgress;
-  analysis?: BuilderAnalysis;
-  pending_signals?: BuilderSignal[];
-  mode?: string;
-  target_dimension?: string;
-}> {
+): Promise<BuilderTurnResponse> {
   return safeInvoke("builder_step", {
     ...sessionArgs(sessionId),
     userReply,
@@ -2225,10 +3263,14 @@ export interface UnfinishedBuilderSession {
   mode: "Quick" | "Incremental" | "Socratic";
   step_index: number;
   finished: boolean;
-  draft_yaml: string;
-  current_prompt?: string;
-  pending_signals?: BuilderSignal[];
+  current_prompt: string;
+  pending_signal_count: number;
+  waiting_for_review: boolean;
+  review_in_progress: boolean;
   target_dimension?: "Identity" | "Goals" | "Capabilities" | "State";
+  retention_status?: "active" | "expired_recoverable" | null;
+  expires_at?: string | null;
+  purge_after?: string | null;
 }
 
 export async function builderListUnfinished(): Promise<UnfinishedBuilderSession[]> {
@@ -2238,12 +3280,9 @@ export async function builderListUnfinished(): Promise<UnfinishedBuilderSession[
 export async function builderDeleteSession(sessionId: string): Promise<void> {
   return safeInvoke("builder_delete_session", sessionArgs(sessionId));
 }
-export async function builderGetPendingSignals(sessionId: string): Promise<{
-  session_id: string;
-  signals: BuilderSignal[];
-  summary: BuilderSummary;
-  finished: boolean;
-}> {
+export async function builderGetPendingSignals(
+  sessionId: string
+): Promise<BuilderPendingSignalsView> {
   return safeInvoke("builder_get_pending_signals", sessionArgs(sessionId));
 }
 
@@ -2253,33 +3292,14 @@ export interface BuilderSignalDecision {
   proposed_value?: unknown;
 }
 
-export interface SkippedField {
-  path: string;
-  reason: string;
-  expected?: string;
-}
-
-export async function builderApplySignals(
-  sessionId: string,
-  decisions: BuilderSignalDecision[]
-): Promise<{
-  success: boolean;
-  applied_fields: string[];
-  merged_fields?: string[];
-  skipped_fields: SkippedField[];
-  edited_count: number;
-  rejected_count: number;
-  model: LifeModel;
-}> {
-  return safeInvoke("builder_apply_signals", { ...sessionArgs(sessionId), decisions });
-}
-
 export async function builderCreateProposals(
   sessionId: string,
   decisions: BuilderSignalDecision[]
 ): Promise<{
   success: boolean;
   created_count: number;
+  reused_count: number;
+  updated_count: number;
   rejected_count: number;
   proposal_ids: string[];
   run_id: string;
@@ -2351,8 +3371,26 @@ export interface ExportedVectorChunk {
   last_accessed_at: string;
 }
 
-export interface ExportPayload {
-  version: string;
+export interface PortableDailyTaskV1 {
+  title: string;
+  status: "pending" | "completed";
+  dueAt?: string | null;
+  timeBlock?: { start: string; end: string } | null;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}
+
+export interface PortableDailyTaskArchiveV1 {
+  schema: "openlife.state-store-daily-tasks-portable.v1";
+  exportedAt: string;
+  canonicalDigest: string;
+  payloadDigest: string;
+  skippedExpiredCount: number;
+  dailyTasks: PortableDailyTaskV1[];
+}
+
+interface ExportPayloadBase {
   app_version?: string;
   exported_at: string;
   life_model: LifeModel;
@@ -2360,9 +3398,93 @@ export interface ExportPayload {
   vectors: ExportedVectorChunk[];
 }
 
+export interface ExportPayloadV1 extends ExportPayloadBase {
+  version: "1.0";
+}
+
+export interface ExportPayloadV2 extends ExportPayloadBase {
+  version: "2.0";
+  state_store: PortableDailyTaskArchiveV1;
+}
+
+export type ExportPayload = ExportPayloadV1 | ExportPayloadV2;
+
+export const MAX_OPENLIFE_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_OPENLIFE_IMPORT_MESSAGES = 50_000;
+export const MAX_OPENLIFE_IMPORT_VECTORS = 50_000;
+export const MAX_OPENLIFE_IMPORT_STATE_TASKS = 512;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isPortableDailyTask(value: unknown): value is PortableDailyTaskV1 {
+  return (
+    isRecord(value) &&
+    typeof value.title === "string" &&
+    (value.status === "pending" || value.status === "completed") &&
+    isNullableString(value.dueAt) &&
+    (value.timeBlock === undefined ||
+      value.timeBlock === null ||
+      (isRecord(value.timeBlock) &&
+        typeof value.timeBlock.start === "string" &&
+        typeof value.timeBlock.end === "string")) &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string" &&
+    typeof value.expiresAt === "string"
+  );
+}
+
+export function parseOpenLifeExportPayload(text: string): ExportPayload {
+  if (text.length > MAX_OPENLIFE_IMPORT_FILE_BYTES) {
+    throw new Error("OpenLife 备份超过 64 MiB 导入上限");
+  }
+  const value: unknown = JSON.parse(text);
+  if (
+    !isRecord(value) ||
+    (value.version !== "1.0" && value.version !== "2.0") ||
+    typeof value.exported_at !== "string" ||
+    !isRecord(value.life_model) ||
+    !Array.isArray(value.messages) ||
+    !Array.isArray(value.vectors)
+  ) {
+    throw new Error("OpenLife 备份格式无效或版本不受支持");
+  }
+  if (value.messages.length > MAX_OPENLIFE_IMPORT_MESSAGES) {
+    throw new Error("OpenLife 备份超过消息条目导入上限");
+  }
+  if (value.vectors.length > MAX_OPENLIFE_IMPORT_VECTORS) {
+    throw new Error("OpenLife 备份超过向量条目导入上限");
+  }
+  if (value.version === "2.0") {
+    const stateStore = value.state_store;
+    if (
+      !isRecord(stateStore) ||
+      stateStore.schema !== "openlife.state-store-daily-tasks-portable.v1" ||
+      typeof stateStore.exportedAt !== "string" ||
+      typeof stateStore.canonicalDigest !== "string" ||
+      typeof stateStore.payloadDigest !== "string" ||
+      typeof stateStore.skippedExpiredCount !== "number" ||
+      !Array.isArray(stateStore.dailyTasks) ||
+      stateStore.dailyTasks.length > MAX_OPENLIFE_IMPORT_STATE_TASKS ||
+      !stateStore.dailyTasks.every(isPortableDailyTask)
+    ) {
+      throw new Error("OpenLife v2 备份缺少有效的 StateStore portable archive");
+    }
+  } else if ("state_store" in value) {
+    throw new Error("OpenLife v1 备份不得伪装携带 v2 StateStore archive");
+  }
+  return value as unknown as ExportPayload;
+}
+
 export type DangerActionType =
   | "data_export"
   | "data_import_overwrite"
+  | "data_import_abandon_recovery"
   | "mcp_audit_export"
   | "mcp_audit_cleanup"
   | "mcp_audit_key_rotation"
@@ -2391,6 +3513,10 @@ export interface DangerActionPreflightView {
   safeModeBlocked: boolean;
   blockingReasons: string[];
   sourceRefs: string[];
+  /** Metadata-only pointer to an interrupted governed import, when one exists. */
+  recoveryOperationId?: string | null;
+  /** Metadata-only durable journal stage for the interrupted import. */
+  recoveryStage?: string | null;
 }
 
 export interface DangerActionConfirmationEvidence {
@@ -2439,30 +3565,122 @@ export async function exportAllData(): Promise<ExportPayload> {
 
 export interface DataImportResult {
   success: boolean;
+  status?:
+    | "completed"
+    | "replayed"
+    | "recovery_completed_restart_required"
+    | "projection_degraded_recovery_required"
+    | string;
   legacy: boolean;
   warning: string;
   metadata_safe: boolean;
   durable_lifemodel_write: boolean;
   imported_message_count: number;
-  imported_vector_count: number;
+  /** Null on a historical replay when execution-only vector counts were not durably recorded. */
+  imported_vector_count: number | null;
+  state_store_targeted?: boolean;
+  state_store_replayed?: boolean;
+  state_store_restored_count?: number;
+  state_store_skipped_expired_count?: number;
+  state_store_projection_status?: "not_requested" | "pending" | "applied" | "degraded" | string;
+}
+
+export function describeDataImportResult(result: DataImportResult): string {
+  const projectionRecoveryRequired =
+    result.status === "projection_degraded_recovery_required" ||
+    // Older backend builds used this status. Keep it fail-closed while rolling forward.
+    result.status === "completed_with_projection_degraded" ||
+    result.state_store_projection_status === "degraded";
+
+  if (projectionRecoveryRequired) {
+    return "导入未完成：canonical 数据已经写入，但兼容投影处于降级恢复状态；请勿将投影页面视为最新事实，并按诊断提示恢复。";
+  }
+  if (result.status === "recovery_completed_restart_required") {
+    return "中断的导入已恢复完成；当前进程仍处于恢复隔离状态，请重启 OpenLife 后再继续使用数据功能。";
+  }
+  if (result.state_store_replayed || result.status === "replayed") {
+    return "同一导入操作已安全重放，没有重复写入。";
+  }
+  if (result.success && result.status === "completed") {
+    return "导入成功，请刷新页面以查看最新数据";
+  }
+
+  const status = result.status?.trim() || "unknown";
+  return `导入未完成：后端返回 ${status} 状态，请保留原备份并检查数据诊断。`;
 }
 
 export async function importAllData(
   payload: ExportPayload,
-  confirmationEvidence?: DangerActionConfirmationEvidence
+  confirmationEvidence?: DangerActionConfirmationEvidence,
+  operationId: string = crypto.randomUUID()
 ): Promise<DataImportResult> {
+  const importRequest = manualDataImportRequest(operationId);
   return safeInvoke<DataImportResult>("import_all_data", {
     payload,
-    importRequest: MANUAL_DATA_IMPORT_REQUEST,
-    import_request: MANUAL_DATA_IMPORT_REQUEST,
+    importRequest,
+    import_request: importRequest,
     ...(confirmationEvidence
       ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
       : {}),
   });
 }
 
-export async function testApiKey(): Promise<boolean> {
-  return safeInvoke<boolean>("test_api_key");
+export interface GovernedDataImportAbandonmentResult {
+  success: true;
+  status: "abandoned_preserving_current_restart_required" | "abandoned_preserving_current";
+  operation_id: string;
+  stage: "abandoned_preserving_current";
+  recovery_terminalized: true;
+  original_import_completed: false;
+  rollback_completed: false;
+  preserved_current_canonical_data: boolean;
+  abandonment_mutated_canonical_owners: false;
+  original_import_effect_state: "preserved_current_observed_per_owner";
+  owner_resolution_counts: {
+    before: number;
+    target: number;
+    other: number;
+  };
+  resolution_evidence_count: number;
+  restart_required: boolean;
+}
+
+export interface GovernedDataImportStatusView {
+  status: string;
+  operationId: string | null;
+  stage: string | null;
+  terminal: boolean;
+  terminalAt: string | null;
+  recoveryRequired: boolean;
+  runtimeRecoveryIsolationActive: boolean;
+  restartRequired: boolean;
+  originalImportCompleted: boolean;
+  rollbackCompleted: boolean;
+  preservedCurrent: boolean;
+  ownerCount: number;
+  resolutionEvidenceCount: number;
+  ownerResolutionCounts: {
+    before: number;
+    target: number;
+    other: number;
+  };
+  observedAt: string;
+}
+
+export async function getGovernedDataImportStatus(): Promise<GovernedDataImportStatusView> {
+  return safeInvoke<GovernedDataImportStatusView>("get_governed_data_import_status");
+}
+
+export async function abandonGovernedDataImportRecovery(
+  operationId: string,
+  confirmationEvidence: DangerActionConfirmationEvidence
+): Promise<GovernedDataImportAbandonmentResult> {
+  return safeInvoke<GovernedDataImportAbandonmentResult>("abandon_governed_data_import_recovery", {
+    operationId,
+    operation_id: operationId,
+    confirmationEvidence,
+    confirmation_evidence: confirmationEvidence,
+  });
 }
 
 export interface LlmConnectionTestResult {
@@ -2499,30 +3717,6 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
   return safeInvoke("delete_chat_session", sessionArgs(sessionId));
 }
 
-export async function recordState(
-  dimensionName: string,
-  value: number,
-  unit: string,
-  note?: string,
-  minThreshold?: number,
-  maxThreshold?: number,
-  alertDays?: number
-): Promise<number> {
-  return safeInvoke<number>("record_state", {
-    dimensionName,
-    dimension_name: dimensionName,
-    value,
-    unit,
-    note,
-    minThreshold,
-    min_threshold: minThreshold,
-    maxThreshold,
-    max_threshold: maxThreshold,
-    alertDays,
-    alert_days: alertDays,
-  });
-}
-
 export async function getStateHistory(
   dimensionName: string,
   limit: number
@@ -2542,36 +3736,6 @@ export async function getDailyGoals(): Promise<DailyGoal[]> {
   return safeInvoke<DailyGoal[]>("get_daily_goals");
 }
 
-export async function addDailyGoal(
-  name: string,
-  timeBlock?: { start: string; end: string }
-): Promise<void> {
-  return safeInvoke("add_daily_goal", {
-    name,
-    ...optionalDualArg("timeBlock", "time_block", timeBlock),
-  });
-}
-
-export async function updateDailyGoal(
-  index: number,
-  name: string,
-  timeBlock?: { start: string; end: string }
-): Promise<void> {
-  return safeInvoke("update_daily_goal", {
-    index,
-    name,
-    ...optionalDualArg("timeBlock", "time_block", timeBlock),
-  });
-}
-
-export async function deleteDailyGoal(index: number): Promise<void> {
-  return safeInvoke("delete_daily_goal", { index });
-}
-
-export async function toggleDailyGoal(index: number): Promise<boolean> {
-  return safeInvoke<boolean>("toggle_daily_goal", { index });
-}
-
 // ── Milestone D: Hot Memory Cache ──
 export interface HotMemoryCache {
   identity_summary: string;
@@ -2586,17 +3750,38 @@ export async function getHotCache(): Promise<HotMemoryCache> {
   return safeInvoke<HotMemoryCache>("get_hot_cache");
 }
 
-// ── Milestone D: Memory Tier / Archive ──
-export interface ArchivedChunkSummary {
-  id: number;
-  session_id: string;
-  content: string;
-  source: string;
-  created_at: string;
-  archived_at: string;
-  summary?: string;
-  access_count: number;
-  importance_score: number;
+// ── Canonical Memory retrieval / access-tier telemetry ──
+export interface CanonicalMemoryOwner {
+  ownerKind: string;
+  ownerId: string;
+}
+
+export interface LowAccessCanonicalMemoryCandidate {
+  owner: CanonicalMemoryOwner;
+  tier: number;
+  accessCount: number;
+  lastAccessedAt?: string;
+  importanceScore: number;
+  candidateOnly: boolean;
+}
+
+export interface ArchivedCanonicalMemoryView {
+  owner: CanonicalMemoryOwner;
+  revision: number;
+  lastEventId: string;
+  changedAt: string;
+  canonicalDisposition: string;
+}
+
+export interface MemoryRetrievalMutationResult {
+  owner: CanonicalMemoryOwner;
+  disposition: string;
+  changed: boolean;
+  canonicalCommitted: boolean;
+  revision?: number;
+  outboxEventId?: string;
+  projectionState: "applied" | "pending" | "degraded" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
 }
 
 export interface TierStats {
@@ -2607,19 +3792,18 @@ export interface TierStats {
   archived: number;
 }
 
-export async function archiveLowAccessMemories(): Promise<number> {
-  return safeInvoke<number>("archive_low_access_memories");
+export async function getLowAccessMemoryCandidates(): Promise<LowAccessCanonicalMemoryCandidate[]> {
+  return safeInvoke<LowAccessCanonicalMemoryCandidate[]>("archive_low_access_memories");
 }
 
-export async function restoreArchivedChunks(chunkIds: number[]): Promise<number> {
-  return safeInvoke<number>("restore_archived_chunks", {
-    chunkIds,
-    chunk_ids: chunkIds,
-  });
+export async function restoreArchivedMemory(
+  owner: CanonicalMemoryOwner
+): Promise<MemoryRetrievalMutationResult> {
+  return safeInvoke<MemoryRetrievalMutationResult>("restore_archived_chunks", { owner });
 }
 
-export async function listArchivedChunks(limit: number): Promise<ArchivedChunkSummary[]> {
-  return safeInvoke<ArchivedChunkSummary[]>("list_archived_chunks", { limit });
+export async function listArchivedChunks(limit: number): Promise<ArchivedCanonicalMemoryView[]> {
+  return safeInvoke<ArchivedCanonicalMemoryView[]>("list_archived_chunks", { limit });
 }
 
 export async function getMemoryTierStats(): Promise<TierStats> {
@@ -2705,37 +3889,51 @@ export async function getLastModelError(): Promise<LastModelError | null> {
 }
 
 // ── AgentRun ──
-export interface ModelRouteTrace {
+export interface ProductModelRouteTrace {
   provider: string;
   model: string;
   routeType: string;
-  preferLocal: boolean;
-  localModel: string;
-  reason: string;
+  reason?: string;
   privacyLevel: string;
-  latencyMs?: number;
   retryCount: number;
   fallbackReason?: string;
   providerHealthIsEstimated?: boolean;
 }
 
-export interface ContextSummary {
+export interface ProductContextSummary {
   lifeModelEmpty: boolean;
-  includedLifeModelSections: string[];
   memoryHitCount: number;
-  memorySources: string[];
   usedToolsPrompt: boolean;
   redactionApplied: boolean;
   redactionLevel: string;
 }
 
-export interface ToolActionScope {
-  toolId: string;
+export interface ProductToolActionScope {
   toolName: string;
   source: string;
   riskLevel: string;
   capabilities: string[];
-  actionType: string;
+}
+
+/** Frontend-only compatibility fields; ProductModelRouteTrace is the IPC contract. */
+export interface ModelRouteTrace extends ProductModelRouteTrace {
+  preferLocal?: boolean;
+  localModel?: string;
+  latencyMs?: number;
+}
+
+/** Frontend-only compatibility fields; ProductContextSummary is the IPC contract. */
+export interface ContextSummary extends ProductContextSummary {
+  includedLifeModelSections?: string[];
+  memorySources?: string[];
+}
+
+/** Frontend-only compatibility fields; ProductToolActionScope is the IPC contract. */
+export interface ToolActionScope extends ProductToolActionScope {
+  toolId?: string;
+  actionType?: string;
+  requiresConfirmation?: boolean;
+  allowed?: boolean;
 }
 
 export interface ProviderStatus {
@@ -2755,29 +3953,40 @@ export interface ModelRouterStatus {
   message?: string;
 }
 
-export interface AgentAction {
+export interface ProductAgentAction {
   id: string;
   actionType: string;
   target?: string;
-  input: any;
-  output?: any;
   status: string;
   permissionDecision?: string;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
   timestamp: string;
-  toolScope?: ToolActionScope;
-  reactTrace?: ReactActionTraceEnvelope;
+  toolScope?: ProductToolActionScope;
+  reactTrace?: ProductReactActionTrace;
 }
 
-export interface AgentObservation {
+export interface ProductAgentObservation {
   id: string;
   actionId?: string;
   content: string;
   source: string;
-  structuredResult?: any;
   timestamp: string;
+  reactTrace?: ProductReactActionTrace;
+}
+
+/** Frontend-only compatibility shape for historical AgentRun views. */
+export interface AgentAction extends Omit<ProductAgentAction, "toolScope" | "reactTrace"> {
+  input?: unknown;
+  output?: unknown;
+  toolScope?: ToolActionScope;
+  reactTrace?: ReactActionTraceEnvelope;
+}
+
+/** Frontend-only compatibility shape for historical AgentRun views. */
+export interface AgentObservation extends Omit<ProductAgentObservation, "reactTrace"> {
+  structuredResult?: unknown;
   reactTrace?: ReactActionTraceEnvelope;
 }
 
@@ -2795,11 +4004,45 @@ export interface AgentRunError {
   recoverable: boolean;
 }
 
-export interface AgentRun {
+export interface ProductAgentRunError {
+  message: string;
+  phase: string;
+  recoverable: boolean;
+}
+
+export interface ProductHSSelectionAudit {
+  selectedPolicyIds: string[];
+  selectedHeuristicIds: string[];
+  estimatedTokens: number;
+  tokenBudget: number;
+}
+
+export interface ProductHSBehaviorCheckSummary {
+  id: string;
+  label: string;
+  passed: boolean;
+  summary?: string;
+}
+
+export interface ProductAgentStatusUpdate {
+  phase: string;
+  message: string;
+  stepIndex: number;
+  toolCallIndex?: number;
+  timestamp: string;
+}
+
+export interface ProductAgentRun {
   id: string;
   taskId: string;
   sessionId?: string;
-  status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled";
+  status:
+    | "running"
+    | "waiting_permission"
+    | "completed"
+    | "failed"
+    | "remote_unknown"
+    | "cancelled";
   kind:
     | "conversation"
     | "builder"
@@ -2813,34 +4056,65 @@ export interface AgentRun {
     | "memory_governance"
     | "skill"
     | "plugin";
-  userInput?: string;
-  contextSummary?: ContextSummary;
-  modelRoute?: ModelRouteTrace;
+  contextSummary?: ProductContextSummary;
+  modelRoute?: ProductModelRouteTrace;
   outputPreview?: string;
-  error?: AgentRunError;
+  error?: ProductAgentRunError;
   generatedProposals: string[];
-  actions: AgentAction[];
-  observations: AgentObservation[];
+  actions: ProductAgentAction[];
+  observations: ProductAgentObservation[];
   reasoningStrategy?: string;
-  reasoningTrace?: ReasoningTrace;
-  hsSelectionAudit?: HSSelectionAudit;
-  behaviorChecks?: HSBehaviorCheckSummary[];
-  statusUpdates?: AgentStatusUpdate[];
-  stepCount?: number;
-  toolCallCount?: number;
-  warnings?: string[];
+  legacyPayloadUnverified: boolean;
+  hsSelectionAudit?: ProductHSSelectionAudit;
+  behaviorChecks: ProductHSBehaviorCheckSummary[];
+  statusUpdates: ProductAgentStatusUpdate[];
+  stepCount: number;
+  toolCallCount: number;
+  warnings: string[];
   deletedAt?: string;
   deleteReason?: string;
   startedAt: string;
   finishedAt?: string;
 }
 
-export async function getAgentRun(runId: string): Promise<AgentRun | null> {
-  return safeInvoke<AgentRun | null>("get_agent_run", { runId });
+/**
+ * Frontend-only compatibility view. Product AgentRun IPC commands return the
+ * exact ProductAgentRun contract; the adapter below does not synthesize any
+ * removed body, trace, route, or tool fields.
+ */
+export interface AgentRunView extends Omit<
+  ProductAgentRun,
+  "contextSummary" | "modelRoute" | "actions" | "observations"
+> {
+  userInput?: string;
+  inputRef?: string;
+  inputDigest?: string;
+  contextSummary?: ContextSummary;
+  modelRoute?: ModelRouteTrace;
+  actions: AgentAction[];
+  observations: AgentObservation[];
+  reasoningTrace?: ReasoningTrace;
+  reasoningTraceDigest?: string;
 }
 
-export async function listAgentRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
-  return safeInvoke<AgentRun[]>("list_agent_runs", { limit, offset });
+/** @deprecated Prefer ProductAgentRun at IPC boundaries or AgentRunView in UI code. */
+export type AgentRun = AgentRunView;
+
+export function productAgentRunToView(run: ProductAgentRun): AgentRunView {
+  return run;
+}
+
+export async function getAgentRun(runId: string): Promise<AgentRunView | null> {
+  const run = await safeInvoke<ProductAgentRun | null>("get_agent_run", { runId });
+  return run ? productAgentRunToView(run) : null;
+}
+
+export async function listAgentRuns(
+  limit: number = 50,
+  offset: number = 0
+): Promise<AgentRunView[]> {
+  const runs = await safeInvoke<ProductAgentRun[]>("list_agent_runs", { limit, offset });
+  return runs.map(productAgentRunToView);
 }
 
 export async function listProviderTransmissionHistory(
@@ -2851,15 +4125,19 @@ export async function listProviderTransmissionHistory(
   });
 }
 
-export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
+export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRunView[]> {
   return listAgentRuns(limit, offset);
 }
 
 export async function listAgentRunsForSession(
   sessionId: string,
   limit: number = 50
-): Promise<AgentRun[]> {
-  return safeInvoke<AgentRun[]>("list_agent_runs_for_session", { sessionId, limit });
+): Promise<AgentRunView[]> {
+  const runs = await safeInvoke<ProductAgentRun[]>("list_agent_runs_for_session", {
+    sessionId,
+    limit,
+  });
+  return runs.map(productAgentRunToView);
 }
 
 export async function deleteAgentRun(
@@ -2941,79 +4219,6 @@ export interface SkillManifest {
   pluginId?: string;
 }
 
-export interface SkillRunResponse {
-  runId: string;
-  status: string;
-  summary: string;
-  generatedProposals: string[];
-}
-
-export interface SkillRuntimeDescriptor {
-  id: string;
-  name: string;
-  sourceKind: "built_in" | "plugin";
-  executionStatus:
-    | "executable_built_in"
-    | "disabled_declarative_only"
-    | "model_only_no_tools"
-    | "blocked";
-  inputSchemaDigest: string;
-  outputSchemaDigest: string;
-  proposalPolicy: string;
-  requiredContextIds: string[];
-  allowedToolIds: string[];
-  allowedToolCount: number;
-  executionBudget: SkillManifest["executionBudget"];
-  capabilityFlags: string[];
-  metadataSafe: boolean;
-  containsRawContent: boolean;
-  directWriteImplied: boolean;
-}
-
-export interface SkillRuntimeStatusReport {
-  reportKind: string;
-  readiness: {
-    reportKind: string;
-    ready: boolean;
-    metadataSafe: boolean;
-    containsRawContent: boolean;
-    requiredBuiltinsPresent: boolean;
-    builtInSkillCount: number;
-    pluginSkillCount: number;
-    descriptors: SkillRuntimeDescriptor[];
-    pluginBoundarySummary: any;
-    proposalGovernanceSummary: any;
-    privacyModelRouteBoundarySummary: any;
-    traceContractSummary: any;
-    defaultChatUnchanged: boolean;
-    runtimeExecutionPerformed: boolean;
-    modelCallPerformed: boolean;
-    toolCallPerformed: boolean;
-    businessWritesPerformed: boolean;
-    blockers: string[];
-  };
-  defaultChatUnchanged: boolean;
-  readOnly: boolean;
-  runtimeExecutionPerformed: boolean;
-  modelCallPerformed: boolean;
-  toolCallPerformed: boolean;
-  businessWritesPerformed: boolean;
-  metadataSafe: boolean;
-  blockers: string[];
-}
-
-export async function listSkills(): Promise<SkillManifest[]> {
-  return safeInvoke<SkillManifest[]>("list_skills");
-}
-
-export async function getSkillRuntimeStatus(): Promise<SkillRuntimeStatusReport> {
-  return safeInvoke<SkillRuntimeStatusReport>("get_skill_runtime_status");
-}
-
-export async function runSkill(skillId: string, input: any): Promise<SkillRunResponse> {
-  return safeInvoke<SkillRunResponse>("run_skill", { skillId, skill_id: skillId, input });
-}
-
 export interface PluginManifest {
   id: string;
   name: string;
@@ -3058,6 +4263,36 @@ export async function listProposals(
   limit: number = 50
 ): Promise<AgentProposal[]> {
   return safeInvoke<AgentProposal[]>("list_proposals", { status, proposalType, riskLevel, limit });
+}
+
+export async function getReviewCenterViewModel(): Promise<
+  ViewModelEnvelope<ReviewCenterViewModel>
+> {
+  return safeInvoke<ViewModelEnvelope<ReviewCenterViewModel>>("get_review_center_view_model");
+}
+
+export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeModelViewModel>> {
+  return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
+}
+
+export async function getMemoryViewModel(): Promise<ViewModelEnvelope<MemoryViewModel>> {
+  return safeInvoke<ViewModelEnvelope<MemoryViewModel>>("get_memory_view_model");
+}
+
+export async function getProviderPrivacyBoundarySummary(): Promise<
+  ViewModelEnvelope<ProviderPrivacyBoundarySummary>
+> {
+  return safeInvoke<ViewModelEnvelope<ProviderPrivacyBoundarySummary>>(
+    "get_provider_privacy_boundary_summary"
+  );
+}
+
+export async function getTasksViewModel(): Promise<ViewModelEnvelope<TasksViewModel>> {
+  return safeInvoke<ViewModelEnvelope<TasksViewModel>>("get_tasks_view_model");
+}
+
+export async function getWorkspaceViewModel(): Promise<ViewModelEnvelope<WorkspaceViewModel>> {
+  return safeInvoke<ViewModelEnvelope<WorkspaceViewModel>>("get_workspace_view_model");
 }
 
 export async function batchAcceptLowRiskProposals(proposalIds?: string[]): Promise<number> {
@@ -3131,6 +4366,8 @@ export interface MemoryLifecycleRecord {
   scope: string;
   category: string;
   riskLevel: string;
+  sensitivity: string;
+  auditDigest: string;
   status: string;
   materializationStatus: string;
   materializationErrorCode?: string;
@@ -3176,6 +4413,18 @@ export interface MemoryRollbackReport {
   record: MemoryLifecycleRecord;
   rollbackEvent: MemoryRollbackEvent;
   materializedView: MemoryMaterializedView;
+  canonicalMutation: {
+    eventId: string;
+    aggregateKind: string;
+    aggregateId: string;
+    mutationKind: string;
+    payloadDigest: string;
+    tombstoneId?: string | null;
+    createdAt: string;
+  };
+  canonicalCommitted: boolean;
+  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
 }
 
 export interface MemoryProposalDraftEditReport {
@@ -3246,11 +4495,43 @@ export interface PatchApplyResult {
   error?: string;
 }
 
-export async function acceptProposal(proposalId: string): Promise<{
+export interface ArtifactMaterializationReceipt {
+  artifactId: string;
+  proposalId: string;
+  targetReference: string;
+  targetReferenceDigest: string;
+  contentDigest: string;
+  observedContentDigest: string;
+  byteSize: number;
+  mediaType: string;
+  status: "confirmed";
+}
+
+export interface AcceptProposalResult {
   success: boolean;
   patchResult: PatchApplyResult;
+  effectStatus: "confirmed";
+  proposalProjectionStatus: "confirmed" | "reconciliation_required";
+  warnings: string[];
+  mainChatTaskSync?: unknown[];
+  memoryGateway?: unknown;
   memoryLifecycle?: MemoryLifecycleRecord;
-}> {
+  memoryPersistence?: {
+    canonicalCommitted: boolean;
+    outboxEventId?: string;
+    projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+    pending?: number;
+    degraded?: number;
+    applied?: number;
+    reasonCode?: string;
+    errorDigest?: string;
+  };
+  artifactMaterialization?: ArtifactMaterializationReceipt;
+  blockedAction?: unknown;
+  canContinue?: boolean;
+}
+
+export async function acceptProposal(proposalId: string): Promise<AcceptProposalResult> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
 }
 

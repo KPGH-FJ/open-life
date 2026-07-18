@@ -1,5 +1,6 @@
 use crate::life_model::LifeModel;
 use anyhow::{Context, Result};
+use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -161,20 +162,22 @@ impl VersionManager {
     fn save_manifest(&self, manifest: &VersionManifest) -> Result<()> {
         let path = self.manifest_path();
         let text = serde_json::to_string_pretty(manifest).context("序列化版本索引失败")?;
-        fs::write(&path, text).with_context(|| format!("写入版本索引失败: {:?}", path))
+        crate::atomic_file::write_atomic(&path, text.as_bytes())
+            .with_context(|| format!("写入版本索引失败: {:?}", path))
     }
 
     pub fn snapshot(&self, model: &LifeModel, tag: &str, note: &str) -> Result<LifeModelVersion> {
         let yaml_content = serde_yaml::to_string(model).context("序列化人生模型失败")?;
+        let mut manifest = self.load_manifest()?;
         let timestamp = chrono::Local::now().to_rfc3339();
         let safe_time = timestamp.replace(":", "-");
         let version = format!("{}_{}", model.metadata.version.replace(".", "_"), safe_time);
         let filename = format!("{}.yaml", version);
         let path = self.versions_dir.join(&filename);
 
-        fs::write(&path, &yaml_content).with_context(|| format!("写入版本文件失败: {:?}", path))?;
+        crate::atomic_file::write_atomic(&path, yaml_content.as_bytes())
+            .with_context(|| format!("写入版本文件失败: {:?}", path))?;
 
-        let mut manifest = self.load_manifest().unwrap_or_default();
         manifest.versions.retain(|entry| entry.version != version);
         manifest.versions.push(VersionMetadata {
             version: version.clone(),
@@ -185,8 +188,84 @@ impl VersionManager {
         manifest
             .versions
             .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        let _ = self.save_manifest(&manifest);
+        self.save_manifest(&manifest)?;
 
+        Ok(LifeModelVersion {
+            version,
+            timestamp,
+            tag: tag.to_string(),
+            note: note.to_string(),
+            yaml_content,
+        })
+    }
+
+    /// Materialize a journal projection under a deterministic semantic key.
+    /// Retrying the same key with the same canonical model is idempotent;
+    /// reusing the key for different content fails closed. This method repairs
+    /// the crash window where the snapshot file was renamed but the manifest
+    /// had not yet been updated.
+    pub fn ensure_projection_snapshot(
+        &self,
+        model: &LifeModel,
+        projection_key: &str,
+        tag: &str,
+        note: &str,
+    ) -> Result<LifeModelVersion> {
+        if projection_key.is_empty()
+            || projection_key.len() > 512
+            || projection_key.chars().any(char::is_control)
+        {
+            anyhow::bail!("invalid LifeModel projection snapshot key");
+        }
+        let yaml_content = serde_yaml::to_string(model).context("序列化人生模型失败")?;
+        let version = format!("projection_{}", sha256_hex(projection_key.as_bytes()));
+        let path = self.versions_dir.join(format!("{version}.yaml"));
+        let mut manifest = self.load_manifest()?;
+
+        if let Some(existing) = manifest
+            .versions
+            .iter()
+            .find(|entry| entry.version == version)
+        {
+            if existing.tag != tag || existing.note != note {
+                anyhow::bail!("LifeModel projection snapshot key metadata conflict");
+            }
+            let existing_content = fs::read_to_string(&path)
+                .with_context(|| format!("读取投影版本文件失败: {:?}", path))?;
+            if existing_content != yaml_content {
+                anyhow::bail!("LifeModel projection snapshot key content conflict");
+            }
+            return Ok(LifeModelVersion {
+                version,
+                timestamp: existing.timestamp.clone(),
+                tag: existing.tag.clone(),
+                note: existing.note.clone(),
+                yaml_content,
+            });
+        }
+
+        if path.exists() {
+            let existing_content = fs::read_to_string(&path)
+                .with_context(|| format!("读取孤立投影版本文件失败: {:?}", path))?;
+            if existing_content != yaml_content {
+                anyhow::bail!("LifeModel orphan projection snapshot content conflict");
+            }
+        } else {
+            crate::atomic_file::write_atomic(&path, yaml_content.as_bytes())
+                .with_context(|| format!("写入投影版本文件失败: {:?}", path))?;
+        }
+
+        let timestamp = chrono::Local::now().to_rfc3339();
+        manifest.versions.push(VersionMetadata {
+            version: version.clone(),
+            timestamp: timestamp.clone(),
+            tag: tag.to_string(),
+            note: note.to_string(),
+        });
+        manifest
+            .versions
+            .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        self.save_manifest(&manifest)?;
         Ok(LifeModelVersion {
             version,
             timestamp,
@@ -219,7 +298,7 @@ impl VersionManager {
     }
 
     pub fn has_snapshot_tag_on_date(&self, tag: &str, date: &str) -> Result<bool> {
-        let manifest = self.load_manifest().unwrap_or_default();
+        let manifest = self.load_manifest()?;
         Ok(manifest
             .versions
             .iter()
@@ -231,7 +310,7 @@ impl VersionManager {
         if !self.versions_dir.exists() {
             return Ok(versions);
         }
-        let manifest = self.load_manifest().unwrap_or_default();
+        let manifest = self.load_manifest()?;
         let mut entries: Vec<_> = fs::read_dir(&self.versions_dir)
             .context("读取版本目录失败")?
             .filter_map(|e| e.ok())
@@ -299,6 +378,14 @@ impl VersionManager {
         }
         Ok(output)
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -444,5 +531,98 @@ mod tests {
         assert!(!mgr
             .has_snapshot_tag_on_date("auto:evolution", &date)
             .unwrap());
+    }
+
+    #[test]
+    fn projection_snapshot_retry_is_idempotent_and_key_conflict_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = VersionManager::new(dir.path());
+        let model = LifeModel::default_model();
+        let first = mgr
+            .ensure_projection_snapshot(
+                &model,
+                "file-outbox:operation-1:patch-after",
+                "patch:proposal-1:after",
+                "Snapshot after patch proposal-1",
+            )
+            .unwrap();
+        let retry = mgr
+            .ensure_projection_snapshot(
+                &model,
+                "file-outbox:operation-1:patch-after",
+                "patch:proposal-1:after",
+                "Snapshot after patch proposal-1",
+            )
+            .unwrap();
+        assert_eq!(first.version, retry.version);
+        assert_eq!(mgr.list_versions().unwrap().len(), 1);
+
+        let mut conflicting = model;
+        conflicting.identity.name = "different canonical content".into();
+        assert!(mgr
+            .ensure_projection_snapshot(
+                &conflicting,
+                "file-outbox:operation-1:patch-after",
+                "patch:proposal-1:after",
+                "Snapshot after patch proposal-1",
+            )
+            .is_err());
+        assert_eq!(mgr.list_versions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn corrupt_manifest_is_not_silently_replaced_during_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.json"), b"not-json").unwrap();
+        let mgr = VersionManager::new(dir.path());
+        assert!(mgr
+            .ensure_projection_snapshot(
+                &LifeModel::default_model(),
+                "file-outbox:operation-1:daily",
+                "auto:daily-save",
+                "Daily auto snapshot",
+            )
+            .is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("index.json")).unwrap(),
+            b"not-json"
+        );
+    }
+
+    #[test]
+    fn projection_retry_repairs_file_rename_before_manifest_without_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = VersionManager::new(dir.path());
+        let model = LifeModel::default_model();
+        let projection_key = "file-outbox:operation-2:patch-after";
+        let version = format!("projection_{}", sha256_hex(projection_key.as_bytes()));
+        let yaml = serde_yaml::to_string(&model).unwrap();
+        crate::atomic_file::write_atomic(
+            &dir.path().join(format!("{version}.yaml")),
+            yaml.as_bytes(),
+        )
+        .unwrap();
+
+        let repaired = mgr
+            .ensure_projection_snapshot(
+                &model,
+                projection_key,
+                "patch:proposal-2:after",
+                "Snapshot after patch proposal-2",
+            )
+            .unwrap();
+        assert_eq!(repaired.version, version);
+        assert_eq!(mgr.list_versions().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(
+                    |entry| entry.path().extension().and_then(|value| value.to_str())
+                        == Some("yaml")
+                )
+                .count(),
+            1
+        );
     }
 }

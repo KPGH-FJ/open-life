@@ -2,6 +2,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+/// Explicit idempotency contract owned by the tool manifest.
+///
+/// This is deliberately not inferred from the tool name, action type, or
+/// capabilities. `Unspecified` is the serde/default migration state and is
+/// rejected by ToolGateway for executable manifests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolIdempotencyContract {
+    #[default]
+    Unspecified,
+    NonIdempotent,
+    Idempotent,
+}
+
+impl ToolIdempotencyContract {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::NonIdempotent => "non_idempotent",
+            Self::Idempotent => "idempotent",
+        }
+    }
+}
+
 /// Unified manifest for all tools available in OpenLife.
 /// Covers both built-in tools and external MCP tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +53,10 @@ pub struct ToolManifest {
     /// Action type: "read" | "write" | "network" | "external_side_effect"
     #[serde(default)]
     pub action_type: String,
+    /// Typed idempotency contract used by ToolGateway retry policy. This must
+    /// be explicitly declared for every executable manifest.
+    #[serde(default)]
+    pub idempotency_contract: ToolIdempotencyContract,
     /// Optional tags for recommendation engine matching.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -67,6 +95,34 @@ impl std::fmt::Display for ToolSource {
 }
 
 impl ToolManifest {
+    /// Deterministic identity for the execution-relevant manifest contract.
+    /// Descriptions are intentionally excluded; changing executable schema,
+    /// source, risk, capabilities, or idempotency invalidates a replay.
+    pub fn execution_contract_digest(&self) -> String {
+        let mut capabilities = self.capabilities.clone();
+        capabilities.sort();
+        let mut tags = self.tags.clone();
+        tags.sort();
+        crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!([
+            "tool_manifest_execution_contract_v1",
+            self.id,
+            self.name,
+            self.parameters,
+            self.permission_level,
+            self.risk_level,
+            self.version,
+            self.source.to_string(),
+            capabilities,
+            self.requires_confirmation,
+            self.enabled,
+            self.declarative_only,
+            self.action_type,
+            self.idempotency_contract.as_str(),
+            tags,
+        ]))
+        .1
+    }
+
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -91,6 +147,7 @@ impl ToolManifest {
             enabled: true,
             declarative_only: false,
             action_type: String::new(),
+            idempotency_contract: ToolIdempotencyContract::Unspecified,
             tags: Vec::new(),
         }
     }
@@ -149,6 +206,14 @@ impl ToolManifest {
     pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
         self.capabilities = capabilities;
         self.normalized()
+    }
+
+    pub fn with_idempotency_contract(
+        mut self,
+        idempotency_contract: ToolIdempotencyContract,
+    ) -> Self {
+        self.idempotency_contract = idempotency_contract;
+        self
     }
 
     /// Mark this tool as declarative-only (cannot be executed).
@@ -234,6 +299,7 @@ mod tests {
         );
         assert_eq!(m.name, "test_tool");
         assert_eq!(m.permission_level, "low");
+        assert_eq!(m.idempotency_contract, ToolIdempotencyContract::Unspecified);
         assert!(m.tags.is_empty());
     }
 
@@ -293,6 +359,7 @@ mod tests {
 
         assert!(m.capabilities.is_empty());
         assert!(m.action_type.is_empty());
+        assert_eq!(m.idempotency_contract, ToolIdempotencyContract::Unspecified);
         assert_eq!(m.risk_level, "low");
     }
 

@@ -1,0 +1,1114 @@
+{
+  "schema_version": "openlife-backend-remediation-v4-discovered-findings-v1",
+  "status": "append-only",
+  "authority": "subordinate-to-phase7-and-additive-to-frozen-35",
+  "created_at": "2026-07-10T23:36:23+08:00",
+  "protected_baseline": {
+    "frozen_inventory_file": "plans/openlife_backend_remediation_v4_inventory.json",
+    "frozen_inventory_sha256": "3126792be60df62df73ca9e574d8dc6726e2d18862495a31bda85104ca1095fe",
+    "frozen_finding_count": 35,
+    "frozen_scenario_file": "plans/openlife_backend_remediation_v4_scenarios.json",
+    "frozen_scenario_sha256": "e969e091777134c62d388c012149c056813ee0c4eb290307c47cf8b439802482",
+    "frozen_scenario_count": 40
+  },
+  "append_policy": {
+    "identity_is_severity_independent": true,
+    "existing_entries_must_not_be_rewritten": true,
+    "rejected_hypotheses_remain_recorded": true,
+    "merge_base_append_only_check_required_in_ci": true,
+    "supplemental_scenarios_do_not_change_frozen_denominator": true
+  },
+  "definition_corrections": [
+    {
+      "id": "BR4-C001",
+      "recorded_at": "2026-07-13T14:05:00+08:00",
+      "finding_id": "BR4-D047",
+      "field": "related_frozen_findings",
+      "operation": "remove_invalid_reference",
+      "invalid_value": "P0-05",
+      "effective_value": null,
+      "reason": "The frozen inventory has only P0-01 through P0-03. D047's body and first recorded fingerprint prove P0-05 was present at registration, so the invalid reference is corrected by an append-only record instead of silently rewriting the immutable finding; P1-17 remains the valid related frozen finding.",
+      "evidence": [
+        "frozen-inventory:P0-01-through-P0-03",
+        "first-registration:BR4-D047-related-P0-05-and-P1-17",
+        "phase0-gate:missing-frozen-reference-red"
+      ],
+      "immutable_fingerprint": "2bc5d7126d951498cba8e6166c710b5cdbcf4611ef43abaeb1ee0f4f615ab4dc"
+    },
+    {
+      "id": "BR4-C002",
+      "recorded_at": "2026-07-13T14:15:00+08:00",
+      "field": "immutable_fingerprint",
+      "operation": "replace_invalid_derived_fingerprints",
+      "replacements": [
+        {"finding_id":"BR4-D044","invalid_value":"813060daf8e31c1bc7e04d5831c9a1c43870a1a0ffbf128e3fa4f02a532de665","effective_value":"1a979bc9f187ef9b2ce0d6832abb2f4f64d0292253a8cb67d2fc0e8b654394fd"},
+        {"finding_id":"BR4-D045","invalid_value":"4ff4ff645c34404937fa220405c69113c5bfb8d9bfcc73cb1cc9058efb370268","effective_value":"28026d6372e46f2c2e88d4c6130844b423515f93683495955b0c1cb6b9e0e497"},
+        {"finding_id":"BR4-D046","invalid_value":"c887338fc9304476c07f3cb2224245e996e505faa8e6328c04ea69ee56188721","effective_value":"999bafe3a97af725ef44ff94fd7fc873b956d670cbd1b90badd32d5485badeeb"},
+        {"finding_id":"BR4-D047","invalid_value":"d594f46060bc85606c6f71e366d6851c059abdcdfc5d8f2e18391bb6ae2fdb22","effective_value":"16b6871bec3d28038dee4fe3940e5700e014024bab8baae1464f3cd9be07f885"},
+        {"finding_id":"BR4-D048","invalid_value":"bbd0375d20cb16a3ad09b36710e7203e6dd8519d95f3b2b8231b4c30af592ee2","effective_value":"2ac7f99ca8a245ce0fd4a879cb00f128911e1921fd8ce95a037542b7dc189c98"},
+        {"finding_id":"BR4-D049","invalid_value":"ff94589c4a2420f6abc1708821fb0bf731d524e5fd158ee20855d624bb9bc167","effective_value":"ba68fcc54042c527e62eeebc17f67dc8cc9b73e72db3726942a77c7d41986c6f"},
+        {"finding_id":"BR4-D050","invalid_value":"fd86c994a6a6a2c83d9f5f5db88bbf6b41afb682da24f29b12aabafa1531e2c5","effective_value":"169b3df2f5978b306166df0bd47fb28f0aa8de3dc4a60645cc46a49096b0beaf"},
+        {"finding_id":"BR4-D051","invalid_value":"e828cbf73b5c4a9bae4d27f420461ed73d7f6d5aa519e66f20d957958d2b030a","effective_value":"832a36a6d4a7fb72290101ba8fb95b2020f9d8e420a6a00de5849468bd028932"},
+        {"finding_id":"BR4-D052","invalid_value":"40f9144fee6ea8013027cc3066ccd4b9afb640fb4551f739b3e5d7bd46928e74","effective_value":"32e1cd997967fcd18786822f4bf3acf59b0594416fcaf1c382ab9328df99cdef"},
+        {"finding_id":"BR4-D053","invalid_value":"d71e5254266d74f15418c9cbfb811cd97530336e0aff201fd454c112a1474d9a","effective_value":"5793b27495481036d24251f73593859f91adfdc38799ee0022b11bac064415f7"}
+      ],
+      "reason": "Session forensics proved the D044-D053 immutable bodies equal their first successful registrations, while their stored fingerprint fields came from draft, summary, or trailing-newline inputs. The original entries remain byte-identical and this append-only record supplies only the canonical Rust-algorithm fingerprint for each exact invalid stored value.",
+      "evidence": [
+        "session-forensics:first-successful-D044-through-D053-additions",
+        "algorithm:sorted-recursive-canonical-json-without-fingerprint-field-or-trailing-newline",
+        "phase0-gate:stored-versus-canonical-fingerprint-red"
+      ],
+      "immutable_fingerprint": "b6257639545857f77d3f1400eebc61ca94cb9af4a4cd9e8cc5d54b750daea80f"
+    }
+  ],
+  "findings": [
+    {
+      "id": "BR4-D001",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "net_new_root_cause",
+      "related_frozen_findings": ["P0-01", "P2-01", "P2-02"],
+      "why_not_fully_subsumed": "The frozen audit followed ordinary Main Chat; independently shipped Builder and skill paths can construct provider authorization without the product PolicyRouter.",
+      "title": "Non-Main-Chat provider paths can self-authorize cloud execution",
+      "observed_symptom": "Builder can send accumulated answers and LifeModel-derived context under a caller-created PolicyAllowed request.",
+      "root_cause_hypothesis": "PreparedProviderRequest validates shape but not provenance, while product call sites remain free to invent privacy decision ids and data routes.",
+      "affected_surfaces": ["openlife-core/src/builder/engine.rs::generate_builder_phase", "src-tauri/src/commands/builder.rs", "src-tauri/src/commands/agent_runtime/skills.rs"],
+      "broken_invariants": ["I02", "I03", "I17"],
+      "target_phase": "Phase 1",
+      "owner_module": "PolicyRouter and provider execution seam",
+      "acceptance": ["Every shipped provider start has a policy decision with verifiable provenance", "Blocked or LocalOnly data never falls through to cloud"],
+      "deletion_targets": ["Builder-created explicit_user_input privacy decision", "Shipped provider calls using default prepare_chat_request"],
+      "immutable_fingerprint": "611326966903856f2069d48395092f490bae8ff5b035b7250b4159d446cbf019"
+    },
+    {
+      "id": "BR4-D002",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "net_new_root_cause",
+      "related_frozen_findings": ["P2-02"],
+      "why_not_fully_subsumed": "The frozen event finding did not identify a convenience provider API that discards an already-produced adapter receipt.",
+      "title": "Provider convenience API discards invocation receipts",
+      "observed_symptom": "generate_prepared returns only text, so Builder, skills and runtime layers can lose request-edge truth after a real provider call.",
+      "root_cause_hypothesis": "The API treats receipt consumption as optional even though receipt truth is part of successful execution.",
+      "affected_surfaces": ["openlife-core/src/scheduler.rs::generate_prepared", "openlife-core/src/builder/engine.rs", "openlife-core/src/agent/runtime.rs"],
+      "broken_invariants": ["I03", "I12", "I13"],
+      "target_phase": "Phase 1",
+      "owner_module": "ProviderAdapter outcome contract",
+      "acceptance": ["All product provider APIs return or durably consume the receipt", "No product caller can select text while silently dropping receipt truth"],
+      "deletion_targets": ["Receipt-dropping generate_prepared product API"],
+      "immutable_fingerprint": "d9e5b925333763d62092f12e10092ddc784a78015ce252f8d58103680e42b738"
+    },
+    {
+      "id": "BR4-D003",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-12", "P2-02"],
+      "why_not_fully_subsumed": "Ollama and settings probes were bounded, but the cloud generation adapter still owns separate unbounded HTTP behavior.",
+      "title": "Cloud provider HTTP boundary is not uniformly bounded",
+      "observed_symptom": "Cloud response bodies, error bodies, SSE frames, redirect and proxy behavior are not all governed by one network boundary.",
+      "root_cause_hypothesis": "Provider adapters construct reqwest behavior independently instead of consuming a typed provider network policy.",
+      "affected_surfaces": ["openlife-core/src/llm.rs", "openlife-core/src/network_client.rs"],
+      "broken_invariants": ["I03", "I07", "I12"],
+      "target_phase": "Phase 1 and Phase 4",
+      "owner_module": "ProviderAdapter network boundary",
+      "acceptance": ["Provider redirects, proxying, bodies, frames, connect, idle and total duration are bounded", "Oversized and incomplete streams fail with minimal receipts"],
+      "deletion_targets": ["Unbounded direct cloud reqwest response handling"],
+      "immutable_fingerprint": "7decbb3f34e3892a26ca15c37855934a3b638d28e8482800208be65c666211a1"
+    },
+    {
+      "id": "BR4-D004",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "net_new_root_cause",
+      "related_frozen_findings": ["P1-14", "P1-21", "P2-02"],
+      "why_not_fully_subsumed": "The frozen vector and routing findings did not identify embedding as an independent model authority with silent semantic fallback.",
+      "title": "Embedding uses a second provider authority with silent fallback",
+      "observed_symptom": "Embedding can switch cloud to Ollama to hash without a route decision, profile compatibility check or receipt.",
+      "root_cause_hypothesis": "Embedding availability and vector compatibility are treated as implementation detail instead of persisted model-route truth.",
+      "affected_surfaces": ["openlife-core/src/ollama.rs", "openlife-core/src/scheduler.rs", "openlife-core/src/vectors.rs"],
+      "broken_invariants": ["I03", "I08", "I12"],
+      "target_phase": "Phase 1 and Phase 5",
+      "owner_module": "ProviderRouter embedding profile",
+      "acceptance": ["Embedding route and model profile are explicit and receipted", "Incompatible fallback creates a rebuild-required state rather than silent mixed vectors"],
+      "deletion_targets": ["Silent cloud-to-local-to-hash embedding fallback"],
+      "immutable_fingerprint": "e0113272c122b4dac5a253ae78597ba89db38a3abcac0b81b534a225beae3a9e"
+    },
+    {
+      "id": "BR4-D005",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-14", "P2-02"],
+      "why_not_fully_subsumed": "Receipt projection exists, but aggregation can combine start and terminal facts from different requests.",
+      "title": "Multi-attempt provider aggregation can fabricate one success",
+      "observed_symptom": "Projection can select the first request id and any later completed receipt when multiple providers or attempts occur.",
+      "root_cause_hypothesis": "Receipts are aggregated by turn-level booleans rather than an attempt state machine keyed by request id.",
+      "affected_surfaces": ["src-tauri/src/main_chat_runtime_facts/provider_route.rs", "src-tauri/src/main_chat_event_stream.rs"],
+      "broken_invariants": ["I08", "I12"],
+      "target_phase": "Phase 2",
+      "owner_module": "ExecutionReceipt projection",
+      "acceptance": ["Every started request has an independent terminal or unknown state", "Projection never joins facts from different request ids"],
+      "deletion_targets": ["Turn-level any-completed provider aggregation"],
+      "immutable_fingerprint": "2222906d3e29b3fd0f1d7dee0762bd7fb4b782732b96c03225eaf811d6c44eec"
+    },
+    {
+      "id": "BR4-D006",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-02", "P2-02"],
+      "why_not_fully_subsumed": "Local cancellation plumbing exists, but cancellation can drop provider and tool facts observed inside an in-flight kernel future.",
+      "title": "Cancellation can discard already-observed execution facts",
+      "observed_symptom": "Dropping the kernel future may leave only a provider_started boolean while receipts and tool observations never reach durable state.",
+      "root_cause_hypothesis": "Receipt collection is returned at future completion instead of being durably appended at observation time.",
+      "affected_surfaces": ["src-tauri/src/main_chat_turn_runtime.rs", "src-tauri/src/main_chat_kernel.rs", "src-tauri/src/main_chat_react_runtime.rs"],
+      "broken_invariants": ["I08", "I11", "I12", "I13"],
+      "target_phase": "Phase 2",
+      "owner_module": "OpenLifeTurnRuntime event sink",
+      "acceptance": ["Cancellation preserves all facts observed before abort", "Unconfirmed remote state is remote_unknown and no late durable effect commits"],
+      "deletion_targets": ["Completion-only receipt harvesting"],
+      "immutable_fingerprint": "00a9983306910d0be51af9388f8237da5100f03342378d85fe15de9db8d5d807"
+    },
+    {
+      "id": "BR4-D007",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "net_new_root_cause",
+      "related_frozen_findings": ["P1-05", "P1-08", "P1-18"],
+      "why_not_fully_subsumed": "The frozen tool timeout work did not model the boundary after an external request is dispatched but before its result is observed.",
+      "title": "ToolGateway cannot represent dispatched-but-unknown effects",
+      "observed_symptom": "An MCP or external tool timeout after wire dispatch can be recorded as failed or blocked and may become retryable.",
+      "root_cause_hypothesis": "Tool execution status lacks prepared, dispatched, confirmed and unknown effect states.",
+      "affected_surfaces": ["openlife-core/src/agent/tool_gateway.rs", "openlife-core/src/agent/action_executor", "openlife-core/src/mcp.rs"],
+      "broken_invariants": ["I10", "I12"],
+      "target_phase": "Phase 4",
+      "owner_module": "ToolGateway effect receipt",
+      "acceptance": ["Wire dispatch is recorded before waiting for response", "Timeout after dispatch becomes unknown and is not automatically retried"],
+      "deletion_targets": ["Binary success-failed external effect status"],
+      "immutable_fingerprint": "23eea0e8c8dccf9eb6ea439453984886c7838175833fb2ab374da1cc241611eb"
+    },
+    {
+      "id": "BR4-D008",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-17", "P2-02"],
+      "why_not_fully_subsumed": "Event batches are now atomic internally, but canonical mutations and their event/outbox facts still span stores and transactions.",
+      "title": "Canonical writes and execution facts lack one transaction plus outbox",
+      "observed_symptom": "A crash can leave a domain write committed without its durable execution fact or projection trigger.",
+      "root_cause_hypothesis": "Each store owns local transactions but no PersistenceCoordinator owns mutation plus outbox atomicity.",
+      "affected_surfaces": ["src-tauri/src/main_chat_event_stream.rs", "src-tauri/src/memory_gateway.rs", "src-tauri/src/life_model_write_gateway.rs"],
+      "broken_invariants": ["I08", "I09", "I13", "I15"],
+      "target_phase": "Phase 5",
+      "owner_module": "PersistenceCoordinator",
+      "acceptance": ["Canonical mutation and outbox row commit in one transaction", "Projection replay is idempotent after crash"],
+      "deletion_targets": ["Cross-store write-then-log sequences without recovery"],
+      "immutable_fingerprint": "19c0a37f9d85ec9958d18ed91621d6d2dd09a46502eaa485fb065dbcda4e829e"
+    },
+    {
+      "id": "BR4-D009",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P0-01", "P1-09", "P2-02"],
+      "why_not_fully_subsumed": "False completion was corrected, but scheduler policy provenance and per-request durable receipts remain absent.",
+      "title": "Scheduler has incomplete policy and provider truth",
+      "observed_symptom": "Scheduled generation currently hard-codes LocalOnly and only validates an in-memory collector before completing a claim.",
+      "root_cause_hypothesis": "Scheduler owns execution without consuming the same DataRouteDecision and durable event contract as product turns.",
+      "affected_surfaces": ["src-tauri/src/scheduler_runner.rs", "openlife-core/src/scheduler.rs"],
+      "broken_invariants": ["I02", "I03", "I08", "I12"],
+      "target_phase": "Phase 5",
+      "owner_module": "Durable scheduler runtime",
+      "acceptance": ["Each scheduled provider request has policy provenance and a durable receipt", "Unknown remote effects remain unknown and are reconciled before retry"],
+      "deletion_targets": ["Hard-coded scheduler data route and in-memory-only receipt gate"],
+      "immutable_fingerprint": "2fc013a0db274fc6ccbff2f5e2cc28bb347ed70cccf0dcb279294cc836ca3016"
+    },
+    {
+      "id": "BR4-D010",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-19", "P2-02"],
+      "why_not_fully_subsumed": "AgentRun and events were minimized, but TaskSession, transcript, observation, LifeEvent and extended run fields still duplicate sensitive text.",
+      "title": "Sensitive canonical content remains duplicated across execution stores",
+      "observed_symptom": "User goals, transcript summaries and observation metadata can persist raw conversation or external content outside its canonical owner.",
+      "root_cause_hypothesis": "Storage schemas accept free-form strings and legacy migrations mark rows minimized before every sensitive column is transformed.",
+      "affected_surfaces": ["openlife-core/src/agent/store.rs", "openlife-core/src/agent/main_chat_agent_v1.rs", "src-tauri/src/main_chat_event_stream.rs"],
+      "broken_invariants": ["I08", "I12", "I14"],
+      "target_phase": "Phase 1 and Phase 5",
+      "owner_module": "Canonical content reference contract",
+      "acceptance": ["Cross-store sentinel scan finds canonical body only at its owner", "Legacy restart migration removes raw duplicates without losing references"],
+      "deletion_targets": ["Free-form execution-store body copies", "Premature minimized migration marker"],
+      "immutable_fingerprint": "98ff83849622bcb97c090edfee6ec36ce57c6798696fd1c309700d59bfcb9811"
+    },
+    {
+      "id": "BR4-D011",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "net_new_root_cause",
+      "related_frozen_findings": ["P1-19", "P1-17"],
+      "why_not_fully_subsumed": "The frozen minimization work did not define deletion propagation across stores that retain references or derived content.",
+      "title": "Deletion lacks cross-store tombstone and reconciliation",
+      "observed_symptom": "Deleting an AgentRun or conversation record does not reconcile related events, actions, vectors or LifeEvents.",
+      "root_cause_hypothesis": "Stores expose independent deletes without a canonical deletion event and idempotent projection cleanup.",
+      "affected_surfaces": ["openlife-core/src/agent/store.rs", "openlife-core/src/vectors.rs", "src-tauri/src/main_chat_event_stream.rs"],
+      "broken_invariants": ["I08", "I09", "I14"],
+      "target_phase": "Phase 5",
+      "owner_module": "PersistenceCoordinator deletion workflow",
+      "acceptance": ["Canonical deletion writes a tombstone and outbox event", "All projections reconcile idempotently and report lag instead of stale certainty"],
+      "deletion_targets": ["Independent best-effort delete methods"],
+      "immutable_fingerprint": "1ac300bd44bb599094160c04cd0d4d327d1ef6db83ac62f3d366fde02f77c054"
+    },
+    {
+      "id": "BR4-D012",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P2",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P2-03", "P2-07"],
+      "why_not_fully_subsumed": "An unused second provider/fail-soft completion route was protected by symbol-presence tests despite having no product caller.",
+      "title": "Dormant fallback route survived behind false-green tests",
+      "observed_symptom": "generate_non_stream_fallback and ReAct follow-up synthesis remained compiled and tests asserted their presence.",
+      "root_cause_hypothesis": "Extraction tests treated symbol existence as behavior evidence and authority cleanup did not require a consumer map.",
+      "affected_surfaces": ["src-tauri/src/main_chat_generation_support.rs", "src-tauri/src/main_chat_react_runtime.rs", "src-tauri/src/main_chat_react_unit_tests.rs"],
+      "broken_invariants": ["I01", "I12", "I18"],
+      "target_phase": "Phase 2 and Phase 6",
+      "owner_module": "Single-system deletion inventory",
+      "acceptance": ["Dormant symbols and duplicate observation reply fields are absent", "Authority inventory and behavioral gates preserve the deletion"],
+      "deletion_targets": ["generate_non_stream_fallback", "synthesize_main_chat_react_follow_up", "MainChatReactFollowUp"],
+      "immutable_fingerprint": "682c923bef3cbea8f62f979a4a70c16d8b5c452180bcd56d1b0d4193bba9f86b"
+    },
+    {
+      "id": "BR4-D013",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P0-01", "P1-07", "P2-02"],
+      "why_not_fully_subsumed": "A ToolGateway helper initiated its own hard-coded Ollama synthesis, outside both tool and provider receipts.",
+      "title": "web.fetch helper initiated an untracked provider call",
+      "observed_symptom": "summarize=true could contact localhost Ollama after the governed web read without a provider policy or receipt.",
+      "root_cause_hypothesis": "Tool code combined evidence acquisition and model synthesis instead of returning untrusted content to the active TurnRuntime.",
+      "affected_surfaces": ["openlife-core/src/agent/action_executor/helpers.rs", "openlife-core/src/agent/action_executor/execution_tools.rs"],
+      "broken_invariants": ["I02", "I03", "I05", "I12"],
+      "target_phase": "Phase 1",
+      "owner_module": "ToolGateway and TurnRuntime",
+      "acceptance": ["Product tool code cannot start provider HTTP", "web.fetch returns bounded untrusted evidence for authorized synthesis"],
+      "deletion_targets": ["summarize_content hard-coded Ollama call"],
+      "immutable_fingerprint": "114f1cda96780aefee9c9b156bd692d98a01f14029d9d8a48d3f47f053521ca8"
+    },
+    {
+      "id": "BR4-D014",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "net_new_root_cause",
+      "related_frozen_findings": ["P1-12", "P2-09"],
+      "why_not_fully_subsumed": "Secret migration did not bind a masked or environment credential to provider and endpoint identity.",
+      "title": "Provider credential could be reused across endpoint identities",
+      "observed_symptom": "Changing a provider endpoint while submitting a masked key could send the previously stored or environment key to the new endpoint.",
+      "root_cause_hypothesis": "Credential lookup was keyed by a global field instead of canonical provider endpoint identity and version.",
+      "affected_surfaces": ["src-tauri/src/commands/settings.rs", "src-tauri/src/provider_validation.rs", "openlife-core/src/config.rs"],
+      "broken_invariants": ["I03", "I08", "I15"],
+      "target_phase": "Phase 1",
+      "owner_module": "Provider credential store",
+      "acceptance": ["Masked credentials are reused only for unchanged canonical identity", "Custom endpoint tests cannot inherit official environment credentials"],
+      "deletion_targets": ["Global masked credential fallback", "Unscoped environment credential fallback"],
+      "immutable_fingerprint": "8d8a401deae02d10bfaba6baf6880edad109fa3f5b73021e522c8301397ea2d2"
+    },
+    {
+      "id": "BR4-D015",
+      "discovered_at": "2026-07-10T23:36:23+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-16", "P1-19"],
+      "why_not_fully_subsumed": "Audit encryption protected confidentiality at rest but still duplicated complete arguments and results into another durable store.",
+      "title": "MCP audit encrypted duplicate raw payloads",
+      "observed_symptom": "Arguments and tool results were copied in full into encrypted audit rows and exports.",
+      "root_cause_hypothesis": "Audit integrity was conflated with payload retention instead of storing minimal type, size and digest receipts.",
+      "affected_surfaces": ["openlife-core/src/mcp_audit.rs", "src-tauri/src/commands/mcp.rs"],
+      "broken_invariants": ["I08", "I14"],
+      "target_phase": "Phase 1",
+      "owner_module": "MCP audit receipt store",
+      "acceptance": ["New audit rows and exports contain only minimal receipts", "Legacy restart migration removes encrypted raw payload copies"],
+      "deletion_targets": ["Raw MCP arguments and result audit columns as product payload"],
+      "immutable_fingerprint": "2b0d116414202192325291f322eb13e6e203f105c8bcfeeb5c3971a7fce2b109"
+    },
+    {"id":"BR4-D016","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-05","P1-17","P2-02"],"why_not_fully_subsumed":"The frozen concurrency findings covered proposals and LifeModel writes, but not Builder session state split between an in-memory map and a last-writer-wins JSON store.","title":"Builder session had two authorities and duplicate review staging","observed_symptom":"Concurrent answers could overwrite each other and a double-click could stage duplicate review runs or proposals.","root_cause_hypothesis":"Builder commands treated an in-memory map and a file store as peers and lacked revision CAS plus an exclusive review claim.","affected_surfaces":["src-tauri/src/commands/builder.rs","src-tauri/src/state.rs","openlife-core/src/builder/store.rs"],"broken_invariants":["I08","I10","I18"],"target_phase":"Phase 3","owner_module":"BuilderSessionStore canonical gateway","acceptance":["BuilderSessionStore is the only product session owner","Concurrent step commits one revision and concurrent review submission stages one batch"],"deletion_targets":["AppState builder_sessions product cache","Unconditional Builder session overwrite and removal"],"immutable_fingerprint":"7d90d6dee15ad34d934b7aac9e12b2792e05ab29ce98bb5afa70efd0f7669a02"},
+    {"id":"BR4-D017","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-19","P2-09"],"why_not_fully_subsumed":"AgentRun minimization did not cover raw Builder transcripts exposed by list IPC or persisted with permissive local file modes.","title":"Builder session privacy boundary exposed raw unfinished answers","observed_symptom":"Listing unfinished sessions returned draft YAML and pending candidates, while raw Builder answers were stored in an app-managed JSON file without an explicit owner-only permission contract.","root_cause_hypothesis":"The resumable Builder domain object was serialized directly as a product read model and generic file persistence did not encode sensitivity.","affected_surfaces":["src-tauri/src/commands/builder.rs","frontend/src/tauri.ts","openlife-core/src/builder/store.rs","openlife-core/src/atomic_file.rs"],"broken_invariants":["I08","I14","I15","I17"],"target_phase":"Phase 1 and Phase 5","owner_module":"Builder session privacy gateway","acceptance":["Unfinished-session IPC returns a narrow summary with no answer or candidate bodies","App-managed Builder directory and file are owner-only and retention is explicit"],"deletion_targets":["Raw BuilderSession list IPC","Default-permission Builder session writes"],"immutable_fingerprint":"c1a34d49f32c21c79297e26607466b8308f973722f4d24bef51bf5e55e72465d"},
+    {"id":"BR4-D018","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P1-06","P1-19"],"why_not_fully_subsumed":"Proposal CAS existed, but per-signal Builder proposals shared one model hash, copied canonical collection values, and had no typed atomic review batch.","title":"Builder review batch was self-conflicting and duplicated canonical LifeModel content","observed_symptom":"Accepting one of several Builder proposals made the rest stale; the first batch draft then copied full before and merged after collections into Proposal storage and exposed blind generic JSON editing.","root_cause_hypothesis":"Builder review modeled each field as an independent replace patch instead of one minimal candidate batch materialized atomically against a global base hash.","affected_surfaces":["src-tauri/src/commands/builder.rs","openlife-core/src/life_model/patch.rs","src-tauri/src/commands/proposal.rs","src-tauri/src/life_model_write_gateway.rs"],"broken_invariants":["I06","I08","I10","I14"],"target_phase":"Phase 3 and Phase 5","owner_module":"ReviewWorkflow typed LifeModel candidate batch","acceptance":["One Builder review produces one atomic CAS proposal","Proposal stores candidate path and candidate only, with no canonical before or merged after copy","Generic batch JSON editing is unavailable until a typed editor and typed read model exist"],"deletion_targets":["Per-signal shared-base proposals","Full canonical collection before-after copies","Generic untyped Builder batch edit"],"immutable_fingerprint":"85fb77140fe05c16781f2d48a55020b141fb95195cf34d6d97988d2bf91838a8"},
+    {"id":"BR4-D019","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P0","classification":"evidence_gap","related_frozen_findings":["P1-19","P2-02","P2-07"],"why_not_fully_subsumed":"The frozen suite did not assert that every explicit Builder question is retained with correct typed semantics or that malformed edits fail atomically.","title":"Deterministic Builder could discard or misparse explicit user answers","observed_symptom":"Several Socratic and Incremental answers were collected then dropped, correction text could be treated as confirmation, malformed arrays could partially apply, and free-text numeric parsing could assign the wrong score.","root_cause_hypothesis":"Removing provider inference left prompt, extraction and typed validation as separate incomplete maps without an answer-to-candidate coverage contract.","affected_surfaces":["openlife-core/src/builder/engine.rs","openlife-core/src/builder/types.rs","src-tauri/src/commands/builder.rs"],"broken_invariants":["I08","I12","I17"],"target_phase":"Phase 3","owner_module":"Deterministic Builder answer and candidate compiler","acceptance":["Every displayed question has an explicit retain-map-or-remove disposition","Corrections do not advance confirmation and labeled numeric values map correctly","Candidate validation is whole-payload and range checked with no silent member loss"],"deletion_targets":["Collect-and-drop Builder questions","First-integer numeric inference","filter_map partial candidate application","Capability-overclaiming Builder copy"],"immutable_fingerprint":"41ae8ae73b08d021fc6f88ba99757cd552d308e084b142d54cf14ae7033dd7cc"},
+    {"id":"BR4-D020","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P0","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P1-17","P2-02"],"why_not_fully_subsumed":"Proposal atomic-claim work did not reconcile linked AgentRun projections or the split between confirmed effects and a later Proposal status update.","title":"Proposal, dispatch effect and AgentRun terminal facts could diverge","observed_symptom":"Builder runs remained WaitingPermission after review, and a confirmed effect followed by Proposal update failure could still appear pending or failed.","root_cause_hypothesis":"Proposal status, dispatch state and AgentRun status are updated as independent terminal truths without one reconciliation owner.","affected_surfaces":["src-tauri/src/commands/proposal.rs","openlife-core/src/agent/proposal_store.rs","openlife-core/src/agent/store.rs"],"broken_invariants":["I09","I10","I12","I13"],"target_phase":"Phase 3 and Phase 5","owner_module":"ReviewWorkflow reconciler","acceptance":["All AgentRuns linked to a terminal Proposal converge idempotently","Confirmed effect with projection failure is reported as projection pending, never effect failed","Pending, accepted, rejected, unknown and postponed remain distinguishable"],"deletion_targets":["Proposal-only terminal updates","WaitingPermission runs with terminal generated proposals","False failure after confirmed effect"],"immutable_fingerprint":"06ec9a165b8c9d840cda90b0ebe273c56cf8ff3bb35b6904c674173eac9e7d24"},
+    {"id":"BR4-D021","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P1-17"],"why_not_fully_subsumed":"The original duplicate-effect finding required atomic claim but did not define safe recovery for definitely-before-effect failure versus unknown post-dispatch state.","title":"Failed Proposal dispatch claims had no safe recovery state","observed_symptom":"A failed claim remained permanently owned, while treating every failure as retryable would risk duplicating an unknown external effect.","root_cause_hypothesis":"Dispatch state lacked a durable distinction between failed before effect, dispatched unknown, confirmed and projection pending.","affected_surfaces":["openlife-core/src/agent/proposal_store.rs","src-tauri/src/commands/proposal.rs"],"broken_invariants":["I10","I11","I12"],"target_phase":"Phase 3 and Phase 5","owner_module":"ReviewWorkflow dispatcher and reconciler","acceptance":["Definitely-before-effect failure can be released or revision-reclaimed","Unknown and confirmed effects cannot be automatically redispatched","Recovery transitions are CAS guarded and idempotent"],"deletion_targets":["Permanent failed dispatch claim","Binary failed status without effect certainty"],"immutable_fingerprint":"12629093042800b91c5b120834ce72be60668dbf7533c5c655789c47355988e7"},
+    {"id":"BR4-D022","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-07","P2-02","P2-03"],"why_not_fully_subsumed":"Deleting the generic Skill Runtime removed a second authority but left declarative plugin and registry built-ins exposed as selectable despite no TurnRuntime-native execution path.","title":"Skill catalog advertised capabilities that never reached TurnRuntime","observed_symptom":"Plugin IDs were unsanitizable and registry built-ins had no SKILL.md context source, so selecting an advertised skill either failed or ran ordinary chat without the skill instruction.","root_cause_hypothesis":"Catalog availability was inferred from write budget instead of an executable TurnRuntime-native context and output contract.","affected_surfaces":["src-tauri/src/commands/execution.rs","src-tauri/src/main_chat_skills_tools.rs","src-tauri/src/main_chat_context_loader.rs","openlife-core/src/skills.rs"],"broken_invariants":["I01","I05","I12","I17","I18"],"target_phase":"Phase 3 and Phase 4","owner_module":"TurnRuntime-native skill gateway","acceptance":["Only skills with a captured bounded instruction in PreparedProviderRequest are selectable","Declarative plugin manifests remain inspectable but unavailable","Legacy JSON-envelope skill runtime is not revived"],"deletion_targets":["allow_writes-derived skill availability","Declarative plugin entries in product SkillRegistry","Selectable registry skills without TurnRuntime context"],"immutable_fingerprint":"96de8f62238bd22185881a99df523ee1067a668f42fd6b6cd2806d2120058407"},
+    {"id":"BR4-D023","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P0","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-06","P1-17","P2-02"],"why_not_fully_subsumed":"LifeModel CAS protected the canonical save but post-save daily snapshot and patch projection failures could still escape as if the canonical write failed.","title":"LifeModel post-commit projection errors could falsify canonical outcome","observed_symptom":"The canonical LifeModel changed before a daily snapshot error returned Err, permitting the Proposal path to record failure or encourage a duplicate retry.","root_cause_hypothesis":"Daily snapshots and patch records were executed inline as required tail steps instead of derived projections with degraded status and reconciliation.","affected_surfaces":["src-tauri/src/life_model_write_gateway.rs","openlife-core/src/versioning.rs","openlife-core/src/life_model/patch_store.rs"],"broken_invariants":["I09","I10","I12","I13"],"target_phase":"Phase 3 and Phase 5","owner_module":"LifeModelWriteGateway projection receipt","acceptance":["No error after canonical commit is reported as canonical failure","Snapshot and patch failures produce projection_degraded and remain reconcilable","Fault injection proves canonical value and receipt agree"],"deletion_targets":["Post-canonical question-mark error propagation","Inline projection as commit success criterion"],"immutable_fingerprint":"892fbadeeefaae0c8404adef166711c02421749f5b441804d242ab9f199992ea"},
+    {"id":"BR4-D024","discovered_at":"2026-07-11T00:24:51+08:00","severity_at_discovery":"P2","classification":"evidence_gap","related_frozen_findings":["P2-03","P2-07"],"why_not_fully_subsumed":"Deletion guards existed, but newly deleted commands were recorded as active paths with delete disposition instead of immutable expected-absent symbols.","title":"Authority inventory could describe deleted commands as still active","observed_symptom":"The manifest said commands were deleted while inventory entries still used an existing lib.rs path and disposition delete.","root_cause_hypothesis":"Inventory maintenance lacked a schema-level distinction between a future deletion target and a completed symbol deletion.","affected_surfaces":["plans/openlife_single_system_phase1_inventory.json","src-tauri/src/single_system_authority_tests.rs"],"broken_invariants":["I12","I18"],"target_phase":"Phase 6","owner_module":"Single-system deletion inventory","acceptance":["Completed command deletions use host_path, former_symbol, deleted and expected_absent","Manifest, handler scan and inventory classification agree"],"deletion_targets":["Active-path encoding for completed deleted symbols"],"immutable_fingerprint":"e8548ec86eb08f63a262df9dc9cfd208f71cb297513d2412dcdc73f3bc553475"},
+    {"id":"BR4-D025","discovered_at":"2026-07-11T00:36:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P2-03","P2-07"],"why_not_fully_subsumed":"Atomic acceptance guards covered the shipped command path but an unused bulk helper could still mark low-risk proposals accepted without materializing their effects.","title":"Dormant low-risk batch acceptance bypassed effect materialization","observed_symptom":"batch_accept_low_risk updated Proposal status directly, so a future caller could report accepted without applying the canonical or external effect.","root_cause_hypothesis":"A migration-era convenience API encoded decision status as if it were execution completion and survived without a product consumer.","affected_surfaces":["openlife-core/src/agent/proposal_store.rs"],"broken_invariants":["I10","I12","I18"],"target_phase":"Phase 3 and Phase 6","owner_module":"ReviewWorkflow single acceptance path","acceptance":["The unused bulk acceptance helper is deleted","No Proposal status transition can bypass dispatcher and materializer truth"],"deletion_targets":["ProposalStore batch_accept_low_risk"],"immutable_fingerprint":"d1b6aa7a8c201e43e776150fc259beb35e8ea4ff5600a006bf1911eb978eabb1"},
+    {"id":"BR4-D026","discovered_at":"2026-07-11T00:36:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-17","P2-02"],"why_not_fully_subsumed":"The event truth findings did not cover a database status value that was absent from the Rust ProposalStatus contract and silently decoded as Pending.","title":"Expired proposals could reappear as pending review","observed_symptom":"cleanup wrote status=expired, but deserialization fell back to Pending when Expired was not a typed enum variant.","root_cause_hypothesis":"The database lifecycle and domain state machine evolved independently with a fail-open unknown-status fallback.","affected_surfaces":["openlife-core/src/agent/proposal_store.rs","openlife-core/src/agent/types.rs","openlife-core/src/agent/review_item.rs"],"broken_invariants":["I08","I12","I17"],"target_phase":"Phase 3","owner_module":"Proposal lifecycle state contract","acceptance":["Expired is a typed non-reviewable Proposal status end to end","Unknown persisted status fails closed instead of becoming Pending"],"deletion_targets":["Unknown Proposal status fallback to Pending","Untyped expired database state"],"immutable_fingerprint":"5fbebce87658744a16c225d0ebdf412e637d044be189f0ff443254fc0b3666af"},
+    {"id":"BR4-D027","discovered_at":"2026-07-11T00:40:00+08:00","severity_at_discovery":"P2","classification":"evidence_gap","related_frozen_findings":["P2-02","P2-03","P2-07"],"why_not_fully_subsumed":"Runtime fact tests did not cover a hand-built Proposal command response whose snake_case keys disagreed with the TypeScript camelCase adapter contract.","title":"Proposal command response and TypeScript adapter use different field names","observed_symptom":"Rust returns patch_result and reconciliation fields while acceptProposal declares patchResult; the current UI ignores the body, hiding the drift until a consumer relies on it.","root_cause_hypothesis":"The IPC boundary returns untyped serde_json objects and duplicates response shape knowledge in TypeScript.","affected_surfaces":["src-tauri/src/commands/proposal.rs","frontend/src/tauri.ts"],"broken_invariants":["I12","I17"],"target_phase":"Phase 6","owner_module":"Typed Proposal command response contract","acceptance":["Rust uses a typed serde response with one naming convention","TypeScript contract and IPC schema test consume the exact serialized shape"],"deletion_targets":["Hand-built Proposal result JSON with duplicated key naming"],"immutable_fingerprint":"3342bd4c81e2f41548b7de1b06f016dd6d7d507ef052540e6b683a95d0b6e5bc"},
+    {"id":"BR4-D028","discovered_at":"2026-07-11T00:56:01+08:00","severity_at_discovery":"P0","classification":"net_new_root_cause","related_frozen_findings":["P1-02","P2-02"],"why_not_fully_subsumed":"The frozen cancellation finding assumed an active runtime token; it did not cover the interval where a task is already user-visible but has not entered the cancellation registry, or manual cleanup skipped by an error return.","title":"Cancellation registry lifecycle is not linearized with the visible task lifecycle","observed_symptom":"A user can cancel a visible task before registry registration and the runtime later proceeds with a fresh token; a kernel error can also leave a ghost active entry.","root_cause_hypothesis":"Task publication, cancellation registration, cancellation intent and cleanup are separate non-atomic steps, cancel misses leave no tombstone, and cleanup is manual instead of scope-owned.","affected_surfaces":["src-tauri/src/main_chat_runtime_support.rs","src-tauri/src/main_chat_cancellation.rs","src-tauri/src/main_chat_turn_runtime.rs"],"broken_invariants":["I01","I08","I11","I12"],"target_phase":"Phase 2","owner_module":"CancellationRegistry task-lifecycle guard","acceptance":["Cancel and register have one linearizable outcome even when cancel wins before registration","A pre-registration cancel yields zero provider, tool and canonical write dispatch","Every runtime exit removes its active registry entry"],"deletion_targets":["Late unconditional cancellation registration","Cancel miss without durable in-process intent","Manual success-path-only registry cleanup"],"immutable_fingerprint":"0a3f6906480656374b1a7c450beeabb9c65e6e43386f66a3be3bda038bda692f"},
+    {"id":"BR4-D029","discovered_at":"2026-07-11T00:56:01+08:00","severity_at_discovery":"P0","classification":"net_new_root_cause","related_frozen_findings":["P1-02","P1-05","P1-06","P1-17"],"why_not_fully_subsumed":"The frozen write CAS and proposal claims prevent duplicate writers but do not order a local cancellation against a canonical transaction that is about to commit.","title":"Canonical commits are not linearized against local cancellation","observed_symptom":"Cancellation can win at the TurnRuntime select while a synchronous Memory, LifeEvent, Proposal or plan transaction still commits because the token never reaches the domain gateway.","root_cause_hypothesis":"Cancellation is an outer future-drop signal rather than an execution epoch or commit permit checked atomically at each canonical gateway boundary.","affected_surfaces":["src-tauri/src/main_chat_kernel.rs","src-tauri/src/memory_gateway.rs","src-tauri/src/life_model_write_gateway.rs","openlife-core/src/agent/tool_gateway.rs"],"broken_invariants":["I06","I08","I11","I12"],"target_phase":"Phase 2 and Phase 5","owner_module":"Turn execution epoch and canonical commit permits","acceptance":["Cancel-winning interleavings cannot create Memory, Proposal, LifeEvent or plan writes","Commit-winning interleavings remain committed and are not relabeled cancelled","All product canonical gateways accept and verify a scoped execution permit"],"deletion_targets":["Outer-select-only no-late-commit claim","Ungated turn-owned canonical commits"],"immutable_fingerprint":"c4aea94c9143e21db7edf1ff83d0407304ee5b7e68a63f9db5913c1ab29e7900"},
+    {"id":"BR4-D030","discovered_at":"2026-07-11T00:56:01+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-02","P1-08","P1-18"],"why_not_fully_subsumed":"The frozen cancellation scope covered ordinary turns, while resume and retry replay dispatch tools directly outside TurnRuntime registration and token ownership.","title":"Resume and retry replay bypass TurnRuntime cancellation ownership","observed_symptom":"Cancelling a task can mark a replay action cancelled in storage while an already-dispatched Web or MCP call continues waiting and may retain an unknown remote effect.","root_cause_hypothesis":"Task controls act as a second execution runtime and invoke ToolGateway without entering the shared cancellation registry or request-level effect state machine.","affected_surfaces":["src-tauri/src/main_chat_task_controls.rs","src-tauri/src/main_chat_cancellation.rs","openlife-core/src/agent/tool_gateway.rs","openlife-core/src/mcp.rs"],"broken_invariants":["I01","I05","I11","I12","I18"],"target_phase":"Phase 2 and Phase 4","owner_module":"OpenLifeTurnRuntime replay execution path","acceptance":["Resume and retry register under the same cancellation owner as ordinary turns","A hanging local tool wait ends promptly on local cancel","Dispatched external work without confirmation is receipted unknown and is not automatically retried"],"deletion_targets":["Task-control-owned direct ToolGateway replay","Database-status-only replay cancellation"],"immutable_fingerprint":"03f13ad20c91340a6fcbac15ceb1efd42f7e73de5f5e4fff0fd8571fd79a5338"},
+    {"id":"BR4-D031","discovered_at":"2026-07-11T00:56:01+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-02","P1-17","P2-02"],"why_not_fully_subsumed":"The frozen durable-event requirement did not identify cancellation finalization split between the command path and runtime or the multi-append partial receipt window.","title":"Cancellation terminal facts have two owners and are not persisted atomically","observed_symptom":"The cancel command can return a Cancelled task before durable cancellation events exist, while runtime later finalizes again and may persist only a prefix of cancel_requested, local_aborted and remote_unknown.","root_cause_hypothesis":"Task controls and TurnRuntime both own terminalization, and cancellation receipt facts are appended as independent transactions rather than one idempotent durable batch.","affected_surfaces":["src-tauri/src/main_chat_task_controls.rs","src-tauri/src/main_chat_turn_runtime.rs","src-tauri/src/main_chat_event_stream.rs"],"broken_invariants":["I08","I09","I12","I13"],"target_phase":"Phase 2 and Phase 5","owner_module":"TurnRuntime cancellation finalizer and TurnEventStore batch","acceptance":["One owner performs canonical cancellation finalization","Cancellation facts persist as one idempotent batch before frontend terminal delivery","Injected failure cannot expose a partial cancelled receipt as complete"],"deletion_targets":["Task-control terminal finalizer duplication","Per-event cancellation terminal appends"],"immutable_fingerprint":"d7fe06936a0ffeddb3b821ed4c7c2e74871c1482709029dc044c29bd7a49903b"},
+    {"id":"BR4-D032","discovered_at":"2026-07-11T00:56:01+08:00","severity_at_discovery":"P2","classification":"evidence_gap","related_frozen_findings":["P1-02","P2-02","P2-07"],"why_not_fully_subsumed":"The frozen cancellation scenario and current Phase2 test do not inspect the returned client-close signal, registration race, canonical stores, AgentLoop, ToolGateway or the cancel command duration.","title":"Cancellation acceptance test can pass without proving its stated guarantees","observed_symptom":"A test named for client request abortion ignores client_closed, starts its one-second timer after cancel returns, and checks only task events while unobserved canonical or external effects may continue.","root_cause_hypothesis":"The test was shaped around the current implementation and asserted declared metadata instead of independent transport, storage and concurrency evidence.","affected_surfaces":["src-tauri/src/backend_remediation_phase2_tests.rs","src-tauri/src/main_chat_task_control_tests.rs"],"broken_invariants":["I11","I12","I13"],"target_phase":"Phase 2","owner_module":"Frozen cancellation evidence harness","acceptance":["The harness mechanically proves the client socket closes and times the entire cancel operation","Tests inspect every in-scope canonical store and external effect recorder","Registration-race, AgentLoop, tool and commit interleavings have independent negative assertions"],"deletion_targets":["Unused client_closed evidence","Self-reported localRequestHandleAborted as sole proof","Post-return-only cancellation latency timer"],"immutable_fingerprint":"c720884a6a45cf7094840f57a972792b979b7b3bc1d2bb439a3ae624b9e8eade"},
+    {"id":"BR4-D033","discovered_at":"2026-07-11T01:14:20+08:00","severity_at_discovery":"P0","classification":"net_new_root_cause","related_frozen_findings":["P1-05","P1-09","P2-02"],"why_not_fully_subsumed":"Proposal and scheduler claims are atomic, but Main Chat action replay still uses a load-then-transition sequence without an expected-state or replay claim.","title":"Concurrent resume or retry can dispatch the same queued action more than once","observed_symptom":"Two controls can both observe one replayable action, transition it independently and enter ToolGateway, duplicating an external read or effect.","root_cause_hypothesis":"ActionQueueStore transition has no compare-and-swap precondition and replay lacks a durable exclusive claim and effect-certainty lifecycle.","affected_surfaces":["src-tauri/src/main_chat_task_controls.rs","openlife-core/src/agent/main_chat_agent_v1.rs::ActionQueueStore"],"broken_invariants":["I05","I08","I10","I12"],"target_phase":"Phase 2 and Phase 4","owner_module":"OpenLifeTurnRuntime replay claim","acceptance":["Concurrent resume and retry have exactly one replay-claim winner","A dispatched-unknown claim is not automatically released or replayed","Action transition and claim use expected revision or status CAS"],"deletion_targets":["Replay load-then-unconditional-transition","Unclaimed direct ToolGateway replay"],"immutable_fingerprint":"2e0b03dafd13633d220eaf9eaebb04c8fa0cd58bf28c5dc53ba3fe7bef9f48a0"},
+    {"id":"BR4-D034","discovered_at":"2026-07-11T01:14:20+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P1-08","P1-18"],"why_not_fully_subsumed":"Typed tool contracts exist, but replay safety is still inferred from action-name strings and therefore ignores the actual manifest, idempotency key and effect receipt.","title":"Automatic retry safety is inferred from tool names instead of typed effect contracts","observed_symptom":"Actions named mcp.read_only, web.search or web.fetch can be automatically replayed even when the prior dispatch is unknown or the concrete peer does not provide idempotency.","root_cause_hypothesis":"A migration-era allowlist encodes presumed semantics in names instead of consuming ToolManifest risk, effect and idempotency fields plus the last invocation receipt.","affected_surfaces":["src-tauri/src/main_chat_task_controls.rs::main_chat_action_type_supports_automatic_retry","openlife-core/src/agent/tool_gateway.rs","openlife-core/src/mcp.rs"],"broken_invariants":["I02","I05","I10","I12"],"target_phase":"Phase 4","owner_module":"ToolGateway typed retry policy","acceptance":["Automatic retry requires a typed idempotent contract and a definitely-before-effect receipt","Remote unknown is never automatically retried","Tool names alone cannot authorize replay"],"deletion_targets":["main_chat_action_type_supports_automatic_retry name allowlist","retryReplayable metadata without typed provenance"],"immutable_fingerprint":"a32cbeac157ab94dc64a7691b69ac51a74e0fe82621218b7387d417314b42337"},
+    {"id":"BR4-D035","discovered_at":"2026-07-11T01:14:20+08:00","severity_at_discovery":"P0","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-02","P1-18"],"why_not_fully_subsumed":"The frozen MCP timeout finding did not cover a request whose frame was flushed before local cancellation and whose late response remains on a reused sequential transport.","title":"Cancelled MCP requests can contaminate a reused transport with stale responses","observed_symptom":"Dropping the local wait after an MCP frame is flushed leaves the child running; a late response can be consumed by the next request and misattributed.","root_cause_hypothesis":"The stdio session has neither request-level cancellation and multiplex correlation nor a quarantine/restart rule after an uncertain in-flight request.","affected_surfaces":["openlife-core/src/mcp.rs::send_request_raw","openlife-core/src/agent/tool_gateway.rs"],"broken_invariants":["I05","I08","I11","I12"],"target_phase":"Phase 4","owner_module":"MCP transport session lifecycle","acceptance":["Cancel before flush remains not_attempted","Cancel after flush records remote_unknown and quarantines or restarts the session","A stale response cannot satisfy a later request"],"deletion_targets":["Reuse of MCP session after dropped in-flight response","Completion-order response attribution without cancellation quarantine"],"immutable_fingerprint":"2c43caf80860f7456a916d8aac81986c3d43ea31c5d9399b9cf602966bab125f"},
+    {"id":"BR4-D036","discovered_at":"2026-07-11T01:14:20+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-17","P2-02","P2-07"],"why_not_fully_subsumed":"Durable terminal event work does not automatically make the product truthful because RunEvidenceView currently derives lifecycle from task, transcript and AgentRun projections without reading TurnEventStore.","title":"Task evidence read model ignores canonical durable turn terminal facts","observed_symptom":"When task or transcript projection lags after a durable cancel or unknown receipt, the product can still show running, retryable or completed from stale secondary state.","root_cause_hypothesis":"The read model predates TurnEventStore as the terminal fact owner and reconstructs lifecycle from projections without a reconciliation marker.","affected_surfaces":["src-tauri/src/main_chat_task_controls.rs::RunEvidenceView","src-tauri/src/main_chat_event_stream.rs"],"broken_invariants":["I08","I09","I12","I13","I17"],"target_phase":"Phase 2 and Phase 6","owner_module":"ProductProjection run evidence view","acceptance":["RunEvidenceView consumes the latest durable terminal receipt before projections","Projection lag is represented as pending or degraded, never a contradictory lifecycle","Unsafe controls are disabled while canonical and projection state diverge"],"deletion_targets":["Projection-only task lifecycle reconstruction","Retry controls derived from stale task status"],"immutable_fingerprint":"08e06696ed4bf5c02a7a7366917056550e8350a50a3ced61253fe353b2bc688a"},
+    {"id":"BR4-D037","discovered_at":"2026-07-11T01:23:00+08:00","severity_at_discovery":"P0","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-03","P1-19","P2-02"],"why_not_fully_subsumed":"UUID uniqueness and AgentRun minimization were addressed, but ordinary Main Chat still creates its AgentRun only after provider and tool execution, leaving cancellation events to invent an unrelated run id.","title":"AgentRun begins after execution effects instead of owning the turn lifecycle","observed_symptom":"A turn can contact a provider and be cancelled before any AgentRun exists; the cancellation finalizer then generates a random run id that has no canonical AgentRun row and cannot be joined reliably.","root_cause_hypothesis":"AgentRun is modeled as a post-kernel result projection rather than the execution identity created by OpenLifeTurnRuntime before any provider, tool or canonical effect.","affected_surfaces":["src-tauri/src/main_chat_turn_runtime.rs","src-tauri/src/main_chat_kernel.rs","src-tauri/src/main_chat_runtime_support.rs","openlife-core/src/agent/store.rs"],"broken_invariants":["I01","I08","I12","I13"],"target_phase":"Phase 2","owner_module":"OpenLifeTurnRuntime execution identity","acceptance":["One canonical AgentRun exists before any provider or tool start","Provider, tool, cancellation and terminal events use that same run id","Cancellation never generates an event-only synthetic run id"],"deletion_targets":["Post-effect AgentRun creation in kernel branches","Random cancellation_run_id fallback without AgentRun row"],"immutable_fingerprint":"543141486cfe2fbe4a5367a5f1754a400bdc97548963f5a9e200c7d0d9ed88ac"},
+    {"id":"BR4-D038","discovered_at":"2026-07-11T01:45:15+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-17","P2-02","P2-07"],"why_not_fully_subsumed":"Atomic event batches do not prevent two payloads from claiming the same immutable event identity, and current row decoding converts corrupted durable facts into plausible runtime values.","title":"TurnEventStore accepts conflicting immutable facts and fabricates corrupted rows","observed_symptom":"The same task, event type and object id can be appended again when its payload digest changes; malformed sequence, timestamp or payload data is returned as sequence zero, current time or null instead of a corruption state.","root_cause_hypothesis":"Event idempotency incorrectly includes the payload digest, while the durable row mapper uses lossy fallback values instead of failing closed on canonical-store corruption.","affected_surfaces":["src-tauri/src/main_chat_event_stream.rs::append_event_in_transaction","src-tauri/src/main_chat_event_stream.rs::row_to_event"],"broken_invariants":["I08","I09","I12","I13"],"target_phase":"Phase 2 and Phase 5","owner_module":"TurnEventStore immutable identity and decoder","acceptance":["An existing immutable identity with the same digest is idempotent and a different digest is a typed conflict that rolls back the batch","Invalid sequence, timestamp or payload JSON produces an explicit corruption or degraded error and never a synthetic fact","Fault tests prove sequence and prior facts remain unchanged after identity conflict or row corruption"],"deletion_targets":["Payload-digest-dependent duplicate event identity","Utc::now, null and zero fallbacks for corrupted durable rows"],"immutable_fingerprint":"419afbad5293688f8666665b2f6ae91d235e5dd0c7b809cf110dd512961b4385"},
+    {"id":"BR4-D039","discovered_at":"2026-07-11T02:13:07+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P0-01","P1-12","P1-13","P2-02"],"why_not_fully_subsumed":"The frozen network-policy finding covered ToolGateway ask semantics and the provider boundary finding covered transport bounds, but neither proved that shipped provider chat and status probes enforce the same policy represented by ProviderPrivacy.","title":"Provider network policy is reported but not enforced at shipped HTTP edges","observed_symptom":"ProviderPrivacy can report cloud blocked while Main Chat passes no NetworkPolicy to cloud HTTP, and opening Settings can issue an authenticated direct-reqwest provider probe even when networking is disabled or default-deny.","root_cause_hypothesis":"Network policy is interpreted independently by preflight, read models, provider adapters and settings probes instead of producing one enforced DataRouteDecision consumed at every provider HTTP edge.","affected_surfaces":["openlife-core/src/llm.rs","src-tauri/src/commands/router.rs","src-tauri/src/main_chat_runtime_facts/provider_route.rs","src-tauri/src/provider_privacy_boundary.rs"],"broken_invariants":["I02","I03","I07","I12","I17"],"target_phase":"Phase 1 and Phase 4","owner_module":"PolicyRouter provider DataRouteDecision and NetworkClient","acceptance":["Disabled, default-deny and denylisted provider policies produce zero chat and status-probe dispatches under capture","Ask creates an explicit consent state before dispatch and ProviderPrivacy reflects the same enforced decision and receipt","Every shipped provider HTTP edge consumes NetworkClient plus the policy decision"],"deletion_targets":["Direct reqwest provider status probe","Boolean-only provider preflight","Provider adapter calls with no NetworkPolicy"],"immutable_fingerprint":"2ecc945447c522606c381bae30dff680bce090bd4c58708a8d728a4425b26c87"},
+    {"id":"BR4-D040","discovered_at":"2026-07-11T03:00:00+08:00","severity_at_discovery":"P2","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-17","P2-02","P2-07"],"why_not_fully_subsumed":"D038 validates immutable identity during store initialization and current append calls, but the SQLite schema still permits a legacy process or direct connection to insert a conflicting immutable triple after the store has opened.","title":"TurnEventStore immutable identity is not enforced against bypass writers","observed_symptom":"A second connection can insert the same task, immutable event type and object id with a different payload digest after initialization, leaving list readers able to observe two contradictory facts.","root_cause_hypothesis":"Immutable identity is an application-level preflight check rather than a database-owned constraint shared by every writer.","affected_surfaces":["src-tauri/src/main_chat_event_stream.rs","main_chat_agent_events SQLite schema"],"broken_invariants":["I08","I09","I12","I13"],"target_phase":"Phase 2 and Phase 5","owner_module":"TurnEventStore database identity constraint","acceptance":["A post-open external SQLite connection cannot commit a conflicting immutable identity","Same-digest idempotency remains valid and legacy conflicts fail store initialization","Readers cannot observe two immutable facts with one logical identity"],"deletion_targets":["Application-only immutable identity enforcement","Digest-dependent schema uniqueness as immutable authority"],"immutable_fingerprint":"facf868899e6c83e1f14edad1aecb59b70e76873787bca923bfb802b109f81ed"},
+    {"id":"BR4-D041","discovered_at":"2026-07-11T03:00:00+08:00","severity_at_discovery":"P2","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-19","P2-02","P2-09"],"why_not_fully_subsumed":"Event payload value minimization removes free-form strings but still preserves arbitrary object key names and primitive values, so future generic or user-derived payloads can create a new sensitive metadata surface.","title":"TurnEventStore minimizer preserves untrusted object-key and primitive metadata","observed_symptom":"A payload containing a private fact in an object key, or sensitive numeric and boolean structure, can be durably copied even though string values are converted to receipts.","root_cause_hypothesis":"The event store recursively sanitizes values without a typed per-event schema or an allowlist for metadata keys and primitive fields.","affected_surfaces":["src-tauri/src/main_chat_event_stream.rs::minimize_event_payload"],"broken_invariants":["I08","I14"],"target_phase":"Phase 1 and Phase 5","owner_module":"TurnEventStore typed minimal payload contract","acceptance":["Unknown or user-derived object keys are omitted or replaced by a bounded digest receipt","Only typed allowlisted primitive fields survive for each event contract","Existing product event replay remains functional without copying raw external payload structure"],"deletion_targets":["Recursive arbitrary-key payload preservation","Untyped primitive retention in durable events"],"immutable_fingerprint":"8e256d86ae36c606048d76a05d05ae50a6a2c6f7ee1f1ca995a0882c6ccfa5f2"},
+    {"id":"BR4-D042","discovered_at":"2026-07-11T03:35:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-14","P1-21","P2-05"],"why_not_fully_subsumed":"D004 profile correctness prevents mixed vectors, but every Memory search still scans and groups all active vector rows before a bounded candidate query, so profile validation itself can dominate latency.","title":"Vector profile compatibility check performs an unbounded active-row scan per search","observed_symptom":"Each search runs an O(N) GROUP BY over active vectors and then may compute cosine for up to 2000 candidates, allowing vector growth to stall ordinary Memory reads.","root_cause_hypothesis":"Compatibility state is recomputed from the full vector corpus at query time instead of maintained as an indexed profile summary updated with canonical vector writes and rebuilds.","affected_surfaces":["openlife-core/src/vectors.rs","openlife-core/src/agent/memory_service.rs"],"broken_invariants":["I08","I12","I15"],"target_phase":"Phase 5","owner_module":"VectorStore profile summary projection","acceptance":["Compatibility lookup is bounded by indexed profile summary rows, not active vector count","Candidate dimension work has a strict maximum and rejects oversized provider vectors before persistence","Rebuild and deletion update the summary transactionally or mark it projection_degraded"],"deletion_targets":["Per-search full active-vector GROUP BY","Unbounded custom embedding dimension"],"immutable_fingerprint":"217bdcf9b447c4858c8f5fbc467cc63a393888f105a1aa0ff38550fb3b96aca3"},
+    {"id":"BR4-D043","discovered_at":"2026-07-11T03:50:38+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-11"],"why_not_fully_subsumed":"The frozen A2A finding covered authentication, network policy and payload minimization, but not terminal truth when the governed reasoning provider fails.","title":"A2A reports Completed after governed reasoning failure","observed_symptom":"Layered reasoning failure can discard its trace and provider receipt while the A2A task handler still returns TaskState::Completed.","root_cause_hypothesis":"The A2A handler owns a second terminal-state projection and collapses reasoning failure into response prose instead of consuming the governed execution receipt.","affected_surfaces":["openlife-core/src/a2a.rs","openlife-core/src/agent/reasoning/layered.rs"],"broken_invariants":["I08","I12","I17"],"target_phase":"Phase 4 and Phase 6","owner_module":"A2A adapter and ExecutionReceipt projection","acceptance":["A2A provider failure preserves its attempt receipt and bounded reasoning trace","Failed or unknown A2A execution is never projected as Completed"],"deletion_targets":["Unconditional A2A TaskState::Completed projection"],"immutable_fingerprint":"691db0ee474a2917e806769794af86cf370f479f22615ffaf810d5bd26c26ae8"},
+    {"id":"BR4-D044","discovered_at":"2026-07-11T16:35:00+08:00","severity_at_discovery":"P0","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-02","P1-05","P1-08","P2-03"],"why_not_fully_subsumed":"BR4-D030 covers Main Chat task-control resume and retry, but a separate shipped AgentRun replay command and frontend bridge also invoke ToolGateway directly with non-consuming permission semantics and no TurnRuntime cancellation owner.","title":"Shipped AgentRun replay command bypasses TurnRuntime and durable effect ownership","observed_symptom":"AgentRunDetail or Chat can replay a needs_confirmation action repeatedly outside the canonical replay claim, cancellation registry, durable tool receipt projection and canonical-write admission path.","root_cause_hypothesis":"A legacy AgentRun convenience command remained a product execution authority after Main Chat task controls and ToolGateway governance were introduced.","affected_surfaces":["src-tauri/src/commands/agent.rs::replay_agent_action","src-tauri/src/lib.rs","frontend/src/tauri.ts","frontend/src/pages/AgentRunDetail.tsx","frontend/src/pages/ChatPage.tsx"],"broken_invariants":["I01","I05","I10","I11","I12","I18"],"target_phase":"Phase 2, Phase 4 and Phase 6","owner_module":"OpenLifeTurnRuntime replay execution path","acceptance":["No shipped command or frontend bridge can directly replay an AgentRun action outside the canonical replay claim","Replay consumes the correctly scoped permission exactly once and records pre-dispatch, dispatched, confirmed or unknown truth under one cancellation owner","AgentRunDetail and Chat consume the same task-control or ReviewWorkflow projection instead of a second runtime"],"deletion_targets":["replay_agent_action shipped command","replayAgentAction frontend bridge","AgentRun command-owned direct ToolGateway execution","consume_allow_once=false replay permission bypass"],"immutable_fingerprint":"813060daf8e31c1bc7e04d5831c9a1c43870a1a0ffbf128e3fa4f02a532de665"},
+    {"id":"BR4-D045","discovered_at":"2026-07-11T16:00:26+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P1-17"],"why_not_fully_subsumed":"The same-proposal dispatch claim does not prevent distinct but semantically equivalent Memory proposals from committing duplicate canonical facts.","title":"Equivalent accepted Memory facts have no canonical uniqueness or CAS","observed_symptom":"Concurrent or repeated equivalent Memory proposals can each commit a new canonical Lifecycle record despite a compatibility-store duplicate precheck.","root_cause_hypothesis":"MemoryLifecycle admission assigns a random identity and has no normalized fact key or uniqueness constraint; its duplicate precheck reads a derived compatibility store outside the canonical transaction.","affected_surfaces":["src-tauri/src/memory_gateway.rs::materialize_memory_proposal","openlife-core/src/agent/memory_lifecycle.rs::accept_memory_proposal"],"broken_invariants":["I06","I08","I09","I10"],"target_phase":"Phase 3 and Phase 5","owner_module":"MemoryLifecycleStore canonical fact admission","acceptance":["Equivalent facts derive a deterministic canonical fact key","Concurrent distinct proposals create at most one active canonical fact","The losing proposal resolves idempotently to the existing canonical owner reference"],"deletion_targets":["Compatibility-store duplicate precheck as write authority","UUID-only unconditional canonical insert"],"immutable_fingerprint":"4ff4ff645c34404937fa220405c69113c5bfb8d9bfcc73cb1cc9058efb370268"},
+    {"id":"BR4-D046","discovered_at":"2026-07-11T16:00:26+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-05","P1-17"],"why_not_fully_subsumed":"Canonical gateway routing alone does not make a user-triggered Memory indexing command idempotent across double-click, IPC retry or a lost response.","title":"Manual Memory indexing has no retry idempotency identity","observed_symptom":"Repeating the same manual indexing command can create duplicate canonical Memory rows and duplicate logical outbox work.","root_cause_hypothesis":"index_memory_chunk accepts only session, content and source and performs an unconditional insert without a stable operation identity bound to a payload digest.","affected_surfaces":["src-tauri/src/commands/memory.rs::index_memory_chunk","src-tauri/src/memory_gateway.rs","openlife-core/src/memory.rs::save_with_outbox"],"broken_invariants":["I06","I08","I12","I13"],"target_phase":"Phase 3 and Phase 5","owner_module":"MemoryGateway idempotent command admission","acceptance":["A stable operation id is bound to the exact payload digest","Retrying the same operation and payload returns the original receipt","Reusing an operation id with a different payload fails closed","Concurrent identical submissions produce one canonical row and one logical outbox item"],"deletion_targets":["Unkeyed manual indexing command","Unconditional Memory insert on command retry"],"immutable_fingerprint":"c887338fc9304476c07f3cb2224245e996e505faa8e6328c04ea69ee56188721"},
+    {"id":"BR4-D047","discovered_at":"2026-07-11T19:20:00+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P0-05","P1-17"],"why_not_fully_subsumed":"The durable-store degradation contract required an explicit read-only fallback, but the MemoryStore fallback validated a table name that no current schema creates.","title":"MemoryStore degraded read-only fallback always rejected the real database","observed_symptom":"When the writable MemoryStore could not open, the read-only recovery path checked for memory_records instead of the canonical memories table and fell through to an unavailable sentinel even though the database was readable.","root_cause_hypothesis":"The recovery constructor retained a historical table name after the canonical MemoryStore schema converged on memories, and no test opened a real current database through the degraded path.","affected_surfaces":["openlife-core/src/memory.rs::open_read_only_existing","src-tauri/src/bootstrap.rs::open_persistent_or_read_only"],"broken_invariants":["I08","I12","I15"],"target_phase":"Phase 5","owner_module":"MemoryStore degraded read gateway","acceptance":["A current MemoryStore database opens read-only and returns canonical messages when writable open is unavailable","Missing or corrupt canonical tables still fail closed","The recovery path never silently substitutes temp or in-memory state"],"deletion_targets":["Historical memory_records table assertion in the shipped recovery path"],"immutable_fingerprint":"d594f46060bc85606c6f71e366d6851c059abdcdfc5d8f2e18391bb6ae2fdb22"},
+    {"id":"BR4-D048","discovered_at":"2026-07-11T21:30:00+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-19","P1-21","P2-03","P2-11"],"why_not_fully_subsumed":"Builder privacy and retention work bounded exposure duration but did not bound one reply, one session, the canonical JSON file, or review-candidate amplification.","title":"Builder input and canonical session persistence were unbounded","observed_symptom":"A very large pasted answer or oversized/corrupt Builder session file could allocate and serialize unbounded memory, block the desktop process, and amplify private content on disk; an unknown mode also silently became Quick.","root_cause_hypothesis":"Builder ingress, session persistence and review admission evolved without one bounded resource contract, while invalid enum input used a permissive fallback.","affected_surfaces":["src-tauri/src/commands/builder.rs","openlife-core/src/builder/store.rs"],"broken_invariants":["I07","I08","I12","I15","I17"],"target_phase":"Phase 3 and Phase 5","owner_module":"Builder bounded ingress and canonical session gateway","acceptance":["Oversized replies and decision batches fail before session or proposal mutation","Canonical Builder files and sessions have explicit bounded limits and oversized files fail before deserialization","Normal long answers remain supported","Unknown Builder mode fails instead of silently selecting Quick"],"deletion_targets":["Unbounded Builder reply and review payloads","Unbounded read_to_string Builder store load","Unknown-mode fallback to Quick"],"immutable_fingerprint":"bbd0375d20cb16a3ad09b36710e7203e6dd8519d95f3b2b8231b4c30af592ee2"}
+    ,{"id":"BR4-D049","discovered_at":"2026-07-12T00:00:00+08:00","severity_at_discovery":"P2","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P2-03","P2-07"],"why_not_fully_subsumed":"D012 deleted one dormant provider fallback, but a separate callerless keyword-write, reasoning-prompt and conversation-inference module remained compiled solely because an extraction test required its existence.","title":"Dormant conversation update module survived behind an existence test","observed_symptom":"Three Main Chat helpers with zero product callers remained in the shipped module graph, including keyword-based daily-goal mutation logic and conversation inference writes.","root_cause_hypothesis":"Module extraction was treated as architecture progress without a consumer map, and a symbol-presence test became the only owner of obsolete behavior.","affected_surfaces":["src-tauri/src/main_chat_conversation_updates.rs","src-tauri/src/lib.rs","src-tauri/src/main_chat_runtime_module_tests.rs"],"broken_invariants":["I01","I02","I12","I18"],"target_phase":"Phase 2 and Phase 6","owner_module":"Single-system deletion inventory","acceptance":["The callerless module and declaration are absent from the shipped crate","An absence guard and deletion inventory prevent the keyword-write and inference route from returning"],"deletion_targets":["main_chat_conversation_updates module","try_auto_checkin_daily_goals","build_reasoning_trace_prompt","capture_conversation_signals"],"immutable_fingerprint":"ff94589c4a2420f6abc1708821fb0bf731d524e5fd158ee20855d624bb9bc167"}
+    ,{"id":"BR4-D050","discovered_at":"2026-07-12T00:00:00+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-02","P1-05","P1-17","P2-02"],"why_not_fully_subsumed":"Message idempotency and canonical gateway work did not cover mutating slash commands intercepted by ChatPage before ordinary Main Chat enters OpenLifeTurnRuntime.","title":"Frontend mutating slash commands bypass TurnRuntime and canonical effect receipts","observed_symptom":"ChatPage can add a daily goal or record state before persisting the user and assistant messages; a lost message response followed by retry can duplicate the durable effect while the conversation has only one receipt.","root_cause_hypothesis":"A frontend convenience parser owns policy, execution ordering and success prose outside TurnRuntime, while effect commands lack a payload-bound operation identity shared with conversation facts.","affected_surfaces":["frontend/src/pages/ChatPage.tsx::tryHandleQuickCommand","frontend/src/tauri.ts","src-tauri/src/commands/state.rs","openlife-core/src/memory.rs"],"broken_invariants":["I01","I02","I06","I08","I10","I12","I13","I17"],"target_phase":"Phase 2, Phase 3 and Phase 5","owner_module":"OpenLifeTurnRuntime typed command admission","acceptance":["A mutating chat command has one backend-owned policy and execution path","One operation UUID binds the exact effect payload and conversation receipt","Lost responses and retries converge to one effect and truthful message projection","Frontend no longer authorizes or reports durable mutation from a page-local parser"],"deletion_targets":["ChatPage-owned mutating quick-command execution","Unkeyed add_daily_goal and record_state command effects","Frontend-generated success prose without canonical effect receipt"],"immutable_fingerprint":"fd86c994a6a6a2c83d9f5f5db88bbf6b41afb682da24f29b12aabafa1531e2c5"}
+    ,{"id":"BR4-D051","discovered_at":"2026-07-12T04:00:00+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-02","P1-05","P1-08","P2-03"],"why_not_fully_subsumed":"The frozen D30 scenario requires a useful post-read Memory Proposal, but the implementation grants only a read capability and then lets Kernel keyword logic authorize a second action without observation-bound policy authority.","title":"Kernel upgrades a read-only policy decision into an unbound Memory Proposal","observed_symptom":"A successful read plus matching user words always creates a Memory Proposal before canonical tool evidence exists; the proposal body comes from the request rather than the observed content and the if-useful condition is not evaluated.","root_cause_hypothesis":"Conditional multi-intent was not represented in IntentFrame or PolicyDecision, so Kernel became a second action router and ReviewWorkflow accepted a task-session reference instead of a one-shot proof bound to the current canonical observation.","affected_surfaces":["openlife-core/src/agent/main_chat_governance_intent.rs","openlife-core/src/agent/main_chat_agent_v1.rs","openlife-core/src/agent/main_chat_memory_candidate.rs","openlife-core/src/agent/review_workflow.rs","src-tauri/src/main_chat_kernel.rs","src-tauri/src/main_chat_react_runtime.rs","src-tauri/src/main_chat_turn_runtime.rs","src-tauri/src/main_chat_event_stream.rs"],"broken_invariants":["I01","I02","I05","I08","I10","I12","I13"],"target_phase":"Phase 2 and Phase 3","owner_module":"PolicyRouter conditional post-observation plan and ReviewWorkflow","acceptance":["D30 is represented as one exact read grant plus one linked conditional post-observation grant without a general MemoryProposal capability","A proposal can be staged only after a successful current-turn canonical observation and one-shot policy admission","Proposal content and evidence bind to the admitted observation; not-useful content produces zero Proposal","Prompt injection, cross-run evidence, cancellation and retries cannot create a late or duplicate Proposal","Buffered and streaming turns expose the same durable observation and review facts"],"deletion_targets":["user_text_requests_memory_proposal_after_read","kernel_followup_memory_proposal_outcome","Kernel read-success plus keyword proposal branch","User-request fallback as conditional proposal body authority"],"immutable_fingerprint":"e828cbf73b5c4a9bae4d27f420461ed73d7f6d5aa519e66f20d957958d2b030a"}
+    ,{"id":"BR4-D052","discovered_at":"2026-07-12T05:00:00+08:00","severity_at_discovery":"P1","classification":"evidence_gap_and_scope_correction","related_frozen_findings":["P1-02","P1-05","P2-03","P2-07"],"why_not_fully_subsumed":"BR4-D049 covers the genuinely callerless conversation-update helpers. ProposalEngine was a different shipped product authority with AppState, bootstrap, Main Chat finalizer and replay consumers; merging it into D049 hid the real dependency and capability change.","title":"ProposalEngine deletion was misclassified as callerless despite shipped consumers","observed_symptom":"Active deletion documents and inventory claim zero production consumers and no ReviewWorkflow admission, while the baseline product created the engine at bootstrap, invoked it after ordinary Main Chat and replay, then submitted its caller-shaped proposals to ReviewWorkflow.","root_cause_hypothesis":"Deletion evidence was written from current symbol scans without reconstructing the baseline consumer graph, so removal of an unauthorized product authority was described as dead-code cleanup and received no capability non-regression matrix.","affected_surfaces":["src-tauri/src/state.rs","src-tauri/src/bootstrap.rs","src-tauri/src/main_chat_generation_support.rs","src-tauri/src/commands/agent.rs","openlife-core/src/agent/proposal_engine.rs","openlife-core/src/agent/proposal_generators/chat.rs","plans/openlife_single_system_deletion_manifest.md","plans/openlife_single_system_development_preparation.md","plans/openlife_single_system_phase1_inventory.json","src-tauri/src/single_system_authority_tests.rs"],"broken_invariants":["I02","I12","I18"],"target_phase":"Phase 3 and Phase 6","owner_module":"Single-system deletion inventory and proposal capability evidence","acceptance":["Active docs describe the real baseline consumer graph and the PolicyRouter authorization bypass accurately","Inventory records every former product owner and caller as expected absent","Production-wide absence guards cover state, bootstrap, finalizer, replay, reexports and semantic post-hoc proposal authorization","Ordinary provider or assistant output cannot create a post-hoc Proposal","Explicit low-risk, sensitive review-only, inferred deferred review and typed Builder/Tool permission capabilities each have separate non-regression evidence","BR4-D051 D30 remains separate and receives no ProposalEngine replacement credit"],"deletion_targets":["AppState.proposal_engine","bootstrap ProposalEngine registration","generate_and_persist_chat_proposals","should_generate_chat_proposals","AgentRun replay generate_from_run consumer","Post-hoc raw run output as proposal authorization"],"immutable_fingerprint":"40f9144fee6ea8013027cc3066ccd4b9afb640fb4551f739b3e5d7bd46928e74"}
+    ,{"id":"BR4-D053","discovered_at":"2026-07-12T06:00:00+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-05","P2-01","P2-02"],"why_not_fully_subsumed":"BR4-D052 corrects the deleted ProposalEngine evidence and requires capability non-regression, but it does not cover the current replacement behavior that blocks the answer and creates one proposal per inferred candidate. Frozen MEM-04 and the Phase 3 contract explicitly require non-blocking deferred review and batching.","title":"Inferred memory governance blocks answers and emits per-candidate proposals","observed_symptom":"An inferred preference or stable-fact turn exits through a fixed governance-plan answer instead of the normal conversation, then stages one Proposal per candidate; implicit candidates are described as user-requested and canonical duplicates are not checked before proposal creation.","root_cause_hypothesis":"Candidate extraction, action routing and ReviewWorkflow submission were fused into a terminal Kernel strategy, so the existence of any memory artifact preempts ProviderGeneration and the materializer loop treats candidates as independent proposals rather than one deduplicated domain review batch.","affected_surfaces":["openlife-core/src/agent/main_chat_memory_candidate.rs","openlife-core/src/agent/main_chat_agent_v1.rs","src-tauri/src/main_chat_kernel.rs","openlife-core/src/agent/review_workflow.rs","openlife-core/src/agent/memory_lifecycle.rs"],"broken_invariants":["I01","I02","I06","I08","I10","I12","I17"],"target_phase":"Phase 3","owner_module":"PolicyRouter inferred-memory plan and ReviewWorkflow batch admission","acceptance":["MEM-04 produces the normal helpful answer and does not block ProviderGeneration","All eligible inferred candidates in one domain and conversation become at most one deferred ReviewBatch","Canonical fact keys suppress or reuse duplicate pending/accepted facts before staging","Implicit candidates are never described as an explicit user request","No canonical Memory or HS change occurs before acceptance","Sensitive, identity, injected, unstable and low-confidence variants remain review-only, blocked or no-op as specified","Proposal fatigue and capability success metrics remain within the frozen thresholds"],"deletion_targets":["run_memory_governance_turn as a terminal inferred-memory strategy","Per-candidate ReviewWorkflow submit loop for inferred memory","Implicit-candidate User requested reason text","Proposal staging without canonical fact-key deduplication"],"immutable_fingerprint":"d71e5254266d74f15418c9cbfb811cd97530336e0aff201fd454c112a1474d9a"}
+    ,{"id":"BR4-D054","discovered_at":"2026-07-13T13:30:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-17","P2-02","P2-11"],"why_not_fully_subsumed":"D050 bound the Task receipt to raw durable columns, but the same final owner graph still deserializes Transcript and ActionQueue enum values through lossy fallbacks before hashing; the frozen migration and truth findings did not cover same-object and same-digest corruption through persisted enum coercion.","title":"Persisted final-owner enum fallbacks erase corruption and preserve digest equality","observed_symptom":"An unknown Transcript kind can reopen as a legitimate Error entry, and an unknown Action replay certainty can reopen as dispatched_unknown; both produce the same typed object and final-owner digest as the legal value. Unknown Task strategy and status values also reopen as apparently valid product state before the first final receipt is written.","root_cause_hypothesis":"Canonical store row decoders use permissive wildcard defaults and a current-schema rewrite instead of strict one-to-one persisted enum parsing, so corruption is normalized before validation and durable receipt construction.","affected_surfaces":["openlife-core/src/agent/main_chat_agent_v1.rs::MainChatAgentStrategy::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::AgentTaskSessionStatus::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::ExecutionTranscriptEntryKind::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::ActionReplayEffectCertainty::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::row_to_persisted_agent_task_session","openlife-core/src/agent/main_chat_agent_v1.rs::row_to_transcript_entry","openlife-core/src/agent/main_chat_agent_v1.rs::row_to_queued_action","src-tauri/src/main_chat_turn_runtime.rs"],"broken_invariants":["I08","I12","I13"],"target_phase":"Phase 2 and Phase 5","owner_module":"Strict canonical owner row decoders","acceptance":["Every persisted Task strategy, Task status, Transcript kind and Action replay certainty has an explicit one-to-one parser and unknown values fail before typed materialization","Current-schema unknown values are never rewritten into a valid conservative state","Corrupt Transcript and Action rows cannot reproduce a legal owner object or final digest","Recovery rejects corrupt rows without provider, tool or canonical effect redispatch","All legal historical enum values retain deterministic round-trip and capability behavior"],"deletion_targets":["Unknown MainChatAgentStrategy fallback to DirectAnswer","Unknown AgentTaskSessionStatus fallback to Running","Unknown ExecutionTranscriptEntryKind fallback to Error","Unknown ActionReplayEffectCertainty fallback to DispatchedUnknown","Current-schema rewrite that erases unknown replay certainty"],"immutable_fingerprint":"beb215bba58757bad61e51db0c20d78f51c87c659524d3e988b9966b27fdd99d"}
+    ,{"id":"BR4-D055","discovered_at":"2026-07-13T13:30:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-02","P1-05","P1-17","P2-02"],"why_not_fully_subsumed":"D050 added stable identities and owner digests, but final persistence and recovery still read independently mutable Action, Task, Transcript, Run and ToolEvent stores without one terminalization epoch; the frozen concurrency findings did not model this cross-owner final receipt race or legal post-final ReviewWorkflow successors.","title":"Turn finalization snapshots mutable owners without a linearization boundary","observed_symptom":"A Proposal accept or another legitimate owner mutation can commit between final-owner snapshots or between the last snapshot and final append, allowing a successful final receipt that immediately fails recovery. A legal post-final proposal reconciliation is also indistinguishable from unproven owner drift because recovery requires current mutable heads to equal the historical final snapshot.","root_cause_hypothesis":"TurnRuntime constructs a terminal fact from sequential cross-store reads and appends it later, while product writers mutate the same owner graph through direct store APIs with no shared terminalization epoch, CAS transition receipt or proven successor model.","affected_surfaces":["src-tauri/src/main_chat_turn_runtime.rs::persist_openlife_turn_final_delivery_receipt","src-tauri/src/main_chat_turn_runtime.rs::recover_openlife_turn_from_durable_final","src-tauri/src/commands/proposal.rs","src-tauri/src/main_chat_task_controls.rs","src-tauri/src/main_chat_runtime_support.rs","openlife-core/src/agent/main_chat_agent_v1.rs","openlife-core/src/agent/store.rs","openlife-core/src/agent/tool_gateway.rs"],"broken_invariants":["I01","I06","I08","I09","I10","I12","I13"],"target_phase":"Phase 2, Phase 3 and Phase 5","owner_module":"Turn owner graph gateway and durable terminalization coordinator","acceptance":["Each operation has one durable open, sealing and sealed terminalization epoch bound to the immutable final event","Final append and sealed epoch commit atomically inside the event store transaction","Every production mutation of Action, Task, Transcript, Run and ToolEvent enters one gateway with expected revision or transition receipt; direct product writers are absent","Proposal review cannot race an unsealed origin turn, and a legal post-final review change is represented as a provenance-bound successor without rewriting final","Barrier tests prove snapshot-to-append and recovery races cannot create false success, false drift or duplicate redispatch","No shared store guard is held across provider, tool, network or user await, and lock order is mechanically fixed","Legacy receipts remain explicitly strict or migrated; unknown history is not silently accepted"],"deletion_targets":["Sequential unlocked owner snapshots followed by a later final append","Direct product mutations that bypass the turn owner graph gateway","Current-head equality as the only historical final recovery rule","Unproven post-final owner mutation"],"immutable_fingerprint":"7909acf1cfe17f054d0c45a3ad98469ca5ecc94ef9d8642de7ea0864e275469a"}
+    ,{"id":"BR4-D056","discovered_at":"2026-07-13T14:00:00+08:00","severity_at_discovery":"P2","classification":"evidence_gap","related_frozen_findings":["P2-03","P2-07"],"why_not_fully_subsumed":"The frozen evidence findings require mechanical proof, but did not define one executable append-only registry path that canonicalizes fingerprints, owns the classification taxonomy, and proves that the guard actually executed after every registry edit.","title":"Discovered-finding registry admitted invalid fingerprints and an incomplete taxonomy guard","observed_symptom":"D044 through D053 retained their first immutable definitions but carried fingerprints that did not match the Rust canonical algorithm, D052 used a legitimate classification rejected by the guard, and an incorrectly filtered Cargo invocation executed zero tests while appearing successful.","root_cause_hypothesis":"Finding definitions, fingerprint generation, classification validation and evidence commands were maintained through separate ad hoc steps, so draft hashes or newline-bearing hashes could be recorded without immediately running the one authoritative gate.","affected_surfaces":["plans/openlife_backend_remediation_v4_discovered_findings.json","plans/openlife_backend_remediation_v4_discovered_traceability.json","src-tauri/src/backend_remediation_phase0_tests.rs","CI Phase0 evidence gate"],"broken_invariants":["I12","I18"],"target_phase":"Phase 0 and Phase 6","owner_module":"Discovered-finding append-only evidence gate","acceptance":["Every effective registry fingerprint equals the canonical no-trailing-newline Rust digest; a noncanonical stored historical value is accepted only through an exact append-only correction bound to the trusted immutable prefix","The first recorded immutable finding bodies remain unchanged while incorrect derived fingerprint metadata is corrected with provenance","The classification taxonomy has one explicit schema-owned allowlist that includes evidence_gap_and_scope_correction","Every registry edit runs a command that executes the named Phase0 test rather than matching zero tests","CI compares against the merge base and rejects deletion, reordering or immutable-body rewrite while allowing append-only findings and dynamic trace updates"],"deletion_targets":["Ad hoc draft or summary fingerprint generation","Trailing-newline-dependent fingerprint generation","Classification tokens duplicated outside the Phase0 schema guard","Zero-test Cargo invocations accepted as registry evidence"],"immutable_fingerprint":"8cc97bf3ad8538c8a5fcc26092ccb938fa2df65cc427c2fc65bd1302782de02d"}
+    ,{
+      "id": "BR4-D057",
+      "discovered_at": "2026-07-13T16:30:00+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "The frozen MCP audit finding covered encryption and rotation semantics, but not the shipped authority-file loader that aliases a missing file, an unreadable file and malformed JSON before bootstrap creates and persists a replacement key epoch.",
+      "title": "Malformed MCP audit keyring is treated as first boot and overwritten with new authority",
+      "observed_symptom": "A malformed or unreadable mcp_audit_keys.json becomes an empty keyring, bootstrap creates a new keychain epoch and rewrites the file, and historical audit rows can remain visible only as decrypt-failed placeholders while the original key references are no longer configured.",
+      "root_cause_hypothesis": "The key-reference loader returns an untyped empty vector for every read or decode failure, hydration silently deduplicates epochs and treats empty as first boot, and bootstrap activates key material without proving that the reference file and existing audit database agree on the complete epoch set.",
+      "affected_surfaces": [
+        "src-tauri/src/storage.rs::load_mcp_audit_keyring_from_path",
+        "src-tauri/src/secret_store.rs::hydrate_or_create_mcp_audit_keys",
+        "src-tauri/src/bootstrap.rs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I15"
+      ],
+      "target_phase": "Phase 1 and Phase 5",
+      "owner_module": "MCP audit key authority bootstrap",
+      "acceptance": [
+        "Missing, present-valid, present-invalid and unreadable keyring states remain distinct",
+        "A present-invalid keyring or a missing keyring beside an existing non-empty audit database creates no secret, performs no rotation or overwrite, and enters explicit unavailable or read-only state",
+        "Duplicate or structurally invalid epochs fail instead of being deduplicated",
+        "A genuine first boot creates exactly one durable key reference and all configured historical epochs remain readable"
+      ],
+      "deletion_targets": [
+        "read-or-decode-error to empty-keyring fallback",
+        "Silent audit epoch deduplication",
+        "Automatic key creation when an existing audit database has no proven keyring",
+        "Missing-epoch fallback to the active audit key"
+      ],
+      "immutable_fingerprint": "a44348002ac0c6e552db7d30b9476eb0bc8be7ec3499b1defe8ca6e3a310af77"
+    }
+    ,{
+      "id": "BR4-D058",
+      "discovered_at": "2026-07-13T16:31:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen tool and persistence findings did not distinguish pre-ToolGateway governance blockers from runtime-issued tool receipts, while finalization still assumes every rendered tool-call receipt has one durable terminal ToolEvent owner.",
+      "title": "Pre-ToolGateway blockers mint non-authoritative tool receipts that finalization treats as durable terminal owners",
+      "observed_symptom": "A missing workspace file or lexical traversal is blocked before ToolGateway, but Kernel manufactures a caller-only failed-before-dispatch receipt; regular event projection excludes that non-runtime receipt while final persistence requires a matching terminal ToolEvent and fails with turn_final_tool_terminal_owner_missing.",
+      "root_cause_hypothesis": "Pre-gateway blockers, live ToolGateway receipts, ActionQueue owners and durable ToolEvent owners are modeled as a positional one-to-one set, while regular projection and final recovery use different receipt-admission predicates and fallback code manufactures render-only receipt authority.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs::blocked_kernel_read_tool_execution",
+        "src-tauri/src/main_chat_kernel.rs::record_kernel_tool_call_evidence",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "src-tauri/src/main_chat_event_stream.rs",
+        "openlife-core/src/agent/tool_gateway.rs"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I05",
+        "I08",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2, Phase 4 and Phase 5",
+      "owner_module": "ToolGateway blocker and terminal-owner projection contract",
+      "acceptance": [
+        "Missing-file and traversal admission failures return a structured blocker with failed ActionQueue state, zero Proposal and no synthetic ToolExecutionReceipt or ToolEvent owner",
+        "A real quoted or successful workspace read enters ToolGateway and owns exactly one runtime receipt and terminal event",
+        "A runtime-issued receipt with a missing, duplicate or conflicting terminal owner fails closed",
+        "Buffered, streaming and durable final recovery retain the same keyed blocker and tool-owner truth"
+      ],
+      "deletion_targets": [
+        "Production failed_before_dispatch receipt creation in blocked_kernel_read_tool_execution",
+        "Missing-receipt fallback that manufactures a fake tool owner",
+        "Positional ActionQueue-count equals receipt-count equals terminal-event-count recovery assumption",
+        "Pre-gateway blocker metadata carrying a synthetic toolExecutionReceipt"
+      ],
+      "immutable_fingerprint": "b45517f3d86fe0f931b3aba0bf4c1a7d57d0a52010abea009a4563569d5dab25"
+    }
+    ,{
+      "id": "BR4-D059",
+      "discovered_at": "2026-07-13T16:32:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-17",
+        "P2-02",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "The frozen database and migration findings did not cover malformed required or present-optional JSON being decoded as null, absence or an empty collection before canonical identity, governance, migration and projection decisions.",
+      "title": "Canonical persisted JSON corruption is normalized into valid domain defaults",
+      "observed_symptom": "Legacy transcript metadata can be rewritten from malformed JSON to null while its payload version advances; Patch, Proposal, Memory and MemoryLifecycle rows can reopen with corrupted before, after, tags, evidence, conflict or rollback arrays silently replaced by legal empty values.",
+      "root_cause_hypothesis": "Canonical row decoders and one legacy migration use ok, unwrap_or_default or unwrap_or(null) instead of distinguishing SQL NULL from present-invalid JSON, and downstream projections can swallow the resulting store error into a healthy empty read model.",
+      "affected_surfaces": [
+        "openlife-core/src/agent/main_chat_agent_v1.rs::legacy transcript migration",
+        "openlife-core/src/life_model/patch_store.rs::row_to_patch",
+        "openlife-core/src/agent/proposal_store.rs::row_to_proposal",
+        "openlife-core/src/memory.rs",
+        "openlife-core/src/agent/memory_lifecycle.rs",
+        "src-tauri/src/life_state_projection.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I09",
+        "I12",
+        "I13",
+        "I15",
+        "I17"
+      ],
+      "target_phase": "Phase 2, Phase 3, Phase 5 and Phase 6",
+      "owner_module": "Strict canonical JSON row decoders and degraded projections",
+      "acceptance": [
+        "Required and present-optional canonical JSON fail before typed materialization, identity digest, effect dispatch or migration version advance",
+        "A mixed valid-and-corrupt legacy migration rolls back the whole batch and preserves the original bytes for reconciliation",
+        "Canonical and audit owners never synthesize null, absence or empty arrays from a decode error",
+        "Derived views may rebuild but expose projection-degraded rather than healthy empty truth",
+        "Review and LifeState projections propagate owner decode failure as unavailable or unknown instead of ok with zero items"
+      ],
+      "deletion_targets": [
+        "Malformed legacy transcript metadata to JSON null migration",
+        "Patch before and after JSON semantic defaults",
+        "Proposal present-before JSON to absence",
+        "Memory tags JSON to empty tags",
+        "MemoryLifecycle canonical and rollback JSON to empty arrays",
+        "Projection store-error to healthy-empty fallback"
+      ],
+      "immutable_fingerprint": "f98cae8ec6e292624e0f7f1b90350a785497e27f9a55731d2d6264ef6444f2d2"
+    }
+    ,{
+      "id": "BR4-D060",
+      "discovered_at": "2026-07-13T16:33:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-07",
+        "P1-17",
+        "P2-08",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "The frozen plugin and tool-authority findings did not cover the persisted user enable override being lost on read or parse failure; current plugin tools are intentionally non-executable, so the confirmed impact is product permission truth rather than a proven tool side effect.",
+      "title": "Malformed plugin enable overrides restore manifest defaults as valid product state",
+      "observed_symptom": "If enabled_overrides.json is malformed or unreadable, PluginRegistry starts with an empty override map and a manifest carrying enabled true is listed as enabled even when the user had durably disabled it.",
+      "root_cause_hypothesis": "PluginRegistry construction erases the error with unwrap_or_default, reload cannot distinguish a missing override file from corrupt authority, and bootstrap registers the registry read-write because manifest reload itself succeeds.",
+      "affected_surfaces": [
+        "openlife-core/src/plugins.rs::PluginRegistry::new",
+        "openlife-core/src/plugins.rs::load_enabled_overrides",
+        "openlife-core/src/plugins.rs::save_enabled_overrides",
+        "src-tauri/src/bootstrap.rs",
+        "src-tauri/src/commands/execution.rs"
+      ],
+      "broken_invariants": [
+        "I05",
+        "I08",
+        "I12",
+        "I17"
+      ],
+      "target_phase": "Phase 4 and Phase 6",
+      "owner_module": "PluginRegistry enable-authority loader",
+      "acceptance": [
+        "Missing override and present-invalid or unreadable override states remain distinct",
+        "Corrupt authority never restores a manifest default as a trusted user enable decision",
+        "Registry and product read models expose unavailable or unknown while preserving the original override bytes",
+        "Valid enable and disable overrides survive restart",
+        "Plugin tools and skills remain absent from executable product registries until a separate reviewed ToolGateway contract exists"
+      ],
+      "deletion_targets": [
+        "Plugin enable-override load error to empty map",
+        "Non-atomic enabled_overrides.json rewrite",
+        "Product read-write registration after override authority failed to load"
+      ],
+      "immutable_fingerprint": "49598afd20ee336168364aadc1e27359e56fe49cd2e6aa8b33cdf837bb2a3168"
+    }
+    ,{
+      "id": "BR4-D061",
+      "discovered_at": "2026-07-13T16:34:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-17",
+        "P2-02",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "BR4-D054 covered persisted Main Chat Task, Transcript and ActionQueue enums only; PatchStore, ProposalStore and MemoryLifecycle retain separate enum and timestamp coercions whose current-schema, legacy-schema and read-only reachability require their own RED audit.",
+      "title": "Non-JSON persisted enum and timestamp defaults can fabricate valid owner state",
+      "observed_symptom": "Unknown Patch operation, source, risk or status values reopen as Replace, Manual, Medium or Pending; unknown Proposal type or risk becomes Unsupported or Medium; malformed optional timestamps disappear or MemoryLifecycle timestamps become the current time.",
+      "root_cause_hypothesis": "Several owner row decoders reuse permissive domain parsers or inline wildcard defaults for persisted input, and optional timestamp parsing collapses present-invalid text into absence or Utc::now instead of a database conversion failure.",
+      "affected_surfaces": [
+        "openlife-core/src/life_model/patch_store.rs::row_to_patch",
+        "openlife-core/src/agent/proposal_store.rs::row_to_proposal",
+        "openlife-core/src/agent/memory_lifecycle.rs::row_to_record",
+        "openlife-core/src/agent/memory_lifecycle.rs::row_to_rollback_event",
+        "openlife-core/src/agent/memory_lifecycle.rs::parse_time"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 3 and Phase 5",
+      "owner_module": "Strict non-JSON canonical owner row decoders",
+      "acceptance": [
+        "Every persisted enum has an explicit one-to-one database parser and unknown values fail before typed materialization or owner digest",
+        "Present-invalid timestamps fail instead of becoming None or the current time",
+        "All legal historical enum and timestamp values retain deterministic round-trip",
+        "Current schema constraints, legacy schemas and read-only recovery paths are audited separately",
+        "No D054 or D059 evidence is reused as closure credit for this owner set"
+      ],
+      "deletion_targets": [
+        "Patch unknown operation, source, risk and status defaults",
+        "Proposal unknown type and risk defaults",
+        "Malformed Patch and Proposal optional timestamps to absence",
+        "MemoryLifecycle unknown status to Candidate and materialization status to NotRequired on persisted reads",
+        "MemoryLifecycle malformed timestamp to Utc::now"
+      ],
+      "immutable_fingerprint": "42d9a7c8534f0c2ec7463e2853dc246f8c680736a099dfeb9eff9a623a521ed1"
+    }
+    ,{
+      "id": "BR4-D062",
+      "discovered_at": "2026-07-13T17:10:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "evidence_gap_and_scope_correction",
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-03"
+      ],
+      "why_not_fully_subsumed": "BR4-D058 correctly identified a missing terminal owner, but its initial acceptance grouped a missing file with lexical traversal as pre-ToolGateway admission failures. A missing file is known only after canonicalize, metadata or read touches the operating system, so keeping that observation outside ToolGateway would preserve a second product tool executor while making the new tests green.",
+      "title": "D058 conflated lexical admission blockers with filesystem execution failures",
+      "observed_symptom": "Workspace path traversal and a missing workspace file currently fail before ToolGateway and share a synthetic failed-before-dispatch path even though the first is a pure policy decision and the second is a real filesystem execution result.",
+      "root_cause_hypothesis": "Workspace tool admission, path-policy validation and actual filesystem I/O were collapsed in Kernel and WorkspaceFileResolver, and the first D058 evidence contract copied that implementation boundary instead of enforcing ToolGateway as the only product execution authority.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs",
+        "src-tauri/src/workspace_file_resolver.rs",
+        "openlife-core/src/agent/action_executor/tool_executor.rs",
+        "openlife-core/src/agent/action_executor/execution_tools.rs",
+        "openlife-core/src/agent/tool_gateway.rs",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "plans/openlife_backend_remediation_v4_discovered_findings.json",
+        "plans/openlife_backend_remediation_v4_discovered_traceability.json"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I05",
+        "I08",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2, Phase 4 and Phase 5",
+      "owner_module": "ToolGateway filesystem adapter and identity-keyed final owner binding",
+      "acceptance": [
+        "Pure lexical traversal, absolute-path and outside-workspace policy violations may fail before ToolGateway with a typed ActionQueue blocker and no ToolExecutionReceipt or ToolEvent",
+        "Canonicalize, metadata, open and read operations occur only inside ToolGateway or its bounded filesystem adapter",
+        "A missing file produces one runtime-bound failed ToolExecutionReceipt, exactly one matching tool.failed terminal event and a versioned identity-keyed final owner binding",
+        "Final persistence and recovery match each action to its owner by stable identity; missing, duplicate, conflicting and unknown bindings fail closed without positional zip or count inference",
+        "Quoted and successful workspace reads retain real ToolGateway lifecycle, and legacy version-one finals containing real tool owners remain recoverable"
+      ],
+      "deletion_targets": [
+        "Filesystem canonicalize, metadata, open or read outside ToolGateway",
+        "Missing-file pre-gateway no-receipt hypothesis",
+        "Synthetic failed_before_dispatch ToolExecutionReceipt for lexical policy blockers",
+        "Positional tool owner zip or count recovery model"
+      ],
+      "immutable_fingerprint": "971e183ba25d91505eae948debdf3deecfad4c338ff7281ec0c9d858bd250c29"
+    }
+    ,{
+      "id": "BR4-D063",
+      "discovered_at": "2026-07-13T17:30:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-17",
+        "P1-20",
+        "P2-03"
+      ],
+      "why_not_fully_subsumed": "The frozen dangerous-action, persistence and command-surface findings did not cover a second shipped MCP audit deletion command and page that bypass both the effects gate and Rust-owned native confirmation while a governed Settings cleanup command already exists.",
+      "title": "Shipped MCP page keeps an ungoverned second audit-log deletion authority",
+      "observed_symptom": "McpPage authorizes cleanup with a client-only dialog and invokes clear_mcp_audit_logs, a release-registered command that calls the public clear_old_logs mutation directly; negative days produce a future cutoff and can delete every audit row, while the separate Settings command uses the persistence effects gate and native confirmation.",
+      "root_cause_hypothesis": "MCP audit maintenance is split between commands/mcp.rs and commands/settings.rs, and a public store mutation plus a frontend wrapper lets page-local UX act as durable deletion authority instead of routing through one governed maintenance gateway.",
+      "affected_surfaces": [
+        "frontend/src/pages/McpPage.tsx",
+        "frontend/src/tauri.ts::clearMcpAuditLogs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/mcp.rs::clear_mcp_audit_logs",
+        "src-tauri/src/commands/settings.rs::cleanup_mcp_audit_logs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::clear_old_logs"
+      ],
+      "broken_invariants": [
+        "I06",
+        "I08",
+        "I18"
+      ],
+      "target_phase": "Phase 5 and Phase 6",
+      "owner_module": "Governed MCP audit maintenance gateway",
+      "acceptance": [
+        "Exactly one shipped MCP audit deletion command and one domain mutation entry remain",
+        "Degraded persistence, missing or invalid native confirmation, and invalid retention input perform zero deletion",
+        "Negative, zero and overflow retention values fail closed before database mutation",
+        "A valid native grant deletes only records older than the bounded retention cutoff and preserves recent records",
+        "McpPage reuses or links to the governed workflow and has no independent client-confirmation write authority"
+      ],
+      "deletion_targets": [
+        "clear_mcp_audit_logs backend command, import and shipped handler registration",
+        "Frontend clearMcpAuditLogs wrapper and McpPage direct cleanup call",
+        "Public second mutation entry McpAuditStore::clear_old_logs",
+        "Client-only confirmation as durable deletion authorization",
+        "Unvalidated negative, zero or overflow retention deletion semantics"
+      ],
+      "immutable_fingerprint": "92c6242909678d83dcade1755ce2322737470c584169f36fa9f404e7c2ebb1de"
+    }
+    ,{
+      "id": "BR4-D064",
+      "discovered_at": "2026-07-13T17:31:00+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "The frozen audit encryption and rotation findings and BR4-D057 cover keyring load corruption, but not the global epoch-only keychain namespace or the absence of one cross-process writable owner binding key-reference, database and secret activation.",
+      "title": "Global epoch-only MCP audit secret references and lease-free writers can orphan ciphertext across profiles and processes",
+      "observed_symptom": "Release, development, QA or custom-data-dir stores that create or rotate in the same epoch use the same global keychain reference; set_password overwrites that credential while each store can retain different in-memory key bytes, and multiple McpAuditStore instances or processes can independently open the same database for writes without an owner lease.",
+      "root_cause_hypothesis": "The implementation conflates numeric rotation order with globally unique store identity, permits replacement writes for newly generated audit secrets, does not bind key references to a canonical store identity, and activates JSON references, keychain material and SQLite state without one OS-backed ownership protocol.",
+      "affected_surfaces": [
+        "src-tauri/src/secret_store.rs::MCP_AUDIT_KEY_REF_PREFIX",
+        "src-tauri/src/secret_store.rs::create_mcp_audit_key_material",
+        "src-tauri/src/secret_store.rs::KeyringSecretStore",
+        "src-tauri/src/storage.rs::app_data_dir",
+        "src-tauri/src/bootstrap.rs",
+        "src-tauri/src/commands/settings.rs::rotate_mcp_audit_key",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore",
+        "openlife-core/src/sqlite_migration.rs::SqliteSlotOwnerLease"
+      ],
+      "broken_invariants": [
+        "I06",
+        "I08",
+        "I12",
+        "I15"
+      ],
+      "target_phase": "Phase 1 and Phase 5",
+      "owner_module": "MCP audit key-reference authority and SQLite writable-owner protocol",
+      "acceptance": [
+        "Each canonical audit store owns a durable random store identity and each new key uses a collision-resistant store-bound reference; numeric epoch is ordering metadata only",
+        "Creating a new secret is create-only: a collision preserves existing keychain bytes, reference-file bytes and database state",
+        "Exactly one OS-backed writable owner exists per canonical audit database across clones and processes, and connection identity is revalidated before use",
+        "The versioned mcp_audit_keys.json remains the sole canonical key-reference owner; database and lease metadata may retain only version, digest and verifier data and cannot reconstruct or guess references",
+        "A missing keyring beside a non-empty audit database enters exactly Unavailable, creates no secret and performs no reference guessing, keychain enumeration or claimed read-only recovery",
+        "Read-only recovery is allowed only when the keyring is present and structurally valid, every referenced secret hydrates, and ciphertext verification succeeds; BR4-D057 strict loader-state validation is a prerequisite for the BR4-D064 migration",
+        "Legacy epoch-only references are read-only recovery inputs and are never overwritten or automatically deleted; new writes use unique references and restart reads both generations"
+      ],
+      "deletion_targets": [
+        "Global prefix-plus-epoch identity for newly created MCP audit keys",
+        "Unconditional secret replacement for newly generated audit key material",
+        "Writable McpAuditStore without SqliteSlotOwnerLease or equivalent no-create cross-process authority lease",
+        "Per-operation writable Connection::open path detached from the held owner identity",
+        "Missing-keyring reference guessing, keychain scanning or duplicate database key-reference authority",
+        "Legacy global epoch references as active-write or automatic-delete targets",
+        "Unleased key-reference, keychain and database activation sequence"
+      ],
+      "immutable_fingerprint": "0ff3398ef9c35c9616c09fd20f2fe6d1809cdcfe6ccf797ee70e42096a313296"
+    }
+    ,{
+      "id": "BR4-D065",
+      "discovered_at": "2026-07-13T19:00:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "BR4-D057 covers bootstrap key-authority corruption, but neither it nor the frozen persistence and projection findings require every shipped audit read to depend on both key-reference and audit-store health or preserve list and decrypt failures as unknown.",
+      "title": "MCP audit reads bypass or erase trusted-read failure as healthy product truth",
+      "observed_symptom": "System diagnostics converts an unavailable audit store or list error into zero recent logs and zero PII hits, while the shipped audit-list command reads McpAuditStore without a trusted-read gate and per-row decrypt errors are returned as successful decrypt-failed placeholders.",
+      "root_cause_hypothesis": "There is no single typed MCP audit read gateway that owns composite key-reference and database trust, read completeness and product projection; raw consumers independently turn an error into empty truth, direct data or a successful placeholder.",
+      "affected_surfaces": [
+        "src-tauri/src/commands/diagnostics.rs::get_system_diagnostics_with_state",
+        "src-tauri/src/commands/mcp.rs::list_mcp_audit_logs",
+        "src-tauri/src/persistence_coordinator.rs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::list_logs",
+        "frontend/src/pages/settings/tabs/PrivacyTab.tsx",
+        "frontend/src/pages/McpPage.tsx"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I09",
+        "I12",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 5 and Phase 6",
+      "owner_module": "MCP audit trusted-read gateway and product projection",
+      "acceptance": [
+        "Every shipped audit read enters one gateway that requires trusted McpAuditKeyReferenceStore and McpAuditStore state before interpreting rows",
+        "Diagnostics and product read models represent available, unavailable, degraded and unknown explicitly and never convert a gate, list or decrypt error into count zero",
+        "The audit-list command fails closed or returns a typed unavailable result, and a row decrypt failure cannot be returned as a successful log entry",
+        "A trusted empty audit database returns available with count zero, while a trusted non-empty database returns exact bounded counts and entries",
+        "BR4-D057 cannot enter GREEN until its unavailable bootstrap states project unknown through diagnostics, audit list and UI with zero provider, tool or canonical effect dispatch"
+      ],
+      "deletion_targets": [
+        "Diagnostics audit read error or untrusted state fallback to (0, 0)",
+        "Shipped list_mcp_audit_logs direct McpAuditStore read",
+        "Bare audit count fields that cannot distinguish trusted zero from unknown",
+        "Per-row decrypt failure rendered as a successful decrypt-failed log entry"
+      ],
+      "immutable_fingerprint": "81df31ee962ac04b902490a219457a135091e5fbd455bc9147f28f7e92f3f574"
+    }
+    ,{
+      "id": "BR4-D066",
+      "discovered_at": "2026-07-13T19:01:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen audit-key finding and BR4-D057 cover one store's encryption, restart and bootstrap authority, but not by-value ToolGateway resource snapshots that retain an independently mutable active write epoch across a successful runtime rotation.",
+      "title": "ToolGateway resource snapshots clone mutable MCP audit write-key authority",
+      "observed_symptom": "A Main Chat, AgentLoop or Scheduler resource snapshot captured at epoch A can keep writing new audit rows with A after the AppState store successfully rotates and durably records epoch B; historical-key retention keeps those rows readable and hides the failed cutover.",
+      "root_cause_hypothesis": "McpAuditStore derives Clone over its active key, key configuration and keyring, and capture_shared_after_config copies that mutable authority by value to long-lived product execution contexts while rotation mutates only the AppState instance.",
+      "affected_surfaces": [
+        "src-tauri/src/state.rs",
+        "src-tauri/src/tool_gateway_resources.rs::capture_shared_after_config",
+        "src-tauri/src/commands/settings.rs::rotate_mcp_audit_key",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore",
+        "openlife-core/src/agent/action_executor/mod.rs::ActionExecutionContext",
+        "openlife-core/src/agent/action_executor/tool_executor.rs::call_tool_internal"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12"
+      ],
+      "target_phase": "Phase 4 and Phase 5",
+      "owner_module": "MCP audit key authority and ToolGateway shared handle",
+      "acceptance": [
+        "Product ToolGateway resources carry a cloneable handle to one active audit-key authority and never copy mutable key material or epoch state by value",
+        "After epoch B is durably activated, a real tool completion through a resource captured at epoch A writes B; Main Chat, AgentLoop and Scheduler satisfy the same barrier",
+        "The rotation and audit-insert linearization boundary is explicit so an insert committed before cutover may use A and every insert after cutover uses B",
+        "A key-reference save failure leaves every writer on A, creates no B row and exposes no successful rotation",
+        "Historical A rows remain readable after B rotation and no audit-key or store guard is held across external provider, tool or network await"
+      ],
+      "deletion_targets": [
+        "By-value McpAuditStore in product ToolGateway resource snapshots",
+        "state.mcp_audit_store lock then clone active-authority capture",
+        "Multiple independently mutable active audit-key views",
+        "Rotation rollback based on cloning and replacing mutable key authority"
+      ],
+      "immutable_fingerprint": "6f67d6d3aeb1f2f45297f28e12f41eff91f95e2b858f684471e42af701cfff30"
+    }
+    ,{
+      "id": "BR4-D067",
+      "discovered_at": "2026-07-13T19:02:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-08",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen ToolGateway, persistence and runtime-truth findings cover dispatch and effect receipts, but not the post-adapter MCP audit insert whose failure is erased after the tool outcome is already known.",
+      "title": "ToolGateway swallows MCP audit persistence failure after tool execution",
+      "observed_symptom": "After a manifest-backed tool succeeds or fails, call_tool_internal attempts to insert its audit row, prints a warning on error and returns the original ToolCallInternalResult; the execution receipt and PersistenceCoordinator therefore expose no fact that the durable audit trail is missing.",
+      "root_cause_hypothesis": "MCP audit is modeled as best-effort side logging outside the typed ToolGateway terminal and persistence-health contract, so audit commit failure has no canonical disposition, cannot degrade future effect admission and is indistinguishable from a successfully audited execution.",
+      "affected_surfaces": [
+        "openlife-core/src/agent/action_executor/tool_executor.rs::call_tool_internal",
+        "openlife-core/src/agent/action_executor/helpers.rs::ToolCallInternalResult",
+        "openlife-core/src/tool_execution_receipt.rs::ToolExecutionReceipt",
+        "openlife-core/src/agent/action_executor/mod.rs::ActionExecutionContext",
+        "src-tauri/src/persistence_coordinator.rs",
+        "src-tauri/src/main_chat_react_execution.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 4, Phase 5 and Phase 6",
+      "owner_module": "ToolGateway terminal receipt and audit persistence disposition",
+      "acceptance": [
+        "The existing ToolGateway terminal fact carries a minimal audit persistence disposition bound to the same receipt without copying tool arguments, output or sensitive payload",
+        "If a tool succeeds and audit commit fails, the observed tool effect remains succeeded or confirmed while audit state is failed or unknown, PersistenceCoordinator degrades and later effects are blocked",
+        "If both tool execution and audit persistence fail, the two outcomes remain separately observable and the original tool failure is not overwritten",
+        "Audit failure never automatically retries a non-idempotent tool or rewrites a confirmed external effect as not attempted",
+        "Normal execution writes exactly one minimized audit row, a pre-dispatch blocker writes no false success row, and recovery deepens existing receipt and event owners rather than adding a parallel ledger"
+      ],
+      "deletion_targets": [
+        "Audit insert failure eprintln then continue success path",
+        "Audit insert failure eprintln then return only the original tool error",
+        "Tool terminal result with no audit persistence disposition",
+        "Continued healthy effect admission after a runtime MCP audit store failure"
+      ],
+      "immutable_fingerprint": "3ec8fd15d7d75461478bfbffac9b94334434a9b4abb26930e409a71a52551d13"
+    }
+    ,{
+      "id": "BR4-D068",
+      "discovered_at": "2026-07-13T20:00:00+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-02",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "The frozen audit-encryption, persistence, migration and runtime-truth findings, BR4-D057 key-authority work and BR4-D065 trusted-read work do not bind the plaintext payload_minimized_version or receipt schema to the authenticated ciphertext and do not test a version flip that reclassifies a legacy raw payload as current.",
+      "title": "Unauthenticated payload_minimized_version can expose legacy raw-sensitive ciphertext as a current receipt",
+      "observed_symptom": "A legacy row containing raw sensitive arguments and result under valid ciphertext can have payload_minimized_version changed from 0 to 1; restart then skips migrate_legacy_payloads, while list_logs neither selects the version nor validates the decrypted receipt schema and returns the raw plaintext through the current product audit shape.",
+      "root_cause_hypothesis": "AES-GCM authenticates only the encrypted plaintext bytes with no AAD or versioned envelope binding, while an independently mutable database column is treated as the migration and current-format authority and the read decoder accepts arbitrary decrypted UTF-8 as a minimized receipt.",
+      "affected_surfaces": [
+        "openlife-core/src/mcp_audit.rs::MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::encrypt",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::decrypt_for_epoch",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::migrate_legacy_payloads",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::list_logs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::export_logs",
+        "src-tauri/src/commands/mcp.rs::list_mcp_audit_logs",
+        "frontend/src/pages/McpPage.tsx"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I15",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 5 and Phase 6",
+      "owner_module": "Versioned authenticated MCP audit payload envelope and strict receipt decoder",
+      "acceptance": [
+        "Payload format version and exact minimized-receipt schema are cryptographically bound to each ciphertext through authenticated AAD or a versioned encrypted envelope; the plaintext database column alone never authorizes current-format interpretation",
+        "Changing only payload_minimized_version from 0 to 1 cannot skip required migration or return legacy raw arguments or result; the row fails closed as typed unavailable or unknown with zero product exposure",
+        "Every legal current minimized receipt remains exactly readable and every legal legacy row still migrates transactionally to an authenticated current receipt and remains readable after restart",
+        "Any authentication, envelope-schema or migration failure performs zero rewrite: ciphertext, payload version, key epoch, database main-file and sidecar bytes, and key-reference state remain unchanged",
+        "Strict read and export decoding reject wrong kind, payloadStored, valueType, bytes, digest, version and unknown fields before constructing McpLogEntry or product truth",
+        "BR4-D057 key-authority evidence and BR4-D065 trusted-read evidence remain separately open and cannot count as BR4-D068 closure"
+      ],
+      "deletion_targets": [
+        "Plaintext payload_minimized_version as the sole migration or current-format authority",
+        "AES-GCM audit payloads with no authenticated format-version and receipt-schema binding",
+        "Current-row decrypt-and-return without strict minimized-receipt decoding",
+        "Version-zero to version-one tamper path that skips migration and returns raw sensitive plaintext",
+        "Migration failure paths that rewrite ciphertext or version metadata",
+        "D057 or D065 completion credit reused as D068 closure"
+      ],
+      "immutable_fingerprint": "7f78be9990b20301fea9e5f7d69aed51893bd74468704153a6e0a51808b416ec"
+    },
+    {
+      "id": "BR4-D069",
+      "discovered_at": "2026-07-16T23:01:44+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "D055 introduced immutable Proposal origin bindings and one proven post-final successor, but did not distinguish a newly created current-turn review item from an idempotently reused pending Proposal, model more than one legal successor on the same TaskSession, or require product Review and Tasks projections to consume the canonical binding instead of descriptive Proposal fields.",
+      "title": "Proposal reuse and multi-review transitions conflate review identity with current task ownership",
+      "observed_symptom": "Repeating an explicit governed Memory request reused the existing pending Proposal but attempted to bind it to the new TaskSession and failed the turn; a newly created Proposal could leave TaskSession waiting while the final delivery claimed completed-with-pending-items; accepting two artifact Proposals for one task failed on the second transition because every successor was required to start from the original final head; Tasks and ReviewCenter could also infer task linkage from source_detail, payload or run strings.",
+      "root_cause_hypothesis": "ReviewWorkflow admission exposed the Proposal object without a current-turn-created versus reused disposition, while OpenLifeTurnRuntime and product projections treated every visible Proposal as a current task owner and the terminal owner graph modeled a single successor rather than a verified revision chain.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "src-tauri/src/main_chat_event_stream.rs",
+        "src-tauri/src/terminal_owner_write_gateway.rs",
+        "src-tauri/src/read_models/review_center.rs",
+        "src-tauri/src/read_models/tasks.rs",
+        "openlife-core/src/agent/review_item.rs",
+        "src-tauri/src/main_chat_command_surface_eval.rs"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I06",
+        "I08",
+        "I10",
+        "I12",
+        "I13",
+        "I17"
+      ],
+      "target_phase": "Phase 2, Phase 3, Phase 5 and Phase 6",
+      "owner_module": "ReviewWorkflow admission projection and terminal owner successor graph",
+      "acceptance": [
+        "Review admission records whether a pending Proposal was created for the current turn or reused from an existing canonical review",
+        "Only a newly created current-turn Proposal can block and own the current TaskSession; an idempotently reused Proposal retains its original terminal origin and is a nonblocking deferred review reference",
+        "TaskSession blocker state, pendingBlockerCount and terminal delivery status agree for every new and reused Proposal path",
+        "Multiple accepted Proposals for one task advance a contiguous revision and digest successor chain, while gaps, overflow, identity mismatch and unproven drift fail closed",
+        "TasksViewModel and ReviewCenter task relations and batch owners consume ProposalStore terminal origin bindings only; source_detail, payload task strings and run_id cannot mint ownership",
+        "Send, stream, restart and partial multi-artifact acceptance remain idempotent with one effect and one immutable successor per Proposal"
+      ],
+      "deletion_targets": [
+        "Rebinding one idempotently reused Proposal to a later TaskSession",
+        "Treating every visible Proposal as a current-turn blocker",
+        "Comparing every legal successor only with the original final owner head",
+        "Tasks or Review projections deriving task ownership from source_detail, payload or run strings",
+        "Terminal completion wording that contradicts TaskSession waiting-permission state"
+      ],
+      "immutable_fingerprint": "6e1acbc4e583e70f6103223fc4b9d8ac6649e216ae599d426d16c5c695ff3ef7"
+    },
+    {
+      "id": "BR4-D070",
+      "discovered_at": "2026-07-16T23:01:44+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-08",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "D067 added audit persistence truth to normal ToolGateway terminalization, but a runtime-dropped ToolGateway future can leave an already finished transport receipt at audit_persistence=pending, and the cancellation epoch previously skipped every finished registration instead of settling that remaining durability uncertainty.",
+      "title": "Runtime cancellation can leave a finished tool receipt with pending audit persistence",
+      "observed_symptom": "Cancelling a real hanging MCP replay after dispatch produced invalid_tool_execution_receipt:tool_receipt_terminal_audit_persistence_pending and then a secondary final-delivery schema failure instead of the stable local-abort result. Two restart fixtures also bypassed the new PersistenceCoordinator effect gate by calling the product before_dispatch observer while bootstrap was intentionally unsealed.",
+      "root_cause_hypothesis": "Tool transport completion and audit durability are separate terminal dimensions, but MainChatExecutionEpoch treated finished_at as proof that no registration finalization remained; test crash simulation also reused the product dispatch-admission entry instead of a test-only exact prepared-fact seam.",
+      "affected_surfaces": [
+        "openlife-core/src/tool_execution_receipt.rs::ToolExecutionReceiptRegistration",
+        "src-tauri/src/main_chat_cancellation.rs::MainChatExecutionEpoch",
+        "src-tauri/src/main_chat_event_stream.rs::MainChatToolLifecycleObserver",
+        "src-tauri/src/main_chat_task_control_tests.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I11",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2, Phase 4 and Phase 6",
+      "owner_module": "Tool receipt runtime finalizer and Main Chat cancellation epoch",
+      "acceptance": [
+        "Local abort and runtime-failure finalizers settle audit_persistence=pending to unknown without changing a committed or failed audit disposition",
+        "A finished transport receipt is still revisited when audit persistence remains pending, and the resulting terminal receipt is mechanically valid",
+        "A real hanging MCP replay aborts locally within one second, records remote or audit uncertainty truthfully, and performs no late durable commit",
+        "PersistenceCoordinator remains fail closed during release bootstrap; historical crash fixtures persist an exact prepared fact only through a cfg(test) seam and cannot dispatch a tool",
+        "Normal ToolGateway audit commit and failure paths retain their D067 semantics without retrying the tool"
+      ],
+      "deletion_targets": [
+        "Skipping all finished receipt registrations during cancellation finalization",
+        "Terminal tool receipts with audit_persistence pending",
+        "Crash fixtures calling the shipped before_dispatch admission while persistence is Initializing",
+        "Audit-pending validation errors masking the canonical local cancellation result"
+      ],
+      "immutable_fingerprint": "b515e32ffa41e43734b0375a0a20bc1d65e7af4a0101bc680619438362e7a905"
+    },
+    {
+      "id": "BR4-D071",
+      "discovered_at": "2026-07-16T23:17:22+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P0-01",
+        "P1-02",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen wire-truth, cancellation and inferred-runtime-fact findings require truthful provider reporting, but they did not cover a valid adapter start followed by conflicting attempt metadata: the runtime failed closed correctly, then recomputed model_invoked from the invalid aggregate state and erased the already observed dispatch.",
+      "title": "Provider attempt metadata conflict erases an already observed adapter dispatch",
+      "observed_symptom": "A provider request emitted a valid provider_started edge and remained in flight; injecting a conflicting model terminal correctly poisoned the attempt state and failed the turn with remote state unknown, but the final delivery returned model_invoked=false and omitted the proven provider start from durable lifecycle facts.",
+      "root_cause_hypothesis": "ProviderInvocationState::Invalid intentionally does not imply dispatch, but finalization used that aggregate enum as the sole invocation authority and the invalid-state terminalizer discarded valid earlier kernel lifecycle evidence instead of persisting only the proof-backed prefix.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_turn_runtime.rs::CancellationAwareMainChatEventSink",
+        "src-tauri/src/main_chat_turn_runtime.rs::terminalize_main_chat_kernel_failure",
+        "src-tauri/src/main_chat_turn_runtime.rs::finalize_openlife_turn_result",
+        "src-tauri/src/backend_remediation_phase2_tests.rs::conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_receipt_state"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 2 and Phase 6",
+      "owner_module": "OpenLifeTurnRuntime provider lifecycle terminalization and FinalDelivery projection",
+      "acceptance": [
+        "A valid adapter start that precedes provider-attempt state corruption is persisted only when the exact scheduler durability proof exists",
+        "The turn and provider attempt remain failed closed as invalid and remote unknown; no provider.completed or remote-cancel confirmation is invented",
+        "FinalDelivery model_invoked is true only from a typed invocation state or an exact same-run durable provider_request lifecycle fact",
+        "A receipt-state failure without a proven provider start leaves model_invoked false",
+        "Provider lifecycle facts, receipt-state failure and turn failure keep one canonical run identity and survive buffered and streamed projection"
+      ],
+      "deletion_targets": [
+        "Invalid provider aggregate state erasing an earlier proven adapter start",
+        "model_invoked derived only from ProviderInvocationState after state corruption",
+        "Provider receipt-state failure presented as proof that no provider dispatch occurred",
+        "Invented provider completion or remote cancellation confirmation after metadata conflict"
+      ],
+      "immutable_fingerprint": "6d84efd9513db4357554104d113a9c5aaf213bd4e45313481a873e4419e1c6ef"
+    },
+    {
+      "id": "BR4-D072",
+      "discovered_at": "2026-07-16T23:43:49+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P0-01",
+        "P1-02",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen provider-truth and cancellation findings and BR4-D071 require truthful lifecycle facts, but they did not require nested candidate-ranking and AgentLoop provider attempts to share the TurnRuntime durability-proof scope or preserve their real chronological order when cancellation drops the kernel future.",
+      "title": "Nested AgentLoop provider attempts lose durability proof and reorder cancellation facts",
+      "observed_symptom": "A two-stage ReAct turn completed its provider-backed candidate ranking, started a second AgentLoop provider request and was locally cancelled while that request hung. The cancellation terminalizer could not prove the nested in-flight start, emitted provider.receipt_state_failed, and could order the second start before the first completion because same-kind facts were sorted by stable object id rather than occurrence time.",
+      "root_cause_hypothesis": "OpenLifeTurnRuntime did not own one fresh per-turn ProviderReceiptCollector. Candidate ranking used the captured scheduler collector while AgentLoop rebound a separate execution-local collector hidden inside the dropped future; cancellation could observe progress events without the matching durability authority, and its batch normalized receipt timestamps to the cancellation instant before stable-id ordering.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_turn_runtime.rs::OpenLifeTurnRuntime::execute",
+        "src-tauri/src/main_chat_turn_runtime.rs::persist_main_chat_cancellation_events",
+        "src-tauri/src/main_chat_react_runtime.rs::try_run_main_chat_react_agent_loop",
+        "src-tauri/src/main_chat_event_stream.rs::MainChatAgentRuntimeEventInput",
+        "src-tauri/src/backend_remediation_phase2_tests.rs::cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I08",
+        "I11",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2 and Phase 6",
+      "owner_module": "OpenLifeTurnRuntime per-turn provider proof scope and cancellation event batch",
+      "acceptance": [
+        "OpenLifeTurnRuntime installs one fresh ProviderReceiptCollector per turn and every nested provider route in that turn shares it without leaking receipts across turns",
+        "Cancelling after a completed ranking request and a started hanging AgentLoop request preserves the first started and completed facts and the second proof-backed started plus remote_unknown facts",
+        "The durable order is ranking start before ranking completion before AgentLoop start before cancel_requested before AgentLoop remote_unknown before local_aborted",
+        "The hanging request receives no provider.completed fact and local abort does not claim remote provider cancellation",
+        "Provider proof collection remains bound to the captured coherent provider generation and Phase 2, task-control, runtime, command-surface and single-system gates remain green"
+      ],
+      "deletion_targets": [
+        "Separate candidate-ranking and AgentLoop ProviderReceiptCollectors inside one turn",
+        "A dropped AgentLoop future owning the only durability proof for its in-flight provider request",
+        "Cancellation receipt timestamps rewritten to the cancellation instant",
+        "Same-kind provider lifecycle facts ordered by stable object id before occurrence time",
+        "provider.receipt_state_failed used as fallback for an otherwise proof-backed nested start"
+      ],
+      "immutable_fingerprint": "effa1cd6aa7afbae4cd09d9ff010d7bea9b3b99d1ec4ba5b2b8d00b63aa4a30b"
+    }
+  ]
+}

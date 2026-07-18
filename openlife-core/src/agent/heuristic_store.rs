@@ -251,6 +251,22 @@ impl HeuristicStore {
         Ok(store)
     }
 
+    pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
+        let db_path = db_path.into();
+        let conn = crate::sqlite_migration::open_existing_read_only(
+            &db_path,
+            "heuristic_store",
+            &["heuristics"],
+        )?;
+        Ok(Self::from_connection(conn))
+    }
+
+    pub fn unavailable_sentinel() -> Result<Self> {
+        Ok(Self::from_connection(
+            crate::sqlite_migration::unavailable_read_only_sentinel("heuristic_store")?,
+        ))
+    }
+
     fn from_connection(conn: Connection) -> Self {
         Self {
             conn: Mutex::new(conn),

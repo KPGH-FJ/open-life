@@ -1,13 +1,44 @@
+use crate::agent::ToolStartedTransitionObserver;
 use crate::privacy::PrivacyEngine;
-use crate::tool_manifest::{ToolManifest, ToolSource};
+#[cfg(test)]
+use crate::tool_execution_receipt::ToolActionEffect;
+use crate::tool_execution_receipt::ToolExecutionReceiptTracker;
+use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{Mutex, Semaphore};
+
+const MCP_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MCP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MCP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MCP_MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct McpClientLimits {
+    handshake_timeout: std::time::Duration,
+    list_timeout: std::time::Duration,
+    call_timeout: std::time::Duration,
+    max_frame_bytes: usize,
+}
+
+impl Default for McpClientLimits {
+    fn default() -> Self {
+        Self {
+            handshake_timeout: MCP_HANDSHAKE_TIMEOUT,
+            list_timeout: MCP_LIST_TIMEOUT,
+            call_timeout: MCP_CALL_TIMEOUT,
+            max_frame_bytes: MCP_MAX_FRAME_BYTES,
+        }
+    }
+}
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,105 +78,298 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-/// MCP Client using Stdio transport
+struct McpSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    transport_state: McpTransportState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpTransportState {
+    Healthy,
+    Poisoned,
+}
+
+impl McpSession {
+    fn ensure_healthy(&self) -> Result<()> {
+        if self.transport_state == McpTransportState::Poisoned {
+            anyhow::bail!(
+                "MCP transport is unavailable after an incomplete or invalid prior request"
+            );
+        }
+        Ok(())
+    }
+
+    fn poison(&mut self) {
+        self.transport_state = McpTransportState::Poisoned;
+        // A line-oriented stdio transport cannot safely recover after a request
+        // future is dropped: a late response would otherwise be consumed by the
+        // next request. Killing the owned subprocess makes that uncertainty
+        // explicit and prevents the session from being reused.
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Cancellation-safety boundary for one stdio write/read exchange.
+///
+/// The guard is armed before any request bytes are written. If the enclosing
+/// future is timed out or dropped, `Drop` poisons and terminates the transport;
+/// only a completely parsed, id-matched JSON-RPC response disarms it.
+struct McpInFlightRequest<'a> {
+    session: &'a mut McpSession,
+    completed: bool,
+    receipt_tracker: Option<ToolExecutionReceiptTracker>,
+}
+
+impl<'a> McpInFlightRequest<'a> {
+    fn begin(
+        session: &'a mut McpSession,
+        receipt_tracker: Option<ToolExecutionReceiptTracker>,
+    ) -> Result<Self> {
+        session.ensure_healthy()?;
+        Ok(Self {
+            session,
+            completed: false,
+            receipt_tracker,
+        })
+    }
+
+    fn mark_response_observed(&self) {
+        if let Some(tracker) = &self.receipt_tracker {
+            tracker.mark_response_observed();
+        }
+    }
+
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for McpInFlightRequest<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            if let Some(tracker) = &self.receipt_tracker {
+                // Cancellation before the line delimiter is accepted is
+                // definitely pre-dispatch. Once the delimiter crosses the
+                // pipe boundary, the tracker is already dispatched and this
+                // drop must preserve remote uncertainty.
+                if tracker.snapshot().transport_status
+                    != crate::tool_execution_receipt::ToolTransportStatus::NotAttempted
+                {
+                    tracker.mark_local_aborted();
+                }
+                tracker.finish();
+            }
+            self.session.poison();
+        }
+    }
+}
+
+/// Write one line-delimited JSON-RPC request and record the first point at
+/// which the peer can parse and execute it. Once the delimiter has been
+/// accepted by the pipe, a later flush failure or cancellation cannot prove
+/// that the remote process did not act, so the receipt must already be in the
+/// dispatched state before awaiting `flush`.
+async fn write_json_rpc_request_frame<W>(
+    writer: &mut W,
+    request: &JsonRpcRequest,
+    max_frame_bytes: usize,
+    receipt_tracker: Option<&ToolExecutionReceiptTracker>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let json = serde_json::to_string(request)?;
+    if json.len() > max_frame_bytes {
+        anyhow::bail!("MCP request frame exceeds {} bytes", max_frame_bytes);
+    }
+    writer.write_all(json.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    if let Some(tracker) = receipt_tracker {
+        tracker.mark_mcp_dispatched();
+    }
+    writer.flush().await?;
+    Ok(())
+}
+
+/// MCP client using bounded asynchronous stdio transport.
+#[derive(Clone)]
 pub struct McpClient {
-    child: Arc<Mutex<Child>>,
-    request_id: Arc<Mutex<u64>>,
+    session: Arc<Mutex<McpSession>>,
+    request_id: Arc<AtomicU64>,
+    concurrency: Arc<Semaphore>,
+    limits: McpClientLimits,
     pub command: String,
     pub args: Vec<String>,
 }
 
 impl McpClient {
     /// Start an MCP server subprocess and create a client
-    pub fn new(command: &str, args: &[&str], env: &HashMap<String, String>) -> Result<Self> {
+    pub async fn new(command: &str, args: &[&str], env: &HashMap<String, String>) -> Result<Self> {
+        Self::new_with_limits(command, args, env, McpClientLimits::default()).await
+    }
+
+    async fn new_with_limits(
+        command: &str,
+        args: &[&str],
+        env: &HashMap<String, String>,
+        limits: McpClientLimits,
+    ) -> Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
         for (k, v) in env {
             cmd.env(k, v);
         }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn MCP server: {}", command))?;
-
-        // Initialize the server
-        {
-            let stdin = child.stdin.as_mut().context("failed to get stdin")?;
-            let init_req = JsonRpcRequest {
-                jsonrpc: "2.0".into(),
-                id: 0,
-                method: "initialize".into(),
-                params: Some(serde_json::json!({
+        let stdin = child.stdin.take().context("failed to get MCP stdin")?;
+        let stdout = child.stdout.take().context("failed to get MCP stdout")?;
+        let client = Self {
+            session: Arc::new(Mutex::new(McpSession {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout),
+                transport_state: McpTransportState::Healthy,
+            })),
+            request_id: Arc::new(AtomicU64::new(1)),
+            concurrency: Arc::new(Semaphore::new(1)),
+            limits,
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        client
+            .request_with_timeout(
+                0,
+                "initialize",
+                Some(serde_json::json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
                     "clientInfo": { "name": "openlife", "version": "0.1.0" }
                 })),
-            };
-            Self::send_request_raw(stdin, &init_req)?;
-        }
-
-        // Read initialization response (consume it)
-        {
-            let stdout = child.stdout.as_mut().context("failed to get stdout")?;
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .context("failed to read init response")?;
-            // We could parse and validate, but for now we just consume
-        }
-
-        Ok(Self {
-            child: Arc::new(Mutex::new(child)),
-            request_id: Arc::new(Mutex::new(1)),
-            command: command.to_string(),
-            args: args.iter().map(|s| s.to_string()).collect(),
-        })
-    }
-
-    fn send_request_raw(stdin: &mut std::process::ChildStdin, req: &JsonRpcRequest) -> Result<()> {
-        let json = serde_json::to_string(req)?;
-        writeln!(stdin, "{}", json)?;
-        stdin.flush()?;
-        Ok(())
+                limits.handshake_timeout,
+                None,
+                None,
+            )
+            .await
+            .context("MCP initialize handshake failed")?;
+        client.send_initialized_notification().await?;
+        Ok(client)
     }
 
     fn next_id(&self) -> u64 {
-        let mut id = self.request_id.lock().unwrap();
-        let current = *id;
-        *id += 1;
-        current
+        self.request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn send_initialized_notification(&self) -> Result<()> {
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .context("MCP concurrency semaphore closed")?;
+        let mut session = self.session.lock().await;
+        let in_flight = McpInFlightRequest::begin(&mut session, None)?;
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        let frame = serde_json::to_vec(&notification)?;
+        if frame.len() > self.limits.max_frame_bytes {
+            anyhow::bail!("MCP notification frame exceeds limit");
+        }
+        in_flight.session.stdin.write_all(&frame).await?;
+        in_flight.session.stdin.write_all(b"\n").await?;
+        in_flight.session.stdin.flush().await?;
+        in_flight.complete();
+        Ok(())
+    }
+
+    async fn request_with_timeout(
+        &self,
+        id: u64,
+        method: &str,
+        params: Option<Value>,
+        timeout: std::time::Duration,
+        receipt_tracker: Option<ToolExecutionReceiptTracker>,
+        started_observer: Option<&dyn ToolStartedTransitionObserver>,
+    ) -> Result<JsonRpcResponse> {
+        let tracker_after_timeout = receipt_tracker.clone();
+        let response = tokio::time::timeout(timeout, async move {
+            let _permit = self
+                .concurrency
+                .acquire()
+                .await
+                .context("MCP concurrency semaphore closed")?;
+            let mut session = self.session.lock().await;
+            let in_flight = McpInFlightRequest::begin(&mut session, receipt_tracker)?;
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id,
+                method: method.into(),
+                params,
+            };
+            let dispatch_tracker = in_flight.receipt_tracker.clone();
+            write_json_rpc_request_frame(
+                &mut in_flight.session.stdin,
+                &request,
+                self.limits.max_frame_bytes,
+                dispatch_tracker.as_ref(),
+            )
+            .await?;
+            if let (Some(observer), Some(tracker)) =
+                (started_observer, in_flight.receipt_tracker.as_ref())
+            {
+                observer.after_dispatch(&tracker.snapshot()).await?;
+            }
+            let frame =
+                read_frame_limited(&mut in_flight.session.stdout, self.limits.max_frame_bytes)
+                    .await?;
+            let response: JsonRpcResponse = serde_json::from_slice(&frame)
+                .with_context(|| "invalid bounded MCP JSON response")?;
+            if response.id != id {
+                anyhow::bail!(
+                    "MCP response id mismatch: expected {}, received {}",
+                    id,
+                    response.id
+                );
+            }
+            if response.jsonrpc != "2.0" {
+                anyhow::bail!("MCP response jsonrpc version mismatch");
+            }
+            // A response is observed only after bounded framing, JSON parsing,
+            // protocol version validation, and exact request-id matching.
+            in_flight.mark_response_observed();
+            in_flight.complete();
+            Ok(response)
+        })
+        .await;
+        match response {
+            Ok(response) => response,
+            Err(_) => {
+                if let Some(tracker) = tracker_after_timeout {
+                    if tracker.snapshot().transport_status
+                        != crate::tool_execution_receipt::ToolTransportStatus::NotAttempted
+                    {
+                        tracker.mark_local_aborted();
+                    }
+                    tracker.finish();
+                }
+                Err(anyhow::anyhow!("MCP request '{}' timed out", method))
+            }
+        }
     }
 
     /// List available tools from the MCP server
-    pub fn list_tools(&self) -> Result<Vec<Tool>> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mcp child mutex poison: {}", e))?;
+    pub async fn list_tools(&self) -> Result<Vec<Tool>> {
         let id = self.next_id();
-
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id,
-            method: "tools/list".into(),
-            params: None,
-        };
-
-        let stdin = child.stdin.as_mut().context("stdin unavailable")?;
-        Self::send_request_raw(stdin, &req)?;
-
-        let stdout = child.stdout.as_mut().context("stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .context("failed to read response")?;
-
-        let resp: JsonRpcResponse = serde_json::from_str(&line)
-            .with_context(|| format!("invalid JSON response: {}", line))?;
+        let resp = self
+            .request_with_timeout(id, "tools/list", None, self.limits.list_timeout, None, None)
+            .await?;
 
         if let Some(err) = resp.error {
             return Err(anyhow::anyhow!("MCP error {}: {}", err.code, err.message));
@@ -160,38 +384,59 @@ impl McpClient {
         Ok(tools)
     }
 
-    /// Call a tool with the given arguments
-    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mcp child mutex poison: {}", e))?;
-        let id = self.next_id();
+    #[cfg(test)]
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
+        let (_, request_digest) =
+            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+                "method": "tools/call",
+                "name": name,
+                "arguments": &arguments,
+            }));
+        let tracker = ToolExecutionReceiptTracker::new(
+            None,
+            None,
+            request_digest,
+            ToolActionEffect::Unknown,
+            ToolIdempotencyContract::Unspecified,
+        );
+        self.call_tool_with_receipt_tracker(name, arguments, tracker, None)
+            .await
+    }
 
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id,
-            method: "tools/call".into(),
-            params: Some(serde_json::json!({
+    pub(crate) async fn call_tool_with_receipt_tracker(
+        &self,
+        name: &str,
+        arguments: Value,
+        receipt_tracker: ToolExecutionReceiptTracker,
+        started_observer: Option<&dyn ToolStartedTransitionObserver>,
+    ) -> Result<String> {
+        let id = self.next_id();
+        let response = self
+            .request_with_timeout(
+                id,
+                "tools/call",
+                Some(serde_json::json!({
                 "name": name,
                 "arguments": arguments
-            })),
+                })),
+                self.limits.call_timeout,
+                Some(receipt_tracker.clone()),
+                started_observer,
+            )
+            .await;
+        let resp = match response {
+            Ok(response) => response,
+            Err(error) => {
+                receipt_tracker.mark_effect_unknown_if_dispatched();
+                receipt_tracker.finish();
+                return Err(error);
+            }
         };
 
-        let stdin = child.stdin.as_mut().context("stdin unavailable")?;
-        Self::send_request_raw(stdin, &req)?;
-
-        let stdout = child.stdout.as_mut().context("stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .context("failed to read response")?;
-
-        let resp: JsonRpcResponse = serde_json::from_str(&line)
-            .with_context(|| format!("invalid JSON response: {}", line))?;
-
         if let Some(err) = resp.error {
+            receipt_tracker.mark_execution_failed();
+            receipt_tracker.mark_effect_unknown_if_dispatched();
+            receipt_tracker.finish();
             return Err(anyhow::anyhow!("MCP error {}: {}", err.code, err.message));
         }
 
@@ -208,27 +453,152 @@ impl McpClient {
             })
             .unwrap_or_default();
 
+        receipt_tracker.mark_execution_succeeded();
+        receipt_tracker.mark_effect_confirmed();
+        receipt_tracker.finish();
         Ok(content)
     }
 }
 
-impl Drop for McpClient {
-    fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
+async fn read_frame_limited(
+    reader: &mut BufReader<ChildStdout>,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut frame = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            anyhow::bail!("MCP server closed stdout before a complete response frame");
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |position| position + 1);
+        if frame.len().saturating_add(take) > max_bytes {
+            reader.consume(take);
+            anyhow::bail!("MCP response frame exceeds {} bytes", max_bytes);
+        }
+        frame.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            while matches!(frame.last(), Some(b'\n' | b'\r')) {
+                frame.pop();
+            }
+            if frame.is_empty() {
+                anyhow::bail!("MCP server returned an empty response frame");
+            }
+            return Ok(frame);
         }
     }
 }
 
 pub type BuiltinFn = Box<dyn Fn(Value) -> Result<String> + Send + Sync>;
+type SharedBuiltinFn = Arc<dyn Fn(Value) -> Result<String> + Send + Sync>;
+
+const EXECUTOR_INSTANCE_RETIRED: u64 = 1_u64 << 63;
+const EXECUTOR_INSTANCE_INFLIGHT_MASK: u64 = EXECUTOR_INSTANCE_RETIRED - 1;
+
+/// Cross-snapshot dispatch authority for one concrete callback/client
+/// instance. Registry snapshots share this gate, so replacing or unregistering
+/// the live instance can retire stale snapshots without holding a registry
+/// guard across adapter I/O.
+#[derive(Debug)]
+struct ExecutorInstanceGate {
+    instance_id: String,
+    state: AtomicU64,
+}
+
+impl ExecutorInstanceGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            state: AtomicU64::new(0),
+        })
+    }
+
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn retire(&self) {
+        self.state
+            .fetch_or(EXECUTOR_INSTANCE_RETIRED, Ordering::AcqRel);
+    }
+
+    fn is_retired(&self) -> bool {
+        self.state.load(Ordering::Acquire) & EXECUTOR_INSTANCE_RETIRED != 0
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Result<ExecutorInstanceLease> {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            if current & EXECUTOR_INSTANCE_RETIRED != 0 {
+                anyhow::bail!("mcp_registry_dispatch_instance_retired");
+            }
+            let inflight = current & EXECUTOR_INSTANCE_INFLIGHT_MASK;
+            if inflight == EXECUTOR_INSTANCE_INFLIGHT_MASK {
+                anyhow::bail!("mcp_registry_dispatch_instance_inflight_exhausted");
+            }
+            match self.state.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(ExecutorInstanceLease {
+                        gate: Arc::clone(self),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ExecutorInstanceLease {
+    gate: Arc<ExecutorInstanceGate>,
+}
+
+impl Drop for ExecutorInstanceLease {
+    fn drop(&mut self) {
+        let previous = self.gate.state.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous & EXECUTOR_INSTANCE_INFLIGHT_MASK > 0);
+    }
+}
 
 /// Registry for multiple MCP clients and built-in tools
+#[derive(Clone)]
 pub struct McpRegistry {
     clients: HashMap<String, McpClient>,
+    server_tools: HashMap<String, Vec<Tool>>,
+    server_manifests: HashMap<String, Vec<ToolManifest>>,
     tools_cache: Vec<Tool>,
     privacy_engine: PrivacyEngine,
-    builtins: HashMap<String, BuiltinFn>,
+    builtins: HashMap<String, SharedBuiltinFn>,
     builtin_manifests: Vec<ToolManifest>,
+    registry_generation: u64,
+    execution_instance_gates: HashMap<String, Arc<ExecutorInstanceGate>>,
+}
+
+/// Opaque execution-instance binding captured from one registry snapshot.
+/// A manifest contract may remain byte-for-byte identical while its callback
+/// or MCP client is replaced; this binding makes that replacement observable
+/// to policy/receipt observers. The shared ExecutorInstanceGate remains the
+/// concrete adapter-edge linearization authority after observer awaits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpRegistryDispatchBinding {
+    registry_generation: u64,
+    executor_instance_id: String,
+}
+
+impl McpRegistryDispatchBinding {
+    pub fn registry_generation(&self) -> u64 {
+        self.registry_generation
+    }
+
+    pub fn executor_instance_id(&self) -> &str {
+        &self.executor_instance_id
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -237,6 +607,17 @@ pub struct McpServerInfo {
     pub command: String,
     pub args: Vec<String>,
     pub tool_count: usize,
+}
+
+/// Fully probed registration candidate that has not yet mutated registry
+/// state. Preparing it may spawn a process and await MCP I/O; committing it is
+/// synchronous and is therefore safe to perform while holding a shared
+/// registry mutex.
+pub struct PreparedMcpRegistration {
+    name: String,
+    client: McpClient,
+    tools: Vec<Tool>,
+    manifests: Vec<ToolManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,17 +636,210 @@ pub struct McpArgumentInspection {
     pub requires_confirmation: bool,
 }
 
+fn validate_discovered_tools(tools: &[Tool]) -> Result<()> {
+    for tool in tools {
+        if tool.name.trim().is_empty() {
+            anyhow::bail!("MCP server returned a tool without a name");
+        }
+        if !tool.parameters.is_object() {
+            anyhow::bail!(
+                "MCP tool '{}' returned an invalid parameter schema",
+                tool.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_typed_mcp_manifests(
+    server_name: &str,
+    discovered: &[Tool],
+    manifests: &[ToolManifest],
+) -> Result<()> {
+    if discovered.len() != manifests.len() {
+        anyhow::bail!(
+            "MCP server '{}' manifest count does not match discovered tools",
+            server_name
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for manifest in manifests {
+        if !seen.insert(manifest.name.as_str()) {
+            anyhow::bail!("duplicate typed MCP manifest '{}': rejected", manifest.name);
+        }
+        if !matches!(
+            &manifest.source,
+            ToolSource::Mcp { server_name: source_server } if source_server == server_name
+        ) {
+            anyhow::bail!(
+                "typed MCP manifest '{}' has the wrong server authority",
+                manifest.name
+            );
+        }
+        if manifest.id.trim().is_empty()
+            || manifest.name.trim().is_empty()
+            || manifest.permission_level.trim().is_empty()
+            || manifest.risk_level.trim().is_empty()
+            || manifest.action_type.trim().is_empty()
+            || manifest.capabilities.is_empty()
+            || manifest.idempotency_contract == ToolIdempotencyContract::Unspecified
+            || !manifest.enabled
+            || manifest.declarative_only
+            || manifest
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("migration:name_inferred_contract"))
+        {
+            anyhow::bail!(
+                "typed MCP manifest '{}' is incomplete or non-executable",
+                manifest.name
+            );
+        }
+        let tool = discovered
+            .iter()
+            .find(|tool| tool.name == manifest.name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "typed MCP manifest '{}' was not discovered from server '{}'",
+                    manifest.name,
+                    server_name
+                )
+            })?;
+        if tool.parameters != manifest.parameters {
+            anyhow::bail!(
+                "typed MCP manifest '{}' parameter schema differs from discovery",
+                manifest.name
+            );
+        }
+        crate::agent::tool_gateway::validate_manifest_execution_contract(manifest).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "typed MCP manifest '{}' execution contract is invalid: {error}",
+                    manifest.name
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn registry_execution_instance_key(manifest: &ToolManifest) -> String {
+    format!("{}\0{}\0{}", manifest.source, manifest.id, manifest.name)
+}
+
+fn memory_archive_owner_parameters() -> Value {
+    let owner = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "ownerKind": {
+                "type": "string",
+                "enum": ["memory_lifecycle", "memory_record", "knowledge_note"]
+            },
+            "ownerId": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "required": ["ownerKind", "ownerId"]
+    });
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "owner": owner.clone(),
+            "owners": {
+                "type": "array",
+                "items": owner,
+                "minItems": 1,
+                "maxItems": 200,
+                "uniqueItems": true
+            },
+            "reason": { "type": "string", "maxLength": 512 }
+        },
+        "oneOf": [
+            { "required": ["owner"], "not": { "required": ["owners"] } },
+            { "required": ["owners"], "not": { "required": ["owner"] } }
+        ]
+    })
+}
+
+fn memory_write_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
+            "scope": {
+                "type": "string",
+                "enum": ["global", "workspace", "conversation", "project"]
+            },
+            "category": {
+                "type": "string",
+                "enum": ["fact", "workflow", "preference", "boundary"]
+            },
+            "candidateKind": {
+                "type": "string",
+                "enum": [
+                    "episodic_life_event",
+                    "semantic_user_fact",
+                    "procedural_rule",
+                    "preference",
+                    "identity_or_role"
+                ]
+            }
+        },
+        "required": ["content"]
+    })
+}
+
 impl McpRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
             clients: HashMap::new(),
+            server_tools: HashMap::new(),
+            server_manifests: HashMap::new(),
             tools_cache: Vec::new(),
             privacy_engine: PrivacyEngine::new(),
             builtins: HashMap::new(),
             builtin_manifests: Vec::new(),
+            registry_generation: 0,
+            execution_instance_gates: HashMap::new(),
         };
         reg.register_default_builtins();
         reg
+    }
+
+    /// Build the registry used by the default product release.
+    ///
+    /// Core governed capabilities remain available, including Web, bounded
+    /// file reads, tasks, and Memory proposals. Test utilities and generic
+    /// extension dispatch stay out of the release product path.
+    pub fn new_release_product() -> Self {
+        let mut registry = Self::new();
+        registry.remove_builtin_by_name("builtin_echo");
+        registry.remove_builtin_by_name("mcp.call_tool");
+        registry
+    }
+
+    fn remove_builtin_by_name(&mut self, name: &str) {
+        let removed = self
+            .builtin_manifests
+            .iter()
+            .filter(|manifest| manifest.name == name)
+            .cloned()
+            .collect::<Vec<_>>();
+        for manifest in &removed {
+            if let Some(gate) = self
+                .execution_instance_gates
+                .remove(&registry_execution_instance_key(manifest))
+            {
+                gate.retire();
+            }
+            self.builtins.remove(&manifest.name);
+        }
+        self.builtin_manifests
+            .retain(|manifest| manifest.name != name);
+        if !removed.is_empty() {
+            self.registry_generation = self.registry_generation.saturating_add(1);
+        }
     }
 
     pub(crate) fn register_default_builtins(&mut self) {
@@ -290,6 +864,7 @@ impl McpRegistry {
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::Idempotent,
             tags: vec!["test".into(), "utility".into()],
         };
         self.register_builtin(
@@ -307,6 +882,7 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "lifemodel".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -315,6 +891,7 @@ impl McpRegistry {
             "low",
             vec!["read".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -323,6 +900,7 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "lifemodel".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -331,6 +909,7 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "lifemodel".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -339,6 +918,7 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "memory".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -347,6 +927,7 @@ impl McpRegistry {
             "low",
             vec!["read".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -355,6 +936,7 @@ impl McpRegistry {
             "low",
             vec!["read".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         // Permission tools: let the agent inspect and request tool permissions.
@@ -364,6 +946,7 @@ impl McpRegistry {
             "low",
             vec!["read".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
@@ -372,14 +955,7 @@ impl McpRegistry {
             "medium",
             vec!["read".into()],
             "read",
-        );
-
-        self.register_core_os_tool(
-            "permission.replay_action",
-            "在权限已授权后重放之前被阻断的工具操作",
-            "medium",
-            vec!["write".into()],
-            "write",
+            ToolIdempotencyContract::NonIdempotent,
         );
 
         // snapshot.create is manifest-only until the Version Control executor is configured.
@@ -395,22 +971,27 @@ impl McpRegistry {
             "high",
             vec!["write".into(), "lifemodel".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
         );
 
-        self.register_core_os_tool(
+        self.register_core_os_tool_with_parameters(
             "memory.propose_write",
             "提议写入记忆（生成 Proposal，不直接写入）",
             "medium",
             vec!["write".into(), "memory".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
+            memory_write_parameters(),
         );
 
-        self.register_core_os_tool(
+        self.register_core_os_tool_with_parameters(
             "memory.propose_archive",
             "提议归档记忆（生成 Proposal，不直接归档）",
             "medium",
             vec!["write".into(), "memory".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
+            memory_archive_owner_parameters(),
         );
 
         // Execution Tools: P1 (file, web)
@@ -420,6 +1001,7 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "filesystem".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_execution_tool(
@@ -428,6 +1010,7 @@ impl McpRegistry {
             "high",
             vec!["write".into(), "filesystem".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
         );
 
         self.register_execution_tool(
@@ -436,6 +1019,7 @@ impl McpRegistry {
             "medium",
             vec!["network".into()],
             "network",
+            ToolIdempotencyContract::Idempotent,
         );
 
         self.register_builtin(
@@ -460,6 +1044,7 @@ impl McpRegistry {
                 enabled: true,
                 declarative_only: false,
                 action_type: "read".into(),
+                idempotency_contract: ToolIdempotencyContract::Idempotent,
                 tags: vec!["execution".into(), "web".into()],
             },
             Box::new(|_args| Ok("web.search executed".to_string())),
@@ -488,6 +1073,7 @@ impl McpRegistry {
                 enabled: true,
                 declarative_only: false,
                 action_type: "external_side_effect".into(),
+                idempotency_contract: ToolIdempotencyContract::NonIdempotent,
                 tags: vec!["execution".into(), "mcp_wrapper".into()],
             },
             Box::new(|_args| Ok("mcp.call_tool executed".to_string())),
@@ -502,6 +1088,7 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "calendar".into()],
             "read",
+            ToolIdempotencyContract::Idempotent,
         );
 
         // Execution Tools: P1 proposal-only governed executors.
@@ -511,6 +1098,7 @@ impl McpRegistry {
             "medium",
             vec!["write".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
         );
 
         // email.read remains provider-gated until IMAP config is available.
@@ -522,6 +1110,7 @@ impl McpRegistry {
             "medium",
             vec!["write".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
         );
 
         // P1 task.create_proposal: creates real local tasks via TaskStore
@@ -531,15 +1120,18 @@ impl McpRegistry {
             "medium",
             vec!["write".into()],
             "write",
+            ToolIdempotencyContract::NonIdempotent,
         );
+    }
 
-        // A2A: now P1 with real A2AClient executor
+    pub fn register_dev_a2a_tool(&mut self) {
         self.register_execution_tool(
             "a2a.call_agent",
-            "调用外部 A2A Agent（30s超时+私网拦截）",
+            "开发模式调用已配对的外部 A2A Agent",
             "medium",
-            vec!["write".into(), "network".into()],
-            "write",
+            vec!["external_side_effect".into(), "network".into()],
+            "external_side_effect",
+            ToolIdempotencyContract::NonIdempotent,
         );
     }
 
@@ -551,15 +1143,42 @@ impl McpRegistry {
         risk_level: &str,
         capabilities: Vec<String>,
         action_type: &str,
+        idempotency_contract: ToolIdempotencyContract,
+    ) {
+        self.register_core_os_tool_with_parameters(
+            id,
+            description,
+            risk_level,
+            capabilities,
+            action_type,
+            idempotency_contract,
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        );
+    }
+
+    // The typed built-in manifest registers each risk and capability field explicitly.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
+    fn register_core_os_tool_with_parameters(
+        &mut self,
+        id: &str,
+        description: &str,
+        risk_level: &str,
+        capabilities: Vec<String>,
+        action_type: &str,
+        idempotency_contract: ToolIdempotencyContract,
+        parameters: Value,
     ) {
         let manifest = ToolManifest {
             id: id.into(),
             name: id.into(),
             description: description.into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
+            parameters,
             permission_level: risk_level.into(),
             risk_level: risk_level.into(),
             version: "1.0.0".into(),
@@ -569,6 +1188,7 @@ impl McpRegistry {
             enabled: true,
             declarative_only: false,
             action_type: action_type.into(),
+            idempotency_contract,
             tags: vec!["core_os".into()],
         };
         let id_owned = id.to_string();
@@ -591,6 +1211,7 @@ impl McpRegistry {
         risk_level: &str,
         capabilities: Vec<String>,
         action_type: &str,
+        idempotency_contract: ToolIdempotencyContract,
     ) {
         let manifest = ToolManifest {
             id: id.into(),
@@ -611,6 +1232,7 @@ impl McpRegistry {
             enabled: true,
             declarative_only: false,
             action_type: action_type.into(),
+            idempotency_contract,
             tags: vec!["execution".into()],
         };
         let id_owned = id.to_string();
@@ -641,6 +1263,7 @@ impl McpRegistry {
             enabled: true,
             declarative_only: true,
             action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec!["execution".into(), "manifest_only".into()],
         };
         self.register_builtin(
@@ -656,57 +1279,169 @@ impl McpRegistry {
 
     /// Register a built-in tool with its manifest.
     pub fn register_builtin(&mut self, manifest: ToolManifest, func: BuiltinFn) {
-        self.builtins.insert(manifest.name.clone(), func);
+        let replaced = self
+            .builtin_manifests
+            .iter()
+            .filter(|existing| existing.id == manifest.id || existing.name == manifest.name)
+            .cloned()
+            .collect::<Vec<_>>();
+        for existing in &replaced {
+            if let Some(gate) = self
+                .execution_instance_gates
+                .remove(&registry_execution_instance_key(existing))
+            {
+                gate.retire();
+            }
+            self.builtins.remove(&existing.name);
+        }
+        self.builtin_manifests
+            .retain(|existing| existing.id != manifest.id && existing.name != manifest.name);
+        self.registry_generation = self.registry_generation.saturating_add(1);
+        self.execution_instance_gates.insert(
+            registry_execution_instance_key(&manifest),
+            ExecutorInstanceGate::new(),
+        );
+        self.builtins.insert(manifest.name.clone(), Arc::from(func));
         self.builtin_manifests.push(manifest);
     }
 
     /// Remove built-in tools by source (e.g., remove all plugin tools).
     pub fn remove_builtins_by_source(&mut self, source_filter: impl Fn(&ToolSource) -> bool) {
-        let names_to_remove: Vec<String> = self
+        let removed_manifests = self
             .builtin_manifests
             .iter()
-            .filter(|m| source_filter(&m.source))
-            .map(|m| m.name.clone())
-            .collect();
-        for name in &names_to_remove {
-            self.builtins.remove(name);
+            .filter(|manifest| source_filter(&manifest.source))
+            .cloned()
+            .collect::<Vec<_>>();
+        for manifest in &removed_manifests {
+            if let Some(gate) = self
+                .execution_instance_gates
+                .remove(&registry_execution_instance_key(manifest))
+            {
+                gate.retire();
+            }
+        }
+        for manifest in &removed_manifests {
+            self.builtins.remove(&manifest.name);
         }
         self.builtin_manifests.retain(|m| !source_filter(&m.source));
+        if !removed_manifests.is_empty() {
+            self.registry_generation = self.registry_generation.saturating_add(1);
+        }
     }
 
     /// Register and start an MCP server
-    pub fn register(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
+    pub async fn register(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
         self.register_with_env(name, command, args, &HashMap::new())
+            .await
     }
 
     /// Register and start an MCP server with environment variables.
-    pub fn register_with_env(
+    pub async fn register_with_env(
+        &mut self,
+        _name: &str,
+        _command: &str,
+        _args: &[&str],
+        _env: &HashMap<String, String>,
+    ) -> Result<()> {
+        anyhow::bail!(
+            "MCP registration requires explicit typed manifests; discovered names cannot authorize execution"
+        )
+    }
+
+    pub async fn register_with_env_and_manifests(
         &mut self,
         name: &str,
         command: &str,
         args: &[&str],
         env: &HashMap<String, String>,
+        manifests: Vec<ToolManifest>,
     ) -> Result<()> {
-        let client = McpClient::new(command, args, env)?;
-        let tools = client.list_tools().unwrap_or_default();
-        self.tools_cache.extend(tools);
-        self.clients.insert(name.to_string(), client);
+        if self.clients.contains_key(name) {
+            anyhow::bail!("MCP server '{}' is already registered", name);
+        }
+        let prepared = Self::prepare_registration(name, command, args, env, manifests).await?;
+        self.commit_prepared_registration(prepared)
+    }
+
+    pub async fn prepare_registration(
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &HashMap<String, String>,
+        manifests: Vec<ToolManifest>,
+    ) -> Result<PreparedMcpRegistration> {
+        if name.trim().is_empty() {
+            anyhow::bail!("MCP server name must not be empty");
+        }
+        if manifests.is_empty() {
+            anyhow::bail!("MCP server '{}' has no typed manifest contracts", name);
+        }
+        let client = McpClient::new(command, args, env).await?;
+        let tools = client
+            .list_tools()
+            .await
+            .with_context(|| format!("failed to list tools for MCP server '{}'", name))?;
+        validate_discovered_tools(&tools)?;
+        validate_typed_mcp_manifests(name, &tools, &manifests)?;
+        Ok(PreparedMcpRegistration {
+            name: name.to_string(),
+            client,
+            tools,
+            manifests,
+        })
+    }
+
+    pub fn commit_prepared_registration(
+        &mut self,
+        prepared: PreparedMcpRegistration,
+    ) -> Result<()> {
+        if self.clients.contains_key(&prepared.name) {
+            anyhow::bail!("MCP server '{}' is already registered", prepared.name);
+        }
+        self.registry_generation = self.registry_generation.saturating_add(1);
+        for manifest in &prepared.manifests {
+            self.execution_instance_gates.insert(
+                registry_execution_instance_key(manifest),
+                ExecutorInstanceGate::new(),
+            );
+        }
+        self.server_tools
+            .insert(prepared.name.clone(), prepared.tools);
+        self.server_manifests
+            .insert(prepared.name.clone(), prepared.manifests);
+        self.clients.insert(prepared.name, prepared.client);
+        self.rebuild_tools_cache();
         Ok(())
     }
 
     /// Unregister an MCP server
     pub fn unregister(&mut self, name: &str) -> Result<()> {
-        let removed = self.clients.remove(name);
-        if removed.is_none() {
+        if !self.clients.contains_key(name) {
             return Err(anyhow::anyhow!("server '{}' not found", name));
         }
-        // rebuild tools cache
-        self.tools_cache.clear();
-        for client in self.clients.values() {
-            let tools = client.list_tools().unwrap_or_default();
-            self.tools_cache.extend(tools);
+        if let Some(manifests) = self.server_manifests.get(name) {
+            for manifest in manifests {
+                let key = registry_execution_instance_key(manifest);
+                if let Some(gate) = self.execution_instance_gates.remove(&key) {
+                    gate.retire();
+                }
+            }
         }
+        self.clients.remove(name);
+        self.server_tools.remove(name);
+        self.server_manifests.remove(name);
+        self.registry_generation = self.registry_generation.saturating_add(1);
+        self.rebuild_tools_cache();
         Ok(())
+    }
+
+    fn rebuild_tools_cache(&mut self) {
+        self.tools_cache = self
+            .server_tools
+            .values()
+            .flat_map(|tools| tools.iter().cloned())
+            .collect();
     }
 
     /// List registered servers with metadata
@@ -717,7 +1452,7 @@ impl McpRegistry {
                 name: name.clone(),
                 command: client.command.clone(),
                 args: client.args.clone(),
-                tool_count: client.list_tools().unwrap_or_default().len(),
+                tool_count: self.server_tools.get(name).map_or(0, Vec::len),
             })
             .collect()
     }
@@ -735,34 +1470,47 @@ impl McpRegistry {
             .into_iter()
             .map(ToolManifest::normalized)
             .collect();
-        for (server_name, client) in &self.clients {
-            if let Ok(tools) = client.list_tools() {
-                for tool in tools {
-                    out.push(
-                        ToolManifest {
-                            id: format!("mcp:{}:{}", server_name, tool.name),
-                            name: tool.name.clone(),
-                            description: tool.description.clone(),
-                            parameters: tool.parameters.clone(),
-                            permission_level: String::new(),
-                            risk_level: String::new(),
-                            version: "1.0.0".into(),
-                            source: ToolSource::Mcp {
-                                server_name: server_name.clone(),
-                            },
-                            capabilities: Vec::new(),
-                            requires_confirmation: true,
-                            enabled: true,
-                            declarative_only: false,
-                            action_type: String::new(),
-                            tags: vec!["migration:name_inferred_contract_warning".into()],
-                        }
-                        .normalized(),
-                    );
-                }
+        for manifests in self.server_manifests.values() {
+            for manifest in manifests {
+                out.push(manifest.clone().normalized());
             }
         }
         out
+    }
+
+    pub fn dispatch_binding(&self, manifest: &ToolManifest) -> Result<McpRegistryDispatchBinding> {
+        let exact = self
+            .list_manifests()
+            .into_iter()
+            .filter(|candidate| {
+                candidate.id == manifest.id
+                    && candidate.name == manifest.name
+                    && candidate.source.to_string() == manifest.source.to_string()
+                    && candidate.execution_contract_digest() == manifest.execution_contract_digest()
+            })
+            .collect::<Vec<_>>();
+        let [registered] = exact.as_slice() else {
+            anyhow::bail!("mcp_registry_dispatch_manifest_identity_not_unique");
+        };
+        let executor_instance = self
+            .execution_instance_gates
+            .get(&registry_execution_instance_key(registered))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("mcp_registry_dispatch_instance_missing"))?;
+        if executor_instance.is_retired() {
+            anyhow::bail!("mcp_registry_dispatch_instance_retired");
+        }
+        Ok(McpRegistryDispatchBinding {
+            registry_generation: self.registry_generation,
+            executor_instance_id: executor_instance.instance_id().to_string(),
+        })
+    }
+
+    fn acquire_execution_instance(&self, manifest: &ToolManifest) -> Result<ExecutorInstanceLease> {
+        self.execution_instance_gates
+            .get(&registry_execution_instance_key(manifest))
+            .ok_or_else(|| anyhow::anyhow!("mcp_registry_dispatch_instance_missing"))?
+            .try_acquire()
     }
 
     /// Return manifest snapshots already held by the registry without asking
@@ -791,6 +1539,7 @@ impl McpRegistry {
                 enabled: true,
                 declarative_only: false,
                 action_type: String::new(),
+                idempotency_contract: ToolIdempotencyContract::Unspecified,
                 tags: vec!["migration:name_inferred_contract_warning".into()],
             }
             .normalized()
@@ -798,8 +1547,7 @@ impl McpRegistry {
         out
     }
 
-    /// Execute a manifest by its source.
-    pub fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
+    fn execute_manifest_body(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
         match &manifest.source {
             ToolSource::BuiltIn => {
                 if let Some(func) = self.builtins.get(&manifest.name) {
@@ -811,9 +1559,9 @@ impl McpRegistry {
                     ))
                 }
             }
-            ToolSource::Mcp { server_name } => {
-                self.call_tool_on_server(server_name, &manifest.name, arguments)
-            }
+            ToolSource::Mcp { .. } => Err(anyhow::anyhow!(
+                "MCP manifest execution requires the asynchronous transport"
+            )),
             ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
             ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
                 "Plugin tool '{}' from '{}' requires a configured executor/provider before it can run",
@@ -823,52 +1571,128 @@ impl McpRegistry {
         }
     }
 
-    /// Call a tool by name (searches all registered servers).
-    /// Arguments are desensitized before sending and reconstructed after receiving the result.
-    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
-        // 1. Detect and desensitize arguments
-        let args_str = arguments.to_string();
-        let pii = self.privacy_engine.detect(&args_str);
-        let (desensitized_str, map) = if pii.is_empty() {
-            (args_str, HashMap::new())
-        } else {
-            self.privacy_engine.desensitize(&args_str)
-        };
-        let desensitized_args: Value =
-            serde_json::from_str(&desensitized_str).unwrap_or_else(|_| arguments.clone());
-
-        let mut last_error: Option<anyhow::Error> = None;
-        for client in self.clients.values() {
-            match client.call_tool(name, desensitized_args.clone()) {
-                Ok(result) => {
-                    // 2. Reconstruct any placeholders in the result
-                    let final_result = if map.is_empty() {
-                        result
-                    } else {
-                        self.privacy_engine.reconstruct(&result, &map)
-                    };
-                    return Ok(final_result);
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("not found") || msg.contains("Unknown tool") {
-                        last_error = Some(e);
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("tool {} not found", name)))
+    /// Execute only after the caller owns the concrete instance lease. Keeping
+    /// the lease in the type-level call boundary prevents a future product
+    /// path from bypassing the retire/acquire linearization point.
+    fn execute_manifest_after_instance_acquire(
+        &self,
+        manifest: &ToolManifest,
+        arguments: Value,
+        _instance_lease: &ExecutorInstanceLease,
+    ) -> Result<String> {
+        self.execute_manifest_body(manifest, arguments)
     }
 
-    /// Call a tool on a specific MCP server by name.
-    /// Requires the server to be registered. Returns error if server or tool is not found.
-    pub fn call_tool_on_server(
+    #[cfg(test)]
+    fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
+        self.execute_manifest_body(manifest, arguments)
+    }
+
+    #[cfg(test)]
+    async fn execute_manifest_async(
+        &self,
+        manifest: &ToolManifest,
+        arguments: Value,
+    ) -> Result<String> {
+        let (_, request_digest) =
+            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+                "manifestId": manifest.id,
+                "arguments": &arguments,
+            }));
+        let receipt_tracker = ToolExecutionReceiptTracker::new(
+            None,
+            Some(manifest.id.clone()),
+            request_digest,
+            ToolActionEffect::from_contract(&manifest.action_type, &manifest.capabilities),
+            manifest.idempotency_contract,
+        );
+        self.execute_manifest_async_with_receipt_tracker(manifest, arguments, receipt_tracker, None)
+            .await
+    }
+
+    pub(crate) async fn execute_manifest_async_with_receipt_tracker(
+        &self,
+        manifest: &ToolManifest,
+        arguments: Value,
+        receipt_tracker: ToolExecutionReceiptTracker,
+        started_observer: Option<&dyn ToolStartedTransitionObserver>,
+    ) -> Result<String> {
+        // This atomic instance lease is the concrete adapter-edge
+        // linearization point. A concurrent replacement either retires first
+        // (this attempt fails before the callback/client sees arguments) or
+        // this acquire wins (the in-flight attempt remains bound to the old
+        // instance while replacement affects only subsequent attempts).
+        let instance_lease = self.acquire_execution_instance(manifest)?;
+        match &manifest.source {
+            ToolSource::Mcp { server_name } => {
+                self.call_tool_on_server_after_instance_acquire(
+                    server_name,
+                    &manifest.name,
+                    arguments,
+                    receipt_tracker,
+                    started_observer,
+                    &instance_lease,
+                )
+                .await
+            }
+            ToolSource::BuiltIn => {
+                receipt_tracker.mark_local_dispatch_attempted();
+                let result = self.execute_manifest_after_instance_acquire(
+                    manifest,
+                    arguments,
+                    &instance_lease,
+                );
+                // A local callback return is the first concrete boundary we
+                // can prove. Entering the callback alone remains ambiguous if
+                // it panics, blocks forever, or the owning future is aborted.
+                receipt_tracker.mark_local_dispatch_observed();
+                if let Some(observer) = started_observer {
+                    observer.after_dispatch(&receipt_tracker.snapshot()).await?;
+                }
+                receipt_tracker.mark_response_observed();
+                if result.is_ok() {
+                    receipt_tracker.mark_execution_succeeded();
+                    receipt_tracker.mark_effect_confirmed();
+                } else {
+                    receipt_tracker.mark_execution_failed();
+                    receipt_tracker.mark_effect_unknown_if_dispatched();
+                }
+                receipt_tracker.finish();
+                result
+            }
+            ToolSource::A2A { .. } | ToolSource::Plugin { .. } => {
+                receipt_tracker.finish();
+                self.execute_manifest_after_instance_acquire(manifest, arguments, &instance_lease)
+            }
+        }
+    }
+
+    async fn call_tool_on_server_after_instance_acquire(
         &self,
         server_name: &str,
         name: &str,
         arguments: Value,
+        receipt_tracker: ToolExecutionReceiptTracker,
+        started_observer: Option<&dyn ToolStartedTransitionObserver>,
+        _instance_lease: &ExecutorInstanceLease,
+    ) -> Result<String> {
+        self.call_tool_on_server_with_receipt_tracker_body(
+            server_name,
+            name,
+            arguments,
+            receipt_tracker,
+            started_observer,
+        )
+        .await
+    }
+
+    async fn call_tool_on_server_with_receipt_tracker_body(
+        &self,
+        server_name: &str,
+        name: &str,
+        arguments: Value,
+        receipt_tracker: ToolExecutionReceiptTracker,
+        started_observer: Option<&dyn ToolStartedTransitionObserver>,
     ) -> Result<String> {
         let client = self
             .clients
@@ -887,7 +1711,14 @@ impl McpRegistry {
             serde_json::from_str(&desensitized_str).unwrap_or_else(|_| arguments.clone());
 
         // 2. Execute on the specific server
-        let result = client.call_tool(name, desensitized_args)?;
+        let result = client
+            .call_tool_with_receipt_tracker(
+                name,
+                desensitized_args,
+                receipt_tracker,
+                started_observer,
+            )
+            .await?;
 
         // 3. Reconstruct any placeholders in the result
         let final_result = if map.is_empty() {
@@ -1038,6 +1869,105 @@ fn collect_privacy_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_execution_receipt::ToolExecutionReceipt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct StartedAfterBuiltinCallbackObserver {
+        stage: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolStartedTransitionObserver for StartedAfterBuiltinCallbackObserver {
+        async fn after_dispatch(&self, receipt: &ToolExecutionReceipt) -> Result<()> {
+            anyhow::ensure!(
+                self.stage.load(Ordering::SeqCst) == 1,
+                "tool.started was observed before the builtin callback returned"
+            );
+            anyhow::ensure!(receipt.dispatch_observed);
+            anyhow::ensure!(receipt.dispatched_at.is_some());
+            self.stage.store(2, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FlushNeverCompletesWriter {
+        bytes: Vec<u8>,
+    }
+
+    impl AsyncWrite for FlushNeverCompletesWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buffer: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.bytes.extend_from_slice(buffer);
+            std::task::Poll::Ready(Ok(buffer.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_started_observer_runs_only_after_callback_returns() {
+        let mut registry = McpRegistry::new();
+        let manifest = executor_gate_builtin_manifest("builtin_started_after_callback");
+        let stage = Arc::new(AtomicUsize::new(0));
+        let callback_stage = Arc::clone(&stage);
+        registry.register_builtin(
+            manifest.clone(),
+            Box::new(move |_arguments| {
+                assert_eq!(callback_stage.load(Ordering::SeqCst), 0);
+                callback_stage.store(1, Ordering::SeqCst);
+                Ok("callback-returned".into())
+            }),
+        );
+        let tracker = ToolExecutionReceiptTracker::new(
+            Some("run-builtin-started-after-callback".into()),
+            Some(manifest.id.clone()),
+            "builtin-started-after-callback".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        let observer = StartedAfterBuiltinCallbackObserver {
+            stage: Arc::clone(&stage),
+        };
+
+        let result = registry
+            .execute_manifest_async_with_receipt_tracker(
+                &manifest,
+                serde_json::json!({}),
+                tracker.clone(),
+                Some(&observer),
+            )
+            .await
+            .expect("execute builtin callback");
+
+        assert_eq!(result, "callback-returned");
+        assert_eq!(stage.load(Ordering::SeqCst), 2);
+        let receipt = tracker.snapshot();
+        assert!(receipt.dispatch_observed);
+        assert_eq!(
+            receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::ResponseObserved
+        );
+        receipt
+            .mechanically_valid_terminal()
+            .expect("builtin callback receipt is mechanically valid");
+    }
 
     fn legacy_product_copy_regex() -> regex::Regex {
         let terms = [
@@ -1048,6 +1978,200 @@ mod tests {
             ["declarative", "only"].join("-"),
         ];
         regex::Regex::new(&terms.join("|")).expect("legacy product copy regex")
+    }
+
+    #[tokio::test]
+    async fn mcp_delimiter_write_is_dispatch_even_when_following_flush_never_finishes() {
+        let mut writer = FlushNeverCompletesWriter::default();
+        let tracker = ToolExecutionReceiptTracker::new(
+            Some("run-flush-window".into()),
+            Some("mcp:test:flush-window".into()),
+            "request-digest-flush-window".into(),
+            ToolActionEffect::ExternalMutation,
+            ToolIdempotencyContract::NonIdempotent,
+        );
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: 7,
+            method: "tools/call".into(),
+            params: Some(serde_json::json!({"name":"side_effect"})),
+        };
+
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            write_json_rpc_request_frame(
+                &mut writer,
+                &request,
+                MCP_MAX_FRAME_BYTES,
+                Some(&tracker),
+            ),
+        )
+        .await;
+        assert!(timed_out.is_err(), "test writer must remain stuck in flush");
+        assert!(
+            writer.bytes.ends_with(b"\n"),
+            "the peer-visible frame delimiter crossed the pipe boundary"
+        );
+
+        let dispatched = tracker.snapshot();
+        assert_eq!(
+            dispatched.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::Dispatched
+        );
+        assert_eq!(
+            dispatched.dispatch_kind,
+            crate::tool_execution_receipt::ToolDispatchKind::McpStdio
+        );
+        assert_eq!(dispatched.dispatch_attempt_count, 1);
+        assert!(dispatched.dispatched_at.is_some());
+        assert!(dispatched.response_observed_at.is_none());
+
+        tracker.mark_local_aborted();
+        tracker.finish();
+        let terminal = tracker.snapshot();
+        assert_eq!(
+            terminal.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::RemoteUnknown
+        );
+        assert_eq!(
+            terminal.effect_status,
+            crate::tool_execution_receipt::ToolEffectStatus::Unknown
+        );
+        assert!(!terminal.automatic_retry_safe());
+        terminal
+            .mechanically_valid_terminal()
+            .expect("flush-window cancellation must produce a valid unknown receipt");
+    }
+
+    #[test]
+    fn memory_write_manifest_exposes_the_reviewed_candidate_contract() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "memory.propose_write")
+            .expect("memory write manifest");
+
+        assert_eq!(manifest.parameters["type"], serde_json::json!("object"));
+        assert_eq!(
+            manifest.parameters["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            manifest.parameters["required"],
+            serde_json::json!(["content"])
+        );
+        assert_eq!(
+            manifest.parameters["properties"]["content"]["maxLength"],
+            serde_json::json!(65536)
+        );
+        assert!(manifest.parameters["properties"]["candidateKind"]["enum"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == "identity_or_role")));
+    }
+
+    #[test]
+    fn memory_archive_manifest_requires_typed_canonical_owners() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "memory.propose_archive")
+            .expect("memory archive manifest");
+
+        assert_eq!(manifest.parameters["type"], serde_json::json!("object"));
+        assert_eq!(
+            manifest.parameters["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            manifest.parameters["properties"]["owner"]["required"],
+            serde_json::json!(["ownerKind", "ownerId"])
+        );
+        assert_eq!(
+            manifest.parameters["properties"]["owners"]["minItems"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            manifest.parameters["properties"]["owners"]["maxItems"],
+            serde_json::json!(200)
+        );
+        assert_eq!(manifest.parameters["oneOf"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn typed_mcp_manifest_without_idempotency_contract_is_rejected_at_registration_boundary() {
+        let parameters = serde_json::json!({"type": "object"});
+        let discovered = vec![Tool {
+            name: "typed.read".into(),
+            description: "Typed read".into(),
+            parameters: parameters.clone(),
+        }];
+        let manifests = vec![ToolManifest {
+            id: "mcp:typed:typed.read".into(),
+            name: "typed.read".into(),
+            description: "Typed read".into(),
+            parameters,
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::Mcp {
+                server_name: "typed".into(),
+            },
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::Unspecified,
+            tags: vec!["typed_contract".into()],
+        }];
+
+        let error = validate_typed_mcp_manifests("typed", &discovered, &manifests)
+            .expect_err("missing idempotency is an incomplete MCP manifest")
+            .to_string();
+        assert!(error.contains("incomplete or non-executable"));
+    }
+
+    #[test]
+    fn typed_mcp_manifest_with_unknown_permission_risk_or_action_is_rejected_at_registration_boundary(
+    ) {
+        let parameters = serde_json::json!({"type": "object"});
+        let discovered = vec![Tool {
+            name: "typed.read".into(),
+            description: "Typed read".into(),
+            parameters: parameters.clone(),
+        }];
+        for (permission_level, risk_level, action_type) in [
+            ("mystery", "low", "read"),
+            ("low", "mystery", "read"),
+            ("low", "low", "mystery"),
+        ] {
+            let manifest = ToolManifest {
+                id: "mcp:typed:typed.read".into(),
+                name: "typed.read".into(),
+                description: "Typed read".into(),
+                parameters: parameters.clone(),
+                permission_level: permission_level.into(),
+                risk_level: risk_level.into(),
+                version: "1.0.0".into(),
+                source: ToolSource::Mcp {
+                    server_name: "typed".into(),
+                },
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: action_type.into(),
+                idempotency_contract: ToolIdempotencyContract::Idempotent,
+                tags: vec!["typed_contract".into()],
+            };
+
+            let error = validate_typed_mcp_manifests("typed", &discovered, &[manifest])
+                .expect_err("unknown typed execution vocabulary must fail at registration")
+                .to_string();
+            assert!(error.contains("execution contract is invalid"));
+        }
     }
 
     #[test]
@@ -1072,6 +2196,23 @@ mod tests {
             violations.is_empty(),
             "legacy product terms leaked in MCP manifest copy: {violations:?}"
         );
+    }
+
+    #[test]
+    fn release_product_registry_keeps_core_capabilities_without_extension_dispatch() {
+        let registry = McpRegistry::new_release_product();
+        let names = registry
+            .list_manifests()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(names.contains("web.search"));
+        assert!(names.contains("file.read"));
+        assert!(names.contains("memory.propose_write"));
+        assert!(!names.contains("builtin_echo"));
+        assert!(!names.contains("mcp.call_tool"));
+        assert!(!names.contains("a2a.call_agent"));
     }
 
     #[test]
@@ -1107,6 +2248,7 @@ mod tests {
             enabled: true,
             declarative_only: true,
             action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
             tags: vec!["read".into(), "manifest_only".into()],
         };
         copies.push(
@@ -1184,5 +2326,705 @@ mod tests {
         let prompt = registry.tools_prompt();
         assert!(prompt.contains("web.search"));
         assert!(prompt.contains("\"query\""));
+    }
+
+    fn test_limits() -> McpClientLimits {
+        McpClientLimits {
+            handshake_timeout: std::time::Duration::from_secs(2),
+            list_timeout: std::time::Duration::from_secs(2),
+            call_timeout: std::time::Duration::from_millis(200),
+            max_frame_bytes: 4096,
+        }
+    }
+
+    fn executor_gate_builtin_manifest(name: &str) -> ToolManifest {
+        let mut manifest = ToolManifest::new(
+            name,
+            "Executor instance gate test.",
+            serde_json::json!({"type": "object"}),
+            "low",
+            "1",
+            ToolSource::BuiltIn,
+        )
+        .with_capabilities(vec!["read".into()])
+        .with_idempotency_contract(ToolIdempotencyContract::Idempotent);
+        manifest.action_type = "read".into();
+        manifest
+    }
+
+    #[tokio::test]
+    async fn executor_instance_gate_linearizes_builtin_replacement_at_adapter_edge() {
+        use std::sync::atomic::AtomicUsize;
+
+        // A: replacement retires first. The stale registry snapshot cannot
+        // pass arguments to either the old or replacement callback and its
+        // receipt remains pre-dispatch.
+        let stale_count = Arc::new(AtomicUsize::new(0));
+        let replacement_count = Arc::new(AtomicUsize::new(0));
+        let mut live = McpRegistry::new();
+        let manifest = executor_gate_builtin_manifest("executor_gate_retire_wins");
+        let stale_counter = Arc::clone(&stale_count);
+        live.register_builtin(
+            manifest.clone(),
+            Box::new(move |_arguments| {
+                stale_counter.fetch_add(1, Ordering::SeqCst);
+                Ok("stale".into())
+            }),
+        );
+        let snapshot = live.clone();
+        let snapshot_manifest = snapshot
+            .list_manifests()
+            .into_iter()
+            .find(|candidate| candidate.id == manifest.id)
+            .expect("snapshot manifest");
+        let stale_binding = snapshot
+            .dispatch_binding(&snapshot_manifest)
+            .expect("snapshot binding");
+        let replacement_counter = Arc::clone(&replacement_count);
+        live.register_builtin(
+            snapshot_manifest.clone(),
+            Box::new(move |_arguments| {
+                replacement_counter.fetch_add(1, Ordering::SeqCst);
+                Ok("replacement".into())
+            }),
+        );
+        let live_manifest = live
+            .list_manifests()
+            .into_iter()
+            .find(|candidate| candidate.id == manifest.id)
+            .expect("replacement manifest");
+        let live_binding = live
+            .dispatch_binding(&live_manifest)
+            .expect("replacement binding");
+        assert_ne!(
+            stale_binding.executor_instance_id(),
+            live_binding.executor_instance_id()
+        );
+        let rejected_tracker = ToolExecutionReceiptTracker::new(
+            Some("run-executor-gate-retire-wins".into()),
+            Some(snapshot_manifest.id.clone()),
+            "request-digest-executor-gate-retire-wins".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        let error = snapshot
+            .execute_manifest_async_with_receipt_tracker(
+                &snapshot_manifest,
+                serde_json::json!({"secret": "must-not-cross"}),
+                rejected_tracker.clone(),
+                None,
+            )
+            .await
+            .expect_err("retired snapshot must fail before callback dispatch")
+            .to_string();
+        assert!(error.contains("mcp_registry_dispatch_instance_retired"));
+        assert_eq!(stale_count.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement_count.load(Ordering::SeqCst), 0);
+        let rejected_receipt = rejected_tracker.snapshot();
+        assert_eq!(rejected_receipt.dispatch_attempt_count, 0);
+        assert_eq!(
+            rejected_receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::NotAttempted
+        );
+
+        // B: acquire wins. This directly exercises only the continuation below
+        // the production acquire point (not a second full-path race): the one
+        // invocation is already linearized against the old instance,
+        // replacement returns immediately, and only later attempts are
+        // affected.
+        let old_count = Arc::new(AtomicUsize::new(0));
+        let next_count = Arc::new(AtomicUsize::new(0));
+        let mut live = McpRegistry::new();
+        let manifest = executor_gate_builtin_manifest("executor_gate_acquire_wins");
+        let old_counter = Arc::clone(&old_count);
+        live.register_builtin(
+            manifest.clone(),
+            Box::new(move |_arguments| {
+                old_counter.fetch_add(1, Ordering::SeqCst);
+                Ok("old-linearized".into())
+            }),
+        );
+        let snapshot = live.clone();
+        let snapshot_manifest = snapshot
+            .list_manifests()
+            .into_iter()
+            .find(|candidate| candidate.id == manifest.id)
+            .expect("snapshot manifest");
+        let instance_lease = snapshot
+            .acquire_execution_instance(&snapshot_manifest)
+            .expect("old instance acquire wins before replacement");
+        let next_counter = Arc::clone(&next_count);
+        live.register_builtin(
+            snapshot_manifest.clone(),
+            Box::new(move |_arguments| {
+                next_counter.fetch_add(1, Ordering::SeqCst);
+                Ok("next".into())
+            }),
+        );
+        assert_eq!(
+            snapshot
+                .execute_manifest_after_instance_acquire(
+                    &snapshot_manifest,
+                    serde_json::json!({"authorized": true}),
+                    &instance_lease,
+                )
+                .expect("already-acquired old instance may finish"),
+            "old-linearized"
+        );
+        drop(instance_lease);
+        assert_eq!(old_count.load(Ordering::SeqCst), 1);
+        assert_eq!(next_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn async_stdio_transport_completes_handshake_list_and_call() {
+        let script = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+    elif method == 'tools/list':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'tools':[{'name':'echo','description':'echo','parameters':{'type':'object'}}]}}), flush=True)
+    elif method == 'tools/call':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'content':[{'type':'text','text':'pong'}]}}), flush=True)
+"#;
+        let client = McpClient::new_with_limits(
+            "python3",
+            &["-u", "-c", script],
+            &HashMap::new(),
+            test_limits(),
+        )
+        .await
+        .unwrap();
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        let receipt_tracker = crate::tool_execution_receipt::ToolExecutionReceiptTracker::new(
+            Some("run-successful-mcp".into()),
+            Some("mcp:test:echo".into()),
+            "request-digest-success".into(),
+            crate::tool_execution_receipt::ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        assert_eq!(
+            client
+                .call_tool_with_receipt_tracker(
+                    "echo",
+                    serde_json::json!({"value": "ping"}),
+                    receipt_tracker.clone(),
+                    None,
+                )
+                .await
+                .unwrap(),
+            "pong"
+        );
+        let receipt = receipt_tracker.snapshot();
+        assert_eq!(
+            receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::ResponseObserved
+        );
+        assert_eq!(
+            receipt.effect_status,
+            crate::tool_execution_receipt::ToolEffectStatus::NotAttempted
+        );
+        assert!(receipt.dispatched_at.is_some());
+        assert!(receipt.response_observed_at.is_some());
+        assert_eq!(
+            client
+                .call_tool("echo", serde_json::json!({"value": "second"}))
+                .await
+                .unwrap(),
+            "pong",
+            "a fully matched response keeps the transport reusable"
+        );
+    }
+
+    fn executor_gate_mcp_manifest(server_name: &str) -> ToolManifest {
+        ToolManifest {
+            id: format!("mcp:{server_name}:echo"),
+            name: "echo".into(),
+            description: "Echo bounded text".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}}
+            }),
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::Mcp {
+                server_name: server_name.into(),
+            },
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::Idempotent,
+            tags: vec!["read".into()],
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_instance_gate_linearizes_mcp_unregister_at_adapter_edge() {
+        let script = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+    elif method == 'tools/list':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'tools':[{'name':'echo','description':'echo','parameters':{'type':'object','properties':{'text':{'type':'string'}}}}]}}), flush=True)
+    elif method == 'tools/call':
+        text = message.get('params', {}).get('arguments', {}).get('text', '')
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'content':[{'type':'text','text':text}]}}), flush=True)
+"#;
+
+        // A: unregister retires first, so the stale snapshot never writes a
+        // tools/call frame and its receipt remains pre-dispatch.
+        let mut live = McpRegistry::new();
+        let args = ["-u", "-c", script];
+        live.register_with_env_and_manifests(
+            "gate-retire-wins",
+            "python3",
+            &args,
+            &HashMap::new(),
+            vec![executor_gate_mcp_manifest("gate-retire-wins")],
+        )
+        .await
+        .expect("register MCP gate fixture");
+        let snapshot = live.clone();
+        let manifest = snapshot
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.id == "mcp:gate-retire-wins:echo")
+            .expect("MCP snapshot manifest");
+        live.unregister("gate-retire-wins")
+            .expect("retire live MCP instance");
+        let rejected_tracker = ToolExecutionReceiptTracker::new(
+            Some("run-mcp-gate-retire-wins".into()),
+            Some(manifest.id.clone()),
+            "request-digest-mcp-gate-retire-wins".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        let error = snapshot
+            .execute_manifest_async_with_receipt_tracker(
+                &manifest,
+                serde_json::json!({"text": "must-not-cross"}),
+                rejected_tracker.clone(),
+                None,
+            )
+            .await
+            .expect_err("retired MCP snapshot must fail before transport")
+            .to_string();
+        assert!(error.contains("mcp_registry_dispatch_instance_retired"));
+        let rejected_receipt = rejected_tracker.snapshot();
+        assert_eq!(rejected_receipt.dispatch_attempt_count, 0);
+        assert_eq!(
+            rejected_receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::NotAttempted
+        );
+
+        // B: acquire wins. This directly exercises the MCP continuation below
+        // the production acquire point (not a second full-path race):
+        // unregister does not wait for the remote call, and the
+        // already-linearized snapshot may complete exactly that call.
+        let mut live = McpRegistry::new();
+        live.register_with_env_and_manifests(
+            "gate-acquire-wins",
+            "python3",
+            &args,
+            &HashMap::new(),
+            vec![executor_gate_mcp_manifest("gate-acquire-wins")],
+        )
+        .await
+        .expect("register second MCP gate fixture");
+        let snapshot = live.clone();
+        let manifest = snapshot
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.id == "mcp:gate-acquire-wins:echo")
+            .expect("second MCP snapshot manifest");
+        let instance_lease = snapshot
+            .acquire_execution_instance(&manifest)
+            .expect("MCP instance acquire wins before unregister");
+        live.unregister("gate-acquire-wins")
+            .expect("unregister returns without waiting on in-flight lease");
+        let accepted_tracker = ToolExecutionReceiptTracker::new(
+            Some("run-mcp-gate-acquire-wins".into()),
+            Some(manifest.id.clone()),
+            "request-digest-mcp-gate-acquire-wins".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+        assert_eq!(
+            snapshot
+                .call_tool_on_server_after_instance_acquire(
+                    "gate-acquire-wins",
+                    "echo",
+                    serde_json::json!({"text": "already-authorized"}),
+                    accepted_tracker.clone(),
+                    None,
+                    &instance_lease,
+                )
+                .await
+                .expect("already-acquired MCP instance may finish"),
+            "already-authorized"
+        );
+        drop(instance_lease);
+        assert_eq!(accepted_tracker.snapshot().dispatch_attempt_count, 1);
+    }
+
+    #[tokio::test]
+    async fn registry_requires_typed_contract_executes_mcp_and_issues_bound_content_receipt() {
+        let script = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+    elif method == 'tools/list':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'tools':[{'name':'echo','description':'echo','parameters':{'type':'object','properties':{'text':{'type':'string'}}}}]}}), flush=True)
+    elif method == 'tools/call':
+        text = message.get('params', {}).get('arguments', {}).get('text', '')
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'content':[{'type':'text','text':text}]}}), flush=True)
+"#;
+        let mut registry = McpRegistry::new();
+        let args = ["-u", "-c", script];
+        let missing_contract_error = registry
+            .register_with_env("test", "python3", &args, &HashMap::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing_contract_error.contains("typed manifests"));
+
+        let manifest = ToolManifest {
+            id: "mcp:test:echo".into(),
+            name: "echo".into(),
+            description: "Echo bounded text".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}}
+            }),
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::Mcp {
+                server_name: "test".into(),
+            },
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::Idempotent,
+            tags: vec!["typed_contract".into()],
+        };
+        registry
+            .register_with_env_and_manifests(
+                "test",
+                "python3",
+                &args,
+                &HashMap::new(),
+                vec![manifest.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .execute_manifest_async(&manifest, serde_json::json!({"text": "verified"}))
+                .await
+                .unwrap(),
+            "verified"
+        );
+
+        let permissions = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        permissions
+            .grant(
+                "echo",
+                "mcp:test",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let audit = crate::mcp_audit::McpAuditStore::new(audit_dir.path().join("audit.db"));
+        let privacy = PrivacyEngine::new();
+        let agent_run_store = crate::agent::AgentRunStore::new_in_memory().unwrap();
+        let mut agent_run = crate::agent::AgentRun::new_chat_run("mcp-real-chain-test", "");
+        agent_run_store.create_run(&agent_run).unwrap();
+        let context = crate::agent::ActionExecutionContext::new(
+            &registry,
+            &permissions,
+            &audit,
+            &privacy,
+            &[],
+        )
+        .with_agent_run_store(&agent_run_store);
+        let result = crate::agent::ToolGateway::from_executor_config(Default::default())
+            .execute(
+                crate::agent::AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "echo".into(),
+                    input: serde_json::json!({"arguments": {"text": "gateway-verified"}}),
+                    source_run_id: Some(agent_run.id.clone()),
+                    step_index: 0,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status,
+            crate::agent::ActionExecutionStatus::Succeeded
+        );
+        assert!(result.observation.content.contains("gateway-verified"));
+        assert!(result
+            .action
+            .react_trace
+            .as_ref()
+            .and_then(|trace| trace.output_receipt.as_ref())
+            .is_some());
+        assert!(result.observation.react_trace.is_none());
+        let mut forged_run = agent_run.clone();
+        forged_run.actions.push(result.action.clone());
+        let mut forged_observation = result.observation.clone();
+        forged_observation
+            .structured_result
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("gateway structured evidence")
+            .insert("gatewayEvidenceTampered".into(), serde_json::json!(true));
+        forged_run.observations.push(forged_observation);
+        let error = agent_run_store
+            .update_run(&forged_run)
+            .expect_err("post-gateway semantic mutation must invalidate the final binding")
+            .to_string();
+        assert!(error.contains("canonical_binding_invalid"), "{error}");
+        agent_run.actions.push(result.action);
+        agent_run.observations.push(result.observation);
+        agent_run_store.update_run(&agent_run).unwrap();
+        let persisted = agent_run_store.get_run(&agent_run.id).unwrap().unwrap();
+        assert!(persisted.actions[0]
+            .react_trace
+            .as_ref()
+            .and_then(|trace| trace.output_receipt.as_ref())
+            .is_some());
+        assert!(persisted.observations[0].react_trace.is_none());
+        assert_eq!(audit.list_logs(10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hung_mcp_call_is_bounded_by_transport_timeout() {
+        let script = r#"
+import json, sys, time
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+    elif method == 'tools/call':
+        time.sleep(30)
+"#;
+        let client = McpClient::new_with_limits(
+            "python3",
+            &["-u", "-c", script],
+            &HashMap::new(),
+            test_limits(),
+        )
+        .await
+        .unwrap();
+        let receipt_tracker = crate::tool_execution_receipt::ToolExecutionReceiptTracker::new(
+            Some("run-hung-mcp".into()),
+            Some("mcp:test:hang".into()),
+            "request-digest-hung".into(),
+            crate::tool_execution_receipt::ToolActionEffect::ExternalMutation,
+            ToolIdempotencyContract::NonIdempotent,
+        );
+        let started = std::time::Instant::now();
+        let error = client
+            .call_tool_with_receipt_tracker(
+                "hang",
+                serde_json::json!({}),
+                receipt_tracker.clone(),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let receipt = receipt_tracker.snapshot();
+        assert_eq!(
+            receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::RemoteUnknown
+        );
+        assert_eq!(
+            receipt.effect_status,
+            crate::tool_execution_receipt::ToolEffectStatus::Unknown
+        );
+        assert!(receipt.dispatched_at.is_some());
+        assert!(receipt.response_observed_at.is_none());
+
+        let retry_started = std::time::Instant::now();
+        let retry_error = client
+            .call_tool("after-timeout", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(retry_error.contains("transport is unavailable"));
+        assert!(
+            retry_started.elapsed() < std::time::Duration::from_secs(1),
+            "a timed-out transport must fail closed instead of waiting for or consuming a late frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_dispatch_guard_drop_stays_not_attempted_and_finishes_receipt() {
+        let script = r#"
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('method') == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+"#;
+        let client = McpClient::new_with_limits(
+            "python3",
+            &["-u", "-c", script],
+            &HashMap::new(),
+            test_limits(),
+        )
+        .await
+        .unwrap();
+        let tracker = crate::tool_execution_receipt::ToolExecutionReceiptTracker::new(
+            Some("run-pre-dispatch-drop".into()),
+            Some("mcp:test:pre-dispatch".into()),
+            "request-digest-pre-dispatch".into(),
+            crate::tool_execution_receipt::ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::Idempotent,
+        );
+
+        {
+            let mut session = client.session.lock().await;
+            let guard = McpInFlightRequest::begin(&mut session, Some(tracker.clone())).unwrap();
+            drop(guard);
+            assert_eq!(session.transport_state, McpTransportState::Poisoned);
+        }
+
+        let receipt = tracker.snapshot();
+        assert_eq!(
+            receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::NotAttempted
+        );
+        assert_eq!(
+            receipt.effect_status,
+            crate::tool_execution_receipt::ToolEffectStatus::NotAttempted
+        );
+        assert!(receipt.dispatched_at.is_none());
+        assert!(receipt.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn caller_cancellation_poisons_transport_before_a_late_response_can_be_reused() {
+        let marker_dir = tempfile::tempdir().unwrap();
+        let marker = marker_dir.path().join("request-observed");
+        let script = r#"
+import json, os, sys, time
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
+    elif method == 'tools/call':
+        with open(os.environ['MCP_TEST_MARKER'], 'w', encoding='utf-8') as marker:
+            marker.write(str(message['id']))
+        time.sleep(1)
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'content':[{'type':'text','text':'late'}]}}), flush=True)
+"#;
+        let mut env = HashMap::new();
+        env.insert(
+            "MCP_TEST_MARKER".to_string(),
+            marker.to_string_lossy().into_owned(),
+        );
+        let limits = McpClientLimits {
+            call_timeout: std::time::Duration::from_secs(5),
+            ..test_limits()
+        };
+        let client = McpClient::new_with_limits("python3", &["-u", "-c", script], &env, limits)
+            .await
+            .unwrap();
+        let receipt_tracker = crate::tool_execution_receipt::ToolExecutionReceiptTracker::new(
+            Some("run-cancelled-mcp".into()),
+            Some("mcp:test:slow".into()),
+            "request-digest-cancelled".into(),
+            crate::tool_execution_receipt::ToolActionEffect::ExternalMutation,
+            ToolIdempotencyContract::NonIdempotent,
+        );
+        let call_client = client.clone();
+        let call_receipt_tracker = receipt_tracker.clone();
+        let call = tokio::spawn(async move {
+            call_client
+                .call_tool_with_receipt_tracker(
+                    "slow",
+                    serde_json::json!({}),
+                    call_receipt_tracker,
+                    None,
+                )
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the server observes the request before the caller cancels it");
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        let receipt = receipt_tracker.snapshot();
+        assert_eq!(
+            receipt.transport_status,
+            crate::tool_execution_receipt::ToolTransportStatus::RemoteUnknown
+        );
+        assert_eq!(
+            receipt.effect_status,
+            crate::tool_execution_receipt::ToolEffectStatus::Unknown
+        );
+        assert!(receipt.dispatched_at.is_some());
+        assert!(receipt.finished_at.is_some());
+
+        let error = client
+            .call_tool("next", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("transport is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn oversized_mcp_frame_is_rejected_during_handshake() {
+        let script = r#"
+import json, sys
+message = json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'padding':'x' * 8192}}), flush=True)
+"#;
+        let error = McpClient::new_with_limits(
+            "python3",
+            &["-u", "-c", script],
+            &HashMap::new(),
+            test_limits(),
+        )
+        .await
+        .err()
+        .expect("oversized frame must fail")
+        .to_string();
+        assert!(error.contains("handshake failed"));
     }
 }

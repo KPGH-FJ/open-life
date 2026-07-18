@@ -109,7 +109,7 @@ export function MainTabs() {
   );
 }
 
-function SecondaryToolsMenu() {
+function SecondaryToolsMenu({ devExtensionsEnabled }: { devExtensionsEnabled: boolean }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const location = useLocation();
@@ -129,6 +129,13 @@ function SecondaryToolsMenu() {
   useEffect(() => {
     setOpen(false);
   }, [location.pathname]);
+
+  const routeGroups = ADVANCED_PRODUCT_ROUTE_GROUPS.map(group => ({
+    ...group,
+    items: group.items.filter(
+      item => devExtensionsEnabled || (item.path !== "/mcp" && item.path !== "/a2a")
+    ),
+  })).filter(group => group.items.length > 0);
 
   return (
     <div className="relative" onKeyDown={handleKeyDown}>
@@ -152,7 +159,7 @@ function SecondaryToolsMenu() {
           <div className="px-3 pb-1 pt-1 text-[11px] font-semibold text-stone-500">
             Technical surfaces
           </div>
-          {ADVANCED_PRODUCT_ROUTE_GROUPS.map(group => (
+          {routeGroups.map(group => (
             <div key={group.label} className="py-1">
               <div className="px-3 pb-1 pt-1 text-[11px] font-semibold text-stone-400">
                 {group.label}
@@ -187,6 +194,7 @@ export default function ProductShell({
   safeModeReason,
 }: ProductShellProps) {
   const badgeLabel = runtimeBadgeLabel(diagnostics);
+  const devExtensionsEnabled = diagnostics?.runtime_build_info?.devExtensionsEnabled === true;
 
   return (
     <div className="h-screen min-h-0 overflow-hidden bg-[#f5f6f2] text-stone-950">
@@ -207,7 +215,7 @@ export default function ProductShell({
                   <span className="truncate">{badgeLabel}</span>
                 </div>
               )}
-              <SecondaryToolsMenu />
+              <SecondaryToolsMenu devExtensionsEnabled={devExtensionsEnabled} />
             </div>
           </div>
         </header>

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import OverviewTab from "./OverviewTab";
@@ -122,6 +122,17 @@ describe("OverviewTab", () => {
 
   const baseProps = {
     diagnostics: defaultDiagnostics as any,
+    providerPrivacyBoundary: {
+      routeType: "auto",
+      externalTransmission: "possible",
+      providerLabel: "DeepSeek",
+      modelLabel: "deepseek-chat",
+      privacyLabel:
+        "cloud route configured; external transmission is possible, not proven by this summary",
+      risk: "medium",
+      localOnlyRequired: false,
+      evidenceRefs: [],
+    } as any,
     projection: defaultProjection as any,
     safeMode: false,
     exportLoading: false,
@@ -156,6 +167,37 @@ describe("OverviewTab", () => {
     expect(screen.getByText(/恢复控制台/)).toBeInTheDocument();
   });
 
+  it("shows metadata-only credential recovery status and requires restart", async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "recover_required_credential_access") {
+        return {
+          items: [
+            { purpose: "agent_run_receipts", status: "available" },
+            { purpose: "main_chat_events", status: "available" },
+            { purpose: "action_queue", status: "available" },
+            { purpose: "task_store", status: "available" },
+          ],
+          allRequiredCredentialsReady: true,
+          restartRequired: true,
+        };
+      }
+      return mockInvoke(command);
+    });
+    render(
+      <MemoryRouter>
+        <OverviewTab {...baseProps} safeMode={true} />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "解锁或初始化系统密钥" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/系统密钥已可访问，请完全退出并重启/)).toBeInTheDocument()
+    );
+    expect(screen.getByText(/Agent 运行回执：可访问 \(available\)/)).toBeInTheDocument();
+    expect(screen.getByText(/前端不会读取或显示密钥/)).toBeInTheDocument();
+  });
+
   it("shows core link ready text when diagnostics is ok", () => {
     render(
       <MemoryRouter>
@@ -170,6 +212,20 @@ describe("OverviewTab", () => {
       <MemoryRouter>
         <OverviewTab
           {...baseProps}
+          providerPrivacyBoundary={
+            {
+              routeType: "auto",
+              externalTransmission: "possible",
+              providerLabel: "DeepSeek",
+              modelLabel: "deepseek-chat",
+              privacyLabel:
+                "cloud route configured but validation is not ready; transmission status remains possible",
+              risk: "medium",
+              localOnlyRequired: false,
+              blockedReason: "Provider validation is unvalidated; cloud route is not proven ready.",
+              evidenceRefs: [],
+            } as any
+          }
           diagnostics={
             {
               ...defaultDiagnostics,
@@ -200,8 +256,8 @@ describe("OverviewTab", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByText(/Configured, not validated/)).toBeInTheDocument();
-    expect(screen.getByText(/不能当作 cloud-ready/)).toBeInTheDocument();
+    expect(screen.getByText(/Provider validation is unvalidated/)).toBeInTheDocument();
+    expect(screen.getByText("模型边界")).toBeInTheDocument();
     expect(screen.queryByText(/云端模型 已配置/)).not.toBeInTheDocument();
   });
 });

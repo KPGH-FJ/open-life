@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dev-extensions",
+  "description": "Explicit development-only localhost capability",
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
