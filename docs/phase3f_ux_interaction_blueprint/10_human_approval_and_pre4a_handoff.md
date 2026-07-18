@@ -100,9 +100,22 @@ frontend, Smoke Test, Stage 1 dogfood, and Step 6 acceptance.
 
 The earlier PR #51 run also recorded one coverage-only wall-clock assertion
 above 500 ms in `total_response_duration_is_bounded_even_when_chunks_keep_arriving`.
-That test passed locally in 0.12 seconds and passed in the fixed-main coverage
-run. It is therefore recorded as a non-reproduced runner-load event rather than
-a product fix, without weakening the request-timeout implementation or test.
+Although it passed locally and in the next fixed-main coverage run, it recurred
+in PR #54. While validating the first correction, coverage then exposed the
+same class of sub-second observation assumption in
+`hanging_provider_records_local_adapter_start_without_inventing_terminal_truth`.
+The repetition established a test-determinism defect rather than a one-off
+runner-load event.
+
+PR #55 changed only code inside Rust test modules. It replaced both
+coverage-sensitive wall-clock assumptions with five-second test watchdogs while
+retaining the product-owned assertions: the request must return its configured
+timeout error, provider start must be observable, the hanging execution must
+not finish, and abort must not invent a terminal receipt. Production request
+timeouts, scheduler behavior, receipt semantics, and durable-write authority
+were not changed. PR #55 passed all ten checks, merged as `974b416`, and its
+protected-main CI run `29660063950` passed all eight jobs, including Rust
+Coverage and Smoke Test.
 
 ```text
 DESIGN_AUTHORITY_PR = https://github.com/KPGH-FJ/open-life/pull/51
@@ -113,6 +126,10 @@ MAINLINE_TIMEZONE_FIX_PR = https://github.com/KPGH-FJ/open-life/pull/52
 MAINLINE_TIMEZONE_FIX_CI = PASS_10_OF_10
 MAINLINE_TIMEZONE_FIX_MERGED = YES_AT_a58f4e2
 FIXED_MAIN_PUSH_CI = PASS_RUN_29653861700
+COVERAGE_TIMING_FIX_PR = https://github.com/KPGH-FJ/open-life/pull/55
+COVERAGE_TIMING_FIX_CI = PASS_10_OF_10
+COVERAGE_TIMING_FIX_MERGED = YES_AT_974b416
+COVERAGE_TIMING_FIXED_MAIN_CI = PASS_RUN_29660063950
 ```
 
 Targeted local checks against exact fixed main `a58f4e2` also passed:
@@ -123,6 +140,16 @@ Targeted local checks against exact fixed main `a58f4e2` also passed:
 | `cargo fmt --check`                             | `PASS`               |
 | both transient-state regressions under `TZ=UTC` | `PASS`               |
 | exact network total-response timeout test       | `PASS`, 0.12 seconds |
+
+Targeted local checks after merging PR #55 into the handoff branch also
+passed:
+
+| Gate                                                           | Result               |
+| -------------------------------------------------------------- | -------------------- |
+| `cargo fmt --check`                                            | `PASS`               |
+| exact network total-response timeout regression                | `PASS`, 0.12 seconds |
+| exact hanging-provider start-observation regression            | `PASS`, 0.01 seconds |
+| `cargo test -q -p openlife-core --lib` on the PR #55 candidate | `PASS`, 1,478 passed |
 
 ## Design Authority Mainline Closeout
 
@@ -147,11 +174,13 @@ DESIGN_ASSETS_TRACKED_AND_REVIEWED = YES
 DESIGN_AUTHORITY_COMMIT = beade1985b41
 REMOTE_STATE_FETCHED_AND_CLASSIFIED = YES
 CONVERGENCE_MERGED_TO_MAIN = YES
-MERGED_MAIN_PUSH_CI = PASS_AT_8b3e493
-MAIN_REVERIFIED = YES_AT_8b3e493_IDENTICAL_TREE
+MERGED_MAIN_PUSH_CI = PASS_AT_974b416
+MAIN_REVERIFIED = YES_AT_974b416_CI_AND_TARGETED_TESTS
 CURRENT_MAIN_CI_STABILITY = PASS
 FRONTEND_REFACTOR_READY = YES
 DESIGN_AUTHORITY_MERGED_TO_MAIN = YES_AT_8b3e493
+PRODUCTION_COMPILED_PATH_MODIFIED = NO
+TEST_ONLY_RUST_SOURCE_MODIFIED = YES_FOR_CI_DETERMINISM
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
 PHASE4A_START_DECISION = PENDING_USER_APPROVAL
 ```
