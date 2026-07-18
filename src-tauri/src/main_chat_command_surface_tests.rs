@@ -7129,8 +7129,14 @@ fn roadshow_rc05_separate_process_create_complete_undo_preserves_one_task_histor
             .expect("RC05 child Tokio runtime");
         runtime.block_on(async move {
             let state = isolated_command_surface_state_with_persistent_main_chat(&root);
-            let local_test_clock =
-                format!("{}T09:00:00+08:00", chrono::Local::now().format("%Y-%m-%d"));
+            let test_offset = chrono::FixedOffset::east_opt(8 * 60 * 60).unwrap();
+            // Derive the date in the same explicit zone encoded in the fixed clock.
+            let local_test_clock = format!(
+                "{}T09:00:00+08:00",
+                chrono::Utc::now()
+                    .with_timezone(&test_offset)
+                    .format("%Y-%m-%d")
+            );
             *state.runtime_clock_source.lock().await =
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::Fixed(
                     chrono::DateTime::parse_from_rfc3339(&local_test_clock)
