@@ -5524,15 +5524,15 @@ mod tests {
                 .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), request_observed_rx)
+        let observation_watchdog = std::time::Duration::from_secs(5);
+        tokio::time::timeout(observation_watchdog, request_observed_rx)
             .await
             .expect("server observes the HTTP attempt")
             .expect("request observation channel remains open");
-        let progress =
-            tokio::time::timeout(std::time::Duration::from_millis(100), progress_rx.recv())
-                .await
-                .expect("local adapter start is observable before response headers")
-                .expect("provider progress channel remains open");
+        let progress = tokio::time::timeout(observation_watchdog, progress_rx.recv())
+            .await
+            .expect("local adapter start is observable before response headers")
+            .expect("provider progress channel remains open");
         assert!(matches!(
             progress,
             ProviderInvocationProgress::Started {

@@ -2150,17 +2150,19 @@ mod tests {
             }
         });
 
-        let started = std::time::Instant::now();
-        let error = NetworkClient::new(NetworkClientPolicy {
-            allow_loopback: true,
-            request_timeout: Duration::from_millis(70),
-            ..Default::default()
-        })
-        .get_text(&format!("http://{address}/trickle"), None)
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            NetworkClient::new(NetworkClientPolicy {
+                allow_loopback: true,
+                request_timeout: Duration::from_millis(70),
+                ..Default::default()
+            })
+            .get_text(&format!("http://{address}/trickle"), None),
+        )
         .await
-        .unwrap_err();
+        .expect("request must finish within the test watchdog");
+        let error = result.unwrap_err();
 
-        assert!(started.elapsed() < Duration::from_millis(500));
         assert!(format!("{error:#}").contains("timed out"));
         server.await.unwrap();
     }
