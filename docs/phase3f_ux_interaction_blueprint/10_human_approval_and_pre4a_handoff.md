@@ -1,6 +1,6 @@
 # Phase 3F Human Approval And Pre-4A Handoff
 
-Status: `APPROVED_DIRECTION_DESIGN_PR_PENDING`
+Status: `APPROVED_DIRECTION_MAIN_FIX_PENDING`
 Date: 2026-07-18
 
 ## Approval Record
@@ -82,6 +82,31 @@ autostart, and a temporary Vite port. The Tauri binary ran, Vite listened, and
 the isolated stores were created; all processes and temporary data were then
 removed. This is a local startup check, not external live-provider evidence.
 
+## Post-Publication CI Finding
+
+Design-authority PR #51 later ran the unchanged Rust baseline in a different
+UTC time window. Linux and macOS both rejected two transient-state test
+fixtures with `state_daily_task_due_at_out_of_range`. The fixtures encoded
+`+08:00` while deriving their date from the runner-local zone, so UTC runners
+after 16:00Z crossed the fixture's 24-hour TTL. The production StateStore
+correctly failed closed; the tests were inconsistent.
+
+The isolated test-only correction is draft PR #52. It reproduces the failure
+under `TZ=UTC`, derives the fixture date from the same explicit `+08:00` zone,
+and leaves production timing validation unchanged. Its complete remote matrix
+is green: Linux, macOS, Windows, Rust coverage, security audit, frontend,
+Smoke Test, Stage 1 dogfood, and Step 6 acceptance all passed. Until PR #52 is
+merged and protected main is fetched and reverified, the current readiness gate
+must remain closed.
+
+```text
+DESIGN_AUTHORITY_PR = https://github.com/KPGH-FJ/open-life/pull/51
+DESIGN_AUTHORITY_PR_CI = BLOCKED_BY_MAINLINE_TIMEZONE_FIX
+MAINLINE_TIMEZONE_FIX_PR = https://github.com/KPGH-FJ/open-life/pull/52
+MAINLINE_TIMEZONE_FIX_CI = PASS_10_OF_10
+MAINLINE_TIMEZONE_FIX_MERGED = NO
+```
+
 ## Required Pre-4A Gate
 
 ```text
@@ -90,17 +115,18 @@ DESIGN_ASSETS_TRACKED_AND_REVIEWED = YES
 DESIGN_AUTHORITY_COMMIT = beade1985b41
 REMOTE_STATE_FETCHED_AND_CLASSIFIED = YES
 CONVERGENCE_MERGED_TO_MAIN = YES
-MAIN_CI_GREEN = YES
-MAIN_REVERIFIED = YES
-FRONTEND_REFACTOR_READY = YES
+MERGED_MAIN_PUSH_CI = PASS_AT_79f6138
+LOCAL_MAIN_REVERIFICATION = PASS_AT_79f6138
+CURRENT_MAIN_CI_STABILITY = BLOCKED_BY_PR_52
+FRONTEND_REFACTOR_READY = NO
 DESIGN_AUTHORITY_MERGED_TO_MAIN = NO
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
 ```
 
 Protected remote `main` is the only long-term product authority. The next work
-is to publish and review the scoped design-authority commit, merge it through
-protected main, then fetch and reverify the resulting `origin/main`. No Phase 4A
-branch or contract implementation is allowed before that final gate.
+is to review and merge PR #52, fetch and reverify protected main, then refresh,
+review, and merge PR #51 before one final mainline revalidation. No Phase 4A
+branch or contract implementation is allowed before those gates.
 
 ## Backend Boundary
 
