@@ -86,19 +86,24 @@ Approve or revise these points before Phase 4A:
 ```text
 PHASE3F_HUMAN_APPROVAL = YES
 VISUAL_AND_INTERACTION_DIRECTION = YES
-BACKEND_CAPABILITY_MAP = PRE_MERGE_REVIEW_CANDIDATE
+BACKEND_CAPABILITY_MAP = MERGED_CONVERGENCE_SOURCE_REVIEWED
 STATIC_PROTOTYPE_QA = PASS
 RICH_REVIEW_CONTRACT = BLOCKED
 EXACT_PERMISSION_PRESENTATION_CONTRACT = BLOCKED
-CONVERGENCE_MERGED_TO_MAIN = NO
-MAIN_CI_GREEN = UNKNOWN
-MAIN_REVERIFIED = NO
+CONVERGENCE_MERGED_TO_MAIN = YES
+MAIN_CI_GREEN = YES
+MAIN_REVERIFIED = YES
+FRONTEND_REFACTOR_READY = YES
+DESIGN_AUTHORITY_COMMITTED = YES
+DESIGN_AUTHORITY_MERGED_TO_MAIN = NO
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
 PRODUCTION_SOURCE_MODIFIED = NO
 REACT_PORT_READY = NO
 ```
 
-Approval was recorded on 2026-07-18. The next allowed slice is the Pre-4A
-convergence gate. It must merge convergence and the approved design authority
-through protected main, pass remote CI, fetch the resulting `origin/main`, and
-reverify it before any Phase 4A branch or contract implementation begins.
+Approval was recorded on 2026-07-18. Convergence was merged through PR #50 and
+the resulting `origin/main` was CI-green and independently reverified. The
+remaining Pre-4A gate is to review and merge the approved Phase 3 design
+authority through protected main, fetch and reverify that resulting main, and
+only then create the Phase 4A branch. `REACT_PORT_READY` remains `NO` because
+the rich Review and exact Permission presentation contracts are still open.
