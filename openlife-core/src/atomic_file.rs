@@ -33,6 +33,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
                 path.display()
             )
         })?;
+        // This File::open + sync_all directory-durability pattern is Unix-only.
+        // Windows requires a special directory handle instead.
+        #[cfg(unix)]
         if let Some(parent) = path.parent() {
             std::fs::File::open(parent)
                 .and_then(|directory| directory.sync_all())

@@ -7534,6 +7534,7 @@ fn retire_legacy_source_file(
         }
         Err(error) => return Err(error.into()),
     }
+    #[cfg(unix)]
     if let Some(parent) = source_path.parent() {
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())

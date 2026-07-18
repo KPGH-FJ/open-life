@@ -4096,7 +4096,10 @@ mod tests {
             tokio::spawn(
                 async move { scheduler.execute_scheduled_provider_request(prepared).await },
             );
-        tokio::time::timeout(std::time::Duration::from_secs(1), chat_seen.notified())
+        // Coverage instrumentation can make the full local-provider path
+        // several times slower; keep a bounded wait without using a
+        // production latency threshold as a test-harness deadline.
+        tokio::time::timeout(std::time::Duration::from_secs(10), chat_seen.notified())
             .await
             .expect("scheduled HTTP request crossed the loopback edge");
         let started = store

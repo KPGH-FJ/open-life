@@ -1225,6 +1225,7 @@ fn is_fake_ip_benchmark_address(ip: IpAddr) -> bool {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validated_loopback_proxy_url(host: &str, port: i32) -> Result<Url> {
     let address = host
         .trim()
