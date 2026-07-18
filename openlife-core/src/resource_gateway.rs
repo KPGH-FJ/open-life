@@ -577,8 +577,17 @@ fn macos_process_resident_bytes(pid: u32) -> Option<u64> {
     }
 }
 
+// glibc models the resource selector as an unsigned integer while the BSD
+// family, including macOS, uses `c_int`. Keep the wrapper aligned with the
+// platform libc signature so the constants type-check without lossy casts.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type ResourceLimitSelector = libc::__rlimit_resource_t;
+
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
+type ResourceLimitSelector = libc::c_int;
+
 #[cfg(unix)]
-fn set_resource_limit(resource: libc::c_int, limit: u64) -> std::io::Result<()> {
+fn set_resource_limit(resource: ResourceLimitSelector, limit: u64) -> std::io::Result<()> {
     let mut value = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,

@@ -12753,6 +12753,7 @@ mod tests {
         drop(second_wal_keeper);
     }
 
+    #[cfg(unix)]
     #[test]
     fn same_path_database_replacement_never_inherits_the_original_store_authority() {
         let directory = tempfile::tempdir().unwrap();
