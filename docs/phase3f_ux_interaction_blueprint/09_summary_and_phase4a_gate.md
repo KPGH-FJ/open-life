@@ -91,14 +91,15 @@ STATIC_PROTOTYPE_QA = PASS
 RICH_REVIEW_CONTRACT = BLOCKED
 EXACT_PERMISSION_PRESENTATION_CONTRACT = BLOCKED
 CONVERGENCE_MERGED_TO_MAIN = YES
-MERGED_MAIN_PUSH_CI = PASS_AT_a58f4e2
-LOCAL_TARGETED_MAIN_REVERIFICATION = PASS_AT_a58f4e2
+MERGED_MAIN_PUSH_CI = PASS_AT_8b3e493
+MAIN_REVERIFIED = YES_AT_8b3e493_IDENTICAL_TREE
 CURRENT_MAIN_CI_STABILITY = PASS
 MAINLINE_TIMEZONE_FIX_PR = MERGED
-FRONTEND_REFACTOR_READY = NO
+FRONTEND_REFACTOR_READY = YES
 DESIGN_AUTHORITY_COMMITTED = YES
-DESIGN_AUTHORITY_MERGED_TO_MAIN = NO
+DESIGN_AUTHORITY_MERGED_TO_MAIN = YES_AT_8b3e493
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
+PHASE4A_START_DECISION = PENDING_USER_APPROVAL
 PRODUCTION_SOURCE_MODIFIED = NO
 REACT_PORT_READY = NO
 ```
@@ -108,8 +109,10 @@ main push CI passed and exact `origin/main` was independently reverified.
 Publishing the design authority later exposed a pre-existing UTC-runner defect
 in two transient-state test clocks. The isolated fix in PR #52 has now been
 merged as `a58f4e2`; protected-main CI and targeted local UTC regression checks
-passed. Readiness remains fail-closed until the refreshed design-authority PR
-is itself green, merged, and the resulting protected main is reverified. Only
-then may the Phase 4A branch be created. `REACT_PORT_READY` also remains `NO`
-because the rich Review and exact Permission presentation contracts are still
-open.
+passed. The refreshed design authority then passed its full PR matrix and was
+merged through PR #51 as `8b3e493`; the resulting protected-main CI passed and
+its file tree is identical to the locally verified candidate. The repository
+is therefore ready for a user decision on starting Phase 4A Contract Closure.
+No Phase 4A branch has been created. `REACT_PORT_READY` remains `NO` because the
+rich Review and exact Permission presentation contracts are intentionally Phase
+4A blockers, not completed contracts.

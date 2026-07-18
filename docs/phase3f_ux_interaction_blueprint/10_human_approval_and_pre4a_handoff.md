@@ -1,7 +1,7 @@
 # Phase 3F Human Approval And Pre-4A Handoff
 
-Status: `APPROVED_DIRECTION_DESIGN_PR_CI_PENDING`
-Date: 2026-07-18
+Status: `PRE4A_GATE_COMPLETE_AWAITING_START_DECISION`
+Date: 2026-07-19
 
 ## Approval Record
 
@@ -106,7 +106,9 @@ a product fix, without weakening the request-timeout implementation or test.
 
 ```text
 DESIGN_AUTHORITY_PR = https://github.com/KPGH-FJ/open-life/pull/51
-DESIGN_AUTHORITY_PR_CI = REFRESHED_RUN_PENDING
+DESIGN_AUTHORITY_PR_CI = PASS_8_OF_8_AT_fdd87fc
+DESIGN_AUTHORITY_MERGED = YES_AT_8b3e493
+DESIGN_MAIN_PUSH_CI = PASS_RUN_29655484846
 MAINLINE_TIMEZONE_FIX_PR = https://github.com/KPGH-FJ/open-life/pull/52
 MAINLINE_TIMEZONE_FIX_CI = PASS_10_OF_10
 MAINLINE_TIMEZONE_FIX_MERGED = YES_AT_a58f4e2
@@ -122,6 +124,21 @@ Targeted local checks against exact fixed main `a58f4e2` also passed:
 | both transient-state regressions under `TZ=UTC` | `PASS`               |
 | exact network total-response timeout test       | `PASS`, 0.12 seconds |
 
+## Design Authority Mainline Closeout
+
+The refreshed Phase 3 design authority passed all eight PR checks at
+`fdd87fc`, including Linux, macOS, Windows, Rust coverage, frontend coverage,
+security audit, and Smoke Test. PR #51 was merged as protected-main commit
+`8b3e493` at `2026-07-18T18:14:45Z`. Its main push CI run `29655484846` also
+passed all eight checks.
+
+The merge commit and the locally verified PR candidate have identical file
+trees. Local candidate verification included `TZ=UTC cargo test -p
+openlife-tauri --lib` with 1,172 passed, zero failed, and 13 ignored, plus the
+Phase 3E and Phase 3F data and interaction validators. PR #51 itself remained
+strictly docs-only: 108 changed files under the Phase 3D, 3E, and 3F
+directories, with no `frontend/src`, `src-tauri`, or `openlife-core` diff.
+
 ## Required Pre-4A Gate
 
 ```text
@@ -130,18 +147,21 @@ DESIGN_ASSETS_TRACKED_AND_REVIEWED = YES
 DESIGN_AUTHORITY_COMMIT = beade1985b41
 REMOTE_STATE_FETCHED_AND_CLASSIFIED = YES
 CONVERGENCE_MERGED_TO_MAIN = YES
-MERGED_MAIN_PUSH_CI = PASS_AT_a58f4e2
-LOCAL_TARGETED_MAIN_REVERIFICATION = PASS_AT_a58f4e2
+MERGED_MAIN_PUSH_CI = PASS_AT_8b3e493
+MAIN_REVERIFIED = YES_AT_8b3e493_IDENTICAL_TREE
 CURRENT_MAIN_CI_STABILITY = PASS
-FRONTEND_REFACTOR_READY = NO
-DESIGN_AUTHORITY_MERGED_TO_MAIN = NO
+FRONTEND_REFACTOR_READY = YES
+DESIGN_AUTHORITY_MERGED_TO_MAIN = YES_AT_8b3e493
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
+PHASE4A_START_DECISION = PENDING_USER_APPROVAL
 ```
 
 Protected remote `main` is the only long-term product authority. The next work
-is to refresh, review, and merge PR #51 against fixed main before one final
-mainline revalidation. No Phase 4A branch or contract implementation is allowed
-before those gates.
+is a user decision on whether to start Phase 4A from a newly created branch at
+the then-current verified main. This readiness state authorizes Contract
+Closure planning and implementation only after that decision. It does not make
+the rich Review or exact Permission presentation contracts complete, and it
+does not authorize a React page migration yet.
 
 ## Backend Boundary
 
