@@ -63,12 +63,13 @@
       "external_provider_streaming": "passed_current_code_29_provider_bound_chunks_final_completed",
       "live_https_fetch_same_turn_provider": "passed_example_com_real_network_read_local_capture_provider_receipt_truth",
       "live_deepseek_search_same_turn_provider": "passed_current_code_once_one_bounded_post_structured_https_results_typed_observation_local_capture_provider_bound_citation_receipt_truth",
-      "roadshow_rc04_current_deepseek_search_and_external_provider": "passed_current_code_once_one_resource_one_live_search_action_one_external_provider_resource_and_web_citations_zero_proposals",
+      "roadshow_rc04_current_deepseek_search_and_external_provider": "passed_current_code_twice_after_stability_fix_each_one_resource_one_live_search_action_one_external_provider_resource_and_web_citations_zero_proposals",
       "roadshow_rc01": "passed_current_code_509_provider_bound_chunks_three_prose_blocks_five_steps_zero_side_effects",
       "roadshow_rc02_rc03": "passed_current_code_both_resource_source_classes",
       "roadshow_rc06_rc07": "passed_current_code_review_before_materialize_and_idempotent_acceptance",
       "roadshow_rc08": "passed_current_code_external_provider_cancel_remote_unknown_no_late_commit_then_new_operation_retry_fixture_web_only",
-      "deepseek_search_adapter_commit": "930ce33e76583371e6fe067940042d89fb9c2f59"
+      "deepseek_search_adapter_commit": "930ce33e76583371e6fe067940042d89fb9c2f59",
+      "deepseek_search_stability_fix_commit": "81d972635933a6908842090ecb63d74bfcd92141"
     },
     "open_blockers": {
       "independent_read_only_review": "pending and must rerun mechanical evidence from source, not review this summary only",
@@ -150,6 +151,7 @@
       "completion_claim": "scoped_mechanical_real_fetch_live_search_and_external_provider_gates_green_native_trial_and_independent_review_pending",
       "commit": "a40605579cfed02b310cfaa0f7be2bbea82af596",
       "deepseek_search_adapter_commit": "930ce33e76583371e6fe067940042d89fb9c2f59",
+      "deepseek_search_stability_fix_commit": "81d972635933a6908842090ecb63d74bfcd92141",
       "evidence": "plans/openlife_roadshow_v2_web_evidence.md"
     },
     {
@@ -281,9 +283,9 @@
     "operation_replay": "passed_no_tool_or_provider_redispatch",
     "reasoning_strategy_canonicalization": "passed_direct_react_memory_governance_round_trip",
     "real_duckduckgo_local_provider_chain": "passed_network_read_provider_adapter_receipt_durable_events_final_last",
-    "real_deepseek_local_provider_chain": "passed_current_code_once_one_bounded_post_one_tool_receipt_typed_observation_bound_web_citation_provider_lifecycle_and_final_last",
+    "real_deepseek_local_provider_chain": "passed_current_code_once_after_stability_fix_one_bounded_post_one_tool_receipt_typed_observation_bound_web_citation_provider_lifecycle_and_final_last",
     "generic_live_fetch": "passed_current_mac_fake_ip_environment_via_verified_loopback_system_proxy_https_hostname_and_adapter_bound_domain_allowlist_without_private_or_mixed_dns_relaxation",
-    "external_live_cloud_provider": "passed_current_code_once_rc04_resource_plus_deepseek_live_search_plus_external_provider_with_backend_validated_resource_and_web_citations_zero_proposals",
+    "external_live_cloud_provider": "passed_current_code_twice_after_stability_fix_rc04_resource_plus_deepseek_live_search_plus_external_provider_with_backend_validated_resource_and_web_citations_zero_proposals",
     "native_product_trial": "pending",
     "independent_read_only_review": "pending_not_run",
     "main_chat_kernel": "passed_103_of_103_current_checkpoint",
@@ -443,12 +445,12 @@
     "cumulative_rc08_external_live_provider": "passed_twice_current_evidence_commit_real_external_provider_cancel_remote_unknown_no_late_durable_commit_and_one_new_uuid_retry_governed_fixture_web_only_no_external_live_web_credit",
     "cumulative_cc01_external_live": "passed_twice_current_commit_after_root_stack_repair_one_resource_one_real_web_action_one_external_provider_one_pending_cited_report_zero_preaccept_files_then_one_confirmed_idempotent_materialization",
     "cumulative_rc04_latest_control": "failed_closed_after_completed_real_web_and_external_provider_when_model_omitted_required_web_citation_not_counted_as_new_credit_prior_two_pass_evidence_retained",
-    "cumulative_rc04_current_revalidation": "passed_current_code_once_deepseek_live_search_external_provider_resource_and_web_citations_zero_proposals_without_retry_or_validator_relaxation",
+    "cumulative_rc04_current_revalidation": "passed_current_code_twice_after_policy_required_search_tool_fix_deepseek_live_search_external_provider_resource_and_web_citations_zero_proposals_without_retry_or_validator_relaxation",
     "cumulative_current_external_provider_direct": "passed_current_code_external_provider_completed_without_side_effects",
     "cumulative_current_external_provider_stream": "passed_current_code_29_provider_bound_chunks_done_completed_final_last",
     "cumulative_current_live_https_fetch": "passed_real_example_com_network_dispatch_response_observed_receipt_and_same_turn_provider_synthesis_under_adapter_bound_fake_ip_proxy_domain_policy",
-    "cumulative_current_live_deepseek_search": "passed_one_bounded_anthropic_compatible_post_structured_result_only_exact_url_bound_untrusted_snippets_and_same_turn_provider_synthesis",
-    "cumulative_current_core_full": "passed_1476_failed_0_ignored_2",
+    "cumulative_current_live_deepseek_search": "passed_policy_required_tool_choice_one_bounded_anthropic_compatible_post_structured_result_only_exact_url_bound_untrusted_snippets_and_same_turn_provider_synthesis_remote_internal_search_count_not_claimed",
+    "cumulative_current_core_full": "passed_1477_failed_0_ignored_2",
     "cumulative_current_tauri_full_three_consecutive": "passed_1172_failed_0_ignored_13_each_run",
     "cumulative_current_workspace_clippy": "passed_all_targets_deny_warnings_all_clippy_waivers_are_expiring_owned_expectations_and_five_stale_waivers_were_deleted",
     "cumulative_current_cargo_audit": "passed_exact_ownership_for_18_informational_warnings",
@@ -476,5 +478,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-18T14:27:00+08:00"
+  "last_updated_at": "2026-07-18T14:38:00+08:00"
 }

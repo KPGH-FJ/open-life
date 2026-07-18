@@ -63,16 +63,28 @@ router, ToolGateway, observation schema, or credential owner:
   choosing the search provider belongs to the later frontend handoff and is
   not claimed by this backend freeze.
 
+Commit `81d972635933a6908842090ecb63d74bfcd92141` closes the
+stability gap found by the second live RC04 run. [DeepSeek's official
+integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code)
+says the model decides whether the query requires Web Search; one real
+run therefore returned only thinking/text and correctly failed as
+`web_search_no_structured_results`. Because PolicyRouter had already authorized
+and required external evidence, the adapter now sends `tool_choice=web_search`
+and asks for exactly one verbatim-query search. This is one request, not a
+failure retry. DeepSeek may still perform an unobservable number of internal
+search operations despite `max_uses=1`, so OpenLife claims one ToolGateway/HTTP
+dispatch and does not claim an exact remote internal search count.
+
 Current mechanical and live evidence:
 
 | Gate | Current result | Credit boundary |
 | --- | --- | --- |
-| Core full suite | 1476 passed, 0 failed, 2 ignored | current code, including typed DeepSeek and exact network-policy counterfactuals |
+| Core full suite | 1477 passed, 0 failed, 2 ignored | current code, including typed DeepSeek, forced policy-required tool choice, and exact network-policy counterfactuals |
 | Tauri full suite | 1172 passed, 0 failed, 13 ignored; parser binary 2/2 | ignored live gates do not receive credit from this run |
 | workspace all-target Clippy with `-D warnings` | passed | warning-free current workspace |
 | frontend typecheck and format | passed | backend config contract only; no UI journey credit |
-| real DeepSeek search + captured local Provider | 1/1 passed | actual external search, one dispatch, typed observation, bound Web citation, durable Provider lifecycle |
-| RC04 real Resource + DeepSeek search + external Provider | 1/1 passed | one frozen Resource, one external Web action, one external Provider, both citation classes, zero Proposals |
+| real DeepSeek search + captured local Provider | 1/1 passed after stability fix | actual external search, one dispatch, typed observation, bound Web citation, durable Provider lifecycle |
+| RC04 real Resource + DeepSeek search + external Provider | 2/2 consecutive passed after stability fix | each run has one frozen Resource, one external Web action, one external Provider, both citation classes, zero Proposals |
 
 The current macOS proxy/fake-IP path is handled by a domain-bound egress
 exception for the fixed official DeepSeek endpoint. It does not weaken private,
