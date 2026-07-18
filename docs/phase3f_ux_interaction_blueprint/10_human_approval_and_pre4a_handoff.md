@@ -1,6 +1,6 @@
 # Phase 3F Human Approval And Pre-4A Handoff
 
-Status: `APPROVED_DIRECTION_MAIN_FIX_PENDING`
+Status: `APPROVED_DIRECTION_DESIGN_PR_CI_PENDING`
 Date: 2026-07-18
 
 ## Approval Record
@@ -50,11 +50,11 @@ BACKEND_REMEDIATION_V4 = PAUSED_SEPARATE_BRANCH
 
 The protected-main push checks passed for commit `79f6138`:
 
-| Check | Result | Run |
-| --- | --- | --- |
-| CI | `PASS` | `29642938351` |
+| Check                           | Result | Run           |
+| ------------------------------- | ------ | ------------- |
+| CI                              | `PASS` | `29642938351` |
 | Step 6 Tauri Product Acceptance | `PASS` | `29642938335` |
-| Stage 1 Tauri Dogfood | `PASS` | `29642938370` |
+| Stage 1 Tauri Dogfood           | `PASS` | `29642938370` |
 
 The deleted convergence remote branch is not a second authority. The fetched
 `origin/main` merge commit is the sole code baseline.
@@ -63,18 +63,18 @@ The deleted convergence remote branch is not a second authority. The fetched
 
 An isolated detached worktree at exact `origin/main` commit `79f6138` produced:
 
-| Gate | Result |
-| --- | --- |
-| clean worktree and `git diff --check` | `PASS` |
-| `cargo fmt --check` | `PASS` |
-| `cargo check --workspace` | `PASS` |
-| `cargo test -p openlife-tauri single_system -- --nocapture` | `PASS`, 39 passed |
-| `cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` | `PASS`, 30 passed |
-| `corepack pnpm --dir frontend typecheck` | `PASS` |
-| `corepack pnpm --dir frontend format:check` | `PASS` |
-| `corepack pnpm --dir frontend test` | `PASS`, 43 files / 520 tests |
-| `corepack pnpm --dir frontend build` | `PASS` |
-| isolated `make dev` product start | `PASS` |
+| Gate                                                                   | Result                       |
+| ---------------------------------------------------------------------- | ---------------------------- |
+| clean worktree and `git diff --check`                                  | `PASS`                       |
+| `cargo fmt --check`                                                    | `PASS`                       |
+| `cargo check --workspace`                                              | `PASS`                       |
+| `cargo test -p openlife-tauri single_system -- --nocapture`            | `PASS`, 39 passed            |
+| `cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` | `PASS`, 30 passed            |
+| `corepack pnpm --dir frontend typecheck`                               | `PASS`                       |
+| `corepack pnpm --dir frontend format:check`                            | `PASS`                       |
+| `corepack pnpm --dir frontend test`                                    | `PASS`, 43 files / 520 tests |
+| `corepack pnpm --dir frontend build`                                   | `PASS`                       |
+| isolated `make dev` product start                                      | `PASS`                       |
 
 The startup used a temporary `OPENLIFE_DATA_DIR`, explicit permission for that
 isolated dev profile, `OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=0`, no A2A
@@ -91,21 +91,36 @@ fixtures with `state_daily_task_due_at_out_of_range`. The fixtures encoded
 after 16:00Z crossed the fixture's 24-hour TTL. The production StateStore
 correctly failed closed; the tests were inconsistent.
 
-The isolated test-only correction is draft PR #52. It reproduces the failure
-under `TZ=UTC`, derives the fixture date from the same explicit `+08:00` zone,
-and leaves production timing validation unchanged. Its complete remote matrix
-is green: Linux, macOS, Windows, Rust coverage, security audit, frontend,
-Smoke Test, Stage 1 dogfood, and Step 6 acceptance all passed. Until PR #52 is
-merged and protected main is fetched and reverified, the current readiness gate
-must remain closed.
+The isolated test-only correction was merged through PR #52. It reproduced the
+failure under `TZ=UTC`, now derives the fixture date from the same explicit
+`+08:00` zone, and leaves production timing validation unchanged. Its pull
+request matrix was green, and the resulting protected-main merge commit
+`a58f4e2` passed Linux, macOS, Windows, Rust coverage, security audit,
+frontend, Smoke Test, Stage 1 dogfood, and Step 6 acceptance.
+
+The earlier PR #51 run also recorded one coverage-only wall-clock assertion
+above 500 ms in `total_response_duration_is_bounded_even_when_chunks_keep_arriving`.
+That test passed locally in 0.12 seconds and passed in the fixed-main coverage
+run. It is therefore recorded as a non-reproduced runner-load event rather than
+a product fix, without weakening the request-timeout implementation or test.
 
 ```text
 DESIGN_AUTHORITY_PR = https://github.com/KPGH-FJ/open-life/pull/51
-DESIGN_AUTHORITY_PR_CI = BLOCKED_BY_MAINLINE_TIMEZONE_FIX
+DESIGN_AUTHORITY_PR_CI = REFRESHED_RUN_PENDING
 MAINLINE_TIMEZONE_FIX_PR = https://github.com/KPGH-FJ/open-life/pull/52
 MAINLINE_TIMEZONE_FIX_CI = PASS_10_OF_10
-MAINLINE_TIMEZONE_FIX_MERGED = NO
+MAINLINE_TIMEZONE_FIX_MERGED = YES_AT_a58f4e2
+FIXED_MAIN_PUSH_CI = PASS_RUN_29653861700
 ```
+
+Targeted local checks against exact fixed main `a58f4e2` also passed:
+
+| Gate                                            | Result               |
+| ----------------------------------------------- | -------------------- |
+| clean detached worktree and `git diff --check`  | `PASS`               |
+| `cargo fmt --check`                             | `PASS`               |
+| both transient-state regressions under `TZ=UTC` | `PASS`               |
+| exact network total-response timeout test       | `PASS`, 0.12 seconds |
 
 ## Required Pre-4A Gate
 
@@ -115,18 +130,18 @@ DESIGN_ASSETS_TRACKED_AND_REVIEWED = YES
 DESIGN_AUTHORITY_COMMIT = beade1985b41
 REMOTE_STATE_FETCHED_AND_CLASSIFIED = YES
 CONVERGENCE_MERGED_TO_MAIN = YES
-MERGED_MAIN_PUSH_CI = PASS_AT_79f6138
-LOCAL_MAIN_REVERIFICATION = PASS_AT_79f6138
-CURRENT_MAIN_CI_STABILITY = BLOCKED_BY_PR_52
+MERGED_MAIN_PUSH_CI = PASS_AT_a58f4e2
+LOCAL_TARGETED_MAIN_REVERIFICATION = PASS_AT_a58f4e2
+CURRENT_MAIN_CI_STABILITY = PASS
 FRONTEND_REFACTOR_READY = NO
 DESIGN_AUTHORITY_MERGED_TO_MAIN = NO
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
 ```
 
 Protected remote `main` is the only long-term product authority. The next work
-is to review and merge PR #52, fetch and reverify protected main, then refresh,
-review, and merge PR #51 before one final mainline revalidation. No Phase 4A
-branch or contract implementation is allowed before those gates.
+is to refresh, review, and merge PR #51 against fixed main before one final
+mainline revalidation. No Phase 4A branch or contract implementation is allowed
+before those gates.
 
 ## Backend Boundary
 
