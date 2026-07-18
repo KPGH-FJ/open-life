@@ -670,10 +670,15 @@ describe("MailboxPage", () => {
   it("selects rows and renders the selected proposal reader", async () => {
     renderMailboxPage();
 
-    expect((await screen.findAllByText("新增目标")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: /确认外部能力/ }));
+    const initialRow = await screen.findByRole("button", { name: /新增目标/ });
+    await waitFor(() => {
+      expect(initialRow).toHaveAttribute("aria-pressed", "true");
+    });
+    const pluginRow = screen.getByRole("button", { name: /确认外部能力/ });
+    fireEvent.click(pluginRow);
 
     await waitFor(() => {
+      expect(pluginRow).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByTestId("mail-reader")).toHaveTextContent("插件请求获得写权限。");
     });
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("OpenLife");
@@ -938,7 +943,15 @@ describe("MailboxPage", () => {
   it("does not allow unsupported proposal types to be accepted", async () => {
     renderMailboxPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: /确认外部能力/ }));
+    const initialRow = await screen.findByRole("button", { name: /新增目标/ });
+    await waitFor(() => {
+      expect(initialRow).toHaveAttribute("aria-pressed", "true");
+    });
+    const pluginRow = screen.getByRole("button", { name: /确认外部能力/ });
+    fireEvent.click(pluginRow);
+    await waitFor(() => {
+      expect(pluginRow).toHaveAttribute("aria-pressed", "true");
+    });
 
     const unsupportedAccept = await screen.findByRole("button", { name: "同意" });
     expect(unsupportedAccept).toBeDisabled();
