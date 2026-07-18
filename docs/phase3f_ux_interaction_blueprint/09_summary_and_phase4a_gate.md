@@ -91,16 +91,18 @@ STATIC_PROTOTYPE_QA = PASS
 RICH_REVIEW_CONTRACT = BLOCKED
 EXACT_PERMISSION_PRESENTATION_CONTRACT = BLOCKED
 CONVERGENCE_MERGED_TO_MAIN = YES
-MERGED_MAIN_PUSH_CI = PASS_AT_8b3e493
-MAIN_REVERIFIED = YES_AT_8b3e493_IDENTICAL_TREE
+MERGED_MAIN_PUSH_CI = PASS_AT_974b416
+MAIN_REVERIFIED = YES_AT_974b416_CI_AND_TARGETED_TESTS
 CURRENT_MAIN_CI_STABILITY = PASS
 MAINLINE_TIMEZONE_FIX_PR = MERGED
+MAINLINE_COVERAGE_TIMING_FIX_PR = MERGED
 FRONTEND_REFACTOR_READY = YES
 DESIGN_AUTHORITY_COMMITTED = YES
 DESIGN_AUTHORITY_MERGED_TO_MAIN = YES_AT_8b3e493
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
 PHASE4A_START_DECISION = PENDING_USER_APPROVAL
-PRODUCTION_SOURCE_MODIFIED = NO
+PRODUCTION_COMPILED_PATH_MODIFIED = NO
+TEST_ONLY_RUST_SOURCE_MODIFIED = YES_FOR_CI_DETERMINISM
 REACT_PORT_READY = NO
 ```
 
@@ -111,8 +113,14 @@ in two transient-state test clocks. The isolated fix in PR #52 has now been
 merged as `a58f4e2`; protected-main CI and targeted local UTC regression checks
 passed. The refreshed design authority then passed its full PR matrix and was
 merged through PR #51 as `8b3e493`; the resulting protected-main CI passed and
-its file tree is identical to the locally verified candidate. The repository
-is therefore ready for a user decision on starting Phase 4A Contract Closure.
-No Phase 4A branch has been created. `REACT_PORT_READY` remains `NO` because the
-rich Review and exact Permission presentation contracts are intentionally Phase
-4A blockers, not completed contracts.
+its file tree is identical to the locally verified candidate. A coverage-only
+wall-clock assertion then recurred while validating this status correction, and
+a second coverage-sensitive observation test exposed the same class of problem.
+PR #55 replaced those test-only sub-second assumptions with bounded watchdogs
+while preserving the product timeout and scheduler assertions. It merged as
+`974b416`; its pull-request matrix and protected-main CI both passed, including
+Rust Coverage and Smoke. The repository is therefore ready for a user decision
+on starting Phase 4A Contract Closure. No Phase 4A branch has been created.
+`REACT_PORT_READY` remains `NO` because the rich Review and exact Permission
+presentation contracts are intentionally Phase 4A blockers, not completed
+contracts.
