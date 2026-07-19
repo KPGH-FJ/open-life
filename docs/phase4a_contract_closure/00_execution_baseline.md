@@ -1,6 +1,6 @@
 # Phase 4A Contract Closure Execution Baseline
 
-Status: `TECHNICAL_EXIT_PASS_PENDING_HUMAN_REVIEW`
+Status: `MERGED_AND_HUMAN_APPROVED`
 Date: 2026-07-19
 
 ## 1. Authority And Branch
@@ -65,3 +65,10 @@ contracts. The new frontend reducer modules are not imported by `App.tsx`,
 The pre-existing `/today-v2-preview` route is still compiled by `App.tsx`.
 Phase 4A does not claim that this is a dev-only harness. Moving or deleting it
 is an explicit Phase 4B ledger item with a release-bundle absence guard.
+
+## 6. Merge Closeout
+
+The user approved Phase 4A on 2026-07-19. PR #56 merged as
+`7f9faf4eb75a086438604a158983a5c127547574`; protected-main CI, retired Stage 1
+contract, and retired Step 6 contract runs passed at that exact merge SHA.
+Phase 4B was then branched from the verified merge commit.

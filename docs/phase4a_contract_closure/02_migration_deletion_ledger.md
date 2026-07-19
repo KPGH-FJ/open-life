@@ -1,6 +1,6 @@
 # Phase 4 Frontend Migration And Deletion Ledger
 
-Status: `ACTIVE_BEFORE_V2_OWNER_CREATION`
+Status: `ACTIVE_DURING_V2_MIGRATION`
 Date: 2026-07-19
 
 State vocabulary:
@@ -17,8 +17,9 @@ State vocabulary:
 | New owner | Old owner | Last product caller | Deletion condition | Absence guard | State |
 | --- | --- | --- | --- | --- | --- |
 | Future Shell V2 in the Phase 4B harness, then production Shell V2 | `frontend/src/components/ProductShell.tsx`, current `productShellContract.ts` primary IA | `frontend/src/App.tsx` | Shell V2 keyboard/mobile/product journeys accepted; 4E atomic route switch ready | Production source/import scan and release route test show old shell authority absent | `identified` |
+| `frontend/src/ui/foundation/**` semantic tokens and primitives | `frontend/src/components/product/ProductPrimitives.tsx` plus page-local visual primitives | `AgentRunDetail`, `LifeModelPage`, settings tabs, `RuntimeDisclosureStrip`, `ReviewDecisionCard`, and provider/runtime utility type imports | Every Phase 4D journey uses the new semantic owner; no old primitive caller remains | Phase 4E production import scan and old-owner file absence test | `contract_ready` |
 | Strict Today V2 adapter over named backend owners | `frontend/src/pages/TodayPage.tsx` local layout/composition | `/today` route in `App.tsx` | Today V2 passes stale/error/unknown and real Tauri journey; no raw fallback | `/today` renders new owner; old page/import absent | `contract_ready` |
-| Dev-only Phase 4B harness | `TodayV2PreviewPage` and `/today-v2-preview` in production `App.tsx` | release route table | Preview moved behind compile-time dev entry or separate test config | Release bundle/route scan contains neither page import nor `/today-v2-preview` | `identified` |
+| Dev-only Phase 4B harness | deleted `TodayV2PreviewPage` and deleted `/today-v2-preview` production route | no product caller remains | Completed in Phase 4B; independent dev entry owns layout fixtures | Frontend build scan, App route test, inventory contract, and Rust single-system guard prove absence | `guarded_absent` |
 | Existing backend `WorkspaceViewModel` plus future Workspace V2 renderer | `CompanionPage`/`ChatPage` joins over Tasks, projection, and page state | `/companion` | Governed-action journey consumes activeTask, pendingReviewItems, activity, actions, and refreshed state | Product page scan has no parallel lifecycle/review/privacy reconstruction | `contract_ready` |
 | Existing backend `TasksViewModel` plus future Tasks V2 renderer | `RunsPage` current task-list presentation | `/runs` | Read-only spine accepted and controls dispatch through contract | Old page owner absent; no list/detail reconstruction | `contract_ready` |
 | `ReviewItem.decisionContext` plus future Review Center V2 | `MailboxPage` join of raw `listProposals`, `proposalDisplay`, and ReviewItem | `/mailbox` | Pending decision journey renders before/after and exact permission solely from ReviewItem; dispatch always refreshes | Product scan forbids `listProposals` and `buildReviewDecisionView` in Review V2 | `contract_ready` |

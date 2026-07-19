@@ -1,6 +1,6 @@
 # Phase 4A Exit Gate And Validation
 
-Status: `TECHNICAL_EXIT_PASS_PENDING_HUMAN_REVIEW`
+Status: `MERGED_AND_HUMAN_APPROVED`
 Date: 2026-07-19
 
 ## 1. Executable Exit Conditions
@@ -107,9 +107,10 @@ PR #56's first Rust Check exposed two deny-warnings Clippy findings. Both were
 semantic-equivalent condition cleanups; the exact CI Clippy command and the
 affected Rust test suites passed before the follow-up push.
 
-The production build still contains `TodayV2PreviewPage`. This is expected for
-the current baseline and proves the Phase 4B dev-only harness/absence item is
-not yet complete.
+At Phase 4A closeout the production build still contained
+`TodayV2PreviewPage`. Phase 4B subsequently deleted that page and route and
+added executable release absence guards; this does not retroactively turn the
+Phase 4A package into a visual implementation.
 
 ## 4. Human Gate
 
@@ -118,8 +119,11 @@ Even after all technical gates pass:
 ```text
 PHASE4A_TECHNICAL_EXIT = PASS
 REACT_PORT_CONTRACT_READY = YES
-PHASE4B_START_DECISION = PENDING_HUMAN_REVIEW
+PHASE4A_MERGED_TO_MAIN = YES_AT_7f9faf4
+PHASE4B_START_DECISION = APPROVED_2026_07_19
 PRODUCTION_REACT_MIGRATION_AUTHORIZED = NO
 ```
 
-The user reviews this Phase 4A package before Phase 4B foundation/harness work.
+The user reviewed and approved this package before Phase 4B foundation/harness
+work began. PR #56 and all protected-main workflows passed before branch
+creation.

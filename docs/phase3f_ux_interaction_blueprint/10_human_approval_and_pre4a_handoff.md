@@ -1,6 +1,6 @@
 # Phase 3F Human Approval And Pre-4A Handoff
 
-Status: `PRE4A_GATE_COMPLETE_AWAITING_START_DECISION`
+Status: `HANDOFF_COMPLETE_PHASE4B_PENDING_HUMAN_REVIEW`
 Date: 2026-07-19
 
 ## Approval Record
@@ -186,7 +186,9 @@ TEST_ONLY_RUST_SOURCE_MODIFIED = YES_FOR_CI_DETERMINISM
 PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = YES_AT_1267EE4
 PHASE4A_START_DECISION = APPROVED_2026_07_19
 PHASE4A_TECHNICAL_EXIT = PASS
-PHASE4B_START_DECISION = PENDING_HUMAN_REVIEW
+PHASE4A_MERGED_TO_MAIN = YES_AT_7f9faf4
+PHASE4A_MAIN_CI = PASS_RUN_29668642176
+PHASE4B_START_DECISION = APPROVED_2026_07_19
 PRODUCTION_REACT_MIGRATION_AUTHORIZED = NO
 ```
 
@@ -196,7 +198,9 @@ created from verified main commit `1267ee4`; protected-main CI run
 `29661506060` had passed for that exact SHA. The branch is authorized for
 Contract Closure only. It does not authorize a React page migration or a
 production route switch. Phase 4A later passed its technical gate set; starting
-Phase 4B remains a separate human decision.
+Phase 4B remained a separate human decision. The user approved Phase 4B on
+2026-07-19 only after PR #56 merged and protected-main CI passed at `7f9faf4`;
+no production page migration or route-authority switch was authorized.
 
 ## Backend Boundary
 

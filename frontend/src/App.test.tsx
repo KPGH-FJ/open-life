@@ -30,7 +30,7 @@ function productionSourceFiles(dir = join(process.cwd(), "src")): string[] {
     const fullPath = join(dir, entry);
     const stat = statSync(fullPath);
     if (stat.isDirectory()) {
-      if (entry === "test") continue;
+      if (entry === "test" || entry === "dev") continue;
       files.push(...productionSourceFiles(fullPath));
     } else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.(ts|tsx)$/.test(entry)) {
       files.push(fullPath);
@@ -566,6 +566,7 @@ describe("App product surface routing", () => {
       "src/pages/DashboardPage.tsx",
       "src/pages/ProposalReviewPage.tsx",
       "src/pages/LifeMapPage.tsx",
+      "src/pages/TodayV2PreviewPage.tsx",
     ]) {
       expect(existsSync(join(process.cwd(), retiredFile)), `${retiredFile} must stay deleted`).toBe(
         false
@@ -573,7 +574,9 @@ describe("App product surface routing", () => {
     }
 
     const appSource = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
-    expect(appSource).not.toMatch(/OnboardingWizard|DashboardPage|ProposalReviewPage|LifeMapPage/);
+    expect(appSource).not.toMatch(
+      /OnboardingWizard|DashboardPage|ProposalReviewPage|LifeMapPage|TodayV2PreviewPage|\/today-v2-preview/
+    );
 
     const routeRegistryPath = join(process.cwd(), "src/productShellContract.ts");
     const tauriTypesPath = join(process.cwd(), "src/tauri.ts");

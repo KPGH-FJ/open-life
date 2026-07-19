@@ -1,13 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const vitePort = Number(process.env.PORT || process.env.VITE_PORT || 5173);
+const vitePort = Number(process.env.PORT || process.env.VITE_PORT || 4184);
 
-export default defineConfig(async ({ command }) => ({
+export default defineConfig(({ command }) => ({
   base: command === "build" ? "./" : "/",
   plugins: [react()],
   define: {
-    __OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false),
+    __OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(true),
   },
   resolve: {
     alias: {
@@ -23,7 +23,12 @@ export default defineConfig(async ({ command }) => ({
     },
   },
   build: {
+    outDir: "dist-phase4b",
+    emptyOutDir: true,
     minify: "terser",
+    rollupOptions: {
+      input: new URL("./dev/phase4b/index.html", import.meta.url).pathname,
+    },
     terserOptions: {
       compress: {
         drop_console: true,

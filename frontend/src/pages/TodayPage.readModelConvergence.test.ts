@@ -99,7 +99,7 @@ describe("frontend read-model convergence guards", () => {
     expectNotContains("src/pages/settings/tabs/OverviewTab.tsx", ["buildProviderReadinessView"]);
   });
 
-  it("keeps Today limited and preview paths explicit instead of inventing missing owners", () => {
+  it("keeps Today limited and the future adapter explicit without a production preview route", () => {
     expectContains("src/pages/TodayPage.tsx", [
       "getLifeStateProjection",
       "getDailyGoals",
@@ -113,14 +113,11 @@ describe("frontend read-model convergence guards", () => {
       "getProviderPrivacyBoundarySummary",
     ]);
 
-    expectContains("src/pages/TodayV2PreviewPage.tsx", [
-      "getProviderPrivacyBoundarySummary",
-      "buildTodayViewModelEnvelope",
-    ]);
     expectContains("src/viewmodels/today/todayViewModelAdapter.ts", [
       "providerPrivacyBoundary",
       "Provider/privacy boundary is not backend-owned by the Today limited slice.",
     ]);
+    expectNotContains("src/App.tsx", ["TodayV2PreviewPage", "/today-v2-preview"]);
   });
 
   it("keeps frontend helpers display-only", () => {

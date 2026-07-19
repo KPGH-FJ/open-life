@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-07-19T10:50:36.161Z",
+  "baseUrl": "http://127.0.0.1:4184/dev/phase4b/",
+  "assertions": 37,
+  "result": "PASS",
+  "failures": [],
+  "observations": [
+    {
+      "viewport": "1440x900",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_1440x900.png",
+      "overflow": 0,
+      "bodyFont": 14,
+      "metadataFont": 12
+    },
+    {
+      "viewport": "1280x800",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_1280x800.png",
+      "overflow": 0,
+      "bodyFont": 14,
+      "metadataFont": 12
+    },
+    {
+      "viewport": "390x844",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_390x844.png",
+      "overflow": 0,
+      "bodyFont": 14,
+      "metadataFont": 12
+    },
+    {
+      "contrast": "ink on canvas",
+      "ratio": 18.88
+    },
+    {
+      "contrast": "secondary on sidebar",
+      "ratio": 7.51
+    },
+    {
+      "contrast": "muted on canvas",
+      "ratio": 5.74
+    },
+    {
+      "contrast": "amber on amber soft",
+      "ratio": 5.9
+    },
+    {
+      "contrast": "red on red soft",
+      "ratio": 6.35
+    },
+    {
+      "contrast": "green on green soft",
+      "ratio": 4.83
+    },
+    {
+      "interaction": "mobile-dialog",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_390x844_dialog.png"
+    }
+  ]
+}

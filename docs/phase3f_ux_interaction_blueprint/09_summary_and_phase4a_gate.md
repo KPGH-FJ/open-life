@@ -1,6 +1,6 @@
 # Phase 3F Summary And Phase 4A Gate
 
-Status: `PRE4A_GATE_COMPLETE_AWAITING_START_DECISION`
+Status: `HANDOFF_COMPLETE_PHASE4B_PENDING_HUMAN_REVIEW`
 Date: 2026-07-19
 
 ## 1. Review Entry
@@ -106,6 +106,9 @@ PRODUCTION_PAGE_ROUTE_SHELL_MODIFIED = NO
 PRODUCTION_BUSINESS_COMMAND_AUTHORITY_MODIFIED = NO
 TEST_ONLY_RUST_SOURCE_MODIFIED = YES_FOR_CI_DETERMINISM
 REACT_PORT_READY = YES_FOR_PHASE4B_FOUNDATION_NOT_PAGE_MIGRATION
+PHASE4A_MERGED_TO_MAIN = YES_AT_7f9faf4
+PHASE4A_MAIN_CI = PASS_RUN_29668642176
+PHASE4B_START_DECISION = APPROVED_2026_07_19
 ```
 
 Approval was recorded on 2026-07-18. Convergence was merged through PR #50; its
@@ -127,4 +130,5 @@ Rust Coverage and Smoke. The user approved Phase 4A Contract Closure on
 Phase 4A now owns the rich Review and exact Permission presentation contract
 work. This update does not authorize React page migration or a production route
 switch. Phase 4A subsequently passed its complete technical gate set; Phase 4B
-still requires separate human approval.
+was separately approved after PR #56 merged and exact-main CI passed. Phase 4B
+is limited to UI foundation and a dev-only harness.

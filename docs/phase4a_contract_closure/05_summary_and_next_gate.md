@@ -1,6 +1,6 @@
 # Phase 4A Summary And Next Gate
 
-Status: `TECHNICAL_EXIT_PASS_PENDING_HUMAN_REVIEW`
+Status: `MERGED_AND_HUMAN_APPROVED`
 Date: 2026-07-19
 
 ## Delivered
@@ -34,8 +34,8 @@ Date: 2026-07-19
 - Current Mailbox still joins raw proposals for presentation; its replacement
   is a Phase 4D journey and is listed in the deletion ledger.
 - Current Today, Companion, Runs, LifeModel, and Settings pages are not V2.
-- `/today-v2-preview` is still a production-compiled route and must move to the
-  Phase 4B dev-only harness before React migration work.
+- At this phase's closeout `/today-v2-preview` was still production compiled;
+  Phase 4B subsequently deleted it and added release absence guards.
 - Workspace activity is metadata-only; evidence bodies remain in typed owners.
 - Review Apply remains disabled where no materialization command exists.
 - Phase 4A has no visual UI to dogfood; browser visual QA begins with the Phase
@@ -58,6 +58,7 @@ deletes old owners in the same change.
 ```text
 PHASE4A_TECHNICAL_EXIT = PASS
 REACT_PORT_CONTRACT_READY = YES
-PHASE4B_START_DECISION = PENDING_HUMAN_REVIEW
+PHASE4A_MERGED_TO_MAIN = YES_AT_7f9faf4
+PHASE4B_START_DECISION = APPROVED_2026_07_19
 PRODUCTION_REACT_MIGRATION_AUTHORIZED = NO
 ```
