@@ -50,8 +50,8 @@
 .ol-action-button {
   min-width: 108px;
   min-height: var(--ol-control-height);
-  padding: 7px var(--ol-space-3);
-  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  padding: var(--ol-space-1) var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
   border-radius: var(--ol-radius-2);
   font-size: var(--ol-type-body);
   line-height: 20px;
@@ -95,7 +95,7 @@
 }
 
 .ol-action-button--danger {
-  border-color: var(--ol-line-strong);
+  border-color: var(--ol-control-boundary);
   background: var(--ol-surface);
   color: var(--ol-red);
 }
@@ -128,7 +128,7 @@
   height: var(--ol-icon-button-size);
   flex: 0 0 var(--ol-icon-button-size);
   place-items: center;
-  border: var(--ol-divider-width) solid var(--ol-line);
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
   border-radius: var(--ol-radius-2);
   background: var(--ol-surface);
   color: var(--ol-ink-secondary);
@@ -173,8 +173,8 @@
 }
 
 .ol-status-label__dot {
-  width: 7px;
-  height: 7px;
+  width: var(--ol-space-2);
+  height: var(--ol-space-2);
   border-radius: 50%;
   background: currentColor;
 }
@@ -205,7 +205,7 @@
   gap: var(--ol-space-1);
   padding: var(--ol-space-3) var(--ol-space-4);
   border: var(--ol-divider-width) solid var(--ol-line);
-  border-left-width: 3px;
+  border-left-width: var(--ol-space-1);
   border-radius: var(--ol-radius-2);
   background: var(--ol-information-soft);
   color: var(--ol-ink-secondary);
@@ -267,8 +267,8 @@
 .ol-text-field {
   width: 100%;
   min-height: var(--ol-control-height);
-  padding: 6px 10px;
-  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  padding: var(--ol-space-1) var(--ol-space-2);
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
   border-radius: var(--ol-radius-2);
   background: var(--ol-surface);
   color: var(--ol-ink);
@@ -303,14 +303,14 @@
 .ol-toggle-copy {
   display: grid;
   min-width: 0;
-  gap: 2px;
+  gap: var(--ol-space-1);
 }
 
 .ol-toggle {
   display: grid;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 44px;
+  width: var(--ol-toggle-hit-size);
+  height: var(--ol-toggle-hit-size);
+  flex: 0 0 var(--ol-toggle-hit-size);
   place-items: center;
   border-radius: var(--ol-radius-2);
   background: transparent;
@@ -319,10 +319,10 @@
 .ol-toggle__track {
   position: relative;
   display: block;
-  width: 40px;
-  height: 22px;
-  border-radius: 11px;
-  background: var(--ol-line-strong);
+  width: var(--ol-toggle-track-width);
+  height: var(--ol-toggle-track-height);
+  border-radius: var(--ol-toggle-track-radius);
+  background: var(--ol-control-boundary);
   transition: background-color var(--ol-motion-fast) ease;
 }
 
@@ -332,17 +332,17 @@
 
 .ol-toggle__thumb {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
+  top: var(--ol-toggle-thumb-inset);
+  left: var(--ol-toggle-thumb-inset);
+  width: var(--ol-toggle-thumb-size);
+  height: var(--ol-toggle-thumb-size);
   border-radius: 50%;
   background: var(--ol-on-accent);
   transition: transform var(--ol-motion-fast) ease;
 }
 
 .ol-toggle[data-state="on"] .ol-toggle__thumb {
-  transform: translateX(18px);
+  transform: translateX(var(--ol-toggle-thumb-travel));
 }
 
 .ol-toggle:disabled {
@@ -366,12 +366,12 @@
 
 .ol-nav-row {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: var(--ol-nav-icon-size) minmax(0, 1fr) auto;
   gap: var(--ol-space-3);
   align-items: center;
   width: 100%;
-  min-height: 48px;
-  padding: 7px 10px;
+  min-height: var(--ol-nav-row-height);
+  padding: var(--ol-space-1) var(--ol-space-2);
   border-radius: var(--ol-radius-2);
   background: transparent;
   color: var(--ol-ink-secondary);
@@ -386,8 +386,8 @@
 
 .ol-nav-row__icon {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: var(--ol-nav-icon-size);
+  height: var(--ol-nav-icon-size);
   place-items: center;
 }
 
@@ -412,14 +412,14 @@
 }
 
 .ol-nav-row__badge {
-  min-width: 20px;
-  padding: 1px 5px;
+  min-width: var(--ol-space-6);
+  padding: 0 var(--ol-space-2);
   border: var(--ol-divider-width) solid var(--ol-amber);
   border-radius: var(--ol-radius-1);
   background: var(--ol-amber-soft);
   color: var(--ol-amber);
-  font-size: 11px;
-  line-height: 17px;
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
   font-weight: 700;
   text-align: center;
 }
@@ -427,9 +427,9 @@
 .ol-evidence-row {
   display: grid;
   width: 100%;
-  gap: 2px;
-  padding: 10px var(--ol-space-3);
-  border: var(--ol-divider-width) solid var(--ol-line);
+  gap: var(--ol-space-1);
+  padding: var(--ol-space-2) var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
   border-radius: var(--ol-radius-2);
   background: var(--ol-surface);
   color: var(--ol-ink);
@@ -460,13 +460,13 @@
   display: grid;
   place-items: center;
   padding: var(--ol-space-4);
-  background: rgb(17 17 17 / 28%);
+  background: var(--ol-overlay-scrim);
 }
 
 .ol-dialog {
   display: grid;
   width: min(480px, 100%);
-  max-height: min(720px, calc(100vh - 32px));
+  max-height: min(720px, calc(100vh - var(--ol-space-8)));
   overflow: auto;
   border: var(--ol-divider-width) solid var(--ol-line-strong);
   border-radius: var(--ol-radius-3);

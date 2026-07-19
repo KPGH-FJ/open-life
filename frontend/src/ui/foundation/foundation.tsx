@@ -134,16 +134,21 @@ export function FoundationStatusLabel({
   label,
   status = "neutral",
   verified = false,
+  live = false,
 }: {
   label: string;
   status?: FoundationStatus;
   verified?: boolean;
+  live?: boolean;
 }) {
   if (status === "success" && !verified) {
     throw new Error("Success status requires verified=true.");
   }
   return (
-    <span className={cx("ol-status-label", `ol-status-label--${status}`)} role="status">
+    <span
+      className={cx("ol-status-label", `ol-status-label--${status}`)}
+      role={live ? "status" : undefined}
+    >
       <span className="ol-status-label__dot" aria-hidden="true" />
       {label}
     </span>
@@ -181,6 +186,7 @@ export type FoundationTextFieldProps = Omit<
   description?: string;
   error?: string;
   stateMessage?: string;
+  disabledReason?: string;
 };
 
 export function FoundationTextField({
@@ -189,13 +195,22 @@ export function FoundationTextField({
   description,
   error,
   stateMessage,
+  disabled = false,
+  disabledReason,
   className,
   ...inputProps
 }: FoundationTextFieldProps) {
   const descriptionId = `${id}-description`;
   const errorId = `${id}-error`;
   const stateId = `${id}-state`;
-  const describedBy = [description && descriptionId, error && errorId, stateMessage && stateId]
+  const reasonId = `${id}-disabled-reason`;
+  const reason = requireDisabledReason(disabled, disabledReason);
+  const describedBy = [
+    description && descriptionId,
+    stateMessage && stateId,
+    error && errorId,
+    reason && reasonId,
+  ]
     .filter(Boolean)
     .join(" ");
 
@@ -212,6 +227,7 @@ export function FoundationTextField({
       <input
         {...inputProps}
         id={id}
+        disabled={disabled}
         aria-invalid={Boolean(error) || undefined}
         aria-describedby={describedBy || undefined}
         className={cx("ol-text-field", error && "ol-text-field--error", className)}
@@ -224,6 +240,11 @@ export function FoundationTextField({
       {error && (
         <span id={errorId} className="ol-field__error">
           {error}
+        </span>
+      )}
+      {reason && (
+        <span id={reasonId} className="ol-disabled-reason">
+          {reason}
         </span>
       )}
     </div>
@@ -250,7 +271,7 @@ export function FoundationToggle({
 
   if (state === "unknown") {
     return (
-      <div className="ol-toggle-row ol-toggle-row--unknown" role="status">
+      <div className="ol-toggle-row ol-toggle-row--unknown">
         <span className="ol-toggle-copy">
           <span className="ol-toggle-copy__label">{label}</span>
           {description && <span className="ol-toggle-copy__description">{description}</span>}

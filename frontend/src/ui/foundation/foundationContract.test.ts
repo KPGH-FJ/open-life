@@ -25,8 +25,22 @@ describe("Phase 4B token and isolation contract", () => {
       "--ol-red: #9f3a35",
       "--ol-green: #2e7d4f",
       "--ol-focus: #2563eb",
+      "--ol-control-boundary: #858585",
     ]) {
       expect(tokens).toContain(expected);
+    }
+  });
+
+  it("keeps literal colors and sub-12px type out of foundation consumers", () => {
+    for (const path of [
+      "src/ui/foundation/openlife.foundation.css",
+      "src/dev/phase4b/phase4b-harness.css",
+    ]) {
+      const source = read(path);
+      expect(source, path).not.toMatch(/#[0-9a-f]{3,8}|(?:rgb|hsl)a?\(/i);
+      for (const match of source.matchAll(/font-size:\s*([0-9.]+)px/g)) {
+        expect(Number(match[1]), `${path}: ${match[0]}`).toBeGreaterThanOrEqual(12);
+      }
     }
   });
 
@@ -57,6 +71,8 @@ describe("Phase 4B token and isolation contract", () => {
 
     expect(productVite).toContain("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)");
     expect(harnessVite).toContain("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(true)");
+    expect(harnessVite).toContain('appType: "mpa"');
+    expect(harnessVite).toContain('name: "phase4b-entry-boundary"');
     expect(app).not.toMatch(/TodayV2PreviewPage|\/today-v2-preview|src\/dev\/phase4b/);
   });
 });

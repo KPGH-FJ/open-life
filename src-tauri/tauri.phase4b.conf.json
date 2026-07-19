@@ -4,7 +4,7 @@
   "identifier": "ai.openlife.app.phase4b",
   "build": {
     "beforeDevCommand": "corepack pnpm --dir ../frontend dev:phase4b --host 127.0.0.1 --port 4184",
-    "beforeBuildCommand": "node ../frontend/scripts/reject-phase4b-tauri-build.mjs",
+    "beforeBuildCommand": "node -e \"console.error('Phase 4B is development-only; release and package builds are forbidden.'); process.exit(1)\"",
     "devUrl": "http://127.0.0.1:4184/dev/phase4b/",
     "frontendDist": "../frontend/dist-phase4b"
   },

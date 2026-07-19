@@ -304,7 +304,7 @@ export function FoundationHarness() {
             </div>
           </section>
 
-          <div className="phase4b-feedback" role="status" aria-live="polite">
+          <div className="phase4b-feedback">
             <TriangleAlert size={17} aria-hidden="true" />
             <span>{feedback}</span>
           </div>

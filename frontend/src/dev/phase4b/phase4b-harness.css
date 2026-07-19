@@ -34,8 +34,8 @@ summary {
   grid-template-columns: minmax(220px, auto) minmax(0, 1fr) auto;
   gap: var(--ol-space-4);
   align-items: center;
-  min-height: 48px;
-  padding: 6px var(--ol-space-3);
+  min-height: var(--ol-nav-row-height);
+  padding: var(--ol-space-1) var(--ol-space-3);
   border-bottom: var(--ol-divider-width) solid var(--ol-line-strong);
   background: var(--ol-surface-sunken);
 }
@@ -70,14 +70,14 @@ summary {
 
 .phase4b-qa-mark {
   display: grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
+  width: var(--ol-space-8);
+  height: var(--ol-space-8);
+  flex: 0 0 var(--ol-space-8);
   place-items: center;
   border-radius: var(--ol-radius-1);
   background: var(--ol-ink);
   color: var(--ol-on-accent);
-  font-size: 10px;
+  font-size: var(--ol-type-caption);
   font-weight: 700;
 }
 
@@ -117,12 +117,12 @@ summary {
 
 .phase4b-lab-nav nav {
   display: grid;
-  gap: 2px;
+  gap: var(--ol-space-1);
 }
 
 .phase4b-lab-nav__boundary {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-columns: var(--ol-space-5) minmax(0, 1fr);
   gap: var(--ol-space-2);
   align-items: start;
   margin-top: auto;
@@ -152,7 +152,7 @@ summary {
   min-height: 0;
   overflow: auto;
   scroll-behavior: smooth;
-  padding: var(--ol-space-8) clamp(24px, 4vw, 56px) var(--ol-space-12);
+  padding: var(--ol-space-8) clamp(var(--ol-space-6), 4vw, var(--ol-space-12)) var(--ol-space-12);
   background: var(--ol-canvas);
 }
 
@@ -200,7 +200,7 @@ summary {
 }
 
 .phase4b-section-heading h2 {
-  margin: 2px 0 0;
+  margin: var(--ol-space-1) 0 0;
   font-size: var(--ol-type-surface);
   line-height: var(--ol-line-surface);
   font-weight: 600;
@@ -259,7 +259,7 @@ summary {
 
 .phase4b-feedback {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-columns: var(--ol-space-5) minmax(0, 1fr);
   gap: var(--ol-space-2);
   align-items: start;
   margin-top: var(--ol-space-6);
@@ -345,8 +345,8 @@ summary {
 
   .phase4b-lab-nav .ol-nav-row {
     width: auto;
-    grid-template-columns: 20px auto;
-    min-height: 44px;
+    grid-template-columns: var(--ol-space-5) auto;
+    min-height: var(--ol-control-height-mobile);
   }
 
   .phase4b-lab-nav .ol-nav-row__meta,

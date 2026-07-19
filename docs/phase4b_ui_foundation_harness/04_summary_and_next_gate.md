@@ -10,11 +10,14 @@ Date: 2026-07-19
 - React primitives with executable disabled, loading, unknown, blocked,
   verified, dialog, focus, and live-feedback behavior.
 - Semantic Tailwind aliases backed by the same variables.
-- Independent browser/Tauri dev harness with explicit fixture boundaries.
+- Separate browser/Tauri dev harness entry with explicit fixture boundaries and
+  fail-hard HTML navigation boundaries.
 - Production bundle, route, source-import, and Tauri build absence guards.
 - Deletion of the old production-compiled Today V2 preview route/page.
 - Browser screenshots, machine-readable QA, interaction tests, and contrast
   evidence.
+- Corrective guards for disabled fields, single-owner announcements, 3:1
+  control boundaries, and working-directory-independent Tauri build rejection.
 
 ## Deliberately Unchanged
 
@@ -28,6 +31,8 @@ Date: 2026-07-19
 ## Known Limits
 
 - The harness is a component lab, not Shell V2 and not a product route.
+- It is not the latest product UI and must not be reviewed at `/phase4b/`; the
+  only review entry is `/dev/phase4b/`.
 - Existing production pages still use `ProductPrimitives.tsx` and page-local
   Tailwind styles; migration/deletion remains scheduled by journey.
 - Harness evidence strings are layout examples, not backend `EvidenceRef` data.

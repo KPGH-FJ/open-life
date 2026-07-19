@@ -25,6 +25,12 @@ describe("OpenLife UI foundation primitives", () => {
           disabled
           disabledReason="提交期间不能关闭。"
         />
+        <FoundationTextField
+          id="disabled-provider"
+          label="供应商地址"
+          disabled
+          disabledReason="当前配置来源未知，暂时不能编辑。"
+        />
       </>
     );
 
@@ -36,6 +42,10 @@ describe("OpenLife UI foundation primitives", () => {
       "aria-describedby",
       screen.getByText("提交期间不能关闭。").id
     );
+    expect(screen.getByLabelText("供应商地址")).toHaveAttribute(
+      "aria-describedby",
+      screen.getByText("当前配置来源未知，暂时不能编辑。").id
+    );
   });
 
   it("rejects disabled controls without a reason and unverified green success", () => {
@@ -44,6 +54,9 @@ describe("OpenLife UI foundation primitives", () => {
       expect(() => render(<FoundationActionButton label="无效动作" disabled />)).toThrow(
         "disabledReason"
       );
+      expect(() =>
+        render(<FoundationTextField id="invalid-disabled-field" label="无效字段" disabled />)
+      ).toThrow("disabledReason");
       expect(() => render(<FoundationStatusLabel label="未经验证" status="success" />)).toThrow(
         "verified=true"
       );
@@ -57,7 +70,8 @@ describe("OpenLife UI foundation primitives", () => {
       <FoundationToggle label="当前传输边界" description="未知不能表现为关闭。" state="unknown" />
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("状态未知");
+    expect(screen.getByText("状态未知")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
   });
 

@@ -41,6 +41,7 @@
   --ol-surface-sunken: #f2f2f2;
   --ol-line: #e6e6e6;
   --ol-line-strong: #d4d4d4;
+  --ol-control-boundary: #858585;
   --ol-ink: #111111;
   --ol-ink-secondary: #4f4f4f;
   --ol-ink-muted: #666666;
@@ -57,11 +58,21 @@
   --ol-information: #4f4f4f;
   --ol-information-soft: #f7f7f7;
   --ol-focus: #2563eb;
+  --ol-overlay-scrim: rgb(17 17 17 / 28%);
 
   --ol-control-height: 36px;
   --ol-control-height-mobile: 44px;
   --ol-icon-button-size: 36px;
   --ol-icon-button-size-mobile: 44px;
+  --ol-toggle-hit-size: 44px;
+  --ol-toggle-track-width: 40px;
+  --ol-toggle-track-height: 22px;
+  --ol-toggle-track-radius: 11px;
+  --ol-toggle-thumb-size: 16px;
+  --ol-toggle-thumb-inset: 3px;
+  --ol-toggle-thumb-travel: 18px;
+  --ol-nav-row-height: 48px;
+  --ol-nav-icon-size: 22px;
   --ol-divider-width: 1px;
   --ol-focus-width: 2px;
   --ol-focus-offset: 2px;

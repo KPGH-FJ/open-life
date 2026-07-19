@@ -2242,7 +2242,7 @@ fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_
     for required in [
         "http://127.0.0.1:4184/dev/phase4b/",
         "dev:phase4b --host 127.0.0.1 --port 4184",
-        "reject-phase4b-tauri-build.mjs",
+        "Phase 4B is development-only; release and package builds are forbidden.",
         "\"active\": false",
     ] {
         assert!(

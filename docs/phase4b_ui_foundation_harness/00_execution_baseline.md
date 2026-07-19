@@ -30,7 +30,8 @@ Phase 4B may:
 - create the semantic CSS token authority selected in Phase 3F;
 - create reusable React UI primitives and their state matrix;
 - expose semantic Tailwind aliases that resolve to the CSS variables;
-- create a compile-time dev-only Vite/Tauri component harness;
+- create a compile-time dev-only Vite/Tauri component harness with a separate
+  MPA HTML entry;
 - delete the production-compiled `/today-v2-preview` route and page;
 - add release-bundle, route, import, and Tauri configuration absence guards;
 - add component, accessibility, interaction, and browser QA evidence;
@@ -50,13 +51,16 @@ Phase 4B does not:
 
 ## 4. Production Change Boundary
 
-`frontend/src/App.tsx` changes only to remove the retired preview route. The
-normal app still renders the existing production shell and pages. The new UI
-foundation is not imported by `App.tsx`, `ProductShell.tsx`, or any production
-page in this phase.
+React product behavior changes only to remove the retired preview route from
+`frontend/src/App.tsx`. Build configuration and test infrastructure also change
+to enforce token and release-absence contracts. The normal app still renders
+the existing production shell and pages. The new UI foundation is not imported
+by `App.tsx`, `ProductShell.tsx`, or any production page in this phase.
 
 The harness has its own HTML entry, Vite config, compile-time flag, Tauri dev
-overlay, and output directory. Its Tauri overlay rejects build/package use.
+The Vite dev server rejects every HTML navigation except
+`/dev/phase4b/`; a mistyped review URL cannot fall through to the production
+`src/main.tsx` entry.
 
 ## 5. Exit Gate
 
