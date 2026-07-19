@@ -179,18 +179,24 @@ MAIN_REVERIFIED = YES_AT_974b416_CI_AND_TARGETED_TESTS
 CURRENT_MAIN_CI_STABILITY = PASS
 FRONTEND_REFACTOR_READY = YES
 DESIGN_AUTHORITY_MERGED_TO_MAIN = YES_AT_8b3e493
-PRODUCTION_COMPILED_PATH_MODIFIED = NO
+PRODUCTION_CONTRACT_READ_MODEL_SOURCE_MODIFIED = YES_PHASE4A
+PRODUCTION_PAGE_ROUTE_SHELL_MODIFIED = NO
+PRODUCTION_BUSINESS_COMMAND_AUTHORITY_MODIFIED = NO
 TEST_ONLY_RUST_SOURCE_MODIFIED = YES_FOR_CI_DETERMINISM
-PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
-PHASE4A_START_DECISION = PENDING_USER_APPROVAL
+PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = YES_AT_1267EE4
+PHASE4A_START_DECISION = APPROVED_2026_07_19
+PHASE4A_TECHNICAL_EXIT = PASS
+PHASE4B_START_DECISION = PENDING_HUMAN_REVIEW
+PRODUCTION_REACT_MIGRATION_AUTHORIZED = NO
 ```
 
-Protected remote `main` is the only long-term product authority. The next work
-is a user decision on whether to start Phase 4A from a newly created branch at
-the then-current verified main. This readiness state authorizes Contract
-Closure planning and implementation only after that decision. It does not make
-the rich Review or exact Permission presentation contracts complete, and it
-does not authorize a React page migration yet.
+Protected remote `main` remains the only long-term product authority. The user
+approved Phase 4A on 2026-07-19, and `codex/phase4a-contract-closure` was
+created from verified main commit `1267ee4`; protected-main CI run
+`29661506060` had passed for that exact SHA. The branch is authorized for
+Contract Closure only. It does not authorize a React page migration or a
+production route switch. Phase 4A later passed its technical gate set; starting
+Phase 4B remains a separate human decision.
 
 ## Backend Boundary
 

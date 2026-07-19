@@ -88,8 +88,8 @@ PHASE3F_HUMAN_APPROVAL = YES
 VISUAL_AND_INTERACTION_DIRECTION = YES
 BACKEND_CAPABILITY_MAP = MERGED_CONVERGENCE_SOURCE_REVIEWED
 STATIC_PROTOTYPE_QA = PASS
-RICH_REVIEW_CONTRACT = BLOCKED
-EXACT_PERMISSION_PRESENTATION_CONTRACT = BLOCKED
+RICH_REVIEW_CONTRACT = PHASE4A_TECHNICAL_PASS
+EXACT_PERMISSION_PRESENTATION_CONTRACT = PHASE4A_TECHNICAL_PASS
 CONVERGENCE_MERGED_TO_MAIN = YES
 MERGED_MAIN_PUSH_CI = PASS_AT_974b416
 MAIN_REVERIFIED = YES_AT_974b416_CI_AND_TARGETED_TESTS
@@ -99,11 +99,13 @@ MAINLINE_COVERAGE_TIMING_FIX_PR = MERGED
 FRONTEND_REFACTOR_READY = YES
 DESIGN_AUTHORITY_COMMITTED = YES
 DESIGN_AUTHORITY_MERGED_TO_MAIN = YES_AT_8b3e493
-PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = NO
-PHASE4A_START_DECISION = PENDING_USER_APPROVAL
-PRODUCTION_COMPILED_PATH_MODIFIED = NO
+PHASE4A_BRANCH_CREATED_FROM_VERIFIED_MAIN = YES_AT_1267EE4
+PHASE4A_START_DECISION = APPROVED_2026_07_19
+PRODUCTION_CONTRACT_READ_MODEL_SOURCE_MODIFIED = YES_PHASE4A
+PRODUCTION_PAGE_ROUTE_SHELL_MODIFIED = NO
+PRODUCTION_BUSINESS_COMMAND_AUTHORITY_MODIFIED = NO
 TEST_ONLY_RUST_SOURCE_MODIFIED = YES_FOR_CI_DETERMINISM
-REACT_PORT_READY = NO
+REACT_PORT_READY = YES_FOR_PHASE4B_FOUNDATION_NOT_PAGE_MIGRATION
 ```
 
 Approval was recorded on 2026-07-18. Convergence was merged through PR #50; its
@@ -119,8 +121,10 @@ a second coverage-sensitive observation test exposed the same class of problem.
 PR #55 replaced those test-only sub-second assumptions with bounded watchdogs
 while preserving the product timeout and scheduler assertions. It merged as
 `974b416`; its pull-request matrix and protected-main CI both passed, including
-Rust Coverage and Smoke. The repository is therefore ready for a user decision
-on starting Phase 4A Contract Closure. No Phase 4A branch has been created.
-`REACT_PORT_READY` remains `NO` because the rich Review and exact Permission
-presentation contracts are intentionally Phase 4A blockers, not completed
-contracts.
+Rust Coverage and Smoke. The user approved Phase 4A Contract Closure on
+2026-07-19, and `codex/phase4a-contract-closure` was created from verified
+`origin/main` at `1267ee4` after protected-main CI run `29661506060` passed.
+Phase 4A now owns the rich Review and exact Permission presentation contract
+work. This update does not authorize React page migration or a production route
+switch. Phase 4A subsequently passed its complete technical gate set; Phase 4B
+still requires separate human approval.

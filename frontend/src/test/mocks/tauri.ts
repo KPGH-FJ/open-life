@@ -430,11 +430,22 @@ export function createMockWorkspaceViewModelEnvelope(
   const now = new Date().toISOString();
   const base: ViewModelEnvelope<WorkspaceViewModel> = {
     data: {
-      activeTaskRef: {
-        id: "mainchat_task_mock",
-        kind: "task",
-        label: "mock goal",
-        href: "/runs/run_mainchat_mock",
+      activeTask: {
+        canonicalTaskId: "mainchat_task_mock",
+        taskSessionId: "mainchat_task_mock",
+        relatedRunIds: ["run_mainchat_mock"],
+        conversationId: "conversation_mock",
+        title: "mock goal",
+        strategy: "react",
+        lifecycleStatus: "running",
+        terminalDeliveryStatus: "not_terminal",
+        finalDeliveryEvidencePresent: false,
+        pendingBlockers: [],
+        pendingReviewItemRefs: [],
+        allowedControls: [],
+        nextRecommendedControl: "open_trace",
+        evidenceRefs: [],
+        updatedAt: now,
       },
       recentTaskRefs: [
         {
@@ -444,14 +455,16 @@ export function createMockWorkspaceViewModelEnvelope(
           href: "/runs/run_mainchat_mock",
         },
       ],
-      pendingReviewItemRefs: [],
-      timeline: [
+      pendingReviewItems: [],
+      activity: [
         {
-          id: "mainchat_task_mock",
-          label: "mock goal",
-          status: "completed_needs_evidence",
+          id: "event_mock",
+          kind: "action",
+          label: "Action requested",
+          summary: "action_state_recorded",
+          status: "recorded",
           evidenceRefs: [],
-          updatedAt: now,
+          occurredAt: now,
         },
       ],
       providerPrivacyBoundarySummary: {
@@ -464,8 +477,9 @@ export function createMockWorkspaceViewModelEnvelope(
         localOnlyRequired: false,
         evidenceRefs: [],
       },
+      activityRedactionState: "metadata_only",
       sourceRefs: [],
-      contractLimitations: ["WorkspaceViewModel is a limited R4 baseline."],
+      contractLimitations: ["Workspace activity is metadata-only."],
     },
     status: "ready",
     lastUpdatedAt: now,

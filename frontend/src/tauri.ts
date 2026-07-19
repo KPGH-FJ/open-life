@@ -2110,6 +2110,7 @@ export type ReviewActionBase = {
   requiresConfirmation?: boolean;
   targetReviewItemId: string;
   expectedMaterializationStatusAfterDispatch?: ReviewItemMaterializationStatus;
+  completionProofAfterDispatch: boolean;
 };
 
 export type ReviewActionKindEffectInvariant =
@@ -2225,12 +2226,67 @@ export type ReviewItemTaskResumeRelation = {
   blockedReason?: string;
 };
 
+export type ReviewReadableValue = {
+  kind: "text" | "number" | "boolean" | "list" | "object" | "redacted" | "unknown";
+  summary: string;
+  detail?: string;
+  sensitivity: "public" | "local_private" | "sensitive" | "redacted";
+  truncated: boolean;
+};
+
+export type PermissionTransmissionBoundary = {
+  externalTransmission: "not_sent" | "sent" | "possible" | "unknown";
+  summary: string;
+  targetLabel?: string;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type PermissionDecisionContext = {
+  status: "ready" | "incomplete";
+  scopeKind: "action_bound" | "network_policy" | "unknown";
+  policy: "allow_once" | "unknown";
+  toolLabel: string;
+  toolName?: string;
+  capabilityLabels: string[];
+  requestedTargetLabel?: string;
+  resolvedTargetLabel?: string;
+  purposeSummary: string;
+  scopeDigest?: string;
+  requestDigestKind: "input" | "endpoint" | "unknown";
+  requestDigest?: string;
+  requestLengthBytes?: number;
+  blockedRunId?: string;
+  blockedStepIndex?: number;
+  networkPolicyDecisionId?: string;
+  transmissionBoundary: PermissionTransmissionBoundary;
+  expiresAt?: string;
+  revocationSummary: string;
+  missingFields: string[];
+  evidenceRefs: EvidenceRef[];
+};
+
+export type ReviewDecisionContext = {
+  reviewItemId: string;
+  title: string;
+  summary: string;
+  before?: ReviewReadableValue;
+  after: ReviewReadableValue;
+  reasonSummary: string;
+  sourceSummary: string;
+  impactSummary: string;
+  affectedObjectLabels: string[];
+  expiresAt?: string;
+  permission?: PermissionDecisionContext;
+  evidenceRefs: EvidenceRef[];
+};
+
 export type ReviewItem = {
   id: string;
   type: ReviewItemType;
   source: ReviewItemSource;
   status: ReviewItemDecisionStatus;
   materializationStatus: ReviewItemMaterializationStatus;
+  decisionContext: ReviewDecisionContext;
   allowedActions: ReviewAction[];
   risk: ProductRiskLevel;
   expiresAt?: string;
@@ -2506,20 +2562,40 @@ export type TasksViewModel = {
   contractLimitations: string[];
 };
 
-export type WorkspaceTimelineItem = {
+export type WorkspaceActivityKind =
+  | "user_input"
+  | "route_decision"
+  | "plan"
+  | "action"
+  | "observation"
+  | "follow_up"
+  | "permission_request"
+  | "proposal_request"
+  | "error"
+  | "retry"
+  | "final_result"
+  | "fallback"
+  | "blocker"
+  | "durable_lifecycle"
+  | "unknown";
+
+export type WorkspaceActivityItem = {
   id: string;
+  kind: WorkspaceActivityKind;
   label: string;
-  status: TaskLifecycleStatus;
+  summary: string;
+  status: "recorded" | "waiting_decision" | "blocked" | "failed" | "completed" | "unknown";
   evidenceRefs: EvidenceRef[];
-  updatedAt?: string;
+  occurredAt?: string;
 };
 
 export type WorkspaceViewModel = {
-  activeTaskRef?: BackendEntityRef;
+  activeTask?: TaskViewModelItem;
   recentTaskRefs: BackendEntityRef[];
-  pendingReviewItemRefs: BackendEntityRef[];
-  timeline: WorkspaceTimelineItem[];
+  pendingReviewItems: ReviewItem[];
+  activity: WorkspaceActivityItem[];
   providerPrivacyBoundarySummary: ProviderPrivacyBoundarySummary;
+  activityRedactionState: string;
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };

@@ -34,6 +34,26 @@ const CURRENT_WORKSPACE_ROUTE_REF = "route:companion";
 const CURRENT_REVIEW_ROUTE_REF = "route:mailbox";
 const STALE_DISABLED_REASON = "Refresh Today state before using this action.";
 
+// This adapter owns presentation composition only. Every product fact remains
+// owned by one of the backend inputs named here.
+export const TODAY_VIEW_MODEL_AUTHORITY_CONTRACT = Object.freeze({
+  version: "openlife.today-adapter.v1",
+  compositionOwner: "strict_frontend_adapter",
+  inputs: Object.freeze({
+    readinessAndSafeMode: "LifeStateProjection",
+    taskPressureAndPendingReview: "LifeStateProjection",
+    dailyGoals: "get_daily_goals compatibility projection",
+    providerPrivacyBoundary: "ProviderPrivacyBoundarySummary",
+  }),
+  forbiddenLocalTruth: Object.freeze([
+    "proposal status",
+    "task lifecycle",
+    "provider route",
+    "external transmission",
+    "durable completion",
+  ]),
+});
+
 export function buildTodayViewModelEnvelope(
   input: BuildTodayViewModelEnvelopeInput
 ): TodayViewModelEnvelope {

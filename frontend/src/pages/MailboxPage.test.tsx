@@ -264,6 +264,7 @@ function reviewAction(
     requiresConfirmation: kind === "approve" || kind === "apply",
     targetReviewItemId: proposal.id,
     expectedMaterializationStatusAfterDispatch: kind === "approve" ? "unknown" : undefined,
+    completionProofAfterDispatch: false,
   } as ReviewAction;
 }
 
@@ -351,6 +352,23 @@ function reviewItemFromProposal(proposal: AgentProposal, safeMode = false): Revi
     },
     status,
     materializationStatus: materializationStatusFor(proposal),
+    decisionContext: {
+      reviewItemId: proposal.id,
+      title: "Review proposed change",
+      summary: "Backend ReviewItem decision-context fixture",
+      after: {
+        kind: "object",
+        summary: "Proposed value",
+        sensitivity: "local_private",
+        truncated: false,
+      },
+      reasonSummary: proposal.reason,
+      sourceSummary: proposal.source,
+      impactSummary: "Approval remains separate from materialization.",
+      affectedObjectLabels: [proposal.affectedPath],
+      expiresAt: proposal.expiresAt,
+      evidenceRefs: [],
+    },
     allowedActions: actions,
     risk: proposal.riskLevel,
     expiresAt: proposal.expiresAt,

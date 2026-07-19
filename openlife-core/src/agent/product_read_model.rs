@@ -161,6 +161,8 @@ pub struct ReviewAction {
     pub target_review_item_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_materialization_status_after_dispatch: Option<ReviewItemMaterializationStatus>,
+    #[serde(default)]
+    pub completion_proof_after_dispatch: bool,
 }
 
 impl ReviewAction {
@@ -180,6 +182,7 @@ impl ReviewAction {
             requires_confirmation: false,
             target_review_item_id: target_review_item_id.into(),
             expected_materialization_status_after_dispatch: None,
+            completion_proof_after_dispatch: false,
         }
     }
 
@@ -191,6 +194,55 @@ impl ReviewAction {
                 expected,
                 actual: self.effect,
             });
+        }
+        for (field, value) in [
+            ("id", self.id.as_str()),
+            ("label", self.label.as_str()),
+            ("targetReviewItemId", self.target_review_item_id.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(
+                    ProductReadModelContractError::ReviewActionRequiredFieldMissing { field },
+                );
+            }
+        }
+        if self.enabled && self.disabled_reason.is_some() {
+            return Err(
+                ProductReadModelContractError::EnabledReviewActionHasDisabledReason {
+                    id: self.id.clone(),
+                },
+            );
+        }
+        if !self.enabled
+            && !self
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+        {
+            return Err(
+                ProductReadModelContractError::DisabledReviewActionMissingReason {
+                    id: self.id.clone(),
+                },
+            );
+        }
+        if matches!(
+            self.kind,
+            ReviewActionKind::Approve | ReviewActionKind::Apply
+        ) && !self.requires_confirmation
+        {
+            return Err(
+                ProductReadModelContractError::ReviewActionConfirmationRequired {
+                    id: self.id.clone(),
+                    kind: self.kind,
+                },
+            );
+        }
+        if self.completion_proof_after_dispatch {
+            return Err(
+                ProductReadModelContractError::ReviewActionClaimsCompletionProof {
+                    id: self.id.clone(),
+                },
+            );
         }
         Ok(())
     }
@@ -322,7 +374,7 @@ pub struct ProviderPrivacyBoundarySummary {
     pub local_only_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub evidence_refs: Vec<EvidenceRef>,
 }
 
@@ -387,6 +439,22 @@ pub enum ProductReadModelContractError {
         expected: ReviewActionEffect,
         actual: ReviewActionEffect,
     },
+    ReviewActionRequiredFieldMissing {
+        field: &'static str,
+    },
+    EnabledReviewActionHasDisabledReason {
+        id: String,
+    },
+    DisabledReviewActionMissingReason {
+        id: String,
+    },
+    ReviewActionConfirmationRequired {
+        id: String,
+        kind: ReviewActionKind,
+    },
+    ReviewActionClaimsCompletionProof {
+        id: String,
+    },
 }
 
 impl std::fmt::Display for ProductReadModelContractError {
@@ -400,6 +468,23 @@ impl std::fmt::Display for ProductReadModelContractError {
                 f,
                 "review action {:?} must use effect {:?}, got {:?}",
                 kind, expected, actual
+            ),
+            Self::ReviewActionRequiredFieldMissing { field } => {
+                write!(f, "review action required field is missing: {field}")
+            }
+            Self::EnabledReviewActionHasDisabledReason { id } => {
+                write!(f, "enabled review action {id} cannot carry disabledReason")
+            }
+            Self::DisabledReviewActionMissingReason { id } => {
+                write!(f, "disabled review action {id} requires disabledReason")
+            }
+            Self::ReviewActionConfirmationRequired { id, kind } => write!(
+                f,
+                "review action {id} with kind {kind:?} requires confirmation"
+            ),
+            Self::ReviewActionClaimsCompletionProof { id } => write!(
+                f,
+                "review action {id} cannot claim completion proof after dispatch"
             ),
         }
     }
@@ -471,7 +556,10 @@ mod tests {
                 ReviewActionEffect::EvidenceOnly,
             ),
         ] {
-            let action = ReviewAction::new("action", "Action", kind, "review:item");
+            let mut action = ReviewAction::new("action", "Action", kind, "review:item");
+            if matches!(kind, ReviewActionKind::Approve | ReviewActionKind::Apply) {
+                action = action.requiring_confirmation();
+            }
             assert_eq!(action.effect, effect);
             action.validate().expect("valid action invariant");
         }
@@ -480,7 +568,8 @@ mod tests {
     #[test]
     fn product_read_model_review_action_effect_invariant_rejects_mismatches() {
         let mut action =
-            ReviewAction::new("apply", "Apply", ReviewActionKind::Apply, "review:item");
+            ReviewAction::new("apply", "Apply", ReviewActionKind::Apply, "review:item")
+                .requiring_confirmation();
         action.effect = ReviewActionEffect::DecisionOnly;
 
         let err = action
@@ -493,6 +582,38 @@ mod tests {
                 expected: ReviewActionEffect::MaterializationRequest,
                 actual: ReviewActionEffect::DecisionOnly,
             }
+        );
+    }
+
+    #[test]
+    fn product_read_model_review_action_rejects_completion_claims_and_fake_disabled_states() {
+        let mut completion = ReviewAction::new(
+            "approve",
+            "Approve",
+            ReviewActionKind::Approve,
+            "review:item",
+        )
+        .requiring_confirmation();
+        completion.completion_proof_after_dispatch = true;
+        assert_eq!(
+            completion.validate(),
+            Err(
+                ProductReadModelContractError::ReviewActionClaimsCompletionProof {
+                    id: "approve".into()
+                }
+            )
+        );
+
+        let mut disabled =
+            ReviewAction::new("reject", "Reject", ReviewActionKind::Reject, "review:item");
+        disabled.enabled = false;
+        assert_eq!(
+            disabled.validate(),
+            Err(
+                ProductReadModelContractError::DisabledReviewActionMissingReason {
+                    id: "reject".into()
+                }
+            )
         );
     }
 

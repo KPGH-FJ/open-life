@@ -2,6 +2,7 @@ use crate::agent::product_read_model::{
     BackendEntityKind, BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
     ProductRiskLevel, ReviewAction, ReviewActionKind, ReviewItemMaterializationStatus,
 };
+use crate::agent::review_decision_context::{build_review_decision_context, ReviewDecisionContext};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -126,6 +127,7 @@ pub struct ReviewItem {
     pub source: ReviewItemSource,
     pub status: ReviewItemDecisionStatus,
     pub materialization_status: ReviewItemMaterializationStatus,
+    pub decision_context: ReviewDecisionContext,
     pub allowed_actions: Vec<ReviewAction>,
     pub risk: ProductRiskLevel,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -326,6 +328,7 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
     let status = ReviewItemDecisionStatus::from(proposal.status);
     let materialization_status = materialization_status_for(proposal, input);
     let evidence_refs = evidence_refs_for(proposal);
+    let decision_context = build_review_decision_context(proposal, &evidence_refs);
     let target_refs = target_refs_for(proposal);
     let task_resume_relation =
         task_resume_relation_for(proposal, status, materialization_status, input);
@@ -334,6 +337,7 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
         &item_id,
         status,
         materialization_status,
+        &decision_context,
         task_resume_relation.as_ref(),
         input,
     );
@@ -350,6 +354,7 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
         },
         status,
         materialization_status,
+        decision_context,
         allowed_actions,
         risk: risk_for(proposal.risk_level),
         expires_at: proposal.expires_at,
@@ -364,11 +369,12 @@ fn allowed_actions_for(
     item_id: &str,
     status: ReviewItemDecisionStatus,
     materialization_status: ReviewItemMaterializationStatus,
+    decision_context: &ReviewDecisionContext,
     task_resume_relation: Option<&ReviewItemTaskResumeRelation>,
     input: &ReviewCenterBuildInput,
 ) -> Vec<ReviewAction> {
     let mut actions = Vec::new();
-    let approve_blocker = approve_blocker(proposal, input);
+    let approve_blocker = approve_blocker(proposal, decision_context, input);
     actions.push(
         action(item_id, "approve", "Approve", ReviewActionKind::Approve)
             .with_expected_materialization_status(ReviewItemMaterializationStatus::Unknown)
@@ -515,7 +521,11 @@ fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
         && proposal.affected_path == crate::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
 }
 
-fn approve_blocker(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> Option<String> {
+fn approve_blocker(
+    proposal: &AgentProposal,
+    decision_context: &ReviewDecisionContext,
+    input: &ReviewCenterBuildInput,
+) -> Option<String> {
     if input.safe_mode_active {
         return Some(
             input
@@ -530,6 +540,18 @@ fn approve_blocker(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> 
     }
     if is_unsupported_type(proposal.proposal_type) {
         return Some("This review item type has no backend apply pathway yet.".into());
+    }
+    if proposal.proposal_type == ProposalType::ToolPermission {
+        if !decision_context
+            .permission
+            .as_ref()
+            .is_some_and(|permission| permission.is_ready())
+        {
+            return Some(
+                "Exact permission scope is incomplete; approval stays disabled until the backend can explain the action, target, duration, and transmission boundary."
+                    .into(),
+            );
+        }
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
         && !is_path_in_safe_paths(external_write_path(proposal), &input.safe_paths)
@@ -765,7 +787,18 @@ fn increment(map: &mut BTreeMap<String, usize>, key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{ProviderPrivacyBoundarySummary, WorkspaceActivityItem};
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Phase4AContractGolden {
+        schema_version: String,
+        review_item: ReviewItem,
+        workspace_activity: WorkspaceActivityItem,
+        provider_boundary: ProviderPrivacyBoundarySummary,
+    }
 
     fn proposal(proposal_type: ProposalType) -> AgentProposal {
         AgentProposal::new(
@@ -784,6 +817,31 @@ mod tests {
             .iter()
             .find(|action| action.kind == kind)
             .expect("action exists")
+    }
+
+    #[test]
+    fn phase4a_contract_golden_round_trips_and_preserves_action_invariants() {
+        let raw = include_str!("../../../frontend/src/test/fixtures/phase4a-contract-golden.json");
+        let parsed: serde_json::Value = serde_json::from_str(raw).expect("parse golden JSON");
+        let golden: Phase4AContractGolden =
+            serde_json::from_value(parsed.clone()).expect("deserialize Rust contract");
+
+        assert_eq!(golden.schema_version, "openlife.phase4a-contract.v1");
+        assert!(golden
+            .review_item
+            .allowed_actions
+            .iter()
+            .all(|action| action.validate().is_ok()));
+        assert!(golden
+            .review_item
+            .decision_context
+            .permission
+            .as_ref()
+            .is_some_and(|permission| permission.is_ready()));
+        assert_eq!(
+            serde_json::to_value(golden).expect("serialize Rust contract"),
+            parsed
+        );
     }
 
     #[test]
@@ -811,6 +869,30 @@ mod tests {
         assert!(!edit.enabled);
         assert!(reject.enabled);
         assert_eq!(model.summary.blocked_action_count, 2);
+    }
+
+    #[test]
+    fn review_item_incomplete_tool_permission_disables_approve_but_keeps_reject_available() {
+        let proposal = proposal(ProposalType::ToolPermission);
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+        let item = &model.items[0];
+        let approve = find_action(item, ReviewActionKind::Approve);
+
+        assert!(!approve.enabled);
+        assert!(approve
+            .disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Exact permission scope is incomplete")));
+        assert!(find_action(item, ReviewActionKind::Reject).enabled);
+        assert!(!item
+            .decision_context
+            .permission
+            .as_ref()
+            .expect("permission context")
+            .is_ready());
     }
 
     #[test]

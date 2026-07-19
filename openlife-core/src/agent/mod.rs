@@ -33,6 +33,7 @@ pub mod proposal_store;
 pub mod provider_privacy_boundary;
 pub mod reasoning;
 pub mod regression_suite;
+pub mod review_decision_context;
 pub mod review_item;
 pub mod review_workflow;
 pub mod runtime;
@@ -244,6 +245,12 @@ pub use reasoning::{
 pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
+pub use review_decision_context::{
+    build_review_decision_context, PermissionDecisionContext, PermissionDecisionContextStatus,
+    PermissionPolicyKind, PermissionRequestDigestKind, PermissionScopeKind,
+    PermissionTransmissionBoundary, ReviewDecisionContext, ReviewReadableValue,
+    ReviewReadableValueKind,
+};
 pub use review_item::{
     build_review_center_view_model, build_review_item, ReviewBatch, ReviewBatchDomain,
     ReviewCenterBuildInput, ReviewCenterSummary, ReviewCenterViewModel, ReviewItem,
@@ -280,8 +287,9 @@ pub use tasks_view_model::{
     build_tasks_view_model, build_workspace_view_model, TaskControl, TaskControlEffect,
     TaskControlKind, TaskLatestResultPreview, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
     TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
-    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceTimelineItem,
-    WorkspaceViewModel,
+    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceActivityItem,
+    WorkspaceActivityKind, WorkspaceActivityStatus, WorkspaceViewModel,
+    WorkspaceViewModelBuildInput,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use tool_execution_owner::AgentRunToolExecutionFaultPoint;
