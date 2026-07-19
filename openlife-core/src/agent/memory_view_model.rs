@@ -490,11 +490,11 @@ fn push_unique_evidence(refs: &mut Vec<EvidenceRef>, next: EvidenceRef) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::product_read_model::{
-        ProductRiskLevel, ReviewItemMaterializationStatus, ViewModelWarningSeverity,
-    };
-    use crate::agent::review_item::{ReviewItemSource, ReviewItemSourceKind};
+    use crate::agent::product_read_model::ViewModelWarningSeverity;
+    use crate::agent::review_item::{build_review_item, ReviewCenterBuildInput};
+    use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
     use chrono::Utc;
+    use serde_json::json;
 
     fn record(
         id: &str,
@@ -533,25 +533,19 @@ mod tests {
     }
 
     fn review_item(id: &str, proposal_id: &str) -> ReviewItem {
-        ReviewItem {
-            id: id.into(),
-            item_type: ReviewItemType::MemoryWrite,
-            source: ReviewItemSource {
-                kind: ReviewItemSourceKind::Proposal,
-                proposal_id: proposal_id.into(),
-                proposal_source: "manual".into(),
-                source_detail: None,
-                run_id: None,
-            },
-            status: ReviewItemDecisionStatus::Pending,
-            materialization_status: ReviewItemMaterializationStatus::NotStarted,
-            allowed_actions: Vec::new(),
-            risk: ProductRiskLevel::Low,
-            expires_at: None,
-            evidence_refs: Vec::new(),
-            target_refs: Vec::new(),
-            task_resume_relation: None,
-        }
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.candidate",
+            json!({ "content": "metadata-safe content" }),
+            "test memory proposal",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.id = proposal_id.into();
+        let mut item = build_review_item(&proposal, &ReviewCenterBuildInput::default());
+        item.id = id.into();
+        item
     }
 
     #[test]

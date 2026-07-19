@@ -1029,6 +1029,12 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "pub enum TaskTerminalDeliveryStatus",
         "pub fn build_tasks_view_model",
         "pub fn build_workspace_view_model",
+        "pub struct WorkspaceViewModelBuildInput",
+        "pub struct WorkspaceActivityItem",
+        "pub active_task: Option<TaskViewModelItem>",
+        "pub pending_review_items: Vec<ReviewItem>",
+        "pub activity: Vec<WorkspaceActivityItem>",
+        "activity_redaction_state: \"metadata_only\"",
         "CompletedWithPendingReview",
         "CompletedNeedsEvidence",
         "TaskControlEffect::TaskResumeRequest",
@@ -1071,7 +1077,7 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "get_provider_privacy_boundary_summary_with_state",
         "state.agent_run_store",
         "build_tasks_view_model",
-        "WorkspaceViewModel consumes R5 ProviderPrivacyBoundarySummary",
+        "Workspace activity is metadata-only",
     ] {
         assert!(
             read_model.contains(required),
@@ -2102,6 +2108,98 @@ fn single_system_direct_proposal_write_callsites_match_inventory() {
         actual, expected,
         "direct proposal write callsites must be registered in Phase 1 inventory"
     );
+}
+
+#[test]
+fn single_system_phase4a_review_permission_contract_is_backend_owned_and_fail_closed() {
+    let review_item = read_repo_file("openlife-core/src/agent/review_item.rs");
+    for required in [
+        "pub decision_context: ReviewDecisionContext",
+        "build_review_decision_context(proposal, &evidence_refs)",
+        "Exact permission scope is incomplete",
+        "materialization_status_for",
+        "ReviewItemMaterializationStatus::Unknown",
+    ] {
+        assert!(
+            review_item.contains(required),
+            "Phase 4A ReviewItem owner must include {required}"
+        );
+    }
+
+    let decision_context = read_repo_file("openlife-core/src/agent/review_decision_context.rs");
+    for required in [
+        "pub struct ReviewDecisionContext",
+        "pub struct PermissionDecisionContext",
+        "PermissionScopeKind::ActionBound",
+        "PermissionScopeKind::NetworkPolicy",
+        "PermissionDecisionContextStatus::Incomplete",
+        "ExternalTransmissionStatus::Unknown",
+        "transmissionBoundary",
+        "[REDACTED]",
+    ] {
+        assert!(
+            decision_context.contains(required),
+            "Phase 4A readable decision projection must include {required}"
+        );
+    }
+
+    let action_contract = read_repo_file("openlife-core/src/agent/product_read_model.rs");
+    for required in [
+        "pub completion_proof_after_dispatch: bool",
+        "ReviewActionClaimsCompletionProof",
+        "DisabledReviewActionMissingReason",
+        "ReviewActionConfirmationRequired",
+    ] {
+        assert!(
+            action_contract.contains(required),
+            "Phase 4A ReviewAction contract must include {required}"
+        );
+    }
+
+    let bridge = read_repo_file("frontend/src/tauri.ts");
+    for required in [
+        "export type ReviewDecisionContext =",
+        "export type PermissionDecisionContext =",
+        "completionProofAfterDispatch: boolean",
+        "decisionContext: ReviewDecisionContext",
+        "activeTask?: TaskViewModelItem",
+        "pendingReviewItems: ReviewItem[]",
+        "activity: WorkspaceActivityItem[]",
+    ] {
+        assert!(
+            bridge.contains(required),
+            "Phase 4A TypeScript bridge must mirror {required}"
+        );
+    }
+}
+
+#[test]
+fn single_system_phase4a_test_fixtures_and_contract_harnesses_are_absent_from_product_imports() {
+    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        for forbidden in [
+            "phase4a-contract-golden",
+            "src/test/fixtures",
+            "test/phase4aContractGolden",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4A test contract must not enter product source {rel}: {forbidden}"
+            );
+        }
+    }
+
+    let app = read_repo_file("frontend/src/App.tsx");
+    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
+    for source in [&app, &shell] {
+        assert!(!source.contains("phase4a-contract-golden"));
+        assert!(!source.contains("reviewDispatchContract"));
+        assert!(!source.contains("settingsOrchestrationContract"));
+    }
 }
 
 #[test]

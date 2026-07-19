@@ -3,6 +3,7 @@ use crate::agent::product_read_model::{
     BackendEntityKind, BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
     ProviderPrivacyBoundarySummary,
 };
+use crate::agent::review_item::{ReviewItem, ReviewItemDecisionStatus};
 use crate::agent::types::{AgentRun, AgentRunStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -270,29 +271,163 @@ pub struct TasksViewModel {
     pub contract_limitations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceActivityKind {
+    UserInput,
+    RouteDecision,
+    Plan,
+    Action,
+    Observation,
+    FollowUp,
+    PermissionRequest,
+    ProposalRequest,
+    Error,
+    Retry,
+    FinalResult,
+    Fallback,
+    Blocker,
+    DurableLifecycle,
+    Unknown,
+}
+
+impl WorkspaceActivityKind {
+    pub fn from_product_code(value: &str) -> Self {
+        match value {
+            "user_input" => Self::UserInput,
+            "route_decision" => Self::RouteDecision,
+            "plan" => Self::Plan,
+            "action" => Self::Action,
+            "observation" => Self::Observation,
+            "follow_up" => Self::FollowUp,
+            "permission_request" => Self::PermissionRequest,
+            "proposal_request" => Self::ProposalRequest,
+            "error" => Self::Error,
+            "retry" => Self::Retry,
+            "final_result" => Self::FinalResult,
+            "fallback" => Self::Fallback,
+            "blocker" => Self::Blocker,
+            value if value.starts_with("turn_") || value.contains("lifecycle") => {
+                Self::DurableLifecycle
+            }
+            _ => Self::Unknown,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::UserInput => "Request recorded",
+            Self::RouteDecision => "Route selected",
+            Self::Plan => "Plan updated",
+            Self::Action => "Action requested",
+            Self::Observation => "Result observed",
+            Self::FollowUp => "Follow-up requested",
+            Self::PermissionRequest => "Permission required",
+            Self::ProposalRequest => "Review required",
+            Self::Error => "Execution failed",
+            Self::Retry => "Retry requested",
+            Self::FinalResult => "Final result recorded",
+            Self::Fallback => "Fallback recorded",
+            Self::Blocker => "Execution blocked",
+            Self::DurableLifecycle => "Durable task state recorded",
+            Self::Unknown => "Unclassified activity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceActivityStatus {
+    Recorded,
+    WaitingDecision,
+    Blocked,
+    Failed,
+    Completed,
+    Unknown,
+}
+
+impl WorkspaceActivityStatus {
+    pub fn from_product_codes(
+        kind: WorkspaceActivityKind,
+        lifecycle_state: Option<&str>,
+        failure_kind: Option<&str>,
+    ) -> Self {
+        if failure_kind.is_some_and(|failure| failure != "policy_blocker") {
+            return Self::Failed;
+        }
+        match lifecycle_state {
+            Some("failed" | "timed_out" | "interrupted") => Self::Failed,
+            Some("blocked" | "waiting_permission") => Self::Blocked,
+            Some("completed" | "delivered") => Self::Completed,
+            Some("unknown") => Self::Unknown,
+            _ if matches!(
+                kind,
+                WorkspaceActivityKind::PermissionRequest | WorkspaceActivityKind::ProposalRequest
+            ) =>
+            {
+                Self::WaitingDecision
+            }
+            _ if kind == WorkspaceActivityKind::Blocker => Self::Blocked,
+            _ if kind == WorkspaceActivityKind::Error => Self::Failed,
+            _ if kind == WorkspaceActivityKind::Unknown => Self::Unknown,
+            _ => Self::Recorded,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceTimelineItem {
+pub struct WorkspaceActivityItem {
     pub id: String,
+    pub kind: WorkspaceActivityKind,
     pub label: String,
-    pub status: TaskLifecycleStatus,
+    pub summary: String,
+    pub status: WorkspaceActivityStatus,
     pub evidence_refs: Vec<EvidenceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<DateTime<Utc>>,
+    pub occurred_at: Option<DateTime<Utc>>,
+}
+
+impl WorkspaceActivityItem {
+    pub fn from_product_event(
+        id: impl Into<String>,
+        kind_code: &str,
+        summary: impl Into<String>,
+        lifecycle_state: Option<&str>,
+        failure_kind: Option<&str>,
+        evidence_refs: Vec<EvidenceRef>,
+        occurred_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        let kind = WorkspaceActivityKind::from_product_code(kind_code);
+        Self {
+            id: id.into(),
+            kind,
+            label: kind.label().into(),
+            summary: summary.into(),
+            status: WorkspaceActivityStatus::from_product_codes(
+                kind,
+                lifecycle_state,
+                failure_kind,
+            ),
+            evidence_refs,
+            occurred_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceViewModel {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_task_ref: Option<BackendEntityRef>,
+    pub active_task: Option<TaskViewModelItem>,
     #[serde(default)]
     pub recent_task_refs: Vec<BackendEntityRef>,
     #[serde(default)]
-    pub pending_review_item_refs: Vec<BackendEntityRef>,
+    pub pending_review_items: Vec<ReviewItem>,
     #[serde(default)]
-    pub timeline: Vec<WorkspaceTimelineItem>,
+    pub activity: Vec<WorkspaceActivityItem>,
     pub provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
+    pub activity_redaction_state: String,
     #[serde(default)]
     pub source_refs: Vec<EvidenceRef>,
     #[serde(default)]
@@ -332,6 +467,16 @@ pub struct TasksViewModelBuildInput {
     pub contract_limitations: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkspaceViewModelBuildInput {
+    pub tasks: TasksViewModel,
+    pub review_items: Vec<ReviewItem>,
+    pub active_task_activity: Vec<WorkspaceActivityItem>,
+    pub provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
+    pub source_refs: Vec<EvidenceRef>,
+    pub contract_limitations: Vec<String>,
+}
+
 pub fn build_tasks_view_model(input: TasksViewModelBuildInput) -> TasksViewModel {
     let task_run_ids = input
         .task_inputs
@@ -363,54 +508,70 @@ pub fn build_tasks_view_model(input: TasksViewModelBuildInput) -> TasksViewModel
     }
 }
 
-pub fn build_workspace_view_model(
-    tasks: &TasksViewModel,
-    provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
-    mut contract_limitations: Vec<String>,
-) -> WorkspaceViewModel {
-    contract_limitations.push(
-        "WorkspaceViewModel is a limited R4 baseline; it summarizes backend task/review relations and does not replace Frontend V2."
-            .into(),
-    );
-    let active = tasks
+pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> WorkspaceViewModel {
+    let active_task = input
+        .tasks
         .items
         .iter()
         .find(|item| item.lifecycle_status.is_active())
-        .or_else(|| {
-            tasks
-                .items
+        .cloned();
+    let recent_task_refs = input
+        .tasks
+        .items
+        .iter()
+        .take(6)
+        .map(task_ref)
+        .collect::<Vec<_>>();
+    let active_review_ids = active_task
+        .as_ref()
+        .map(|task| {
+            task.pending_review_item_refs
                 .iter()
-                .find(|item| item.lifecycle_status != TaskLifecycleStatus::Unknown)
-        });
-    let active_task_ref = active.map(task_ref);
-    let recent_task_refs = tasks.items.iter().take(6).map(task_ref).collect::<Vec<_>>();
-    let pending_review_item_refs = tasks
-        .items
-        .iter()
-        .flat_map(|item| item.pending_review_item_refs.iter().cloned())
-        .map(|item| (item.id.clone(), item))
-        .collect::<BTreeMap<_, _>>();
-    let timeline = tasks
-        .items
-        .iter()
-        .take(8)
-        .map(|item| WorkspaceTimelineItem {
-            id: item.canonical_task_id.clone(),
-            label: item.title.clone(),
-            status: item.lifecycle_status,
-            evidence_refs: item.evidence_refs.clone(),
-            updated_at: item.updated_at,
+                .map(|item| item.id.as_str())
+                .collect::<BTreeSet<_>>()
         })
-        .collect();
+        .unwrap_or_default();
+    let active_task_id = active_task
+        .as_ref()
+        .map(|task| task.canonical_task_id.as_str());
+    let mut pending_review_items = input
+        .review_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                ReviewItemDecisionStatus::Pending
+                    | ReviewItemDecisionStatus::Edited
+                    | ReviewItemDecisionStatus::Deferred
+            ) && (active_review_ids.contains(item.id.as_str())
+                || active_task_id.is_some_and(|task_id| {
+                    item.task_resume_relation
+                        .as_ref()
+                        .is_some_and(|relation| relation.task_session_id == task_id)
+                }))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    pending_review_items.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut source_refs = input.tasks.source_refs.clone();
+    source_refs.extend(input.source_refs);
+    source_refs.sort_by(|left, right| left.id.cmp(&right.id));
+    source_refs.dedup_by(|left, right| left.id == right.id && left.source == right.source);
+    let activity = if active_task.is_some() {
+        input.active_task_activity
+    } else {
+        Vec::new()
+    };
 
     WorkspaceViewModel {
-        active_task_ref,
+        active_task,
         recent_task_refs,
-        pending_review_item_refs: pending_review_item_refs.into_values().collect(),
-        timeline,
-        provider_privacy_boundary_summary,
-        source_refs: tasks.source_refs.clone(),
-        contract_limitations,
+        pending_review_items,
+        activity,
+        provider_privacy_boundary_summary: input.provider_privacy_boundary_summary,
+        activity_redaction_state: "metadata_only".into(),
+        source_refs,
+        contract_limitations: input.contract_limitations,
     }
 }
 
@@ -1100,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_baseline_uses_backend_task_refs() {
+    fn workspace_composes_active_task_and_product_safe_activity() {
         let tasks = build_tasks_view_model(TasksViewModelBuildInput {
             task_inputs: vec![TaskViewModelTaskInput {
                 task_session_id: "task-5".into(),
@@ -1110,14 +1271,34 @@ mod tests {
             }],
             ..Default::default()
         });
-        let workspace =
-            build_workspace_view_model(&tasks, ProviderPrivacyBoundarySummary::unknown(), vec![]);
+        let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
+            tasks,
+            review_items: Vec::new(),
+            active_task_activity: vec![WorkspaceActivityItem::from_product_event(
+                "event-1",
+                "action",
+                "action_state_recorded",
+                Some("running"),
+                None,
+                Vec::new(),
+                None,
+            )],
+            provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary::unknown(),
+            source_refs: Vec::new(),
+            contract_limitations: Vec::new(),
+        });
 
         assert_eq!(
-            workspace.active_task_ref.as_ref().map(|r| r.id.as_str()),
+            workspace
+                .active_task
+                .as_ref()
+                .map(|task| task.canonical_task_id.as_str()),
             Some("task-5")
         );
-        assert_eq!(workspace.timeline[0].status, TaskLifecycleStatus::Running);
+        assert_eq!(
+            workspace.activity[0].status,
+            WorkspaceActivityStatus::Recorded
+        );
         assert_eq!(
             workspace.provider_privacy_boundary_summary.risk,
             ProductRiskLevel::Unknown
@@ -1143,6 +1324,7 @@ mod tests {
             ..Default::default()
         });
         let item = &tasks.items[0];
+        let canonical_task_id = item.canonical_task_id.clone();
 
         assert_eq!(item.lifecycle_status, TaskLifecycleStatus::Unknown);
         assert_eq!(
@@ -1167,9 +1349,24 @@ mod tests {
         assert_eq!(tasks.summary.failed_count, 0);
         assert_eq!(tasks.summary.completed_count, 0);
 
-        let workspace =
-            build_workspace_view_model(&tasks, ProviderPrivacyBoundarySummary::unknown(), vec![]);
-        assert!(workspace.active_task_ref.is_none());
-        assert_eq!(workspace.timeline[0].status, TaskLifecycleStatus::Unknown);
+        let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
+            tasks,
+            review_items: Vec::new(),
+            active_task_activity: vec![WorkspaceActivityItem::from_product_event(
+                "event-ignored",
+                "unknown",
+                "unknown",
+                Some("unknown"),
+                None,
+                Vec::new(),
+                None,
+            )],
+            provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary::unknown(),
+            source_refs: Vec::new(),
+            contract_limitations: Vec::new(),
+        });
+        assert!(workspace.active_task.is_none());
+        assert!(workspace.activity.is_empty());
+        assert_eq!(workspace.recent_task_refs[0].id, canonical_task_id);
     }
 }

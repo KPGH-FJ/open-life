@@ -7,10 +7,13 @@ import type {
   ProductAction as ProductActionContract,
   ProductActionKind as ProductActionKindContract,
   ProductRiskLevel as ProductRiskLevelContract,
+  PermissionDecisionContext as PermissionDecisionContextContract,
+  PermissionTransmissionBoundary as PermissionTransmissionBoundaryContract,
   ProviderPrivacyBoundarySummary as ProviderPrivacyBoundarySummaryContract,
   ReviewAction as ReviewActionContract,
   ReviewActionBase as ReviewActionBaseContract,
   ReviewActionKindEffectInvariant as ReviewActionKindEffectInvariantContract,
+  ReviewDecisionContext as ReviewDecisionContextContract,
   ReviewItemMaterializationStatus as ReviewItemMaterializationStatusContract,
   ViewModelEnvelope as ViewModelEnvelopeContract,
   ViewModelStatus as ViewModelStatusContract,
@@ -33,6 +36,9 @@ export type ReviewItemMaterializationStatus = ReviewItemMaterializationStatusCon
 export type ReviewActionBase = ReviewActionBaseContract;
 export type ReviewActionKindEffectInvariant = ReviewActionKindEffectInvariantContract;
 export type ReviewAction = ReviewActionContract;
+export type ReviewDecisionContext = ReviewDecisionContextContract;
+export type PermissionDecisionContext = PermissionDecisionContextContract;
+export type PermissionTransmissionBoundary = PermissionTransmissionBoundaryContract;
 export type DebugAction = DebugActionContract;
 export type ViewModelEnvelope<T> = ViewModelEnvelopeContract<T>;
 export type RiskLevel = Exclude<ProductRiskLevelContract, "none" | "unknown">;

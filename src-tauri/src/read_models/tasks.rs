@@ -6,10 +6,12 @@ use crate::state::AppState;
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, AgentRun, BackendEntityKind,
     BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
-    ProviderPrivacyBoundarySummary, ReviewItem, ReviewItemDecisionStatus, TaskViewModelRunInput,
-    TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput, ViewModelEnvelope,
-    ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity, WorkspaceViewModel,
+    ProviderPrivacyBoundarySummary, ReviewItem, ReviewItemDecisionStatus, TaskLifecycleStatus,
+    TaskViewModelRunInput, TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput,
+    ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
+    WorkspaceActivityItem, WorkspaceViewModel, WorkspaceViewModelBuildInput,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tauri::State;
 
@@ -33,12 +35,24 @@ pub async fn get_workspace_view_model(
 pub(crate) async fn get_tasks_view_model_with_state(
     state: &Arc<AppState>,
 ) -> Result<ViewModelEnvelope<TasksViewModel>, String> {
+    Ok(load_tasks_read_model_snapshot(state).await?.envelope)
+}
+
+struct TasksReadModelSnapshot {
+    envelope: ViewModelEnvelope<TasksViewModel>,
+    review_items: Vec<ReviewItem>,
+    activity_by_task: BTreeMap<String, Vec<WorkspaceActivityItem>>,
+}
+
+async fn load_tasks_read_model_snapshot(
+    state: &Arc<AppState>,
+) -> Result<TasksReadModelSnapshot, String> {
     let mut warnings = Vec::new();
     let review_items = load_review_items(state, &mut warnings).await;
-    let task_inputs = load_task_inputs(state, &review_items, &mut warnings).await;
+    let loaded_tasks = load_task_inputs(state, &review_items, &mut warnings).await;
     let run_inputs = load_run_inputs(state, &mut warnings).await;
     let model = build_tasks_view_model(TasksViewModelBuildInput {
-        task_inputs,
+        task_inputs: loaded_tasks.task_inputs,
         run_inputs,
         source_refs: vec![
             source_ref("main_chat_task_controls", "Main Chat task controls"),
@@ -62,47 +76,106 @@ pub(crate) async fn get_tasks_view_model_with_state(
     let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(model));
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
     envelope.warnings = warnings;
-    Ok(envelope)
+    Ok(TasksReadModelSnapshot {
+        envelope,
+        review_items,
+        activity_by_task: loaded_tasks.activity_by_task,
+    })
 }
 
 pub(crate) async fn get_workspace_view_model_with_state(
     state: &Arc<AppState>,
 ) -> Result<ViewModelEnvelope<WorkspaceViewModel>, String> {
-    let tasks_envelope = get_tasks_view_model_with_state(state).await?;
-    let tasks = tasks_envelope
+    let mut snapshot = load_tasks_read_model_snapshot(state).await?;
+    let tasks_status = snapshot.envelope.status;
+    let tasks = snapshot
+        .envelope
         .data
-        .as_ref()
+        .take()
         .ok_or_else(|| "TasksViewModel data unavailable for WorkspaceViewModel".to_string())?;
+    let active_task_id = tasks.items.iter().find_map(|item| {
+        matches!(
+            item.lifecycle_status,
+            TaskLifecycleStatus::Running
+                | TaskLifecycleStatus::WaitingPermission
+                | TaskLifecycleStatus::Blocked
+        )
+        .then_some(item.canonical_task_id.clone())
+    });
+    let active_task_activity = active_task_id
+        .as_ref()
+        .and_then(|task_id| snapshot.activity_by_task.remove(task_id))
+        .unwrap_or_default();
     let provider_envelope = get_provider_privacy_boundary_summary_with_state(state).await?;
+    let provider_status = provider_envelope.status;
     let provider_summary = provider_envelope
         .data
         .clone()
         .unwrap_or_else(ProviderPrivacyBoundarySummary::unknown);
-    let model = build_workspace_view_model(
+    let model = build_workspace_view_model(WorkspaceViewModelBuildInput {
         tasks,
-        provider_summary,
-        vec![
-            "WorkspaceViewModel consumes R5 ProviderPrivacyBoundarySummary; request controls still do not prove task completion.".into(),
-            "External transmission remains possible or unknown unless backend route evidence explicitly proves otherwise.".into(),
+        review_items: snapshot.review_items,
+        active_task_activity,
+        provider_privacy_boundary_summary: provider_summary,
+        source_refs: vec![source_ref(
+            "main_chat_task_evidence_view",
+            "Metadata-safe Main Chat task activity",
+        )],
+        contract_limitations: vec![
+            "Task controls and review actions are requests only; completion requires a refreshed backend read model.".into(),
+            "Workspace activity is metadata-only. Resource, Web, and artifact bodies remain behind their typed evidence owners.".into(),
         ],
+    });
+    let status = workspace_composition_status(
+        tasks_status,
+        provider_status,
+        !model.recent_task_refs.is_empty(),
     );
-    let status = if model.recent_task_refs.is_empty() {
-        ViewModelStatus::Empty
-    } else {
-        ViewModelStatus::Ready
-    };
     let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(model));
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
-    envelope.warnings = tasks_envelope.warnings;
+    envelope.warnings = snapshot.envelope.warnings;
     envelope.warnings.extend(provider_envelope.warnings);
     Ok(envelope)
+}
+
+fn workspace_composition_status(
+    tasks_status: ViewModelStatus,
+    provider_status: ViewModelStatus,
+    has_task_data: bool,
+) -> ViewModelStatus {
+    if matches!(tasks_status, ViewModelStatus::Error)
+        || matches!(provider_status, ViewModelStatus::Error)
+    {
+        return ViewModelStatus::Error;
+    }
+    if matches!(tasks_status, ViewModelStatus::Loading)
+        || matches!(provider_status, ViewModelStatus::Loading)
+    {
+        return ViewModelStatus::Loading;
+    }
+    if matches!(tasks_status, ViewModelStatus::Stale)
+        || matches!(provider_status, ViewModelStatus::Stale)
+        || (has_task_data && matches!(provider_status, ViewModelStatus::Empty))
+    {
+        return ViewModelStatus::Stale;
+    }
+    if !has_task_data || matches!(tasks_status, ViewModelStatus::Empty) {
+        return ViewModelStatus::Empty;
+    }
+    ViewModelStatus::Ready
+}
+
+#[derive(Default)]
+struct LoadedTaskInputs {
+    task_inputs: Vec<TaskViewModelTaskInput>,
+    activity_by_task: BTreeMap<String, Vec<WorkspaceActivityItem>>,
 }
 
 async fn load_task_inputs(
     state: &Arc<AppState>,
     review_items: &[ReviewItem],
     warnings: &mut Vec<ViewModelWarning>,
-) -> Vec<TaskViewModelTaskInput> {
+) -> LoadedTaskInputs {
     let summaries = match list_main_chat_agent_tasks_with_state(
         Some(MainChatAgentTaskFilter {
             statuses: Vec::new(),
@@ -122,11 +195,12 @@ async fn load_task_inputs(
                 "main_chat_task_summaries_unavailable",
                 format!("TasksViewModel could not load Main Chat task summaries: {err}"),
             ));
-            return Vec::new();
+            return LoadedTaskInputs::default();
         }
     };
 
     let mut inputs = Vec::new();
+    let mut activity_by_task = BTreeMap::new();
     for summary in summaries {
         let detail =
             match get_main_chat_agent_task_detail_with_state(&summary.task_session_id, state).await
@@ -155,6 +229,10 @@ async fn load_task_inputs(
         let mut pending_blockers = detail.blockers.clone();
         pending_blockers.extend(detail.task_session.pending_blockers.clone());
         pending_blockers.extend(detail.continuity_diagnostics.reason_codes.clone());
+        activity_by_task.insert(
+            summary.task_session_id.clone(),
+            workspace_activity_for_task(&summary.task_session_id, &detail),
+        );
         inputs.push(TaskViewModelTaskInput {
             task_session_id: summary.task_session_id,
             conversation_id: Some(summary.conversation_id),
@@ -174,7 +252,48 @@ async fn load_task_inputs(
             updated_at: Some(detail.task_session.updated_at),
         });
     }
-    inputs
+    LoadedTaskInputs {
+        task_inputs: inputs,
+        activity_by_task,
+    }
+}
+
+fn workspace_activity_for_task(
+    task_session_id: &str,
+    detail: &TaskDetail,
+) -> Vec<WorkspaceActivityItem> {
+    detail
+        .evidence_view
+        .event_timeline
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let event_id = if event.id.trim().is_empty() || event.id == "unknown" {
+                format!("{task_session_id}:activity:{index}")
+            } else {
+                event.id.clone()
+            };
+            let evidence_id = event
+                .source_ref
+                .clone()
+                .filter(|source| !source.trim().is_empty() && source != "unknown")
+                .unwrap_or_else(|| event_id.clone());
+            WorkspaceActivityItem::from_product_event(
+                event_id,
+                &event.kind,
+                event.summary.clone(),
+                event.normalized_lifecycle_state.as_deref(),
+                event.failure_kind.as_deref(),
+                vec![EvidenceRef {
+                    id: evidence_id,
+                    label: "Task activity evidence".into(),
+                    source: EvidenceSource::Task,
+                    sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+                }],
+                event.created_at,
+            )
+        })
+        .collect()
 }
 
 async fn load_run_inputs(
@@ -297,10 +416,10 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::{load_run_inputs, review_refs_for_task};
+    use super::{load_run_inputs, review_refs_for_task, workspace_composition_status};
     use openlife_core::agent::{
         build_review_center_view_model, AgentProposal, ProposalSource, ProposalType,
-        ReviewCenterBuildInput, RiskLevel,
+        ReviewCenterBuildInput, RiskLevel, ViewModelStatus,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -365,6 +484,34 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, proposal_id);
         assert!(review_refs_for_task(&model.items, "forged-task").is_empty());
+    }
+
+    #[test]
+    fn workspace_composition_preserves_upstream_failure_states() {
+        assert_eq!(
+            workspace_composition_status(ViewModelStatus::Error, ViewModelStatus::Ready, false,),
+            ViewModelStatus::Error
+        );
+        assert_eq!(
+            workspace_composition_status(ViewModelStatus::Ready, ViewModelStatus::Stale, true,),
+            ViewModelStatus::Stale
+        );
+        assert_eq!(
+            workspace_composition_status(ViewModelStatus::Ready, ViewModelStatus::Loading, true,),
+            ViewModelStatus::Loading
+        );
+    }
+
+    #[test]
+    fn workspace_composition_fails_closed_when_provider_summary_is_absent() {
+        assert_eq!(
+            workspace_composition_status(ViewModelStatus::Ready, ViewModelStatus::Empty, true,),
+            ViewModelStatus::Stale
+        );
+        assert_eq!(
+            workspace_composition_status(ViewModelStatus::Ready, ViewModelStatus::Ready, true,),
+            ViewModelStatus::Ready
+        );
     }
 
     #[tokio::test]
