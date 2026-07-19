@@ -214,10 +214,10 @@ impl ReviewAction {
             );
         }
         if !self.enabled
-            && !self
+            && self
                 .disabled_reason
                 .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty())
+                .is_none_or(|reason| reason.trim().is_empty())
         {
             return Err(
                 ProductReadModelContractError::DisabledReviewActionMissingReason {

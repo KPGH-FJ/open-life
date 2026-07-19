@@ -541,17 +541,16 @@ fn approve_blocker(
     if is_unsupported_type(proposal.proposal_type) {
         return Some("This review item type has no backend apply pathway yet.".into());
     }
-    if proposal.proposal_type == ProposalType::ToolPermission {
-        if !decision_context
+    if proposal.proposal_type == ProposalType::ToolPermission
+        && !decision_context
             .permission
             .as_ref()
             .is_some_and(|permission| permission.is_ready())
-        {
-            return Some(
-                "Exact permission scope is incomplete; approval stays disabled until the backend can explain the action, target, duration, and transmission boundary."
-                    .into(),
-            );
-        }
+    {
+        return Some(
+            "Exact permission scope is incomplete; approval stays disabled until the backend can explain the action, target, duration, and transmission boundary."
+                .into(),
+        );
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
         && !is_path_in_safe_paths(external_write_path(proposal), &input.safe_paths)

@@ -59,6 +59,7 @@ The final gate set ran successfully on 2026-07-19:
 ```sh
 git diff --check
 cargo fmt --check
+cargo clippy --all --locked -- -D warnings
 cargo test -p openlife-core --lib
 cargo test -p openlife-tauri single_system -- --nocapture
 cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture
@@ -75,6 +76,9 @@ git diff --check
 PASS
 
 cargo fmt --check
+PASS
+
+cargo clippy --all --locked -- -D warnings
 PASS
 
 cargo test -p openlife-core --lib
@@ -98,6 +102,10 @@ PASS: 46 files / 534 tests
 corepack pnpm --dir frontend build
 PASS: 1,675 modules transformed
 ```
+
+PR #56's first Rust Check exposed two deny-warnings Clippy findings. Both were
+semantic-equivalent condition cleanups; the exact CI Clippy command and the
+affected Rust test suites passed before the follow-up push.
 
 The production build still contains `TodayV2PreviewPage`. This is expected for
 the current baseline and proves the Phase 4B dev-only harness/absence item is
