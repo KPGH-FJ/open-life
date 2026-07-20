@@ -10,7 +10,7 @@ import { chromium } from "@playwright/test";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "..");
-const artifactDir = path.resolve(repoRoot, "docs/phase4d_read_only_spine/artifacts");
+const artifactDir = path.resolve(repoRoot, "docs/phase4d_governed_action_spine/artifacts");
 const baseUrl = process.env.OPENLIFE_PHASE4D_URL || "http://127.0.0.1:4186/dev/phase4d/";
 const rejectedUrls = ["/", "/index.html", "/phase4d/"].map(pathname =>
   new URL(pathname, baseUrl).toString()
@@ -174,7 +174,7 @@ try {
 
     check(
       (await page
-        .locator('[data-harness-marker="OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS"]')
+        .locator('[data-harness-marker="OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS"]')
         .count()) === 1,
       `${label}: Phase 4D marker is missing.`
     );
@@ -258,12 +258,69 @@ try {
 
     const tasksScreenshot = path.join(artifactDir, `phase4d_${label}_tasks_inspector.png`);
     await page.screenshot({ path: tasksScreenshot, type: "png" });
+
+    await page.getByRole("button", { name: "关闭证据检查器" }).click();
+    await page.getByRole("button", { name: /^工作区\s+当前执行/ }).click();
+    await page.getByRole("heading", { name: "整理三次客户访谈，归纳下周要验证的问题" }).waitFor();
+    check(
+      await page.getByText("任务暂停在一个动作之前").isVisible(),
+      `${label}: Workspace must expose the current blocker before actions.`
+    );
+    const workspaceScreenshot = path.join(
+      artifactDir,
+      `phase4d_${label}_workspace_permission_pending.png`
+    );
+    await page.screenshot({ path: workspaceScreenshot, type: "png" });
+
+    await page.getByRole("button", { name: "查看权限请求" }).click();
+    await page.getByRole("heading", { name: "读取本地客户访谈记录", level: 2 }).waitFor();
+    const governedLayout = await page.evaluate(() => {
+      const review = document.querySelector(".ol-review-layout");
+      const queue = document.querySelector(".ol-review-queue");
+      const detail = document.querySelector(".ol-review-detail");
+      const main = document.querySelector(".ol-shell-main").getBoundingClientRect();
+      const approve = Array.from(document.querySelectorAll("button"))
+        .find(button => button.textContent?.trim() === "仅允许本次")
+        ?.getBoundingClientRect();
+      return {
+        reviewOverflow: review.scrollWidth - review.clientWidth,
+        queueWidth: queue.getBoundingClientRect().width,
+        detailOverflow: detail.scrollWidth - detail.clientWidth,
+        approvalVisible:
+          Boolean(approve) && approve.top >= main.top && approve.bottom <= main.bottom + 1,
+      };
+    });
+    check(
+      governedLayout.reviewOverflow <= 1,
+      `${label}: Review layout overflows its work surface.`
+    );
+    check(
+      Math.abs(governedLayout.queueWidth - 248) <= 0.5,
+      `${label}: Review queue must be 248px.`
+    );
+    check(governedLayout.detailOverflow <= 1, `${label}: Review detail content overflows.`);
+    check(
+      governedLayout.approvalVisible,
+      `${label}: primary review decision must remain visible in the sticky action area.`
+    );
+    check(
+      (await page.getByText("已允许一次").count()) === 0,
+      `${label}: opening a permission request must not approve it.`
+    );
+    const reviewPendingScreenshot = path.join(
+      artifactDir,
+      `phase4d_${label}_review_permission_pending.png`
+    );
+    await page.screenshot({ path: reviewPendingScreenshot, type: "png" });
     observations.push({
       viewport: label,
       todayScreenshot: path.relative(repoRoot, todayScreenshot),
       tasksScreenshot: path.relative(repoRoot, tasksScreenshot),
+      workspaceScreenshot: path.relative(repoRoot, workspaceScreenshot),
+      reviewPendingScreenshot: path.relative(repoRoot, reviewPendingScreenshot),
       ...layout,
       ...inspectorLayout,
+      ...governedLayout,
     });
     await page.close();
   }
@@ -292,16 +349,126 @@ try {
     "Task search must produce a visible result."
   );
 
-  await page.getByRole("button", { name: /^今日\s+当前关注/ }).click();
-  await page.getByRole("button", { name: "查看待决定建议" }).click();
+  await page.getByRole("button", { name: /^工作区\s+当前执行/ }).click();
+  await page.getByRole("heading", { name: "整理三次客户访谈，归纳下周要验证的问题" }).waitFor();
+  await page.getByRole("button", { name: "查看权限请求" }).click();
+  await page.getByRole("heading", { name: "读取本地客户访谈记录", level: 2 }).waitFor();
   check(
-    await page.getByRole("heading", { name: "审核中心尚未接入本次只读主干", level: 1 }).isVisible(),
-    "Review entry must expose unavailable state instead of redirecting."
+    (await page.getByText("已允许一次").count()) === 0,
+    "View action must not approve a review."
   );
-  check((await page.getByText("已批准").count()) === 0, "View action must not approve a review.");
   check((await page.getByText("已应用").count()) === 0, "View action must not apply a review.");
-  const reviewScreenshot = path.join(artifactDir, "phase4d_1440x900_review_unavailable.png");
-  await page.screenshot({ path: reviewScreenshot, type: "png" });
+
+  const reviewActions = await page.locator('[data-action-category="review"]').evaluateAll(nodes =>
+    nodes.map(node => ({
+      id: node.getAttribute("data-action-id"),
+      kind: node.getAttribute("data-action-kind"),
+      effect: node.getAttribute("data-action-effect"),
+      enabled: node.getAttribute("data-action-enabled"),
+      disabledReason: node.getAttribute("data-action-disabled-reason"),
+      targetRef: node.getAttribute("data-action-target-ref"),
+      requiresConfirmation: node.getAttribute("data-action-requires-confirmation"),
+      expectedMaterializationStatus: node.getAttribute(
+        "data-action-expected-materialization-status"
+      ),
+      completionProofAfterDispatch: node.getAttribute(
+        "data-action-completion-proof-after-dispatch"
+      ),
+    }))
+  );
+  check(reviewActions.length === 4, "Pending permission must expose four typed ReviewActions.");
+  for (const action of reviewActions) {
+    check(Boolean(action.id), "ReviewAction id is missing.");
+    check(Boolean(action.kind), `${action.id}: ReviewAction kind is missing.`);
+    check(Boolean(action.effect), `${action.id}: ReviewAction effect is missing.`);
+    check(["true", "false"].includes(action.enabled), `${action.id}: enabled is invalid.`);
+    check(action.disabledReason !== null, `${action.id}: disabledReason attribute is missing.`);
+    check(
+      action.targetRef === "review-permission-interview-notes",
+      `${action.id}: target mismatch.`
+    );
+    check(
+      Boolean(action.expectedMaterializationStatus),
+      `${action.id}: expected materialization status is missing.`
+    );
+    check(
+      action.completionProofAfterDispatch === "false",
+      `${action.id}: command dispatch must not claim completion.`
+    );
+  }
+
+  const approve = page.getByRole("button", { name: "仅允许本次" });
+  await approve.click();
+  const approvalDialog = page.getByRole("dialog", { name: "仅允许这一次？" });
+  await approvalDialog.waitFor();
+  check(
+    (await page.getByText("已允许一次").count()) === 0,
+    "Opening confirmation must not record approval."
+  );
+  check(
+    await approvalDialog
+      .getByRole("heading", { name: "仅允许这一次？" })
+      .evaluate(node => document.activeElement === node),
+    "Approval dialog must focus its title before presenting a high-impact decision."
+  );
+  const confirmApproval = approvalDialog.getByRole("button", { name: "确认仅允许本次" });
+  await reachWithKeyboard(page, confirmApproval, "Permission approval confirmation");
+  await confirmApproval.click();
+  await page.getByText("决定已记录，尚未继续任务").waitFor();
+  check(
+    (await page.getByText("任务已完成").count()) === 0,
+    "Approved permission must not be presented as task completion."
+  );
+  check(
+    await page.getByText("已允许一次，尚未继续任务").isVisible(),
+    "Approved permission must stay distinct from task resume."
+  );
+  const approvedScreenshot = path.join(
+    artifactDir,
+    "phase4d_1440x900_review_approved_not_resumed.png"
+  );
+  await page.screenshot({ path: approvedScreenshot, type: "png" });
+
+  await page.getByRole("button", { name: "返回工作区" }).click();
+  const resume = page.getByRole("button", { name: "继续任务" });
+  await resume.waitFor();
+  const resumeContract = await resume.evaluate(node => ({
+    category: node.getAttribute("data-action-category"),
+    id: node.getAttribute("data-action-id"),
+    kind: node.getAttribute("data-action-kind"),
+    effect: node.getAttribute("data-action-effect"),
+    enabled: node.getAttribute("data-action-enabled"),
+    targetRef: node.getAttribute("data-action-target-ref"),
+    completionProofAfterDispatch: node.getAttribute("data-action-completion-proof-after-dispatch"),
+  }));
+  check(resumeContract.category === "task-control", "Resume must remain a TaskControl action.");
+  check(resumeContract.id === "task-interview-notes:resume", "Resume control id mismatch.");
+  check(resumeContract.kind === "resume", "Resume control kind mismatch.");
+  check(resumeContract.effect === "task_resume_request", "Resume control effect mismatch.");
+  check(resumeContract.enabled === "true", "Exact resume control must be enabled after refresh.");
+  check(resumeContract.targetRef === "task-interview-notes", "Resume target mismatch.");
+  check(
+    resumeContract.completionProofAfterDispatch === "false",
+    "Resume command must not claim completion."
+  );
+  await resume.click();
+  const resumeDialog = page.getByRole("dialog", { name: "确认继续这项任务？" });
+  await resumeDialog.waitFor();
+  await resumeDialog.getByRole("button", { name: "确认继续" }).click();
+  await page.getByText("任务已继续，正在处理").waitFor();
+  check(
+    await page.getByText("任务正在处理").isVisible(),
+    "Refreshed exact task must render running after resume."
+  );
+  check(
+    (await page.getByText("任务已完成").count()) === 0,
+    "Running task must not be presented as completed."
+  );
+  const runningScreenshot = path.join(
+    artifactDir,
+    "phase4d_1440x900_workspace_resumed_running.png"
+  );
+  await page.screenshot({ path: runningScreenshot, type: "png" });
 
   await page.getByRole("button", { name: "设置" }).click();
   check(
@@ -329,6 +496,38 @@ try {
   );
   const staleScreenshot = path.join(artifactDir, "phase4d_1440x900_today_stale.png");
   await page.screenshot({ path: staleScreenshot, type: "png" });
+
+  await page.getByRole("button", { name: /^审核中心\s+建议与权限决定/ }).click();
+  await page.getByText("审核状态已陈旧", { exact: true }).waitFor();
+  check(
+    await page.getByRole("button", { name: "仅允许本次" }).isDisabled(),
+    "Stale Review must disable approval."
+  );
+  check(
+    await page.getByRole("button", { name: "拒绝" }).isDisabled(),
+    "Stale Review must disable rejection."
+  );
+  check(
+    await page.getByRole("button", { name: "查看访问范围" }).isEnabled(),
+    "Stale Review must preserve evidence access."
+  );
+
+  await page.getByLabel("数据来源").selectOption("fixture-incomplete-permission");
+  await page.getByRole("button", { name: /^审核中心\s+建议与权限决定/ }).click();
+  await page.getByText("访问范围不完整").waitFor();
+  check(
+    await page.getByRole("button", { name: "仅允许本次" }).isDisabled(),
+    "Incomplete permission scope must disable approval."
+  );
+  check(
+    await page.getByText("缺少目标范围和有效期；不能批准。").isVisible(),
+    "Incomplete permission must expose the backend disabled reason."
+  );
+  const incompleteScreenshot = path.join(
+    artifactDir,
+    "phase4d_1440x900_review_incomplete_scope_blocked.png"
+  );
+  await page.screenshot({ path: incompleteScreenshot, type: "png" });
 
   await page.getByLabel("数据来源").selectOption("fixture-error");
   await page.getByText("今日状态读取失败").waitFor();
@@ -383,12 +582,6 @@ try {
     check(action.disabledReason !== null, `${action.id}: disabledReason attribute is missing.`);
     check(Boolean(action.targetRef), `${action.id}: targetRef is missing.`);
   }
-  check(
-    (await page.getByRole("button", { name: /批准|拒绝|应用变更|恢复任务|重试任务/ }).count()) ===
-      0,
-    "Read-only slice must not render review decisions or task controls."
-  );
-
   const tokens = await page.evaluate(() => {
     const style = getComputedStyle(document.documentElement);
     return Object.fromEntries(
@@ -431,8 +624,16 @@ try {
   }
 
   observations.push({
-    interaction: "review-unavailable",
-    screenshot: path.relative(repoRoot, reviewScreenshot),
+    interaction: "review-approved-not-resumed",
+    screenshot: path.relative(repoRoot, approvedScreenshot),
+  });
+  observations.push({
+    interaction: "workspace-resumed-running",
+    screenshot: path.relative(repoRoot, runningScreenshot),
+  });
+  observations.push({
+    interaction: "review-incomplete-scope-blocked",
+    screenshot: path.relative(repoRoot, incompleteScreenshot),
   });
   observations.push({
     interaction: "today-stale",

@@ -13,6 +13,7 @@ import {
 import type {
   EvidenceRef,
   ProviderPrivacyBoundarySummary,
+  ReviewItem,
   TaskViewModelItem,
   TasksViewModel,
   ViewModelEnvelope,
@@ -43,6 +44,17 @@ import {
   todayContext,
   toWorkbenchEvidence,
 } from "./readOnlySpinePresentation";
+import {
+  governedBoundaryEnvelope,
+  reviewContext,
+  reviewInspector,
+  workspaceContext,
+  workspaceInspector,
+  ReviewGovernedView,
+  useGovernedActionJourney,
+  WorkspaceGovernedView,
+  type GovernedActionDataSource,
+} from "@/ui/journeys/governedAction";
 
 export type ReadOnlyProductSurfaceId = "today" | "workspace" | "tasks" | "review" | "life-model";
 
@@ -343,9 +355,11 @@ function unavailableInspector(title: string): WorkbenchInspectorModel {
 
 export function ReadOnlySpineJourney({
   dataSource,
+  governedActionDataSource,
   initialSurface = "today",
 }: {
   dataSource: ReadOnlySpineDataSource;
+  governedActionDataSource?: GovernedActionDataSource;
   initialSurface?: ReadOnlyProductSurfaceId;
 }) {
   const [mode, setMode] = useState<"product" | "settings">("product");
@@ -362,6 +376,7 @@ export function ReadOnlySpineJourney({
   const [selectedEvidence, setSelectedEvidence] = useState("");
   const [announcement, setAnnouncement] = useState("正在读取今日状态。");
   const [focusKey, setFocusKey] = useState("initial");
+  const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
@@ -445,11 +460,17 @@ export function ReadOnlySpineJourney({
     setAnnouncement("正在读取今日状态。");
     void loadToday(false);
     if (initialSurface === "tasks") void loadTasks(false);
+    if (
+      governedActionDataSource &&
+      (initialSurface === "workspace" || initialSurface === "review")
+    ) {
+      void governed.load(false);
+    }
     return () => {
       todayRequestRef.current += 1;
       tasksRequestRef.current += 1;
     };
-  }, [dataSource, initialSurface, loadTasks, loadToday]);
+  }, [dataSource, governed.load, governedActionDataSource, initialSurface, loadTasks, loadToday]);
 
   function navigateProduct(id: string): void {
     const next = id as ReadOnlyProductSurfaceId;
@@ -458,11 +479,18 @@ export function ReadOnlySpineJourney({
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus(`nav-${next}`);
-    if (next === "tasks" && !tasksLoaded) void loadTasks(false);
+    if (next === "tasks" && !tasksLoaded && !governed.snapshot) void loadTasks(false);
     if (next === "today") {
       setAnnouncement("已进入今日，只显示后端提供的当前关注。 ");
     } else if (next === "tasks") {
-      setAnnouncement("已进入任务，只读查看后端任务状态。 ");
+      setAnnouncement("已进入任务，查看后端任务状态与交付证明。 ");
+    } else if (governedActionDataSource && (next === "workspace" || next === "review")) {
+      setAnnouncement(
+        next === "workspace"
+          ? "已进入工作区，正在核对当前执行与阻塞。"
+          : "已进入审核中心，正在核对建议与权限。"
+      );
+      void governed.load(false);
     } else {
       setAnnouncement(`“${unavailableCopy[next].title}”，当前没有替代数据或重定向。`);
     }
@@ -493,8 +521,37 @@ export function ReadOnlySpineJourney({
   }
 
   const currentBoundaryEnvelope =
-    activeSurface === "tasks" ? tasksSnapshot.boundaryEnvelope : todaySnapshot.boundaryEnvelope;
+    governedActionDataSource && (activeSurface === "workspace" || activeSurface === "review")
+      ? governedBoundaryEnvelope(governed.snapshot)
+      : activeSurface === "tasks"
+        ? governed.snapshot
+          ? governedBoundaryEnvelope(governed.snapshot)
+          : tasksSnapshot.boundaryEnvelope
+        : todaySnapshot.boundaryEnvelope;
   const boundary = boundaryPresentation(currentBoundaryEnvelope);
+
+  const effectiveTasksSnapshot: TasksReadOnlySnapshot = useMemo(
+    () =>
+      governedActionDataSource && governed.snapshot
+        ? {
+            envelope: governed.snapshot.tasksEnvelope,
+            boundaryEnvelope: governedBoundaryEnvelope(governed.snapshot),
+            diagnostics: governed.snapshot.diagnostics
+              .filter(item => item.id === "tasks_view_model")
+              .map(item => ({ ...item, id: "tasks_view_model" as const })),
+          }
+        : tasksSnapshot,
+    [governed.snapshot, governedActionDataSource, tasksSnapshot]
+  );
+  const effectiveSelectedTask = useMemo(
+    () =>
+      selectedTask
+        ? (effectiveTasksSnapshot.envelope.data?.items.find(
+            item => item.canonicalTaskId === selectedTask.canonicalTaskId
+          ) ?? null)
+        : null,
+    [effectiveTasksSnapshot.envelope.data?.items, selectedTask]
+  );
 
   const context: WorkbenchContextSummary = useMemo(() => {
     if (mode === "settings") {
@@ -505,13 +562,28 @@ export function ReadOnlySpineJourney({
       };
     }
     if (activeSurface === "today") return todayContext(todaySnapshot.envelope);
-    if (activeSurface === "tasks") return tasksContext(tasksSnapshot.envelope);
+    if (activeSurface === "tasks") return tasksContext(effectiveTasksSnapshot.envelope);
+    if (activeSurface === "workspace" && governedActionDataSource) {
+      return workspaceContext(governed.snapshot);
+    }
+    if (activeSurface === "review" && governedActionDataSource) {
+      return reviewContext(governed.snapshot, governed.selectedItem);
+    }
     return {
       eyebrow: "桌面工作台",
       title: unavailableCopy[activeSurface].title,
       status: { label: "尚未迁移", status: "unknown" },
     };
-  }, [activeSettingsId, activeSurface, mode, tasksSnapshot.envelope, todaySnapshot.envelope]);
+  }, [
+    activeSettingsId,
+    activeSurface,
+    effectiveTasksSnapshot.envelope,
+    governed.selectedItem,
+    governed.snapshot,
+    governedActionDataSource,
+    mode,
+    todaySnapshot.envelope,
+  ]);
 
   const inspector = useMemo(() => {
     if (mode === "settings") {
@@ -519,7 +591,13 @@ export function ReadOnlySpineJourney({
     }
     if (activeSurface === "today") return todayInspector(todaySnapshot, selectedEvidence);
     if (activeSurface === "tasks") {
-      return taskInspector(tasksSnapshot, selectedTask, selectedEvidence);
+      return taskInspector(effectiveTasksSnapshot, effectiveSelectedTask, selectedEvidence);
+    }
+    if (activeSurface === "workspace" && governedActionDataSource) {
+      return workspaceInspector(governed.snapshot, selectedEvidence);
+    }
+    if (activeSurface === "review" && governedActionDataSource) {
+      return reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
     }
     return unavailableInspector(unavailableCopy[activeSurface].title);
   }, [
@@ -527,8 +605,11 @@ export function ReadOnlySpineJourney({
     activeSurface,
     mode,
     selectedEvidence,
-    selectedTask,
-    tasksSnapshot,
+    effectiveSelectedTask,
+    effectiveTasksSnapshot,
+    governed.selectedItem,
+    governed.snapshot,
+    governedActionDataSource,
     todaySnapshot,
   ]);
 
@@ -542,6 +623,16 @@ export function ReadOnlySpineJourney({
     setSelectedEvidence("");
     setInspectorOpen(true);
     setAnnouncement(`已选择任务“${task.title}”，并打开状态依据。`);
+  }
+
+  function openReviewItem(item: ReviewItem): void {
+    governed.selectReviewItem(item);
+    setMode("product");
+    setActiveSurface("review");
+    setInspectorOpen(false);
+    setSelectedEvidence("");
+    requestFocus(`review-${item.id}`);
+    setAnnouncement(`已打开“${item.decisionContext.title}”；查看没有记录任何决定。`);
   }
 
   function openEvidence(evidence: WorkbenchEvidenceReference): void {
@@ -575,13 +666,51 @@ export function ReadOnlySpineJourney({
   } else if (activeSurface === "tasks") {
     content = (
       <TasksReadOnlyView
-        envelope={tasksSnapshot.envelope}
-        refreshing={tasksRefreshing}
-        selectedTaskId={selectedTask?.canonicalTaskId ?? null}
-        onRefresh={() => void loadTasks(true)}
+        envelope={effectiveTasksSnapshot.envelope}
+        refreshing={tasksRefreshing || governed.refreshing}
+        selectedTaskId={effectiveSelectedTask?.canonicalTaskId ?? null}
+        onRefresh={() =>
+          void (governedActionDataSource && governed.snapshot
+            ? governed.load(true)
+            : loadTasks(true))
+        }
         onSelectTask={selectTask}
         onOpenInspector={openInspector}
         onAnnounce={setAnnouncement}
+      />
+    );
+  } else if (activeSurface === "workspace" && governedActionDataSource) {
+    content = (
+      <WorkspaceGovernedView
+        snapshot={governed.snapshot}
+        refreshing={governed.refreshing}
+        resumeState={governed.resumeState}
+        onRefresh={() => void governed.load(true)}
+        onOpenReview={openReviewItem}
+        onResume={governed.requestResume}
+        onConfirmResume={governed.confirmResume}
+        onCancelResume={governed.cancelResumeConfirmation}
+        onOpenInspector={openInspector}
+      />
+    );
+  } else if (activeSurface === "review" && governedActionDataSource) {
+    content = (
+      <ReviewGovernedView
+        snapshot={governed.snapshot}
+        selectedItem={governed.selectedItem}
+        refreshing={governed.refreshing}
+        dispatchState={governed.reviewState}
+        onRefresh={() => void governed.load(true)}
+        onSelectItem={item => {
+          governed.selectReviewItem(item);
+          setSelectedEvidence("");
+          setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
+        }}
+        onRequestAction={governed.requestReviewAction}
+        onConfirmAction={governed.confirmReviewAction}
+        onCancelConfirmation={governed.cancelReviewConfirmation}
+        onBackWorkspace={() => navigateProduct("workspace")}
+        onOpenInspector={openInspector}
       />
     );
   } else {

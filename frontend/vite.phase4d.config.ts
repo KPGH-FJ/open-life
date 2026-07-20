@@ -8,6 +8,30 @@ function phase4dEntryBoundary(): Plugin {
   return {
     name: "phase4d-entry-boundary",
     configureServer(server) {
+      server.middlewares.use("/__phase4d_tauri_probe", (request, response, next) => {
+        if (request.method !== "POST") return next();
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", chunk => {
+          body = `${body}${chunk}`.slice(0, 16_384);
+        });
+        request.on("end", () => {
+          try {
+            const payload = JSON.parse(body) as { marker?: string };
+            if (payload.marker !== "OPENLIFE_PHASE4D_REAL_TAURI_PROBE") {
+              response.statusCode = 400;
+              response.end("invalid probe marker");
+              return;
+            }
+            console.info(`[phase4d-real-tauri-probe] ${JSON.stringify(payload)}`);
+            response.statusCode = 204;
+            response.end();
+          } catch {
+            response.statusCode = 400;
+            response.end("invalid probe payload");
+          }
+        });
+      });
       server.middlewares.use((request, response, next) => {
         if (request.method !== "GET" || !request.url) return next();
 
@@ -19,7 +43,7 @@ function phase4dEntryBoundary(): Plugin {
 
         response.statusCode = 404;
         response.setHeader("Content-Type", "text/plain; charset=utf-8");
-        response.end("Phase 4D read-only journey harness is available only at /dev/phase4d/.\n");
+        response.end("Phase 4D desktop journey harness is available only at /dev/phase4d/.\n");
       });
     },
   };

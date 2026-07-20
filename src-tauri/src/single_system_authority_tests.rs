@@ -2365,7 +2365,7 @@ fn single_system_phase4c_desktop_shell_harness_is_dev_only_and_product_authority
 }
 
 #[test]
-fn single_system_phase4d_read_only_spine_is_dev_only_and_product_authority_is_unchanged() {
+fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_is_unchanged() {
     let app = read_repo_file("frontend/src/App.tsx");
     let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
     let route_contract = read_repo_file("frontend/src/productShellContract.ts");
@@ -2373,7 +2373,11 @@ fn single_system_phase4d_read_only_spine_is_dev_only_and_product_authority_is_un
         for forbidden in [
             "src/dev/phase4d",
             "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
+            "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
+            "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
             "ReadOnlySpineJourney",
+            "WorkspaceGovernedView",
+            "ReviewGovernedView",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -2423,7 +2427,12 @@ fn single_system_phase4d_read_only_spine_is_dev_only_and_product_authority_is_un
     );
     for required in [
         "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
+        "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
+        "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
         "ReadOnlySpineJourney",
+        "WorkspaceGovernedView",
+        "ReviewGovernedView",
+        "ol-governed-page",
         "dev/phase4d/index.html",
     ] {
         assert!(
@@ -2441,7 +2450,11 @@ fn single_system_phase4d_read_only_spine_is_dev_only_and_product_authority_is_un
         assert!(
             !source.contains("src/dev/phase4d")
                 && !source.contains("OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS")
-                && !source.contains("ReadOnlySpineJourney"),
+                && !source.contains("OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_REAL_TAURI_PROBE")
+                && !source.contains("ReadOnlySpineJourney")
+                && !source.contains("WorkspaceGovernedView")
+                && !source.contains("ReviewGovernedView"),
             "product source must not import the Phase 4D journey or harness: {rel}"
         );
     }

@@ -18,6 +18,7 @@ import type {
 
 export type Phase4dFixtureId =
   | "fixture-ready"
+  | "fixture-incomplete-permission"
   | "fixture-stale"
   | "fixture-error"
   | "fixture-empty";
@@ -389,6 +390,7 @@ function makeTasksSnapshot(id: Phase4dFixtureId): TasksReadOnlySnapshot {
 
 export const phase4dFixtureLabels: Record<Phase4dFixtureId, string> = {
   "fixture-ready": "静态样例：可用 + 需要处理",
+  "fixture-incomplete-permission": "静态样例：权限范围不完整",
   "fixture-stale": "静态样例：数据陈旧",
   "fixture-error": "静态样例：读取失败",
   "fixture-empty": "静态样例：暂无内容",
