@@ -23,6 +23,7 @@
 }
 
 .ol-foundation button:focus-visible,
+.ol-foundation a:focus-visible,
 .ol-foundation input:focus-visible,
 .ol-foundation select:focus-visible,
 .ol-foundation textarea:focus-visible,

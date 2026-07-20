@@ -5,6 +5,7 @@ const frontendRoot = process.cwd();
 const distRoot = join(frontendRoot, "dist");
 const appPath = join(frontendRoot, "src", "App.tsx");
 const shellPath = join(frontendRoot, "src", "components", "ProductShell.tsx");
+const routeContractPath = join(frontendRoot, "src", "productShellContract.ts");
 const retiredPreviewPath = join(frontendRoot, "src", "pages", "TodayV2PreviewPage.tsx");
 
 if (!existsSync(distRoot)) {
@@ -20,9 +21,12 @@ const forbiddenSourceMarkers = [
   "TodayV2PreviewPage",
   "src/dev/phase4b",
   "OPENLIFE_PHASE4B_DEV_HARNESS",
+  "src/dev/phase4c",
+  "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
+  "OpenLifeWorkbenchShell",
 ];
 
-for (const sourcePath of [appPath, shellPath]) {
+for (const sourcePath of [appPath, shellPath, routeContractPath]) {
   const source = readFileSync(sourcePath, "utf8");
   for (const marker of forbiddenSourceMarkers) {
     if (source.includes(marker)) {
@@ -44,6 +48,10 @@ const forbiddenBundleMarkers = [
   "OPENLIFE_PHASE4B_DEV_HARNESS",
   "LAYOUT_FIXTURE",
   "dev/phase4b/index.html",
+  "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
+  "OpenLifeWorkbenchShell",
+  "ol-workbench-shell",
+  "dev/phase4c/index.html",
 ];
 
 for (const filePath of releaseFiles(distRoot)) {
@@ -56,4 +64,6 @@ for (const filePath of releaseFiles(distRoot)) {
   }
 }
 
-console.log("Production absence guard passed: Phase 4B harness and retired preview are absent.");
+console.log(
+  "Production absence guard passed: Phase 4B/4C harnesses, Phase 4C shell, and retired preview are absent."
+);

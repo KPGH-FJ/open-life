@@ -2241,7 +2241,8 @@ fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_
     );
     for required in [
         "http://127.0.0.1:4184/dev/phase4b/",
-        "dev:phase4b --host 127.0.0.1 --port 4184",
+        "corepack pnpm dev:phase4b --host 127.0.0.1 --port 4184",
+        "\"cwd\": \"../frontend\"",
         "Phase 4B is development-only; release and package builds are forbidden.",
         "\"active\": false",
     ] {
@@ -2279,6 +2280,86 @@ fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_
         assert!(
             !source.contains("src/dev/phase4b") && !source.contains("OPENLIFE_PHASE4B_DEV_HARNESS"),
             "product source must not import Phase 4B harness: {rel}"
+        );
+    }
+}
+
+#[test]
+fn single_system_phase4c_desktop_shell_harness_is_dev_only_and_product_authority_is_unchanged() {
+    let app = read_repo_file("frontend/src/App.tsx");
+    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
+    let route_contract = read_repo_file("frontend/src/productShellContract.ts");
+    for source in [&app, &shell, &route_contract] {
+        for forbidden in [
+            "src/dev/phase4c",
+            "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
+            "OpenLifeWorkbenchShell",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4C dev-only shell must stay absent from product authority: {forbidden}"
+            );
+        }
+    }
+
+    let production_vite = read_repo_file("frontend/vite.config.ts");
+    let phase4b_vite = read_repo_file("frontend/vite.phase4b.config.ts");
+    let harness_vite = read_repo_file("frontend/vite.phase4c.config.ts");
+    let tauri_overlay = read_repo_file("src-tauri/tauri.phase4c.conf.json");
+    let package = read_repo_file("frontend/package.json");
+    let release_guard = read_repo_file("frontend/scripts/verify-production-absence.mjs");
+
+    assert!(
+        production_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false)")
+            && phase4b_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false)")
+            && harness_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(true)"),
+        "Phase 4C harness must be compile-time false outside its dedicated Vite entry"
+    );
+    assert!(
+        harness_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)"),
+        "Phase 4C must not reactivate the Phase 4B harness"
+    );
+    for required in [
+        "http://127.0.0.1:4185/dev/phase4c/",
+        "corepack pnpm dev:phase4c --host 127.0.0.1 --port 4185",
+        "\"cwd\": \"../frontend\"",
+        "Phase 4C is development-only; release and package builds are forbidden.",
+        "\"minWidth\": 1024",
+        "\"active\": false",
+    ] {
+        assert!(
+            tauri_overlay.contains(required),
+            "Phase 4C Tauri dev overlay must contain {required}"
+        );
+    }
+    assert!(
+        package.contains("\"dev:phase4c\": \"vite --config vite.phase4c.config.ts\"")
+            && package.contains("\"build:phase4c\"")
+            && package.contains("\"qa:phase4c\""),
+        "Phase 4C scripts must remain explicit dev/review commands"
+    );
+    for required in [
+        "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
+        "OpenLifeWorkbenchShell",
+        "dev/phase4c/index.html",
+    ] {
+        assert!(
+            release_guard.contains(required),
+            "release bundle guard must scan for Phase 4C marker {required}"
+        );
+    }
+
+    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert!(
+            !source.contains("src/dev/phase4c")
+                && !source.contains("OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS")
+                && !source.contains("OpenLifeWorkbenchShell"),
+            "product source must not import the Phase 4C shell or harness: {rel}"
         );
     }
 }

@@ -51,9 +51,10 @@ Phase 4B should implement only:
 3. production bundle/route absence guards for fixtures and preview pages;
 4. no production shell or route authority switch.
 
-Phase 4C then builds Shell V2 inside that harness. Phase 4D migrates real
-business journeys. Phase 4E performs one production authority switch and
-deletes old owners in the same change.
+Phase 4C then builds the desktop Shell V2 with the Phase 4B foundation inside
+its own isolated dev-only harness. Phase 4D migrates real business journeys.
+Phase 4E performs one production authority switch and deletes old owners in
+the same change.
 
 ```text
 PHASE4A_TECHNICAL_EXIT = PASS
