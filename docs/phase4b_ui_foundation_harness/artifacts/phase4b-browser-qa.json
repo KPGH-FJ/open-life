@@ -1,0 +1,109 @@
+{
+  "generatedAt": "2026-07-19T13:22:08.148Z",
+  "baseUrl": "http://127.0.0.1:4184/dev/phase4b/",
+  "assertions": 90,
+  "result": "PASS",
+  "failures": [],
+  "observations": [
+    {
+      "rejectedUiUrl": "http://127.0.0.1:4184/",
+      "status": 404,
+      "productEntryPresent": false
+    },
+    {
+      "rejectedUiUrl": "http://127.0.0.1:4184/index.html",
+      "status": 404,
+      "productEntryPresent": false
+    },
+    {
+      "rejectedUiUrl": "http://127.0.0.1:4184/phase4b/",
+      "status": 404,
+      "productEntryPresent": false
+    },
+    {
+      "viewport": "1440x900",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_1440x900.png",
+      "bottomScreenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_1440x900_bottom.png",
+      "overflow": 0,
+      "bodyFont": 14,
+      "metadataFont": 12,
+      "scrollTop": 714,
+      "scrollHeight": 1566,
+      "clientHeight": 852
+    },
+    {
+      "viewport": "1280x800",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_1280x800.png",
+      "bottomScreenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_1280x800_bottom.png",
+      "overflow": 0,
+      "bodyFont": 14,
+      "metadataFont": 12,
+      "scrollTop": 814,
+      "scrollHeight": 1566,
+      "clientHeight": 752
+    },
+    {
+      "viewport": "390x844",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_390x844.png",
+      "bottomScreenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_390x844_bottom.png",
+      "overflow": 0,
+      "bodyFont": 14,
+      "metadataFont": 12,
+      "scrollTop": 1662,
+      "scrollHeight": 2348,
+      "clientHeight": 686
+    },
+    {
+      "contrast": "ink on canvas",
+      "ratio": 18.88
+    },
+    {
+      "contrast": "secondary on sidebar",
+      "ratio": 7.51
+    },
+    {
+      "contrast": "muted on canvas",
+      "ratio": 5.74
+    },
+    {
+      "contrast": "amber on amber soft",
+      "ratio": 5.9
+    },
+    {
+      "contrast": "red on red soft",
+      "ratio": 6.35
+    },
+    {
+      "contrast": "green on green soft",
+      "ratio": 4.83
+    },
+    {
+      "nonTextContrast": "control boundary on canvas",
+      "ratio": 3.69
+    },
+    {
+      "nonTextContrast": "control boundary on sunken hover",
+      "ratio": 3.3
+    },
+    {
+      "nonTextContrast": "focus on canvas",
+      "ratio": 5.17
+    },
+    {
+      "nonTextContrast": "focus on amber soft",
+      "ratio": 4.97
+    },
+    {
+      "nonTextContrast": "focus on red soft",
+      "ratio": 4.89
+    },
+    {
+      "nonTextContrast": "focus on green soft",
+      "ratio": 4.95
+    },
+    {
+      "interaction": "mobile-dialog",
+      "screenshot": "docs/phase4b_ui_foundation_harness/artifacts/phase4b_390x844_dialog.png"
+    }
+  ]
+}

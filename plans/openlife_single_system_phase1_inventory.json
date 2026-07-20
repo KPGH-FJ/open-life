@@ -1363,12 +1363,14 @@
     },
     {
       "id": "frontend_today_v2_preview_multi_source_state",
-      "path": "frontend/src/pages/TodayV2PreviewPage.tsx",
+      "former_path": "frontend/src/pages/TodayV2PreviewPage.tsx",
       "phase": 8,
-      "disposition": "keep",
-      "reason": "Today V2 preview route reads projection and daily goals into a frontend-only adapter; it is unlisted preview evidence, not backend ViewModel authority.",
-      "r0_surface_classification": "frontend_preview_only",
-      "r0_raw_source_scan_hit": true,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Phase 4B removed the production-compiled preview page and route. The bounded Today adapter remains contract evidence, while visual foundation fixtures live only in the isolated dev harness.",
+      "r0_surface_classification": "deleted_preview_route",
+      "r0_raw_source_scan_hit": false,
       "backend_owner": false
     },
     {

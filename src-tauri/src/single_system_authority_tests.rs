@@ -1312,10 +1312,6 @@ fn single_system_r5_memory_and_provider_privacy_readmodels_own_product_boundarie
             "memoryViewModel",
         ),
         (
-            "frontend/src/pages/TodayV2PreviewPage.tsx",
-            "getProviderPrivacyBoundarySummary",
-        ),
-        (
             "frontend/src/viewmodels/today/todayViewModelAdapter.ts",
             "providerPrivacyBoundary",
         ),
@@ -1570,6 +1566,15 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
     let mut expected = BTreeSet::new();
     let mut classified = BTreeMap::new();
     for entry in entries {
+        let disposition = entry_str(entry, "disposition");
+        validate_inventory_path_contract(
+            "frontend_multi_source_state_surfaces",
+            entry,
+            disposition,
+        );
+        if disposition == "deleted" {
+            continue;
+        }
         let path = entry_str(entry, "path").to_string();
         let classification = entry_str(entry, "r0_surface_classification").to_string();
         assert!(
@@ -1600,10 +1605,6 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
     }
 
     for (path, expected_class) in [
-        (
-            "frontend/src/pages/TodayV2PreviewPage.tsx",
-            "frontend_preview_only",
-        ),
         (
             "frontend/src/pages/chat/useChatContext.ts",
             "product_hook_raw_read_convergence_target",
@@ -2199,6 +2200,86 @@ fn single_system_phase4a_test_fixtures_and_contract_harnesses_are_absent_from_pr
         assert!(!source.contains("phase4a-contract-golden"));
         assert!(!source.contains("reviewDispatchContract"));
         assert!(!source.contains("settingsOrchestrationContract"));
+    }
+}
+
+#[test]
+fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_absent() {
+    let app = read_repo_file("frontend/src/App.tsx");
+    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
+    for source in [&app, &shell] {
+        for forbidden in [
+            "TodayV2PreviewPage",
+            "/today-v2-preview",
+            "src/dev/phase4b",
+            "OPENLIFE_PHASE4B_DEV_HARNESS",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4B dev-only surface must stay absent from product shell authority: {forbidden}"
+            );
+        }
+    }
+
+    assert!(
+        !repo_root()
+            .join("frontend/src/pages/TodayV2PreviewPage.tsx")
+            .exists(),
+        "retired production preview page must stay absent"
+    );
+
+    let production_vite = read_repo_file("frontend/vite.config.ts");
+    let harness_vite = read_repo_file("frontend/vite.phase4b.config.ts");
+    let tauri_overlay = read_repo_file("src-tauri/tauri.phase4b.conf.json");
+    let package = read_repo_file("frontend/package.json");
+    let release_guard = read_repo_file("frontend/scripts/verify-production-absence.mjs");
+
+    assert!(
+        production_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)")
+            && harness_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(true)"),
+        "Phase 4B harness must be compile-time false for production and true only in its Vite entry"
+    );
+    for required in [
+        "http://127.0.0.1:4184/dev/phase4b/",
+        "dev:phase4b --host 127.0.0.1 --port 4184",
+        "Phase 4B is development-only; release and package builds are forbidden.",
+        "\"active\": false",
+    ] {
+        assert!(
+            tauri_overlay.contains(required),
+            "Phase 4B Tauri dev overlay must contain {required}"
+        );
+    }
+    assert!(
+        !tauri_overlay.contains("dev:phase4b -- --host"),
+        "Phase 4B beforeDevCommand must pass Vite host options instead of hiding them after a separator"
+    );
+    assert!(
+        package.contains("vite build && node scripts/verify-production-absence.mjs"),
+        "normal production build must execute the Phase 4B release absence guard"
+    );
+    for required in [
+        "OPENLIFE_PHASE4B_DEV_HARNESS",
+        "TodayV2PreviewPage",
+        "/today-v2-preview",
+        "dev/phase4b/index.html",
+    ] {
+        assert!(
+            release_guard.contains(required),
+            "release bundle guard must scan for {required}"
+        );
+    }
+
+    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert!(
+            !source.contains("src/dev/phase4b") && !source.contains("OPENLIFE_PHASE4B_DEV_HARNESS"),
+            "product source must not import Phase 4B harness: {rel}"
+        );
     }
 }
 
