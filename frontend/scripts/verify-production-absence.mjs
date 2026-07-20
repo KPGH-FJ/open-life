@@ -24,6 +24,9 @@ const forbiddenSourceMarkers = [
   "src/dev/phase4c",
   "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
   "OpenLifeWorkbenchShell",
+  "src/dev/phase4d",
+  "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
+  "ReadOnlySpineJourney",
 ];
 
 for (const sourcePath of [appPath, shellPath, routeContractPath]) {
@@ -52,6 +55,10 @@ const forbiddenBundleMarkers = [
   "OpenLifeWorkbenchShell",
   "ol-workbench-shell",
   "dev/phase4c/index.html",
+  "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
+  "ReadOnlySpineJourney",
+  "ol-readonly-page",
+  "dev/phase4d/index.html",
 ];
 
 for (const filePath of releaseFiles(distRoot)) {
@@ -65,5 +72,5 @@ for (const filePath of releaseFiles(distRoot)) {
 }
 
 console.log(
-  "Production absence guard passed: Phase 4B/4C harnesses, Phase 4C shell, and retired preview are absent."
+  "Production absence guard passed: Phase 4B/4C/4D harnesses, new desktop journeys, and retired preview are absent."
 );

@@ -9,6 +9,7 @@ export default defineConfig(async ({ command }) => ({
   define: {
     __OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false),
     __OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false),
+    __OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(false),
   },
   resolve: {
     alias: {
