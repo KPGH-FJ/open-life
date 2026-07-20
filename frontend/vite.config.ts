@@ -8,6 +8,7 @@ export default defineConfig(async ({ command }) => ({
   plugins: [react()],
   define: {
     __OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false),
+    __OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false),
   },
   resolve: {
     alias: {
