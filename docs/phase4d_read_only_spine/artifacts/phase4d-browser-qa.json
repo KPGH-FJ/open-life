@@ -1,0 +1,112 @@
+{
+  "generatedAt": "2026-07-20T12:35:09.999Z",
+  "scope": "desktop_tauri_only",
+  "narrowScreenAcceptance": false,
+  "baseUrl": "http://127.0.0.1:4186/dev/phase4d/",
+  "assertions": 97,
+  "result": "PASS",
+  "failures": [],
+  "observations": [
+    {
+      "rejectedUrl": "http://127.0.0.1:4186/",
+      "status": 404
+    },
+    {
+      "rejectedUrl": "http://127.0.0.1:4186/index.html",
+      "status": 404
+    },
+    {
+      "rejectedUrl": "http://127.0.0.1:4186/phase4d/",
+      "status": 404
+    },
+    {
+      "viewport": "1440x900",
+      "todayScreenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1440x900_today_ready.png",
+      "tasksScreenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1440x900_tasks_inspector.png",
+      "overflow": 0,
+      "sidebarWidth": 232,
+      "contextHeight": 56,
+      "toolbarGap": 0,
+      "bodyFont": 15,
+      "metadataFont": 12,
+      "inspectorWidth": 344,
+      "mainInspectorGap": 0,
+      "inspectorRightGap": 0,
+      "taskRowsOverflow": false
+    },
+    {
+      "viewport": "1280x800",
+      "todayScreenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1280x800_today_ready.png",
+      "tasksScreenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1280x800_tasks_inspector.png",
+      "overflow": 0,
+      "sidebarWidth": 232,
+      "contextHeight": 56,
+      "toolbarGap": 0,
+      "bodyFont": 15,
+      "metadataFont": 12,
+      "inspectorWidth": 344,
+      "mainInspectorGap": 0,
+      "inspectorRightGap": 0,
+      "taskRowsOverflow": false
+    },
+    {
+      "viewport": "1024x720",
+      "todayScreenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1024x720_today_ready.png",
+      "tasksScreenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1024x720_tasks_inspector.png",
+      "overflow": 0,
+      "sidebarWidth": 232,
+      "contextHeight": 56,
+      "toolbarGap": 0,
+      "bodyFont": 15,
+      "metadataFont": 12,
+      "inspectorWidth": 344,
+      "mainInspectorGap": 0,
+      "inspectorRightGap": 0,
+      "taskRowsOverflow": false
+    },
+    {
+      "contrast": "ink on canvas",
+      "ratio": 18.88
+    },
+    {
+      "contrast": "secondary on sidebar",
+      "ratio": 7.51
+    },
+    {
+      "contrast": "muted on canvas",
+      "ratio": 5.74
+    },
+    {
+      "contrast": "amber on protection",
+      "ratio": 5.9
+    },
+    {
+      "contrast": "red on error",
+      "ratio": 6.35
+    },
+    {
+      "contrast": "green on verified",
+      "ratio": 4.83
+    },
+    {
+      "nonTextContrast": "control boundary",
+      "ratio": 3.69
+    },
+    {
+      "nonTextContrast": "focus on canvas",
+      "ratio": 5.17
+    },
+    {
+      "interaction": "review-unavailable",
+      "screenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1440x900_review_unavailable.png"
+    },
+    {
+      "interaction": "today-stale",
+      "screenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1440x900_today_stale.png"
+    },
+    {
+      "interaction": "tasks-error-fail-closed",
+      "screenshot": "docs/phase4d_read_only_spine/artifacts/phase4d_1440x900_tasks_error_fail_closed.png"
+    }
+  ]
+}

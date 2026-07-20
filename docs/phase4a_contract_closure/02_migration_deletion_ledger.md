@@ -1,7 +1,7 @@
 # Phase 4 Frontend Migration And Deletion Ledger
 
 Status: `ACTIVE_DURING_V2_MIGRATION`
-Date: 2026-07-19
+Date: 2026-07-20
 
 State vocabulary:
 
@@ -16,12 +16,12 @@ State vocabulary:
 
 | New owner | Old owner | Last product caller | Deletion condition | Absence guard | State |
 | --- | --- | --- | --- | --- | --- |
-| `frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx` in the isolated Phase 4C harness, then the future production shell owner | `frontend/src/components/ProductShell.tsx`, current `productShellContract.ts` primary IA | `frontend/src/App.tsx` | Desktop Tauri Shell keyboard and product journeys accepted; all Phase 4D callers migrated; 4E atomic route switch ready | Production source/import scan and release route test show old shell authority absent | `contract_ready` |
+| `frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx`, consumed by `frontend/src/ui/journeys/readOnly/ReadOnlySpineJourney.tsx` in the isolated Phase 4D harness, then the future production shell owner | `frontend/src/components/ProductShell.tsx`, current `productShellContract.ts` primary IA | `frontend/src/App.tsx` | Desktop Tauri Shell keyboard and all Phase 4D business journeys accepted; remaining product callers migrated; 4E atomic route switch ready | Production source/import scan and release route test show old shell authority absent | `contract_ready` |
 | `frontend/src/ui/foundation/**` semantic tokens and primitives | `frontend/src/components/product/ProductPrimitives.tsx` plus page-local visual primitives | `AgentRunDetail`, `LifeModelPage`, settings tabs, `RuntimeDisclosureStrip`, `ReviewDecisionCard`, and provider/runtime utility type imports | Every Phase 4D journey uses the new semantic owner; no old primitive caller remains | Phase 4E production import scan and old-owner file absence test | `contract_ready` |
-| Strict Today V2 adapter over named backend owners | `frontend/src/pages/TodayPage.tsx` local layout/composition | `/today` route in `App.tsx` | Today V2 passes stale/error/unknown and real Tauri journey; no raw fallback | `/today` renders new owner; old page/import absent | `contract_ready` |
+| `frontend/src/ui/journeys/readOnly/TodayReadOnlyView.tsx` over `readOnlySpineDataSource.ts` and strict `openlife.today-adapter.v1` | `frontend/src/pages/TodayPage.tsx` local layout/composition | `/today` route in `frontend/src/App.tsx` | Today journey passes ready/empty/stale/error/unknown-boundary and real Tauri fail-closed dogfood; production caller moves in the 4E atomic switch | `/today` renders the new owner; old page/import absent; release bundle excludes Phase 4D harness markers | `contract_ready` |
 | Dev-only Phase 4B harness | deleted `TodayV2PreviewPage` and deleted `/today-v2-preview` production route | no product caller remains | Completed in Phase 4B; independent dev entry owns layout fixtures | Frontend build scan, App route test, inventory contract, and Rust single-system guard prove absence | `guarded_absent` |
 | Existing backend `WorkspaceViewModel` plus future Workspace V2 renderer | `CompanionPage`/`ChatPage` joins over Tasks, projection, and page state | `/companion` | Governed-action journey consumes activeTask, pendingReviewItems, activity, actions, and refreshed state | Product page scan has no parallel lifecycle/review/privacy reconstruction | `contract_ready` |
-| Existing backend `TasksViewModel` plus future Tasks V2 renderer | `RunsPage` current task-list presentation | `/runs` | Read-only spine accepted and controls dispatch through contract | Old page owner absent; no list/detail reconstruction | `contract_ready` |
+| `frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx` over backend `TasksViewModel` via `readOnlySpineDataSource.ts` | `frontend/src/pages/RunsPage.tsx` task-list presentation plus remaining task-control joins | `/runs` route in `frontend/src/App.tsx`; task-control callers remain in old pages | Read-only Tasks journey accepted; governed-action journey later owns controls through dispatch -> refresh -> identity/state verification; production caller moves only in 4E | Old task-list owner absent; no frontend `AgentRun` list join; release bundle excludes Phase 4D journey markers | `contract_ready` |
 | `ReviewItem.decisionContext` plus future Review Center V2 | `MailboxPage` join of raw `listProposals`, `proposalDisplay`, and ReviewItem | `/mailbox` | Pending decision journey renders before/after and exact permission solely from ReviewItem; dispatch always refreshes | Product scan forbids `listProposals` and `buildReviewDecisionView` in Review V2 | `contract_ready` |
 | Existing `LifeModelViewModel`/`MemoryViewModel` plus future durable-truth renderer | current LifeModel and Memory page owners | `/life-model`, `/memory` | Durable-truth journey distinguishes approved/applying/applied/failed/rollback | Old page owners absent; no raw proposal or store reconstruction | `identified` |
 | `settingsOrchestrationContract` plus future Settings V2 | `SettingsPage` page-local test/save/refresh lifecycle | `/settings` | Privacy/config journey uses edit -> test -> save -> boundary refresh and fails closed | Old reducer/lifecycle absent; route test proves unknown boundary is not green | `contract_ready` |
@@ -39,3 +39,22 @@ Every Phase 4D journey must update this ledger in the same change:
 5. perform deletion in the same 4E atomic authority switch.
 
 The ledger does not authorize a long-lived `/v2` route or production fallback.
+
+## Phase 4D Read-Only Spine Update
+
+The first Phase 4D slice established exact desktop candidate owners for Shell,
+Today, and Tasks without changing production authority:
+
+- dev-only owner: `/dev/phase4d/` plus `tauri.phase4d.conf.json`;
+- production owner still active: `App.tsx` -> `ProductShell`, `TodayPage`, and
+  `RunsPage`;
+- executable guard: production Vite compile flags, release-bundle marker scan,
+  and `single_system_phase4d_read_only_spine_is_dev_only_and_product_authority_is_unchanged`;
+- deletion status: `DELETE_READY=NO` for Shell, Today, and Tasks;
+- reason: governed Workspace/Permission/Review/Resume behavior and the final
+  route-authority switch are intentionally not part of this read-only slice.
+
+The real isolated Tauri run returned Today `stale` and Tasks `error` while
+required stores were unavailable. That is fail-closed evidence, not proof that
+the ready/empty backend path is available, and it does not advance any row to
+`delete_ready`.
