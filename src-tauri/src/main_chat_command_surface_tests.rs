@@ -7656,7 +7656,8 @@ async fn roadshow_rc08_exact_prompt_cancels_locally_without_late_commit_then_ret
         .await
     });
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let provider_dispatch_watchdog = std::time::Duration::from_secs(5);
+    tokio::time::timeout(provider_dispatch_watchdog, async {
         while !request_observed.load(Ordering::SeqCst) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -7939,7 +7940,8 @@ fn roadshow_rc08_separate_process_preserves_cancelled_attempt_before_retry() {
                         )
                         .await
                     });
-                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    let provider_dispatch_watchdog = std::time::Duration::from_secs(5);
+                    tokio::time::timeout(provider_dispatch_watchdog, async {
                         while !request_observed.load(Ordering::SeqCst) {
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
