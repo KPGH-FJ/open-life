@@ -26,6 +26,7 @@ export type SettingsOrchestrationState = {
 };
 
 export type SettingsOrchestrationEvent =
+  | { type: "reset" }
   | { type: "edit" }
   | { type: "test_requested" }
   | { type: "test_succeeded"; result: SettingsConnectionTestResult }
@@ -51,6 +52,9 @@ export function settingsOrchestrationReducer(
   state: SettingsOrchestrationState,
   event: SettingsOrchestrationEvent
 ): SettingsOrchestrationState {
+  if (event.type === "reset") {
+    return initialSettingsOrchestrationState;
+  }
   if (event.type === "edit") {
     return {
       ...state,

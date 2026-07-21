@@ -152,7 +152,14 @@ describe("Phase 4D desktop read-only journey", () => {
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(screen.getByRole("navigation", { name: "设置分类" })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "产品区域" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "模型与隐私设置尚未迁移", level: 1 })).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "模型与供应商", level: 1 })).toHaveFocus();
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索设置" }), "API 凭据");
+    expect(screen.getByRole("status")).toHaveTextContent("找到 1 个设置分类");
+    expect(screen.getByRole("button", { name: /^模型与供应商/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^隐私与网络/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "清除设置搜索" }));
+    expect(screen.getByRole("status")).toHaveTextContent("共 7 个设置分类");
 
     await user.click(screen.getByRole("button", { name: "返回工作台" }));
     expect(screen.getByRole("button", { name: "设置" })).toHaveFocus();

@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bot,
+  Brain,
   CalendarDays,
-  Cpu,
-  Database,
+  HardDrive,
+  KeyRound,
+  LifeBuoy,
   ListTodo,
   Monitor,
-  Shield,
+  Network,
+  Palette,
   ShieldCheck,
   UserRound,
-  Wrench,
 } from "lucide-react";
 import type {
   EvidenceRef,
@@ -62,6 +65,14 @@ import {
   useDurableTruthJourney,
   type DurableTruthDataSource,
 } from "@/ui/journeys/durableTruth";
+import {
+  settingsPrivacyContext,
+  settingsPrivacyInspector,
+  SettingsPrivacyView,
+  useSettingsPrivacyJourney,
+  type SettingsPrivacyDataSource,
+  type SettingsPrivacySurfaceId,
+} from "@/ui/journeys/settingsPrivacy";
 
 export type ReadOnlyProductSurfaceId = "today" | "workspace" | "tasks" | "review" | "life-model";
 
@@ -74,10 +85,55 @@ const productNavigation: readonly WorkbenchNavigationItem[] = [
 ];
 
 const settingsNavigation: readonly WorkbenchNavigationItem[] = [
-  { id: "provider-privacy", label: "模型与隐私", meta: "路由与传输边界", icon: Shield },
-  { id: "local-data", label: "本地数据", meta: "存储与保留", icon: Database },
-  { id: "runtime", label: "运行环境", meta: "模型与工具", icon: Cpu },
-  { id: "advanced", label: "高级", meta: "开发与诊断", icon: Wrench },
+  {
+    id: "model-provider",
+    label: "模型与供应商",
+    meta: "本地与云端连接",
+    searchTerms: ["API 地址", "API 凭据", "连接测试", "本地模型", "Provider"],
+    icon: Bot,
+  },
+  {
+    id: "privacy-network",
+    label: "隐私与网络",
+    meta: "路由与传输边界",
+    searchTerms: ["外部传输", "网络策略", "本地限定", "风险"],
+    icon: Network,
+  },
+  {
+    id: "tools-permissions",
+    label: "工具与权限",
+    meta: "能力与授权记录",
+    searchTerms: ["工具", "权限", "授权", "MCP"],
+    icon: KeyRound,
+  },
+  {
+    id: "data-recovery",
+    label: "数据与恢复",
+    meta: "导入、导出与保留",
+    searchTerms: ["本地数据", "备份", "导入", "导出", "删除"],
+    icon: HardDrive,
+  },
+  {
+    id: "life-memory",
+    label: "LifeModel 与记忆",
+    meta: "长期状态治理",
+    searchTerms: ["Memory", "长期状态", "应用", "回滚"],
+    icon: Brain,
+  },
+  {
+    id: "appearance",
+    label: "外观",
+    meta: "界面显示",
+    searchTerms: ["主题", "字体", "密度"],
+    icon: Palette,
+  },
+  {
+    id: "advanced-support",
+    label: "高级与支持",
+    meta: "诊断与版本信息",
+    searchTerms: ["调试", "日志", "版本", "支持"],
+    icon: LifeBuoy,
+  },
 ];
 
 const unavailableCopy: Record<
@@ -101,23 +157,39 @@ const unavailableCopy: Record<
 };
 
 const settingsCopy: Record<string, { title: string; reason: string }> = {
-  "provider-privacy": {
-    title: "模型与隐私设置尚未迁移",
-    reason: "本页只显示后端读取到的边界摘要，不在本次只读旅程中编辑或保存配置。",
+  "model-provider": {
+    title: "模型与供应商",
+    reason: "当前由 Phase 4D 隐私与配置旅程接入。",
   },
-  "local-data": {
-    title: "本地数据设置尚未迁移",
-    reason: "导入、导出、保留和删除都可能改变持久状态，需要后续独立契约与确认流程。",
+  "privacy-network": {
+    title: "隐私与网络",
+    reason: "当前由 Phase 4D 隐私与配置旅程接入。",
   },
-  runtime: {
-    title: "运行环境设置尚未迁移",
-    reason: "模型与工具配置仍由现有生产页面负责；当前页面不会写入替代配置。",
+  "tools-permissions": {
+    title: "工具与权限尚未迁移",
+    reason: "本 slice 不从工具清单和历史权限记录拼装新的授权真相。",
   },
-  advanced: {
-    title: "高级诊断尚未迁移",
-    reason: "高级信息是辅助检查工具，不作为同级产品入口，也不在产品工作面伪造调试状态。",
+  "data-recovery": {
+    title: "数据与恢复尚未迁移",
+    reason: "导入、导出、保留和删除都可能改变持久状态，需要独立契约与危险动作确认。",
+  },
+  "life-memory": {
+    title: "LifeModel 与记忆设置尚未迁移",
+    reason: "长期状态查看仍在产品区；本设置入口不会创建第二套 LifeModel 或 Memory truth。",
+  },
+  appearance: {
+    title: "外观设置尚未迁移",
+    reason: "当前 Foundation 已固定视觉 token，但还没有生产外观偏好契约。",
+  },
+  "advanced-support": {
+    title: "高级与支持尚未迁移",
+    reason: "高级信息只作为辅助检查工具，不在产品工作面伪造调试或支持状态。",
   },
 };
+
+function isSettingsPrivacySurface(id: string): id is SettingsPrivacySurfaceId {
+  return id === "model-provider" || id === "privacy-network";
+}
 
 function loadingBoundaryEnvelope(): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
   return {
@@ -365,19 +437,25 @@ export function ReadOnlySpineJourney({
   dataSource,
   governedActionDataSource,
   durableTruthDataSource,
+  settingsPrivacyDataSource,
   initialSurface = "today",
 }: {
   dataSource: ReadOnlySpineDataSource;
   governedActionDataSource?: GovernedActionDataSource;
   durableTruthDataSource?: DurableTruthDataSource;
+  settingsPrivacyDataSource?: SettingsPrivacyDataSource;
   initialSurface?: ReadOnlyProductSurfaceId;
 }) {
   const [mode, setMode] = useState<"product" | "settings">("product");
   const [activeSurface, setActiveSurface] = useState<ReadOnlyProductSurfaceId>(initialSurface);
-  const [activeSettingsId, setActiveSettingsId] = useState("provider-privacy");
-  const [reviewReturnSurface, setReviewReturnSurface] = useState<"workspace" | "life-model">(
-    "workspace"
+  const [settingsReturnSurface, setSettingsReturnSurface] =
+    useState<ReadOnlyProductSurfaceId>(initialSurface);
+  const [activeSettingsId, setActiveSettingsId] = useState<SettingsPrivacySurfaceId | string>(
+    "model-provider"
   );
+  const [reviewReturnSurface, setReviewReturnSurface] = useState<
+    "workspace" | "life-model" | "settings"
+  >("workspace");
   const [settingsQuery, setSettingsQuery] = useState("");
   const [todaySnapshot, setTodaySnapshot] = useState<TodayReadOnlySnapshot>(loadingTodaySnapshot);
   const [tasksSnapshot, setTasksSnapshot] = useState<TasksReadOnlySnapshot>(loadingTasksSnapshot);
@@ -391,6 +469,7 @@ export function ReadOnlySpineJourney({
   const [focusKey, setFocusKey] = useState("initial");
   const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
+  const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, setAnnouncement);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
@@ -527,15 +606,22 @@ export function ReadOnlySpineJourney({
   }
 
   function openSettings(): void {
+    setSettingsReturnSurface(activeSurface);
     setMode("settings");
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus("settings-open");
-    setAnnouncement("已进入设置上下文；当前分类尚未迁移，不会写入配置。 ");
+    if (settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)) {
+      settingsPrivacy.ensureLoaded();
+      setAnnouncement("已进入设置上下文，正在核对清理后的配置与模型传输边界。 ");
+    } else {
+      setAnnouncement(`已进入“${settingsCopy[activeSettingsId].title}”；当前入口尚未迁移。`);
+    }
   }
 
   function backFromSettings(): void {
     setMode("product");
+    setActiveSurface(settingsReturnSurface);
     setSettingsQuery("");
     setInspectorOpen(false);
     setSelectedEvidence("");
@@ -547,17 +633,24 @@ export function ReadOnlySpineJourney({
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus(`settings-${id}`);
-    setAnnouncement(`已进入“${settingsCopy[id].title}”；当前不会读取或保存替代配置。`);
+    if (settingsPrivacyDataSource && isSettingsPrivacySurface(id)) {
+      settingsPrivacy.ensureLoaded();
+      setAnnouncement(`已进入“${settingsCopy[id].title}”；产品事实只取自后端配置与边界读模型。`);
+    } else {
+      setAnnouncement(`已进入“${settingsCopy[id].title}”；当前不会读取或保存替代配置。`);
+    }
   }
 
   const currentBoundaryEnvelope =
-    governedActionDataSource && (activeSurface === "workspace" || activeSurface === "review")
-      ? governedBoundaryEnvelope(governed.snapshot)
-      : activeSurface === "tasks"
-        ? governed.snapshot
-          ? governedBoundaryEnvelope(governed.snapshot)
-          : tasksSnapshot.boundaryEnvelope
-        : todaySnapshot.boundaryEnvelope;
+    mode === "settings" && settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)
+      ? settingsPrivacy.effectiveBoundaryEnvelope
+      : governedActionDataSource && (activeSurface === "workspace" || activeSurface === "review")
+        ? governedBoundaryEnvelope(governed.snapshot)
+        : activeSurface === "tasks"
+          ? governed.snapshot
+            ? governedBoundaryEnvelope(governed.snapshot)
+            : tasksSnapshot.boundaryEnvelope
+          : todaySnapshot.boundaryEnvelope;
   const boundary = boundaryPresentation(currentBoundaryEnvelope);
 
   const effectiveTasksSnapshot: TasksReadOnlySnapshot = useMemo(
@@ -585,6 +678,9 @@ export function ReadOnlySpineJourney({
 
   const context: WorkbenchContextSummary = useMemo(() => {
     if (mode === "settings") {
+      if (settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)) {
+        return settingsPrivacyContext(settingsPrivacy, activeSettingsId);
+      }
       return {
         eyebrow: "设置",
         title: settingsCopy[activeSettingsId].title,
@@ -618,11 +714,16 @@ export function ReadOnlySpineJourney({
     governed.snapshot,
     governedActionDataSource,
     mode,
+    settingsPrivacy,
+    settingsPrivacyDataSource,
     todaySnapshot.envelope,
   ]);
 
   const inspector = useMemo(() => {
     if (mode === "settings") {
+      if (settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)) {
+        return settingsPrivacyInspector(settingsPrivacy, activeSettingsId, selectedEvidence);
+      }
       return unavailableInspector(settingsCopy[activeSettingsId].title);
     }
     if (activeSurface === "today") return todayInspector(todaySnapshot, selectedEvidence);
@@ -652,6 +753,8 @@ export function ReadOnlySpineJourney({
     governed.selectedItem,
     governed.snapshot,
     governedActionDataSource,
+    settingsPrivacy,
+    settingsPrivacyDataSource,
     todaySnapshot,
   ]);
 
@@ -668,7 +771,9 @@ export function ReadOnlySpineJourney({
   }
 
   function openReviewItem(item: ReviewItem): void {
-    setReviewReturnSurface(activeSurface === "life-model" ? "life-model" : "workspace");
+    setReviewReturnSurface(
+      mode === "settings" ? "settings" : activeSurface === "life-model" ? "life-model" : "workspace"
+    );
     governed.selectReviewItem(item);
     setMode("product");
     setActiveSurface("review");
@@ -688,15 +793,26 @@ export function ReadOnlySpineJourney({
 
   let content;
   if (mode === "settings") {
-    const copy = settingsCopy[activeSettingsId];
-    content = (
-      <UnavailableReadOnlyView
-        title={copy.title}
-        reason={copy.reason}
-        onToday={() => navigateProduct("today")}
-        onTasks={() => navigateProduct("tasks")}
-      />
-    );
+    if (settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)) {
+      content = (
+        <SettingsPrivacyView
+          controller={settingsPrivacy}
+          surface={activeSettingsId}
+          onOpenReview={openReviewItem}
+          onOpenInspector={openInspector}
+        />
+      );
+    } else {
+      const copy = settingsCopy[activeSettingsId];
+      content = (
+        <UnavailableReadOnlyView
+          title={copy.title}
+          reason={copy.reason}
+          onToday={() => navigateProduct("today")}
+          onTasks={() => navigateProduct("tasks")}
+        />
+      );
+    }
   } else if (activeSurface === "today") {
     content = (
       <TodayReadOnlyView
@@ -753,8 +869,27 @@ export function ReadOnlySpineJourney({
         onRequestAction={governed.requestReviewAction}
         onConfirmAction={governed.confirmReviewAction}
         onCancelConfirmation={governed.cancelReviewConfirmation}
-        backLabel={reviewReturnSurface === "life-model" ? "返回 LifeModel" : undefined}
-        onBackWorkspace={() => navigateProduct(reviewReturnSurface)}
+        backLabel={
+          reviewReturnSurface === "life-model"
+            ? "返回 LifeModel"
+            : reviewReturnSurface === "settings"
+              ? "返回模型与供应商"
+              : undefined
+        }
+        onBackWorkspace={() => {
+          if (reviewReturnSurface === "settings") {
+            setMode("settings");
+            setActiveSurface(settingsReturnSurface);
+            setActiveSettingsId("model-provider");
+            setInspectorOpen(false);
+            setSelectedEvidence("");
+            requestFocus("settings-review-return");
+            settingsPrivacy.ensureLoaded();
+            setAnnouncement("已返回模型与供应商；审核决定不会自动重新测试或保存设置。 ");
+          } else {
+            navigateProduct(reviewReturnSurface);
+          }
+        }}
         onOpenInspector={openInspector}
       />
     );

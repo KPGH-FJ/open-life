@@ -286,11 +286,13 @@ export function ReviewGovernedView({
                 <div className="ol-review-diff__columns">
                   <div>
                     <small>当前</small>
-                    <strong>任务暂停，动作尚未执行</strong>
+                    <strong>
+                      {selectedItem.decisionContext.before?.summary ?? "请求尚未发送，动作尚未执行"}
+                    </strong>
                   </div>
                   <div>
                     <small>批准后</small>
-                    <strong>只允许同一工具、目标与输入匹配一次</strong>
+                    <strong>{selectedItem.decisionContext.after.summary}</strong>
                   </div>
                 </div>
               </section>
@@ -325,9 +327,15 @@ export function ReviewGovernedView({
                     <dd>{permission.toolLabel}</dd>
                   </div>
                   <div>
-                    <dt>目标</dt>
+                    <dt>请求目标</dt>
                     <dd>{permission.requestedTargetLabel ?? "目标未知"}</dd>
                   </div>
+                  {permission.resolvedTargetLabel && (
+                    <div>
+                      <dt>解析目标</dt>
+                      <dd>{permission.resolvedTargetLabel}</dd>
+                    </div>
+                  )}
                   <div>
                     <dt>用途</dt>
                     <dd>{permission.purposeSummary}</dd>
@@ -523,7 +531,9 @@ export function ReviewGovernedView({
             </div>
             <div>
               <dt>目标</dt>
-              <dd>{permission.requestedTargetLabel ?? "目标未知"}</dd>
+              <dd>
+                {permission.resolvedTargetLabel ?? permission.requestedTargetLabel ?? "目标未知"}
+              </dd>
             </div>
             <div>
               <dt>用途</dt>

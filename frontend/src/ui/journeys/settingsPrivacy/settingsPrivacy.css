@@ -1,0 +1,276 @@
+.ol-settings-page {
+  display: grid;
+  width: min(100%, 820px);
+  min-width: 0;
+  margin: 0 auto;
+  padding: var(--ol-space-8) var(--ol-space-8) var(--ol-space-12);
+}
+
+.ol-settings-page--centered {
+  min-height: 100%;
+  align-content: center;
+  gap: var(--ol-space-4);
+}
+
+.ol-settings-boundary,
+.ol-settings-section,
+.ol-settings-test-result,
+.ol-settings-actions,
+.ol-settings-advanced {
+  min-width: 0;
+  padding: 0 0 var(--ol-space-8);
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-settings-boundary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--ol-space-3) var(--ol-space-6);
+}
+
+.ol-settings-boundary .ol-settings-section-heading {
+  grid-column: 1 / -1;
+}
+
+.ol-settings-boundary__summary {
+  display: grid;
+  min-width: 0;
+  gap: var(--ol-space-2);
+}
+
+.ol-settings-boundary__summary p,
+.ol-settings-test-result p,
+.ol-settings-actions p {
+  margin: 0;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-reading);
+  line-height: var(--ol-line-reading);
+}
+
+.ol-settings-evidence-link {
+  align-self: end;
+  min-height: var(--ol-control-height);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ol-ink-secondary);
+  font: inherit;
+  font-size: var(--ol-type-body);
+  cursor: pointer;
+}
+
+.ol-settings-evidence-link:hover {
+  color: var(--ol-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.ol-settings-page > .ol-notice {
+  margin-top: var(--ol-space-5);
+}
+
+.ol-settings-page > .ol-notice p {
+  margin: 0;
+}
+
+.ol-settings-form {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ol-settings-section,
+.ol-settings-test-result,
+.ol-settings-actions,
+.ol-settings-advanced {
+  margin-top: var(--ol-space-8);
+}
+
+.ol-settings-section {
+  display: grid;
+  gap: var(--ol-space-5);
+}
+
+.ol-settings-section-heading {
+  min-width: 0;
+}
+
+.ol-settings-section-heading > span,
+.ol-settings-actions > div:first-child > span {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  font-weight: 600;
+}
+
+.ol-settings-section-heading h2 {
+  margin: var(--ol-space-1) 0 0;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-section);
+  line-height: var(--ol-line-section);
+  font-weight: 650;
+}
+
+.ol-settings-select-field {
+  display: grid;
+  gap: var(--ol-space-1);
+  min-width: 0;
+}
+
+.ol-settings-select-field__label {
+  color: var(--ol-ink);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+  font-weight: 600;
+}
+
+.ol-settings-select-field__description {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-settings-select-field select {
+  width: 100%;
+  min-width: 0;
+  height: var(--ol-control-height);
+  margin-top: var(--ol-space-1);
+  padding: 0 var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
+  border-radius: var(--ol-radius-1);
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  font-family: var(--ol-font-ui);
+  font-size: var(--ol-type-body);
+}
+
+.ol-settings-select-field select:disabled {
+  border-color: var(--ol-line-strong);
+  background: var(--ol-surface-subtle);
+  color: var(--ol-ink-muted);
+}
+
+.ol-settings-test-result {
+  display: grid;
+  gap: var(--ol-space-3);
+  padding-left: var(--ol-space-4);
+  border-left: 3px solid var(--ol-amber);
+}
+
+.ol-settings-test-result:has(.ol-status-label--success) {
+  border-left-color: var(--ol-green);
+}
+
+.ol-settings-test-result:has(.ol-status-label--error) {
+  border-left-color: var(--ol-red);
+}
+
+.ol-settings-test-result__limit {
+  color: var(--ol-ink-muted) !important;
+  font-size: var(--ol-type-body) !important;
+  line-height: var(--ol-line-body) !important;
+}
+
+.ol-settings-inline-actions,
+.ol-settings-actions__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--ol-space-2);
+}
+
+.ol-settings-actions {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--ol-space-4) var(--ol-space-6);
+  padding-top: var(--ol-space-5);
+  border-top: var(--ol-divider-width) solid var(--ol-line-strong);
+  background: var(--ol-canvas);
+}
+
+.ol-settings-actions > div:first-child {
+  min-width: 0;
+}
+
+.ol-settings-actions p {
+  margin-top: var(--ol-space-1);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+.ol-settings-fact-list,
+.ol-settings-confirmation,
+.ol-settings-advanced dl {
+  display: grid;
+  margin: 0;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-settings-fact-list > div,
+.ol-settings-confirmation > div,
+.ol-settings-advanced dl > div {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: var(--ol-space-4);
+  padding: var(--ol-space-3) 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-settings-fact-list dt,
+.ol-settings-confirmation dt,
+.ol-settings-advanced dt {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+.ol-settings-fact-list dd,
+.ol-settings-confirmation dd,
+.ol-settings-advanced dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+.ol-settings-advanced {
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+.ol-settings-advanced summary {
+  padding: var(--ol-space-2) 0;
+  color: var(--ol-ink-muted);
+  cursor: pointer;
+  font-size: var(--ol-type-caption);
+  font-weight: 600;
+}
+
+.ol-settings-advanced[open] summary {
+  margin-bottom: var(--ol-space-2);
+}
+
+.ol-settings-confirmation {
+  width: min(100%, 520px);
+}
+
+@media (max-width: 1180px) {
+  .ol-settings-page {
+    padding-right: var(--ol-space-6);
+    padding-left: var(--ol-space-6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ol-settings-evidence-link {
+    transition: none;
+  }
+}

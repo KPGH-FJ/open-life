@@ -15,6 +15,7 @@ export interface WorkbenchNavigationItem {
   id: string;
   label: string;
   meta?: string;
+  searchTerms?: readonly string[];
   icon: LucideIcon;
   badge?: string;
 }
@@ -135,7 +136,10 @@ export function OpenLifeWorkbenchShell({
   const normalizedQuery = settingsQuery.trim().toLocaleLowerCase("zh-CN");
   const visibleSettingsItems = normalizedQuery
     ? settingsItems.filter(item =>
-        `${item.label} ${item.meta ?? ""}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery)
+        [item.label, item.meta ?? "", ...(item.searchTerms ?? [])]
+          .join(" ")
+          .toLocaleLowerCase("zh-CN")
+          .includes(normalizedQuery)
       )
     : settingsItems;
 
@@ -193,6 +197,20 @@ export function OpenLifeWorkbenchShell({
                 onChange={event => onSettingsQueryChange(event.target.value)}
               />
             </label>
+            <div className="ol-shell-search-status">
+              <p role="status" aria-live="polite">
+                {normalizedQuery
+                  ? `找到 ${visibleSettingsItems.length} 个设置分类`
+                  : `共 ${settingsItems.length} 个设置分类`}
+              </p>
+              {normalizedQuery && (
+                <FoundationIconButton
+                  label="清除设置搜索"
+                  icon={<X size={16} strokeWidth={1.75} aria-hidden="true" />}
+                  onClick={() => onSettingsQueryChange("")}
+                />
+              )}
+            </div>
             <nav aria-label="设置分类">
               {visibleSettingsItems.map(item => {
                 const Icon = item.icon;

@@ -159,6 +159,27 @@
   color: var(--ol-ink);
 }
 
+.ol-shell-search-status {
+  display: flex;
+  min-height: var(--ol-control-height);
+  gap: var(--ol-space-2);
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--ol-space-1) var(--ol-space-1) var(--ol-space-2);
+}
+
+.ol-shell-search-status p {
+  margin: 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-shell-search-status .ol-icon-button {
+  width: 28px;
+  height: 28px;
+}
+
 .ol-shell-search-empty {
   margin: var(--ol-space-4) var(--ol-space-2);
   color: var(--ol-ink-muted);

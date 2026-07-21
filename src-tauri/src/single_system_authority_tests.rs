@@ -2375,11 +2375,13 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
             "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
             "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
             "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
+            "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
             "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
             "ReadOnlySpineJourney",
             "WorkspaceGovernedView",
             "ReviewGovernedView",
             "DurableTruthView",
+            "SettingsPrivacyView",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -2425,18 +2427,21 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
         package.contains("\"dev:phase4d\": \"vite --config vite.phase4d.config.ts\"")
             && package.contains("\"build:phase4d\"")
             && package.contains("\"qa:phase4d\"")
-            && package.contains("\"qa:phase4d:durable\""),
+            && package.contains("\"qa:phase4d:durable\"")
+            && package.contains("\"qa:phase4d:settings\""),
         "Phase 4D scripts must remain explicit dev/review commands"
     );
     for required in [
         "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
         "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
         "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
+        "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
         "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
         "ReadOnlySpineJourney",
         "WorkspaceGovernedView",
         "ReviewGovernedView",
         "DurableTruthView",
+        "SettingsPrivacyView",
         "ol-governed-page",
         "ol-durable-page",
         "dev/phase4d/index.html",
@@ -2458,11 +2463,13 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
                 && !source.contains("OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_REAL_TAURI_PROBE")
                 && !source.contains("ReadOnlySpineJourney")
                 && !source.contains("WorkspaceGovernedView")
                 && !source.contains("ReviewGovernedView")
-                && !source.contains("DurableTruthView"),
+                && !source.contains("DurableTruthView")
+                && !source.contains("SettingsPrivacyView"),
             "product source must not import the Phase 4D journey or harness: {rel}"
         );
     }

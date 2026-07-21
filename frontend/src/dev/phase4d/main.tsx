@@ -6,6 +6,7 @@ import "@/ui/shell/openlife.shell.css";
 import "@/ui/journeys/readOnly/readOnlySpine.css";
 import "@/ui/journeys/governedAction/governedAction.css";
 import "@/ui/journeys/durableTruth/durableTruth.css";
+import "@/ui/journeys/settingsPrivacy/settingsPrivacy.css";
 import "./phase4d-harness.css";
 
 declare const __OPENLIFE_PHASE4D_HARNESS__: boolean;
