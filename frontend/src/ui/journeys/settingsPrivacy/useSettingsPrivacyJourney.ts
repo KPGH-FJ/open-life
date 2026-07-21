@@ -4,7 +4,13 @@ import {
   settingsOrchestrationReducer,
   type SettingsOrchestrationState,
 } from "@/contracts/settingsOrchestrationContract";
-import type { AppConfig, ProviderPrivacyBoundarySummary, ViewModelEnvelope } from "@/tauri";
+import type {
+  AppConfig,
+  CredentialRecoveryReport,
+  ProviderPrivacyBoundarySummary,
+  ViewModelEnvelope,
+} from "@/tauri";
+import { journeyErrorCode as errorCode } from "@/ui/journeys/journeyError";
 import {
   buildSettingsPrivacyErrorSnapshot,
   type SettingsConnectionTestOutcome,
@@ -14,6 +20,7 @@ import {
 import {
   cloneSettingsConfig,
   connectionTestPresentation,
+  credentialState,
   endpointHost,
   providerIdentity,
   settingsProductActions,
@@ -35,6 +42,18 @@ export type SettingsDraftEdit =
   | { field: "network_enabled"; value: boolean }
   | { field: "network_default"; value: "ask" | "allow" | "deny" };
 
+export type CredentialRecoveryState = {
+  phase: "idle" | "confirming" | "recovering" | "complete" | "error";
+  report: CredentialRecoveryReport | null;
+  error: string | null;
+};
+
+const initialCredentialRecoveryState: CredentialRecoveryState = {
+  phase: "idle",
+  report: null,
+  error: null,
+};
+
 export type SettingsPrivacyJourneyController = {
   snapshot: SettingsPrivacySnapshot | null;
   draft: AppConfig | null;
@@ -46,6 +65,8 @@ export type SettingsPrivacyJourneyController = {
   actions: ReturnType<typeof settingsProductActions>;
   effectiveBoundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
   testConfirmationOpen: boolean;
+  credentialRecovery: CredentialRecoveryState;
+  credentialRecoveryConfirmationOpen: boolean;
   load: (announceResult?: boolean) => Promise<SettingsPrivacySnapshot>;
   ensureLoaded: () => void;
   edit: (edit: SettingsDraftEdit) => void;
@@ -53,11 +74,10 @@ export type SettingsPrivacyJourneyController = {
   confirmTest: () => void;
   cancelTest: () => void;
   save: () => void;
+  requestCredentialRecovery: () => void;
+  confirmCredentialRecovery: () => void;
+  cancelCredentialRecovery: () => void;
 };
-
-function errorCode(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function loadingBoundaryEnvelope(): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
   return {
@@ -122,8 +142,13 @@ export function useSettingsPrivacyJourney(
     null
   );
   const [testConfirmationOpen, setTestConfirmationOpen] = useState(false);
+  const [credentialRecovery, setCredentialRecovery] = useState<CredentialRecoveryState>(
+    initialCredentialRecoveryState
+  );
+  const [credentialRecoveryConfirmationOpen, setCredentialRecoveryConfirmationOpen] =
+    useState(false);
   const requestRef = useRef(0);
-  const operationRef = useRef<"test" | "save" | null>(null);
+  const operationRef = useRef<"test" | "save" | "credential_recovery" | null>(null);
 
   useEffect(() => {
     requestRef.current += 1;
@@ -133,6 +158,8 @@ export function useSettingsPrivacyJourney(
     setLoading(false);
     setLastTestOutcome(null);
     setTestConfirmationOpen(false);
+    setCredentialRecovery(initialCredentialRecoveryState);
+    setCredentialRecoveryConfirmationOpen(false);
     dispatch({ type: "reset" });
     return () => {
       requestRef.current += 1;
@@ -182,14 +209,20 @@ export function useSettingsPrivacyJourney(
       const next = applyDraftEdit(draft, change);
       const identityChanged = providerIdentity(next) !== previousIdentity;
       const matchesStoredIdentity =
-        snapshot?.config?.llm.openai_key === "***" &&
+        snapshot?.config !== null &&
+        snapshot?.config !== undefined &&
+        credentialState(snapshot.config) === "stored" &&
         providerIdentity(next) === providerIdentity(snapshot.config);
       const restoreStoredCredential =
         matchesStoredIdentity &&
         (identityChanged || (change.field === "credential" && !change.value.trim()));
-      if (identityChanged) next.llm.openai_key = "";
+      if (identityChanged) {
+        next.llm.openai_key = "";
+        next.llm.openai_key_ref = undefined;
+      }
       if (restoreStoredCredential) {
-        next.llm.openai_key = "***";
+        next.llm.openai_key = snapshot?.config?.llm.openai_key === "***" ? "***" : "";
+        next.llm.openai_key_ref = snapshot?.config?.llm.openai_key_ref;
       }
       setDraft(next);
       setLastTestOutcome(null);
@@ -208,7 +241,24 @@ export function useSettingsPrivacyJourney(
   );
 
   const validation = useMemo(() => validateSettingsDraft(draft), [draft]);
-  const actions = useMemo(() => settingsProductActions(state, validation), [state, validation]);
+  const actions = useMemo(
+    () =>
+      settingsProductActions(state, validation, {
+        safeModeActive: snapshot?.safeMode?.active === true,
+        phase: credentialRecovery.phase,
+        readyForRestart: Boolean(
+          credentialRecovery.report?.allRequiredCredentialsReady &&
+          credentialRecovery.report.restartRequired
+        ),
+      }),
+    [
+      credentialRecovery.phase,
+      credentialRecovery.report,
+      snapshot?.safeMode?.active,
+      state,
+      validation,
+    ]
+  );
 
   const executeTest = useCallback(async () => {
     if (!dataSource || !draft || operationRef.current || !actions.test.enabled) return;
@@ -332,6 +382,65 @@ export function useSettingsPrivacyJourney(
     })();
   }, [actions.save, announce, dataSource, draft]);
 
+  const requestCredentialRecovery = useCallback(() => {
+    if (!actions.recovery.enabled) {
+      announce(
+        `当前不能检查系统凭据：${actions.recovery.disabledReason ?? "恢复前置条件不可用。"}`
+      );
+      return;
+    }
+    if (!dataSource || operationRef.current) {
+      announce("当前不能检查系统凭据；请等待正在进行的设置操作结束。");
+      return;
+    }
+    setCredentialRecovery({ phase: "confirming", report: null, error: null });
+    setCredentialRecoveryConfirmationOpen(true);
+    announce("等待你确认系统凭据检查范围；尚未访问系统凭据库。");
+  }, [actions.recovery, announce, dataSource]);
+
+  const cancelCredentialRecovery = useCallback(() => {
+    setCredentialRecoveryConfirmationOpen(false);
+    setCredentialRecovery(initialCredentialRecoveryState);
+    announce("已取消系统凭据检查；没有访问或初始化系统凭据。");
+  }, [announce]);
+
+  const confirmCredentialRecovery = useCallback(() => {
+    if (!snapshot?.safeMode?.active || !dataSource || operationRef.current) {
+      setCredentialRecoveryConfirmationOpen(false);
+      setCredentialRecovery({
+        phase: "error",
+        report: null,
+        error: "credential_recovery_precondition_unavailable",
+      });
+      announce("系统凭据检查前置条件不可用；安全模式保持不变。");
+      return;
+    }
+
+    const requestId = requestRef.current;
+    setCredentialRecoveryConfirmationOpen(false);
+    setCredentialRecovery({ phase: "recovering", report: null, error: null });
+    operationRef.current = "credential_recovery";
+    announce("正在进入系统原生确认；安全模式在完整重启并重新核对前保持不变。");
+    void (async () => {
+      try {
+        const report = await dataSource.recoverRequiredCredentialAccess();
+        if (requestId !== requestRef.current) return;
+        setCredentialRecovery({ phase: "complete", report, error: null });
+        announce(
+          report.allRequiredCredentialsReady
+            ? "本次系统凭据检查均可访问；请完全退出并重启，当前页面不会自行解除安全模式。"
+            : "仍有系统凭据不可用；没有覆盖已有数据，安全模式继续保持。"
+        );
+      } catch (error) {
+        if (requestId !== requestRef.current) return;
+        setCredentialRecovery({ phase: "error", report: null, error: errorCode(error) });
+        announce("系统凭据检查未完成；没有解除安全模式，也没有把失败解释为恢复成功。");
+      } finally {
+        if (requestId === requestRef.current) operationRef.current = null;
+      }
+    })();
+  }, [announce, dataSource, snapshot?.safeMode?.active]);
+
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
   const effectiveBoundaryEnvelope = useMemo(() => {
     if (!snapshot) return loadingBoundaryEnvelope();
@@ -365,6 +474,8 @@ export function useSettingsPrivacyJourney(
     actions,
     effectiveBoundaryEnvelope,
     testConfirmationOpen,
+    credentialRecovery,
+    credentialRecoveryConfirmationOpen,
     load,
     ensureLoaded,
     edit,
@@ -372,6 +483,9 @@ export function useSettingsPrivacyJourney(
     confirmTest,
     cancelTest,
     save,
+    requestCredentialRecovery,
+    confirmCredentialRecovery,
+    cancelCredentialRecovery,
   };
 }
 

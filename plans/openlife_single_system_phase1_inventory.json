@@ -1738,9 +1738,9 @@
       "path": "frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts",
       "phase": 8,
       "disposition": "keep",
-      "reason": "Settings edits use sanitized config while provider/privacy product truth comes from ProviderPrivacyBoundarySummary and exact review/test receipts.",
+      "reason": "Settings edits use sanitized config; provider/privacy product truth comes from ProviderPrivacyBoundarySummary; Safe Mode is read directly from LifeStateProjection; review/test outcomes use exact receipts. The frontend does not reconstruct any of these backend-owned truths.",
       "r0_surface_classification": "production_settings_privacy_data_source",
-      "r0_raw_source_scan_hit": false,
+      "r0_raw_source_scan_hit": true,
       "backend_owner": false
     }
   ],

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ReviewAction, ReviewItem, TaskControl, TaskViewModelItem } from "@/tauri";
+import { journeyErrorCode as errorCode } from "@/ui/journeys/journeyError";
 import {
   initialReviewDispatchState,
   reviewDispatchReducer,
@@ -22,10 +23,6 @@ import {
 } from "./governedActionDataSource";
 
 type Announce = (message: string) => void;
-
-function errorCode(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function reviewEnvelopeAllowsDecisions(snapshot: GovernedActionSnapshot | null): boolean {
   return snapshot?.reviewEnvelope.status === "ready";

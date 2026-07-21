@@ -58,9 +58,11 @@ function snapshot(
   return {
     config: currentConfig,
     boundaryEnvelope: envelope,
+    safeMode: { active: false, reason: "", sourceRefs: [] },
     diagnostics: [
       { id: "sanitized_config", status: "loaded" },
       { id: "provider_privacy_boundary", status: "loaded" },
+      { id: "life_state_projection", status: "loaded" },
       { id: "review_item_resolution", status: "not_requested" },
     ],
   };
@@ -94,6 +96,7 @@ describe("settings privacy journey", () => {
       loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(config(), boundary())),
       testProviderConnection,
       saveSettings,
+      recoverRequiredCredentialAccess: vi.fn(),
     };
     const announce = vi.fn();
     const { result } = renderHook(() => useSettingsPrivacyJourney(source, announce));
@@ -136,6 +139,7 @@ describe("settings privacy journey", () => {
       loadSettingsPrivacy,
       testProviderConnection: vi.fn(),
       saveSettings,
+      recoverRequiredCredentialAccess: vi.fn(),
     };
     const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
     await act(async () => {
@@ -161,6 +165,7 @@ describe("settings privacy journey", () => {
       loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(config(), boundary())),
       testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
+      recoverRequiredCredentialAccess: vi.fn(),
     };
     const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
     await act(async () => {
@@ -178,6 +183,7 @@ describe("settings privacy journey", () => {
       loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(config(), boundary())),
       testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
+      recoverRequiredCredentialAccess: vi.fn(),
     };
     const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
     await act(async () => {
@@ -197,5 +203,78 @@ describe("settings privacy journey", () => {
     expect(result.current.draft?.llm.openai_key).toBe("");
     act(() => result.current.edit({ field: "provider", value: "deepseek" }));
     expect(result.current.draft?.llm.openai_key).toBe("***");
+  });
+
+  it("requires app confirmation before invoking credential recovery and keeps Safe Mode active", async () => {
+    const recoveryReport = {
+      items: [
+        { purpose: "agent_run_receipts" as const, status: "created" as const },
+        { purpose: "main_chat_events" as const, status: "available" as const },
+        { purpose: "action_queue" as const, status: "available" as const },
+        { purpose: "task_store" as const, status: "available" as const },
+      ],
+      allRequiredCredentialsReady: true,
+      restartRequired: true,
+    };
+    const recovery = vi.fn().mockResolvedValue(recoveryReport);
+    const safeModeSnapshot = snapshot(config(), boundary());
+    safeModeSnapshot.safeMode = {
+      active: true,
+      reason: "integrity_key_unavailable",
+      sourceRefs: ["safe-mode:credential-store"],
+    };
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(safeModeSnapshot),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+      recoverRequiredCredentialAccess: recovery,
+    };
+    const announce = vi.fn();
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, announce));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.requestCredentialRecovery());
+    expect(result.current.credentialRecoveryConfirmationOpen).toBe(true);
+    expect(result.current.actions.recovery.enabled).toBe(false);
+    expect(result.current.actions.test.enabled).toBe(false);
+    expect(recovery).not.toHaveBeenCalled();
+
+    act(() => result.current.confirmCredentialRecovery());
+    await waitFor(() => expect(result.current.credentialRecovery.phase).toBe("complete"));
+
+    expect(recovery).toHaveBeenCalledTimes(1);
+    expect(result.current.credentialRecovery.report).toEqual(recoveryReport);
+    expect(result.current.snapshot?.safeMode?.active).toBe(true);
+    expect(announce).toHaveBeenCalledWith(expect.stringContaining("本次系统凭据检查均可访问"));
+    expect(announce).toHaveBeenCalledWith(expect.stringContaining("当前页面不会自行解除安全模式"));
+  });
+
+  it("keeps credential recovery blocked when the native command fails", async () => {
+    const safeModeSnapshot = snapshot(config(), boundary());
+    safeModeSnapshot.safeMode = {
+      active: true,
+      reason: "credential_store_unavailable",
+      sourceRefs: [],
+    };
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(safeModeSnapshot),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+      recoverRequiredCredentialAccess: vi.fn().mockRejectedValue(new Error("native cancelled")),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.requestCredentialRecovery());
+    act(() => result.current.confirmCredentialRecovery());
+    await waitFor(() => expect(result.current.credentialRecovery.phase).toBe("error"));
+
+    expect(result.current.credentialRecovery.report).toBeNull();
+    expect(result.current.credentialRecovery.error).toBe("native cancelled");
+    expect(result.current.snapshot?.safeMode?.active).toBe(true);
   });
 });

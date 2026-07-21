@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatSession, MainChatTurnStatus, ProductAction } from "@/tauri";
 import type { ChatMessage } from "@/types";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import type { WorkspaceConversationDataSource } from "./workspaceConversationDataSource";
 
 type Announce = (message: string) => void;
@@ -19,10 +20,6 @@ export type WorkspaceTurnState =
       blockers: string[];
     }
   | { phase: "failed"; stage: "create" | "send" | "refresh"; reason: string };
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function sessionTitle(input: string): string {
   const normalized = input.replace(/\s+/g, " ").trim();

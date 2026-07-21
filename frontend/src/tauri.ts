@@ -273,7 +273,11 @@ export interface AppConfig {
       | "zhipu"
       | "custom";
     openai_base: string;
-    openai_key: string;
+    // Rust omits the runtime secret when serializing get_config. The field is
+    // present only when the user submits a replacement credential.
+    openai_key?: string;
+    // Non-secret credential-store reference used only to represent presence.
+    openai_key_ref?: string;
     credential_version?: number;
     embedding_model: string;
     chat_model: string;

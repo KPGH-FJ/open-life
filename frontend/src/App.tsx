@@ -17,6 +17,7 @@ import {
   type ReadOnlySpineRouteState,
 } from "@/ui/journeys/readOnly";
 import { tauriSettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
+import { journeyErrorCode } from "@/ui/journeys/journeyError";
 import {
   isRetiredProductPath,
   productPath,
@@ -43,7 +44,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
   static getDerivedStateFromError(error: unknown): Partial<ErrorBoundaryState> {
     return {
       hasError: true,
-      error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+      error: error instanceof Error ? (error.stack ?? error.message) : journeyErrorCode(error),
     };
   }
 

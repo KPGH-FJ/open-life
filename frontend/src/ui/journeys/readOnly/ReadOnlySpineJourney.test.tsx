@@ -105,6 +105,19 @@ describe("Phase 4D desktop read-only journey", () => {
     expect(screen.queryByLabelText("筛选任务")).not.toBeInTheDocument();
   });
 
+  it("replaces the live-region route message instead of retaining the Today loading message", async () => {
+    const user = userEvent.setup();
+    render(<ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-ready")} />);
+    await screen.findByText("整理下周客户访谈要验证的三个问题");
+
+    await user.click(screen.getByRole("button", { name: /^任务\s+队列与连续性/ }));
+
+    expect(
+      screen.getByText("已进入任务；任务状态与交付证明只取自后端读模型。")
+    ).toBeInTheDocument();
+    expect(screen.queryByText("正在读取今日状态。")).not.toBeInTheDocument();
+  });
+
   it("treats an error envelope as authoritative even when it carries old payload data", async () => {
     const user = userEvent.setup();
     const fixture = phase4dFixtureDataSource("fixture-ready");

@@ -8,6 +8,7 @@ import {
   type ViewModelEnvelope,
   type ViewModelStatus,
 } from "@/tauri";
+import { journeyErrorCode as errorMessage } from "@/ui/journeys/journeyError";
 import {
   buildTodayViewModelEnvelope,
   type BuildTodayViewModelEnvelopeInput,
@@ -35,10 +36,6 @@ export type TasksReadOnlySnapshot = {
 export interface ReadOnlySpineDataSource {
   loadToday(): Promise<TodayReadOnlySnapshot>;
   loadTasks(): Promise<TasksReadOnlySnapshot>;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function buildReadModelErrorEnvelope<T>(
