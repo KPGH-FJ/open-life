@@ -494,7 +494,9 @@ mod tests {
             .path()
             .join("tool-gateway-core-os-run-lookup-toctou.db");
         let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
-        let owner = openlife_core::agent::AgentRun::new_tool_execution_run("agent_run.lookup");
+        let mut owner = openlife_core::agent::AgentRun::new_tool_execution_run("agent_run.lookup");
+        // Keep this adapter-fault fixture outside privacy patterns so it reaches dispatch.
+        owner.id = "agent-run-lookup-toctou-owner".into();
         store.create_run(&owner).unwrap();
 
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();

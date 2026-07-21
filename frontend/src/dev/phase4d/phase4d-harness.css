@@ -21,7 +21,7 @@ select {
 
 .phase4d-harness {
   display: grid;
-  grid-template-rows: 64px minmax(0, 1fr);
+  grid-template-rows: 84px minmax(0, 1fr);
   width: 100%;
   min-width: var(--ol-shell-min-width);
   height: 100%;
@@ -34,9 +34,10 @@ select {
   display: grid;
   grid-template-areas:
     "identity source boundaries"
-    "feedback feedback feedback";
+    "feedback feedback feedback"
+    "warning warning warning";
   grid-template-columns: auto minmax(260px, 340px) minmax(0, 1fr);
-  grid-template-rows: 36px 20px;
+  grid-template-rows: 32px 18px 18px;
   min-width: 0;
   gap: var(--ol-space-4);
   align-items: center;
@@ -73,6 +74,16 @@ select {
   color: var(--ol-ink-muted);
   font-size: var(--ol-type-caption);
   line-height: var(--ol-line-caption);
+}
+
+.phase4d-qa-warning {
+  grid-area: warning;
+  min-width: 0;
+  margin: 0;
+  color: var(--ol-amber);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  white-space: nowrap;
 }
 
 .phase4d-source-select select {
