@@ -3,12 +3,15 @@ import type { ReviewAction, TaskControl } from "@/tauri";
 
 const tauriMocks = vi.hoisted(() => ({
   acceptProposal: vi.fn(),
+  cancelMainChatAgentTask: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
   getTasksViewModel: vi.fn(),
   getWorkspaceViewModel: vi.fn(),
   postponeProposal: vi.fn(),
+  refreshMainChatAgentTaskContext: vi.fn(),
   rejectProposal: vi.fn(),
   resumeMainChatAgentTask: vi.fn(),
+  retryMainChatAgentAction: vi.fn(),
 }));
 
 vi.mock("@/tauri", () => tauriMocks);
@@ -108,6 +111,58 @@ describe("governed action Tauri data source", () => {
     expect(tauriMocks.rejectProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.postponeProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.resumeMainChatAgentTask).toHaveBeenCalledWith("task-1");
+  });
+
+  it("dispatches only exact executable TaskControl contracts", async () => {
+    const controls: TaskControl[] = [
+      {
+        id: "task-1:resume",
+        label: "Resume",
+        kind: "resume",
+        effect: "task_resume_request",
+        enabled: true,
+        targetTaskId: "task-1",
+        completionProofAfterDispatch: false,
+      },
+      {
+        id: "task-1:retry",
+        label: "Retry",
+        kind: "retry",
+        effect: "task_retry_request",
+        enabled: true,
+        targetTaskId: "task-1",
+        targetActionId: "action-2",
+        completionProofAfterDispatch: false,
+      },
+      {
+        id: "task-1:cancel",
+        label: "Cancel",
+        kind: "cancel",
+        effect: "task_cancel_request",
+        enabled: true,
+        requiresConfirmation: true,
+        targetTaskId: "task-1",
+        completionProofAfterDispatch: false,
+      },
+      {
+        id: "task-1:refresh",
+        label: "Refresh context",
+        kind: "refresh_context",
+        effect: "task_refresh_request",
+        enabled: true,
+        targetTaskId: "task-1",
+        completionProofAfterDispatch: false,
+      },
+    ];
+
+    for (const control of controls) {
+      await tauriGovernedActionDataSource.dispatchTaskControl(control);
+    }
+
+    expect(tauriMocks.resumeMainChatAgentTask).toHaveBeenCalledWith("task-1");
+    expect(tauriMocks.retryMainChatAgentAction).toHaveBeenCalledWith("task-1", "action-2");
+    expect(tauriMocks.cancelMainChatAgentTask).toHaveBeenCalledWith("task-1");
+    expect(tauriMocks.refreshMainChatAgentTaskContext).toHaveBeenCalledWith("task-1");
   });
 
   it("fails closed instead of inventing edit, apply, revoke, resume, or evidence dispatch", async () => {

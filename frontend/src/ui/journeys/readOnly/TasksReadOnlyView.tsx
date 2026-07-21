@@ -1,7 +1,22 @@
 import { useMemo, useState } from "react";
-import { FileSearch, RefreshCw, Search } from "lucide-react";
-import type { ProductAction, TaskViewModelItem, TasksViewModel, ViewModelEnvelope } from "@/tauri";
-import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from "@/ui/foundation";
+import { FileSearch, Play, RefreshCw, RotateCcw, Search, XCircle } from "lucide-react";
+import type {
+  ProductAction,
+  TaskControl,
+  TaskViewModelItem,
+  TasksViewModel,
+  ViewModelEnvelope,
+} from "@/tauri";
+import {
+  FoundationActionButton,
+  FoundationDialog,
+  FoundationNotice,
+  FoundationStatusLabel,
+} from "@/ui/foundation";
+import {
+  isExecutableTaskControl,
+  type TaskControlDispatchState,
+} from "@/ui/journeys/governedAction/taskControlContract";
 import {
   formatBackendTime,
   taskLifecyclePresentation,
@@ -66,6 +81,69 @@ function actionAttributes(action: ProductAction) {
   } as const;
 }
 
+function taskControlLabel(control: TaskControl): string {
+  if (control.kind === "resume") return "继续任务";
+  if (control.kind === "retry") return "重试失败步骤";
+  if (control.kind === "cancel") return "取消任务";
+  if (control.kind === "refresh_context") return "刷新上下文";
+  return control.label;
+}
+
+function taskControlIcon(control: TaskControl) {
+  if (control.kind === "resume") return <Play size={17} aria-hidden="true" />;
+  if (control.kind === "retry") return <RotateCcw size={17} aria-hidden="true" />;
+  if (control.kind === "cancel") return <XCircle size={17} aria-hidden="true" />;
+  return <RefreshCw size={17} aria-hidden="true" />;
+}
+
+function taskControlFeedback(state: TaskControlDispatchState) {
+  if (state.phase === "idle" || state.phase === "confirming") return null;
+  if (state.phase === "blocked") {
+    return { title: "当前不能执行这项动作", body: state.reason, tone: "protection" as const };
+  }
+  if (state.phase === "dispatching") {
+    return {
+      title: "正在发送任务请求",
+      body: "命令返回不代表任务已经改变。",
+      tone: "neutral" as const,
+    };
+  }
+  if (state.phase === "refreshing") {
+    return {
+      title: "正在核对任务状态",
+      body: "等待同一任务的后端读模型刷新。",
+      tone: "neutral" as const,
+    };
+  }
+  if (state.phase === "awaiting_projection") {
+    return {
+      title: "任务变化尚未确认",
+      body: "请求已发送，但刷新后的同一任务还没有证明目标变化。",
+      tone: "protection" as const,
+    };
+  }
+  if (state.phase === "failed") {
+    return {
+      title: state.stage === "dispatch" ? "任务请求失败" : "任务状态核对失败",
+      body: state.errorCode,
+      tone: "error" as const,
+    };
+  }
+  return {
+    title:
+      state.control.kind === "cancel"
+        ? "任务已取消"
+        : state.control.kind === "refresh_context"
+          ? "上下文已刷新"
+          : "任务状态已更新",
+    body:
+      state.control.kind === "cancel"
+        ? "刷新后的同一任务已确认取消。"
+        : `刷新后的同一任务当前为 ${state.refreshedTask.lifecycleStatus}；这不是完成证明。`,
+    tone: "neutral" as const,
+  };
+}
+
 export function TasksReadOnlyView({
   envelope,
   refreshing,
@@ -74,6 +152,10 @@ export function TasksReadOnlyView({
   onSelectTask,
   onOpenInspector,
   onAnnounce,
+  taskControlState,
+  onRequestTaskControl,
+  onConfirmTaskControl,
+  onCancelTaskControlConfirmation,
 }: {
   envelope: ViewModelEnvelope<TasksViewModel>;
   refreshing: boolean;
@@ -82,6 +164,10 @@ export function TasksReadOnlyView({
   onSelectTask: (task: TaskViewModelItem) => void;
   onOpenInspector: () => void;
   onAnnounce: (message: string) => void;
+  taskControlState: TaskControlDispatchState;
+  onRequestTaskControl: (control: TaskControl, expectedTaskId: string) => void;
+  onConfirmTaskControl: () => void;
+  onCancelTaskControlConfirmation: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
@@ -97,6 +183,10 @@ export function TasksReadOnlyView({
       ),
     [filter, items, normalizedQuery]
   );
+  const selectedTask = items.find(item => item.canonicalTaskId === selectedTaskId) ?? null;
+  const executableControls = selectedTask?.allowedControls.filter(isExecutableTaskControl) ?? [];
+  const controlFeedback = taskControlFeedback(taskControlState);
+  const taskControlBusy = ["dispatching", "refreshing"].includes(taskControlState.phase);
   const refreshAction = {
     id: "tasks.refresh",
     label: "Refresh TasksViewModel",
@@ -124,12 +214,12 @@ export function TasksReadOnlyView({
   }
 
   return (
-    <article className="ol-readonly-page" data-testid="phase4d-tasks-view">
+    <article className="ol-readonly-page" data-testid="tasks-product-view">
       <header className="ol-readonly-page-heading ol-readonly-page-heading--with-actions">
         <div>
           <span>哪些任务需要我或可以继续</span>
           <h2>{taskPrimaryQuestion(envelope)}</h2>
-          <p>生命周期、阻塞和结果只来自后端任务读模型；当前页面不执行任务控制。</p>
+          <p>生命周期、阻塞、结果和可用动作都只来自后端任务读模型。</p>
         </div>
         <FoundationActionButton
           label="重新读取"
@@ -240,6 +330,76 @@ export function TasksReadOnlyView({
         </section>
       )}
 
+      {listAvailable && (
+        <section className="ol-readonly-action-area" aria-labelledby="tasks-controls-title">
+          <div>
+            <span>任务动作</span>
+            <h3 id="tasks-controls-title">
+              {selectedTask ? selectedTask.title : "选择一个任务查看可用动作"}
+            </h3>
+          </div>
+          {selectedTask && executableControls.length > 0 ? (
+            <div className="ol-readonly-task-controls">
+              {executableControls.map(control => {
+                const busyForControl =
+                  taskControlBusy &&
+                  taskControlState.phase !== "idle" &&
+                  taskControlState.control.id === control.id;
+                const staleReason =
+                  envelope.status === "stale" ? "任务读模型已陈旧；请先重新读取。" : undefined;
+                const disabled = !control.enabled || Boolean(staleReason) || taskControlBusy;
+                const disabledReason =
+                  staleReason ||
+                  control.disabledReason ||
+                  (!control.enabled ? "后端未提供禁用原因；动作保持关闭。" : undefined) ||
+                  (taskControlBusy ? "另一项任务动作正在核对。" : undefined);
+                return (
+                  <FoundationActionButton
+                    key={control.id}
+                    label={taskControlLabel(control)}
+                    icon={taskControlIcon(control)}
+                    variant={control.kind === "cancel" ? "danger" : "secondary"}
+                    loading={busyForControl}
+                    loadingLabel={taskControlState.phase === "refreshing" ? "正在核对" : "正在请求"}
+                    disabled={disabled}
+                    disabledReason={disabledReason}
+                    data-action-category="task-control"
+                    data-action-id={control.id}
+                    data-action-kind={control.kind}
+                    data-action-effect={control.effect}
+                    data-action-enabled={String(control.enabled)}
+                    data-action-disabled-reason={
+                      control.disabledReason ??
+                      (!control.enabled ? "后端未提供禁用原因；动作保持关闭。" : "")
+                    }
+                    data-action-target-ref={control.targetTaskId}
+                    data-action-target-action-id={control.targetActionId ?? ""}
+                    data-action-requires-confirmation={String(
+                      Boolean(control.requiresConfirmation)
+                    )}
+                    data-action-completion-proof-after-dispatch={String(
+                      Boolean(control.completionProofAfterDispatch)
+                    )}
+                    onClick={() => onRequestTaskControl(control, selectedTask.canonicalTaskId)}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <p className="ol-readonly-task-control-empty">
+              {selectedTask
+                ? "后端当前没有提供可执行的任务控制。"
+                : "选择任务只改变当前检查对象，不会自动发送命令。"}
+            </p>
+          )}
+          {controlFeedback && (
+            <FoundationNotice title={controlFeedback.title} tone={controlFeedback.tone} live>
+              <p>{controlFeedback.body}</p>
+            </FoundationNotice>
+          )}
+        </section>
+      )}
+
       <section className="ol-readonly-action-area" aria-labelledby="tasks-evidence-title">
         <div>
           <span>证据入口</span>
@@ -255,6 +415,42 @@ export function TasksReadOnlyView({
           onClick={onOpenInspector}
         />
       </section>
+
+      <FoundationDialog
+        open={taskControlState.phase === "confirming"}
+        title={
+          taskControlState.phase === "confirming" && taskControlState.control.kind === "cancel"
+            ? "确认取消这项任务？"
+            : "确认执行这项任务动作？"
+        }
+        description="确认只发送一次精确任务命令；最终状态仍以后端刷新结果为准。"
+        onClose={onCancelTaskControlConfirmation}
+        footer={
+          <>
+            <FoundationActionButton
+              label="返回"
+              variant="quiet"
+              onClick={onCancelTaskControlConfirmation}
+            />
+            <FoundationActionButton
+              label={
+                taskControlState.phase === "confirming"
+                  ? taskControlLabel(taskControlState.control)
+                  : "确认"
+              }
+              variant={
+                taskControlState.phase === "confirming" &&
+                taskControlState.control.kind === "cancel"
+                  ? "danger"
+                  : "primary"
+              }
+              onClick={onConfirmTaskControl}
+            />
+          </>
+        }
+      >
+        <p>{selectedTask?.title ?? "当前任务"}</p>
+      </FoundationDialog>
     </article>
   );
 }

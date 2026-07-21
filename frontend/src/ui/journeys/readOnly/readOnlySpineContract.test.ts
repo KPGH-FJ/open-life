@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -7,15 +7,12 @@ function read(path: string): string {
 }
 
 describe("Phase 4D read-only journey boundaries", () => {
-  it("keeps Phase 4D out of production route and shell authorities", () => {
-    for (const path of [
-      "src/App.tsx",
-      "src/components/ProductShell.tsx",
-      "src/productShellContract.ts",
-    ]) {
-      const source = read(path);
-      expect(source, path).not.toMatch(/ReadOnlySpineJourney|src\/dev\/phase4d|PHASE4D/);
-    }
+  it("makes the Phase 4D journey owner production authority without importing its harness", () => {
+    const app = read("src/App.tsx");
+    expect(app).toContain("ReadOnlySpineJourney");
+    expect(app).not.toMatch(/src\/dev\/phase4d|PHASE4D/);
+    expect(existsSync(join(process.cwd(), "src/components/ProductShell.tsx"))).toBe(false);
+    expect(existsSync(join(process.cwd(), "src/productShellContract.ts"))).toBe(false);
   });
 
   it("contains no narrow-screen navigation implementation or narrow viewport breakpoint", () => {
@@ -42,14 +39,14 @@ describe("Phase 4D read-only journey boundaries", () => {
     }
   });
 
-  it("requires an isolated entry and release absence markers", () => {
+  it("keeps the isolated fixture harness absent from release while allowing production journeys", () => {
     expect(read("vite.phase4d.config.ts")).toContain(
       "__OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(true)"
     );
     expect(read("vite.config.ts")).toContain("__OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(false)");
     const guard = read("scripts/verify-production-absence.mjs");
     expect(guard).toContain("OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS");
-    expect(guard).toContain("ReadOnlySpineJourney");
     expect(guard).toContain("dev/phase4d/index.html");
+    expect(guard).toContain("ProductShell.tsx");
   });
 });

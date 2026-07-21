@@ -11,6 +11,11 @@ import {
   type TaskResumeState,
 } from "./governedActionContract";
 import {
+  initialTaskControlDispatchState,
+  taskControlDispatchReducer,
+  type TaskControlDispatchState,
+} from "./taskControlContract";
+import {
   buildGovernedActionErrorSnapshot,
   type GovernedActionDataSource,
   type GovernedActionSnapshot,
@@ -45,6 +50,7 @@ export type GovernedActionJourneyController = {
   refreshing: boolean;
   reviewState: ReviewDispatchState;
   resumeState: TaskResumeState;
+  taskControlState: TaskControlDispatchState;
   load: (announceResult?: boolean) => Promise<GovernedActionSnapshot>;
   selectReviewItem: (itemOrId: ReviewItem | string) => void;
   requestReviewAction: (action: ReviewAction) => void;
@@ -53,6 +59,9 @@ export type GovernedActionJourneyController = {
   requestResume: (control: TaskControl, expectedTaskId: string) => void;
   confirmResume: () => void;
   cancelResumeConfirmation: () => void;
+  requestTaskControl: (control: TaskControl, expectedTaskId: string) => void;
+  confirmTaskControl: () => void;
+  cancelTaskControlConfirmation: () => void;
 };
 
 export function useGovernedActionJourney(
@@ -67,22 +76,29 @@ export function useGovernedActionJourney(
     initialReviewDispatchState
   );
   const [resumeState, dispatchResume] = useReducer(taskResumeReducer, initialTaskResumeState);
+  const [taskControlState, dispatchTaskControlState] = useReducer(
+    taskControlDispatchReducer,
+    initialTaskControlDispatchState
+  );
   const snapshotRef = useRef<GovernedActionSnapshot | null>(null);
   const requestRef = useRef(0);
   const operationSequenceRef = useRef(0);
   const activeReviewOperationRef = useRef<number | null>(null);
   const activeResumeOperationRef = useRef<number | null>(null);
+  const activeTaskControlOperationRef = useRef<number | null>(null);
 
   useEffect(() => {
     requestRef.current += 1;
     activeReviewOperationRef.current = null;
     activeResumeOperationRef.current = null;
+    activeTaskControlOperationRef.current = null;
     snapshotRef.current = null;
     setSnapshot(null);
     setSelectedItemId(null);
     setRefreshing(false);
     dispatchReview({ type: "reset" });
     dispatchResume({ type: "reset" });
+    dispatchTaskControlState({ type: "reset" });
     return () => {
       requestRef.current += 1;
     };
@@ -133,7 +149,11 @@ export function useGovernedActionJourney(
 
   const load = useCallback(
     async (announceResult = true): Promise<GovernedActionSnapshot> => {
-      if (activeReviewOperationRef.current !== null || activeResumeOperationRef.current !== null) {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
         announce("已有决定或任务请求正在核对；本次没有并发刷新。");
         return (
           snapshotRef.current ??
@@ -142,6 +162,7 @@ export function useGovernedActionJourney(
       }
       dispatchReview({ type: "reset" });
       dispatchResume({ type: "reset" });
+      dispatchTaskControlState({ type: "reset" });
       return loadSnapshot(announceResult);
     },
     [announce, loadSnapshot]
@@ -157,7 +178,11 @@ export function useGovernedActionJourney(
 
   const executeReviewAction = useCallback(
     async (action: ReviewAction) => {
-      if (activeReviewOperationRef.current !== null || activeResumeOperationRef.current !== null) {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
         announce("已有决定或任务请求正在核对；没有并发发送命令。");
         return;
       }
@@ -238,7 +263,11 @@ export function useGovernedActionJourney(
 
   const requestReviewAction = useCallback(
     (action: ReviewAction) => {
-      if (activeReviewOperationRef.current !== null || activeResumeOperationRef.current !== null) {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
         announce("已有决定或任务请求正在核对；没有并发发送命令。");
         return;
       }
@@ -285,7 +314,11 @@ export function useGovernedActionJourney(
 
   const executeResume = useCallback(
     async (control: TaskControl) => {
-      if (activeReviewOperationRef.current !== null || activeResumeOperationRef.current !== null) {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
         announce("已有决定或任务请求正在核对；没有并发发送命令。");
         return;
       }
@@ -351,7 +384,11 @@ export function useGovernedActionJourney(
 
   const requestResume = useCallback(
     (control: TaskControl, expectedTaskId: string) => {
-      if (activeReviewOperationRef.current !== null || activeResumeOperationRef.current !== null) {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
         announce("已有决定或任务请求正在核对；没有并发发送命令。");
         return;
       }
@@ -397,6 +434,129 @@ export function useGovernedActionJourney(
     announce("已取消继续任务；没有发送恢复请求。");
   }, [announce]);
 
+  const executeTaskControl = useCallback(
+    async (control: TaskControl) => {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
+        announce("已有决定或任务请求正在核对；没有并发发送命令。");
+        return;
+      }
+      const operationId = ++operationSequenceRef.current;
+      activeTaskControlOperationRef.current = operationId;
+      try {
+        if (!dataSource) {
+          dispatchTaskControlState({
+            type: "dispatch_failed",
+            errorCode: "governed_action_data_source_unavailable",
+          });
+          announce("任务请求未发送：数据源不可用。");
+          return;
+        }
+        try {
+          await dataSource.dispatchTaskControl(control);
+          dispatchTaskControlState({ type: "dispatch_succeeded" });
+        } catch (error) {
+          dispatchTaskControlState({ type: "dispatch_failed", errorCode: errorCode(error) });
+          announce("任务请求失败；当前不会显示状态已经改变。");
+          return;
+        }
+
+        const refreshed = await loadSnapshot(false);
+        if (refreshed.tasksEnvelope.status !== "ready") {
+          dispatchTaskControlState({
+            type: "refresh_failed",
+            errorCode: `task_refresh_status_${refreshed.tasksEnvelope.status}`,
+          });
+          announce("任务请求已发送，但任务读模型未能完成核对；当前不展示成功结论。");
+          return;
+        }
+        const task = findRefreshedTask(refreshed, control.targetTaskId);
+        const refreshEvent = { type: "refresh_succeeded", task } as const;
+        const verification = taskControlDispatchReducer(
+          { phase: "refreshing", control },
+          refreshEvent
+        );
+        dispatchTaskControlState(refreshEvent);
+        if (verification.phase === "failed") {
+          announce("任务请求已发送，但刷新后的任务身份不一致；当前不展示成功结论。");
+        } else if (verification.phase === "awaiting_projection" && !task) {
+          announce("任务请求已发送，但刷新后找不到同一任务；当前保持未知。");
+        } else if (verification.phase === "awaiting_projection") {
+          announce("任务请求已发送，但刷新后的同一任务尚未确认该变化。");
+        } else if (verification.phase === "resolved" && control.kind === "cancel") {
+          announce("刷新后的同一任务已确认取消。");
+        } else if (verification.phase === "resolved" && control.kind === "refresh_context") {
+          announce("任务上下文已经重新读取；任务结果没有因此被解释成完成。");
+        } else if (verification.phase === "resolved" && control.kind === "retry") {
+          announce("刷新后的同一任务已离开失败状态；这还不是完成结论。");
+        } else if (verification.phase === "resolved") {
+          announce("刷新后的同一任务已确认继续；这还不是完成结论。");
+        }
+      } finally {
+        if (activeTaskControlOperationRef.current === operationId) {
+          activeTaskControlOperationRef.current = null;
+        }
+      }
+    },
+    [announce, dataSource, loadSnapshot]
+  );
+
+  const requestTaskControl = useCallback(
+    (control: TaskControl, expectedTaskId: string) => {
+      if (
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
+        announce("已有决定或任务请求正在核对；没有并发发送命令。");
+        return;
+      }
+      const guardedControl =
+        snapshot?.tasksEnvelope.status === "ready"
+          ? control
+          : {
+              ...control,
+              enabled: false,
+              disabledReason: "任务读模型不是可用状态；请先重新读取。",
+            };
+      const next = taskControlDispatchReducer(initialTaskControlDispatchState, {
+        type: "request",
+        control: guardedControl,
+        expectedTaskId,
+      });
+      dispatchTaskControlState({
+        type: "request",
+        control: guardedControl,
+        expectedTaskId,
+      });
+      if (next.phase === "blocked") {
+        announce(`当前不能执行任务动作：${next.reason}`);
+      } else if (next.phase === "confirming") {
+        announce("等待你确认这项任务动作；尚未发送命令。");
+      } else if (next.phase === "dispatching") {
+        announce("正在发送任务请求；命令返回后仍需刷新核对。");
+        void executeTaskControl(guardedControl);
+      }
+    },
+    [announce, executeTaskControl, snapshot]
+  );
+
+  const confirmTaskControl = useCallback(() => {
+    if (taskControlState.phase !== "confirming") return;
+    const control = taskControlState.control;
+    dispatchTaskControlState({ type: "confirm" });
+    announce("正在发送任务请求；命令返回后仍需刷新核对。");
+    void executeTaskControl(control);
+  }, [announce, executeTaskControl, taskControlState]);
+
+  const cancelTaskControlConfirmation = useCallback(() => {
+    dispatchTaskControlState({ type: "cancel_confirmation" });
+    announce("已取消确认；没有发送任务命令。");
+  }, [announce]);
+
   const selectReviewItem = useCallback(
     (itemOrId: ReviewItem | string) => {
       const nextId = typeof itemOrId === "string" ? itemOrId : itemOrId.id;
@@ -414,6 +574,7 @@ export function useGovernedActionJourney(
     refreshing,
     reviewState,
     resumeState,
+    taskControlState,
     load,
     selectReviewItem,
     requestReviewAction,
@@ -422,5 +583,8 @@ export function useGovernedActionJourney(
     requestResume,
     confirmResume,
     cancelResumeConfirmation,
+    requestTaskControl,
+    confirmTaskControl,
+    cancelTaskControlConfirmation,
   };
 }

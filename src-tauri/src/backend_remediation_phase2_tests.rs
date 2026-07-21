@@ -802,9 +802,9 @@ fn d044_shipped_agent_action_replay_bypass_is_absent_and_task_controls_remain_ca
     let terminal_owner_gateway = include_str!("terminal_owner_write_gateway.rs");
     let tool_gateway_resources = include_str!("tool_gateway_resources.rs");
     let frontend_tauri = include_str!("../../frontend/src/tauri.ts");
-    let agent_run_detail = include_str!("../../frontend/src/pages/AgentRunDetail.tsx");
-    let chat_page = include_str!("../../frontend/src/pages/ChatPage.tsx");
-    let tool_call_card = include_str!("../../frontend/src/components/ToolCallCard.tsx");
+    let task_data_source =
+        include_str!("../../frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let tasks_view = include_str!("../../frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx");
     let frontend_mock = include_str!("../../frontend/src/test/mocks/tauri.ts");
     let core_mcp = include_str!("../../openlife-core/src/mcp.rs");
     let core_os_tools =
@@ -833,13 +833,13 @@ fn d044_shipped_agent_action_replay_bypass_is_absent_and_task_controls_remain_ca
             "replay_agent_action",
         ),
         (
-            "AgentRun detail route",
-            agent_run_detail,
+            "production task data source",
+            task_data_source,
             "replayAgentAction",
         ),
-        ("Main Chat route", chat_page, "replayAgentAction"),
-        ("tool-card execute authority", tool_call_card, "onExecute"),
-        ("tool-card retry authority", tool_call_card, "onReplay"),
+        ("Tasks work surface", tasks_view, "replayAgentAction"),
+        ("Tasks execute authority", tasks_view, "onExecute"),
+        ("Tasks replay authority", tasks_view, "onReplay"),
     ] {
         assert!(
             !source.contains(forbidden),
@@ -880,13 +880,15 @@ fn d044_shipped_agent_action_replay_bypass_is_absent_and_task_controls_remain_ca
             "terminal-owner replay write authority lost required invariant: {required}"
         );
     }
-    assert!(agent_run_detail.contains("retryMainChatAgentAction"));
-    assert!(chat_page.contains("retryMainChatAgentAction"));
-    assert!(agent_run_detail.contains("mailboxRoute"));
-    assert!(chat_page.contains("mailboxLinkTarget"));
     assert!(
-        !tool_call_card.contains("mailboxRoute"),
-        "ToolCallCard stays presentation-only; page-level task and review projections own navigation"
+        task_data_source.contains("retryMainChatAgentAction")
+            && task_data_source.contains("dispatchTaskControl"),
+        "typed governed data source must own exact retry command dispatch"
+    );
+    assert!(
+        tasks_view.contains("control.kind === \"retry\"")
+            && tasks_view.contains("data-action-target-action-id"),
+        "Tasks work surface must render only typed retry controls with exact action identity"
     );
     let retired_generic_replay = ["permission", ".replay_action"].concat();
     assert!(
@@ -1084,7 +1086,8 @@ fn d046_knowledge_note_requires_one_operation_bound_canonical_transaction() {
     let command = include_str!("commands/memory.rs");
     let lib = include_str!("lib.rs");
     let frontend = include_str!("../../frontend/src/tauri.ts");
-    let chat_page = include_str!("../../frontend/src/pages/ChatPage.tsx");
+    let conversation =
+        include_str!("../../frontend/src/ui/journeys/governedAction/useWorkspaceConversation.ts");
 
     for required in [
         "save_knowledge_note_idempotent_with_outbox(",
@@ -1108,10 +1111,14 @@ fn d046_knowledge_note_requires_one_operation_bound_canonical_transaction() {
         "unkeyed manual Memory index write authority must stay absent"
     );
     assert!(
-        !chat_page.contains("createKnowledgeNote") && !chat_page.contains("indexMemoryChunk"),
+        !conversation.contains("createKnowledgeNote") && !conversation.contains("indexMemoryChunk"),
         "assistant-authored display content must not bypass ReviewWorkflow through manual indexing"
     );
-    assert!(chat_page.contains("草拟记忆提案"));
+    assert!(
+        conversation.contains("dataSource.sendTurn")
+            && conversation.contains("completed_with_pending_items"),
+        "production conversation must use the governed Main Chat turn and preserve pending state"
+    );
     for (surface, source) in [
         ("memory command", command),
         ("shipped handler", lib),

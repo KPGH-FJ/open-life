@@ -381,16 +381,16 @@ fn retired_default_adapter_type_token() -> &'static str {
 }
 
 #[test]
-fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands() {
+fn production_conversation_does_not_call_default_adapter_migration_preview_or_review_commands() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
-    let chat_paths = [
-        repo_root.join("frontend/src/pages/ChatPage.tsx"),
-        repo_root.join("frontend/src/pages/chat/ChatInputArea.tsx"),
-        repo_root.join("frontend/src/pages/chat/useChatStreaming.ts"),
-        repo_root.join("frontend/src/pages/chat/useChatContext.ts"),
-        repo_root.join("frontend/src/pages/chat/useChatSessions.ts"),
+    let conversation_paths = [
+        repo_root.join("frontend/src/ui/journeys/governedAction/WorkspaceConversationPanel.tsx"),
+        repo_root.join("frontend/src/ui/journeys/governedAction/useWorkspaceConversation.ts"),
+        repo_root
+            .join("frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts"),
+        repo_root.join("frontend/src/App.tsx"),
     ];
     let forbidden = [
         retired_default_adapter_token(),
@@ -422,7 +422,7 @@ fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands(
         "getRuntimeStrategyRegistryStatus",
     ];
 
-    for path in chat_paths {
+    for path in conversation_paths {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         for forbidden in forbidden {
@@ -441,8 +441,11 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
-    let chat_page = std::fs::read_to_string(repo_root.join("frontend/src/pages/ChatPage.tsx"))
-        .expect("read ChatPage.tsx");
+    let conversation = std::fs::read_to_string(
+        repo_root
+            .join("frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts"),
+    )
+    .expect("read production Workspace conversation data source");
     let frontend_bridge = std::fs::read_to_string(repo_root.join("frontend/src/tauri.ts"))
         .expect("read frontend Tauri bridge");
     let shipped_handlers = std::fs::read_to_string(repo_root.join("src-tauri/src/lib.rs"))
@@ -466,8 +469,8 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
         "handleSaveAsDailyGoal",
     ] {
         assert!(
-            !chat_page.contains(forbidden),
-            "ChatPage must not bypass TurnRuntime through {forbidden}"
+            !conversation.contains(forbidden),
+            "production Workspace conversation must not bypass TurnRuntime through {forbidden}"
         );
     }
 
@@ -517,8 +520,8 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
     }
 
     assert!(
-        chat_page.contains("startStreamMessage("),
-        "ChatPage transient-state requests must enter the shared TurnRuntime stream"
+        conversation.contains("sendMessageV2"),
+        "production Workspace conversation must enter the shared buffered TurnRuntime command"
     );
     assert!(
         policy.contains("TransientStateCommand"),

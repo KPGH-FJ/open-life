@@ -11,6 +11,7 @@ function renderJourney(fixtureId: Parameters<typeof phase4dJourneyFixtureDataSou
       dataSource={dataSource}
       governedActionDataSource={dataSource}
       durableTruthDataSource={dataSource}
+      lifeModelBuilderDataSource={dataSource}
       initialSurface="life-model"
     />
   );
@@ -117,5 +118,44 @@ describe("Phase 4D durable truth journey", () => {
     expect(
       await screen.findByRole("heading", { name: "当前有来源的长期理解" })
     ).toBeInTheDocument();
+  });
+
+  it("builds first-time candidates into exact review items without claiming durable completion", async () => {
+    const user = userEvent.setup();
+    const dataSource = renderJourney("fixture-empty");
+    const createProposals = vi.spyOn(dataSource, "createProposals");
+
+    expect(await screen.findByRole("heading", { name: "从真实情况开始" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "开始建立 LifeModel" }));
+    expect(
+      await screen.findByRole("heading", { name: "接下来三个月，你最希望推进什么？" })
+    ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("你的回答"), "先完成三次访谈分析，再确定下一轮验证重点");
+    await user.click(screen.getByRole("button", { name: "继续" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "逐项决定哪些内容进入审核" })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建审核建议" })).toBeDisabled();
+    const acceptChoices = screen.getAllByRole("radio", { name: "纳入审核" });
+    await user.click(acceptChoices[0]);
+    await user.click(acceptChoices[1]);
+    await user.click(screen.getByRole("button", { name: "创建审核建议" }));
+
+    await waitFor(() => expect(createProposals).toHaveBeenCalledOnce());
+    expect(await screen.findByText("审核建议已创建")).toBeInTheDocument();
+    expect(screen.getByText(/尚未批准，也尚未应用到 LifeModel/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "前往审核中心" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "将客户研究设为近期目标", level: 2 })
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "批准变更" }));
+    await user.click(screen.getByRole("button", { name: "确认批准" }));
+    expect(
+      await screen.findByText("已批准，尚未应用", { selector: ".ol-notice__title" })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("已应用", { selector: ".ol-status-label" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回 LifeModel" })).toBeInTheDocument();
   });
 });

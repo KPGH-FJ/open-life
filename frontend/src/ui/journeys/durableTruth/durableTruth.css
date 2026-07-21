@@ -334,6 +334,247 @@
   line-height: var(--ol-line-caption);
 }
 
+.ol-lifemodel-builder {
+  display: grid;
+  gap: var(--ol-space-5);
+  padding: var(--ol-space-6) 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-builder__header,
+.ol-lifemodel-builder__review-heading,
+.ol-lifemodel-builder__footer,
+.ol-lifemodel-builder__unfinished > div {
+  display: flex;
+  min-width: 0;
+  gap: var(--ol-space-4);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.ol-lifemodel-builder__header > div,
+.ol-lifemodel-builder__review-heading > div,
+.ol-lifemodel-builder__unfinished > div > div {
+  display: grid;
+  min-width: 0;
+  gap: var(--ol-space-1);
+}
+
+.ol-lifemodel-builder__header span:first-child,
+.ol-lifemodel-builder__review-heading span:first-child {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  font-weight: 650;
+}
+
+.ol-lifemodel-builder__header h2,
+.ol-lifemodel-builder__review-heading h3 {
+  margin: 0;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-section);
+  line-height: var(--ol-line-section);
+  font-weight: 650;
+}
+
+.ol-lifemodel-builder__start,
+.ol-lifemodel-builder__question,
+.ol-lifemodel-builder__review,
+.ol-lifemodel-builder__created {
+  display: grid;
+  gap: var(--ol-space-4);
+}
+
+.ol-lifemodel-builder__start > p,
+.ol-lifemodel-builder__summary,
+.ol-lifemodel-builder__created p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-reading);
+  line-height: var(--ol-line-reading);
+}
+
+.ol-lifemodel-builder__unfinished {
+  display: grid;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-builder__unfinished > div {
+  align-items: center;
+  padding: var(--ol-space-3) 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-builder__unfinished strong {
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+  font-weight: 600;
+}
+
+.ol-lifemodel-builder__unfinished small,
+.ol-lifemodel-builder__review-heading small,
+.ol-lifemodel-builder__candidates fieldset > small {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-lifemodel-builder__progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: var(--ol-space-4);
+  align-items: center;
+  padding-bottom: var(--ol-space-3);
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-lifemodel-builder__progress progress {
+  width: 100%;
+  height: 4px;
+  border: 0;
+  border-radius: var(--ol-radius-1);
+  background: var(--ol-surface-sunken);
+  color: var(--ol-ink);
+}
+
+.ol-lifemodel-builder__progress progress::-webkit-progress-bar {
+  border-radius: var(--ol-radius-1);
+  background: var(--ol-surface-sunken);
+}
+
+.ol-lifemodel-builder__progress progress::-webkit-progress-value {
+  border-radius: var(--ol-radius-1);
+  background: var(--ol-ink);
+}
+
+.ol-lifemodel-builder__question h3 {
+  max-width: 720px;
+  margin: 0;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-section);
+  line-height: var(--ol-line-section);
+  font-weight: 650;
+}
+
+.ol-lifemodel-builder__question > label,
+.ol-lifemodel-builder__edit > span {
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+  font-weight: 600;
+}
+
+.ol-lifemodel-builder textarea {
+  width: 100%;
+  min-height: 104px;
+  resize: vertical;
+  padding: var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  font: inherit;
+  line-height: var(--ol-line-reading);
+}
+
+.ol-lifemodel-builder textarea:hover {
+  border-color: var(--ol-line-strong);
+}
+
+.ol-lifemodel-builder textarea:focus-visible {
+  outline: var(--ol-focus-width) solid var(--ol-focus);
+  outline-offset: var(--ol-focus-offset);
+}
+
+.ol-lifemodel-builder textarea:disabled {
+  background: var(--ol-surface-sunken);
+  color: var(--ol-ink-muted);
+}
+
+.ol-lifemodel-builder__footer {
+  align-items: center;
+  padding-top: var(--ol-space-3);
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-builder__review-heading {
+  align-items: end;
+}
+
+.ol-lifemodel-builder__summary {
+  padding-left: var(--ol-space-4);
+  border-left: 3px solid var(--ol-amber);
+}
+
+.ol-lifemodel-builder__candidates {
+  display: grid;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-builder__candidates fieldset {
+  display: grid;
+  min-width: 0;
+  gap: var(--ol-space-3);
+  margin: 0;
+  padding: var(--ol-space-5) 0;
+  border: 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-builder__candidates legend {
+  padding: 0;
+  color: var(--ol-ink-muted);
+  font-family: var(--ol-font-mono);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-lifemodel-builder__candidates fieldset > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-reading);
+  line-height: var(--ol-line-reading);
+}
+
+.ol-lifemodel-builder__decision {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2) var(--ol-space-5);
+}
+
+.ol-lifemodel-builder__decision label {
+  display: inline-flex;
+  min-height: var(--ol-control-height);
+  gap: var(--ol-space-2);
+  align-items: center;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+  cursor: pointer;
+}
+
+.ol-lifemodel-builder__decision input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--ol-ink);
+}
+
+.ol-lifemodel-builder__decision input:focus-visible {
+  outline: var(--ol-focus-width) solid var(--ol-focus);
+  outline-offset: var(--ol-focus-offset);
+}
+
+.ol-lifemodel-builder__edit {
+  display: grid;
+  gap: var(--ol-space-2);
+}
+
 @media (max-width: 1120px) {
   .ol-durable-page {
     padding-right: var(--ol-space-6);
@@ -349,5 +590,9 @@
     padding-right: 0;
     padding-left: 0;
     border-left: 0;
+  }
+
+  .ol-lifemodel-builder__progress {
+    grid-template-columns: minmax(0, 1fr) 144px;
   }
 }

@@ -13,7 +13,7 @@ export function UnavailableReadOnlyView({
   onTasks: () => void;
 }) {
   return (
-    <article className="ol-readonly-page" data-testid="phase4d-unavailable-view">
+    <article className="ol-readonly-page" data-testid="unavailable-product-view">
       <header className="ol-readonly-page-heading">
         <span>当前版本暂不可用</span>
         <h2>{title}</h2>
