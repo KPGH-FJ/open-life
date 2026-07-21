@@ -1,0 +1,104 @@
+{
+  "generatedAt": "2026-07-21T04:58:50.252Z",
+  "baseUrl": "http://127.0.0.1:4186/dev/phase4d/",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "width": 1024,
+      "height": 720
+    }
+  ],
+  "assertions": 83,
+  "failures": [],
+  "browserErrors": [],
+  "observations": [
+    {
+      "label": "1440x900",
+      "layout": {
+        "overflow": 0,
+        "sidebarWidth": 232,
+        "contextHeight": 56,
+        "bodyFont": 15,
+        "pageScrollWidth": 820,
+        "pageClientWidth": 820
+      }
+    },
+    {
+      "label": "1280x800",
+      "layout": {
+        "overflow": 0,
+        "sidebarWidth": 232,
+        "contextHeight": 56,
+        "bodyFont": 15,
+        "pageScrollWidth": 820,
+        "pageClientWidth": 820
+      }
+    },
+    {
+      "label": "1024x720",
+      "layout": {
+        "overflow": 0,
+        "sidebarWidth": 232,
+        "contextHeight": 56,
+        "bodyFont": 15,
+        "pageScrollWidth": 792,
+        "pageClientWidth": 792
+      }
+    },
+    {
+      "contrast": "ink on canvas",
+      "ratio": 18.88
+    },
+    {
+      "contrast": "secondary on sidebar",
+      "ratio": 7.51
+    },
+    {
+      "contrast": "muted on canvas",
+      "ratio": 5.74
+    },
+    {
+      "contrast": "amber on amber soft",
+      "ratio": 5.9
+    },
+    {
+      "contrast": "red on red soft",
+      "ratio": 6.35
+    },
+    {
+      "contrast": "green on green soft",
+      "ratio": 4.83
+    },
+    {
+      "nonTextContrast": "control on canvas",
+      "ratio": 3.69
+    },
+    {
+      "nonTextContrast": "control on sunken",
+      "ratio": 3.3
+    },
+    {
+      "nonTextContrast": "focus on canvas",
+      "ratio": 5.17
+    },
+    {
+      "nonTextContrast": "focus on amber",
+      "ratio": 4.97
+    },
+    {
+      "nonTextContrast": "focus on red",
+      "ratio": 4.89
+    },
+    {
+      "nonTextContrast": "focus on green",
+      "ratio": 4.95
+    }
+  ]
+}

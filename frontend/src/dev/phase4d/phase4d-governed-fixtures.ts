@@ -17,6 +17,7 @@ import type {
 } from "@/ui/journeys/governedAction";
 import type { DurableTruthDataSource } from "@/ui/journeys/durableTruth";
 import type { ReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
+import type { SettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import {
   buildDurableFixtureSnapshot,
   durableReviewItem,
@@ -25,10 +26,17 @@ import {
   type DurableFixtureStage,
 } from "./phase4d-durable-fixtures";
 import { phase4dFixtureDataSource, type Phase4dFixtureId } from "./phase4d-fixtures";
+import {
+  createPhase4dSettingsFixture,
+  providerTestReviewItem,
+  providerTestReviewItemId,
+  type ProviderTestFixtureStage,
+} from "./phase4d-settings-fixtures";
 
 export type Phase4dJourneyDataSource = ReadOnlySpineDataSource &
   GovernedActionDataSource &
-  DurableTruthDataSource;
+  DurableTruthDataSource &
+  SettingsPrivacyDataSource;
 
 type FixtureStage = "pending" | "approved" | "rejected" | "deferred" | "running";
 
@@ -316,15 +324,17 @@ function readStatus(id: Phase4dFixtureId): ViewModelStatus {
 function buildSnapshot(
   id: Phase4dFixtureId,
   stage: FixtureStage,
-  durableStage: DurableFixtureStage
+  durableStage: DurableFixtureStage,
+  providerReviewStage: ProviderTestFixtureStage | null
 ): GovernedActionSnapshot {
   const status = readStatus(id);
   const empty = id === "fixture-empty";
   const incomplete = id === "fixture-incomplete-permission";
   const item = permissionItem(stage, incomplete);
   const durableItem = durableReviewItem(durableStage);
+  const providerItem = providerReviewStage ? providerTestReviewItem(providerReviewStage) : null;
   const task = activeTask(stage);
-  const reviewItems = empty ? [] : [item, durableItem];
+  const reviewItems = empty ? [] : [item, durableItem, ...(providerItem ? [providerItem] : [])];
   const workspace: WorkspaceViewModel = {
     ...(empty ? {} : { activeTask: task }),
     recentTaskRefs: empty ? [] : [{ id: taskId, kind: "task", label: task.title }],
@@ -393,6 +403,21 @@ function buildSnapshot(
               : 0,
             highestRisk: durableItem.risk,
           },
+          ...(providerItem
+            ? [
+                {
+                  id: "batch:provider-connection-test",
+                  domain: "tool_permission" as const,
+                  itemIds: [providerTestReviewItemId],
+                  actionRequiredCount: ["pending", "edited", "deferred"].includes(
+                    providerItem.status
+                  )
+                    ? 1
+                    : 0,
+                  highestRisk: providerItem.risk,
+                },
+              ]
+            : []),
         ],
     items: reviewItems,
     summary: {
@@ -461,19 +486,28 @@ function buildSnapshot(
 
 export function phase4dJourneyFixtureDataSource(id: Phase4dFixtureId): Phase4dJourneyDataSource {
   const readOnly = phase4dFixtureDataSource(id);
+  const settingsFixture = createPhase4dSettingsFixture(id);
   let stage: FixtureStage = "pending";
   let durableStage = initialDurableFixtureStage(id);
 
   return {
     ...readOnly,
+    ...settingsFixture.dataSource,
     async load() {
-      return buildSnapshot(id, stage, durableStage);
+      const providerItem = settingsFixture.currentReviewItem();
+      return buildSnapshot(
+        id,
+        stage,
+        durableStage,
+        providerItem ? (providerItem.status as ProviderTestFixtureStage) : null
+      );
     },
     async loadDurableTruth() {
       return buildDurableFixtureSnapshot(id, durableStage);
     },
     async dispatchReviewAction(reviewAction) {
       if (readStatus(id) !== "ready") throw new Error("fixture_review_read_model_not_ready");
+      if (settingsFixture.dispatchReviewAction(reviewAction)) return;
       if (
         reviewAction.targetReviewItemId !== reviewItemId &&
         reviewAction.targetReviewItemId !== durableReviewItemId

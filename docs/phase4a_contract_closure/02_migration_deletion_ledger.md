@@ -24,7 +24,7 @@ State vocabulary:
 | `frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx` plus governed refresh over backend `TasksViewModel` | `frontend/src/pages/RunsPage.tsx` task-list presentation plus remaining task-control joins | `/runs` route in `frontend/src/App.tsx`; task-control callers remain in old pages | Read-only Tasks journey accepted; governed controller now owns exact resume through dispatch -> refresh -> identity/state verification; production caller moves only in 4E | Old task-list owner absent; no frontend `AgentRun` list join; release bundle excludes Phase 4D journey markers | `contract_ready` |
 | `frontend/src/ui/journeys/governedAction/ReviewGovernedView.tsx` over `ReviewItem.decisionContext` and `reviewDispatchReducer` | `MailboxPage` join of raw `listProposals`, `proposalDisplay`, and ReviewItem; Chat page automatic permission approval | `/mailbox` and remaining Chat permission caller | Pending decision journey renders before/after and exact permission solely from `ReviewItem`; approve/reject/later dispatch always refreshes the same review target and never resumes automatically | Product scan forbids raw proposal reconstruction and automatic approve/resume in the candidate owner; release bundle excludes governed journey markers | `contract_ready` |
 | `frontend/src/ui/journeys/durableTruth/**` over backend `LifeModelViewModel`, `MemoryViewModel`, and exact `ReviewItem` lifecycle | current LifeModel and Memory page owners | `/life-model`, `/memory` | Durable-truth journey distinguishes pending/approved/applying/applied/failed/rolled-back, requires exact refreshed proof, and receives typed apply/rollback actions before exposing those controls | Old page owners absent; no raw proposal/store reconstruction; release bundle excludes durable journey markers | `contract_ready` |
-| `settingsOrchestrationContract` plus future Settings V2 | `SettingsPage` page-local test/save/refresh lifecycle | `/settings` | Privacy/config journey uses edit -> test -> save -> boundary refresh and fails closed | Old reducer/lifecycle absent; route test proves unknown boundary is not green | `contract_ready` |
+| `frontend/src/ui/journeys/settingsPrivacy/**` over sanitized `AppConfig`, backend `ProviderPrivacyBoundarySummary`, exact provider receipts, and exact `ReviewItem`, orchestrated by `settingsOrchestrationContract` | `SettingsPage` plus page-local provider test/save/refresh lifecycle | `/settings` | Candidate journey passes draft -> test -> exact permission review -> explicit save -> config/boundary refresh; production caller moves only in 4E | Old Settings owner absent; no config-derived provider truth; release bundle excludes settings journey markers; unknown boundary is never green | `contract_ready` |
 | Shell Settings utility context plus collapsed diagnostic access | ProductShell advanced groups and same-level advanced routes | ProductShell secondary/advanced navigation | Shell V2 keeps Settings outside primary product navigation and Advanced inside Settings/Inspector; unavailable states are explicit | Navigation matrix and release route inventory | `contract_ready` |
 | Future V2 route authority | `LEGACY_PRODUCT_REDIRECTS` compatibility routes | current `App.tsx` redirect map | Every external caller and active doc uses canonical routes; removal reviewed under Phase7 deletion contract | Redirect path absence tests | `identified` |
 
@@ -103,3 +103,30 @@ dev-only desktop Shell:
 
 LifeModel and Memory move to `contract_ready`, not `delete_ready`. Production
 callers have not moved and old page owners remain required until Phase 4E.
+
+## Phase 4D Privacy And Configuration Spine Update
+
+The fourth Phase 4D slice adds the candidate journey
+`Settings draft -> provider test -> exact permission review -> save -> boundary
+refresh` inside the same dev-only desktop Shell:
+
+- `SettingsPrivacyDataSource` reads sanitized AppConfig and
+  ProviderPrivacyBoundarySummary independently, resolves only the ReviewItem
+  whose proposal ID matches the test result, and calls the existing typed test
+  and save commands;
+- `useSettingsPrivacyJourney` owns local draft/test/save/refresh sequencing and
+  never turns command callbacks into provider or boundary truth;
+- `SettingsPrivacyView` implements model/provider and privacy/network surfaces,
+  while the other confirmed Settings categories remain explicitly unavailable;
+- a provider or endpoint change clears the masked credential in the draft;
+- a verified test requires an exact non-simulated completed provider receipt,
+  but remains separate from save;
+- save always re-reads config and boundary, and unknown refresh remains
+  non-green;
+- production owners remain `App.tsx` -> `ProductShell` and the current
+  `SettingsPage` hierarchy;
+- source and bundle guards keep the candidate Settings owner out of production.
+
+Settings remains `contract_ready`, not `delete_ready`. The old product caller
+has not moved, no production route changed, and the real Tauri action E2E is
+still an explicit validation limit before final production acceptance.

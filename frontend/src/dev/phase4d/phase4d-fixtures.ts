@@ -26,7 +26,11 @@ export type Phase4dFixtureId =
   | "fixture-durable-applying"
   | "fixture-durable-applied"
   | "fixture-durable-failed"
-  | "fixture-durable-rolled-back";
+  | "fixture-durable-rolled-back"
+  | "fixture-settings-local-known"
+  | "fixture-settings-review-required"
+  | "fixture-settings-refresh-unknown"
+  | "fixture-settings-save-failed";
 
 const generatedAt = "2026-07-18T08:30:00.000Z";
 
@@ -404,6 +408,10 @@ export const phase4dFixtureLabels: Record<Phase4dFixtureId, string> = {
   "fixture-durable-applied": "长期状态：已应用",
   "fixture-durable-failed": "长期状态：应用失败",
   "fixture-durable-rolled-back": "长期状态：已回滚",
+  "fixture-settings-local-known": "设置：本地边界已确认",
+  "fixture-settings-review-required": "设置：外部测试需要审核",
+  "fixture-settings-refresh-unknown": "设置：保存后边界未知",
+  "fixture-settings-save-failed": "设置：保存失败",
 };
 
 export function phase4dFixtureDataSource(id: Phase4dFixtureId): ReadOnlySpineDataSource {

@@ -28,11 +28,13 @@ const forbiddenSourceMarkers = [
   "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
   "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
   "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
+  "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
   "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
   "ReadOnlySpineJourney",
   "WorkspaceGovernedView",
   "ReviewGovernedView",
   "DurableTruthView",
+  "SettingsPrivacyView",
 ];
 
 for (const sourcePath of [appPath, shellPath, routeContractPath]) {
@@ -64,6 +66,7 @@ const forbiddenBundleMarkers = [
   "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
   "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
   "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
+  "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
   "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
   "ReadOnlySpineJourney",
   "ol-readonly-page",
@@ -72,6 +75,8 @@ const forbiddenBundleMarkers = [
   "ol-governed-page",
   "DurableTruthView",
   "ol-durable-page",
+  "SettingsPrivacyView",
+  "ol-settings-page",
   "dev/phase4d/index.html",
 ];
 
@@ -86,5 +91,5 @@ for (const filePath of releaseFiles(distRoot)) {
 }
 
 console.log(
-  "Production absence guard passed: Phase 4B/4C/4D harnesses, read-only/governed/durable desktop journeys, and retired preview are absent."
+  "Production absence guard passed: Phase 4B/4C/4D harnesses, read-only/governed/durable/settings desktop journeys, and retired preview are absent."
 );

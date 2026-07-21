@@ -3763,7 +3763,25 @@ export interface LlmConnectionTestResult {
   ok: boolean;
   provider: string;
   message: string;
-  validation_status?: string;
+  validation_status: string;
+  network_policy_decision_id?: string;
+  effective_network_policy_decision_id?: string;
+  consent_status?: string;
+  review_proposal_id?: string;
+  permission_id?: string;
+  provider_invocation_receipt?: ProviderInvocationReceipt;
+}
+
+export interface ProviderInvocationReceipt {
+  request_id: string;
+  provider: string;
+  model: string;
+  status: ProviderInvocationStatus;
+  started_at: string;
+  finished_at: string;
+  error_digest?: string;
+  simulated: boolean;
+  policy_evidence?: Record<string, unknown>;
 }
 
 export async function testLlmConnection(config: AppConfig): Promise<LlmConnectionTestResult> {

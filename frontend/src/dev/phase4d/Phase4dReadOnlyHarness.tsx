@@ -3,6 +3,7 @@ import { FoundationStatusLabel } from "@/ui/foundation";
 import { ReadOnlySpineJourney, tauriReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
 import { tauriGovernedActionDataSource } from "@/ui/journeys/governedAction";
 import { tauriDurableTruthDataSource } from "@/ui/journeys/durableTruth";
+import { tauriSettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import { phase4dFixtureLabels, type Phase4dFixtureId } from "./phase4d-fixtures";
 import {
   phase4dJourneyFixtureDataSource,
@@ -11,6 +12,7 @@ import {
 
 const HARNESS_MARKER = "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS";
 const DURABLE_HARNESS_MARKER = "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS";
+const SETTINGS_HARNESS_MARKER = "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS";
 type Phase4dSourceId = "tauri" | Phase4dFixtureId;
 
 function probeResultLabel<
@@ -36,6 +38,7 @@ const tauriJourneyDataSource: Phase4dJourneyDataSource = {
   ...tauriReadOnlySpineDataSource,
   ...tauriGovernedActionDataSource,
   ...tauriDurableTruthDataSource,
+  ...tauriSettingsPrivacyDataSource,
 };
 
 export function Phase4dReadOnlyHarness() {
@@ -44,7 +47,7 @@ export function Phase4dReadOnlyHarness() {
     tauriAvailable ? "tauri" : "fixture-ready"
   );
   const [probeStatus, setProbeStatus] = useState(
-    tauriAvailable ? "正在核对长期状态与既有旅程读模型" : "浏览器 fixture，不代表后端状态"
+    tauriAvailable ? "正在核对长期状态、设置与既有旅程读模型" : "浏览器 fixture，不代表后端状态"
   );
   const dataSource: Phase4dJourneyDataSource = useMemo(
     () =>
@@ -57,12 +60,15 @@ export function Phase4dReadOnlyHarness() {
       return;
     }
     let cancelled = false;
-    setProbeStatus("正在核对 Today、Tasks、Workspace、Review、LifeModel 与 Memory 命令");
+    setProbeStatus(
+      "正在只读核对 Today、Tasks、Workspace、Review、LifeModel、Memory、配置与传输边界命令"
+    );
     Promise.allSettled([
       dataSource.loadToday(),
       dataSource.loadTasks(),
       dataSource.load(),
       dataSource.loadDurableTruth(),
+      dataSource.loadSettingsPrivacy(),
     ]).then(results => {
       if (cancelled) return;
       const governed =
@@ -73,11 +79,15 @@ export function Phase4dReadOnlyHarness() {
         results[3].status === "rejected"
           ? "LifeModel / Memory rejected"
           : `LifeModel ${results[3].value.lifeModelEnvelope.status} · Memory ${results[3].value.memoryEnvelope.status} · Durable Review ${results[3].value.reviewEnvelope.status}`;
+      const settings =
+        results[4].status === "rejected"
+          ? "Settings / Boundary rejected"
+          : `Settings ${results[4].value.config ? "loaded" : "missing"} · Boundary ${results[4].value.boundaryEnvelope.status}`;
       setProbeStatus(
         `命令探针：${probeResultLabel("Today", results[0], false)} · ${probeResultLabel(
           "Tasks",
           results[1]
-        )} · ${governed} · ${durable}`
+        )} · ${governed} · ${durable} · ${settings}`
       );
       const todayWarnings =
         results[0].status === "fulfilled"
@@ -121,6 +131,21 @@ export function Phase4dReadOnlyHarness() {
               durableReview: "rejected",
               durableDiagnostics: [],
             };
+      const settingsStatuses =
+        results[4].status === "fulfilled"
+          ? {
+              sanitizedConfig: results[4].value.config ? "loaded" : "missing",
+              settingsBoundary: results[4].value.boundaryEnvelope.status,
+              settingsDiagnostics: results[4].value.diagnostics.map(item => ({
+                id: item.id,
+                status: item.status,
+              })),
+            }
+          : {
+              sanitizedConfig: "rejected",
+              settingsBoundary: "rejected",
+              settingsDiagnostics: [],
+            };
       void fetch("/__phase4d_tauri_probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -132,6 +157,7 @@ export function Phase4dReadOnlyHarness() {
           tasksWarnings,
           ...governedStatuses,
           ...durableStatuses,
+          ...settingsStatuses,
         }),
       }).catch(() => undefined);
     });
@@ -145,6 +171,7 @@ export function Phase4dReadOnlyHarness() {
       className="ol-foundation phase4d-harness"
       data-harness-marker={HARNESS_MARKER}
       data-durable-harness-marker={DURABLE_HARNESS_MARKER}
+      data-settings-harness-marker={SETTINGS_HARNESS_MARKER}
       data-source-id={sourceId}
     >
       <header className="phase4d-qa-toolbar" aria-label="Phase 4D QA 工具栏">
@@ -182,7 +209,7 @@ export function Phase4dReadOnlyHarness() {
         </div>
         {sourceId === "tauri" && (
           <p className="phase4d-qa-warning" role="note">
-            真实 Tauri 模式会记录审核决定或任务恢复请求；仅使用隔离的开发数据进行验证。
+            自动探针只读取状态；手动点击测试、保存、审核决定或任务恢复会调用真实命令。仅使用隔离的开发数据验证。
           </p>
         )}
       </header>
@@ -192,6 +219,7 @@ export function Phase4dReadOnlyHarness() {
           dataSource={dataSource}
           governedActionDataSource={dataSource}
           durableTruthDataSource={dataSource}
+          settingsPrivacyDataSource={dataSource}
         />
       </div>
     </div>
