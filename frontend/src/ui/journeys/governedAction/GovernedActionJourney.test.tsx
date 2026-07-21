@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { phase4dJourneyFixtureDataSource } from "@/dev/phase4d/phase4d-governed-fixtures";
@@ -167,6 +167,48 @@ describe("Phase 4D governed action journey", () => {
     await waitFor(() => expect(screen.queryByText("任务仍未确认继续")).not.toBeInTheDocument());
     expect(resumeTask).toHaveBeenCalledTimes(1);
     expect(screen.getByText("任务暂停在一个动作之前")).toBeInTheDocument();
+  });
+
+  it("dispatches a Tasks surface control and treats the refreshed task as the only result", async () => {
+    const user = userEvent.setup();
+    const dataSource = phase4dJourneyFixtureDataSource("fixture-ready");
+    const initial = await dataSource.load();
+    const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
+      action => action.kind === "approve"
+    )!;
+    await dataSource.dispatchReviewAction(approve);
+    const dispatchTaskControl = vi.spyOn(dataSource, "dispatchTaskControl");
+
+    const { container } = render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        initialSurface="tasks"
+      />
+    );
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /整理三次客户访谈，归纳下周要验证的问题/,
+      })
+    );
+    const resume = await screen.findByRole("button", { name: "继续任务" });
+    expect(resume).toHaveAttribute("data-action-kind", "resume");
+    expect(resume).toHaveAttribute("data-action-effect", "task_resume_request");
+    expect(resume).toHaveAttribute("data-action-target-ref", "task-interview-notes");
+    expect(resume).toHaveAttribute("data-action-completion-proof-after-dispatch", "false");
+
+    await user.click(resume);
+    const dialog = screen.getByRole("dialog", { name: "确认执行这项任务动作？" });
+    expect(dispatchTaskControl).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "继续任务" }));
+
+    await waitFor(() => expect(dispatchTaskControl).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("任务状态已更新")).toBeInTheDocument();
+    expect(
+      screen.getByText("刷新后的同一任务当前为 running；这不是完成证明。")
+    ).toBeInTheDocument();
+    expect(container).not.toHaveTextContent("任务已完成");
   });
 
   it("ignores old task and review payloads when their envelopes are empty", async () => {

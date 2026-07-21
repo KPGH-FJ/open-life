@@ -331,6 +331,61 @@ function lifeModel(stage: DurableFixtureStage): LifeModelViewModel {
   };
 }
 
+function emptyLifeModel(): LifeModelViewModel {
+  const base = lifeModel("pending");
+  return {
+    ...base,
+    truthMode: "unknown",
+    canonicalSummary: null,
+    currentViewSummary: null,
+    dimensionSummaries: [],
+    trustQualityState: {
+      readiness: "not_built",
+      completionScore: null,
+      missingDimensionCount: 4,
+      staleDimensionCount: 0,
+      warningRefs: [],
+      ownerStatus: "UNKNOWN",
+    },
+    pendingUpdateCounts: {
+      candidate: 0,
+      pendingReview: 0,
+      approvedNotApplied: 0,
+      failedMaterialization: 0,
+      ownerStatus: "UNKNOWN",
+    },
+    provenanceRefs: [],
+    candidateChanges: [],
+    materializedChanges: [],
+    manualOverrideState: {
+      active: false,
+      blockedReason: "尚未建立 LifeModel；首次建立只会创建审核建议。",
+      draftRef: null,
+      saveAction: null,
+      reviewItemRefs: [],
+      evidenceRefs: [],
+      ownerStatus: "UNKNOWN",
+    },
+    relatedReviewItemRefs: [],
+    memoryLinkage: {
+      linkedMemoryCount: 0,
+      candidateMemoryCount: 0,
+      materializedMemoryCount: 0,
+      conflictCount: 0,
+      memoryRefs: [],
+      evidenceRefs: [],
+      linkageStatus: "unknown",
+      tierSummary: { total: null, tier1: null, tier2: null, tier3: null, archived: null },
+      ownerStatus: "UNKNOWN",
+    },
+    sourceRefs: [],
+    contractLimitations: [
+      "该 fixture 只证明首次建立交互，不代表后端已有 LifeModel。",
+      "Builder 候选必须先进入审核，不能直接成为长期状态。",
+    ],
+  };
+}
+
 function lane(
   laneId: MemoryLaneSummary["lane"],
   label: string,
@@ -506,45 +561,80 @@ export function initialDurableFixtureStage(id: Phase4dFixtureId): DurableFixture
 
 export function buildDurableFixtureSnapshot(
   id: Phase4dFixtureId,
-  stage: DurableFixtureStage
+  stage: DurableFixtureStage,
+  builderReviewItems: ReviewItem[] = []
 ): DurableTruthSnapshot {
   const status: ViewModelStatus =
     id === "fixture-error" ? "error" : id === "fixture-stale" ? "stale" : "ready";
   const item = durableReviewItem(stage);
   const empty = id === "fixture-empty";
+  const reviewItems = [...(empty ? [] : [item]), ...builderReviewItems];
   const review: ReviewCenterViewModel = {
-    batches: empty
-      ? []
-      : [
-          {
-            id: "batch:lifemodel-focus-preference",
-            domain: "life_model",
-            itemIds: [durableReviewItemId],
-            actionRequiredCount: ["pending", "edited", "deferred"].includes(item.status) ? 1 : 0,
-            highestRisk: item.risk,
-          },
-        ],
-    items: empty ? [] : [item],
+    batches: [
+      ...(!empty
+        ? [
+            {
+              id: "batch:lifemodel-focus-preference",
+              domain: "life_model" as const,
+              itemIds: [durableReviewItemId],
+              actionRequiredCount: ["pending", "edited", "deferred"].includes(item.status) ? 1 : 0,
+              highestRisk: item.risk,
+            },
+          ]
+        : []),
+      ...(builderReviewItems.length > 0
+        ? [
+            {
+              id: "batch:lifemodel-builder",
+              domain: "life_model" as const,
+              itemIds: builderReviewItems.map(candidate => candidate.id),
+              actionRequiredCount: builderReviewItems.filter(candidate =>
+                ["pending", "edited", "deferred"].includes(candidate.status)
+              ).length,
+              highestRisk: builderReviewItems.some(candidate => candidate.risk === "high")
+                ? ("high" as const)
+                : builderReviewItems.some(candidate => candidate.risk === "medium")
+                  ? ("medium" as const)
+                  : ("low" as const),
+            },
+          ]
+        : []),
+    ],
+    items: reviewItems,
     summary: {
-      total: empty ? 0 : 1,
-      actionRequiredCount:
-        !empty && ["pending", "edited", "deferred"].includes(item.status) ? 1 : 0,
-      blockedActionCount:
-        !empty && item.allowedActions.some(candidate => !candidate.enabled) ? 1 : 0,
-      byStatus: empty ? {} : { [item.status]: 1 },
-      byRisk: empty ? {} : { [item.risk]: 1 },
-      byMaterializationStatus: empty ? {} : { [item.materializationStatus]: 1 },
+      total: reviewItems.length,
+      actionRequiredCount: reviewItems.filter(candidate =>
+        ["pending", "edited", "deferred"].includes(candidate.status)
+      ).length,
+      blockedActionCount: reviewItems.filter(candidate =>
+        candidate.allowedActions.some(action => !action.enabled)
+      ).length,
+      byStatus: reviewItems.reduce<Record<string, number>>((counts, candidate) => {
+        counts[candidate.status] = (counts[candidate.status] ?? 0) + 1;
+        return counts;
+      }, {}),
+      byRisk: reviewItems.reduce<Record<string, number>>((counts, candidate) => {
+        counts[candidate.risk] = (counts[candidate.risk] ?? 0) + 1;
+        return counts;
+      }, {}),
+      byMaterializationStatus: reviewItems.reduce<Record<string, number>>((counts, candidate) => {
+        counts[candidate.materializationStatus] =
+          (counts[candidate.materializationStatus] ?? 0) + 1;
+        return counts;
+      }, {}),
     },
   };
   return {
-    lifeModelEnvelope: envelope(lifeModel(stage), status, "LifeModelViewModel", [
-      lifeModelEvidence,
-      preferenceEvidence,
-    ]),
+    lifeModelEnvelope: envelope(
+      empty ? emptyLifeModel() : lifeModel(stage),
+      status,
+      "LifeModelViewModel",
+      empty ? [] : [lifeModelEvidence, preferenceEvidence]
+    ),
     memoryEnvelope: envelope(memory(stage), status, "MemoryViewModel", [memoryEvidence]),
     reviewEnvelope: envelope(
       review,
-      status === "ready" && empty ? "empty" : status,
+      status === "ready" && reviewItems.length === 0 ? "empty" : status,
       "ReviewCenterViewModel",
       [preferenceEvidence]
     ),

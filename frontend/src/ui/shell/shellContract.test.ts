@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -35,14 +35,13 @@ describe("Phase 4C desktop shell contract", () => {
     expect(harness).not.toMatch(/bottom[- ]?(?:nav|sheet)|mobile|drawer/i);
   });
 
-  it("keeps the new shell and harness out of current production authorities", () => {
+  it("makes the workbench shell the only production shell authority", () => {
     const app = read("src/App.tsx");
-    const productShell = read("src/components/ProductShell.tsx");
-    const routeContract = read("src/productShellContract.ts");
 
-    for (const source of [app, productShell, routeContract]) {
-      expect(source).not.toMatch(/OpenLifeWorkbenchShell|src\/dev\/phase4c|PHASE4C_DESKTOP/);
-    }
+    expect(app).toContain("ReadOnlySpineJourney");
+    expect(app).not.toMatch(/src\/dev\/phase4c|PHASE4C_DESKTOP/);
+    expect(existsSync(join(process.cwd(), "src/components/ProductShell.tsx"))).toBe(false);
+    expect(existsSync(join(process.cwd(), "src/productShellContract.ts"))).toBe(false);
   });
 
   it("keeps the skip-link target focusable and release guards on a stable marker", () => {

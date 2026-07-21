@@ -1,11 +1,14 @@
 import {
   acceptProposal,
+  cancelMainChatAgentTask,
   getReviewCenterViewModel,
   getTasksViewModel,
   getWorkspaceViewModel,
   postponeProposal,
+  refreshMainChatAgentTaskContext,
   rejectProposal,
   resumeMainChatAgentTask,
+  retryMainChatAgentAction,
   type ReviewAction,
   type ReviewCenterViewModel,
   type TaskControl,
@@ -32,6 +35,7 @@ export interface GovernedActionDataSource {
   load(): Promise<GovernedActionSnapshot>;
   dispatchReviewAction(action: ReviewAction): Promise<void>;
   resumeTask(control: TaskControl): Promise<void>;
+  dispatchTaskControl(control: TaskControl): Promise<void>;
 }
 
 function errorText(error: unknown): string {
@@ -151,8 +155,32 @@ async function resumeTask(control: TaskControl): Promise<void> {
   await resumeMainChatAgentTask(control.targetTaskId);
 }
 
+async function dispatchTaskControl(control: TaskControl): Promise<void> {
+  switch (control.kind) {
+    case "resume":
+      await resumeMainChatAgentTask(control.targetTaskId);
+      return;
+    case "cancel":
+      await cancelMainChatAgentTask(control.targetTaskId);
+      return;
+    case "retry":
+      if (!control.targetActionId) throw new Error("task_retry_target_action_missing");
+      await retryMainChatAgentAction(control.targetTaskId, control.targetActionId);
+      return;
+    case "refresh_context":
+      await refreshMainChatAgentTaskContext(control.targetTaskId);
+      return;
+    case "open_trace":
+    case "open_run":
+    case "open_review_item":
+    case "view_evidence":
+      throw new Error("task_control_requires_navigation_handler");
+  }
+}
+
 export const tauriGovernedActionDataSource: GovernedActionDataSource = {
   load: loadGovernedActionSnapshot,
   dispatchReviewAction,
   resumeTask,
+  dispatchTaskControl,
 };

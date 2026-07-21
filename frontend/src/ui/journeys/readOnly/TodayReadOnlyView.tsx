@@ -86,7 +86,7 @@ export function TodayReadOnlyView({
   const hasAttention = Boolean(data && (visibleBlockers.length > 0 || data.pendingReviewCount > 0));
 
   return (
-    <article className="ol-readonly-page" data-testid="phase4d-today-view">
+    <article className="ol-readonly-page" data-testid="today-product-view">
       <header className="ol-readonly-page-heading">
         <span>今天先完成什么</span>
         <h2>把注意力放在一个明确重点上</h2>

@@ -3,5 +3,103 @@
 @tailwind utilities;
 
 body {
-  @apply bg-gray-50 text-gray-900;
+  margin: 0;
+  overflow: hidden;
+  background: var(--ol-canvas, #ffffff);
+  color: var(--ol-ink, #1f1f1f);
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  min-width: 1024px;
+  min-height: 0;
+}
+
+.ol-route-unavailable,
+.ol-app-failure {
+  display: grid;
+  width: min(100% - var(--ol-space-12), 680px);
+  min-height: 100vh;
+  margin: 0 auto;
+  gap: var(--ol-space-4);
+  place-content: center;
+}
+
+.ol-route-unavailable > span {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  font-weight: 650;
+}
+
+.ol-route-unavailable h1 {
+  margin: 0;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-display);
+  line-height: var(--ol-line-display);
+  font-weight: 650;
+}
+
+.ol-route-unavailable p {
+  max-width: 600px;
+  margin: 0;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-reading);
+  line-height: var(--ol-line-reading);
+}
+
+.ol-route-unavailable code {
+  width: fit-content;
+  padding: var(--ol-space-1) var(--ol-space-2);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-1);
+  background: var(--ol-surface-subtle);
+  color: var(--ol-ink-muted);
+  font-family: var(--ol-font-mono);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-route-unavailable .ol-action-button {
+  width: fit-content;
+}
+
+.ol-app-failure > svg {
+  color: var(--ol-red);
+}
+
+.ol-app-failure__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+}
+
+.ol-app-failure__feedback {
+  min-height: var(--ol-line-caption);
+  margin: 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-app-failure__details {
+  padding: var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface-subtle);
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-app-failure__details summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.ol-app-failure__details pre {
+  max-height: 180px;
+  margin: var(--ol-space-3) 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
 }

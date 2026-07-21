@@ -66,7 +66,7 @@ export function reviewDecisionFeedback(
     case "refreshing":
       return {
         title: "正在核对决定",
-        body: "等待 ReviewCenterViewModel 与 TasksViewModel 刷新。",
+        body: "正在重新读取审核项与关联任务。",
         tone: "neutral",
       };
     case "awaiting_projection":
@@ -176,7 +176,7 @@ export function ReviewGovernedView({
     return (
       <div className="ol-governed-page ol-governed-page--centered">
         <FoundationNotice title="审核状态暂时不可用" tone="error">
-          <p>ReviewCenterViewModel 未能建立；当前不会从旧 proposal 列表拼出决定页面。</p>
+          <p>后端没有返回可确认的审核状态；当前不会从旧建议列表拼出决定页面。</p>
         </FoundationNotice>
         <FoundationActionButton
           label="重新读取"
@@ -195,7 +195,7 @@ export function ReviewGovernedView({
         <div className="ol-governed-empty">
           <span>建议与权限</span>
           <h2>暂无审核项</h2>
-          <p>空列表只来自 ReviewCenterViewModel，不代表所有长期变更都已经完成。</p>
+          <p>空列表只表示当前没有待决定项，不代表所有长期变更都已经应用。</p>
         </div>
         <div className="ol-governed-inline-actions">
           <FoundationActionButton

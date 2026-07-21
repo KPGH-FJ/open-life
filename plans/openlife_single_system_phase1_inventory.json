@@ -285,25 +285,21 @@
     },
     {
       "id": "settings_chat_proposal_control_symbol",
-      "host_path": "frontend/src/pages/SettingsPage.tsx",
-      "path_kind": "symbol",
-      "former_symbol": "chat_proposal",
       "phase": 7,
       "disposition": "deleted",
       "retired": true,
       "expected_absent": true,
-      "reason": "Settings must not initialize, diagnose, or save a toggle with no runtime consumer."
+      "reason": "Phase 4E deleted the complete old Settings UI owner; the retired chat proposal control remains absent with the file.",
+      "former_path": "frontend/src/pages/SettingsPage.tsx"
     },
     {
       "id": "review_memory_chat_proposal_controls_symbol",
-      "host_path": "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
-      "path_kind": "symbol",
-      "former_symbol": "chat_proposal",
       "phase": 7,
       "disposition": "deleted",
       "retired": true,
       "expected_absent": true,
-      "reason": "Mailbox and Memory settings must display backend governance truth instead of inert confidence, length, and cooldown controls."
+      "reason": "Phase 4E deleted the complete old Settings UI owner; the retired chat proposal control remains absent with the file.",
+      "former_path": "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx"
     },
     {
       "id": "main_chat_non_stream_fallback_symbol",
@@ -338,23 +334,193 @@
       "expected_absent": true,
       "reason": "The result contract for the dormant second final-delivery route was deleted with its producer."
     },
-    {"id":"skill_runtime_envelope_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillJsonEnvelope","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Self-consumed generic Skill Runtime JSON envelope was deleted with the parallel runtime."},
-    {"id":"skill_runtime_candidate_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillProposalCandidate","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic Skill Runtime proposal candidate contract had no product consumer."},
-    {"id":"skill_runtime_result_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillRunResult","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic Skill Runtime result contract had no product consumer."},
-    {"id":"skill_runtime_descriptor_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillRuntimeDescriptor","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Migration-era runtime descriptor was not a product execution fact."},
-    {"id":"skill_runtime_readiness_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillRuntimeReadinessReport","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Migration-era readiness report was deleted with the generic runtime."},
-    {"id":"skill_runtime_context_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillContext","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Second context assembler contract was deleted; Main Chat ContextCompiler remains authoritative."},
-    {"id":"skill_runtime_normalized_output_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"NormalizedSkillOutput","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic output normalizer had no product consumer after command deletion."},
-    {"id":"skill_runtime_governed_candidate_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"GovernedSkillProposalCandidate","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel proposal governor contract was deleted; ReviewWorkflow remains authoritative."},
-    {"id":"skill_runtime_build_prompt_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"build_skill_prompt","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy model-output prompt builder was not a TurnRuntime-native skill contract."},
-    {"id":"skill_runtime_parse_json_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"parse_skill_json","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy generic runtime JSON parser had no product consumer."},
-    {"id":"skill_runtime_validate_envelope_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"validate_skill_envelope","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy envelope validator was deleted with its parser."},
-    {"id":"skill_runtime_evaluate_readiness_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"evaluate_skill_runtime_readiness","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic runtime readiness evaluator was migration evidence, not product truth."},
-    {"id":"skill_runtime_assemble_context_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"assemble_skill_context","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel skill context assembler was deleted in favor of the Main Chat context authority."},
-    {"id":"skill_runtime_build_context_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"build_skill_context","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel skill context builder was deleted in favor of the Main Chat context authority."},
-    {"id":"skill_runtime_normalize_output_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"normalize_skill_output","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy generic runtime output normalizer had no product consumer."},
-    {"id":"skill_runtime_govern_candidates_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"govern_skill_proposal_candidates","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel skill proposal governor was deleted; ReviewWorkflow owns governed writes."},
-    {"id":"proposal_store_batch_accept_low_risk_symbol","host_path":"openlife-core/src/agent/proposal_store.rs","path_kind":"symbol","former_symbol":"batch_accept_low_risk","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Unused status-only acceptance helper bypassed effect materialization and was deleted."},
+    {
+      "id": "skill_runtime_envelope_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "SkillJsonEnvelope",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Self-consumed generic Skill Runtime JSON envelope was deleted with the parallel runtime."
+    },
+    {
+      "id": "skill_runtime_candidate_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "SkillProposalCandidate",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Generic Skill Runtime proposal candidate contract had no product consumer."
+    },
+    {
+      "id": "skill_runtime_result_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "SkillRunResult",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Generic Skill Runtime result contract had no product consumer."
+    },
+    {
+      "id": "skill_runtime_descriptor_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "SkillRuntimeDescriptor",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Migration-era runtime descriptor was not a product execution fact."
+    },
+    {
+      "id": "skill_runtime_readiness_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "SkillRuntimeReadinessReport",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Migration-era readiness report was deleted with the generic runtime."
+    },
+    {
+      "id": "skill_runtime_context_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "SkillContext",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Second context assembler contract was deleted; Main Chat ContextCompiler remains authoritative."
+    },
+    {
+      "id": "skill_runtime_normalized_output_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "NormalizedSkillOutput",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Generic output normalizer had no product consumer after command deletion."
+    },
+    {
+      "id": "skill_runtime_governed_candidate_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "GovernedSkillProposalCandidate",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Parallel proposal governor contract was deleted; ReviewWorkflow remains authoritative."
+    },
+    {
+      "id": "skill_runtime_build_prompt_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "build_skill_prompt",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Legacy model-output prompt builder was not a TurnRuntime-native skill contract."
+    },
+    {
+      "id": "skill_runtime_parse_json_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "parse_skill_json",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Legacy generic runtime JSON parser had no product consumer."
+    },
+    {
+      "id": "skill_runtime_validate_envelope_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "validate_skill_envelope",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Legacy envelope validator was deleted with its parser."
+    },
+    {
+      "id": "skill_runtime_evaluate_readiness_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "evaluate_skill_runtime_readiness",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Generic runtime readiness evaluator was migration evidence, not product truth."
+    },
+    {
+      "id": "skill_runtime_assemble_context_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "assemble_skill_context",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Parallel skill context assembler was deleted in favor of the Main Chat context authority."
+    },
+    {
+      "id": "skill_runtime_build_context_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "build_skill_context",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Parallel skill context builder was deleted in favor of the Main Chat context authority."
+    },
+    {
+      "id": "skill_runtime_normalize_output_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "normalize_skill_output",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Legacy generic runtime output normalizer had no product consumer."
+    },
+    {
+      "id": "skill_runtime_govern_candidates_symbol",
+      "host_path": "openlife-core/src/skills.rs",
+      "path_kind": "symbol",
+      "former_symbol": "govern_skill_proposal_candidates",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Parallel skill proposal governor was deleted; ReviewWorkflow owns governed writes."
+    },
+    {
+      "id": "proposal_store_batch_accept_low_risk_symbol",
+      "host_path": "openlife-core/src/agent/proposal_store.rs",
+      "path_kind": "symbol",
+      "former_symbol": "batch_accept_low_risk",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Unused status-only acceptance helper bypassed effect materialization and was deleted."
+    },
     {
       "id": "agent_run_direct_replay_command_symbol",
       "host_path": "src-tauri/src/commands/agent.rs",
@@ -1263,103 +1429,123 @@
   "frontend_multi_source_state_surfaces": [
     {
       "id": "frontend_today_multi_source_state",
-      "path": "frontend/src/pages/TodayPage.tsx",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "Today reads LifeStateProjection and daily goals; Today-specific classification and next action remain limited until a backend Today read model exists, and R6 guards prevent raw proposal/diagnostic/provider reconstruction.",
+      "disposition": "deleted",
+      "reason": "Phase 4E moved Today to the production read-only journey over the strict Today adapter; the old page owner was deleted in the atomic switch.",
       "r0_surface_classification": "product_page_raw_read_convergence_target",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/TodayPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_mailbox_multi_source_state",
-      "path": "frontend/src/pages/MailboxPage.tsx",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "Mailbox still reads proposal payloads for display and LifeStateProjection for product pending count, but R2 moves review action eligibility and materialization status behind backend ReviewCenterViewModel.",
+      "disposition": "deleted",
+      "reason": "Phase 4E moved review decisions to ReviewGovernedView over ReviewCenterViewModel; the Mailbox reconstruction owner was deleted.",
       "r0_surface_classification": "product_page_raw_read_convergence_target",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/MailboxPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_chat_multi_source_state",
-      "path": "frontend/src/pages/ChatPage.tsx",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "Chat still composes diagnostics, scheduler config, LifeModel, daily goals, projection, and raw trace panels, but R4 moves primary task lifecycle and task-control availability to backend TasksViewModel.",
+      "disposition": "deleted",
+      "reason": "Phase 4E moved product conversation into the Workspace journey over the governed Main Chat command and backend task/workspace read models; the old Chat owner was deleted.",
       "r0_surface_classification": "product_page_tasks_viewmodel_consumer_with_remaining_raw_reads",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/ChatPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_companion_multi_source_state",
-      "path": "frontend/src/pages/CompanionPage.tsx",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "Companion is a product wrapper over ChatPage and inherits Chat reconstruction risks without directly calling raw read APIs.",
+      "disposition": "deleted",
+      "reason": "Phase 4E replaced the Companion wrapper with the canonical Workspace product surface and deleted the wrapper.",
       "r0_surface_classification": "product_page_wrapper",
       "r0_raw_source_scan_hit": false,
-      "backend_owner": false
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/CompanionPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_lifemodel_multi_source_state",
-      "path": "frontend/src/pages/LifeModelPage.tsx",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "LifeModel page consumes backend LifeModelViewModel for truth, dimensions, review/update/materialization, and memory-linkage summaries; remaining raw scan hit is projection/build-session context for safe-mode and builder-session display.",
+      "disposition": "deleted",
+      "reason": "Phase 4E moved durable truth to the LifeModel/Memory/Review journey and deleted the old LifeModel page owner.",
       "r0_surface_classification": "product_page_backend_lifemodel_viewmodel_consumer_with_projection",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/LifeModelPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_settings_multi_source_state",
-      "path": "frontend/src/pages/SettingsPage.tsx",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "Settings still presents diagnostics and projection state for support/settings display; R5 MemoryViewModel and ProviderPrivacyBoundarySummary now own those product summaries, while a full SettingsViewModel remains missing.",
+      "disposition": "deleted",
+      "reason": "Phase 4E moved provider and privacy configuration to the settingsPrivacy journey and deleted the old Settings owner.",
       "r0_surface_classification": "product_page_raw_read_convergence_target",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/SettingsPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_lifemodel_editor_direct_save",
-      "path": "frontend/src/pages/LifeModelEditor.tsx",
       "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "LifeModel editor reads raw LifeModel and diagnostics around manual override flows; the override must remain explicit and governed.",
+      "disposition": "deleted",
+      "reason": "Phase 4E removed the direct LifeModel editor surface; no production manual-save owner replaces it.",
       "r0_surface_classification": "manual_override_surface",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/LifeModelEditor.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_runs_multi_source_state",
-      "path": "frontend/src/pages/RunsPage.tsx",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Runs consumes backend TasksViewModel for merged lifecycle, terminal delivery status, review refs, and allowed task controls; remaining AgentRun reads are supporting evidence/delete targets, not lifecycle authority.",
+      "disposition": "deleted",
+      "reason": "Phase 4E replaced Runs with canonical Tasks over TasksViewModel and deleted the old run-list owner.",
       "r0_surface_classification": "product_page_tasks_viewmodel_consumer_with_agentrun_evidence",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/RunsPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_agent_run_detail_multi_source_state",
-      "path": "frontend/src/pages/AgentRunDetail.tsx",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "AgentRun detail fetches Main Chat task summaries to relate run/task state locally; task identity should converge behind TasksViewModel.",
+      "disposition": "deleted",
+      "reason": "Phase 4E removed the old run-detail route and its local task/run join owner.",
       "r0_surface_classification": "product_detail_raw_read_convergence_target",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/AgentRunDetail.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_memory_search_multi_source_state",
-      "path": "frontend/src/pages/MemorySearch.tsx",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "MemorySearch consumes backend MemoryViewModel for product memory lifecycle and materialization counts; remaining diagnostics/archive reads are technical action support, not product memory truth.",
+      "disposition": "deleted",
+      "reason": "Phase 4E folded durable Memory summary into the LifeModel journey and removed the old standalone product route.",
       "r0_surface_classification": "technical_memory_surface_memory_view_model_consumer",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/MemorySearch.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_today_v2_preview_multi_source_state",
@@ -1375,73 +1561,87 @@
     },
     {
       "id": "frontend_chat_context_multi_source_state",
-      "path": "frontend/src/pages/chat/useChatContext.ts",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Chat context hook reads diagnostics, scheduler config, and LifeModel primitives for Chat; backend Workspace/Tasks/LifeModel read models should replace product-truth assembly.",
+      "disposition": "deleted",
+      "reason": "Phase 4E deleted the old Chat context assembler; Workspace consumes backend-owned read models and the governed conversation command.",
       "r0_surface_classification": "product_hook_raw_read_convergence_target",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/chat/useChatContext.ts",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_builder_raw_diagnostics_state",
-      "path": "frontend/src/pages/BuilderPage.tsx",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Builder reads diagnostics directly for domain/product setup state; any readiness claims must remain scoped until SettingsViewModel/provider summary exists.",
+      "disposition": "deleted",
+      "reason": "Phase 4E moved first LifeModel construction into the durable-truth Builder proposal journey and deleted the old page.",
       "r0_surface_classification": "domain_product_raw_diagnostics",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/BuilderPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_calibration_raw_state",
-      "path": "frontend/src/pages/CalibrationPage.tsx",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Calibration reads raw LifeModel primitives and must not be used as LifeModelViewModel authority.",
+      "disposition": "deleted",
+      "reason": "Phase 4E removed Calibration as a same-level product route; no replacement product truth is inferred.",
       "r0_surface_classification": "domain_product_raw_lifemodel",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/CalibrationPage.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_version_control_raw_diagnostics_state",
-      "path": "frontend/src/pages/VersionControl.tsx",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Version control reads diagnostics directly for support/admin status and is not a product read-model owner.",
+      "disposition": "deleted",
+      "reason": "Phase 4E removed the old support/admin route from production authority.",
       "r0_surface_classification": "support_admin_raw_diagnostics",
-      "r0_raw_source_scan_hit": true,
-      "backend_owner": false
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false,
+      "former_path": "frontend/src/pages/VersionControl.tsx",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_runtime_disclosure_display_helper",
-      "path": "frontend/src/utils/runtimeDisclosure.ts",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Runtime disclosure formats run/task/route fragments locally and must remain display-only; R5 ProviderPrivacyBoundarySummary owns reusable product provider/privacy boundary truth.",
+      "disposition": "deleted",
+      "reason": "Phase 4E deleted the old local run/task/route disclosure join; Inspector now consumes typed evidence and backend read models.",
       "r0_surface_classification": "frontend_display_helper",
       "r0_raw_source_scan_hit": false,
-      "backend_owner": false
+      "backend_owner": false,
+      "former_path": "frontend/src/utils/runtimeDisclosure.ts",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_run_display_summary_helper",
-      "path": "frontend/src/utils/runDisplaySummary.ts",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Run display summary formats AgentRun/task fragments locally and must remain display-only until TasksViewModel exists.",
+      "disposition": "deleted",
+      "reason": "Phase 4E deleted the old AgentRun summary formatter with the retired Runs surfaces.",
       "r0_surface_classification": "frontend_display_helper",
       "r0_raw_source_scan_hit": false,
-      "backend_owner": false
+      "backend_owner": false,
+      "former_path": "frontend/src/utils/runDisplaySummary.ts",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_capability_status_helper",
-      "path": "frontend/src/utils/capabilityStatus.ts",
       "phase": 8,
-      "disposition": "absorb_then_delete",
-      "reason": "Capability status derives labels from diagnostics and pending counts; provider/privacy/settings readiness should move behind backend-owned summaries.",
+      "disposition": "deleted",
+      "reason": "Phase 4E deleted diagnostics-derived capability readiness; provider/privacy truth now comes from ProviderPrivacyBoundarySummary.",
       "r0_surface_classification": "frontend_display_helper",
       "r0_raw_source_scan_hit": false,
-      "backend_owner": false
+      "backend_owner": false,
+      "former_path": "frontend/src/utils/capabilityStatus.ts",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "frontend_life_state_projection_helper",
@@ -1460,6 +1660,86 @@
       "disposition": "delete",
       "reason": "Monolithic frontend bridge mirrors IPC calls and types; a TypeScript declaration is not proof that a backend read-model command exists.",
       "r0_surface_classification": "frontend_product_bridge",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_production_workbench_owner",
+      "path": "frontend/src/App.tsx",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Production App now composes one route-driven OpenLife Workbench with typed Tauri data sources and no legacy page fallback.",
+      "r0_surface_classification": "production_workbench_composition",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_production_route_contract",
+      "path": "frontend/src/ui/productRouteContract.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Canonical desktop product and Settings paths are owned here; retired paths are classified unavailable and are not redirected.",
+      "r0_surface_classification": "production_route_contract",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_today_readonly_data_source",
+      "path": "frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Today retains one explicit strict adapter over LifeStateProjection and daily goals while privacy truth comes independently from ProviderPrivacyBoundarySummary.",
+      "r0_surface_classification": "production_today_strict_adapter_data_source",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_governed_action_data_source",
+      "path": "frontend/src/ui/journeys/governedAction/governedActionDataSource.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Workspace, Tasks, and Review consume backend-owned read models and dispatch only typed review/task controls followed by refresh.",
+      "r0_surface_classification": "production_governed_action_data_source",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_workspace_conversation_data_source",
+      "path": "frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Workspace conversation delegates to the existing governed Main Chat command and exact persisted session/history APIs.",
+      "r0_surface_classification": "production_workspace_conversation_delegate",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_durable_truth_data_source",
+      "path": "frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "LifeModel and Memory product truth comes from backend LifeModelViewModel, MemoryViewModel, and ReviewCenterViewModel envelopes.",
+      "r0_surface_classification": "production_durable_truth_data_source",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_lifemodel_builder_data_source",
+      "path": "frontend/src/ui/journeys/durableTruth/lifeModelBuilderDataSource.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "First LifeModel construction delegates to Builder sessions and creates review proposals only; it does not apply durable truth.",
+      "r0_surface_classification": "production_lifemodel_builder_delegate",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_settings_privacy_data_source",
+      "path": "frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Settings edits use sanitized config while provider/privacy product truth comes from ProviderPrivacyBoundarySummary and exact review/test receipts.",
+      "r0_surface_classification": "production_settings_privacy_data_source",
       "r0_raw_source_scan_hit": false,
       "backend_owner": false
     }
@@ -2108,7 +2388,9 @@
       "expected_absent": true,
       "reason": "Generic Skill Runtime was a second provider and proposal authority outside OpenLifeTurnRuntime; product skills remain available through governed Main Chat skill selection.",
       "command": "run_skill",
-      "matched_tokens": ["skill_runtime"]
+      "matched_tokens": [
+        "skill_runtime"
+      ]
     },
     {
       "id": "command_get_skill_runtime_status",
@@ -2121,7 +2403,9 @@
       "expected_absent": true,
       "reason": "The migration-era generic Skill Runtime status surface described a deleted parallel runtime.",
       "command": "get_skill_runtime_status",
-      "matched_tokens": ["skill_runtime"]
+      "matched_tokens": [
+        "skill_runtime"
+      ]
     },
     {
       "id": "command_get_skill_run_status",
@@ -2134,7 +2418,9 @@
       "expected_absent": true,
       "reason": "The generic Skill Runtime run lookup was deleted with its parallel execution command.",
       "command": "get_skill_run_status",
-      "matched_tokens": ["skill_runtime"]
+      "matched_tokens": [
+        "skill_runtime"
+      ]
     },
     {
       "id": "command_list_skills",
@@ -2147,7 +2433,9 @@
       "expected_absent": true,
       "reason": "The unused generic Skill Runtime catalog bridge was deleted; Main Chat exposes the governed product skill catalog.",
       "command": "list_skills",
-      "matched_tokens": ["skill_runtime"]
+      "matched_tokens": [
+        "skill_runtime"
+      ]
     },
     {
       "id": "command_replay_agent_action",
@@ -2160,7 +2448,9 @@
       "expected_absent": true,
       "reason": "The shipped direct AgentRun replay handler and product bridge were deleted. Canonical retry and permission resume use TaskViewModel controls with replay claim CAS, cancellation registration, and durable execution truth.",
       "command": "replay_agent_action",
-      "matched_tokens": ["agent_action_replay"]
+      "matched_tokens": [
+        "agent_action_replay"
+      ]
     }
   ]
 }

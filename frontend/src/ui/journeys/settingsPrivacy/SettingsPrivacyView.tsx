@@ -433,9 +433,7 @@ function SettingsTestResult({
             variant="secondary"
             disabled={!reviewItem}
             disabledReason={
-              reviewItem
-                ? undefined
-                : "当前无法从 ReviewCenterViewModel 解析精确待决定项；不会跳转到猜测目标。"
+              reviewItem ? undefined : "当前无法从审核中心确认对应的待决定项；不会跳转到猜测目标。"
             }
             onClick={() => reviewItem && onOpenReview(reviewItem)}
           />

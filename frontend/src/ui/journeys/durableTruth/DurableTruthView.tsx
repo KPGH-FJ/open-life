@@ -3,6 +3,8 @@ import type { ReviewItem } from "@/tauri";
 import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from "@/ui/foundation";
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 import { durableLifecyclePresentation, durableReviewItems } from "./durableTruthPresentation";
+import { LifeModelBuilderPanel } from "./LifeModelBuilderPanel";
+import type { LifeModelBuilderController } from "./useLifeModelBuilder";
 
 const dimensionOrder = ["identity", "goals", "capabilities", "state"];
 
@@ -14,6 +16,8 @@ export function DurableTruthView({
   onSelectItem,
   onOpenReview,
   onOpenInspector,
+  builder,
+  onOpenReviewCenter,
 }: {
   snapshot: DurableTruthSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -22,6 +26,8 @@ export function DurableTruthView({
   onSelectItem: (item: ReviewItem) => void;
   onOpenReview: (item: ReviewItem) => void;
   onOpenInspector: () => void;
+  builder?: LifeModelBuilderController;
+  onOpenReviewCenter?: () => void;
 }) {
   if (!snapshot || snapshot.lifeModelEnvelope.status === "loading") {
     return (
@@ -71,6 +77,21 @@ export function DurableTruthView({
     (left, right) => dimensionOrder.indexOf(left.id) - dimensionOrder.indexOf(right.id)
   );
   const applyAction = selectedItem?.allowedActions.find(action => action.kind === "apply");
+  const hasEstablishedView = Boolean(
+    currentView || canonical || (lifeModel?.dimensionSummaries.length ?? 0) > 0
+  );
+  const builderDisabledReason = (() => {
+    const statuses = [
+      snapshot.lifeModelEnvelope.status,
+      snapshot.memoryEnvelope.status,
+      snapshot.reviewEnvelope.status,
+    ];
+    if (statuses.includes("stale")) return "长期状态已陈旧；请先重新读取。";
+    if (statuses.includes("loading")) {
+      return "长期状态读模型尚不可用。";
+    }
+    return undefined;
+  })();
 
   return (
     <div className="ol-durable-page" data-durable-lifecycle={state.lifecycle}>
@@ -121,6 +142,14 @@ export function DurableTruthView({
           </dl>
         )}
       </section>
+
+      {!hasEstablishedView && builder && onOpenReviewCenter && (
+        <LifeModelBuilderPanel
+          controller={builder}
+          disabledReason={builderDisabledReason}
+          onOpenReview={onOpenReviewCenter}
+        />
+      )}
 
       <section className="ol-durable-change" aria-labelledby="durable-change-title">
         <div className="ol-durable-section-heading">
@@ -339,7 +368,7 @@ export function DurableTruthView({
             </div>
           </>
         ) : (
-          <p className="ol-durable-muted">MemoryViewModel 未提供可展示的概览。</p>
+          <p className="ol-durable-muted">后端没有提供可展示的记忆概览。</p>
         )}
       </section>
     </div>

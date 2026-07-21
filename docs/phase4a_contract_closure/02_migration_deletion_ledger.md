@@ -1,7 +1,7 @@
 # Phase 4 Frontend Migration And Deletion Ledger
 
-Status: `ACTIVE_DURING_V2_MIGRATION`
-Date: 2026-07-20
+Status: `PHASE4E_ATOMIC_SWITCH_EXECUTED`
+Date: 2026-07-21
 
 State vocabulary:
 
@@ -16,17 +16,18 @@ State vocabulary:
 
 | New owner | Old owner | Last product caller | Deletion condition | Absence guard | State |
 | --- | --- | --- | --- | --- | --- |
-| `frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx`, consumed by `frontend/src/ui/journeys/readOnly/ReadOnlySpineJourney.tsx` in the isolated Phase 4D harness, then the future production shell owner | `frontend/src/components/ProductShell.tsx`, current `productShellContract.ts` primary IA | `frontend/src/App.tsx` | Desktop Tauri Shell keyboard and all Phase 4D business journeys accepted; remaining product callers migrated; 4E atomic route switch ready | Production source/import scan and release route test show old shell authority absent | `contract_ready` |
-| `frontend/src/ui/foundation/**` semantic tokens and primitives | `frontend/src/components/product/ProductPrimitives.tsx` plus page-local visual primitives | `AgentRunDetail`, `LifeModelPage`, settings tabs, `RuntimeDisclosureStrip`, `ReviewDecisionCard`, and provider/runtime utility type imports | Every Phase 4D journey uses the new semantic owner; no old primitive caller remains | Phase 4E production import scan and old-owner file absence test | `contract_ready` |
-| `frontend/src/ui/journeys/readOnly/TodayReadOnlyView.tsx` over `readOnlySpineDataSource.ts` and strict `openlife.today-adapter.v1` | `frontend/src/pages/TodayPage.tsx` local layout/composition | `/today` route in `frontend/src/App.tsx` | Today journey passes ready/empty/stale/error/unknown-boundary and real Tauri fail-closed dogfood; production caller moves in the 4E atomic switch | `/today` renders the new owner; old page/import absent; release bundle excludes Phase 4D harness markers | `contract_ready` |
+| `frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx`, composed by `ReadOnlySpineJourney.tsx` | `frontend/src/components/ProductShell.tsx` and `frontend/src/productShellContract.ts` | `frontend/src/App.tsx`, moved in Phase 4E | Production App composes the Workbench and canonical route contract; no old shell fallback remains | Directory/file absence, App owner assertions, production bundle Workbench assertion, Rust `single_system` guard | `guarded_absent` |
+| `frontend/src/ui/foundation/**` semantic tokens and primitives | `frontend/src/components/product/ProductPrimitives.tsx` and page-local component tree | Old pages/components, all deleted in Phase 4E | Every production journey imports the semantic Foundation; the old component directory is absent | Production source scan, directory absence, typecheck, release build | `guarded_absent` |
+| `frontend/src/ui/journeys/readOnly/TodayReadOnlyView.tsx` over `readOnlySpineDataSource.ts` and strict `openlife.today-adapter.v1` | `frontend/src/pages/TodayPage.tsx` local layout/composition | `/today` production route, moved in Phase 4E | `/today` resolves to the Workbench journey; Today consumes projection/daily goals/boundary without raw fallback | Route tests, raw-read inventory match, old page/directory absence, release guard | `guarded_absent` |
 | Dev-only Phase 4B harness | deleted `TodayV2PreviewPage` and deleted `/today-v2-preview` production route | no product caller remains | Completed in Phase 4B; independent dev entry owns layout fixtures | Frontend build scan, App route test, inventory contract, and Rust single-system guard prove absence | `guarded_absent` |
-| `frontend/src/ui/journeys/governedAction/WorkspaceGovernedView.tsx` over backend `WorkspaceViewModel` plus `useGovernedActionJourney.ts` | `CompanionPage`/`ChatPage` joins over Tasks, projection, page state, permission decision, and automatic resume | `/companion`; old Chat/Workspace production callers remain | Governed-action journey consumes `activeTask`, linked review items, metadata activity, exact resume `TaskControl`, and refreshed task identity/state; remaining production callers move in 4E | Product page scan has no parallel lifecycle/review/privacy reconstruction; release bundle excludes governed journey markers | `contract_ready` |
-| `frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx` plus governed refresh over backend `TasksViewModel` | `frontend/src/pages/RunsPage.tsx` task-list presentation plus remaining task-control joins | `/runs` route in `frontend/src/App.tsx`; task-control callers remain in old pages | Read-only Tasks journey accepted; governed controller now owns exact resume through dispatch -> refresh -> identity/state verification; production caller moves only in 4E | Old task-list owner absent; no frontend `AgentRun` list join; release bundle excludes Phase 4D journey markers | `contract_ready` |
-| `frontend/src/ui/journeys/governedAction/ReviewGovernedView.tsx` over `ReviewItem.decisionContext` and `reviewDispatchReducer` | `MailboxPage` join of raw `listProposals`, `proposalDisplay`, and ReviewItem; Chat page automatic permission approval | `/mailbox` and remaining Chat permission caller | Pending decision journey renders before/after and exact permission solely from `ReviewItem`; approve/reject/later dispatch always refreshes the same review target and never resumes automatically | Product scan forbids raw proposal reconstruction and automatic approve/resume in the candidate owner; release bundle excludes governed journey markers | `contract_ready` |
-| `frontend/src/ui/journeys/durableTruth/**` over backend `LifeModelViewModel`, `MemoryViewModel`, and exact `ReviewItem` lifecycle | current LifeModel and Memory page owners | `/life-model`, `/memory` | Durable-truth journey distinguishes pending/approved/applying/applied/failed/rolled-back, requires exact refreshed proof, and receives typed apply/rollback actions before exposing those controls | Old page owners absent; no raw proposal/store reconstruction; release bundle excludes durable journey markers | `contract_ready` |
-| `frontend/src/ui/journeys/settingsPrivacy/**` over sanitized `AppConfig`, backend `ProviderPrivacyBoundarySummary`, exact provider receipts, and exact `ReviewItem`, orchestrated by `settingsOrchestrationContract` | `SettingsPage` plus page-local provider test/save/refresh lifecycle | `/settings` | Candidate journey passes draft -> test -> exact permission review -> explicit save -> config/boundary refresh; production caller moves only in 4E | Old Settings owner absent; no config-derived provider truth; release bundle excludes settings journey markers; unknown boundary is never green | `contract_ready` |
-| Shell Settings utility context plus collapsed diagnostic access | ProductShell advanced groups and same-level advanced routes | ProductShell secondary/advanced navigation | Shell V2 keeps Settings outside primary product navigation and Advanced inside Settings/Inspector; unavailable states are explicit | Navigation matrix and release route inventory | `contract_ready` |
-| Future V2 route authority | `LEGACY_PRODUCT_REDIRECTS` compatibility routes | current `App.tsx` redirect map | Every external caller and active doc uses canonical routes; removal reviewed under Phase7 deletion contract | Redirect path absence tests | `identified` |
+| `WorkspaceGovernedView.tsx`, `WorkspaceConversationPanel.tsx`, and governed data sources | `CompanionPage`/`ChatPage` joins and conversation subcomponents | `/companion` and old Chat owner, removed in Phase 4E | `/workspace` owns execution and conversation; send delegates to governed Main Chat, then refreshes exact read models | Old page/component directory absence, command/source tests, production route test | `guarded_absent` |
+| `TasksReadOnlyView.tsx`, `taskControlContract.ts`, and governed refresh | `RunsPage.tsx`, `AgentRunDetail.tsx`, and local task/run joins | `/runs` and `/runs/*`, retired in Phase 4E | `/tasks` consumes TasksViewModel; control dispatch requires exact identity, confirmation where required, refresh, and no callback completion proof | UI control integration test, reducer tests, old owner absence, retired route test | `guarded_absent` |
+| `ReviewGovernedView.tsx` over rich `ReviewItem` and `reviewDispatchReducer` | `MailboxPage.tsx`, raw proposal display helpers, and Chat permission decision UI | `/mailbox`, retired in Phase 4E | `/review` renders backend decision context and allowed actions; decisions refresh the same item and never resume/apply automatically | Review journey tests, raw proposal reconstruction scan, old owner absence | `guarded_absent` |
+| `frontend/src/ui/journeys/durableTruth/**` over LifeModelViewModel, MemoryViewModel, and exact ReviewItem lifecycle | `LifeModelPage.tsx`, `MemorySearch.tsx`, LifeModel editor, and local trust/quality helpers | `/life-model` and `/memory`, with `/memory` retired | `/life-model` distinguishes pending, approved-not-applied, applying, applied, failed, rolled-back, rejected, and unknown from refreshed backend proof | Durable presentation/journey tests, raw-read inventory, old owner absence | `guarded_absent` |
+| `LifeModelBuilderPanel.tsx` and `lifeModelBuilderDataSource.ts` | `BuilderPage.tsx` and direct builder page composition | `/builder`, retired in Phase 4E | First build is embedded only when LifeModel is not built; it creates review proposals and never applies truth directly | Builder reducer/journey tests, exact ReviewItem fixture mapping, old page absence | `guarded_absent` |
+| `frontend/src/ui/journeys/settingsPrivacy/**` over sanitized AppConfig, ProviderPrivacyBoundarySummary, provider receipts, and exact ReviewItem | `SettingsPage.tsx`, settings tabs, and local provider readiness helpers | `/settings`, moved in Phase 4E | `/settings` owns draft/test/review/save/refresh; unknown boundary never becomes local/green | Settings tests, provider boundary assertions, old page/component/helper absence | `guarded_absent` |
+| Settings utility context and explicit unavailable routes | ProductShell advanced groups and same-level advanced pages | Old shell secondary navigation, removed in Phase 4E | Settings stays outside primary product navigation; retired routes show unavailable state; no Advanced product route is synthesized | Route matrix tests and release bundle guard | `guarded_absent` |
+| `frontend/src/ui/productRouteContract.ts` | `LEGACY_PRODUCT_REDIRECTS` and old route aliases | Old `App.tsx` route map, replaced in Phase 4E | Canonical routes are `/today`, `/workspace`, `/tasks`, `/review`, `/life-model`, `/settings`; root alone redirects to Today | Route contract tests, App tests, release guard, Rust authority guard | `guarded_absent` |
 
 ## Per-Slice Rule
 
@@ -40,7 +41,34 @@ Every Phase 4D journey must update this ledger in the same change:
 
 The ledger does not authorize a long-lived `/v2` route or production fallback.
 
-## Phase 4D Read-Only Spine Update
+## Phase 4E Atomic Switch Update
+
+Phase 4E moved the accepted desktop Workbench into production in one change:
+
+- `App.tsx` now composes one route-driven `ReadOnlySpineJourney` with real Tauri
+  data sources for Today, Workspace, Tasks, Review, LifeModel, Builder, and
+  Settings/privacy;
+- canonical production paths are `/today`, `/workspace`, `/tasks`, `/review`,
+  `/life-model`, and `/settings`; root redirects only to Today;
+- `/companion`, `/mailbox`, `/runs`, `/runs/*`, `/memory`, `/builder`, and the
+  former advanced/support paths display explicit unavailable state and never
+  redirect to another product action;
+- the complete old `frontend/src/pages` and `frontend/src/components` trees,
+  `ProductShell.tsx`, `productShellContract.ts`, and consumed local truth
+  reconstruction helpers were deleted in the same switch;
+- source, inventory, Rust authority, route, and production-bundle guards prove
+  the old owners and Phase 4 dev harnesses are absent;
+- no production fallback to the old UI remains.
+
+All migrated rows are now `guarded_absent`. This state does not claim that
+external live-provider evidence, manual VoiceOver, or final Phase 4F product
+trial is complete.
+
+The Phase 4D sections below record the earlier candidate-only checkpoints.
+Their `contract_ready` statements are historical evidence and do not override
+the current Phase 4E ledger above.
+
+## Historical Phase 4D Read-Only Spine Update
 
 The first Phase 4D slice established exact desktop candidate owners for Shell,
 Today, and Tasks without changing production authority:
@@ -59,7 +87,7 @@ required stores were unavailable. That is fail-closed evidence, not proof that
 the ready/empty backend path is available, and it does not advance any row to
 `delete_ready`.
 
-## Phase 4D Governed-Action Spine Update
+## Historical Phase 4D Governed-Action Spine Update
 
 The second Phase 4D slice adds candidate owners for the continuous desktop
 journey `Workspace -> Permission -> Review -> Refresh -> Resume` inside the
@@ -81,7 +109,7 @@ Workspace, Tasks, and Review remain `contract_ready`, not `delete_ready`.
 Production callers have not moved, no old owner was deleted, and Phase 4E is
 still the only authorized route-authority switch.
 
-## Phase 4D Durable-Truth Spine Update
+## Historical Phase 4D Durable-Truth Spine Update
 
 The third Phase 4D slice adds the candidate journey
 `LifeModel/Memory -> Review -> Refresh -> durable result` inside the same
@@ -104,7 +132,7 @@ dev-only desktop Shell:
 LifeModel and Memory move to `contract_ready`, not `delete_ready`. Production
 callers have not moved and old page owners remain required until Phase 4E.
 
-## Phase 4D Privacy And Configuration Spine Update
+## Historical Phase 4D Privacy And Configuration Spine Update
 
 The fourth Phase 4D slice adds the candidate journey
 `Settings draft -> provider test -> exact permission review -> save -> boundary

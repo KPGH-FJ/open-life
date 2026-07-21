@@ -10,6 +10,8 @@ import { taskLifecyclePresentation } from "@/ui/journeys/readOnly/readOnlySpineP
 import type { TaskResumeState } from "./governedActionContract";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 import { findExactResumeControl } from "./governedActionPresentation";
+import { WorkspaceConversationPanel } from "./WorkspaceConversationPanel";
+import type { WorkspaceConversationController } from "./useWorkspaceConversation";
 
 function resumeFeedback(
   state: TaskResumeState
@@ -78,6 +80,7 @@ export function WorkspaceGovernedView({
   onConfirmResume,
   onCancelResume,
   onOpenInspector,
+  conversation,
 }: {
   snapshot: GovernedActionSnapshot | null;
   refreshing: boolean;
@@ -88,6 +91,7 @@ export function WorkspaceGovernedView({
   onConfirmResume: () => void;
   onCancelResume: () => void;
   onOpenInspector: () => void;
+  conversation?: WorkspaceConversationController;
 }) {
   const envelope = snapshot?.workspaceEnvelope;
   const model =
@@ -102,6 +106,27 @@ export function WorkspaceGovernedView({
     !resumeTarget || !task || resumeTarget === task.canonicalTaskId
       ? resumeFeedback(resumeState)
       : null;
+  const conversationDisabledReason = (() => {
+    if (!conversation) return undefined;
+    if (envelope?.status !== "ready") return "工作区读模型不是可用状态；请先重新读取。";
+    if (!model) return "工作区读模型没有提供可用 payload。";
+    const boundary = model.providerPrivacyBoundarySummary;
+    if (boundary.blockedReason) return boundary.blockedReason;
+    if (boundary.routeType === "unknown" || boundary.externalTransmission === "unknown") {
+      return "模型与传输边界未知；完成核对前不能发送。";
+    }
+    if (boundary.localOnlyRequired && boundary.routeType !== "local") {
+      return "当前要求仅本机处理，但后端没有确认本地路由。";
+    }
+    if (
+      task?.lifecycleStatus === "waiting_permission" &&
+      conversation.selectedSessionId !== null &&
+      (!task.conversationId || task.conversationId === conversation.selectedSessionId)
+    ) {
+      return "当前对话正在等待权限决定；先处理请求，或开始一段新对话。";
+    }
+    return undefined;
+  })();
 
   if (!snapshot || !envelope || envelope.status === "loading") {
     return (
@@ -117,7 +142,7 @@ export function WorkspaceGovernedView({
     return (
       <div className="ol-governed-page ol-governed-page--centered">
         <FoundationNotice title="工作区状态暂时不可用" tone="error">
-          <p>WorkspaceViewModel 未能建立；空 payload 不会被解释成没有任务。</p>
+          <p>后端没有返回可确认的工作区状态；缺失数据不会被解释成没有任务。</p>
         </FoundationNotice>
         <FoundationActionButton
           label="重新读取"
@@ -134,12 +159,17 @@ export function WorkspaceGovernedView({
 
   if (!task) {
     return (
-      <div className="ol-governed-page ol-governed-page--centered">
-        <div className="ol-governed-empty">
-          <span>当前执行</span>
-          <h2>没有活动任务</h2>
-          <p>工作区不会把最近历史提升为当前执行。任务历史仍由“任务”页面负责。</p>
-        </div>
+      <div className="ol-governed-page">
+        <header className="ol-workspace-task-header">
+          <div>
+            <span className="ol-governed-kicker">当前执行</span>
+            <h2>没有活动任务</h2>
+          </div>
+          <FoundationStatusLabel label="没有活动任务" status="neutral" />
+        </header>
+        <p className="ol-governed-muted">
+          工作区不会把最近历史提升为当前执行。任务历史仍由“任务”页面负责。
+        </p>
         <div className="ol-governed-inline-actions">
           <FoundationActionButton
             label="重新读取"
@@ -159,6 +189,12 @@ export function WorkspaceGovernedView({
             onClick={onOpenInspector}
           />
         </div>
+        {conversation && (
+          <WorkspaceConversationPanel
+            controller={conversation}
+            disabledReason={conversationDisabledReason}
+          />
+        )}
       </div>
     );
   }
@@ -300,13 +336,17 @@ export function WorkspaceGovernedView({
         </FoundationNotice>
       )}
 
-      <section className="ol-workspace-activity" aria-labelledby="workspace-activity-title">
-        <div className="ol-governed-section-heading">
-          <span>最近活动</span>
-          <h3 id="workspace-activity-title">这项任务发生了什么</h3>
-        </div>
+      {conversation && (
+        <WorkspaceConversationPanel
+          controller={conversation}
+          disabledReason={conversationDisabledReason}
+        />
+      )}
+
+      <details className="ol-workspace-activity">
+        <summary id="workspace-activity-title">执行记录</summary>
         {model?.activity.length ? (
-          <ol>
+          <ol aria-labelledby="workspace-activity-title">
             {model.activity.map(item => (
               <li key={item.id} data-activity-status={item.status}>
                 <span className="ol-workspace-activity__marker" aria-hidden="true" />
@@ -320,7 +360,7 @@ export function WorkspaceGovernedView({
         ) : (
           <p className="ol-governed-muted">当前没有后端提供的 metadata-only 活动记录。</p>
         )}
-      </section>
+      </details>
 
       <FoundationDialog
         open={resumeState.phase === "confirming"}

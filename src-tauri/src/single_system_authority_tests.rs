@@ -197,6 +197,40 @@ fn source_files(roots: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
+const RETIRED_FRONTEND_OWNERS: &[&str] = &[
+    "frontend/src/components/ProductShell.tsx",
+    "frontend/src/components/product/ProductPrimitives.tsx",
+    "frontend/src/productShellContract.ts",
+    "frontend/src/pages/TodayPage.tsx",
+    "frontend/src/pages/CompanionPage.tsx",
+    "frontend/src/pages/ChatPage.tsx",
+    "frontend/src/pages/RunsPage.tsx",
+    "frontend/src/pages/MailboxPage.tsx",
+    "frontend/src/pages/LifeModelPage.tsx",
+    "frontend/src/pages/MemorySearch.tsx",
+    "frontend/src/pages/SettingsPage.tsx",
+    "frontend/src/pages/BuilderPage.tsx",
+    "frontend/src/pages/AgentRunDetail.tsx",
+    "frontend/src/utils/runtimeDisclosure.ts",
+    "frontend/src/utils/runDisplaySummary.ts",
+    "frontend/src/utils/capabilityStatus.ts",
+];
+
+fn assert_retired_frontend_owners_absent() {
+    for former_directory in ["frontend/src/pages", "frontend/src/components"] {
+        assert!(
+            !repo_root().join(former_directory).exists(),
+            "Phase 4E retired frontend owner directory must stay absent: {former_directory}"
+        );
+    }
+    for former_path in RETIRED_FRONTEND_OWNERS {
+        assert!(
+            !repo_root().join(former_path).exists(),
+            "Phase 4E retired frontend owner must stay absent: {former_path}"
+        );
+    }
+}
+
 fn strip_cfg_test_module(source: &str) -> &str {
     [
         "\n#[cfg(test)]\nmod tests",
@@ -893,29 +927,57 @@ fn single_system_r2_review_center_readmodel_owns_review_actions() {
         "R2 frontend bridge must mirror the ReviewCenterViewModel command shape"
     );
 
-    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    let data_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let controller =
+        read_repo_file("frontend/src/ui/journeys/governedAction/useGovernedActionJourney.ts");
+    let review_view =
+        read_repo_file("frontend/src/ui/journeys/governedAction/ReviewGovernedView.tsx");
     for required in [
-        "getReviewCenterViewModel",
-        "allowedActions.find",
-        "actionBlockedReason(selectedReviewItem, \"approve\")",
-        "materializationStatus",
-        "ReviewCenterViewModel 尚未提供该确认项的后端操作状态",
+        "getReviewCenterViewModel()",
+        "dispatchReviewAction(action: ReviewAction)",
+        "acceptProposal(action.targetReviewItemId)",
+        "rejectProposal(action.targetReviewItemId)",
+        "postponeProposal(action.targetReviewItemId)",
     ] {
         assert!(
-            mailbox.contains(required),
-            "R2 Mailbox must consume backend ReviewItem action/materialization authority: {required}"
+            data_source.contains(required),
+            "R2 production review data source must preserve backend review authority: {required}"
+        );
+    }
+    for required in [
+        "selectedItem?.allowedActions.filter",
+        "item.materializationStatus",
+        "action.completionProofAfterDispatch",
+        "data-action-expected-materialization-status",
+    ] {
+        assert!(
+            review_view.contains(required),
+            "R2 production Review view must render backend action/materialization truth: {required}"
+        );
+    }
+    for required in [
+        "await dataSource.dispatchReviewAction(action)",
+        "const refreshed = await loadSnapshot(false)",
+        "review_refresh_target_missing",
+        "应用结果仍需独立刷新证明",
+    ] {
+        assert!(
+            controller.contains(required),
+            "R2 review dispatch must refresh and verify instead of claiming completion: {required}"
         );
     }
     for forbidden in [
-        "function canAccept(",
-        "function isPathInSafePaths(",
-        "function acceptBlockedReason(",
-        "function appliedNotice(",
+        "listProposals(",
         "setProposals(prev =>",
+        "function canAccept(",
+        "function appliedNotice(",
     ] {
         assert!(
-            !mailbox.contains(forbidden),
-            "R2 Mailbox must not keep local review action/materialization authority pattern: {forbidden}"
+            !data_source.contains(forbidden)
+                && !controller.contains(forbidden)
+                && !review_view.contains(forbidden),
+            "R2 production review path must not restore local review authority: {forbidden}"
         );
     }
 }
@@ -990,13 +1052,32 @@ fn single_system_r3_lifemodel_viewmodel_is_backend_owned() {
         "R3 frontend adapter must delegate to backend LifeModelViewModel, not rebuild raw truth"
     );
 
-    let page = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    let data_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
+    let presentation =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthPresentation.ts");
+    let view = read_repo_file("frontend/src/ui/journeys/durableTruth/DurableTruthView.tsx");
     assert!(
-        page.contains("getLifeModelViewModel")
-            && page.contains("viewModel?.pendingUpdateCounts.pendingReview")
-            && page.contains("viewModel?.memoryLinkage")
-            && page.contains("viewModel?.candidateChanges"),
-        "R3 LifeModel page must consume backend LifeModelViewModel fields"
+        data_source.contains("getLifeModelViewModel()")
+            && data_source.contains("getMemoryViewModel()")
+            && data_source.contains("getReviewCenterViewModel()"),
+        "R3 production durable-truth data source must consume backend ViewModels"
+    );
+    for required in [
+        "lifeModel?.pendingUpdateCounts.pendingReview",
+        "lifeModel?.candidateChanges.length",
+        "approved_not_applied",
+        "change.materializationStatus === \"applied\"",
+    ] {
+        assert!(
+            presentation.contains(required),
+            "R3 durable-truth presentation must keep backend materialization distinctions: {required}"
+        );
+    }
+    assert!(
+        view.contains("selectedItem?.allowedActions.find(action => action.kind === \"apply\")")
+            && view.contains("data-action-target-ref={applyAction.targetReviewItemId}"),
+        "R3 LifeModel application action must come from the ReviewItem action contract"
     );
     for forbidden in [
         "getLifeModel(",
@@ -1011,8 +1092,10 @@ fn single_system_r3_lifemodel_viewmodel_is_backend_owned() {
         "buildLifeModelTrustViews",
     ] {
         assert!(
-            !page.contains(forbidden),
-            "R3 LifeModel page must not reconstruct backend truth locally via {forbidden}"
+            !data_source.contains(forbidden)
+                && !presentation.contains(forbidden)
+                && !view.contains(forbidden),
+            "R3 production durable-truth path must not reconstruct backend truth locally via {forbidden}"
         );
     }
 }
@@ -1111,20 +1194,54 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "R4 frontend bridge must mirror backend task/workspace read-model command shapes"
     );
 
-    let runs = read_repo_file("frontend/src/pages/RunsPage.tsx");
+    let data_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let contract = read_repo_file("frontend/src/ui/journeys/governedAction/taskControlContract.ts");
+    let controller =
+        read_repo_file("frontend/src/ui/journeys/governedAction/useGovernedActionJourney.ts");
+    let tasks_view = read_repo_file("frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx");
     for required in [
-        "getTasksViewModel",
-        "TaskViewModelItem",
-        "TaskControl",
-        "item.lifecycleStatus",
-        "item.terminalDeliveryStatus",
-        "enabledActionControls(item)",
-        "control.effect",
-        "taskControl.targetActionId",
+        "getTasksViewModel()",
+        "dispatchTaskControl(control: TaskControl)",
+        "retryMainChatAgentAction(control.targetTaskId, control.targetActionId)",
+        "refreshMainChatAgentTaskContext(control.targetTaskId)",
     ] {
         assert!(
-            runs.contains(required),
-            "R4 Runs page must consume backend TasksViewModel authority: {required}"
+            data_source.contains(required),
+            "R4 production task data source must use typed backend task contracts: {required}"
+        );
+    }
+    for required in [
+        "control.targetTaskId !== expectedTaskId",
+        "control.completionProofAfterDispatch",
+        "refreshed_tasks_missing_target",
+        "task_refresh_target_mismatch",
+    ] {
+        assert!(
+            contract.contains(required),
+            "R4 task-control reducer must preserve exact identity and fail-closed verification: {required}"
+        );
+    }
+    for required in [
+        "await dataSource.dispatchTaskControl(control)",
+        "const refreshed = await loadSnapshot(false)",
+        "当前不会显示状态已经改变",
+        "页面不会把恢复请求解释成完成",
+    ] {
+        assert!(
+            controller.contains(required),
+            "R4 task dispatch must refresh backend state before product conclusions: {required}"
+        );
+    }
+    for required in [
+        "selectedTask?.allowedControls.filter(isExecutableTaskControl)",
+        "data-action-target-ref={control.targetTaskId}",
+        "data-action-target-action-id={control.targetActionId ?? \"\"}",
+        "data-action-completion-proof-after-dispatch",
+    ] {
+        assert!(
+            tasks_view.contains(required),
+            "R4 Tasks view must render backend TaskControl fields: {required}"
         );
     }
     for forbidden in [
@@ -1133,42 +1250,15 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "taskSummaryByRunId",
         "allowedControlsForSummary",
         "lifecycleForRun",
-    ] {
-        assert!(
-            !runs.contains(forbidden),
-            "R4 Runs page must not locally merge raw task lifecycle/control authority via {forbidden}"
-        );
-    }
-
-    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
-    for required in [
-        "getTasksViewModel",
-        "currentTaskViewItem",
-        "enabledTaskViewControl",
-        "taskViewItem?.lifecycleStatus",
-        "taskViewItem?.terminalDeliveryStatus",
-        "Backend task read model did not enable resume",
-        "canResumeCurrentMainChatTask",
-        "canRetryCurrentMainChatTask",
-        "canCancelCurrentMainChatTask",
-    ] {
-        assert!(
-            chat.contains(required),
-            "R4 Chat page must consume backend TasksViewModel authority: {required}"
-        );
-    }
-    for forbidden in [
-        "taskState?.canResume ? [\"resume\"]",
-        "taskState?.canRetry ? [\"retry\"]",
-        "canCancel ? [\"cancel\"]",
         "taskStatus === \"completed\" ||",
         "runStatus === \"completed\" ||",
-        "disabled={!taskState?.canResume",
-        "disabled={!currentAgentTaskState.canResume",
     ] {
         assert!(
-            !chat.contains(forbidden),
-            "R4 Chat page must not grant task control/completion authority from raw fragments: {forbidden}"
+            !data_source.contains(forbidden)
+                && !contract.contains(forbidden)
+                && !controller.contains(forbidden)
+                && !tasks_view.contains(forbidden),
+            "R4 production task path must not restore raw task lifecycle authority: {forbidden}"
         );
     }
 }
@@ -1289,226 +1379,134 @@ fn single_system_r5_memory_and_provider_privacy_readmodels_own_product_boundarie
         );
     }
 
-    let memory_page = read_repo_file("frontend/src/pages/MemorySearch.tsx");
+    let durable_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
     assert!(
-        memory_page.contains("getMemoryViewModel")
-            && memory_page.contains("memoryViewModel?.summary")
-            && memory_page.contains("lifecycleSummary")
-            && !memory_page.contains("getMemoryTierStats("),
-        "R5 MemorySearch must consume MemoryViewModel and must not derive product counts from raw tier stats"
+        durable_source.contains("getMemoryViewModel()")
+            && durable_source.contains("getLifeModelViewModel()")
+            && !durable_source.contains("getMemoryTierStats("),
+        "R5 production durable-truth source must consume MemoryViewModel instead of raw storage telemetry"
     );
 
-    for (path, required) in [
-        (
-            "frontend/src/pages/settings/tabs/ProviderTab.tsx",
-            "providerPrivacyBoundary",
-        ),
-        (
-            "frontend/src/pages/settings/tabs/OverviewTab.tsx",
-            "providerPrivacyBoundary",
-        ),
-        (
-            "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
-            "memoryViewModel",
-        ),
-        (
-            "frontend/src/viewmodels/today/todayViewModelAdapter.ts",
-            "providerPrivacyBoundary",
-        ),
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
+    let readonly_source =
+        read_repo_file("frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts");
+    let today_adapter = read_repo_file("frontend/src/viewmodels/today/todayViewModelAdapter.ts");
+    for (label, source) in [
+        ("settings", settings_source.as_str()),
+        ("read-only spine", readonly_source.as_str()),
+        ("Today adapter", today_adapter.as_str()),
     ] {
-        let source = read_repo_file(path);
         assert!(
-            source.contains(required),
-            "R5 frontend convergence target {path} must consume {required}"
+            source.contains("ProviderPrivacyBoundarySummary")
+                || source.contains("providerPrivacyBoundary"),
+            "R5 {label} must consume the backend provider/privacy boundary contract"
         );
         assert!(
             !source.contains("buildProviderReadinessView"),
-            "R5 frontend convergence target {path} must not locally rebuild provider/privacy boundary"
+            "R5 {label} must not locally rebuild provider/privacy truth"
         );
     }
+    assert!(
+        settings_source.contains("getProviderPrivacyBoundarySummary()")
+            && readonly_source.contains("getProviderPrivacyBoundarySummary()"),
+        "R5 production Settings and read-only spine must read provider/privacy truth from the backend command"
+    );
 }
 
 #[test]
 fn single_system_r6_frontend_convergence_guards_repaired_authority() {
-    let frontend_guard =
-        read_repo_file("frontend/src/pages/TodayPage.readModelConvergence.test.ts");
-    for required in [
-        "frontend read-model convergence guards",
-        "getReviewCenterViewModel",
-        "getTasksViewModel",
-        "getLifeModelViewModel",
-        "getMemoryViewModel",
-        "getProviderPrivacyBoundarySummary",
-        "reviewRequiredCountFromProjection",
-        "keeps frontend helpers display-only",
-    ] {
-        assert!(
-            frontend_guard.contains(required),
-            "R6 frontend static guard must cover {required}"
-        );
-    }
+    assert_retired_frontend_owners_absent();
 
-    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    let app = read_repo_file("frontend/src/App.tsx");
     for required in [
-        "getReviewCenterViewModel",
-        "allowedActions.find",
-        "item.materializationStatus",
-        "ReviewCenterViewModel 尚未提供该确认项的后端操作状态",
+        "ReadOnlySpineJourney",
+        "tauriReadOnlySpineDataSource",
+        "tauriGovernedActionDataSource",
+        "tauriDurableTruthDataSource",
+        "tauriSettingsPrivacyDataSource",
+        "tauriWorkspaceConversationDataSource",
+        "tauriLifeModelBuilderDataSource",
     ] {
         assert!(
-            mailbox.contains(required),
-            "R6 Mailbox must keep review action/materialization authority in ReviewCenterViewModel: {required}"
+            app.contains(required),
+            "R6 production App must compose the converged owner {required}"
         );
     }
     for forbidden in [
-        "function canAccept(",
-        "function isPathInSafePaths(",
-        "function appliedNotice(",
-        "setProposals(prev =>",
+        "ProductShell",
+        "productShellContract",
+        "LEGACY_PRODUCT_REDIRECTS",
+        "src/dev/phase4",
     ] {
         assert!(
-            !mailbox.contains(forbidden),
-            "R6 Mailbox must not restore local review/materialization inference: {forbidden}"
+            !app.contains(forbidden),
+            "R6 production App must not restore old or dev-only authority: {forbidden}"
         );
     }
 
-    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
+    let route_contract = read_repo_file("frontend/src/ui/productRouteContract.ts");
     for required in [
-        "getTasksViewModel",
-        "currentTaskViewItem",
-        "enabledTaskViewControl",
-        "taskViewItem?.lifecycleStatus",
-        "taskViewItem?.terminalDeliveryStatus",
+        "today: \"/today\"",
+        "workspace: \"/workspace\"",
+        "tasks: \"/tasks\"",
+        "review: \"/review\"",
+        "\"life-model\": \"/life-model\"",
+        "SETTINGS_ROUTE_PATH = \"/settings\"",
+        "RETIRED_PRODUCT_PATHS",
     ] {
         assert!(
-            chat.contains(required),
-            "R6 Chat must keep task lifecycle/control authority in TasksViewModel: {required}"
+            route_contract.contains(required),
+            "R6 production route contract must include {required}"
         );
     }
-    for forbidden in [
-        "taskState?.canResume ? [\"resume\"]",
-        "taskState?.canRetry ? [\"retry\"]",
-        "canCancel ? [\"cancel\"]",
-        "taskStatus === \"completed\" ||",
-        "runStatus === \"completed\" ||",
-    ] {
+    for forbidden in ["Navigate", "Redirect", "LEGACY_PRODUCT_REDIRECTS"] {
         assert!(
-            !chat.contains(forbidden),
-            "R6 Chat must not restore raw task control/completion authority: {forbidden}"
+            !route_contract.contains(forbidden),
+            "R6 route contract must not authorize compatibility routing: {forbidden}"
         );
     }
 
-    let runs = read_repo_file("frontend/src/pages/RunsPage.tsx");
-    for required in [
-        "getTasksViewModel",
-        "TaskViewModelItem",
-        "item.lifecycleStatus",
-        "enabledActionControls(item)",
-        "control.effect",
-    ] {
-        assert!(
-            runs.contains(required),
-            "R6 Runs must keep lifecycle/control authority in TasksViewModel: {required}"
-        );
-    }
-    for forbidden in [
-        "listMainChatAgentTasks",
-        "getMainChatAgentTaskDetail",
-        "taskSummaryByRunId",
-        "allowedControlsForSummary",
-        "lifecycleForRun",
-    ] {
-        assert!(
-            !runs.contains(forbidden),
-            "R6 Runs must not restore raw task summary lifecycle reconstruction: {forbidden}"
-        );
-    }
-
-    let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    let review_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let task_contract =
+        read_repo_file("frontend/src/ui/journeys/governedAction/taskControlContract.ts");
+    let durable_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
+    let today_source =
+        read_repo_file("frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts");
     assert!(
-        lifemodel.contains("getLifeModelViewModel")
-            && lifemodel.contains("viewModel?.pendingUpdateCounts.pendingReview")
-            && lifemodel.contains("viewModel?.memoryLinkage")
-            && lifemodel.contains("viewModel?.candidateChanges"),
-        "R6 LifeModel page must keep backend LifeModelViewModel as product truth source"
+        review_source.contains("getReviewCenterViewModel()")
+            && review_source.contains("getTasksViewModel()")
+            && review_source.contains("getWorkspaceViewModel()")
+            && task_contract.contains("control.completionProofAfterDispatch")
+            && durable_source.contains("getLifeModelViewModel()")
+            && durable_source.contains("getMemoryViewModel()")
+            && settings_source.contains("getProviderPrivacyBoundarySummary()")
+            && today_source.contains("getLifeStateProjection()")
+            && today_source.contains("getDailyGoals()")
+            && today_source.contains("getProviderPrivacyBoundarySummary()"),
+        "R6 converged production data sources must retain their backend authority boundaries"
     );
     for forbidden in [
+        "getSystemDiagnostics(",
+        "listProposals(",
+        "listAgentRuns(",
+        "listMainChatAgentTasks(",
         "getLifeModel(",
-        "getLifeModelCurrentView(",
-        "getSystemDiagnostics(",
-        "countMemoryChunks(",
-        "getMemoryTierStats(",
-        "listProposals(",
-        "buildLifeModelViewModelEnvelope",
-    ] {
-        assert!(
-            !lifemodel.contains(forbidden),
-            "R6 LifeModel page must not restore raw truth reconstruction: {forbidden}"
-        );
-    }
-
-    let memory_page = read_repo_file("frontend/src/pages/MemorySearch.tsx");
-    assert!(
-        memory_page.contains("getMemoryViewModel")
-            && memory_page.contains("memoryViewModel?.summary")
-            && memory_page.contains("lifecycleSummary")
-            && memory_page.contains("向量层级只是存储遥测")
-            && !memory_page.contains("getMemoryTierStats("),
-        "R6 MemorySearch must keep MemoryViewModel as product memory summary source"
-    );
-
-    let settings = read_repo_file("frontend/src/pages/SettingsPage.tsx");
-    assert!(
-        settings.contains("getMemoryViewModel")
-            && settings.contains("getProviderPrivacyBoundarySummary")
-            && settings.contains("providerPrivacyBoundary"),
-        "R6 Settings must consume backend MemoryViewModel and ProviderPrivacyBoundarySummary"
-    );
-    for path in [
-        "frontend/src/pages/settings/tabs/ProviderTab.tsx",
-        "frontend/src/pages/settings/tabs/OverviewTab.tsx",
-    ] {
-        let source = read_repo_file(path);
-        assert!(
-            source.contains("providerPrivacyBoundary") && !source.contains("buildProviderReadinessView"),
-            "R6 Settings tab {path} must use provider/privacy summary and not rebuild provider readiness locally"
-        );
-    }
-
-    let today = read_repo_file("frontend/src/pages/TodayPage.tsx");
-    assert!(
-        today.contains("getLifeStateProjection")
-            && today.contains("getDailyGoals")
-            && today.contains("reviewRequiredCountFromProjection"),
-        "R6 Today page must stay projection-backed until a backend TodayViewModel exists"
-    );
-    for forbidden in [
-        "listProposals(",
-        "getSystemDiagnostics(",
         "getMemoryTierStats(",
         "buildProviderReadinessView",
-        "getProviderPrivacyBoundarySummary",
     ] {
         assert!(
-            !today.contains(forbidden),
-            "R6 Today limited page must not invent missing backend owners via {forbidden}"
-        );
-    }
-
-    let runtime_disclosure = read_repo_file("frontend/src/utils/runtimeDisclosure.ts");
-    for forbidden in [
-        "safeInvoke",
-        "getSystemDiagnostics",
-        "getProviderPrivacyBoundarySummary",
-        "listMainChatAgentTasks",
-        "resumeMainChatAgentTask",
-        "ReviewCenterViewModel",
-        "TasksViewModel",
-        "MemoryViewModel",
-    ] {
-        assert!(
-            !runtime_disclosure.contains(forbidden),
-            "R6 runtimeDisclosure must remain display-only and not call/own {forbidden}"
+            !review_source.contains(forbidden)
+                && !task_contract.contains(forbidden)
+                && !durable_source.contains(forbidden)
+                && !settings_source.contains(forbidden)
+                && !today_source.contains(forbidden),
+            "R6 production data sources must not reconstruct covered truth from {forbidden}"
         );
     }
 
@@ -1543,7 +1541,11 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
         "getLifeModelCompletion(",
     ];
     let mut actual = BTreeSet::new();
-    for file in source_files(&["frontend/src/pages", "frontend/src/utils"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.ts")
             || rel.ends_with(".test.tsx")
@@ -1592,26 +1594,35 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
         "R0 frontend raw reconstruction scan must match classified inventory entries"
     );
 
-    for required_helper in [
-        "frontend/src/utils/runtimeDisclosure.ts",
-        "frontend/src/utils/runDisplaySummary.ts",
-        "frontend/src/utils/capabilityStatus.ts",
+    for required_owner in [
         "frontend/src/utils/lifeStateProjection.ts",
+        "frontend/src/App.tsx",
+        "frontend/src/ui/productRouteContract.ts",
+        "frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts",
+        "frontend/src/ui/journeys/governedAction/governedActionDataSource.ts",
+        "frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts",
+        "frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts",
+        "frontend/src/ui/journeys/durableTruth/lifeModelBuilderDataSource.ts",
+        "frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts",
     ] {
         assert!(
-            classified.contains_key(required_helper),
-            "R0 source map must classify frontend helper {required_helper}"
+            classified.contains_key(required_owner),
+            "R0 source map must classify production frontend owner {required_owner}"
         );
     }
 
     for (path, expected_class) in [
         (
-            "frontend/src/pages/chat/useChatContext.ts",
-            "product_hook_raw_read_convergence_target",
+            "frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts",
+            "production_today_strict_adapter_data_source",
         ),
         (
-            "frontend/src/pages/MemorySearch.tsx",
-            "technical_memory_surface_memory_view_model_consumer",
+            "frontend/src/ui/journeys/governedAction/governedActionDataSource.ts",
+            "production_governed_action_data_source",
+        ),
+        (
+            "frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts",
+            "production_durable_truth_data_source",
         ),
         ("frontend/src/tauri.ts", "frontend_product_bridge"),
     ] {
@@ -2176,7 +2187,11 @@ fn single_system_phase4a_review_permission_contract_is_backend_owned_and_fail_cl
 
 #[test]
 fn single_system_phase4a_test_fixtures_and_contract_harnesses_are_absent_from_product_imports() {
-    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
             continue;
@@ -2195,19 +2210,16 @@ fn single_system_phase4a_test_fixtures_and_contract_harnesses_are_absent_from_pr
     }
 
     let app = read_repo_file("frontend/src/App.tsx");
-    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
-    for source in [&app, &shell] {
-        assert!(!source.contains("phase4a-contract-golden"));
-        assert!(!source.contains("reviewDispatchContract"));
-        assert!(!source.contains("settingsOrchestrationContract"));
-    }
+    assert!(!app.contains("phase4a-contract-golden"));
+    assert!(!app.contains("src/test/fixtures"));
+    assert!(!app.contains("test/phase4aContractGolden"));
 }
 
 #[test]
 fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_absent() {
     let app = read_repo_file("frontend/src/App.tsx");
-    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
-    for source in [&app, &shell] {
+    let workbench = read_repo_file("frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx");
+    for source in [&app, &workbench] {
         for forbidden in [
             "TodayV2PreviewPage",
             "/today-v2-preview",
@@ -2271,7 +2283,11 @@ fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_
         );
     }
 
-    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
             continue;
@@ -2285,19 +2301,20 @@ fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_
 }
 
 #[test]
-fn single_system_phase4c_desktop_shell_harness_is_dev_only_and_product_authority_is_unchanged() {
+fn single_system_phase4c_desktop_shell_is_production_authority_and_harness_stays_dev_only() {
     let app = read_repo_file("frontend/src/App.tsx");
-    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
-    let route_contract = read_repo_file("frontend/src/productShellContract.ts");
-    for source in [&app, &shell, &route_contract] {
-        for forbidden in [
-            "src/dev/phase4c",
-            "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
-            "OpenLifeWorkbenchShell",
-        ] {
+    let workbench = read_repo_file("frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx");
+    let journey = read_repo_file("frontend/src/ui/journeys/readOnly/ReadOnlySpineJourney.tsx");
+    assert!(
+        app.contains("ReadOnlySpineJourney") && journey.contains("OpenLifeWorkbenchShell"),
+        "Phase 4C desktop Workbench shell must be part of the production composition"
+    );
+    assert_retired_frontend_owners_absent();
+    for source in [&app, &workbench, &journey] {
+        for forbidden in ["src/dev/phase4c", "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS"] {
             assert!(
                 !source.contains(forbidden),
-                "Phase 4C dev-only shell must stay absent from product authority: {forbidden}"
+                "Phase 4C dev harness marker must stay absent from production authority: {forbidden}"
             );
         }
     }
@@ -2340,7 +2357,6 @@ fn single_system_phase4c_desktop_shell_harness_is_dev_only_and_product_authority
     );
     for required in [
         "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
-        "OpenLifeWorkbenchShell",
         "dev/phase4c/index.html",
     ] {
         assert!(
@@ -2349,7 +2365,11 @@ fn single_system_phase4c_desktop_shell_harness_is_dev_only_and_product_authority
         );
     }
 
-    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
             continue;
@@ -2357,19 +2377,27 @@ fn single_system_phase4c_desktop_shell_harness_is_dev_only_and_product_authority
         let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
         assert!(
             !source.contains("src/dev/phase4c")
-                && !source.contains("OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS")
-                && !source.contains("OpenLifeWorkbenchShell"),
-            "product source must not import the Phase 4C shell or harness: {rel}"
+                && !source.contains("OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS"),
+            "product source must not import the Phase 4C dev harness: {rel}"
         );
     }
 }
 
 #[test]
-fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_is_unchanged() {
+fn single_system_phase4d_journeys_are_production_authority_and_harness_stays_dev_only() {
     let app = read_repo_file("frontend/src/App.tsx");
-    let shell = read_repo_file("frontend/src/components/ProductShell.tsx");
-    let route_contract = read_repo_file("frontend/src/productShellContract.ts");
-    for source in [&app, &shell, &route_contract] {
+    for required in [
+        "ReadOnlySpineJourney",
+        "tauriGovernedActionDataSource",
+        "tauriDurableTruthDataSource",
+        "tauriSettingsPrivacyDataSource",
+    ] {
+        assert!(
+            app.contains(required),
+            "Phase 4D production journey composition must include {required}"
+        );
+    }
+    for source in [&app] {
         for forbidden in [
             "src/dev/phase4d",
             "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
@@ -2377,15 +2405,10 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
             "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
             "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
             "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
-            "ReadOnlySpineJourney",
-            "WorkspaceGovernedView",
-            "ReviewGovernedView",
-            "DurableTruthView",
-            "SettingsPrivacyView",
         ] {
             assert!(
                 !source.contains(forbidden),
-                "Phase 4D dev-only journey must stay absent from product authority: {forbidden}"
+                "Phase 4D dev harness marker must stay absent from product authority: {forbidden}"
             );
         }
     }
@@ -2437,13 +2460,6 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
         "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
         "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
         "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
-        "ReadOnlySpineJourney",
-        "WorkspaceGovernedView",
-        "ReviewGovernedView",
-        "DurableTruthView",
-        "SettingsPrivacyView",
-        "ol-governed-page",
-        "ol-durable-page",
         "dev/phase4d/index.html",
     ] {
         assert!(
@@ -2452,7 +2468,11 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
         );
     }
 
-    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
             continue;
@@ -2464,13 +2484,8 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
                 && !source.contains("OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS")
-                && !source.contains("OPENLIFE_PHASE4D_REAL_TAURI_PROBE")
-                && !source.contains("ReadOnlySpineJourney")
-                && !source.contains("WorkspaceGovernedView")
-                && !source.contains("ReviewGovernedView")
-                && !source.contains("DurableTruthView")
-                && !source.contains("SettingsPrivacyView"),
-            "product source must not import the Phase 4D journey or harness: {rel}"
+                && !source.contains("OPENLIFE_PHASE4D_REAL_TAURI_PROBE"),
+            "product source must not import the Phase 4D dev harness: {rel}"
         );
     }
 }
@@ -3197,146 +3212,56 @@ fn single_system_phase6_frontend_product_status_reads_life_state_projection() {
         );
     }
 
-    let product_status_files = [
-        "frontend/src/pages/TodayPage.tsx",
-        "frontend/src/pages/MailboxPage.tsx",
-        "frontend/src/pages/ChatPage.tsx",
-        "frontend/src/pages/CompanionPage.tsx",
-        "frontend/src/pages/LifeModelPage.tsx",
-        "frontend/src/pages/SettingsPage.tsx",
-        "frontend/src/pages/settings/tabs/OverviewTab.tsx",
-        "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
-        "frontend/src/pages/settings/tabs/ToolsPermissionsTab.tsx",
-        "frontend/src/pages/settings/tabs/AdvancedTab.tsx",
-    ];
-    let forbidden_raw_status_markers = [
-        "pending_proposal_count",
-        "high_risk_pending_proposal_count",
-        "pending_builder_review_sessions",
-        "unfinished_builder_sessions",
-        "isSafeMode(",
-        "getSafeModeReason(",
-        "diagnosticsUsageReady",
-        "diagnosticsUsageReadinessIssues",
-    ];
+    assert_retired_frontend_owners_absent();
 
-    for path in product_status_files {
-        let source = read_repo_file(path);
-        if path == "frontend/src/pages/CompanionPage.tsx" {
-            assert!(
-                source.contains("<ChatPage companionMode"),
-                "CompanionPage must inherit ChatPage projection-backed status"
-            );
-        } else {
-            assert!(
-                source.contains("LifeStateProjection") || source.contains("getLifeStateProjection"),
-                "Phase6 product status file {path} must use LifeStateProjection"
-            );
-        }
-        if matches!(
-            path,
-            "frontend/src/pages/TodayPage.tsx"
-                | "frontend/src/pages/MailboxPage.tsx"
-                | "frontend/src/pages/ChatPage.tsx"
-        ) {
-            assert!(
-                source.contains("reviewRequiredCountFromProjection"),
-                "Phase6 product pending state in {path} must use the LifeStateProjection helper"
-            );
-        }
-        if path == "frontend/src/pages/LifeModelPage.tsx" {
-            assert!(
-                source.contains("viewModel?.pendingUpdateCounts.pendingReview"),
-                "R3 LifeModel product pending state must use the backend LifeModelViewModel"
-            );
-        }
-        for marker in forbidden_raw_status_markers {
-            assert!(
-                !source.contains(marker),
-                "Phase6 product status file {path} must not derive covered state from raw marker {marker}"
-            );
-        }
-    }
-
-    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
-    let chat_pending_alert = source_between(
-        &chat,
-        "{/* Pending Proposals Alert */}",
-        "{/* Chat mode selector */}",
-    );
+    let today_source =
+        read_repo_file("frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts");
+    let today_adapter = read_repo_file("frontend/src/viewmodels/today/todayViewModelAdapter.ts");
     assert!(
-        chat.contains("const projectionPendingReviewCount = reviewRequiredCountFromProjection("),
-        "Chat product pending state must be named and sourced from LifeStateProjection"
-    );
-    assert!(
-        chat_pending_alert.contains("projectionPendingReviewCount"),
-        "Chat pending banner must render from projection-backed count"
-    );
-    for forbidden in [
-        "?? pendingProposals.length",
-        "|| pendingProposals.length",
-        "pendingProposals.length > 0",
-    ] {
-        assert!(
-            !chat.contains(forbidden),
-            "Chat must not use raw pendingProposals length as product pending authority: {forbidden}"
-        );
-    }
-
-    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
-    assert!(
-        mailbox.contains("const mailboxReviewRequiredCount = reviewRequiredCountFromProjection("),
-        "Mailbox top-level pending state must be named and sourced from LifeStateProjection"
-    );
-    assert!(
-        !mailbox.contains("folderCounts.pending"),
-        "Mailbox global pending badge must not use folderCounts.pending; folderCounts are list-filter details only"
+        today_source.contains("getLifeStateProjection()")
+            && today_source.contains("getDailyGoals()")
+            && today_source.contains("getProviderPrivacyBoundarySummary()")
+            && today_adapter.contains("input.projection.pending.totalReviewRequiredCount"),
+        "Phase6 Today production path must remain a strict adapter over backend projection and boundary inputs"
     );
 
-    let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
-    let builder_review_counter = source_between(
-        &lifemodel,
-        "function BuildSection",
-        "function CommunicationStyleCurrentView",
-    );
+    let governed_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let durable_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
     assert!(
-        lifemodel.contains("const pendingCount = viewModel?.pendingUpdateCounts.pendingReview"),
-        "LifeModel product pending count must come from LifeModelViewModel"
+        governed_source.contains("getWorkspaceViewModel()")
+            && governed_source.contains("getReviewCenterViewModel()")
+            && governed_source.contains("getTasksViewModel()")
+            && durable_source.contains("getLifeModelViewModel()")
+            && durable_source.contains("getMemoryViewModel()")
+            && settings_source.contains("getProviderPrivacyBoundarySummary()"),
+        "Phase6 covered product status must come from backend projection/ViewModel owners"
     );
-    assert!(
-        builder_review_counter.contains("viewModel?.pendingUpdateCounts.pendingReview"),
-        "LifeModel builder review state must come from LifeModelViewModel"
-    );
-    for forbidden in ["pendingProposals", "Math.max", "proposalCount"] {
-        assert!(
-            !builder_review_counter.contains(forbidden),
-            "LifeModel builder review state must not fallback to raw proposal data: {forbidden}"
-        );
-    }
 
-    let today = read_repo_file("frontend/src/pages/TodayPage.tsx");
-    assert!(
-        today.contains(
-            "const pendingCount = reviewRequiredCountFromProjection(state.projection, \"today\")"
-        ),
-        "Today pending state must come from LifeStateProjection helper"
-    );
-    for (path, source) in [
-        ("ChatPage", chat.as_str()),
-        ("MailboxPage", mailbox.as_str()),
-        ("LifeModelPage", lifemodel.as_str()),
-        ("TodayPage", today.as_str()),
+    for (label, source) in [
+        ("Today source", today_source.as_str()),
+        ("Today adapter", today_adapter.as_str()),
+        ("governed source", governed_source.as_str()),
+        ("durable source", durable_source.as_str()),
+        ("settings source", settings_source.as_str()),
     ] {
         for forbidden in [
-            "?? pendingProposals.length",
-            "|| pendingProposals.length",
-            "?? folderCounts.pending",
-            "|| folderCounts.pending",
+            "pending_proposal_count",
+            "high_risk_pending_proposal_count",
+            "pending_builder_review_sessions",
+            "unfinished_builder_sessions",
+            "isSafeMode(",
+            "getSafeModeReason(",
+            "diagnosticsUsageReady",
+            "diagnosticsUsageReadinessIssues",
             "pending.totalReviewRequiredCount ?? 0",
         ] {
             assert!(
                 !source.contains(forbidden),
-                "{path} must not turn projection-missing pending state into a raw or fake definite count: {forbidden}"
+                "Phase6 {label} must not rebuild covered product state from {forbidden}"
             );
         }
     }
@@ -3589,9 +3514,13 @@ fn single_system_phase7_forbids_old_modules_in_product_module_graph() {
 }
 
 #[test]
-fn single_system_phase7_frontend_product_pages_do_not_import_dev_bridge_or_legacy_status() {
+fn single_system_phase7_frontend_product_sources_do_not_import_dev_bridge_or_legacy_status() {
     let mut violations = Vec::new();
-    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.tsx") || rel.ends_with(".test.ts") {
             continue;
@@ -3605,8 +3534,16 @@ fn single_system_phase7_frontend_product_pages_do_not_import_dev_bridge_or_legac
     }
     assert!(
         violations.is_empty(),
-        "Phase7 contract requires product frontend pages/components to avoid dev bridge imports and legacy fallback status fields: {violations:?}"
+        "Phase7 contract requires production frontend sources to avoid dev bridge imports and legacy fallback status fields: {violations:?}"
     );
+
+    let app = read_repo_file("frontend/src/App.tsx");
+    for marker in ["tauriDev", "legacyFallbackUsed", "legacy_fallback_used"] {
+        assert!(
+            !app.contains(marker),
+            "Phase7 production App must not import dev bridge or legacy status: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -3740,11 +3677,16 @@ fn single_system_posthoc_proposal_engine_and_product_consumers_stay_absent() {
         command_surface.contains("ordinary_chat_finalization_never_creates_post_hoc_proposals"),
         "ordinary provider or assistant output must retain a behavioral counterexample against post-hoc Proposal creation"
     );
-    let review_memory = read_repo_file("frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx");
+    let review_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
     assert!(
-        review_memory.contains("后端 PolicyRouter 路由")
-            && review_memory.contains("按后端回执显示"),
-        "Mailbox & Memory must describe backend-owned governance after inert controls are removed"
+        review_source.contains("getReviewCenterViewModel()")
+            && settings_source.contains("getReviewCenterViewModel()")
+            && !review_source.contains("ProposalEngine")
+            && !settings_source.contains("ProposalEngine"),
+        "production review/settings consumers must use ReviewCenterViewModel after ProposalEngine removal"
     );
 
     let manifest = read_repo_file("plans/openlife_single_system_deletion_manifest.md");

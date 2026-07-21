@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { FoundationStatusLabel } from "@/ui/foundation";
 import { ReadOnlySpineJourney, tauriReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
-import { tauriGovernedActionDataSource } from "@/ui/journeys/governedAction";
-import { tauriDurableTruthDataSource } from "@/ui/journeys/durableTruth";
+import {
+  tauriGovernedActionDataSource,
+  tauriWorkspaceConversationDataSource,
+} from "@/ui/journeys/governedAction";
+import {
+  tauriDurableTruthDataSource,
+  tauriLifeModelBuilderDataSource,
+} from "@/ui/journeys/durableTruth";
 import { tauriSettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import { phase4dFixtureLabels, type Phase4dFixtureId } from "./phase4d-fixtures";
 import {
@@ -37,7 +43,9 @@ function isTauriWindow(): boolean {
 const tauriJourneyDataSource: Phase4dJourneyDataSource = {
   ...tauriReadOnlySpineDataSource,
   ...tauriGovernedActionDataSource,
+  ...tauriWorkspaceConversationDataSource,
   ...tauriDurableTruthDataSource,
+  ...tauriLifeModelBuilderDataSource,
   ...tauriSettingsPrivacyDataSource,
 };
 
@@ -220,6 +228,8 @@ export function Phase4dReadOnlyHarness() {
           governedActionDataSource={dataSource}
           durableTruthDataSource={dataSource}
           settingsPrivacyDataSource={dataSource}
+          workspaceConversationDataSource={dataSource}
+          lifeModelBuilderDataSource={dataSource}
         />
       </div>
     </div>

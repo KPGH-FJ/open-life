@@ -54,16 +54,20 @@ import {
   workspaceContext,
   workspaceInspector,
   ReviewGovernedView,
+  useWorkspaceConversation,
   useGovernedActionJourney,
   WorkspaceGovernedView,
   type GovernedActionDataSource,
+  type WorkspaceConversationDataSource,
 } from "@/ui/journeys/governedAction";
 import {
   durableTruthContext,
   durableTruthInspector,
   DurableTruthView,
+  useLifeModelBuilder,
   useDurableTruthJourney,
   type DurableTruthDataSource,
+  type LifeModelBuilderDataSource,
 } from "@/ui/journeys/durableTruth";
 import {
   settingsPrivacyContext,
@@ -75,6 +79,10 @@ import {
 } from "@/ui/journeys/settingsPrivacy";
 
 export type ReadOnlyProductSurfaceId = "today" | "workspace" | "tasks" | "review" | "life-model";
+export type ReadOnlySpineRouteState = {
+  mode: "product" | "settings";
+  surface: ReadOnlyProductSurfaceId;
+};
 
 const productNavigation: readonly WorkbenchNavigationItem[] = [
   { id: "today", label: "今日", meta: "当前关注", icon: CalendarDays },
@@ -141,49 +149,47 @@ const unavailableCopy: Record<
   { title: string; reason: string }
 > = {
   workspace: {
-    title: "工作区尚未接入本次只读主干",
-    reason:
-      "工作区需要贯通权限请求、审核决定、状态刷新与任务恢复。这个完整旅程将在后续阶段单独接入。",
+    title: "工作区状态源不可用",
+    reason: "后端没有提供可组合的当前任务、权限与审核状态；页面不会从历史记录推断当前执行。",
   },
   review: {
-    title: "审核中心尚未接入本次只读主干",
-    reason: "当前不会用样例数据代替真实待决定项，也不会把“查看”解释成批准、拒绝或应用。",
+    title: "审核状态源不可用",
+    reason: "后端没有提供可确认的待决定项；页面不会用旧建议列表代替，也不会把查看解释成批准。",
   },
   "life-model": {
     title: "LifeModel 状态源不可用",
-    reason:
-      "当前组合没有提供 LifeModel、Memory 与审核中心的联合读模型；页面不会从旧状态补造长期理解。",
+    reason: "后端没有同时提供长期理解、记忆与审核状态；页面不会从旧记录补造当前结论。",
   },
 };
 
 const settingsCopy: Record<string, { title: string; reason: string }> = {
   "model-provider": {
-    title: "模型与供应商",
-    reason: "当前由 Phase 4D 隐私与配置旅程接入。",
+    title: "模型与供应商暂不可用",
+    reason: "需要后端同时提供可编辑配置、测试结果与传输边界；页面不会用默认值代替。",
   },
   "privacy-network": {
-    title: "隐私与网络",
-    reason: "当前由 Phase 4D 隐私与配置旅程接入。",
+    title: "隐私与网络暂不可用",
+    reason: "需要后端提供当前传输边界；未知状态不会显示为本地或私密。",
   },
   "tools-permissions": {
-    title: "工具与权限尚未迁移",
-    reason: "本 slice 不从工具清单和历史权限记录拼装新的授权真相。",
+    title: "工具与权限暂不可用",
+    reason: "当前没有可确认的工具权限状态；页面不会从工具清单和历史记录拼装授权结论。",
   },
   "data-recovery": {
-    title: "数据与恢复尚未迁移",
+    title: "数据与恢复暂不可用",
     reason: "导入、导出、保留和删除都可能改变持久状态，需要独立契约与危险动作确认。",
   },
   "life-memory": {
-    title: "LifeModel 与记忆设置尚未迁移",
-    reason: "长期状态查看仍在产品区；本设置入口不会创建第二套 LifeModel 或 Memory truth。",
+    title: "LifeModel 与记忆设置暂不可用",
+    reason: "长期状态仍由 LifeModel 产品区提供；设置不会建立第二套长期状态来源。",
   },
   appearance: {
-    title: "外观设置尚未迁移",
-    reason: "当前 Foundation 已固定视觉 token，但还没有生产外观偏好契约。",
+    title: "外观设置暂不可用",
+    reason: "当前还没有可保存的外观偏好；页面不会提供没有结果的样式控件。",
   },
   "advanced-support": {
-    title: "高级与支持尚未迁移",
-    reason: "高级信息只作为辅助检查工具，不在产品工作面伪造调试或支持状态。",
+    title: "高级与支持暂不可用",
+    reason: "当前没有可确认的诊断与支持状态；高级信息不会替代产品状态。",
   },
 };
 
@@ -318,7 +324,7 @@ function todayInspector(
       envelope.status === "stale" || envelope.status === "error"
         ? "先重新读取；刷新成功前不要依据旧状态执行。"
         : hasPendingReview
-          ? "审核中心接入前，只能确认存在待决定事项，不能在这里代替审批。"
+          ? "前往审核中心查看决定上下文；打开审核项本身不会记录批准或拒绝。"
           : "继续当前重点，必要时查看具体来源。",
     evidence,
     evidenceFeedback:
@@ -362,6 +368,11 @@ function taskInspector(
   ]);
   const lifecycle = selectedTask ? taskLifecyclePresentation(selectedTask) : null;
   const needsDecision = (selectedTask?.pendingReviewItemRefs.length ?? 0) > 0;
+  const hasEnabledTaskControl =
+    selectedTask?.allowedControls.some(
+      control =>
+        control.enabled && ["resume", "retry", "cancel", "refresh_context"].includes(control.kind)
+    ) ?? false;
 
   return {
     title: selectedTask ? selectedTask.title : "任务列表依据",
@@ -379,14 +390,18 @@ function taskInspector(
           ? "后端生命周期看似完成，但缺少最终交付证据，页面保持阻断态。"
           : selectedTask.lifecycleStatus === "unknown"
             ? "任务生命周期未知，不能开放恢复、重试或完成结论。"
-            : "本次 slice 不执行任何任务控制。"
+            : hasEnabledTaskControl
+              ? "可用动作来自后端；发送后仍需刷新同一任务，命令返回不代表任务完成。"
+              : "后端当前没有开放可执行的任务动作。"
       : envelope.status === "stale" || envelope.status === "error"
         ? "陈旧或缺失的任务状态不能用于恢复、重试、取消或完成判断。"
-        : "本次 slice 只读，不把 allowedControls 渲染为可执行按钮。",
+        : "选择任务后，只显示后端明确允许的动作。",
     nextAction: selectedTask
       ? needsDecision
-        ? "后续由审核旅程展示决定上下文；当前只核对来源。"
-        : "核对来源；需要操作时等待对应业务旅程接入。"
+        ? "前往审核中心查看决定上下文；查看本身不会改变审核状态。"
+        : hasEnabledTaskControl
+          ? "使用后端允许的动作，并等待刷新后的同一任务确认结果。"
+          : "核对来源，或重新读取任务状态。"
       : envelope.status === "stale" || envelope.status === "error"
         ? "先重新读取任务状态。"
         : "选择一个任务查看它的状态来源与限制。",
@@ -424,11 +439,11 @@ function taskInspector(
 function unavailableInspector(title: string): WorkbenchInspectorModel {
   return {
     title,
-    conclusion: "该产品旅程尚未在 Phase 4D 当前 slice 接入。",
-    risk: "使用 fixture 或旧页面数据填充这里会制造第二套产品 truth。",
-    nextAction: "返回今日或任务；等待对应后端契约与旅程在后续 slice 接入。",
+    conclusion: "当前页面没有可用的后端契约或数据源。",
+    risk: "使用示例或旧页面记录填充这里会制造未经后端确认的产品结论。",
+    nextAction: "返回今日或任务；在受治理的数据源可用前保持关闭状态。",
     evidence: [],
-    evidenceFeedback: "没有为 unavailable 页面伪造证据。",
+    evidenceFeedback: "当前没有可确认的证据；页面不会补造来源。",
     technicalDetails: [{ label: "availability", value: "not_migrated" }],
   };
 }
@@ -438,15 +453,23 @@ export function ReadOnlySpineJourney({
   governedActionDataSource,
   durableTruthDataSource,
   settingsPrivacyDataSource,
+  workspaceConversationDataSource,
+  lifeModelBuilderDataSource,
   initialSurface = "today",
+  initialMode = "product",
+  onRouteChange,
 }: {
   dataSource: ReadOnlySpineDataSource;
   governedActionDataSource?: GovernedActionDataSource;
   durableTruthDataSource?: DurableTruthDataSource;
   settingsPrivacyDataSource?: SettingsPrivacyDataSource;
+  workspaceConversationDataSource?: WorkspaceConversationDataSource;
+  lifeModelBuilderDataSource?: LifeModelBuilderDataSource;
   initialSurface?: ReadOnlyProductSurfaceId;
+  initialMode?: ReadOnlySpineRouteState["mode"];
+  onRouteChange?: (route: ReadOnlySpineRouteState) => void;
 }) {
-  const [mode, setMode] = useState<"product" | "settings">("product");
+  const [mode, setMode] = useState<"product" | "settings">(initialMode);
   const [activeSurface, setActiveSurface] = useState<ReadOnlyProductSurfaceId>(initialSurface);
   const [settingsReturnSurface, setSettingsReturnSurface] =
     useState<ReadOnlyProductSurfaceId>(initialSurface);
@@ -468,11 +491,25 @@ export function ReadOnlySpineJourney({
   const [announcement, setAnnouncement] = useState("正在读取今日状态。");
   const [focusKey, setFocusKey] = useState("initial");
   const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
+  const refreshGovernedAfterTurn = useCallback(async () => {
+    if (governedActionDataSource) await governed.load(false);
+  }, [governed.load, governedActionDataSource]);
+  const conversation = useWorkspaceConversation(
+    workspaceConversationDataSource,
+    setAnnouncement,
+    refreshGovernedAfterTurn
+  );
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
+  const lifeModelBuilder = useLifeModelBuilder(lifeModelBuilderDataSource, setAnnouncement);
   const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, setAnnouncement);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
+
+  useEffect(() => {
+    setMode(initialMode);
+    setActiveSurface(initialSurface);
+  }, [initialMode, initialSurface]);
 
   const requestFocus = useCallback((prefix: string) => {
     focusSequenceRef.current += 1;
@@ -552,7 +589,10 @@ export function ReadOnlySpineJourney({
     setInspectorOpen(false);
     setAnnouncement("正在读取今日状态。");
     void loadToday(false);
-    if (initialSurface === "tasks") void loadTasks(false);
+    if (initialSurface === "tasks") {
+      if (governedActionDataSource) void governed.load(false);
+      else void loadTasks(false);
+    }
     if (
       governedActionDataSource &&
       (initialSurface === "workspace" || initialSurface === "review")
@@ -577,15 +617,35 @@ export function ReadOnlySpineJourney({
     loadToday,
   ]);
 
-  function navigateProduct(id: string): void {
+  useEffect(() => {
+    if (initialSurface === "workspace" && workspaceConversationDataSource) {
+      conversation.ensureLoaded();
+    }
+  }, [conversation.ensureLoaded, initialSurface, workspaceConversationDataSource]);
+
+  useEffect(() => {
+    if (initialSurface === "life-model" && lifeModelBuilderDataSource) {
+      lifeModelBuilder.ensureLoaded();
+    }
+  }, [initialSurface, lifeModelBuilder.ensureLoaded, lifeModelBuilderDataSource]);
+
+  function navigateProduct(id: string, reviewOrigin?: "workspace" | "life-model"): void {
     const next = id as ReadOnlyProductSurfaceId;
-    if (next === "review") setReviewReturnSurface("workspace");
+    if (next === "review") {
+      setReviewReturnSurface(
+        reviewOrigin ?? (activeSurface === "life-model" ? "life-model" : "workspace")
+      );
+    }
     setMode("product");
     setActiveSurface(next);
+    onRouteChange?.({ mode: "product", surface: next });
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus(`nav-${next}`);
-    if (next === "tasks" && !tasksLoaded && !governed.snapshot) void loadTasks(false);
+    if (next === "tasks" && !governed.snapshot) {
+      if (governedActionDataSource) void governed.load(false);
+      else if (!tasksLoaded) void loadTasks(false);
+    }
     if (next === "today") {
       setAnnouncement("已进入今日，只显示后端提供的当前关注。 ");
     } else if (next === "tasks") {
@@ -597,9 +657,13 @@ export function ReadOnlySpineJourney({
           : "已进入审核中心，正在核对建议与权限。"
       );
       void governed.load(false);
+      if (next === "workspace" && workspaceConversationDataSource) {
+        conversation.ensureLoaded();
+      }
     } else if (next === "life-model" && durableTruthDataSource) {
       setAnnouncement("已进入 LifeModel，正在核对当前理解、审核决定与应用结果。");
       void durable.load(false);
+      if (lifeModelBuilderDataSource) lifeModelBuilder.ensureLoaded();
     } else {
       setAnnouncement(`“${unavailableCopy[next].title}”，当前没有替代数据或重定向。`);
     }
@@ -610,6 +674,7 @@ export function ReadOnlySpineJourney({
     setMode("settings");
     setInspectorOpen(false);
     setSelectedEvidence("");
+    onRouteChange?.({ mode: "settings", surface: activeSurface });
     requestFocus("settings-open");
     if (settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)) {
       settingsPrivacy.ensureLoaded();
@@ -625,6 +690,7 @@ export function ReadOnlySpineJourney({
     setSettingsQuery("");
     setInspectorOpen(false);
     setSelectedEvidence("");
+    onRouteChange?.({ mode: "product", surface: settingsReturnSurface });
     setAnnouncement("已返回之前的产品工作区。 ");
   }
 
@@ -777,6 +843,7 @@ export function ReadOnlySpineJourney({
     governed.selectReviewItem(item);
     setMode("product");
     setActiveSurface("review");
+    onRouteChange?.({ mode: "product", surface: "review" });
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus(`review-${item.id}`);
@@ -837,6 +904,10 @@ export function ReadOnlySpineJourney({
         onSelectTask={selectTask}
         onOpenInspector={openInspector}
         onAnnounce={setAnnouncement}
+        taskControlState={governed.taskControlState}
+        onRequestTaskControl={governed.requestTaskControl}
+        onConfirmTaskControl={governed.confirmTaskControl}
+        onCancelTaskControlConfirmation={governed.cancelTaskControlConfirmation}
       />
     );
   } else if (activeSurface === "workspace" && governedActionDataSource) {
@@ -851,6 +922,7 @@ export function ReadOnlySpineJourney({
         onConfirmResume={governed.confirmResume}
         onCancelResume={governed.cancelResumeConfirmation}
         onOpenInspector={openInspector}
+        conversation={workspaceConversationDataSource ? conversation : undefined}
       />
     );
   } else if (activeSurface === "review" && governedActionDataSource) {
@@ -880,6 +952,7 @@ export function ReadOnlySpineJourney({
           if (reviewReturnSurface === "settings") {
             setMode("settings");
             setActiveSurface(settingsReturnSurface);
+            onRouteChange?.({ mode: "settings", surface: settingsReturnSurface });
             setActiveSettingsId("model-provider");
             setInspectorOpen(false);
             setSelectedEvidence("");
@@ -907,6 +980,10 @@ export function ReadOnlySpineJourney({
         }}
         onOpenReview={openReviewItem}
         onOpenInspector={openInspector}
+        builder={lifeModelBuilderDataSource ? lifeModelBuilder : undefined}
+        onOpenReviewCenter={
+          lifeModelBuilderDataSource ? () => navigateProduct("review", "life-model") : undefined
+        }
       />
     );
   } else {
