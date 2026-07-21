@@ -1,0 +1,56 @@
+{
+  "generatedAt": "2026-07-21T03:11:06.516Z",
+  "baseUrl": "http://127.0.0.1:4186/dev/phase4d/",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "width": 1024,
+      "height": 720
+    }
+  ],
+  "assertions": 60,
+  "failures": [],
+  "browserErrors": [],
+  "observations": [
+    {
+      "label": "1440x900",
+      "layout": {
+        "overflow": 0,
+        "sidebarWidth": 232,
+        "contextHeight": 56,
+        "bodyFont": 15,
+        "pageScrollWidth": 920,
+        "pageClientWidth": 920
+      }
+    },
+    {
+      "label": "1280x800",
+      "layout": {
+        "overflow": 0,
+        "sidebarWidth": 232,
+        "contextHeight": 56,
+        "bodyFont": 15,
+        "pageScrollWidth": 920,
+        "pageClientWidth": 920
+      }
+    },
+    {
+      "label": "1024x720",
+      "layout": {
+        "overflow": 0,
+        "sidebarWidth": 232,
+        "contextHeight": 56,
+        "bodyFont": 15,
+        "pageScrollWidth": 792,
+        "pageClientWidth": 792
+      }
+    }
+  ]
+}

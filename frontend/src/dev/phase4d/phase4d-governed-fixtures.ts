@@ -15,10 +15,20 @@ import type {
   GovernedActionDataSource,
   GovernedActionSnapshot,
 } from "@/ui/journeys/governedAction";
+import type { DurableTruthDataSource } from "@/ui/journeys/durableTruth";
 import type { ReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
+import {
+  buildDurableFixtureSnapshot,
+  durableReviewItem,
+  durableReviewItemId,
+  initialDurableFixtureStage,
+  type DurableFixtureStage,
+} from "./phase4d-durable-fixtures";
 import { phase4dFixtureDataSource, type Phase4dFixtureId } from "./phase4d-fixtures";
 
-export type Phase4dJourneyDataSource = ReadOnlySpineDataSource & GovernedActionDataSource;
+export type Phase4dJourneyDataSource = ReadOnlySpineDataSource &
+  GovernedActionDataSource &
+  DurableTruthDataSource;
 
 type FixtureStage = "pending" | "approved" | "rejected" | "deferred" | "running";
 
@@ -303,13 +313,18 @@ function readStatus(id: Phase4dFixtureId): ViewModelStatus {
   return "ready";
 }
 
-function buildSnapshot(id: Phase4dFixtureId, stage: FixtureStage): GovernedActionSnapshot {
+function buildSnapshot(
+  id: Phase4dFixtureId,
+  stage: FixtureStage,
+  durableStage: DurableFixtureStage
+): GovernedActionSnapshot {
   const status = readStatus(id);
   const empty = id === "fixture-empty";
   const incomplete = id === "fixture-incomplete-permission";
   const item = permissionItem(stage, incomplete);
+  const durableItem = durableReviewItem(durableStage);
   const task = activeTask(stage);
-  const reviewItems = empty ? [] : [item];
+  const reviewItems = empty ? [] : [item, durableItem];
   const workspace: WorkspaceViewModel = {
     ...(empty ? {} : { activeTask: task }),
     recentTaskRefs: empty ? [] : [{ id: taskId, kind: "task", label: task.title }],
@@ -369,6 +384,15 @@ function buildSnapshot(id: Phase4dFixtureId, stage: FixtureStage): GovernedActio
             actionRequiredCount: ["pending", "deferred"].includes(item.status) ? 1 : 0,
             highestRisk: item.risk,
           },
+          {
+            id: "batch:lifemodel-focus-preference",
+            domain: "life_model",
+            itemIds: [durableReviewItemId],
+            actionRequiredCount: ["pending", "edited", "deferred"].includes(durableItem.status)
+              ? 1
+              : 0,
+            highestRisk: durableItem.risk,
+          },
         ],
     items: reviewItems,
     summary: {
@@ -379,9 +403,25 @@ function buildSnapshot(id: Phase4dFixtureId, stage: FixtureStage): GovernedActio
       blockedActionCount: reviewItems.filter(candidate =>
         candidate.allowedActions.some(candidateAction => !candidateAction.enabled)
       ).length,
-      byStatus: empty ? {} : { [item.status]: 1 },
-      byRisk: empty ? {} : { [item.risk]: 1 },
-      byMaterializationStatus: empty ? {} : { not_applicable: 1 },
+      byStatus: empty
+        ? {}
+        : reviewItems.reduce<Record<string, number>>((counts, candidate) => {
+            counts[candidate.status] = (counts[candidate.status] ?? 0) + 1;
+            return counts;
+          }, {}),
+      byRisk: empty
+        ? {}
+        : reviewItems.reduce<Record<string, number>>((counts, candidate) => {
+            counts[candidate.risk] = (counts[candidate.risk] ?? 0) + 1;
+            return counts;
+          }, {}),
+      byMaterializationStatus: empty
+        ? {}
+        : reviewItems.reduce<Record<string, number>>((counts, candidate) => {
+            counts[candidate.materializationStatus] =
+              (counts[candidate.materializationStatus] ?? 0) + 1;
+            return counts;
+          }, {}),
     },
   };
   const taskItems = empty ? [] : [task];
@@ -422,20 +462,32 @@ function buildSnapshot(id: Phase4dFixtureId, stage: FixtureStage): GovernedActio
 export function phase4dJourneyFixtureDataSource(id: Phase4dFixtureId): Phase4dJourneyDataSource {
   const readOnly = phase4dFixtureDataSource(id);
   let stage: FixtureStage = "pending";
+  let durableStage = initialDurableFixtureStage(id);
 
   return {
     ...readOnly,
     async load() {
-      return buildSnapshot(id, stage);
+      return buildSnapshot(id, stage, durableStage);
+    },
+    async loadDurableTruth() {
+      return buildDurableFixtureSnapshot(id, durableStage);
     },
     async dispatchReviewAction(reviewAction) {
       if (readStatus(id) !== "ready") throw new Error("fixture_review_read_model_not_ready");
-      if (reviewAction.targetReviewItemId !== reviewItemId) {
+      if (
+        reviewAction.targetReviewItemId !== reviewItemId &&
+        reviewAction.targetReviewItemId !== durableReviewItemId
+      ) {
         throw new Error("fixture_review_target_mismatch");
       }
       if (!reviewAction.enabled)
         throw new Error(reviewAction.disabledReason || "fixture_action_disabled");
-      if (reviewAction.kind === "approve") stage = "approved";
+      if (reviewAction.targetReviewItemId === durableReviewItemId) {
+        if (reviewAction.kind === "approve") durableStage = "approved_not_applied";
+        else if (reviewAction.kind === "reject") durableStage = "rejected";
+        else if (reviewAction.kind === "later") durableStage = "deferred";
+        else throw new Error("fixture_durable_review_action_unsupported");
+      } else if (reviewAction.kind === "approve") stage = "approved";
       else if (reviewAction.kind === "reject") stage = "rejected";
       else if (reviewAction.kind === "later") stage = "deferred";
       else throw new Error("fixture_review_action_unsupported");

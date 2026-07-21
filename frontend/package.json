@@ -21,6 +21,7 @@
     "qa:phase4b": "node scripts/phase4b-qa.mjs",
     "qa:phase4c": "node scripts/phase4c-qa.mjs",
     "qa:phase4d": "node scripts/phase4d-qa.mjs",
+    "qa:phase4d:durable": "node scripts/phase4d-durable-qa.mjs",
     "verify:release-absence": "node scripts/verify-production-absence.mjs",
     "test": "vitest run",
     "test:watch": "vitest",

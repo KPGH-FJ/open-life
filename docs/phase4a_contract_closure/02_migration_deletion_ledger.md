@@ -23,7 +23,7 @@ State vocabulary:
 | `frontend/src/ui/journeys/governedAction/WorkspaceGovernedView.tsx` over backend `WorkspaceViewModel` plus `useGovernedActionJourney.ts` | `CompanionPage`/`ChatPage` joins over Tasks, projection, page state, permission decision, and automatic resume | `/companion`; old Chat/Workspace production callers remain | Governed-action journey consumes `activeTask`, linked review items, metadata activity, exact resume `TaskControl`, and refreshed task identity/state; remaining production callers move in 4E | Product page scan has no parallel lifecycle/review/privacy reconstruction; release bundle excludes governed journey markers | `contract_ready` |
 | `frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx` plus governed refresh over backend `TasksViewModel` | `frontend/src/pages/RunsPage.tsx` task-list presentation plus remaining task-control joins | `/runs` route in `frontend/src/App.tsx`; task-control callers remain in old pages | Read-only Tasks journey accepted; governed controller now owns exact resume through dispatch -> refresh -> identity/state verification; production caller moves only in 4E | Old task-list owner absent; no frontend `AgentRun` list join; release bundle excludes Phase 4D journey markers | `contract_ready` |
 | `frontend/src/ui/journeys/governedAction/ReviewGovernedView.tsx` over `ReviewItem.decisionContext` and `reviewDispatchReducer` | `MailboxPage` join of raw `listProposals`, `proposalDisplay`, and ReviewItem; Chat page automatic permission approval | `/mailbox` and remaining Chat permission caller | Pending decision journey renders before/after and exact permission solely from `ReviewItem`; approve/reject/later dispatch always refreshes the same review target and never resumes automatically | Product scan forbids raw proposal reconstruction and automatic approve/resume in the candidate owner; release bundle excludes governed journey markers | `contract_ready` |
-| Existing `LifeModelViewModel`/`MemoryViewModel` plus future durable-truth renderer | current LifeModel and Memory page owners | `/life-model`, `/memory` | Durable-truth journey distinguishes approved/applying/applied/failed/rollback | Old page owners absent; no raw proposal or store reconstruction | `identified` |
+| `frontend/src/ui/journeys/durableTruth/**` over backend `LifeModelViewModel`, `MemoryViewModel`, and exact `ReviewItem` lifecycle | current LifeModel and Memory page owners | `/life-model`, `/memory` | Durable-truth journey distinguishes pending/approved/applying/applied/failed/rolled-back, requires exact refreshed proof, and receives typed apply/rollback actions before exposing those controls | Old page owners absent; no raw proposal/store reconstruction; release bundle excludes durable journey markers | `contract_ready` |
 | `settingsOrchestrationContract` plus future Settings V2 | `SettingsPage` page-local test/save/refresh lifecycle | `/settings` | Privacy/config journey uses edit -> test -> save -> boundary refresh and fails closed | Old reducer/lifecycle absent; route test proves unknown boundary is not green | `contract_ready` |
 | Shell Settings utility context plus collapsed diagnostic access | ProductShell advanced groups and same-level advanced routes | ProductShell secondary/advanced navigation | Shell V2 keeps Settings outside primary product navigation and Advanced inside Settings/Inspector; unavailable states are explicit | Navigation matrix and release route inventory | `contract_ready` |
 | Future V2 route authority | `LEGACY_PRODUCT_REDIRECTS` compatibility routes | current `App.tsx` redirect map | Every external caller and active doc uses canonical routes; removal reviewed under Phase7 deletion contract | Redirect path absence tests | `identified` |
@@ -80,3 +80,26 @@ same dev-only Shell:
 Workspace, Tasks, and Review remain `contract_ready`, not `delete_ready`.
 Production callers have not moved, no old owner was deleted, and Phase 4E is
 still the only authorized route-authority switch.
+
+## Phase 4D Durable-Truth Spine Update
+
+The third Phase 4D slice adds the candidate journey
+`LifeModel/Memory -> Review -> Refresh -> durable result` inside the same
+dev-only desktop Shell:
+
+- `DurableTruthDataSource` reads LifeModel, Memory, and Review Center as three
+  backend owners and preserves partial failure as an error envelope;
+- `durableTruthPresentation` joins only exact ReviewItem and proposal change
+  identities, and requires matching LifeModel materialization proof before a
+  verified applied treatment;
+- `DurableTruthView` keeps pending, approved-not-applied, applying, applied,
+  failed, rolled-back, rejected, and unknown distinct;
+- the existing governed Review controller records decisions, refreshes the
+  exact ReviewItem, and never treats command return as application proof;
+- no Apply or rollback control is synthesized while the backend has no typed
+  callable action for those effects;
+- production owners remain `App.tsx` -> `ProductShell` and the current
+  LifeModel/Memory pages.
+
+LifeModel and Memory move to `contract_ready`, not `delete_ready`. Production
+callers have not moved and old page owners remain required until Phase 4E.

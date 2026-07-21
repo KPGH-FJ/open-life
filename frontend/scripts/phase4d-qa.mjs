@@ -353,11 +353,17 @@ try {
   await page.getByRole("heading", { name: "整理三次客户访谈，归纳下周要验证的问题" }).waitFor();
   await page.getByRole("button", { name: "查看权限请求" }).click();
   await page.getByRole("heading", { name: "读取本地客户访谈记录", level: 2 }).waitFor();
+  const permissionReviewDetail = page.locator(
+    '[data-review-item-id="review-permission-interview-notes"]'
+  );
   check(
-    (await page.getByText("已允许一次").count()) === 0,
+    (await permissionReviewDetail.getByText("已允许一次", { exact: true }).count()) === 0,
     "View action must not approve a review."
   );
-  check((await page.getByText("已应用").count()) === 0, "View action must not apply a review.");
+  check(
+    (await permissionReviewDetail.getByText("已应用", { exact: true }).count()) === 0,
+    "View action must not apply a review."
+  );
 
   const reviewActions = await page.locator('[data-action-category="review"]').evaluateAll(nodes =>
     nodes.map(node => ({

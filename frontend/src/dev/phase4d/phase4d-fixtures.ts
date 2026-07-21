@@ -21,7 +21,12 @@ export type Phase4dFixtureId =
   | "fixture-incomplete-permission"
   | "fixture-stale"
   | "fixture-error"
-  | "fixture-empty";
+  | "fixture-empty"
+  | "fixture-durable-approved"
+  | "fixture-durable-applying"
+  | "fixture-durable-applied"
+  | "fixture-durable-failed"
+  | "fixture-durable-rolled-back";
 
 const generatedAt = "2026-07-18T08:30:00.000Z";
 
@@ -394,6 +399,11 @@ export const phase4dFixtureLabels: Record<Phase4dFixtureId, string> = {
   "fixture-stale": "静态样例：数据陈旧",
   "fixture-error": "静态样例：读取失败",
   "fixture-empty": "静态样例：暂无内容",
+  "fixture-durable-approved": "长期状态：已批准，尚未应用",
+  "fixture-durable-applying": "长期状态：正在应用",
+  "fixture-durable-applied": "长期状态：已应用",
+  "fixture-durable-failed": "长期状态：应用失败",
+  "fixture-durable-rolled-back": "长期状态：已回滚",
 };
 
 export function phase4dFixtureDataSource(id: Phase4dFixtureId): ReadOnlySpineDataSource {
