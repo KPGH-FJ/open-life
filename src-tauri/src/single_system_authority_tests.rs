@@ -2374,10 +2374,12 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
             "src/dev/phase4d",
             "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
             "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
+            "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
             "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
             "ReadOnlySpineJourney",
             "WorkspaceGovernedView",
             "ReviewGovernedView",
+            "DurableTruthView",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -2422,17 +2424,21 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
     assert!(
         package.contains("\"dev:phase4d\": \"vite --config vite.phase4d.config.ts\"")
             && package.contains("\"build:phase4d\"")
-            && package.contains("\"qa:phase4d\""),
+            && package.contains("\"qa:phase4d\"")
+            && package.contains("\"qa:phase4d:durable\""),
         "Phase 4D scripts must remain explicit dev/review commands"
     );
     for required in [
         "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
         "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
+        "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
         "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
         "ReadOnlySpineJourney",
         "WorkspaceGovernedView",
         "ReviewGovernedView",
+        "DurableTruthView",
         "ol-governed-page",
+        "ol-durable-page",
         "dev/phase4d/index.html",
     ] {
         assert!(
@@ -2451,10 +2457,12 @@ fn single_system_phase4d_candidate_journeys_are_dev_only_and_product_authority_i
             !source.contains("src/dev/phase4d")
                 && !source.contains("OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS")
                 && !source.contains("OPENLIFE_PHASE4D_REAL_TAURI_PROBE")
                 && !source.contains("ReadOnlySpineJourney")
                 && !source.contains("WorkspaceGovernedView")
-                && !source.contains("ReviewGovernedView"),
+                && !source.contains("ReviewGovernedView")
+                && !source.contains("DurableTruthView"),
             "product source must not import the Phase 4D journey or harness: {rel}"
         );
     }

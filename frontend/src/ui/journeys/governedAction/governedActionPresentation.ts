@@ -154,18 +154,25 @@ export function reviewContext(
     };
   }
   if (item.status === "approved") {
+    const materialization =
+      item.materializationStatus === "applying"
+        ? { label: "正在应用", status: "waiting" as const }
+        : item.materializationStatus === "applied"
+          ? { label: "已应用", status: "success" as const, verified: true }
+          : item.materializationStatus === "failed"
+            ? { label: "应用失败", status: "error" as const }
+            : item.materializationStatus === "rolled_back"
+              ? { label: "已回滚", status: "waiting" as const }
+              : item.materializationStatus === "unknown"
+                ? { label: "应用状态未知", status: "unknown" as const }
+                : { label: "已批准，尚未应用", status: "neutral" as const };
     return {
       eyebrow: "建议与权限",
       title: "审核中心",
       status: {
-        label:
-          item.type === "tool_permission"
-            ? "已允许一次，尚未继续任务"
-            : item.materializationStatus === "applied"
-              ? "已应用"
-              : "已批准，尚未应用",
-        status: item.materializationStatus === "applied" ? "success" : "neutral",
-        verified: item.materializationStatus === "applied" || undefined,
+        label: item.type === "tool_permission" ? "已允许一次，尚未继续任务" : materialization.label,
+        status: item.type === "tool_permission" ? "neutral" : materialization.status,
+        verified: item.type === "tool_permission" ? undefined : materialization.verified,
       },
     };
   }
@@ -306,7 +313,15 @@ export function reviewInspector(
           ? "一次性权限决定已经记录，但任务是否继续仍取决于刷新后的 TaskControl。"
           : item.materializationStatus === "applied"
             ? "刷新后的审核读模型确认变更已经应用。"
-            : "审核决定已经记录，但没有已应用证明。"
+            : item.materializationStatus === "applying"
+              ? "刷新后的审核读模型确认应用过程已经开始，但尚未完成。"
+              : item.materializationStatus === "failed"
+                ? "审核决定仍为已批准，但应用过程失败。"
+                : item.materializationStatus === "rolled_back"
+                  ? "刷新后的审核读模型确认此前应用已经回滚。"
+                  : item.materializationStatus === "unknown"
+                    ? "审核决定已经记录，但应用结果未知。"
+                    : "审核决定已经记录，但没有已应用证明。"
         : `审核项当前状态为 ${item.status}；打开详情没有改变该状态。`
       : snapshot.reviewEnvelope.status === "error"
         ? "ReviewCenterViewModel 未能建立。"

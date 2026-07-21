@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { FoundationStatusLabel } from "@/ui/foundation";
 import { ReadOnlySpineJourney, tauriReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
 import { tauriGovernedActionDataSource } from "@/ui/journeys/governedAction";
+import { tauriDurableTruthDataSource } from "@/ui/journeys/durableTruth";
 import { phase4dFixtureLabels, type Phase4dFixtureId } from "./phase4d-fixtures";
 import {
   phase4dJourneyFixtureDataSource,
@@ -9,6 +10,7 @@ import {
 } from "./phase4d-governed-fixtures";
 
 const HARNESS_MARKER = "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS";
+const DURABLE_HARNESS_MARKER = "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS";
 type Phase4dSourceId = "tauri" | Phase4dFixtureId;
 
 function probeResultLabel<
@@ -33,6 +35,7 @@ function isTauriWindow(): boolean {
 const tauriJourneyDataSource: Phase4dJourneyDataSource = {
   ...tauriReadOnlySpineDataSource,
   ...tauriGovernedActionDataSource,
+  ...tauriDurableTruthDataSource,
 };
 
 export function Phase4dReadOnlyHarness() {
@@ -41,7 +44,7 @@ export function Phase4dReadOnlyHarness() {
     tauriAvailable ? "tauri" : "fixture-ready"
   );
   const [probeStatus, setProbeStatus] = useState(
-    tauriAvailable ? "正在核对五个后端读模型" : "浏览器 fixture，不代表后端状态"
+    tauriAvailable ? "正在核对长期状态与既有旅程读模型" : "浏览器 fixture，不代表后端状态"
   );
   const dataSource: Phase4dJourneyDataSource = useMemo(
     () =>
@@ -54,61 +57,84 @@ export function Phase4dReadOnlyHarness() {
       return;
     }
     let cancelled = false;
-    setProbeStatus("正在核对 Today、Tasks、Workspace 与 Review 命令");
-    Promise.allSettled([dataSource.loadToday(), dataSource.loadTasks(), dataSource.load()]).then(
-      results => {
-        if (cancelled) return;
-        const governed =
-          results[2].status === "rejected"
-            ? "Workspace / Review rejected"
-            : `Workspace ${results[2].value.workspaceEnvelope.status} · Review ${results[2].value.reviewEnvelope.status} · Journey Tasks ${results[2].value.tasksEnvelope.status}`;
-        setProbeStatus(
-          `命令探针：${probeResultLabel("Today", results[0], false)} · ${probeResultLabel(
-            "Tasks",
-            results[1]
-          )} · ${governed}`
-        );
-        const todayWarnings =
-          results[0].status === "fulfilled"
-            ? (results[0].value.envelope.warnings?.map(warning => warning.code) ?? [])
-            : ["request_rejected"];
-        const tasksWarnings =
-          results[1].status === "fulfilled"
-            ? (results[1].value.envelope.warnings?.map(warning => warning.code) ?? [])
-            : ["request_rejected"];
-        const governedStatuses =
-          results[2].status === "fulfilled"
-            ? {
-                workspace: results[2].value.workspaceEnvelope.status,
-                review: results[2].value.reviewEnvelope.status,
-                journeyTasks: results[2].value.tasksEnvelope.status,
-                diagnostics: results[2].value.diagnostics.map(item => ({
-                  id: item.id,
-                  status: item.status,
-                })),
-              }
-            : {
-                workspace: "rejected",
-                review: "rejected",
-                journeyTasks: "rejected",
-                diagnostics: [],
-              };
-        void fetch("/__phase4d_tauri_probe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            marker: "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
-            today:
-              results[0].status === "fulfilled" ? results[0].value.envelope.status : "rejected",
-            tasks:
-              results[1].status === "fulfilled" ? results[1].value.envelope.status : "rejected",
-            todayWarnings,
-            tasksWarnings,
-            ...governedStatuses,
-          }),
-        }).catch(() => undefined);
-      }
-    );
+    setProbeStatus("正在核对 Today、Tasks、Workspace、Review、LifeModel 与 Memory 命令");
+    Promise.allSettled([
+      dataSource.loadToday(),
+      dataSource.loadTasks(),
+      dataSource.load(),
+      dataSource.loadDurableTruth(),
+    ]).then(results => {
+      if (cancelled) return;
+      const governed =
+        results[2].status === "rejected"
+          ? "Workspace / Review rejected"
+          : `Workspace ${results[2].value.workspaceEnvelope.status} · Review ${results[2].value.reviewEnvelope.status} · Journey Tasks ${results[2].value.tasksEnvelope.status}`;
+      const durable =
+        results[3].status === "rejected"
+          ? "LifeModel / Memory rejected"
+          : `LifeModel ${results[3].value.lifeModelEnvelope.status} · Memory ${results[3].value.memoryEnvelope.status} · Durable Review ${results[3].value.reviewEnvelope.status}`;
+      setProbeStatus(
+        `命令探针：${probeResultLabel("Today", results[0], false)} · ${probeResultLabel(
+          "Tasks",
+          results[1]
+        )} · ${governed} · ${durable}`
+      );
+      const todayWarnings =
+        results[0].status === "fulfilled"
+          ? (results[0].value.envelope.warnings?.map(warning => warning.code) ?? [])
+          : ["request_rejected"];
+      const tasksWarnings =
+        results[1].status === "fulfilled"
+          ? (results[1].value.envelope.warnings?.map(warning => warning.code) ?? [])
+          : ["request_rejected"];
+      const governedStatuses =
+        results[2].status === "fulfilled"
+          ? {
+              workspace: results[2].value.workspaceEnvelope.status,
+              review: results[2].value.reviewEnvelope.status,
+              journeyTasks: results[2].value.tasksEnvelope.status,
+              diagnostics: results[2].value.diagnostics.map(item => ({
+                id: item.id,
+                status: item.status,
+              })),
+            }
+          : {
+              workspace: "rejected",
+              review: "rejected",
+              journeyTasks: "rejected",
+              diagnostics: [],
+            };
+      const durableStatuses =
+        results[3].status === "fulfilled"
+          ? {
+              lifeModel: results[3].value.lifeModelEnvelope.status,
+              memory: results[3].value.memoryEnvelope.status,
+              durableReview: results[3].value.reviewEnvelope.status,
+              durableDiagnostics: results[3].value.diagnostics.map(item => ({
+                id: item.id,
+                status: item.status,
+              })),
+            }
+          : {
+              lifeModel: "rejected",
+              memory: "rejected",
+              durableReview: "rejected",
+              durableDiagnostics: [],
+            };
+      void fetch("/__phase4d_tauri_probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marker: "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
+          today: results[0].status === "fulfilled" ? results[0].value.envelope.status : "rejected",
+          tasks: results[1].status === "fulfilled" ? results[1].value.envelope.status : "rejected",
+          todayWarnings,
+          tasksWarnings,
+          ...governedStatuses,
+          ...durableStatuses,
+        }),
+      }).catch(() => undefined);
+    });
     return () => {
       cancelled = true;
     };
@@ -118,12 +144,13 @@ export function Phase4dReadOnlyHarness() {
     <div
       className="ol-foundation phase4d-harness"
       data-harness-marker={HARNESS_MARKER}
+      data-durable-harness-marker={DURABLE_HARNESS_MARKER}
       data-source-id={sourceId}
     >
       <header className="phase4d-qa-toolbar" aria-label="Phase 4D QA 工具栏">
         <div className="phase4d-qa-identity">
           <strong>Phase 4D</strong>
-          <span>桌面受治理动作旅程 · DEV ONLY</span>
+          <span>桌面业务旅程 · DEV ONLY</span>
         </div>
         <label className="phase4d-source-select">
           <span>数据来源</span>
@@ -151,7 +178,7 @@ export function Phase4dReadOnlyHarness() {
           ) : (
             <FoundationStatusLabel label="静态 fixture · 非后端状态" status="unknown" />
           )}
-          <FoundationStatusLabel label="决定与恢复分离" status="waiting" />
+          <FoundationStatusLabel label="决定、恢复与应用分离" status="waiting" />
         </div>
         {sourceId === "tauri" && (
           <p className="phase4d-qa-warning" role="note">
@@ -161,7 +188,11 @@ export function Phase4dReadOnlyHarness() {
       </header>
 
       <div className="phase4d-shell-stage" key={sourceId}>
-        <ReadOnlySpineJourney dataSource={dataSource} governedActionDataSource={dataSource} />
+        <ReadOnlySpineJourney
+          dataSource={dataSource}
+          governedActionDataSource={dataSource}
+          durableTruthDataSource={dataSource}
+        />
       </div>
     </div>
   );

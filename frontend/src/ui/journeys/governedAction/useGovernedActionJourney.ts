@@ -163,6 +163,9 @@ export function useGovernedActionJourney(
       }
       const operationId = ++operationSequenceRef.current;
       activeReviewOperationRef.current = operationId;
+      const dispatchedItem = snapshotRef.current?.reviewEnvelope.data?.items.find(
+        item => item.id === action.targetReviewItemId
+      );
       try {
         if (!dataSource) {
           dispatchReview({
@@ -213,8 +216,10 @@ export function useGovernedActionJourney(
         dispatchReview(refreshEvent);
         if (verification.phase !== "resolved") {
           announce("决定已发送，但刷新后的同一审核项尚未确认该决定；任务仍暂停。");
-        } else if (action.kind === "approve") {
+        } else if (action.kind === "approve" && dispatchedItem?.type === "tool_permission") {
           announce("权限决定已由刷新后的审核读模型确认；任务尚未继续。");
+        } else if (action.kind === "approve") {
+          announce("批准决定已由刷新后的审核读模型确认；应用结果仍需独立刷新证明。");
         } else if (action.kind === "reject") {
           announce("拒绝决定已由刷新后的审核读模型确认。");
         } else if (action.kind === "later") {

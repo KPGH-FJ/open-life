@@ -21,9 +21,13 @@ function reviewItemStatus(item: ReviewItem): {
     if (item.type === "tool_permission") {
       return { label: "已允许一次", status: "neutral" };
     }
-    if (item.materializationStatus === "applied") {
+    if (item.materializationStatus === "applying") return { label: "正在应用", status: "waiting" };
+    if (item.materializationStatus === "applied")
       return { label: "已应用", status: "success", verified: true };
-    }
+    if (item.materializationStatus === "failed") return { label: "应用失败", status: "error" };
+    if (item.materializationStatus === "rolled_back") return { label: "已回滚", status: "waiting" };
+    if (item.materializationStatus === "unknown")
+      return { label: "应用状态未知", status: "unknown" };
     return { label: "已批准，尚未应用", status: "neutral" };
   }
   if (item.status === "rejected") return { label: "已拒绝", status: "neutral" };
@@ -122,6 +126,7 @@ export function ReviewGovernedView({
   onConfirmAction,
   onCancelConfirmation,
   onBackWorkspace,
+  backLabel = "返回工作区",
   onOpenInspector,
 }: {
   snapshot: GovernedActionSnapshot | null;
@@ -134,6 +139,7 @@ export function ReviewGovernedView({
   onConfirmAction: () => void;
   onCancelConfirmation: () => void;
   onBackWorkspace: () => void;
+  backLabel?: string;
   onOpenInspector: () => void;
 }) {
   const envelope = snapshot?.reviewEnvelope;
@@ -152,7 +158,7 @@ export function ReviewGovernedView({
     dispatchState.phase === "dispatching" || dispatchState.phase === "refreshing";
   const supportedActions =
     selectedItem?.allowedActions.filter(action =>
-      ["approve", "reject", "later", "view_evidence"].includes(action.kind)
+      ["approve", "reject", "later", "apply", "view_evidence"].includes(action.kind)
     ) ?? [];
   const hasEvidenceAction = supportedActions.some(action => action.kind === "view_evidence");
 
@@ -193,7 +199,7 @@ export function ReviewGovernedView({
         </div>
         <div className="ol-governed-inline-actions">
           <FoundationActionButton
-            label="返回工作区"
+            label={backLabel}
             icon={<ArrowLeft size={17} aria-hidden="true" />}
             onClick={onBackWorkspace}
           />
@@ -389,7 +395,7 @@ export function ReviewGovernedView({
             <footer className="ol-review-actions" aria-label="审核决定">
               <div className="ol-review-actions__secondary">
                 <FoundationActionButton
-                  label="返回工作区"
+                  label={backLabel}
                   icon={<ArrowLeft size={17} aria-hidden="true" />}
                   variant="quiet"
                   onClick={onBackWorkspace}
@@ -418,6 +424,7 @@ export function ReviewGovernedView({
               <div className="ol-review-actions__decisions">
                 {supportedActions.map(action => {
                   const evidenceOnly = action.kind === "view_evidence";
+                  const unsupportedDispatch = action.kind === "apply";
                   const disabledByEnvelope = envelope.status === "stale" && !evidenceOnly;
                   const disabledByBusy = decisionBusy && !evidenceOnly;
                   return (
@@ -445,6 +452,8 @@ export function ReviewGovernedView({
                           <ShieldCheck size={17} aria-hidden="true" />
                         ) : action.kind === "view_evidence" ? (
                           <Eye size={17} aria-hidden="true" />
+                        ) : action.kind === "apply" ? (
+                          <RefreshCw size={17} aria-hidden="true" />
                         ) : undefined
                       }
                       variant={
@@ -460,15 +469,23 @@ export function ReviewGovernedView({
                         dispatchState.action.id === action.id
                       }
                       loadingLabel={dispatchState.phase === "refreshing" ? "正在核对" : "正在记录"}
-                      disabled={!action.enabled || disabledByEnvelope || disabledByBusy}
+                      disabled={
+                        !action.enabled ||
+                        disabledByEnvelope ||
+                        disabledByBusy ||
+                        unsupportedDispatch
+                      }
                       disabledReason={
                         disabledByEnvelope
                           ? "审核状态已陈旧；请先重新读取。"
                           : disabledByBusy
                             ? "正在核对上一项决定。"
-                            : action.enabled
-                              ? undefined
-                              : action.disabledReason || "后端未允许该决定。"
+                            : unsupportedDispatch
+                              ? action.disabledReason ||
+                                "当前前端没有可调用的 typed apply command；保持只读。"
+                              : action.enabled
+                                ? undefined
+                                : action.disabledReason || "后端未允许该决定。"
                       }
                       onClick={() => (evidenceOnly ? onOpenInspector() : onRequestAction(action))}
                     />

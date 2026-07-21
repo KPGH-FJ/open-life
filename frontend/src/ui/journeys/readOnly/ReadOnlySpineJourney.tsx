@@ -55,6 +55,13 @@ import {
   WorkspaceGovernedView,
   type GovernedActionDataSource,
 } from "@/ui/journeys/governedAction";
+import {
+  durableTruthContext,
+  durableTruthInspector,
+  DurableTruthView,
+  useDurableTruthJourney,
+  type DurableTruthDataSource,
+} from "@/ui/journeys/durableTruth";
 
 export type ReadOnlyProductSurfaceId = "today" | "workspace" | "tasks" | "review" | "life-model";
 
@@ -87,8 +94,9 @@ const unavailableCopy: Record<
     reason: "当前不会用样例数据代替真实待决定项，也不会把“查看”解释成批准、拒绝或应用。",
   },
   "life-model": {
-    title: "LifeModel 尚未接入本次只读主干",
-    reason: "长期状态需要独立验证建议、决定、应用结果与失败回滚；批准仍不等于已经应用。",
+    title: "LifeModel 状态源不可用",
+    reason:
+      "当前组合没有提供 LifeModel、Memory 与审核中心的联合读模型；页面不会从旧状态补造长期理解。",
   },
 };
 
@@ -356,15 +364,20 @@ function unavailableInspector(title: string): WorkbenchInspectorModel {
 export function ReadOnlySpineJourney({
   dataSource,
   governedActionDataSource,
+  durableTruthDataSource,
   initialSurface = "today",
 }: {
   dataSource: ReadOnlySpineDataSource;
   governedActionDataSource?: GovernedActionDataSource;
+  durableTruthDataSource?: DurableTruthDataSource;
   initialSurface?: ReadOnlyProductSurfaceId;
 }) {
   const [mode, setMode] = useState<"product" | "settings">("product");
   const [activeSurface, setActiveSurface] = useState<ReadOnlyProductSurfaceId>(initialSurface);
   const [activeSettingsId, setActiveSettingsId] = useState("provider-privacy");
+  const [reviewReturnSurface, setReviewReturnSurface] = useState<"workspace" | "life-model">(
+    "workspace"
+  );
   const [settingsQuery, setSettingsQuery] = useState("");
   const [todaySnapshot, setTodaySnapshot] = useState<TodayReadOnlySnapshot>(loadingTodaySnapshot);
   const [tasksSnapshot, setTasksSnapshot] = useState<TasksReadOnlySnapshot>(loadingTasksSnapshot);
@@ -377,6 +390,7 @@ export function ReadOnlySpineJourney({
   const [announcement, setAnnouncement] = useState("正在读取今日状态。");
   const [focusKey, setFocusKey] = useState("initial");
   const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
+  const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
@@ -466,14 +480,27 @@ export function ReadOnlySpineJourney({
     ) {
       void governed.load(false);
     }
+    if (durableTruthDataSource && initialSurface === "life-model") {
+      void durable.load(false);
+    }
     return () => {
       todayRequestRef.current += 1;
       tasksRequestRef.current += 1;
     };
-  }, [dataSource, governed.load, governedActionDataSource, initialSurface, loadTasks, loadToday]);
+  }, [
+    dataSource,
+    durable.load,
+    durableTruthDataSource,
+    governed.load,
+    governedActionDataSource,
+    initialSurface,
+    loadTasks,
+    loadToday,
+  ]);
 
   function navigateProduct(id: string): void {
     const next = id as ReadOnlyProductSurfaceId;
+    if (next === "review") setReviewReturnSurface("workspace");
     setMode("product");
     setActiveSurface(next);
     setInspectorOpen(false);
@@ -491,6 +518,9 @@ export function ReadOnlySpineJourney({
           : "已进入审核中心，正在核对建议与权限。"
       );
       void governed.load(false);
+    } else if (next === "life-model" && durableTruthDataSource) {
+      setAnnouncement("已进入 LifeModel，正在核对当前理解、审核决定与应用结果。");
+      void durable.load(false);
     } else {
       setAnnouncement(`“${unavailableCopy[next].title}”，当前没有替代数据或重定向。`);
     }
@@ -569,6 +599,9 @@ export function ReadOnlySpineJourney({
     if (activeSurface === "review" && governedActionDataSource) {
       return reviewContext(governed.snapshot, governed.selectedItem);
     }
+    if (activeSurface === "life-model" && durableTruthDataSource) {
+      return durableTruthContext(durable.snapshot, durable.selectedItem);
+    }
     return {
       eyebrow: "桌面工作台",
       title: unavailableCopy[activeSurface].title,
@@ -577,6 +610,9 @@ export function ReadOnlySpineJourney({
   }, [
     activeSettingsId,
     activeSurface,
+    durable.selectedItem,
+    durable.snapshot,
+    durableTruthDataSource,
     effectiveTasksSnapshot.envelope,
     governed.selectedItem,
     governed.snapshot,
@@ -599,10 +635,16 @@ export function ReadOnlySpineJourney({
     if (activeSurface === "review" && governedActionDataSource) {
       return reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
     }
+    if (activeSurface === "life-model" && durableTruthDataSource) {
+      return durableTruthInspector(durable.snapshot, durable.selectedItem, selectedEvidence);
+    }
     return unavailableInspector(unavailableCopy[activeSurface].title);
   }, [
     activeSettingsId,
     activeSurface,
+    durable.selectedItem,
+    durable.snapshot,
+    durableTruthDataSource,
     mode,
     selectedEvidence,
     effectiveSelectedTask,
@@ -626,6 +668,7 @@ export function ReadOnlySpineJourney({
   }
 
   function openReviewItem(item: ReviewItem): void {
+    setReviewReturnSurface(activeSurface === "life-model" ? "life-model" : "workspace");
     governed.selectReviewItem(item);
     setMode("product");
     setActiveSurface("review");
@@ -633,6 +676,7 @@ export function ReadOnlySpineJourney({
     setSelectedEvidence("");
     requestFocus(`review-${item.id}`);
     setAnnouncement(`已打开“${item.decisionContext.title}”；查看没有记录任何决定。`);
+    if (!governed.snapshot && governedActionDataSource) void governed.load(false);
   }
 
   function openEvidence(evidence: WorkbenchEvidenceReference): void {
@@ -709,7 +753,24 @@ export function ReadOnlySpineJourney({
         onRequestAction={governed.requestReviewAction}
         onConfirmAction={governed.confirmReviewAction}
         onCancelConfirmation={governed.cancelReviewConfirmation}
-        onBackWorkspace={() => navigateProduct("workspace")}
+        backLabel={reviewReturnSurface === "life-model" ? "返回 LifeModel" : undefined}
+        onBackWorkspace={() => navigateProduct(reviewReturnSurface)}
+        onOpenInspector={openInspector}
+      />
+    );
+  } else if (activeSurface === "life-model" && durableTruthDataSource) {
+    content = (
+      <DurableTruthView
+        snapshot={durable.snapshot}
+        selectedItem={durable.selectedItem}
+        refreshing={durable.refreshing}
+        onRefresh={() => void durable.load(true)}
+        onSelectItem={item => {
+          durable.selectItem(item);
+          setSelectedEvidence("");
+          setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
+        }}
+        onOpenReview={openReviewItem}
         onOpenInspector={openInspector}
       />
     );
