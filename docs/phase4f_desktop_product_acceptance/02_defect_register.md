@@ -89,28 +89,60 @@ Date: 2026-07-21
 
 ## D-006: Interactive Credential Access Did Not Survive Restart
 
-- Severity: `P0` acceptance and packaging blocker.
+- Severity: `P0` for durable-journey acceptance. It does not block frontend
+  layout and read-only product work.
 - Native symptom: credential recovery returned all four purposes as
-  `available`, but a complete restart returned to Safe Mode with
+  `available`, but both a complete packaged-app restart and two clean
+  `make dev` launches returned to Safe Mode with
   `AgentRun receipt key is unavailable; AgentRun persistence is disabled`.
 - Source boundary:
   - recovery uses interactive `KeyringSecretStore` and can prove only the
     current credential read;
   - bootstrap uses bounded, non-interactive `StartupKeyringSecretStore`;
   - therefore an interactive `available` result is not restart proof.
-- Signing evidence: the AgentRun Keychain decrypt ACL still referenced the
+- Identity evidence: the AgentRun Keychain decrypt ACL still referenced the
   removed `open-life-backend-d050` executable and cdhash
   `05d890fc52f483d90744b8019b72ad2362e2dde6`. The tested bundle is ad-hoc
   signed with cdhash `b00d8e9c8edb21a674a1138189deb957a83a3579`, which was not added to that
   ACL after the authorized recovery attempt. The final copy-only rebuild has
   cdhash `9b021cbef41385690df6140c3e103bfb112fe5b0`, demonstrating that another
   unsigned debug rebuild changes identity again rather than repairing the ACL.
+  The current `make dev` binary is also ad-hoc signed, identifies as
+  `openlife_tauri-4e33bcd58dc68447`, and has cdhash
+  `2b5256b69515c0325ad30c7736e591d588b401b8`.
 - Safety result: the backend remained in Safe Mode; the frontend did not infer
   recovery from the command report.
 - Bounded frontend repair: replace "ready" claims with "available in this
   check" and continue requiring restart proof.
-- Required remediation before green credit: validate recovery from a stable
-  signed package identity and decide whether the backend recovery contract
-  needs an explicit transient-access state. Do not rotate or delete keys beside
-  canonical data to make the test pass.
+- Current scope decision: Developer ID signing and notarization are deferred;
+  they are not prerequisites for continuing frontend product development.
+  Green credit for durable journeys still requires a development-safe identity
+  or explicit persistent ACL recovery, followed by a fresh process proof. A
+  formal Developer ID is only one future release option, not the required local
+  development solution.
+- Safety boundary: do not rotate or delete keys beside canonical data to make
+  the test pass. The `make dev` recheck did not mutate Keychain ACLs or key
+  material.
 - Rust/backend behavior changed in Phase 4F: `NO`.
+
+## D-007: Dev Profile Isolation Stops Before The Credential Namespace
+
+- Severity: `P1` development isolation defect; release migration risk remains
+  unassessed.
+- Evidence: filesystem storage separates `release`, `dev`, and `qa` profiles,
+  but `src-tauri/src/secret_store.rs` hard-codes the same
+  `com.openlife.desktop` service and `keychain://com.openlife.desktop/...`
+  references for every profile. `tauri.dev.conf.json` does not provide a
+  separate credential identity.
+- Observed impact: the shared Keychain items currently trust an executable from
+  a removed worktree, so current dev and packaged processes can both fail
+  against credentials attached to otherwise separate data directories.
+- Non-claim: the checked-in ignored real-Keychain unit test uses a random MCP
+  account and cleans it up. The current source does not prove which historical
+  command created the four retained authority keys, so that origin remains
+  `UNKNOWN`.
+- Required repair slice: design profile-scoped credential ownership and an
+  explicit, non-rotating migration for existing canonical stores; add tests
+  proving test binaries cannot claim product credential slots. Do not fold this
+  migration into the Phase 4F frontend PR without a separate backend review.
+- Status: `OPEN`, deliberately not repaired in this frontend acceptance branch.

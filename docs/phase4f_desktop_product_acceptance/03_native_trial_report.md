@@ -15,6 +15,14 @@ The final rebuilt artifact is ad-hoc signed with cdhash
 `9b021cbef41385690df6140c3e103bfb112fe5b0`; it launches successfully and
 continues to consume the fail-closed backend Safe Mode projection.
 
+The canonical development entry was then checked separately. The first
+invocation correctly rejected an inherited custom `OPENLIFE_DATA_DIR`; after
+that variable was removed, `make dev` used `OPENLIFE_PROFILE=dev` and
+`~/Library/Application Support/ai.openlife.app.dev`. Two complete launches
+both returned to the same backend Safe Mode. This proves the unresolved
+credential boundary is not limited to the packaged artifact. It does not prove
+that formal distribution signing is required for current product development.
+
 No real provider credential was entered. No provider test, network request,
 settings save, review decision, or durable write was executed. The internal
 credential recovery command was executed only after explicit user approval;
@@ -51,6 +59,9 @@ the frontend received metadata statuses and no key material.
 - After a complete restart, the backend still reported the AgentRun receipt
   key unavailable. The UI remained fail-closed and did not treat the recovery
   report as durable proof.
+- A separate `make dev` launch and full relaunch reproduced the same Safe Mode
+  result while retaining the isolated dev filesystem profile. No Keychain ACL,
+  credential value, or canonical database was modified during that recheck.
 
 ## Journey Credit
 
@@ -62,7 +73,7 @@ the frontend received metadata statuses and no key material.
 | permission -> review -> refresh -> resume | `BLOCKED` | isolated backend had no exact pending permission ReviewItem/task pair |
 | proposal -> decision -> application | `BLOCKED` | Safe Mode blocked Builder start and no exact durable proposal existed |
 | provider test -> save -> boundary refresh | `BLOCKED` | no test credential or authorized external transmission was supplied |
-| credential recovery -> restart -> recheck | `FAILED_FAIL_CLOSED` | interactive reads succeeded, but the old Keychain ACL did not authorize the current ad-hoc bundle on non-interactive restart |
+| credential recovery -> restart -> recheck | `FAILED_FAIL_CLOSED` | interactive reads succeeded, but the old Keychain ACL authorized neither the current ad-hoc bundle nor the current `make dev` binary on non-interactive restart |
 
 Blocked journeys are not credited from fixtures or Rust unit tests.
 
@@ -84,9 +95,11 @@ Blocked journeys are not credited from fixtures or Rust unit tests.
 - `artifacts/14-native-persistent-credential-authorization.png` (authorized
   attempt before the result-copy correction)
 - `artifacts/15-native-restart-safe-mode-persists.png`
+- `artifacts/16-make-dev-restart-safe-mode-persists.png`
 
 Images 01-12 and 14-15 are `1228x768`; the focused report capture 13 is
-`598x374`. Screenshots contain no entered credential or secret material.
+`598x374`, and the `make dev` evidence capture 16 is `445x278`. Screenshots
+contain no entered credential or secret material.
 
 `REAL_TAURI_SHELL=PASS`
 
@@ -99,3 +112,7 @@ Images 01-12 and 14-15 are `1228x768`; the focused report capture 13 is
 `REAL_TAURI_EXTERNAL_PROVIDER_E2E=BLOCKED`
 
 `REAL_TAURI_CREDENTIAL_RECOVERY_E2E=FAILED_FAIL_CLOSED`
+
+`MAKE_DEV_ENTRY=PASS_WITH_SAFE_MODE`
+
+`DEVELOPER_ID_REQUIRED_FOR_CURRENT_FRONTEND_DEVELOPMENT=NO`

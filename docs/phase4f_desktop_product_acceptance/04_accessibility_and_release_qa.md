@@ -89,3 +89,13 @@ CodeRabbit CLI was unavailable in the local environment. A local changed-file
 review was completed instead. It found and repaired the missing Product Action
 Contract for credential recovery, including mutual exclusion with settings
 test/save operations; the final full gates above include that repair.
+
+## Signing Scope
+
+Developer ID signing and notarization are deferred release work. They are not
+part of the current frontend product-development gate. The unresolved issue is
+narrower and already reproducible in `make dev`: existing macOS Keychain ACLs
+do not authorize the current ad-hoc development executable during bounded,
+non-interactive startup. Read-only and fail-closed UI work can continue, but a
+real durable-write journey cannot receive green credit until a local
+development-safe credential path passes a full process restart.
