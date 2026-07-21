@@ -22,9 +22,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
     await user.click(screen.getByRole("button", { name: "查看待决定建议" }));
 
-    expect(
-      screen.getByRole("heading", { name: "审核状态源不可用", level: 1 })
-    ).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "审核状态源不可用", level: 1 })).toHaveFocus();
     expect(screen.getByRole("button", { name: /^审核中心\s+建议与权限决定/ })).toHaveAttribute(
       "aria-current",
       "page"
@@ -152,9 +150,7 @@ describe("Phase 4D desktop read-only journey", () => {
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(screen.getByRole("navigation", { name: "设置分类" })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "产品区域" })).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "模型与供应商暂不可用", level: 1 })
-    ).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "模型与供应商暂不可用", level: 1 })).toHaveFocus();
 
     await user.type(screen.getByRole("searchbox", { name: "搜索设置" }), "API 凭据");
     expect(screen.getByRole("status")).toHaveTextContent("找到 1 个设置分类");
