@@ -112,12 +112,14 @@ Date: 2026-07-21
   removed `open-life-backend-d050` executable and cdhash
   `05d890fc52f483d90744b8019b72ad2362e2dde6`. The tested bundle is ad-hoc
   signed with cdhash `b00d8e9c8edb21a674a1138189deb957a83a3579`, which was not added to that
-  ACL after the authorized recovery attempt. The final copy-only rebuild has
-  cdhash `9b021cbef41385690df6140c3e103bfb112fe5b0`, demonstrating that another
-  unsigned debug rebuild changes identity again rather than repairing the ACL.
-  The current `make dev` binary is also ad-hoc signed, identifies as
+  ACL after the authorized recovery attempt. A later pre-review copy-only
+  rebuild had cdhash `9b021cbef41385690df6140c3e103bfb112fe5b0`,
+  demonstrating that another unsigned debug rebuild changes identity again
+  rather than repairing the ACL.
+  The recorded `make dev` binary was also ad-hoc signed, identified as
   `openlife_tauri-4e33bcd58dc68447`, and has cdhash
-  `2b5256b69515c0325ad30c7736e591d588b401b8`.
+  `2b5256b69515c0325ad30c7736e591d588b401b8`. All four values in this paragraph
+  are historical trial identities, not current-artifact identities.
 - Safety result: the backend remained in Safe Mode; the frontend did not infer
   recovery from the command report.
 - Evidence status: `HISTORICAL-EVIDENCE` from the rejected recovery UI attempt;
@@ -163,6 +165,57 @@ Date: 2026-07-21
 - Repair: when the saved revision is not attested, return an explicit unknown
   envelope rather than reuse the envelope.
 - Evidence: regression test with a ready envelope plus missing refreshed config.
+
+## D-011: Settings Lifecycle Could Overwrite Announcements And Dirty Drafts
+
+- Severity: `P1`.
+- Root causes:
+  - Settings entry forced a backend reload on every re-entry;
+  - a dirty draft could therefore be replaced by the stored config while the
+    reducer still reported unsaved changes;
+  - changing callback identity under StrictMode could also replace terminal
+    load/save announcements with a new pending announcement.
+- Repair:
+  - use a stable cold-entry loader that reuses an existing snapshot;
+  - make cold entry and explicit reload share one active read promise;
+  - invalidate old requests and every test/save/retry continuation with a data
+    source generation token;
+  - prevent an old continuation from releasing a replacement-source operation
+    lock;
+  - cancel route announcements when leaving Settings;
+  - retain an unsaved draft without a read or write when returning.
+- Evidence: StrictMode cold-route, slow-load return, dirty re-entry, concurrent
+  load, explicit-reload re-entry, data-source replacement, and in-flight
+  test/save/retry replacement regression tests.
+
+## D-012: Loading Or Missing LifeStateProjection Could Leak Old Certainty
+
+- Severity: `P1` for fail-closed product truth.
+- Root cause: the Settings surface could continue interpreting an old ready
+  config/boundary while a refresh was in flight, and it did not independently
+  gate actions when the current LifeStateProjection was missing.
+- Repair: treat loading, active Safe Mode, and unknown protection state as
+  separate fail-closed states; disable fields, test, and save; replace the
+  boundary and Inspector conclusion with loading/unknown evidence.
+- Evidence: loading-lock, missing-projection, and active-Safe-Mode regression
+  tests.
+
+## D-013: Post-Save Readback Was Not An Exact Configuration Attestation
+
+- Severity: `P1`.
+- Root cause: a ready envelope and non-null config were insufficient to prove
+  that the readback represented the exact submitted settings revision. A failed
+  boundary refresh also had no bounded retry path.
+- Repair:
+  - retain the previous and submitted sanitized config as an in-memory
+    attestation only for the current save attempt;
+  - require exact canonical config equality plus the single expected credential
+    generation before accepting the refreshed boundary;
+  - keep unknown on mismatch and expose a read-only retry that reuses the same
+    attestation;
+  - never convert a command return into durable completion by itself.
+- Evidence: exact-match, stale credential generation, missing projection,
+  retry-success, and retry-still-unknown regression tests.
 
 ## D-007: Dev Profile Isolation Stops Before The Credential Namespace
 

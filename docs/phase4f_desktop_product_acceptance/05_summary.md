@@ -16,10 +16,16 @@ Date: 2026-07-21
 - Repaired structured Tauri error handling and stale route live-region copy.
 - Repaired direct `/settings` cold-route loading, task `remote_unknown`
   presentation, and post-save boundary fail-closed selection.
+- Closed the follow-up Settings review blockers: exact post-save config
+  attestation, bounded boundary-refresh retry, Projection-aware fail-closed
+  state, loading locks, stable announcements, and dirty-draft re-entry.
+- Prepared a SHA-bound evidence row for the final native Settings rebuild;
+  code review alone does not populate or inherit that artifact credit.
 - Captured native route, Inspector, Settings, dialog, defect, and repair
   evidence without provider credentials or secret material.
-- Passed the complete local frontend, Rust authority, production absence,
-  formatting, type, and diff gate set.
+- Passed the complete committed-source frontend suite (37 files, 286 tests),
+  production build/absence guard, formatting, type, and diff checks. Rust and
+  cross-platform CI remain required on the final PR head before merge.
 - Preserved the rejected recovery attempt and failed-restart evidence as
   historical trial evidence; it is not current product credit.
 - Rechecked the canonical `make dev` entry twice with its isolated dev data

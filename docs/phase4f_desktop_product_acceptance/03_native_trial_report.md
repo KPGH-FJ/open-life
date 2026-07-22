@@ -13,15 +13,19 @@ unknown/stale/error state.
 
 ## 2026-07-22 Review-Repair Recheck
 
-After the independent findings were repaired, the production frontend was
-rebuilt into `target/debug/bundle/macos/OpenLife.app` and launched with a fresh
-temporary QA data directory. The current `/settings` route rendered the
-sanitized configuration, focused `模型与供应商`, retained unknown transmission
-and Safe Mode, and exposed no credential-recovery button. Provider test and
-save remained disabled. No credential command, provider request, save, review
-decision, or durable user-data action was executed. The temporary QA directory
-was moved to Trash after the app exited; release/dev application data was not
-touched.
+The final review-repair source is committed. Its replacement native artifact
+and `/settings` observation must be rebuilt from a clean checkout before the
+current row below can receive credit. The earlier `af4ba87` / `d54a130e...`
+recheck is retained as intermediate historical evidence only because a later
+async-generation repair changed the frontend source.
+
+| Source SHA | Binary SHA-256 | Root executable identity | Verification | Native observation | Credit |
+| --- | --- | --- | --- | --- | --- |
+| `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` |
+
+The final rebuild will use `--no-sign` intentionally and will record root
+executable verification separately from copied executable and app-bundle
+resource-seal verification. No intermediate artifact credit is inherited.
 
 ## Runtime Boundary
 
@@ -31,9 +35,9 @@ The production-config debug bundle was built and launched from
 the shipped Tauri entry and canonical routes; no Vite harness, fixture selector,
 preview route, old page, or mobile surface was used.
 
-The final rebuilt artifact is ad-hoc signed with cdhash
-`9b021cbef41385690df6140c3e103bfb112fe5b0`; it launches successfully and
-continues to consume the fail-closed backend Safe Mode projection.
+The earlier pre-review rebuild had cdhash
+`9b021cbef41385690df6140c3e103bfb112fe5b0`. It remains historical identity
+evidence only and is not the artifact credited by the review-repair recheck.
 
 The canonical development entry was then checked separately. The first
 invocation correctly rejected an inherited custom `OPENLIFE_DATA_DIR`; after
@@ -88,8 +92,9 @@ the frontend received metadata statuses and no key material.
 
 | Journey | Result | Reason |
 | --- | --- | --- |
-| Shell and canonical routes | `PASS_AT_RECORDED_SHA` | packaged production Tauri UI exercised; later review changes require a fresh smoke |
-| stale/unknown/error fail-closed | `PASS_FOR_OBSERVED_CASES` | observed on Today, Workspace, Tasks, LifeModel, and Settings; not exhaustive |
+| Shell and canonical routes | `HISTORICAL_PASS_AT_RECORDED_SHA` | the broad six-route walk belonged to the pre-review artifact |
+| stale/unknown/error fail-closed | `HISTORICAL_PASS_FOR_OBSERVED_CASES` | observed broadly in the original trial; not exhaustive and not inherited by a newer SHA |
+| Current reviewed Settings | `PENDING_FINAL_REBUILD` | code review is green; final native artifact and observation are not yet credited |
 | approved versus applied | `PASS_AT_PRESENTATION_BOUNDARY` | empty-state and automated lifecycle tests preserve separation; no real approved item existed |
 | permission -> review -> refresh -> resume | `BLOCKED` | isolated backend had no exact pending permission ReviewItem/task pair |
 | proposal -> decision -> application | `BLOCKED` | Safe Mode blocked Builder start and no exact durable proposal existed |
@@ -122,9 +127,9 @@ Images 01-12 and 14-15 are `1228x768`; the focused report capture 13 is
 `598x374`, and the `make dev` evidence capture 16 is `445x278`. Screenshots
 contain no entered credential or secret material.
 
-`REAL_TAURI_SHELL=PASS`
+`REAL_TAURI_SHELL=HISTORICAL_PASS_AT_RECORDED_SHA`
 
-`REAL_TAURI_FAIL_CLOSED=PASS`
+`REAL_TAURI_FAIL_CLOSED=HISTORICAL_PASS_FOR_OBSERVED_CASES`
 
 `REAL_TAURI_GOVERNED_ACTION_E2E=BLOCKED`
 
@@ -134,7 +139,11 @@ contain no entered credential or secret material.
 
 `REAL_TAURI_CREDENTIAL_RECOVERY_E2E=HISTORICAL_FAILED_FAIL_CLOSED`
 
-`CURRENT_REVIEWED_TAURI_SETTINGS=PASS`
+`CURRENT_REVIEWED_TAURI_SETTINGS=PENDING_FINAL_REBUILD`
+
+`CURRENT_REVIEWED_ROOT_EXECUTABLE_ADHOC_VERIFY=PENDING_FINAL_REBUILD`
+
+`CURRENT_REVIEWED_APP_BUNDLE_STRICT_VERIFY=PENDING_FINAL_REBUILD`
 
 `CURRENT_REVIEWED_CREDENTIAL_RECOVERY_ACTION=ABSENT_FAIL_CLOSED`
 
