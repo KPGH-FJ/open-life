@@ -13,19 +13,27 @@ unknown/stale/error state.
 
 ## 2026-07-22 Review-Repair Recheck
 
-The final review-repair source is committed. Its replacement native artifact
-and `/settings` observation must be rebuilt from a clean checkout before the
-current row below can receive credit. The earlier `af4ba87` / `d54a130e...`
-recheck is retained as intermediate historical evidence only because a later
-async-generation repair changed the frontend source.
+Clean source `a278f199b96b32fd941541253029e9d4ab362726` was rebuilt into
+`target/debug/bundle/macos/OpenLife.app` and launched in the foreground with a
+fresh temporary QA data directory. The `/settings` route rendered the sanitized
+configuration, focused `模型与供应商`, retained unknown transmission and Safe
+Mode, and exposed no credential-recovery button. Provider test and save remained
+disabled. The process was checked before and after the UI observation as the
+same PID, QA profile, isolated data directory, and bundled executable hash. The
+earlier `af4ba87` / `d54a130e...` recheck remains intermediate historical
+evidence only.
 
 | Source SHA | Binary SHA-256 | Root executable identity | Verification | Native observation | Credit |
 | --- | --- | --- | --- | --- | --- |
-| `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` | `PENDING_FINAL_REBUILD` |
+| `a278f199b96b32fd941541253029e9d4ab362726` | `aaab9b3580b0041c85d6c9ff69d5898e00dae4d201ea18ac21f67f3830ad4f0a` | ad-hoc; CDHash `9e6046ff1bfa36a0c397eab90e6f907d619ce43a`; identifier `openlife_tauri-ed5917cd8eac010b` | root executable: `PASS`; identical bundled executable: `FAIL_RESOURCE_SEAL`; app bundle `--deep --strict`: `FAIL_RESOURCE_SEAL` | `/today` opened fail-closed; `/settings` rendered, focused correctly, kept boundary unknown, omitted recovery, and disabled test/save | `SETTINGS_ONLY_PASS_AT_EXACT_ARTIFACT` |
 
-The final rebuild will use `--no-sign` intentionally and will record root
-executable verification separately from copied executable and app-bundle
-resource-seal verification. No intermediate artifact credit is inherited.
+`--no-sign` was used intentionally. The root debug executable has a valid
+ad-hoc signature, but neither the identical executable copied into the bundle
+nor the whole app bundle passes strict resource-seal verification. This is
+launch evidence for the exact local artifact, not distribution-signing credit.
+No credential command, provider request, save, review decision, or durable
+user-data action was executed. The temporary QA directory was moved to Trash
+after the app exited; release/dev application data was not touched.
 
 ## Runtime Boundary
 
@@ -39,18 +47,21 @@ The earlier pre-review rebuild had cdhash
 `9b021cbef41385690df6140c3e103bfb112fe5b0`. It remains historical identity
 evidence only and is not the artifact credited by the review-repair recheck.
 
-The canonical development entry was then checked separately. The first
-invocation correctly rejected an inherited custom `OPENLIFE_DATA_DIR`; after
-that variable was removed, `make dev` used `OPENLIFE_PROFILE=dev` and
+Historical pre-review runtime evidence: the canonical development entry was
+checked separately during the original trial. The first invocation correctly
+rejected an inherited custom `OPENLIFE_DATA_DIR`; after that variable was
+removed, `make dev` used `OPENLIFE_PROFILE=dev` and
 `~/Library/Application Support/ai.openlife.app.dev`. Two complete launches
-both returned to the same backend Safe Mode. This proves the unresolved
-credential boundary is not limited to the packaged artifact. It does not prove
-that formal distribution signing is required for current product development.
+both returned to the same backend Safe Mode. This is evidence for those
+recorded identities only; it is not inherited by the current `a278f19`
+artifact. It also does not prove that formal distribution signing is required
+for current product development.
 
-No real provider credential was entered. No provider test, network request,
-settings save, review decision, or durable write was executed. The internal
-credential recovery command was executed only after explicit user approval;
-the frontend received metadata statuses and no key material.
+During that historical attempt, no real provider credential was entered and no
+provider test, network request, settings save, review decision, or durable write
+was executed. The internal credential recovery command was executed only after
+explicit user approval; the frontend received metadata statuses and no key
+material.
 
 ## Route Results
 
@@ -94,7 +105,7 @@ the frontend received metadata statuses and no key material.
 | --- | --- | --- |
 | Shell and canonical routes | `HISTORICAL_PASS_AT_RECORDED_SHA` | the broad six-route walk belonged to the pre-review artifact |
 | stale/unknown/error fail-closed | `HISTORICAL_PASS_FOR_OBSERVED_CASES` | observed broadly in the original trial; not exhaustive and not inherited by a newer SHA |
-| Current reviewed Settings | `PENDING_FINAL_REBUILD` | code review is green; final native artifact and observation are not yet credited |
+| Current reviewed Settings | `PASS_AT_A278F19_AAAB9B35_ARTIFACT` | exact current artifact opened Today and Settings; Settings stayed fail-closed with the reviewed controls |
 | approved versus applied | `PASS_AT_PRESENTATION_BOUNDARY` | empty-state and automated lifecycle tests preserve separation; no real approved item existed |
 | permission -> review -> refresh -> resume | `BLOCKED` | isolated backend had no exact pending permission ReviewItem/task pair |
 | proposal -> decision -> application | `BLOCKED` | Safe Mode blocked Builder start and no exact durable proposal existed |
@@ -139,14 +150,14 @@ contain no entered credential or secret material.
 
 `REAL_TAURI_CREDENTIAL_RECOVERY_E2E=HISTORICAL_FAILED_FAIL_CLOSED`
 
-`CURRENT_REVIEWED_TAURI_SETTINGS=PENDING_FINAL_REBUILD`
+`CURRENT_REVIEWED_TAURI_SETTINGS=PASS_AT_A278F19_AAAB9B35_ARTIFACT`
 
-`CURRENT_REVIEWED_ROOT_EXECUTABLE_ADHOC_VERIFY=PENDING_FINAL_REBUILD`
+`CURRENT_REVIEWED_ROOT_EXECUTABLE_ADHOC_VERIFY=PASS`
 
-`CURRENT_REVIEWED_APP_BUNDLE_STRICT_VERIFY=PENDING_FINAL_REBUILD`
+`CURRENT_REVIEWED_APP_BUNDLE_STRICT_VERIFY=FAIL_RESOURCE_SEAL`
 
 `CURRENT_REVIEWED_CREDENTIAL_RECOVERY_ACTION=ABSENT_FAIL_CLOSED`
 
-`MAKE_DEV_ENTRY=PASS_WITH_SAFE_MODE`
+`MAKE_DEV_ENTRY=HISTORICAL_PASS_AT_RECORDED_SHA`
 
 `DEVELOPER_ID_REQUIRED_FOR_CURRENT_FRONTEND_DEVELOPMENT=NO`

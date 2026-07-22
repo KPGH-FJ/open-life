@@ -19,8 +19,13 @@ Date: 2026-07-21
 - Closed the follow-up Settings review blockers: exact post-save config
   attestation, bounded boundary-refresh retry, Projection-aware fail-closed
   state, loading locks, stable announcements, and dirty-draft re-entry.
-- Prepared a SHA-bound evidence row for the final native Settings rebuild;
-  code review alone does not populate or inherit that artifact credit.
+- Bound the current native Settings observation to clean source
+  `a278f199b96b32fd941541253029e9d4ab362726`, binary SHA-256
+  `aaab9b3580b0041c85d6c9ff69d5898e00dae4d201ea18ac21f67f3830ad4f0a`,
+  and CDHash `9e6046ff1bfa36a0c397eab90e6f907d619ce43a`.
+- Recorded that the root ad-hoc executable verifies while the identical copied
+  executable and app bundle fail strict resource-seal verification; no release
+  signing credit is claimed.
 - Captured native route, Inspector, Settings, dialog, defect, and repair
   evidence without provider credentials or secret material.
 - Passed the complete committed-source frontend suite (37 files, 286 tests),
@@ -28,18 +33,19 @@ Date: 2026-07-21
   cross-platform CI remain required on the final PR head before merge.
 - Preserved the rejected recovery attempt and failed-restart evidence as
   historical trial evidence; it is not current product credit.
-- Rechecked the canonical `make dev` entry twice with its isolated dev data
-  profile and reproduced the same fail-closed credential boundary. This
-  separates the current product-development blocker from future Developer ID
-  distribution work.
+- In the original historical trial, rechecked the canonical `make dev` entry
+  twice with its isolated dev data profile and reproduced the same fail-closed
+  credential boundary. That observation belongs to the recorded pre-review
+  identities and is not current `a278f19` artifact credit.
 
 ## Not Yet Credited
 
 - Credential recovery restart proof failed because the existing Keychain ACL
-  remained bound to an old worktree executable rather than the current ad-hoc
-  bundle or `make dev` identities. A development-safe credential identity or
-  explicit persistent ACL recovery is required for durable-journey credit;
-  formal Developer ID signing and notarization are deferred.
+  remained bound to an old worktree executable rather than the identities used
+  by the historical bundle and `make dev` restart trial. A development-safe
+  credential identity or explicit persistent ACL recovery is required for
+  durable-journey credit; formal Developer ID signing and notarization are
+  deferred.
 - The current backend product projection does not expose exact credential
   recovery eligibility/cause. The UI must remain unavailable until that
   authority exists; generic Safe Mode and free-text reasons are insufficient.

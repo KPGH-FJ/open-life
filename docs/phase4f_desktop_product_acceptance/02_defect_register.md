@@ -144,8 +144,9 @@ Date: 2026-07-21
   click handlers called `settingsPrivacy.ensureLoaded()`.
 - Repair: the journey now loads the exact Settings data source on a canonical
   Settings cold route and announces the Settings context.
-- Evidence: a non-mocked journey regression test proves one initial backend
-  read and a rendered `模型与传输边界` surface.
+- Evidence: a journey-level regression test proves that the canonical cold
+  route reads the supplied Settings data source and renders the
+  `模型与传输边界` surface.
 
 ## D-009: Task `remote_unknown` Was Missing From The Frontend Contract
 
