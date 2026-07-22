@@ -35,7 +35,9 @@ export function SettingsPrivacyView({
 }) {
   const draft = controller.draft;
   const boundary = boundaryPresentation(controller.effectiveBoundaryEnvelope);
-  const busy = ["testing", "saving", "refreshing_boundary"].includes(controller.state.phase);
+  const busy =
+    controller.loading ||
+    ["testing", "saving", "refreshing_boundary"].includes(controller.state.phase);
   const testTarget = settingsTestConfirmationTarget(controller);
 
   if (!controller.snapshot && controller.loading) {
@@ -401,12 +403,18 @@ export function SettingsPrivacyView({
 }
 
 function SafeModeNotice({ controller }: { controller: SettingsPrivacyJourneyController }) {
-  if (!controller.snapshot?.safeMode?.active) return null;
+  if (controller.protectionState === "normal" || controller.protectionState === "loading") {
+    return null;
+  }
+
+  const active = controller.protectionState === "active";
 
   return (
-    <FoundationNotice title="安全模式保持生效" tone="protection" live>
+    <FoundationNotice title={active ? "安全模式保持生效" : "保护状态未知"} tone="protection" live>
       <p>
-        后端报告了保护状态；长期写入继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。
+        {active
+          ? "后端报告了保护状态；连接测试与设置保存继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。"
+          : "LifeStateProjection 没有提供可核对的保护状态；连接测试、设置保存和本地确定态全部保持关闭。"}
       </p>
     </FoundationNotice>
   );
@@ -468,6 +476,10 @@ function SettingsActions({
   showTest?: boolean;
 }) {
   const { test, save } = controller.actions;
+  const canRetryBoundary =
+    controller.state.phase === "unknown" &&
+    controller.state.failureStage === "boundary_refresh" &&
+    !controller.state.boundaryAppliesToSavedRevision;
   return (
     <section className="ol-settings-actions" aria-label="设置动作">
       <div>
@@ -475,6 +487,14 @@ function SettingsActions({
         <p>测试与保存互不替代；保存后必须重新读取模型传输边界。</p>
       </div>
       <div className="ol-settings-actions__buttons">
+        {canRetryBoundary && (
+          <FoundationActionButton
+            label="重新读取保存结果"
+            variant="secondary"
+            icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+            onClick={controller.retryBoundaryRefresh}
+          />
+        )}
         {showTest && (
           <FoundationActionButton
             label={test.label}

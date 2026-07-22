@@ -1,4 +1,5 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { phase4dFixtureDataSource } from "@/dev/phase4d/phase4d-fixtures";
@@ -179,24 +180,108 @@ describe("Phase 4D desktop read-only journey", () => {
   });
 
   it("loads the real settings journey when settings is the initial canonical route", async () => {
+    const user = userEvent.setup();
     const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
     const loadSettingsPrivacy = vi.fn(settingsFixture.dataSource.loadSettingsPrivacy);
-    render(
-      <ReadOnlySpineJourney
-        dataSource={phase4dFixtureDataSource("fixture-ready")}
-        settingsPrivacyDataSource={{
-          ...settingsFixture.dataSource,
-          loadSettingsPrivacy,
-        }}
-        initialMode="settings"
-      />
+    const { container } = render(
+      <StrictMode>
+        <ReadOnlySpineJourney
+          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          settingsPrivacyDataSource={{
+            ...settingsFixture.dataSource,
+            loadSettingsPrivacy,
+          }}
+          initialMode="settings"
+        />
+      </StrictMode>
     );
 
-    await waitFor(() => expect(loadSettingsPrivacy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2));
     expect(
       await screen.findByRole("heading", { name: "模型与传输边界", level: 2 })
     ).toBeInTheDocument();
     expect(screen.queryByText("设置暂不可用")).not.toBeInTheDocument();
+
+    const liveRegion = container.querySelector(".ol-sr-only[aria-live='polite']");
+    await waitFor(() => expect(liveRegion).toHaveTextContent("设置与模型传输边界已从后端读取"));
+    expect(liveRegion).not.toHaveTextContent("正在核对清理后的配置");
+
+    const modelInput = screen.getByRole("textbox", { name: "模型" });
+    await user.clear(modelInput);
+    await user.type(modelInput, "qwen2.5:32b");
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() =>
+      expect(liveRegion).toHaveTextContent("保存后的配置与模型传输边界已经由后端重新确认")
+    );
+    expect(liveRegion).not.toHaveTextContent("正在核对清理后的配置");
+  });
+
+  it("does not let a slow settings load overwrite the announcement after returning", async () => {
+    const user = userEvent.setup();
+    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const loadedSnapshot = await settingsFixture.dataSource.loadSettingsPrivacy();
+    let finishLoad: (value: typeof loadedSnapshot) => void = () => undefined;
+    const delayedSnapshot = new Promise<typeof loadedSnapshot>(resolve => {
+      finishLoad = resolve;
+    });
+    const loadSettingsPrivacy = vi.fn(() => delayedSnapshot);
+    const { container } = render(
+      <StrictMode>
+        <ReadOnlySpineJourney
+          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          settingsPrivacyDataSource={{
+            ...settingsFixture.dataSource,
+            loadSettingsPrivacy,
+          }}
+          initialMode="settings"
+        />
+      </StrictMode>
+    );
+
+    await waitFor(() => expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "返回工作台" }));
+    const liveRegion = container.querySelector(".ol-sr-only[aria-live='polite']");
+    expect(liveRegion).toHaveTextContent("已返回之前的产品工作区");
+
+    await act(async () => {
+      finishLoad(loadedSnapshot);
+      await delayedSnapshot;
+    });
+    expect(liveRegion).toHaveTextContent("已返回之前的产品工作区");
+    expect(liveRegion).not.toHaveTextContent("设置与模型传输边界已从后端读取");
+  });
+
+  it("preserves an unsaved settings draft when leaving and returning", async () => {
+    const user = userEvent.setup();
+    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const loadSettingsPrivacy = vi.fn(settingsFixture.dataSource.loadSettingsPrivacy);
+    const { container } = render(
+      <StrictMode>
+        <ReadOnlySpineJourney
+          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          settingsPrivacyDataSource={{
+            ...settingsFixture.dataSource,
+            loadSettingsPrivacy,
+          }}
+          initialMode="settings"
+        />
+      </StrictMode>
+    );
+
+    await waitFor(() => expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2));
+    const modelInput = await screen.findByRole("textbox", { name: "模型" });
+    await user.clear(modelInput);
+    await user.type(modelInput, "qwen2.5:32b-unsaved");
+    expect(modelInput).toHaveValue("qwen2.5:32b-unsaved");
+
+    await user.click(screen.getByRole("button", { name: "返回工作台" }));
+    await user.click(screen.getByRole("button", { name: "设置" }));
+
+    expect(await screen.findByRole("textbox", { name: "模型" })).toHaveValue("qwen2.5:32b-unsaved");
+    expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2);
+    const liveRegion = container.querySelector(".ol-sr-only[aria-live='polite']");
+    await waitFor(() => expect(liveRegion).toHaveTextContent("未保存草稿仍保留"));
   });
 
   it("refreshes through the supplied source and restores Inspector trigger focus", async () => {

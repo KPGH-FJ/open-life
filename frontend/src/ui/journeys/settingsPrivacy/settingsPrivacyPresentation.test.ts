@@ -3,6 +3,7 @@ import type { AppConfig, LlmConnectionTestResult } from "@/tauri";
 import {
   connectionTestPresentation,
   credentialState,
+  settingsConfigMatchesSavedDraft,
   settingsProductActions,
   validateSettingsDraft,
 } from "./settingsPrivacyPresentation";
@@ -131,5 +132,53 @@ describe("settings privacy presentation", () => {
 
     expect(credentialState(sanitized)).toBe("stored");
     expect(validateSettingsDraft(sanitized).canTest).toBe(true);
+  });
+
+  it("attests the refreshed sanitized config without comparing secret material", () => {
+    const previous = config({ openai_key: "***", credential_version: 7 });
+    const submitted = config({ openai_key: "replacement-secret", credential_version: 7 });
+    const refreshed = config({ openai_key: "***", credential_version: 8 });
+
+    expect(settingsConfigMatchesSavedDraft(previous, submitted, refreshed)).toBe(true);
+    expect(
+      settingsConfigMatchesSavedDraft(previous, submitted, {
+        ...refreshed,
+        llm: { ...refreshed.llm, chat_model: "different-model" },
+      })
+    ).toBe(false);
+    expect(
+      settingsConfigMatchesSavedDraft(previous, submitted, {
+        ...refreshed,
+        llm: {
+          ...refreshed.llm,
+          openai_key: undefined,
+          openai_key_ref: undefined,
+          credential_version: 7,
+        },
+      })
+    ).toBe(false);
+
+    const storedSubmission = config({ openai_key: "***", credential_version: 7 });
+    expect(
+      settingsConfigMatchesSavedDraft(
+        previous,
+        storedSubmission,
+        config({ openai_key: "***", credential_version: 7 })
+      )
+    ).toBe(true);
+    expect(
+      settingsConfigMatchesSavedDraft(
+        previous,
+        storedSubmission,
+        config({ openai_key: "***", credential_version: 8 })
+      )
+    ).toBe(false);
+    expect(
+      settingsConfigMatchesSavedDraft(
+        config({ credential_version: undefined }),
+        config({ credential_version: undefined }),
+        config({ credential_version: 0 })
+      )
+    ).toBe(false);
   });
 });

@@ -82,6 +82,20 @@ describe("settings orchestration contract", () => {
       boundaryAppliesToSavedRevision: false,
       failureStage: "boundary_refresh",
     });
+
+    const retrying = settingsOrchestrationReducer(failed, {
+      type: "boundary_refresh_retry_requested",
+    });
+    const recovered = settingsOrchestrationReducer(retrying, {
+      type: "boundary_refreshed",
+      boundary: boundary(),
+    });
+    expect(retrying.phase).toBe("refreshing_boundary");
+    expect(recovered).toMatchObject({
+      phase: "ready",
+      boundaryAppliesToSavedRevision: true,
+      failureStage: null,
+    });
   });
 
   it("does not treat a failed connection test as a saveable state", () => {

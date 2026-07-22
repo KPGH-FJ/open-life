@@ -10,7 +10,9 @@ import { useSettingsPrivacyJourney } from "./useSettingsPrivacyJourney";
 
 function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
   const controller = useSettingsPrivacyJourney(source, vi.fn());
-  useEffect(() => controller.ensureLoaded(), [controller.ensureLoaded]);
+  useEffect(() => {
+    void controller.ensureLoaded();
+  }, [controller.ensureLoaded]);
   return (
     <SettingsPrivacyView
       controller={controller}
@@ -101,5 +103,63 @@ describe("SettingsPrivacyView", () => {
     expect(screen.getByText("设置暂不可用")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "检查系统凭据" })).not.toBeInTheDocument();
     expect(screen.getByText(/不会从自由文本原因推导/)).toBeInTheDocument();
+  });
+
+  it("shows unknown protection and closes actions when LifeStateProjection is unavailable", async () => {
+    const snapshot: SettingsPrivacySnapshot = {
+      config: {
+        llm: {
+          provider: "custom",
+          openai_base: "http://127.0.0.1:11434/v1",
+          openai_key: "***",
+          embedding_model: "nomic-embed-text",
+          chat_model: "qwen2.5:14b",
+        },
+        prefer_local_model: true,
+        local_model: "qwen2.5:14b",
+      },
+      boundaryEnvelope: {
+        data: {
+          routeType: "local",
+          externalTransmission: "not_sent",
+          providerLabel: "本机模型服务",
+          modelLabel: "qwen2.5:14b",
+          privacyLabel: "仅本机处理",
+          risk: "none",
+          localOnlyRequired: true,
+          evidenceRefs: [],
+        },
+        status: "ready",
+        lastUpdatedAt: "2026-07-22T00:00:00Z",
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
+      },
+      safeMode: null,
+      diagnostics: [
+        { id: "sanitized_config", status: "loaded" },
+        { id: "provider_privacy_boundary", status: "loaded" },
+        {
+          id: "life_state_projection",
+          status: "failed",
+          message: "projection unavailable",
+        },
+        { id: "review_item_resolution", status: "not_requested" },
+      ],
+    };
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+
+    render(<SafeModeSettings source={source} />);
+
+    expect(await screen.findByText("保护状态未知")).toBeInTheDocument();
+    expect(screen.getByText(/LifeStateProjection 没有提供可核对的保护状态/)).toBeInTheDocument();
+    expect(screen.getByText("是否外传未知")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "测试连接" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存设置" })).toBeDisabled();
   });
 });

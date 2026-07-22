@@ -10,6 +10,7 @@ import type {
   SettingsPrivacyDataSource,
   SettingsPrivacySnapshot,
 } from "./settingsPrivacyDataSource";
+import { settingsPrivacyContext, settingsPrivacyInspector } from "./settingsPrivacyShellModel";
 import { useSettingsPrivacyJourney } from "./useSettingsPrivacyJourney";
 
 function config(): AppConfig {
@@ -18,6 +19,7 @@ function config(): AppConfig {
       provider: "deepseek",
       openai_base: "https://api.deepseek.com",
       openai_key: "***",
+      credential_version: 7,
       embedding_model: "text-embedding",
       chat_model: "deepseek-chat",
     },
@@ -85,6 +87,74 @@ const verifiedResult: LlmConnectionTestResult = {
 };
 
 describe("settings privacy journey", () => {
+  it("deduplicates concurrent cold-entry loads", async () => {
+    const initialSnapshot = snapshot(config(), boundary());
+    let finishLoad: (value: SettingsPrivacySnapshot) => void = () => undefined;
+    const delayedSnapshot = new Promise<SettingsPrivacySnapshot>(resolve => {
+      finishLoad = resolve;
+    });
+    const loadSettingsPrivacy = vi.fn(() => delayedSnapshot);
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy,
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+
+    let firstLoad: ReturnType<typeof result.current.ensureLoaded> | undefined;
+    let secondLoad: ReturnType<typeof result.current.ensureLoaded> | undefined;
+    act(() => {
+      firstLoad = result.current.ensureLoaded();
+      secondLoad = result.current.ensureLoaded();
+    });
+    expect(loadSettingsPrivacy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishLoad(initialSnapshot);
+      await Promise.all([firstLoad, secondLoad]);
+    });
+    expect(result.current.snapshot).toBe(initialSnapshot);
+  });
+
+  it("invalidates a cached snapshot when the data source changes", async () => {
+    const firstConfig = config();
+    const secondConfig = {
+      ...firstConfig,
+      llm: { ...firstConfig.llm, chat_model: "replacement-source-model" },
+    };
+    const firstLoad = vi.fn().mockResolvedValue(snapshot(firstConfig, boundary()));
+    const secondLoad = vi.fn().mockResolvedValue(snapshot(secondConfig, boundary()));
+    const firstSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: firstLoad,
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const secondSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: secondLoad,
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result, rerender } = renderHook(
+      ({ source }: { source: SettingsPrivacyDataSource }) =>
+        useSettingsPrivacyJourney(source, vi.fn()),
+      { initialProps: { source: firstSource } }
+    );
+
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    expect(result.current.draft?.llm.chat_model).toBe("deepseek-chat");
+
+    rerender({ source: secondSource });
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+
+    expect(firstLoad).toHaveBeenCalledTimes(1);
+    expect(secondLoad).toHaveBeenCalledTimes(1);
+    expect(result.current.draft?.llm.chat_model).toBe("replacement-source-model");
+  });
+
   it("tests without saving and requires an explicit external-transmission confirmation", async () => {
     const saveSettings = vi.fn();
     const testProviderConnection = vi.fn().mockResolvedValue({
@@ -166,7 +236,8 @@ describe("settings privacy journey", () => {
     const loadSettingsPrivacy = vi
       .fn()
       .mockResolvedValueOnce(snapshot(original, boundary()))
-      .mockResolvedValueOnce(failedRefresh);
+      .mockResolvedValueOnce(failedRefresh)
+      .mockResolvedValueOnce(snapshot(edited, boundary()));
     const source: SettingsPrivacyDataSource = {
       loadSettingsPrivacy,
       testProviderConnection: vi.fn(),
@@ -190,6 +261,133 @@ describe("settings privacy journey", () => {
     expect(result.current.effectiveBoundaryEnvelope.data?.blockedReason).toContain(
       "保存后的配置或模型传输边界没有完成核对"
     );
+
+    act(() => result.current.retryBoundaryRefresh());
+    await waitFor(() => expect(result.current.state.phase).toBe("ready"));
+
+    expect(loadSettingsPrivacy).toHaveBeenCalledTimes(3);
+    expect(result.current.state.boundaryAppliesToSavedRevision).toBe(true);
+    expect(result.current.state.failureStage).toBeNull();
+  });
+
+  it("keeps boundary and settings actions closed when LifeStateProjection is missing", async () => {
+    const missingProjection = snapshot(config(), boundary({ routeType: "local" }));
+    missingProjection.safeMode = null;
+    missingProjection.diagnostics = missingProjection.diagnostics.map(diagnostic =>
+      diagnostic.id === "life_state_projection"
+        ? { ...diagnostic, status: "failed", message: "projection unavailable" }
+        : diagnostic
+    );
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(missingProjection),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    expect(result.current.protectionState).toBe("unknown");
+    expect(result.current.actions.test).toMatchObject({ enabled: false });
+    expect(result.current.actions.test.disabledReason).toContain("LifeStateProjection");
+    expect(result.current.actions.save).toMatchObject({ enabled: false });
+    expect(result.current.effectiveBoundaryEnvelope.data).toMatchObject({
+      routeType: "unknown",
+      externalTransmission: "unknown",
+      risk: "unknown",
+    });
+    expect(result.current.effectiveBoundaryEnvelope.data?.blockedReason).toContain(
+      "LifeStateProjection"
+    );
+  });
+
+  it("keeps a ready config closed while backend Safe Mode is active", async () => {
+    const safeModeSnapshot = snapshot(config(), boundary({ routeType: "local" }));
+    safeModeSnapshot.safeMode = {
+      active: true,
+      reason: "persistence_unavailable",
+      sourceRefs: ["safe-mode:persistence"],
+    };
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(safeModeSnapshot),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    expect(result.current.protectionState).toBe("active");
+    expect(result.current.actions.test.enabled).toBe(false);
+    expect(result.current.actions.save.enabled).toBe(false);
+    expect(result.current.effectiveBoundaryEnvelope.data).toMatchObject({
+      routeType: "unknown",
+      externalTransmission: "unknown",
+      privacyLabel: "后端安全模式仍在生效",
+      risk: "unknown",
+    });
+    expect(result.current.effectiveBoundaryEnvelope.warnings?.[0]?.code).toBe(
+      "settings.safe_mode_active"
+    );
+  });
+
+  it("locks the previous snapshot while a settings reload is in flight", async () => {
+    const original = config();
+    const refreshed = {
+      ...original,
+      llm: { ...original.llm, chat_model: "deepseek-chat-v2" },
+    };
+    let finishReload: (value: SettingsPrivacySnapshot) => void = () => undefined;
+    const delayedReload = new Promise<SettingsPrivacySnapshot>(resolve => {
+      finishReload = resolve;
+    });
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi
+        .fn()
+        .mockResolvedValueOnce(snapshot(original, boundary()))
+        .mockImplementationOnce(() => delayedReload),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const announce = vi.fn();
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, announce));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    let reloadPromise: Promise<SettingsPrivacySnapshot> | undefined;
+    act(() => {
+      reloadPromise = result.current.load(false);
+    });
+    await waitFor(() => expect(result.current.loading).toBe(true));
+
+    expect(result.current.protectionState).toBe("loading");
+    expect(result.current.actions.test.enabled).toBe(false);
+    expect(result.current.actions.save.enabled).toBe(false);
+    expect(result.current.effectiveBoundaryEnvelope.status).toBe("loading");
+    expect(settingsPrivacyContext(result.current, "model-provider").status).toMatchObject({
+      label: "正在读取",
+      status: "neutral",
+    });
+    const loadingInspector = settingsPrivacyInspector(result.current, "model-provider", "");
+    expect(loadingInspector.conclusion).toContain("旧快照不作为当前确定态");
+    expect(loadingInspector.nextAction).toContain("不修改、不测试、不保存");
+    act(() => result.current.edit({ field: "chat_model", value: "must-not-win" }));
+    expect(result.current.draft?.llm.chat_model).toBe("deepseek-chat");
+    expect(announce).toHaveBeenLastCalledWith(
+      "当前不能修改设置；请等待后端配置读取或当前操作结束。"
+    );
+
+    await act(async () => {
+      finishReload(snapshot(refreshed, boundary()));
+      await reloadPromise;
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.draft?.llm.chat_model).toBe("deepseek-chat-v2");
   });
 
   it("clears a masked credential when the provider identity changes", async () => {
