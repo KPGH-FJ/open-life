@@ -3,6 +3,26 @@
 Status: `PASS_WITH_BLOCKED_AND_FAILED_ACTION_EVIDENCE`
 Date: 2026-07-21
 
+Review correction (2026-07-22): this report records the native trial performed
+against the pre-review Phase 4F attempt. Credential-recovery interactions and
+artifacts are `HISTORICAL-EVIDENCE`: independent review found that the attempt
+used generic Safe Mode as recovery eligibility. The reviewed frontend keeps
+the command unavailable until a typed backend eligibility contract exists.
+Route observations are bounded observations, not exhaustive proof for every
+unknown/stale/error state.
+
+## 2026-07-22 Review-Repair Recheck
+
+After the independent findings were repaired, the production frontend was
+rebuilt into `target/debug/bundle/macos/OpenLife.app` and launched with a fresh
+temporary QA data directory. The current `/settings` route rendered the
+sanitized configuration, focused `模型与供应商`, retained unknown transmission
+and Safe Mode, and exposed no credential-recovery button. Provider test and
+save remained disabled. No credential command, provider request, save, review
+decision, or durable user-data action was executed. The temporary QA directory
+was moved to Trash after the app exited; release/dev application data was not
+touched.
+
 ## Runtime Boundary
 
 The production-config debug bundle was built and launched from
@@ -41,14 +61,15 @@ the frontend received metadata statuses and no key material.
 
 ## Interaction Results
 
-- All six canonical routes produced visible route feedback and moved focus to
-  the route heading.
+- In this recorded trial, all six canonical routes produced visible route
+  feedback and moved focus to the route heading.
 - Inspector open focused its heading; close returned focus to the trigger.
 - Settings search reduced seven categories to the one matching `API 凭据`.
 - Unmigrated Settings categories rendered an explicit unavailable state with
   working return actions rather than no-op controls.
-- Safe Mode recovery remained reachable even though durable operations were
-  blocked. Opening it showed exact scope before any command was invoked.
+- The rejected recovery attempt remained reachable from generic Safe Mode.
+  Opening it showed exact scope before any command was invoked, but review later
+  proved that the eligibility premise was too broad.
 - Keyboard opening and Escape cancellation of the recovery dialog returned
   focus to `检查系统凭据` and announced that no credential access occurred.
 - LifeModel Builder was attempted against the real backend and returned
@@ -67,13 +88,13 @@ the frontend received metadata statuses and no key material.
 
 | Journey | Result | Reason |
 | --- | --- | --- |
-| Shell and canonical routes | `PASS` | packaged production Tauri UI exercised |
-| stale/unknown/error fail-closed | `PASS` | observed on Today, Workspace, Tasks, LifeModel, and Settings |
+| Shell and canonical routes | `PASS_AT_RECORDED_SHA` | packaged production Tauri UI exercised; later review changes require a fresh smoke |
+| stale/unknown/error fail-closed | `PASS_FOR_OBSERVED_CASES` | observed on Today, Workspace, Tasks, LifeModel, and Settings; not exhaustive |
 | approved versus applied | `PASS_AT_PRESENTATION_BOUNDARY` | empty-state and automated lifecycle tests preserve separation; no real approved item existed |
 | permission -> review -> refresh -> resume | `BLOCKED` | isolated backend had no exact pending permission ReviewItem/task pair |
 | proposal -> decision -> application | `BLOCKED` | Safe Mode blocked Builder start and no exact durable proposal existed |
 | provider test -> save -> boundary refresh | `BLOCKED` | no test credential or authorized external transmission was supplied |
-| credential recovery -> restart -> recheck | `FAILED_FAIL_CLOSED` | interactive reads succeeded, but the old Keychain ACL authorized neither the current ad-hoc bundle nor the current `make dev` binary on non-interactive restart |
+| credential recovery -> restart -> recheck | `HISTORICAL_FAILED_FAIL_CLOSED` | rejected UI attempt only; interactive reads succeeded but restart proof failed |
 
 Blocked journeys are not credited from fixtures or Rust unit tests.
 
@@ -111,7 +132,11 @@ contain no entered credential or secret material.
 
 `REAL_TAURI_EXTERNAL_PROVIDER_E2E=BLOCKED`
 
-`REAL_TAURI_CREDENTIAL_RECOVERY_E2E=FAILED_FAIL_CLOSED`
+`REAL_TAURI_CREDENTIAL_RECOVERY_E2E=HISTORICAL_FAILED_FAIL_CLOSED`
+
+`CURRENT_REVIEWED_TAURI_SETTINGS=PASS`
+
+`CURRENT_REVIEWED_CREDENTIAL_RECOVERY_ACTION=ABSENT_FAIL_CLOSED`
 
 `MAKE_DEV_ENTRY=PASS_WITH_SAFE_MODE`
 

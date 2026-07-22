@@ -1,5 +1,5 @@
-import { Check, KeyRound, RefreshCw, Save, ShieldAlert, Unplug, Wifi } from "lucide-react";
-import type { CredentialRecoveryItem, ReviewItem } from "@/tauri";
+import { Check, RefreshCw, Save, Unplug, Wifi } from "lucide-react";
+import type { ReviewItem } from "@/tauri";
 import {
   FoundationActionButton,
   FoundationDialog,
@@ -52,7 +52,7 @@ export function SettingsPrivacyView({
     const safeModeActive = controller.snapshot?.safeMode?.active === true;
     return (
       <div className={`ol-settings-page${safeModeActive ? "" : " ol-settings-page--centered"}`}>
-        <CredentialRecoverySection controller={controller} />
+        <SafeModeNotice controller={controller} />
         <FoundationNotice title="设置暂不可用" tone="error">
           <p>后端没有返回可编辑配置。页面不会用默认 Provider、地址或隐私结论代替。</p>
         </FoundationNotice>
@@ -79,7 +79,7 @@ export function SettingsPrivacyView({
       data-settings-surface={surface}
       data-settings-phase={controller.state.phase}
     >
-      <CredentialRecoverySection controller={controller} />
+      <SafeModeNotice controller={controller} />
 
       <section className="ol-settings-boundary" aria-labelledby="ol-settings-boundary-title">
         <div className="ol-settings-section-heading">
@@ -400,121 +400,15 @@ export function SettingsPrivacyView({
   );
 }
 
-const credentialPurposeLabels: Record<CredentialRecoveryItem["purpose"], string> = {
-  agent_run_receipts: "助手运行回执",
-  main_chat_events: "对话事件",
-  action_queue: "动作队列",
-  task_store: "任务存储",
-};
-
-const credentialStatusLabels: Record<CredentialRecoveryItem["status"], string> = {
-  available: "本次可访问",
-  created: "本次已安全初始化",
-  missing_existing_data: "已有数据但密钥缺失",
-  invalid: "密钥格式无效",
-  unavailable: "系统凭据库不可用",
-};
-
-function CredentialRecoverySection({
-  controller,
-}: {
-  controller: SettingsPrivacyJourneyController;
-}) {
+function SafeModeNotice({ controller }: { controller: SettingsPrivacyJourneyController }) {
   if (!controller.snapshot?.safeMode?.active) return null;
 
-  const recoveryState = controller.credentialRecovery;
-  const recoveryAction = controller.actions.recovery;
-  const report = recoveryState.report;
-  const recoveryBusy = recoveryState.phase === "recovering";
-  const readyForRestart = Boolean(report?.allRequiredCredentialsReady && report.restartRequired);
-
   return (
-    <section className="ol-settings-recovery" aria-labelledby="ol-settings-recovery-title">
-      <div className="ol-settings-section-heading">
-        <span>后端保护状态</span>
-        <h2 id="ol-settings-recovery-title">安全模式</h2>
-      </div>
-      <div className="ol-settings-recovery__summary">
-        <FoundationStatusLabel label="长期写入保持关闭" status="waiting" live />
-        <p>
-          OpenLife
-          无法确认内部完整性凭据。你可以发起一次受保护检查；完整重启并由后端重新核对前，当前状态不会变为已恢复。
-        </p>
-      </div>
-      <div className="ol-settings-inline-actions">
-        <FoundationActionButton
-          label={recoveryAction.label}
-          icon={<ShieldAlert size={18} strokeWidth={1.75} aria-hidden="true" />}
-          loading={recoveryBusy}
-          loadingLabel="等待系统确认"
-          disabled={!recoveryAction.enabled}
-          disabledReason={recoveryAction.disabledReason}
-          data-action-id={recoveryAction.id}
-          data-action-kind={recoveryAction.kind}
-          data-target-ref={recoveryAction.targetRef}
-          onClick={controller.requestCredentialRecovery}
-        />
-        <span className="ol-settings-recovery__limit">当前状态只由后端重新读取后确认</span>
-      </div>
-
-      {report && (
-        <FoundationNotice
-          title={readyForRestart ? "本次检查均可访问，重启后重新核对" : "仍有系统凭据阻塞"}
-          tone={readyForRestart ? "protection" : "error"}
-          live
-        >
-          <p>
-            {readyForRestart
-              ? "交互式访问不证明下次启动仍可访问。请完全退出并重启 OpenLife；当前页面不会自行改写安全模式。"
-              : "没有生成替代密钥，也没有覆盖已有数据。长期写入继续保持关闭。"}
-          </p>
-          <dl className="ol-settings-recovery-results">
-            {report.items.map(item => (
-              <div key={item.purpose}>
-                <dt>{credentialPurposeLabels[item.purpose]}</dt>
-                <dd>{credentialStatusLabels[item.status]}</dd>
-              </div>
-            ))}
-          </dl>
-        </FoundationNotice>
-      )}
-
-      {recoveryState.phase === "error" && (
-        <FoundationNotice title="系统凭据检查未完成" tone="error" live>
-          <p>安全模式保持不变。可以重新发起检查；原始失败信息仅在检查器中显示。</p>
-        </FoundationNotice>
-      )}
-
-      <FoundationDialog
-        open={controller.credentialRecoveryConfirmationOpen}
-        title="确认系统凭据检查范围"
-        description="下一步还会显示 OpenLife 原生确认；取消任一确认都不会执行检查。"
-        onClose={controller.cancelCredentialRecovery}
-        footer={
-          <>
-            <FoundationActionButton
-              label="取消"
-              variant="quiet"
-              onClick={controller.cancelCredentialRecovery}
-            />
-            <FoundationActionButton
-              label="继续到系统确认"
-              variant="primary"
-              icon={<KeyRound size={18} strokeWidth={1.75} aria-hidden="true" />}
-              onClick={controller.confirmCredentialRecovery}
-            />
-          </>
-        }
-      >
-        <ul className="ol-settings-recovery-confirmation">
-          <li>检查 Agent 运行回执、主聊天事件、动作队列和任务存储四类完整性凭据。</li>
-          <li>仅在对应的长期数据文件不存在时初始化缺失凭据。</li>
-          <li>不会读取或显示密钥内容，也不会替换已有数据旁缺失或无效的密钥。</li>
-          <li>macOS 若要求授权，普通“允许”可能只对当前进程有效；重启结果仍是唯一恢复证明。</li>
-          <li>全部就绪后仍需完全退出并重启，由后端重新确认安全模式。</li>
-        </ul>
-      </FoundationDialog>
-    </section>
+    <FoundationNotice title="安全模式保持生效" tone="protection" live>
+      <p>
+        后端报告了保护状态；长期写入继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。
+      </p>
+    </FoundationNotice>
   );
 }
 

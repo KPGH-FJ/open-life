@@ -279,16 +279,9 @@ export function connectionTestPresentation(
 
 export function settingsProductActions(
   state: SettingsOrchestrationState,
-  validation: SettingsDraftValidation,
-  recovery: {
-    safeModeActive: boolean;
-    phase: "idle" | "confirming" | "recovering" | "complete" | "error";
-    readyForRestart: boolean;
-  } = { safeModeActive: false, phase: "idle", readyForRestart: false }
-): { test: ProductAction; save: ProductAction; recovery: ProductAction } {
-  const settingsBusy = ["testing", "saving", "refreshing_boundary"].includes(state.phase);
-  const recoveryBusy = recovery.phase === "confirming" || recovery.phase === "recovering";
-  const busy = settingsBusy || recoveryBusy;
+  validation: SettingsDraftValidation
+): { test: ProductAction; save: ProductAction } {
+  const busy = ["testing", "saving", "refreshing_boundary"].includes(state.phase);
   const testEnabled = validation.canTest && !busy;
   const saveablePhase =
     (state.phase === "dirty" || state.phase === "tested") &&
@@ -303,9 +296,7 @@ export function settingsProductActions(
       ...(!testEnabled
         ? {
             disabledReason: busy
-              ? recoveryBusy
-                ? "系统凭据检查正在进行。"
-                : "已有设置操作正在进行。"
+              ? "已有设置操作正在进行。"
               : (validation.testDisabledReason ?? "当前配置不能测试连接。"),
           }
         : {}),
@@ -319,9 +310,7 @@ export function settingsProductActions(
       ...(!saveEnabled
         ? {
             disabledReason: busy
-              ? recoveryBusy
-                ? "系统凭据检查正在进行。"
-                : "已有设置操作正在进行。"
+              ? "已有设置操作正在进行。"
               : !saveablePhase
                 ? state.phase === "failed"
                   ? "测试失败后请先修改配置，再决定是否保存。"
@@ -330,25 +319,6 @@ export function settingsProductActions(
           }
         : {}),
       targetRef: "AppConfig",
-    },
-    recovery: {
-      id: "settings.safe_mode.recover_required_credential_access",
-      label: "检查系统凭据",
-      kind: "retry",
-      enabled:
-        recovery.safeModeActive && !settingsBusy && !recoveryBusy && !recovery.readyForRestart,
-      ...(!recovery.safeModeActive || settingsBusy || recoveryBusy || recovery.readyForRestart
-        ? {
-            disabledReason: !recovery.safeModeActive
-              ? "后端没有证明当前处于安全模式。"
-              : recovery.readyForRestart
-                ? "本次凭据检查已完成；请完全退出并重启 OpenLife 后重新核对。"
-                : settingsBusy
-                  ? "请先等待当前设置操作结束。"
-                  : "系统凭据检查正在进行。",
-          }
-        : {}),
-      targetRef: "credential-store:required-integrity-keys",
     },
   };
 }

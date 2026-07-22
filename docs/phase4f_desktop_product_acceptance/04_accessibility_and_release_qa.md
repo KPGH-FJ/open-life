@@ -3,6 +3,15 @@
 Status: `PASS_WITH_MANUAL_VOICEOVER_BLOCKED`
 Date: 2026-07-21
 
+Review correction (2026-07-22): recovery-dialog rows below describe the
+pre-review attempt and remain `HISTORICAL-EVIDENCE`; the current reviewed UI
+does not expose recovery from generic Safe Mode.
+
+The 2026-07-22 review-repair rebuild rechecked the current native Settings
+route: its `h1` received focus, Safe Mode remained visible, and the credential
+action was absent. This current recheck does not inherit recovery-dialog or
+manual VoiceOver credit from the earlier attempt.
+
 ## Native Keyboard And Focus
 
 | Check | Result |
@@ -72,7 +81,7 @@ runtime blocker.
 | --- | --- |
 | `corepack pnpm --dir frontend format:check` | `PASS` |
 | `corepack pnpm --dir frontend typecheck` | `PASS` |
-| `corepack pnpm --dir frontend test` | `PASS`, 37 files / 273 tests |
+| `corepack pnpm --dir frontend test` | `PASS`, 37 files / 272 tests after review repairs |
 | `corepack pnpm --dir frontend build` | `PASS` |
 | `corepack pnpm --dir frontend verify:release-absence` | `PASS` |
 | `cargo fmt --check` | `PASS` |
@@ -85,10 +94,11 @@ read of `LifeStateProjection.safeMode` was missing from the Phase 1 source
 inventory. The inventory now records that direct backend-owned read; the scan
 was not weakened and the full authority gate passed on rerun.
 
-CodeRabbit CLI was unavailable in the local environment. A local changed-file
-review was completed instead. It found and repaired the missing Product Action
-Contract for credential recovery, including mutual exclusion with settings
-test/save operations; the final full gates above include that repair.
+CodeRabbit CLI was unavailable in the local environment. Two independent
+read-only reviews found that generic Safe Mode cannot authorize credential
+recovery, a Settings cold-route load gap, a missing `remote_unknown` task
+variant, and an unproven post-save boundary reuse. The current full gates cover
+the bounded frontend repairs; the credential action remains unavailable.
 
 ## Signing Scope
 

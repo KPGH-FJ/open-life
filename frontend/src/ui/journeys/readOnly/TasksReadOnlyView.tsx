@@ -36,6 +36,7 @@ function taskMatchesFilter(item: TaskViewModelItem, filter: TaskFilter): boolean
         "waiting_permission",
         "blocked",
         "failed",
+        "remote_unknown",
         "completed_with_pending_review",
         "completed_needs_evidence",
         "unknown",
@@ -44,9 +45,13 @@ function taskMatchesFilter(item: TaskViewModelItem, filter: TaskFilter): boolean
       item.pendingReviewItemRefs.length > 0
     );
   }
-  return ["completed", "failed", "cancelled", "completed_needs_evidence"].includes(
-    item.lifecycleStatus
-  );
+  return [
+    "completed",
+    "failed",
+    "remote_unknown",
+    "cancelled",
+    "completed_needs_evidence",
+  ].includes(item.lifecycleStatus);
 }
 
 function taskSearchText(item: TaskViewModelItem): string {
@@ -67,6 +72,7 @@ function statusDetail(item: TaskViewModelItem): string {
   if (item.pendingBlockers.length > 0) return item.pendingBlockers[0];
   if (item.latestResultPreview?.preview) return item.latestResultPreview.preview;
   if (item.lifecycleStatus === "running") return "任务仍在执行。";
+  if (item.lifecycleStatus === "remote_unknown") return "远端执行结果未知，不能标记为完成。";
   return "查看依据可核对当前生命周期与交付状态。";
 }
 

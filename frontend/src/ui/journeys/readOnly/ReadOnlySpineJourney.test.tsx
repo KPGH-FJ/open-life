@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { phase4dFixtureDataSource } from "@/dev/phase4d/phase4d-fixtures";
+import { createPhase4dSettingsFixture } from "@/dev/phase4d/phase4d-settings-fixtures";
 import type { ReadOnlySpineDataSource } from "./readOnlySpineDataSource";
 import { ReadOnlySpineJourney } from "./ReadOnlySpineJourney";
 
@@ -175,6 +176,27 @@ describe("Phase 4D desktop read-only journey", () => {
     await user.click(screen.getByRole("button", { name: "返回工作台" }));
     expect(screen.getByRole("button", { name: "设置" })).toHaveFocus();
     expect(screen.getByRole("navigation", { name: "产品区域" })).toBeInTheDocument();
+  });
+
+  it("loads the real settings journey when settings is the initial canonical route", async () => {
+    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const loadSettingsPrivacy = vi.fn(settingsFixture.dataSource.loadSettingsPrivacy);
+    render(
+      <ReadOnlySpineJourney
+        dataSource={phase4dFixtureDataSource("fixture-ready")}
+        settingsPrivacyDataSource={{
+          ...settingsFixture.dataSource,
+          loadSettingsPrivacy,
+        }}
+        initialMode="settings"
+      />
+    );
+
+    await waitFor(() => expect(loadSettingsPrivacy).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole("heading", { name: "模型与传输边界", level: 2 })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("设置暂不可用")).not.toBeInTheDocument();
   });
 
   it("refreshes through the supplied source and restores Inspector trigger focus", async () => {

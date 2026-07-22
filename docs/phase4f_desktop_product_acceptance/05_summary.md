@@ -8,20 +8,20 @@ Date: 2026-07-21
 - Reverified the Phase 4E merge on main and branched from exact verified SHA
   `7a167f4e50584524586c2350882e43df01b0da2b`.
 - Exercised the single production desktop Workbench in a packaged Tauri app.
-- Verified all canonical routes and fail-closed missing/stale/error behavior.
-- Restored the governed Safe Mode credential-recovery entry without restoring
-  an old Settings owner or changing backend business authority.
+- Observed all canonical routes in the bounded native trial; this is not an
+  exhaustive claim over every missing/stale/error combination.
+- Kept generic Safe Mode visible but removed the attempted credential-recovery
+  entry after review proved that the backend lacks typed recovery eligibility.
 - Repaired the real sanitized AppConfig contract that crashed `/settings`.
 - Repaired structured Tauri error handling and stale route live-region copy.
-- Added the restored recovery control to the typed Product Action Contract and
-  made it mutually exclusive with provider test/save operations.
+- Repaired direct `/settings` cold-route loading, task `remote_unknown`
+  presentation, and post-save boundary fail-closed selection.
 - Captured native route, Inspector, Settings, dialog, defect, and repair
   evidence without provider credentials or secret material.
 - Passed the complete local frontend, Rust authority, production absence,
   formatting, type, and diff gate set.
-- Executed credential recovery after explicit approval, then proved that its
-  interactive `available` result did not survive a full restart under the
-  current ad-hoc package identity. Safe Mode remained fail-closed.
+- Preserved the rejected recovery attempt and failed-restart evidence as
+  historical trial evidence; it is not current product credit.
 - Rechecked the canonical `make dev` entry twice with its isolated dev data
   profile and reproduced the same fail-closed credential boundary. This
   separates the current product-development blocker from future Developer ID
@@ -34,6 +34,9 @@ Date: 2026-07-21
   bundle or `make dev` identities. A development-safe credential identity or
   explicit persistent ACL recovery is required for durable-journey credit;
   formal Developer ID signing and notarization are deferred.
+- The current backend product projection does not expose exact credential
+  recovery eligibility/cause. The UI must remain unavailable until that
+  authority exists; generic Safe Mode and free-text reasons are insufficient.
 - Filesystem profiles are isolated, but the Keychain service and references are
   currently shared by release, dev, and qa. This needs a separately reviewed,
   non-rotating migration slice rather than an opportunistic Phase 4F backend

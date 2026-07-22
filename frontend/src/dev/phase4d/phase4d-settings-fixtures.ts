@@ -350,9 +350,6 @@ export function createPhase4dSettingsFixture(id: Phase4dFixtureId): {
         if (config.llm.openai_key?.trim()) config.llm.openai_key = "***";
         saved = true;
       },
-      async recoverRequiredCredentialAccess() {
-        throw new Error("fixture_credential_recovery_unavailable");
-      },
     },
     currentReviewItem() {
       return id === "fixture-settings-review-required" ? providerTestReviewItem(reviewStage) : null;

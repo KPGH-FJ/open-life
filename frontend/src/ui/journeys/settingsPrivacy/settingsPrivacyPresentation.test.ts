@@ -113,41 +113,6 @@ describe("settings privacy presentation", () => {
       enabled: true,
       targetRef: "AppConfig",
     });
-    expect(actions.recovery).toMatchObject({
-      id: "settings.safe_mode.recover_required_credential_access",
-      kind: "retry",
-      enabled: false,
-      disabledReason: "后端没有证明当前处于安全模式。",
-      targetRef: "credential-store:required-integrity-keys",
-    });
-  });
-
-  it("keeps credential recovery contract-shaped and mutually exclusive with settings actions", () => {
-    const actions = settingsProductActions(
-      { ...initialSettingsOrchestrationState, phase: "dirty", draftRevision: 1 },
-      validateSettingsDraft(config()),
-      { safeModeActive: true, phase: "confirming", readyForRestart: false }
-    );
-
-    expect(actions.recovery).toMatchObject({ enabled: false, kind: "retry" });
-    expect(actions.test).toMatchObject({
-      enabled: false,
-      disabledReason: "系统凭据检查正在进行。",
-    });
-    expect(actions.save).toMatchObject({
-      enabled: false,
-      disabledReason: "系统凭据检查正在进行。",
-    });
-
-    const restartActions = settingsProductActions(
-      initialSettingsOrchestrationState,
-      validateSettingsDraft(config()),
-      { safeModeActive: true, phase: "complete", readyForRestart: true }
-    );
-    expect(restartActions.recovery).toMatchObject({
-      enabled: false,
-      disabledReason: "本次凭据检查已完成；请完全退出并重启 OpenLife 后重新核对。",
-    });
   });
 
   it("does not allow testing without a credential", () => {

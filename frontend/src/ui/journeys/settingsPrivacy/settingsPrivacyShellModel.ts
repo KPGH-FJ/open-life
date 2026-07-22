@@ -80,15 +80,6 @@ export function settingsPrivacyContext(
 
 function phaseConclusion(controller: SettingsPrivacyJourneyController): string {
   if (controller.snapshot?.safeMode?.active) {
-    if (
-      controller.credentialRecovery.report?.allRequiredCredentialsReady &&
-      controller.credentialRecovery.report.restartRequired
-    ) {
-      return "本次检查可以访问内部完整性凭据，但这不证明下次启动仍可访问；当前会话继续保持安全模式。";
-    }
-    if (controller.credentialRecovery.phase === "recovering") {
-      return "正在等待系统凭据检查；长期写入继续关闭，页面不会提前解除安全模式。";
-    }
     return "后端明确报告安全模式；长期写入保持关闭，当前页面不从配置或提示文案推导恢复状态。";
   }
   if (!controller.snapshot?.config) {
@@ -120,16 +111,7 @@ function phaseConclusion(controller: SettingsPrivacyJourneyController): string {
 
 function nextAction(controller: SettingsPrivacyJourneyController): string {
   if (controller.snapshot?.safeMode?.active) {
-    if (
-      controller.credentialRecovery.report?.allRequiredCredentialsReady &&
-      controller.credentialRecovery.report.restartRequired
-    ) {
-      return "完全退出并重启 OpenLife；只依据重启后的后端状态判断，不能沿用本次交互式检查结果。";
-    }
-    if (controller.credentialRecovery.phase === "recovering") {
-      return "完成或取消系统原生确认；不要在等待期间重复发起恢复。";
-    }
-    return "按需发起受保护的系统凭据检查；确认前会先展示准确范围。";
+    return "核对检查器中的后端来源；当前读模型未提供凭据恢复资格时，不执行系统凭据操作。";
   }
   const outcome = controller.lastTestOutcome;
   if (outcome?.result.validation_status === "consent_required") {
@@ -228,18 +210,6 @@ export function settingsPrivacyInspector(
       {
         label: "safeModeSourceRefs",
         value: controller.snapshot?.safeMode?.sourceRefs.join(", ") || "none",
-      },
-      { label: "credentialRecoveryPhase", value: controller.credentialRecovery.phase },
-      {
-        label: "credentialRecoveryStatuses",
-        value:
-          controller.credentialRecovery.report?.items
-            .map(item => `${item.purpose}:${item.status}`)
-            .join(", ") || "none",
-      },
-      {
-        label: "credentialRecoveryError",
-        value: controller.credentialRecovery.error ?? "none",
       },
       { label: "orchestrationPhase", value: controller.state.phase },
       { label: "draftRevision", value: String(controller.state.draftRevision) },

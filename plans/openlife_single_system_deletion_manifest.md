@@ -103,7 +103,7 @@ route cleanup.
 | `frontend/src/ui/journeys/readOnly/**` | Today strict adapter and Tasks ViewModel consumer. |
 | `frontend/src/ui/journeys/governedAction/**` | Workspace conversation, task controls, and Review decisions over backend-owned read models and governed commands. |
 | `frontend/src/ui/journeys/durableTruth/**` | LifeModel/Memory durable-truth presentation and first-build proposal flow; approval remains separate from application. |
-| `frontend/src/ui/journeys/settingsPrivacy/**` | Sanitized settings draft/test/save orchestration with ProviderPrivacyBoundarySummary as product boundary truth and direct `LifeStateProjection.safeMode` consumption for the governed recovery entry. |
+| `frontend/src/ui/journeys/settingsPrivacy/**` | Sanitized settings draft/test/save orchestration with ProviderPrivacyBoundarySummary as product boundary truth and direct `LifeStateProjection.safeMode` consumption for generic protection state. Credential recovery stays unavailable until backend-owned typed eligibility exists. |
 
 ## Shipped Command Surface Result
 
@@ -251,11 +251,12 @@ absent from a clean checkout.
 
 Status: `red-until-trial-green`.
 
-The Phase 4F rerun verified the packaged single Workbench, canonical routes,
-Safe Mode, and fail-closed missing/error behavior. Credential recovery was
-authorized and returned interactive access, but the current ad-hoc bundle was
-still denied on non-interactive restart because the existing Keychain ACL
-remained bound to an old executable identity. Governed permission/review/
+The Phase 4F rerun observed the packaged single Workbench, canonical routes,
+Safe Mode, and bounded fail-closed missing/error cases. A recovery attempt was
+authorized and returned interactive access, but it is historical evidence:
+review found that generic Safe Mode is not valid recovery eligibility, so the
+current frontend keeps that action unavailable. The attempt also failed
+non-interactive restart under the ad-hoc identity. Governed permission/review/
 resume, durable proposal/application, external provider, stable-signed
 credential recovery, and manual VoiceOver still lack green real evidence.
 Phase7 therefore remains red; fixtures and automated presentation tests do not

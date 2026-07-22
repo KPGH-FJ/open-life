@@ -2472,6 +2472,7 @@ export type TaskLifecycleStatus =
   | "waiting_permission"
   | "blocked"
   | "failed"
+  | "remote_unknown"
   | "cancelled"
   | "completed"
   | "completed_with_pending_review"

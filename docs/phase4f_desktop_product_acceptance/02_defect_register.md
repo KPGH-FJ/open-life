@@ -6,6 +6,7 @@ Date: 2026-07-21
 ## D-001: Safe Mode Recovery Was Not Reachable In The New Settings Owner
 
 - Severity: `P0` before native acceptance.
+- Status: `OPEN_FAIL_CLOSED_AFTER_REVIEW`.
 - Evidence: the backend still ships `recover_required_credential_access` and
   `frontend/src/tauri.ts` still exposes its typed bridge, but the Phase 4D/4E
   Settings journey had no caller after the old Settings tree was deleted.
@@ -13,19 +14,26 @@ Date: 2026-07-21
   the blocker without offering the only governed user-initiated recovery path.
 - Root cause: the Phase 4E deletion ledger tracked Settings test/save/boundary
   ownership but omitted this utility action from the migration row.
-- Repair:
+- Rejected first repair attempt:
   - independently load `LifeStateProjection.safeMode`;
-  - keep recovery unavailable when that projection is missing or inactive;
-  - show recovery even when editable config cannot load;
-  - expose a complete Product Action Contract and prevent overlap with
-    provider test/save operations;
-  - require an application confirmation before the existing native confirmation;
-  - display metadata-only results and require restart plus fresh backend proof;
-  - keep errors, partial readiness, and command return fail-closed.
-- Automated evidence: focused data-source, Hook, and rendered-view tests.
-- Native evidence: Safe Mode entry, product confirmation, cancel path, dialog
-  focus, and focus restoration passed in the packaged app. Native credential
-  initialization remains pending explicit action-time user confirmation.
+  - the attempt enabled recovery from `safeMode.active` alone;
+  - independent review proved that vector corruption, database degradation, or
+    unrelated startup warnings can also activate that generic flag;
+  - exposing the command could therefore inspect or initialize unrelated
+    integrity credentials under an incorrect diagnosis.
+- Current bounded repair:
+  - independently load `LifeStateProjection.safeMode` for truthful protection
+    state;
+  - keep the credential action absent because the backend does not expose typed
+    recovery eligibility/cause;
+  - do not parse free-text Safe Mode reasons in the frontend;
+  - require a separately reviewed backend contract before reintroducing the
+    action.
+- Automated evidence: direct Settings cold-route load and generic Safe Mode
+  no-action regression tests.
+- Historical native evidence: the rejected attempt exercised confirmation,
+  cancellation, metadata-only report, and restart failure. Those screenshots
+  remain evidence of the trial, not proof that the current UI ships recovery.
 - Old owner restored: `NO`.
 - Backend business behavior changed: `NO`.
 
@@ -112,6 +120,8 @@ Date: 2026-07-21
   `2b5256b69515c0325ad30c7736e591d588b401b8`.
 - Safety result: the backend remained in Safe Mode; the frontend did not infer
   recovery from the command report.
+- Evidence status: `HISTORICAL-EVIDENCE` from the rejected recovery UI attempt;
+  the current reviewed frontend no longer exposes that action.
 - Bounded frontend repair: replace "ready" claims with "available in this
   check" and continue requiring restart proof.
 - Current scope decision: Developer ID signing and notarization are deferred;
@@ -124,6 +134,35 @@ Date: 2026-07-21
   the test pass. The `make dev` recheck did not mutate Keychain ACLs or key
   material.
 - Rust/backend behavior changed in Phase 4F: `NO`.
+
+## D-008: Direct Settings Cold Route Did Not Load Its Data Source
+
+- Severity: `P1`.
+- Root cause: `initialMode="settings"` synchronized shell mode but only later
+  click handlers called `settingsPrivacy.ensureLoaded()`.
+- Repair: the journey now loads the exact Settings data source on a canonical
+  Settings cold route and announces the Settings context.
+- Evidence: a non-mocked journey regression test proves one initial backend
+  read and a rendered `模型与传输边界` surface.
+
+## D-009: Task `remote_unknown` Was Missing From The Frontend Contract
+
+- Severity: `P1` fail-closed contract mismatch.
+- Root cause: Rust serializes `TaskLifecycleStatus::RemoteUnknown`, while the
+  TypeScript union and presentation switch omitted it.
+- Repair: mirror the backend value and render `远端结果未知` as unverified
+  unknown; include it in attention and terminal filtering.
+- Evidence: presentation regression test; no green/completed state is emitted.
+
+## D-010: Failed Post-Save Refresh Could Reuse An Unproven Boundary
+
+- Severity: `P2`.
+- Root cause: after `boundary_refresh_failed`, the reducer correctly marked the
+  saved revision unknown, but the view selector could still return the latest
+  ready envelope from the failed refresh snapshot.
+- Repair: when the saved revision is not attested, return an explicit unknown
+  envelope rather than reuse the envelope.
+- Evidence: regression test with a ready envelope plus missing refreshed config.
 
 ## D-007: Dev Profile Isolation Stops Before The Credential Namespace
 

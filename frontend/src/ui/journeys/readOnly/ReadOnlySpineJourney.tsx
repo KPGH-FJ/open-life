@@ -641,6 +641,17 @@ export function ReadOnlySpineJourney({
     }
   }, [initialSurface, lifeModelBuilder.ensureLoaded, lifeModelBuilderDataSource]);
 
+  useEffect(() => {
+    if (
+      initialMode === "settings" &&
+      settingsPrivacyDataSource &&
+      isSettingsPrivacySurface(activeSettingsId)
+    ) {
+      settingsPrivacy.ensureLoaded();
+      setAnnouncement("已进入设置上下文，正在核对清理后的配置与模型传输边界。 ");
+    }
+  }, [activeSettingsId, initialMode, settingsPrivacy.ensureLoaded, settingsPrivacyDataSource]);
+
   function navigateProduct(id: string, reviewOrigin?: "workspace" | "life-model"): void {
     const next = id as ReadOnlyProductSurfaceId;
     if (next === "review") {

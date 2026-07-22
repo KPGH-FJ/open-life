@@ -3,11 +3,9 @@ import {
   getLifeStateProjection,
   getProviderPrivacyBoundarySummary,
   getReviewCenterViewModel,
-  recoverRequiredCredentialAccess,
   saveConfig,
   testLlmConnection,
   type AppConfig,
-  type CredentialRecoveryReport,
   type LifeSafeModeProjection,
   type LlmConnectionTestResult,
   type ProviderPrivacyBoundarySummary,
@@ -45,7 +43,6 @@ export interface SettingsPrivacyDataSource {
   loadSettingsPrivacy(): Promise<SettingsPrivacySnapshot>;
   testProviderConnection(config: AppConfig): Promise<SettingsConnectionTestOutcome>;
   saveSettings(config: AppConfig): Promise<void>;
-  recoverRequiredCredentialAccess(): Promise<CredentialRecoveryReport>;
 }
 
 function boundaryErrorEnvelope(message: string): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
@@ -160,5 +157,4 @@ export const tauriSettingsPrivacyDataSource: SettingsPrivacyDataSource = {
   loadSettingsPrivacy,
   testProviderConnection,
   saveSettings: saveConfig,
-  recoverRequiredCredentialAccess,
 };

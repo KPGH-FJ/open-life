@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   SettingsPrivacyDataSource,
@@ -22,7 +21,7 @@ function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
   );
 }
 
-describe("SettingsPrivacyView credential recovery", () => {
+describe("SettingsPrivacyView", () => {
   it("renders the sanitized native config shape when the secret field is omitted", async () => {
     const snapshot: SettingsPrivacySnapshot = {
       config: {
@@ -57,7 +56,6 @@ describe("SettingsPrivacyView credential recovery", () => {
       loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot),
       testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
-      recoverRequiredCredentialAccess: vi.fn(),
     };
 
     render(<SafeModeSettings source={source} />);
@@ -67,7 +65,7 @@ describe("SettingsPrivacyView credential recovery", () => {
     expect(screen.getByText(/后端返回遮罩凭据/)).toBeInTheDocument();
   });
 
-  it("keeps recovery reachable from proven Safe Mode even when editable config is unavailable", async () => {
+  it("does not infer credential recovery eligibility from generic Safe Mode", async () => {
     const snapshot: SettingsPrivacySnapshot = {
       config: null,
       boundaryEnvelope: {
@@ -91,23 +89,17 @@ describe("SettingsPrivacyView credential recovery", () => {
         { id: "review_item_resolution", status: "not_requested" },
       ],
     };
-    const recoverRequiredCredentialAccess = vi.fn();
     const source: SettingsPrivacyDataSource = {
       loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot),
       testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
-      recoverRequiredCredentialAccess,
     };
-    const user = userEvent.setup();
 
     render(<SafeModeSettings source={source} />);
 
-    expect(await screen.findByRole("heading", { name: "安全模式" })).toBeInTheDocument();
+    expect(await screen.findByText("安全模式保持生效")).toBeInTheDocument();
     expect(screen.getByText("设置暂不可用")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "检查系统凭据" }));
-
-    expect(screen.getByRole("dialog", { name: "确认系统凭据检查范围" })).toBeInTheDocument();
-    expect(screen.getByText(/仅在对应的长期数据文件不存在时/)).toBeInTheDocument();
-    expect(recoverRequiredCredentialAccess).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "检查系统凭据" })).not.toBeInTheDocument();
+    expect(screen.getByText(/不会从自由文本原因推导/)).toBeInTheDocument();
   });
 });

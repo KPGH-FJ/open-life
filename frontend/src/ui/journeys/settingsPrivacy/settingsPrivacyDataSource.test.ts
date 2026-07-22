@@ -6,7 +6,6 @@ const tauriMocks = vi.hoisted(() => ({
   getLifeStateProjection: vi.fn(),
   getProviderPrivacyBoundarySummary: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
-  recoverRequiredCredentialAccess: vi.fn(),
   saveConfig: vi.fn(),
   testLlmConnection: vi.fn(),
 }));
@@ -53,7 +52,7 @@ describe("Tauri settings privacy data source", () => {
     });
   });
 
-  it("keeps credential recovery unavailable when LifeStateProjection cannot be read", async () => {
+  it("keeps Safe Mode unknown when LifeStateProjection cannot be read", async () => {
     tauriMocks.getConfig.mockResolvedValue(config);
     tauriMocks.getProviderPrivacyBoundarySummary.mockResolvedValue({
       data: null,
@@ -75,25 +74,6 @@ describe("Tauri settings privacy data source", () => {
       status: "failed",
       message: "projection unavailable",
     });
-  });
-
-  it("delegates credential recovery to the exact existing Tauri command", async () => {
-    const report = {
-      items: [
-        { purpose: "agent_run_receipts", status: "created" },
-        { purpose: "main_chat_events", status: "available" },
-        { purpose: "action_queue", status: "available" },
-        { purpose: "task_store", status: "available" },
-      ],
-      allRequiredCredentialsReady: true,
-      restartRequired: true,
-    };
-    tauriMocks.recoverRequiredCredentialAccess.mockResolvedValue(report);
-
-    await expect(tauriSettingsPrivacyDataSource.recoverRequiredCredentialAccess()).resolves.toEqual(
-      report
-    );
-    expect(tauriMocks.recoverRequiredCredentialAccess).toHaveBeenCalledTimes(1);
   });
 
   it("resolves only the exact ReviewItem referenced by the test result", async () => {
