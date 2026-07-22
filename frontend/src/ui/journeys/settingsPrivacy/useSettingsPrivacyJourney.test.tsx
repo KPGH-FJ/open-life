@@ -7,6 +7,7 @@ import type {
   ViewModelEnvelope,
 } from "@/tauri";
 import type {
+  SettingsConnectionTestOutcome,
   SettingsPrivacyDataSource,
   SettingsPrivacySnapshot,
 } from "./settingsPrivacyDataSource";
@@ -116,6 +117,59 @@ describe("settings privacy journey", () => {
     expect(result.current.snapshot).toBe(initialSnapshot);
   });
 
+  it("waits for an explicit in-flight reload instead of reusing its old snapshot", async () => {
+    const originalSnapshot = snapshot(config(), boundary());
+    const refreshedConfig = {
+      ...config(),
+      llm: { ...config().llm, chat_model: "refreshed-model" },
+    };
+    const refreshedSnapshot = snapshot(refreshedConfig, boundary());
+    let finishReload: (value: SettingsPrivacySnapshot) => void = () => undefined;
+    const delayedReload = new Promise<SettingsPrivacySnapshot>(resolve => {
+      finishReload = resolve;
+    });
+    const loadSettingsPrivacy = vi
+      .fn()
+      .mockResolvedValueOnce(originalSnapshot)
+      .mockImplementationOnce(() => delayedReload);
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy,
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    let reloadPromise: Promise<SettingsPrivacySnapshot> | undefined;
+    let ensurePromise: ReturnType<typeof result.current.ensureLoaded> | undefined;
+    act(() => {
+      reloadPromise = result.current.load(false);
+      ensurePromise = result.current.ensureLoaded();
+    });
+    expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2);
+
+    let ensureSettled = false;
+    void ensurePromise?.then(() => {
+      ensureSettled = true;
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(ensureSettled).toBe(false);
+
+    await act(async () => {
+      finishReload(refreshedSnapshot);
+      await Promise.all([reloadPromise, ensurePromise]);
+    });
+    expect(await ensurePromise).toMatchObject({
+      snapshot: refreshedSnapshot,
+      loadedFromSource: true,
+    });
+    expect(result.current.draft?.llm.chat_model).toBe("refreshed-model");
+  });
+
   it("invalidates a cached snapshot when the data source changes", async () => {
     const firstConfig = config();
     const secondConfig = {
@@ -153,6 +207,178 @@ describe("settings privacy journey", () => {
     expect(firstLoad).toHaveBeenCalledTimes(1);
     expect(secondLoad).toHaveBeenCalledTimes(1);
     expect(result.current.draft?.llm.chat_model).toBe("replacement-source-model");
+  });
+
+  it("ignores an in-flight connection test from a replaced data source", async () => {
+    let finishTest: (value: SettingsConnectionTestOutcome) => void = () => undefined;
+    const delayedTest = new Promise<SettingsConnectionTestOutcome>(resolve => {
+      finishTest = resolve;
+    });
+    const firstSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(config(), boundary())),
+      testProviderConnection: vi.fn(() => delayedTest),
+      saveSettings: vi.fn(),
+    };
+    const replacementConfig = {
+      ...config(),
+      llm: { ...config().llm, chat_model: "replacement-source-model" },
+    };
+    const secondSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(replacementConfig, boundary())),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result, rerender } = renderHook(
+      ({ source }: { source: SettingsPrivacyDataSource }) =>
+        useSettingsPrivacyJourney(source, vi.fn()),
+      { initialProps: { source: firstSource } }
+    );
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    act(() => result.current.edit({ field: "chat_model", value: "first-source-test" }));
+    act(() => result.current.requestTest());
+    act(() => result.current.confirmTest());
+    expect(firstSource.testProviderConnection).toHaveBeenCalledTimes(1);
+
+    rerender({ source: secondSource });
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    await act(async () => {
+      finishTest({ result: verifiedResult, reviewItem: null, reviewResolution: "not_requested" });
+      await delayedTest;
+    });
+
+    expect(result.current.draft?.llm.chat_model).toBe("replacement-source-model");
+    expect(result.current.lastTestOutcome).toBeNull();
+    expect(result.current.state.phase).toBe("idle");
+  });
+
+  it("does not let a stale save clear a replacement-source operation lock", async () => {
+    let finishSave: () => void = () => undefined;
+    const delayedSave = new Promise<void>(resolve => {
+      finishSave = resolve;
+    });
+    let finishReplacementTest: (value: SettingsConnectionTestOutcome) => void = () => undefined;
+    const delayedReplacementTest = new Promise<SettingsConnectionTestOutcome>(resolve => {
+      finishReplacementTest = resolve;
+    });
+    const firstLoad = vi.fn().mockResolvedValue(snapshot(config(), boundary()));
+    const firstSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: firstLoad,
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(() => delayedSave),
+    };
+    const replacementConfig = {
+      ...config(),
+      llm: { ...config().llm, chat_model: "replacement-source-model" },
+    };
+    const secondSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(replacementConfig, boundary())),
+      testProviderConnection: vi.fn(() => delayedReplacementTest),
+      saveSettings: vi.fn(),
+    };
+    const announce = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ source }: { source: SettingsPrivacyDataSource }) =>
+        useSettingsPrivacyJourney(source, announce),
+      { initialProps: { source: firstSource } }
+    );
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    act(() => result.current.edit({ field: "chat_model", value: "first-source-save" }));
+    act(() => result.current.save());
+    expect(firstSource.saveSettings).toHaveBeenCalledTimes(1);
+
+    rerender({ source: secondSource });
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    act(() => result.current.edit({ field: "chat_model", value: "replacement-source-test" }));
+    act(() => result.current.requestTest());
+    act(() => result.current.confirmTest());
+    expect(secondSource.testProviderConnection).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishSave();
+      await delayedSave;
+    });
+    expect(firstLoad).toHaveBeenCalledTimes(1);
+    expect(result.current.state.phase).toBe("testing");
+    act(() => result.current.edit({ field: "chat_model", value: "must-not-apply" }));
+    expect(result.current.draft?.llm.chat_model).toBe("replacement-source-test");
+    expect(announce).toHaveBeenLastCalledWith(
+      "当前不能修改设置；请等待后端配置读取或当前操作结束。"
+    );
+
+    await act(async () => {
+      finishReplacementTest({
+        result: verifiedResult,
+        reviewItem: null,
+        reviewResolution: "not_requested",
+      });
+      await delayedReplacementTest;
+    });
+    await waitFor(() => expect(result.current.state.phase).toBe("tested"));
+  });
+
+  it("ignores an in-flight boundary retry from a replaced data source", async () => {
+    const original = config();
+    const saved = { ...original, llm: { ...original.llm, chat_model: "saved-on-first-source" } };
+    const failedRefresh = snapshot(saved, boundary());
+    failedRefresh.config = null;
+    let finishRetry: (value: SettingsPrivacySnapshot) => void = () => undefined;
+    const delayedRetry = new Promise<SettingsPrivacySnapshot>(resolve => {
+      finishRetry = resolve;
+    });
+    const firstLoad = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot(original, boundary()))
+      .mockResolvedValueOnce(failedRefresh)
+      .mockImplementationOnce(() => delayedRetry);
+    const firstSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: firstLoad,
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn().mockResolvedValue(undefined),
+    };
+    const replacementConfig = {
+      ...original,
+      llm: { ...original.llm, chat_model: "replacement-source-model" },
+    };
+    const secondSource: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(replacementConfig, boundary())),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const announce = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ source }: { source: SettingsPrivacyDataSource }) =>
+        useSettingsPrivacyJourney(source, announce),
+      { initialProps: { source: firstSource } }
+    );
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    act(() => result.current.edit({ field: "chat_model", value: "saved-on-first-source" }));
+    act(() => result.current.save());
+    await waitFor(() => expect(result.current.state.failureStage).toBe("boundary_refresh"));
+    act(() => result.current.retryBoundaryRefresh());
+    expect(firstLoad).toHaveBeenCalledTimes(3);
+
+    rerender({ source: secondSource });
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+    await act(async () => {
+      finishRetry(snapshot(saved, boundary()));
+      await delayedRetry;
+    });
+
+    expect(result.current.draft?.llm.chat_model).toBe("replacement-source-model");
+    expect(result.current.state.phase).toBe("idle");
+    expect(announce).not.toHaveBeenCalledWith("已重新确认精确的已保存配置与模型传输边界。");
   });
 
   it("tests without saving and requires an explicit external-transmission confirmation", async () => {

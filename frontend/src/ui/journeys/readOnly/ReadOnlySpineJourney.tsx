@@ -502,6 +502,11 @@ export function ReadOnlySpineJourney({
   const [selectedEvidence, setSelectedEvidence] = useState("");
   const [announcement, setAnnouncement] = useState(() => routeEntryAnnouncement(initialSurface));
   const [focusKey, setFocusKey] = useState("initial");
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const announceSettings = useCallback((message: string) => {
+    if (modeRef.current === "settings") setAnnouncement(message);
+  }, []);
   const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) await governed.load(false);
@@ -513,7 +518,7 @@ export function ReadOnlySpineJourney({
   );
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
   const lifeModelBuilder = useLifeModelBuilder(lifeModelBuilderDataSource, setAnnouncement);
-  const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, setAnnouncement);
+  const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, announceSettings);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);

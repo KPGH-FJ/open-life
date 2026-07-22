@@ -69,6 +69,12 @@ export type SettingsEnsureLoadedResult = {
   retainedUnsavedDraft: boolean;
 };
 
+type SettingsOperationToken = {
+  kind: "test" | "save" | "boundary_refresh";
+  sourceGeneration: number;
+  sequence: number;
+};
+
 function loadingBoundaryEnvelope(): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
   return {
     data: null,
@@ -154,10 +160,12 @@ export function useSettingsPrivacyJourney(
   );
   const [testConfirmationOpen, setTestConfirmationOpen] = useState(false);
   const requestRef = useRef(0);
-  const operationRef = useRef<"test" | "save" | "boundary_refresh" | null>(null);
+  const sourceGenerationRef = useRef(0);
+  const operationSequenceRef = useRef(0);
+  const operationRef = useRef<SettingsOperationToken | null>(null);
   const snapshotRef = useRef<SettingsPrivacySnapshot | null>(null);
   const stateRef = useRef(state);
-  const ensureLoadPromiseRef = useRef<Promise<SettingsEnsureLoadedResult> | null>(null);
+  const activeLoadPromiseRef = useRef<Promise<SettingsPrivacySnapshot> | null>(null);
   const pendingSaveAttestationRef = useRef<{
     previousConfig: AppConfig;
     submittedConfig: AppConfig;
@@ -167,10 +175,11 @@ export function useSettingsPrivacyJourney(
   stateRef.current = state;
 
   useEffect(() => {
+    sourceGenerationRef.current += 1;
     requestRef.current += 1;
     operationRef.current = null;
     snapshotRef.current = null;
-    ensureLoadPromiseRef.current = null;
+    activeLoadPromiseRef.current = null;
     pendingSaveAttestationRef.current = null;
     setSnapshot(null);
     setDraft(null);
@@ -179,43 +188,62 @@ export function useSettingsPrivacyJourney(
     setTestConfirmationOpen(false);
     dispatch({ type: "reset" });
     return () => {
+      sourceGenerationRef.current += 1;
       requestRef.current += 1;
       snapshotRef.current = null;
-      ensureLoadPromiseRef.current = null;
+      activeLoadPromiseRef.current = null;
     };
   }, [dataSource]);
 
   const load = useCallback(
-    async (announceResult = true): Promise<SettingsPrivacySnapshot> => {
+    (announceResult = true): Promise<SettingsPrivacySnapshot> => {
       const requestId = ++requestRef.current;
       setLoading(true);
-      let next: SettingsPrivacySnapshot;
-      try {
-        next = dataSource
-          ? await dataSource.loadSettingsPrivacy()
-          : buildSettingsPrivacyErrorSnapshot("settings_privacy_data_source_unavailable");
-      } catch (error) {
-        next = buildSettingsPrivacyErrorSnapshot(error);
-      }
-      if (requestId === requestRef.current) {
-        snapshotRef.current = next;
-        setSnapshot(next);
-        setDraft(next.config ? cloneSettingsConfig(next.config) : null);
-        setLoading(false);
-        if (announceResult) {
-          announce(
-            next.config && next.boundaryEnvelope.status !== "error"
-              ? "设置与模型传输边界已从后端重新读取。"
-              : "设置读取不完整；测试、保存和本地确定态保持关闭。"
-          );
+      const loadPromise = (async () => {
+        let next: SettingsPrivacySnapshot;
+        try {
+          next = dataSource
+            ? await dataSource.loadSettingsPrivacy()
+            : buildSettingsPrivacyErrorSnapshot("settings_privacy_data_source_unavailable");
+        } catch (error) {
+          next = buildSettingsPrivacyErrorSnapshot(error);
         }
-      }
-      return next;
+        if (requestId === requestRef.current) {
+          snapshotRef.current = next;
+          setSnapshot(next);
+          setDraft(next.config ? cloneSettingsConfig(next.config) : null);
+          setLoading(false);
+          if (announceResult) {
+            announce(
+              next.config && next.boundaryEnvelope.status !== "error"
+                ? "设置与模型传输边界已从后端重新读取。"
+                : "设置读取不完整；测试、保存和本地确定态保持关闭。"
+            );
+          }
+        }
+        return next;
+      })();
+      const trackedLoadPromise = loadPromise.finally(() => {
+        if (activeLoadPromiseRef.current === trackedLoadPromise) {
+          activeLoadPromiseRef.current = null;
+        }
+      });
+      activeLoadPromiseRef.current = trackedLoadPromise;
+      return trackedLoadPromise;
     },
     [announce, dataSource]
   );
 
   const ensureLoaded = useCallback(async (): Promise<SettingsEnsureLoadedResult> => {
+    const activeLoad = activeLoadPromiseRef.current;
+    if (activeLoad) {
+      return {
+        snapshot: await activeLoad,
+        loadedFromSource: true,
+        retainedUnsavedDraft: false,
+      };
+    }
+
     const currentSnapshot = snapshotRef.current;
     if (currentSnapshot) {
       const currentState = stateRef.current;
@@ -226,22 +254,11 @@ export function useSettingsPrivacyJourney(
       };
     }
 
-    const existingLoad = ensureLoadPromiseRef.current;
-    if (existingLoad) return existingLoad;
-
-    const loadPromise = load(false).then(next => ({
-      snapshot: next,
+    return {
+      snapshot: await load(false),
       loadedFromSource: true,
       retainedUnsavedDraft: false,
-    }));
-    ensureLoadPromiseRef.current = loadPromise;
-    try {
-      return await loadPromise;
-    } finally {
-      if (ensureLoadPromiseRef.current === loadPromise) {
-        ensureLoadPromiseRef.current = null;
-      }
-    }
+    };
   }, [load]);
 
   const edit = useCallback(
@@ -305,12 +322,21 @@ export function useSettingsPrivacyJourney(
 
   const executeTest = useCallback(async () => {
     if (!dataSource || !draft || operationRef.current || !actions.test.enabled) return;
-    operationRef.current = "test";
+    const operationToken: SettingsOperationToken = {
+      kind: "test",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    const operationIsCurrent = () =>
+      operationRef.current === operationToken &&
+      sourceGenerationRef.current === operationToken.sourceGeneration;
     dispatch({ type: "test_requested" });
     setLastTestOutcome(null);
     announce("正在验证这一份设置草稿；测试不会保存任何配置。");
     try {
       const outcome = await dataSource.testProviderConnection(cloneSettingsConfig(draft));
+      if (!operationIsCurrent()) return;
       setLastTestOutcome(outcome);
       const result = outcome.result;
       const receipt = result.provider_invocation_receipt;
@@ -341,10 +367,11 @@ export function useSettingsPrivacyJourney(
         );
       }
     } catch (error) {
+      if (!operationIsCurrent()) return;
       dispatch({ type: "test_failed", errorCode: errorCode(error) });
       announce("连接测试命令失败；当前配置没有可用性证明。");
     } finally {
-      operationRef.current = null;
+      if (operationIsCurrent()) operationRef.current = null;
     }
   }, [actions.test.enabled, announce, dataSource, draft]);
 
@@ -384,16 +411,25 @@ export function useSettingsPrivacyJourney(
     }
     const submitted = cloneSettingsConfig(draft);
     const previousConfig = cloneSettingsConfig(snapshot.config);
+    const operationToken: SettingsOperationToken = {
+      kind: "save",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    const operationIsCurrent = () =>
+      operationRef.current === operationToken &&
+      sourceGenerationRef.current === operationToken.sourceGeneration;
     pendingSaveAttestationRef.current = {
       previousConfig,
       submittedConfig: cloneSettingsConfig(submitted),
     };
-    operationRef.current = "save";
     dispatch({ type: "save_requested" });
     announce("正在保存设置；命令返回不代表模型边界已经确认。");
     void (async () => {
       try {
         await dataSource.saveSettings(submitted);
+        if (!operationIsCurrent()) return;
         dispatch({ type: "save_succeeded" });
         announce("设置命令已返回，正在重新读取配置与模型传输边界。");
         let refreshed: SettingsPrivacySnapshot;
@@ -402,6 +438,8 @@ export function useSettingsPrivacyJourney(
         } catch (error) {
           refreshed = buildSettingsPrivacyErrorSnapshot(error);
         }
+        if (!operationIsCurrent()) return;
+        snapshotRef.current = refreshed;
         setSnapshot(refreshed);
         if (
           !refreshed.config ||
@@ -428,11 +466,12 @@ export function useSettingsPrivacyJourney(
             : "设置已保存，但后端返回的模型传输边界仍未知；当前不显示本地确定态。"
         );
       } catch (error) {
+        if (!operationIsCurrent()) return;
         pendingSaveAttestationRef.current = null;
         dispatch({ type: "save_failed", errorCode: errorCode(error) });
         announce("设置保存失败；草稿仍保留，当前产品边界没有改变。");
       } finally {
-        operationRef.current = null;
+        if (operationIsCurrent()) operationRef.current = null;
       }
     })();
   }, [actions.save, announce, dataSource, draft, snapshot?.config]);
@@ -447,7 +486,15 @@ export function useSettingsPrivacyJourney(
       announce("当前没有可重新核对的保存结果；页面不会猜测配置或边界状态。");
       return;
     }
-    operationRef.current = "boundary_refresh";
+    const operationToken: SettingsOperationToken = {
+      kind: "boundary_refresh",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    const operationIsCurrent = () =>
+      operationRef.current === operationToken &&
+      sourceGenerationRef.current === operationToken.sourceGeneration;
     dispatch({ type: "boundary_refresh_retry_requested" });
     announce("正在重新读取已保存配置、LifeStateProjection 与模型传输边界。");
     void (async () => {
@@ -457,6 +504,8 @@ export function useSettingsPrivacyJourney(
       } catch (error) {
         refreshed = buildSettingsPrivacyErrorSnapshot(error);
       }
+      if (!operationIsCurrent()) return;
+      snapshotRef.current = refreshed;
       setSnapshot(refreshed);
       if (
         !refreshed.config ||
@@ -474,7 +523,7 @@ export function useSettingsPrivacyJourney(
           errorCode: `settings_refresh_${refreshed.boundaryEnvelope.status}`,
         });
         announce("重新读取仍未证明精确的已保存配置与边界；当前继续保持未知。");
-        operationRef.current = null;
+        if (operationIsCurrent()) operationRef.current = null;
         return;
       }
       setDraft(cloneSettingsConfig(refreshed.config));
@@ -485,7 +534,7 @@ export function useSettingsPrivacyJourney(
           ? "已重新确认精确的已保存配置与模型传输边界。"
           : "已重新读取精确配置，但后端边界仍未知；当前不显示本地确定态。"
       );
-      operationRef.current = null;
+      if (operationIsCurrent()) operationRef.current = null;
     })();
   }, [announce, dataSource, state]);
 
