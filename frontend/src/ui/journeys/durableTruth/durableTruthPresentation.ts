@@ -282,7 +282,8 @@ export function durableTruthContext(
 export function durableTruthInspector(
   snapshot: DurableTruthSnapshot | null,
   item: ReviewItem | null,
-  selectedEvidence: string
+  selectedEvidence: string,
+  builderError?: string | null
 ): WorkbenchInspectorModel {
   if (!snapshot) {
     return {
@@ -344,6 +345,7 @@ export function durableTruthInspector(
       { label: "decision", value: item?.status ?? "none" },
       { label: "materialization", value: item?.materializationStatus ?? "none" },
       { label: "lifecycle", value: state.lifecycle },
+      { label: "builderError", value: builderError ?? "none" },
       { label: "limitations", value: limitations.join(" | ") || "none" },
       {
         label: "diagnostics",

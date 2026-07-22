@@ -181,4 +181,22 @@ describe("LifeModel Builder journey", () => {
     expect(result.current.candidates).toHaveLength(2);
     expect(result.current.error).toBe("builder_proposal_store_failed");
   });
+
+  it("extracts a bounded code from structured Tauri failures", async () => {
+    const dataSource = source({
+      startQuick: vi.fn().mockRejectedValue({
+        kind: "Database",
+        detail: {
+          message: "raw persistence detail",
+          hint: "read_only_degraded",
+        },
+      }),
+    });
+    const { result } = renderHook(() => useLifeModelBuilder(dataSource, vi.fn()));
+
+    await act(async () => result.current.start());
+
+    expect(result.current.phase).toBe("error");
+    expect(result.current.error).toBe("Database:read_only_degraded");
+  });
 });

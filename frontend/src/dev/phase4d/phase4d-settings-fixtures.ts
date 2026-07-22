@@ -270,9 +270,11 @@ function settingsSnapshot(
   return {
     config: cloneSettingsConfig(config),
     boundaryEnvelope: boundaryEnvelope(boundary, stale ? "stale" : "ready"),
+    safeMode: { active: false, reason: "", sourceRefs: [] },
     diagnostics: [
       { id: "sanitized_config", status: "loaded" },
       { id: "provider_privacy_boundary", status: "loaded" },
+      { id: "life_state_projection", status: "loaded" },
       { id: "review_item_resolution", status: "not_requested" },
     ],
   };
@@ -345,7 +347,7 @@ export function createPhase4dSettingsFixture(id: Phase4dFixtureId): {
           throw new Error("fixture_settings_save_failed");
         }
         config = cloneSettingsConfig(next);
-        if (config.llm.openai_key.trim()) config.llm.openai_key = "***";
+        if (config.llm.openai_key?.trim()) config.llm.openai_key = "***";
         saved = true;
       },
     },

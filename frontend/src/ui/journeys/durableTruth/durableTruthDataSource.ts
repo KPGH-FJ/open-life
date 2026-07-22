@@ -7,6 +7,7 @@ import {
   type ReviewCenterViewModel,
   type ViewModelEnvelope,
 } from "@/tauri";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
 
 export type DurableTruthDiagnostic = {
@@ -24,10 +25,6 @@ export type DurableTruthSnapshot = {
 
 export interface DurableTruthDataSource {
   loadDurableTruth(): Promise<DurableTruthSnapshot>;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function settledEnvelope<T>(

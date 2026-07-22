@@ -25,7 +25,7 @@ State vocabulary:
 | `ReviewGovernedView.tsx` over rich `ReviewItem` and `reviewDispatchReducer` | `MailboxPage.tsx`, raw proposal display helpers, and Chat permission decision UI | `/mailbox`, retired in Phase 4E | `/review` renders backend decision context and allowed actions; decisions refresh the same item and never resume/apply automatically | Review journey tests, raw proposal reconstruction scan, old owner absence | `guarded_absent` |
 | `frontend/src/ui/journeys/durableTruth/**` over LifeModelViewModel, MemoryViewModel, and exact ReviewItem lifecycle | `LifeModelPage.tsx`, `MemorySearch.tsx`, LifeModel editor, and local trust/quality helpers | `/life-model` and `/memory`, with `/memory` retired | `/life-model` distinguishes pending, approved-not-applied, applying, applied, failed, rolled-back, rejected, and unknown from refreshed backend proof | Durable presentation/journey tests, raw-read inventory, old owner absence | `guarded_absent` |
 | `LifeModelBuilderPanel.tsx` and `lifeModelBuilderDataSource.ts` | `BuilderPage.tsx` and direct builder page composition | `/builder`, retired in Phase 4E | First build is embedded only when LifeModel is not built; it creates review proposals and never applies truth directly | Builder reducer/journey tests, exact ReviewItem fixture mapping, old page absence | `guarded_absent` |
-| `frontend/src/ui/journeys/settingsPrivacy/**` over sanitized AppConfig, ProviderPrivacyBoundarySummary, provider receipts, and exact ReviewItem | `SettingsPage.tsx`, settings tabs, and local provider readiness helpers | `/settings`, moved in Phase 4E | `/settings` owns draft/test/review/save/refresh; unknown boundary never becomes local/green | Settings tests, provider boundary assertions, old page/component/helper absence | `guarded_absent` |
+| `frontend/src/ui/journeys/settingsPrivacy/**` over sanitized AppConfig, ProviderPrivacyBoundarySummary, `LifeStateProjection.safeMode`, provider receipts, exact ReviewItem, and the existing governed credential-recovery command | `SettingsPage.tsx`, settings tabs, and local provider readiness/recovery UI helpers | `/settings`, moved in Phase 4E and repaired in Phase 4F | `/settings` owns draft/test/review/save/refresh and the user-initiated Safe Mode recovery entry; unknown boundary or Safe Mode source never becomes local/green, and recovery return never clears Safe Mode | Settings data-source/hook/view tests, provider boundary assertions, old page/component/helper absence | `guarded_absent` |
 | Settings utility context and explicit unavailable routes | ProductShell advanced groups and same-level advanced pages | Old shell secondary navigation, removed in Phase 4E | Settings stays outside primary product navigation; retired routes show unavailable state; no Advanced product route is synthesized | Route matrix tests and release bundle guard | `guarded_absent` |
 | `frontend/src/ui/productRouteContract.ts` | `LEGACY_PRODUCT_REDIRECTS` and old route aliases | Old `App.tsx` route map, replaced in Phase 4E | Canonical routes are `/today`, `/workspace`, `/tasks`, `/review`, `/life-model`, `/settings`; root alone redirects to Today | Route contract tests, App tests, release guard, Rust authority guard | `guarded_absent` |
 
@@ -63,6 +63,11 @@ Phase 4E moved the accepted desktop Workbench into production in one change:
 All migrated rows are now `guarded_absent`. This state does not claim that
 external live-provider evidence, manual VoiceOver, or final Phase 4F product
 trial is complete.
+
+Phase 4F found that the Phase 4E deletion removed the old Settings recovery UI
+while the governed backend command remained shipped. The repair is owned by the
+new Settings journey and does not restore any old page, component, route, or
+frontend truth helper.
 
 The Phase 4D sections below record the earlier candidate-only checkpoints.
 Their `contract_ready` statements are historical evidence and do not override

@@ -34,6 +34,7 @@ export type SettingsOrchestrationEvent =
   | { type: "save_requested" }
   | { type: "save_succeeded" }
   | { type: "save_failed"; errorCode: string }
+  | { type: "boundary_refresh_retry_requested" }
   | { type: "boundary_refreshed"; boundary: ProviderPrivacyBoundarySummary }
   | { type: "boundary_refresh_failed"; errorCode: string };
 
@@ -98,6 +99,19 @@ export function settingsOrchestrationReducer(
       phase: "failed",
       failureStage: "save",
       errorCode: event.errorCode,
+    };
+  }
+
+  if (
+    state.phase === "unknown" &&
+    state.failureStage === "boundary_refresh" &&
+    event.type === "boundary_refresh_retry_requested"
+  ) {
+    return {
+      ...state,
+      phase: "refreshing_boundary",
+      failureStage: null,
+      errorCode: null,
     };
   }
 

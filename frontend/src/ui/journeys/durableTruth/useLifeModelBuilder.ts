@@ -11,6 +11,7 @@ import type {
   BuilderProposalReceipt,
   LifeModelBuilderDataSource,
 } from "./lifeModelBuilderDataSource";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 
 type Announce = (message: string) => void;
 type CandidateDecision = "undecided" | "accepted" | "rejected" | "edited";
@@ -31,10 +32,6 @@ export type LifeModelBuilderPhase =
   | "submitting"
   | "created"
   | "error";
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function editableValue(value: unknown): string {
   if (typeof value === "string") return value;

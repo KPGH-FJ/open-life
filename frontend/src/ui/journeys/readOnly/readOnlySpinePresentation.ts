@@ -213,6 +213,8 @@ export function taskLifecyclePresentation(item: TaskViewModelItem): ProductStatu
       return { label: "已阻断", status: "blocked" };
     case "failed":
       return { label: "失败", status: "error" };
+    case "remote_unknown":
+      return { label: "远端结果未知", status: "unknown" };
     case "cancelled":
       return { label: "已取消", status: "neutral" };
     case "completed_with_pending_review":

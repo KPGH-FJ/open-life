@@ -3,6 +3,7 @@ import type { AppConfig, LlmConnectionTestResult, ReviewItem } from "@/tauri";
 
 const tauriMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
+  getLifeStateProjection: vi.fn(),
   getProviderPrivacyBoundarySummary: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
   saveConfig: vi.fn(),
@@ -28,6 +29,9 @@ const config: AppConfig = {
 describe("Tauri settings privacy data source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    tauriMocks.getLifeStateProjection.mockResolvedValue({
+      safeMode: { active: false, reason: "", sourceRefs: [] },
+    });
   });
 
   it("loads sanitized config and boundary independently and fails closed on a partial read", async () => {
@@ -40,10 +44,35 @@ describe("Tauri settings privacy data source", () => {
 
     expect(snapshot.config).toEqual(config);
     expect(snapshot.boundaryEnvelope).toMatchObject({ status: "error", data: null });
+    expect(snapshot.safeMode).toEqual({ active: false, reason: "", sourceRefs: [] });
     expect(snapshot.diagnostics).toContainEqual({
       id: "provider_privacy_boundary",
       status: "failed",
       message: "boundary unavailable",
+    });
+  });
+
+  it("keeps Safe Mode unknown when LifeStateProjection cannot be read", async () => {
+    tauriMocks.getConfig.mockResolvedValue(config);
+    tauriMocks.getProviderPrivacyBoundarySummary.mockResolvedValue({
+      data: null,
+      status: "empty",
+      lastUpdatedAt: null,
+      source: "backend-readmodel",
+      evidenceRefs: [],
+      warnings: [],
+      actions: { primary: [], review: [], debugOnly: [] },
+    });
+    tauriMocks.getLifeStateProjection.mockRejectedValue(new Error("projection unavailable"));
+
+    const snapshot = await tauriSettingsPrivacyDataSource.loadSettingsPrivacy();
+
+    expect(snapshot.config).toEqual(config);
+    expect(snapshot.safeMode).toBeNull();
+    expect(snapshot.diagnostics).toContainEqual({
+      id: "life_state_projection",
+      status: "failed",
+      message: "projection unavailable",
     });
   });
 

@@ -21,6 +21,7 @@ import type {
   TasksViewModel,
   ViewModelEnvelope,
 } from "@/tauri";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import {
   OpenLifeWorkbenchShell,
   type WorkbenchContextSummary,
@@ -83,6 +84,21 @@ export type ReadOnlySpineRouteState = {
   mode: "product" | "settings";
   surface: ReadOnlyProductSurfaceId;
 };
+
+function routeEntryAnnouncement(surface: ReadOnlyProductSurfaceId): string {
+  switch (surface) {
+    case "today":
+      return "已进入今日；当前关注只取自后端读模型。";
+    case "workspace":
+      return "已进入工作区；当前执行与阻塞只取自后端读模型。";
+    case "tasks":
+      return "已进入任务；任务状态与交付证明只取自后端读模型。";
+    case "review":
+      return "已进入审核中心；决定状态与后续应用结果分别核对。";
+    case "life-model":
+      return "已进入 LifeModel；长期状态只显示后端已经证明的结果。";
+  }
+}
 
 const productNavigation: readonly WorkbenchNavigationItem[] = [
   { id: "today", label: "今日", meta: "当前关注", icon: CalendarDays },
@@ -231,10 +247,6 @@ function loadingTasksSnapshot(): TasksReadOnlySnapshot {
     boundaryEnvelope: loadingBoundaryEnvelope(),
     diagnostics: [],
   };
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function rejectedTodaySnapshot(error: unknown): TodayReadOnlySnapshot {
@@ -488,8 +500,13 @@ export function ReadOnlySpineJourney({
   const [selectedTask, setSelectedTask] = useState<TaskViewModelItem | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedEvidence, setSelectedEvidence] = useState("");
-  const [announcement, setAnnouncement] = useState("正在读取今日状态。");
+  const [announcement, setAnnouncement] = useState(() => routeEntryAnnouncement(initialSurface));
   const [focusKey, setFocusKey] = useState("initial");
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const announceSettings = useCallback((message: string) => {
+    if (modeRef.current === "settings") setAnnouncement(message);
+  }, []);
   const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) await governed.load(false);
@@ -501,7 +518,7 @@ export function ReadOnlySpineJourney({
   );
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
   const lifeModelBuilder = useLifeModelBuilder(lifeModelBuilderDataSource, setAnnouncement);
-  const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, setAnnouncement);
+  const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, announceSettings);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
@@ -587,7 +604,7 @@ export function ReadOnlySpineJourney({
     setSelectedTask(null);
     setSelectedEvidence("");
     setInspectorOpen(false);
-    setAnnouncement("正在读取今日状态。");
+    setAnnouncement(routeEntryAnnouncement(initialSurface));
     void loadToday(false);
     if (initialSurface === "tasks") {
       if (governedActionDataSource) void governed.load(false);
@@ -629,6 +646,37 @@ export function ReadOnlySpineJourney({
     }
   }, [initialSurface, lifeModelBuilder.ensureLoaded, lifeModelBuilderDataSource]);
 
+  useEffect(() => {
+    if (mode !== "settings" || !settingsPrivacyDataSource) return;
+    let cancelled = false;
+    setAnnouncement("已进入设置上下文，正在核对清理后的配置与模型传输边界。 ");
+    void settingsPrivacy.ensureLoaded().then(result => {
+      if (cancelled) return;
+      if (!result.loadedFromSource) {
+        setAnnouncement(
+          result.retainedUnsavedDraft
+            ? "已返回设置；未保存草稿仍保留，未重新读取或覆盖。"
+            : "已返回设置；沿用已读取的后端快照，未执行写入。"
+        );
+        return;
+      }
+      const next = result.snapshot;
+      const projectionLoaded = next.diagnostics.some(
+        diagnostic => diagnostic.id === "life_state_projection" && diagnostic.status === "loaded"
+      );
+      setAnnouncement(
+        next.config && next.boundaryEnvelope.status !== "error" && projectionLoaded && next.safeMode
+          ? next.safeMode.active
+            ? "设置已从后端读取；安全模式仍在生效，测试与保存保持关闭。"
+            : "设置与模型传输边界已从后端读取。"
+          : "设置读取不完整；测试、保存和本地确定态保持关闭。"
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, settingsPrivacy.ensureLoaded, settingsPrivacyDataSource]);
+
   function navigateProduct(id: string, reviewOrigin?: "workspace" | "life-model"): void {
     const next = id as ReadOnlyProductSurfaceId;
     if (next === "review") {
@@ -642,26 +690,20 @@ export function ReadOnlySpineJourney({
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus(`nav-${next}`);
+    setAnnouncement(routeEntryAnnouncement(next));
     if (next === "tasks" && !governed.snapshot) {
       if (governedActionDataSource) void governed.load(false);
       else if (!tasksLoaded) void loadTasks(false);
     }
-    if (next === "today") {
-      setAnnouncement("已进入今日，只显示后端提供的当前关注。 ");
-    } else if (next === "tasks") {
-      setAnnouncement("已进入任务，查看后端任务状态与交付证明。 ");
-    } else if (governedActionDataSource && (next === "workspace" || next === "review")) {
-      setAnnouncement(
-        next === "workspace"
-          ? "已进入工作区，正在核对当前执行与阻塞。"
-          : "已进入审核中心，正在核对建议与权限。"
-      );
+    if (next === "today" || next === "tasks") {
+      return;
+    }
+    if (governedActionDataSource && (next === "workspace" || next === "review")) {
       void governed.load(false);
       if (next === "workspace" && workspaceConversationDataSource) {
         conversation.ensureLoaded();
       }
     } else if (next === "life-model" && durableTruthDataSource) {
-      setAnnouncement("已进入 LifeModel，正在核对当前理解、审核决定与应用结果。");
       void durable.load(false);
       if (lifeModelBuilderDataSource) lifeModelBuilder.ensureLoaded();
     } else {
@@ -677,7 +719,6 @@ export function ReadOnlySpineJourney({
     onRouteChange?.({ mode: "settings", surface: activeSurface });
     requestFocus("settings-open");
     if (settingsPrivacyDataSource && isSettingsPrivacySurface(activeSettingsId)) {
-      settingsPrivacy.ensureLoaded();
       setAnnouncement("已进入设置上下文，正在核对清理后的配置与模型传输边界。 ");
     } else {
       setAnnouncement(`已进入“${settingsCopy[activeSettingsId].title}”；当前入口尚未迁移。`);
@@ -700,7 +741,7 @@ export function ReadOnlySpineJourney({
     setSelectedEvidence("");
     requestFocus(`settings-${id}`);
     if (settingsPrivacyDataSource && isSettingsPrivacySurface(id)) {
-      settingsPrivacy.ensureLoaded();
+      void settingsPrivacy.ensureLoaded();
       setAnnouncement(`已进入“${settingsCopy[id].title}”；产品事实只取自后端配置与边界读模型。`);
     } else {
       setAnnouncement(`已进入“${settingsCopy[id].title}”；当前不会读取或保存替代配置。`);
@@ -803,7 +844,12 @@ export function ReadOnlySpineJourney({
       return reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
     }
     if (activeSurface === "life-model" && durableTruthDataSource) {
-      return durableTruthInspector(durable.snapshot, durable.selectedItem, selectedEvidence);
+      return durableTruthInspector(
+        durable.snapshot,
+        durable.selectedItem,
+        selectedEvidence,
+        lifeModelBuilderDataSource ? lifeModelBuilder.error : null
+      );
     }
     return unavailableInspector(unavailableCopy[activeSurface].title);
   }, [
@@ -819,6 +865,8 @@ export function ReadOnlySpineJourney({
     governed.selectedItem,
     governed.snapshot,
     governedActionDataSource,
+    lifeModelBuilder.error,
+    lifeModelBuilderDataSource,
     settingsPrivacy,
     settingsPrivacyDataSource,
     todaySnapshot,
@@ -957,7 +1005,6 @@ export function ReadOnlySpineJourney({
             setInspectorOpen(false);
             setSelectedEvidence("");
             requestFocus("settings-review-return");
-            settingsPrivacy.ensureLoaded();
             setAnnouncement("已返回模型与供应商；审核决定不会自动重新测试或保存设置。 ");
           } else {
             navigateProduct(reviewReturnSurface);

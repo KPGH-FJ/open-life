@@ -16,6 +16,7 @@ import {
   type ViewModelEnvelope,
   type WorkspaceViewModel,
 } from "@/tauri";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
 
 export type GovernedActionDiagnostic = {
@@ -36,10 +37,6 @@ export interface GovernedActionDataSource {
   dispatchReviewAction(action: ReviewAction): Promise<void>;
   resumeTask(control: TaskControl): Promise<void>;
   dispatchTaskControl(control: TaskControl): Promise<void>;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function buildGovernedActionErrorSnapshot(error: unknown): GovernedActionSnapshot {

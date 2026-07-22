@@ -56,7 +56,7 @@ export function LifeModelBuilderPanel({
 
       {controller.error && (
         <FoundationNotice title="建立过程暂时不可用" tone="error" live>
-          <p>{controller.error}</p>
+          <p>后端未能启动或继续建立流程；没有创建审核建议，也没有写入 LifeModel。</p>
         </FoundationNotice>
       )}
 

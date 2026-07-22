@@ -103,7 +103,7 @@ route cleanup.
 | `frontend/src/ui/journeys/readOnly/**` | Today strict adapter and Tasks ViewModel consumer. |
 | `frontend/src/ui/journeys/governedAction/**` | Workspace conversation, task controls, and Review decisions over backend-owned read models and governed commands. |
 | `frontend/src/ui/journeys/durableTruth/**` | LifeModel/Memory durable-truth presentation and first-build proposal flow; approval remains separate from application. |
-| `frontend/src/ui/journeys/settingsPrivacy/**` | Sanitized settings draft/test/save orchestration with ProviderPrivacyBoundarySummary as product boundary truth. |
+| `frontend/src/ui/journeys/settingsPrivacy/**` | Sanitized settings draft/test/save orchestration with ProviderPrivacyBoundarySummary as product boundary truth and direct `LifeStateProjection.safeMode` consumption for generic protection state. Credential recovery stays unavailable until backend-owned typed eligibility exists. |
 
 ## Shipped Command Surface Result
 
@@ -241,13 +241,23 @@ trail; recreating the absent targets would violate the single-system contract.
 
 ## Computer Use Trial Status
 
-Trial report path:
-`frontend/test-results/phase7-computer-use-trial/trial-report.md`.
+Current durable desktop rerun report:
+`docs/phase4f_desktop_product_acceptance/03_native_trial_report.md`.
+
+Prior generated trial path:
+`frontend/test-results/phase7-computer-use-trial/trial-report.md`. That local
+generated artifact is not the current durable report authority and may be
+absent from a clean checkout.
 
 Status: `red-until-trial-green`.
 
-The prior trial found real product blockers around external fact requests,
-proposal resolution/task state, first LifeModel quick-build next steps, and
-cross-page state consistency. Phase7 is not complete until the rerun either
-turns green or remains red with fail-closed behavior that is explicit,
-auditable, and consistent across Workspace/Tasks/Review/Today/LifeModel.
+The Phase 4F rerun observed the packaged single Workbench, canonical routes,
+Safe Mode, and bounded fail-closed missing/error cases. A recovery attempt was
+authorized and returned interactive access, but it is historical evidence:
+review found that generic Safe Mode is not valid recovery eligibility, so the
+current frontend keeps that action unavailable. The attempt also failed
+non-interactive restart under the ad-hoc identity. Governed permission/review/
+resume, durable proposal/application, external provider, stable-signed
+credential recovery, and manual VoiceOver still lack green real evidence.
+Phase7 therefore remains red; fixtures and automated presentation tests do not
+replace those blocked or failed journeys.

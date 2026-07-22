@@ -30,8 +30,14 @@ export function settingsPrivacyContext(
   surface: SettingsPrivacySurfaceId
 ): WorkbenchContextSummary {
   const title = surface === "model-provider" ? "模型与供应商" : "隐私与网络";
-  if (controller.loading && !controller.snapshot) {
+  if (controller.loading) {
     return { eyebrow: "设置", title, status: { label: "正在读取", status: "neutral" } };
+  }
+  if (controller.protectionState === "active") {
+    return { eyebrow: "设置", title, status: { label: "安全模式", status: "waiting" } };
+  }
+  if (controller.protectionState === "unknown") {
+    return { eyebrow: "设置", title, status: { label: "保护状态未知", status: "unknown" } };
   }
   if (!controller.snapshot?.config) {
     return { eyebrow: "设置", title, status: { label: "配置不可用", status: "error" } };
@@ -76,6 +82,15 @@ export function settingsPrivacyContext(
 }
 
 function phaseConclusion(controller: SettingsPrivacyJourneyController): string {
+  if (controller.loading) {
+    return "正在重新读取清理后的配置、LifeStateProjection 与模型传输边界；旧快照不作为当前确定态。";
+  }
+  if (controller.protectionState === "active") {
+    return "后端明确报告安全模式；长期写入保持关闭，当前页面不从配置或提示文案推导恢复状态。";
+  }
+  if (controller.protectionState === "unknown") {
+    return "LifeStateProjection 没有提供可核对的保护状态；配置与边界不能据此宣称正常运行。";
+  }
   if (!controller.snapshot?.config) {
     return "后端没有提供可编辑的清理后配置；当前页面不会使用默认值补造设置。";
   }
@@ -104,6 +119,15 @@ function phaseConclusion(controller: SettingsPrivacyJourneyController): string {
 }
 
 function nextAction(controller: SettingsPrivacyJourneyController): string {
+  if (controller.loading) {
+    return "等待本次后端读取结束；期间不修改、不测试、不保存。";
+  }
+  if (controller.protectionState === "active") {
+    return "核对检查器中的后端来源；当前读模型未提供凭据恢复资格时，不执行系统凭据操作。";
+  }
+  if (controller.protectionState === "unknown") {
+    return "先恢复并重新读取 LifeStateProjection；保护状态未知时不测试、不保存。";
+  }
   const outcome = controller.lastTestOutcome;
   if (outcome?.result.validation_status === "consent_required") {
     return outcome.reviewItem
@@ -113,7 +137,9 @@ function nextAction(controller: SettingsPrivacyJourneyController): string {
   if (controller.state.phase === "dirty") return "可先测试草稿，也可以明确保存；测试不会自动保存。";
   if (controller.state.phase === "tested") return "确认字段后明确保存；保存后仍需等待边界刷新。";
   if (controller.state.phase === "unknown")
-    return "重新读取设置与边界；未知状态下不要依赖本地确定态。";
+    return controller.state.failureStage === "boundary_refresh"
+      ? "使用“重新读取保存结果”重新核对精确配置与边界；未知状态下不要依赖本地确定态。"
+      : "重新读取设置与边界；未知状态下不要依赖本地确定态。";
   if (controller.state.phase === "failed") return "查看返回说明，修改草稿后再测试或保存。";
   return "修改配置前先核对当前边界；需要更多来源时打开证据项。";
 }
@@ -132,9 +158,16 @@ export function settingsPrivacyInspector(
     ...(boundaryEnvelope.data?.evidenceRefs ?? []),
   ];
   const reviewRefs = controller.lastTestOutcome?.reviewItem?.evidenceRefs ?? [];
+  const safeModeRefs = controller.snapshot?.safeMode?.sourceRefs ?? [];
   const evidence = uniqueEvidence([
     ...evidenceRefs(boundaryRefs),
     ...evidenceRefs(reviewRefs),
+    ...safeModeRefs.map(id => ({
+      id,
+      label: "安全模式来源",
+      source: "LifeStateProjection",
+      sensitivity: "metadata_only",
+    })),
     ...(result?.network_policy_decision_id
       ? [
           {
@@ -186,6 +219,15 @@ export function settingsPrivacyInspector(
         : undefined,
     technicalDetails: [
       { label: "configSource", value: "get_config (sanitized)" },
+      {
+        label: "safeModeActive",
+        value: String(controller.snapshot?.safeMode?.active ?? "unknown"),
+      },
+      { label: "safeModeReason", value: controller.snapshot?.safeMode?.reason ?? "unknown" },
+      {
+        label: "safeModeSourceRefs",
+        value: controller.snapshot?.safeMode?.sourceRefs.join(", ") || "none",
+      },
       { label: "orchestrationPhase", value: controller.state.phase },
       { label: "draftRevision", value: String(controller.state.draftRevision) },
       { label: "savedRevision", value: String(controller.state.savedRevision ?? "none") },

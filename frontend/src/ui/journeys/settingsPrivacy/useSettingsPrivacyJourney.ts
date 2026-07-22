@@ -5,6 +5,7 @@ import {
   type SettingsOrchestrationState,
 } from "@/contracts/settingsOrchestrationContract";
 import type { AppConfig, ProviderPrivacyBoundarySummary, ViewModelEnvelope } from "@/tauri";
+import { journeyErrorCode as errorCode } from "@/ui/journeys/journeyError";
 import {
   buildSettingsPrivacyErrorSnapshot,
   type SettingsConnectionTestOutcome,
@@ -14,16 +15,21 @@ import {
 import {
   cloneSettingsConfig,
   connectionTestPresentation,
+  credentialState,
   endpointHost,
   providerIdentity,
+  settingsConfigMatchesSavedDraft,
   settingsProductActions,
   unknownDraftBoundaryEnvelope,
+  unknownSettingsProtectionBoundaryEnvelope,
   validateSettingsDraft,
   type SettingsDraftValidation,
   type SettingsTestPresentation,
 } from "./settingsPrivacyPresentation";
 
 type Announce = (message: string) => void;
+
+export type SettingsProtectionState = "loading" | "normal" | "active" | "unknown";
 
 export type SettingsDraftEdit =
   | { field: "provider"; value: NonNullable<AppConfig["llm"]["provider"]> }
@@ -42,22 +48,32 @@ export type SettingsPrivacyJourneyController = {
   loading: boolean;
   lastTestOutcome: SettingsConnectionTestOutcome | null;
   testPresentation: SettingsTestPresentation | null;
+  protectionState: SettingsProtectionState;
   validation: SettingsDraftValidation;
   actions: ReturnType<typeof settingsProductActions>;
   effectiveBoundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
   testConfirmationOpen: boolean;
   load: (announceResult?: boolean) => Promise<SettingsPrivacySnapshot>;
-  ensureLoaded: () => void;
+  ensureLoaded: () => Promise<SettingsEnsureLoadedResult>;
   edit: (edit: SettingsDraftEdit) => void;
   requestTest: () => void;
   confirmTest: () => void;
   cancelTest: () => void;
   save: () => void;
+  retryBoundaryRefresh: () => void;
 };
 
-function errorCode(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+export type SettingsEnsureLoadedResult = {
+  snapshot: SettingsPrivacySnapshot;
+  loadedFromSource: boolean;
+  retainedUnsavedDraft: boolean;
+};
+
+type SettingsOperationToken = {
+  kind: "test" | "save" | "boundary_refresh";
+  sourceGeneration: number;
+  sequence: number;
+};
 
 function loadingBoundaryEnvelope(): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
   return {
@@ -107,6 +123,27 @@ function applyDraftEdit(config: AppConfig, edit: SettingsDraftEdit): AppConfig {
   }
 }
 
+function protectionStateForSnapshot(
+  snapshot: SettingsPrivacySnapshot | null,
+  loading = false
+): SettingsProtectionState {
+  if (loading) return "loading";
+  if (!snapshot) return "unknown";
+  const projectionLoaded = snapshot.diagnostics.some(
+    diagnostic => diagnostic.id === "life_state_projection" && diagnostic.status === "loaded"
+  );
+  if (!projectionLoaded || !snapshot.safeMode) return "unknown";
+  return snapshot.safeMode.active ? "active" : "normal";
+}
+
+function boundaryIsKnown(boundary: ProviderPrivacyBoundarySummary): boolean {
+  return (
+    boundary.routeType !== "unknown" &&
+    boundary.externalTransmission !== "unknown" &&
+    boundary.risk !== "unknown"
+  );
+}
+
 export function useSettingsPrivacyJourney(
   dataSource: SettingsPrivacyDataSource | undefined,
   announce: Announce
@@ -123,11 +160,27 @@ export function useSettingsPrivacyJourney(
   );
   const [testConfirmationOpen, setTestConfirmationOpen] = useState(false);
   const requestRef = useRef(0);
-  const operationRef = useRef<"test" | "save" | null>(null);
+  const sourceGenerationRef = useRef(0);
+  const operationSequenceRef = useRef(0);
+  const operationRef = useRef<SettingsOperationToken | null>(null);
+  const snapshotRef = useRef<SettingsPrivacySnapshot | null>(null);
+  const stateRef = useRef(state);
+  const activeLoadPromiseRef = useRef<Promise<SettingsPrivacySnapshot> | null>(null);
+  const pendingSaveAttestationRef = useRef<{
+    previousConfig: AppConfig;
+    submittedConfig: AppConfig;
+  } | null>(null);
+
+  snapshotRef.current = snapshot;
+  stateRef.current = state;
 
   useEffect(() => {
+    sourceGenerationRef.current += 1;
     requestRef.current += 1;
     operationRef.current = null;
+    snapshotRef.current = null;
+    activeLoadPromiseRef.current = null;
+    pendingSaveAttestationRef.current = null;
     setSnapshot(null);
     setDraft(null);
     setLoading(false);
@@ -135,46 +188,82 @@ export function useSettingsPrivacyJourney(
     setTestConfirmationOpen(false);
     dispatch({ type: "reset" });
     return () => {
+      sourceGenerationRef.current += 1;
       requestRef.current += 1;
+      snapshotRef.current = null;
+      activeLoadPromiseRef.current = null;
     };
   }, [dataSource]);
 
   const load = useCallback(
-    async (announceResult = true): Promise<SettingsPrivacySnapshot> => {
+    (announceResult = true): Promise<SettingsPrivacySnapshot> => {
       const requestId = ++requestRef.current;
       setLoading(true);
-      let next: SettingsPrivacySnapshot;
-      try {
-        next = dataSource
-          ? await dataSource.loadSettingsPrivacy()
-          : buildSettingsPrivacyErrorSnapshot("settings_privacy_data_source_unavailable");
-      } catch (error) {
-        next = buildSettingsPrivacyErrorSnapshot(error);
-      }
-      if (requestId === requestRef.current) {
-        setSnapshot(next);
-        setDraft(next.config ? cloneSettingsConfig(next.config) : null);
-        setLoading(false);
-        if (announceResult) {
-          announce(
-            next.config && next.boundaryEnvelope.status !== "error"
-              ? "设置与模型传输边界已从后端重新读取。"
-              : "设置读取不完整；测试、保存和本地确定态保持关闭。"
-          );
+      const loadPromise = (async () => {
+        let next: SettingsPrivacySnapshot;
+        try {
+          next = dataSource
+            ? await dataSource.loadSettingsPrivacy()
+            : buildSettingsPrivacyErrorSnapshot("settings_privacy_data_source_unavailable");
+        } catch (error) {
+          next = buildSettingsPrivacyErrorSnapshot(error);
         }
-      }
-      return next;
+        if (requestId === requestRef.current) {
+          snapshotRef.current = next;
+          setSnapshot(next);
+          setDraft(next.config ? cloneSettingsConfig(next.config) : null);
+          setLoading(false);
+          if (announceResult) {
+            announce(
+              next.config && next.boundaryEnvelope.status !== "error"
+                ? "设置与模型传输边界已从后端重新读取。"
+                : "设置读取不完整；测试、保存和本地确定态保持关闭。"
+            );
+          }
+        }
+        return next;
+      })();
+      const trackedLoadPromise = loadPromise.finally(() => {
+        if (activeLoadPromiseRef.current === trackedLoadPromise) {
+          activeLoadPromiseRef.current = null;
+        }
+      });
+      activeLoadPromiseRef.current = trackedLoadPromise;
+      return trackedLoadPromise;
     },
     [announce, dataSource]
   );
 
-  const ensureLoaded = useCallback(() => {
-    if (!snapshot && !loading) void load(false);
-  }, [load, loading, snapshot]);
+  const ensureLoaded = useCallback(async (): Promise<SettingsEnsureLoadedResult> => {
+    const activeLoad = activeLoadPromiseRef.current;
+    if (activeLoad) {
+      return {
+        snapshot: await activeLoad,
+        loadedFromSource: true,
+        retainedUnsavedDraft: false,
+      };
+    }
+
+    const currentSnapshot = snapshotRef.current;
+    if (currentSnapshot) {
+      const currentState = stateRef.current;
+      return {
+        snapshot: currentSnapshot,
+        loadedFromSource: false,
+        retainedUnsavedDraft: currentState.draftRevision !== currentState.savedRevision,
+      };
+    }
+
+    return {
+      snapshot: await load(false),
+      loadedFromSource: true,
+      retainedUnsavedDraft: false,
+    };
+  }, [load]);
 
   const edit = useCallback(
     (change: SettingsDraftEdit) => {
-      if (!draft || operationRef.current) {
+      if (!draft || loading || operationRef.current) {
         announce("当前不能修改设置；请等待后端配置读取或当前操作结束。");
         return;
       }
@@ -182,17 +271,24 @@ export function useSettingsPrivacyJourney(
       const next = applyDraftEdit(draft, change);
       const identityChanged = providerIdentity(next) !== previousIdentity;
       const matchesStoredIdentity =
-        snapshot?.config?.llm.openai_key === "***" &&
+        snapshot?.config !== null &&
+        snapshot?.config !== undefined &&
+        credentialState(snapshot.config) === "stored" &&
         providerIdentity(next) === providerIdentity(snapshot.config);
       const restoreStoredCredential =
         matchesStoredIdentity &&
         (identityChanged || (change.field === "credential" && !change.value.trim()));
-      if (identityChanged) next.llm.openai_key = "";
+      if (identityChanged) {
+        next.llm.openai_key = "";
+        next.llm.openai_key_ref = undefined;
+      }
       if (restoreStoredCredential) {
-        next.llm.openai_key = "***";
+        next.llm.openai_key = snapshot?.config?.llm.openai_key === "***" ? "***" : "";
+        next.llm.openai_key_ref = snapshot?.config?.llm.openai_key_ref;
       }
       setDraft(next);
       setLastTestOutcome(null);
+      pendingSaveAttestationRef.current = null;
       dispatch({ type: "edit" });
       if (identityChanged) {
         announce(
@@ -204,20 +300,43 @@ export function useSettingsPrivacyJourney(
         announce("设置草稿已更改；保存并刷新边界前，不把草稿解释为当前产品状态。");
       }
     },
-    [announce, draft, snapshot?.config]
+    [announce, draft, loading, snapshot?.config]
   );
 
   const validation = useMemo(() => validateSettingsDraft(draft), [draft]);
-  const actions = useMemo(() => settingsProductActions(state, validation), [state, validation]);
+  const protectionState = protectionStateForSnapshot(snapshot, loading);
+  const actions = useMemo(() => {
+    const base = settingsProductActions(state, validation);
+    if (protectionState === "normal") return base;
+    const disabledReason =
+      protectionState === "active"
+        ? "后端安全模式仍在生效；连接测试和设置保存保持关闭。"
+        : protectionState === "loading"
+          ? "正在读取 LifeStateProjection 保护状态。"
+          : "LifeStateProjection 保护状态未知；连接测试和设置保存保持关闭。";
+    return {
+      test: { ...base.test, enabled: false, disabledReason },
+      save: { ...base.save, enabled: false, disabledReason },
+    };
+  }, [protectionState, state, validation]);
 
   const executeTest = useCallback(async () => {
     if (!dataSource || !draft || operationRef.current || !actions.test.enabled) return;
-    operationRef.current = "test";
+    const operationToken: SettingsOperationToken = {
+      kind: "test",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    const operationIsCurrent = () =>
+      operationRef.current === operationToken &&
+      sourceGenerationRef.current === operationToken.sourceGeneration;
     dispatch({ type: "test_requested" });
     setLastTestOutcome(null);
     announce("正在验证这一份设置草稿；测试不会保存任何配置。");
     try {
       const outcome = await dataSource.testProviderConnection(cloneSettingsConfig(draft));
+      if (!operationIsCurrent()) return;
       setLastTestOutcome(outcome);
       const result = outcome.result;
       const receipt = result.provider_invocation_receipt;
@@ -248,10 +367,11 @@ export function useSettingsPrivacyJourney(
         );
       }
     } catch (error) {
+      if (!operationIsCurrent()) return;
       dispatch({ type: "test_failed", errorCode: errorCode(error) });
       announce("连接测试命令失败；当前配置没有可用性证明。");
     } finally {
-      operationRef.current = null;
+      if (operationIsCurrent()) operationRef.current = null;
     }
   }, [actions.test.enabled, announce, dataSource, draft]);
 
@@ -279,17 +399,37 @@ export function useSettingsPrivacyJourney(
   }, [announce]);
 
   const save = useCallback(() => {
-    if (!dataSource || !draft || operationRef.current || !actions.save.enabled) {
+    if (
+      !dataSource ||
+      !snapshot?.config ||
+      !draft ||
+      operationRef.current ||
+      !actions.save.enabled
+    ) {
       announce(`当前不能保存：${actions.save.disabledReason ?? "设置草稿不可用。"}`);
       return;
     }
     const submitted = cloneSettingsConfig(draft);
-    operationRef.current = "save";
+    const previousConfig = cloneSettingsConfig(snapshot.config);
+    const operationToken: SettingsOperationToken = {
+      kind: "save",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    const operationIsCurrent = () =>
+      operationRef.current === operationToken &&
+      sourceGenerationRef.current === operationToken.sourceGeneration;
+    pendingSaveAttestationRef.current = {
+      previousConfig,
+      submittedConfig: cloneSettingsConfig(submitted),
+    };
     dispatch({ type: "save_requested" });
     announce("正在保存设置；命令返回不代表模型边界已经确认。");
     void (async () => {
       try {
         await dataSource.saveSettings(submitted);
+        if (!operationIsCurrent()) return;
         dispatch({ type: "save_succeeded" });
         announce("设置命令已返回，正在重新读取配置与模型传输边界。");
         let refreshed: SettingsPrivacySnapshot;
@@ -298,11 +438,15 @@ export function useSettingsPrivacyJourney(
         } catch (error) {
           refreshed = buildSettingsPrivacyErrorSnapshot(error);
         }
+        if (!operationIsCurrent()) return;
+        snapshotRef.current = refreshed;
         setSnapshot(refreshed);
         if (
           !refreshed.config ||
           refreshed.boundaryEnvelope.status !== "ready" ||
-          !refreshed.boundaryEnvelope.data
+          !refreshed.boundaryEnvelope.data ||
+          protectionStateForSnapshot(refreshed) !== "normal" ||
+          !settingsConfigMatchesSavedDraft(previousConfig, submitted, refreshed.config)
         ) {
           dispatch({
             type: "boundary_refresh_failed",
@@ -312,29 +456,100 @@ export function useSettingsPrivacyJourney(
           return;
         }
         setDraft(cloneSettingsConfig(refreshed.config));
+        pendingSaveAttestationRef.current = null;
         dispatch({ type: "boundary_refreshed", boundary: refreshed.boundaryEnvelope.data });
         const boundary = refreshed.boundaryEnvelope.data;
-        const known =
-          boundary.routeType !== "unknown" &&
-          boundary.externalTransmission !== "unknown" &&
-          boundary.risk !== "unknown";
+        const known = boundaryIsKnown(boundary);
         announce(
           known
             ? "保存后的配置与模型传输边界已经由后端重新确认。"
             : "设置已保存，但后端返回的模型传输边界仍未知；当前不显示本地确定态。"
         );
       } catch (error) {
+        if (!operationIsCurrent()) return;
+        pendingSaveAttestationRef.current = null;
         dispatch({ type: "save_failed", errorCode: errorCode(error) });
         announce("设置保存失败；草稿仍保留，当前产品边界没有改变。");
       } finally {
-        operationRef.current = null;
+        if (operationIsCurrent()) operationRef.current = null;
       }
     })();
-  }, [actions.save, announce, dataSource, draft]);
+  }, [actions.save, announce, dataSource, draft, snapshot?.config]);
+
+  const retryBoundaryRefresh = useCallback(() => {
+    const retryable =
+      state.phase === "unknown" &&
+      state.failureStage === "boundary_refresh" &&
+      !state.boundaryAppliesToSavedRevision;
+    const attestation = pendingSaveAttestationRef.current;
+    if (!dataSource || !attestation || operationRef.current || !retryable) {
+      announce("当前没有可重新核对的保存结果；页面不会猜测配置或边界状态。");
+      return;
+    }
+    const operationToken: SettingsOperationToken = {
+      kind: "boundary_refresh",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    const operationIsCurrent = () =>
+      operationRef.current === operationToken &&
+      sourceGenerationRef.current === operationToken.sourceGeneration;
+    dispatch({ type: "boundary_refresh_retry_requested" });
+    announce("正在重新读取已保存配置、LifeStateProjection 与模型传输边界。");
+    void (async () => {
+      let refreshed: SettingsPrivacySnapshot;
+      try {
+        refreshed = await dataSource.loadSettingsPrivacy();
+      } catch (error) {
+        refreshed = buildSettingsPrivacyErrorSnapshot(error);
+      }
+      if (!operationIsCurrent()) return;
+      snapshotRef.current = refreshed;
+      setSnapshot(refreshed);
+      if (
+        !refreshed.config ||
+        refreshed.boundaryEnvelope.status !== "ready" ||
+        !refreshed.boundaryEnvelope.data ||
+        protectionStateForSnapshot(refreshed) !== "normal" ||
+        !settingsConfigMatchesSavedDraft(
+          attestation.previousConfig,
+          attestation.submittedConfig,
+          refreshed.config
+        )
+      ) {
+        dispatch({
+          type: "boundary_refresh_failed",
+          errorCode: `settings_refresh_${refreshed.boundaryEnvelope.status}`,
+        });
+        announce("重新读取仍未证明精确的已保存配置与边界；当前继续保持未知。");
+        if (operationIsCurrent()) operationRef.current = null;
+        return;
+      }
+      setDraft(cloneSettingsConfig(refreshed.config));
+      pendingSaveAttestationRef.current = null;
+      dispatch({ type: "boundary_refreshed", boundary: refreshed.boundaryEnvelope.data });
+      announce(
+        boundaryIsKnown(refreshed.boundaryEnvelope.data)
+          ? "已重新确认精确的已保存配置与模型传输边界。"
+          : "已重新读取精确配置，但后端边界仍未知；当前不显示本地确定态。"
+      );
+      if (operationIsCurrent()) operationRef.current = null;
+    })();
+  }, [announce, dataSource, state]);
 
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
   const effectiveBoundaryEnvelope = useMemo(() => {
     if (!snapshot) return loadingBoundaryEnvelope();
+    if (protectionState === "loading") return loadingBoundaryEnvelope();
+    if (protectionState === "active" || protectionState === "unknown") {
+      return unknownSettingsProtectionBoundaryEnvelope(
+        protectionState === "active"
+          ? "后端安全模式仍在生效；不能把配置或 Provider 边界解释为正常运行证明。"
+          : "LifeStateProjection 未提供可核对的保护状态；不能显示本地、未外传或可执行结论。",
+        protectionState
+      );
+    }
     if (state.phase === "refreshing_boundary") return loadingBoundaryEnvelope();
     if (
       hasUnsavedDraft ||
@@ -345,6 +560,11 @@ export function useSettingsPrivacyJourney(
         "当前存在尚未由保存后读模型确认的设置；不能沿用之前的本地或外传结论。"
       );
     }
+    if (state.failureStage === "boundary_refresh" && !state.boundaryAppliesToSavedRevision) {
+      return unknownDraftBoundaryEnvelope(
+        "保存后的配置或模型传输边界没有完成核对；不能沿用之前的边界结论。"
+      );
+    }
     if (
       (state.phase === "ready" || state.phase === "unknown") &&
       state.boundaryAppliesToSavedRevision
@@ -352,7 +572,7 @@ export function useSettingsPrivacyJourney(
       return snapshot.boundaryEnvelope;
     }
     return snapshot.boundaryEnvelope;
-  }, [hasUnsavedDraft, snapshot, state]);
+  }, [hasUnsavedDraft, protectionState, snapshot, state]);
 
   return {
     snapshot,
@@ -361,6 +581,7 @@ export function useSettingsPrivacyJourney(
     loading,
     lastTestOutcome,
     testPresentation: connectionTestPresentation(lastTestOutcome?.result ?? null),
+    protectionState,
     validation,
     actions,
     effectiveBoundaryEnvelope,
@@ -372,6 +593,7 @@ export function useSettingsPrivacyJourney(
     confirmTest,
     cancelTest,
     save,
+    retryBoundaryRefresh,
   };
 }
 

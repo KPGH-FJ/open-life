@@ -97,14 +97,70 @@ export function providerIdentity(config: AppConfig): string {
 }
 
 export function hasUsableCredential(config: AppConfig): boolean {
-  const credential = config.llm.openai_key.trim();
-  return credential === "***" || credential.length > 0;
+  return credentialState(config) !== "missing";
 }
 
 export function credentialState(config: AppConfig): "stored" | "entered" | "missing" {
-  const credential = config.llm.openai_key.trim();
-  if (credential === "***") return "stored";
-  return credential ? "entered" : "missing";
+  const credential = config.llm.openai_key?.trim() ?? "";
+  if (credential && credential !== "***") return "entered";
+  if (credential === "***" || Boolean(config.llm.openai_key_ref?.trim())) return "stored";
+  return "missing";
+}
+
+function canonicalizeForComparison(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeForComparison);
+  if (value && typeof value === "object") {
+    return Object.keys(value as Record<string, unknown>)
+      .sort()
+      .reduce<Record<string, unknown>>((result, key) => {
+        const entry = (value as Record<string, unknown>)[key];
+        if (entry !== undefined) result[key] = canonicalizeForComparison(entry);
+        return result;
+      }, {});
+  }
+  return value;
+}
+
+export function settingsConfigMatchesSavedDraft(
+  previousConfig: AppConfig,
+  savedDraft: AppConfig,
+  refreshedConfig: AppConfig
+): boolean {
+  const previousCredentialVersion = previousConfig.llm.credential_version;
+  const savedCredentialVersion = savedDraft.llm.credential_version;
+  const refreshedCredentialVersion = refreshedConfig.llm.credential_version;
+  if (
+    previousCredentialVersion === undefined ||
+    savedCredentialVersion !== previousCredentialVersion ||
+    refreshedCredentialVersion === undefined
+  ) {
+    return false;
+  }
+  const credentialGenerationMustAdvance =
+    providerIdentity(savedDraft) !== providerIdentity(previousConfig) ||
+    credentialState(savedDraft) === "entered";
+  const expectedCredentialVersion =
+    previousCredentialVersion + (credentialGenerationMustAdvance ? 1 : 0);
+  if (refreshedCredentialVersion !== expectedCredentialVersion) return false;
+
+  const attestableConfig = (config: AppConfig) => {
+    const llm = { ...config.llm };
+    delete llm.openai_key;
+    delete llm.openai_key_ref;
+    delete llm.credential_version;
+    return {
+      ...config,
+      llm: {
+        ...llm,
+        credentialPresence: credentialState(config) === "missing" ? "missing" : "present",
+      },
+    };
+  };
+
+  return (
+    JSON.stringify(canonicalizeForComparison(attestableConfig(savedDraft))) ===
+    JSON.stringify(canonicalizeForComparison(attestableConfig(refreshedConfig)))
+  );
 }
 
 export function endpointHost(endpoint: string): string | null {
@@ -352,4 +408,29 @@ export function unknownDraftBoundaryEnvelope(
     ],
     actions: { primary: [], review: [], debugOnly: [] },
   };
+}
+
+export function unknownSettingsProtectionBoundaryEnvelope(
+  message: string,
+  protectionState: "active" | "unknown"
+): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
+  const envelope = unknownDraftBoundaryEnvelope(message);
+  if (envelope.data) {
+    envelope.data.privacyLabel =
+      protectionState === "active"
+        ? "后端安全模式仍在生效"
+        : "设置保护状态尚未由 LifeStateProjection 确认";
+  }
+  envelope.warnings = [
+    {
+      code:
+        protectionState === "active"
+          ? "settings.safe_mode_active"
+          : "settings.protection_state_unknown",
+      message,
+      severity: "warning",
+      evidenceRefs: [],
+    },
+  ];
+  return envelope;
 }

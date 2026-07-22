@@ -113,4 +113,16 @@ describe("Phase 4D read-only presentation invariants", () => {
       )
     ).toMatchObject({ label: "待审核，未完成", status: "waiting" });
   });
+
+  it("keeps a remote-unknown task unverified and non-green", () => {
+    expect(
+      taskLifecyclePresentation(
+        task({
+          lifecycleStatus: "remote_unknown",
+          terminalDeliveryStatus: "unknown",
+          finalDeliveryEvidencePresent: false,
+        })
+      )
+    ).toEqual({ label: "远端结果未知", status: "unknown" });
+  });
 });

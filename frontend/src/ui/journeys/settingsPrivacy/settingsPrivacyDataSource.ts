@@ -1,19 +1,26 @@
 import {
   getConfig,
+  getLifeStateProjection,
   getProviderPrivacyBoundarySummary,
   getReviewCenterViewModel,
   saveConfig,
   testLlmConnection,
   type AppConfig,
+  type LifeSafeModeProjection,
   type LlmConnectionTestResult,
   type ProviderPrivacyBoundarySummary,
   type ReviewItem,
   type ViewModelEnvelope,
 } from "@/tauri";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
 
 export type SettingsPrivacyDiagnostic = {
-  id: "sanitized_config" | "provider_privacy_boundary" | "review_item_resolution";
+  id:
+    | "sanitized_config"
+    | "provider_privacy_boundary"
+    | "life_state_projection"
+    | "review_item_resolution";
   status: "loaded" | "failed" | "not_requested" | "missing";
   message?: string;
 };
@@ -21,6 +28,7 @@ export type SettingsPrivacyDiagnostic = {
 export type SettingsPrivacySnapshot = {
   config: AppConfig | null;
   boundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
+  safeMode: LifeSafeModeProjection | null;
   diagnostics: SettingsPrivacyDiagnostic[];
 };
 
@@ -37,10 +45,6 @@ export interface SettingsPrivacyDataSource {
   saveSettings(config: AppConfig): Promise<void>;
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function boundaryErrorEnvelope(message: string): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
   return buildReadModelErrorEnvelope(
     "ProviderPrivacyBoundarySummary",
@@ -54,22 +58,27 @@ export function buildSettingsPrivacyErrorSnapshot(error: unknown): SettingsPriva
   return {
     config: null,
     boundaryEnvelope: boundaryErrorEnvelope(message),
+    safeMode: null,
     diagnostics: [
       { id: "sanitized_config", status: "failed", message },
       { id: "provider_privacy_boundary", status: "failed", message },
+      { id: "life_state_projection", status: "failed", message },
       { id: "review_item_resolution", status: "not_requested" },
     ],
   };
 }
 
 async function loadSettingsPrivacy(): Promise<SettingsPrivacySnapshot> {
-  const [configResult, boundaryResult] = await Promise.allSettled([
+  const [configResult, boundaryResult, projectionResult] = await Promise.allSettled([
     getConfig(),
     getProviderPrivacyBoundarySummary(),
+    getLifeStateProjection(),
   ]);
   const configError = configResult.status === "rejected" ? errorText(configResult.reason) : null;
   const boundaryError =
     boundaryResult.status === "rejected" ? errorText(boundaryResult.reason) : null;
+  const projectionError =
+    projectionResult.status === "rejected" ? errorText(projectionResult.reason) : null;
 
   return {
     config: configResult.status === "fulfilled" ? configResult.value : null,
@@ -77,6 +86,7 @@ async function loadSettingsPrivacy(): Promise<SettingsPrivacySnapshot> {
       boundaryResult.status === "fulfilled"
         ? boundaryResult.value
         : boundaryErrorEnvelope(boundaryError ?? "unknown_error"),
+    safeMode: projectionResult.status === "fulfilled" ? projectionResult.value.safeMode : null,
     diagnostics: [
       configError
         ? { id: "sanitized_config", status: "failed", message: configError }
@@ -84,6 +94,9 @@ async function loadSettingsPrivacy(): Promise<SettingsPrivacySnapshot> {
       boundaryError
         ? { id: "provider_privacy_boundary", status: "failed", message: boundaryError }
         : { id: "provider_privacy_boundary", status: "loaded" },
+      projectionError
+        ? { id: "life_state_projection", status: "failed", message: projectionError }
+        : { id: "life_state_projection", status: "loaded" },
       { id: "review_item_resolution", status: "not_requested" },
     ],
   };
