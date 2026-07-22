@@ -135,6 +135,14 @@ state.
 
 - Preserve the dirty-worktree boundary: do not revert user or prior-agent
   changes unless explicitly asked.
+- Use `/Users/tw/Desktop/open-life` as the only writable development checkout.
+  Do not create or register another Git worktree, roadshow checkout, D0xx
+  checkout, or sibling `open-life-*` development directory unless the user
+  explicitly authorizes that exact action in the current task. Short-lived Git
+  branches must be switched and developed in this checkout.
+- Treat retained historical/V4/D0xx branch refs as read-only evidence until
+  they are explicitly classified. Do not recreate physical checkouts for them
+  merely to inspect their contents; use Git object-level commands instead.
 - For Phase7 or repository-knowledge work, read the named prep/decision files
   before editing.
 - Start authority cleanup with a source map. Every current path listed in a
