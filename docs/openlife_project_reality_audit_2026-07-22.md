@@ -1,10 +1,13 @@
 # OpenLife 项目现实审计与发展指导报告
 
-> - 审计日期：2026-07-22（Asia/Shanghai）
+> - 原始审计日期：2026-07-22（Asia/Shanghai）
+> - 本次事实同步：2026-07-23，PR #64 合入后的 restart-baseline cleanup 分支
 > - 审计性质：生产源码只读、源码优先、本地与远端交叉核验
-> - 当前审计 SHA：`83dc3ac`（`codex/phase4f-desktop-product-acceptance`）
-> - 远端主线 SHA：`7a167f4`（`origin/main`）
-> 总体结论：不能回到旧 V4 分支续跑，也不应推倒重写；应以最新 `origin/main` 为唯一代码基线，先吸收当前 Phase4F 修复，再把 V4 的 72 项发现重组为少量根因计划。架构已明显收敛，但当前仍有 P0/P1 级密钥、状态真相、跨语言契约、路径边界和真实 E2E 问题。
+> - 源码基线 SHA：`bbb1481469d19a86702c15ab809b0971b2bf1ff4`（`codex/restart-baseline-cleanup`）；本次报告同步尚未包含在该提交中
+> - 远端主线 SHA：`74059dbc819851f0ef4597f055d0d6c956e0cd77`（`origin/main`，PR #64 merge commit）
+> - 报告/清理提交：由 cleanup PR 与最终 handoff 记录；不得把未提交工作树内容归因给源码基线 SHA
+> - 时点规则：本文保留原始审计的历史问题证据，但“当前”只指上述 SHA；V4/roadshow/Phase4F 旧 artifact 一律标为历史证据，不自动继承到新基线。
+> 总体结论：不能回到旧 V4 分支续跑，也不应推倒重写。PR #64 已合入唯一主线；当前任务只是建立可恢复、可复现的事实基线，完成 refs/文档/测试入口/派生物清理后再启动正式全仓 Review。当前 72 项 V4 finding 仍是历史 backlog/evidence input，不因 PR 或测试通过而自动关闭。
 
 ## 1. 执行摘要
 
@@ -14,16 +17,16 @@ OpenLife 不是普通聊天应用，也不只是人生规划工具。它当前�
 
 项目也经历了一次正确且必要的方向修正：从历史上的 Stage/Beta/Migration/多运行时并存，转向 Phase7 的 single-system deletion。当前普通 Main Chat 的 send/stream 已共享 `OpenLifeTurnRuntime`；语义与治理路由集中到 `IntentFrame + PolicyRouter`；Proposal、Memory、LifeModel、Tool 分别通过受控网关；前端生产入口已切换到统一 Workbench，并删除旧页面树和兼容重定向。这些不是文档愿景，而有源码、静态禁用测试和当前绿门支持。
 
-但项目仍不能被描述为“完成”“Beta ready”或“可以稳定试用”。最新真实 Tauri 试用只证明：新壳和六个规范路由可启动；当后端如实传播 unknown/expired/error 时，前端能 fail closed；Settings、错误呈现、焦点管理等问题被真实发现并修复。它没有证明权限到执行、提案到持久化、外部 Provider、长期重启恢复等关键闭环，而且后端目前仍有把 store 错误折叠成 `0/ok/Ready` 的路径。凭据恢复在当前进程显示可用，但重启后仍回到 Safe Mode；dev/release/qa 文件系统隔离了，Keychain 命名空间却未隔离。
+但项目仍不能被描述为“完成”“Beta ready”或“可以稳定试用”。Phase4F 的六路由、焦点与广泛 fail-closed 观察是历史 artifact 证据；与当前主线产品源树一致的最新原生证据只证明 `/today` 和 `/settings` 可打开，Settings 能渲染脱敏配置、保持边界 unknown/Safe Mode、禁用 test/save，且不从通用 Safe Mode 推导凭据恢复资格。它没有证明权限到执行、提案到持久化、外部 Provider、长期重启恢复等关键闭环，而且后端目前仍有把 store 错误折叠成 `0/ok/Ready` 的路径。历史凭据恢复尝试在当前进程显示可用，但重启后仍回到 Safe Mode；当前 Settings 已移除这个无类型资格的产品动作。
 
 因此，本报告的核心判断是：
 
 1. 产品理念与治理原则没有根本偏移，甚至比早期更清晰。
 2. 实现已从“功能堆积失控”转向“单系统收敛”，方向正确。
 3. 主要 AI Coding 偏移已经转化为结构性复杂度：超大文件、过多状态/证据层、文档数量失控、测试和合同替代真实产品证明、分支/工作树碎片化。
-4. 旧 V4 分支相对主线已经是 `13 ahead / 195 behind`；只读虚拟合并在 7 个关键文件产生冲突，直接续跑会把历史实现和当前系统重新混在一起。
+4. 旧 V4 分支相对当前主线已经是 `13 ahead / 203 behind`；只读虚拟合并曾在 7 个关键文件产生冲突，直接续跑会把历史实现和当前系统重新混在一起。
 5. 当前不应继续扩展功能面；应进入一轮“安全边界与产品闭环优先的复杂度偿还”。
-6. 下一开发计划不应叫 Phase8、新 Beta 或笼统的 V5，而应是两个顺序门：`Restart Baseline -> Trial Green 1`。先关闭 P0 和会伪造真相、阻断闭环的 P1，再用真实桌面产品完成 3 条可重复、可重启、可审计的纵向闭环。
+6. 当前顺序门是 `Restart Baseline Facts -> Baseline Cleanup -> Formal Repository Review`。本轮不关闭产品 P0/P1、不重构生产代码、不规划新功能；只有在事实和清理基线冻结后，才根据新一轮全仓 Review 决定后续 remediation 与 Trial Green 顺序。
 
 ## 2. 审计范围、方法与证据边界
 
@@ -31,13 +34,13 @@ OpenLife 不是普通聊天应用，也不只是人生规划工具。它当前�
 
 - 当前权威链：`AGENTS.md`、`plans/README.md`、Phase7 删除清单、single-system 开发准备。
 - 本地全部 Git refs、分支、标签、worktree 指向、近期历史。
-- 执行 `git fetch --all --prune --tags` 后的全部远端跟踪分支。
-- 远端公开仓库、开放 PR、Actions 运行摘要、开放 Issues。
+- 原始审计执行 `git fetch --all --prune --tags` 后的全部远端跟踪分支；本次又重新核对了当前本地与 `origin` refs。
+- 远端公开仓库、PR #64 merge 事件、全部最终 status checks、开放 PR/Issues 和 `main` 分支保护上下文。
 - Rust workspace、Tauri handler、Main Chat send/stream、TurnRuntime、Kernel、PolicyRouter、各网关、状态投影、前端生产入口与路由。
 - 当前 Phase4F 原生试用报告、缺陷登记和截图证据索引。
 - Backend Remediation v4 的冻结发现、追加发现和追踪状态。
-- 当前 SHA 上的全 workspace Rust 测试、严格 Clippy、前端全量单测、构建、依赖审计和 Playwright 收集/现行 smoke。
-- 27 个本地 worktree、42 个本地分支、Cargo 派生产物占用和关键 Git 历史/大提交。
+- 原始审计 SHA 上的全 workspace Rust 测试、严格 Clippy、前端全量单测、构建、依赖审计和 Playwright 收集/现行 smoke；以及 PR #64 最终 head 的 GitHub CI 结果。
+- 原始 27 个 registered worktree/42 个本地分支的快照，以及当前 1 个 registered worktree、28 个本地分支、8 个本地 `origin/*` remote-tracking branch ref、远端服务器实时 42 个 branch head（`main` + 41 个非 main）。
 
 这里的“全仓审计”指：覆盖全部一层源码/构建/测试表面的 source map，并对高风险入口、运行链、持久化边界和跨语言合同做调用链追踪，再用 gate、历史和真实试用交叉核对；它不是逐行形式化证明，也不意味着所有潜在缺陷已经被发现。未被上述方法覆盖到的缺陷仍是 `UNKNOWN`。
 
@@ -49,17 +52,16 @@ OpenLife 不是普通聊天应用，也不只是人生规划工具。它当前�
 - 未进行 VoiceOver 人工审查。
 - 未做两个真实进程争用同一密钥/数据库的故障注入，也未做 100+ Proposal、200+ Task、10,000+ audit 的规模压测。
 - 未做 snapshot IPC 利用、真实 MCP secret 泄漏、symlink TOCTOU 或负 retention 删除等破坏性复现；这些按源码确认或候选风险标注。
-- GitHub CLI 因本机 Keychain 登录超时未能读取 API；远端 PR/Actions 使用公开网页核对。
+- GitHub CLI/API 本次可用，PR #64 的 merge commit、最终 checks 和 review 数组已直接核对；个别 Actions log 详情请求发生 TLS timeout，因此不从失败的 log 请求推断额外测试数量。
 - CodeRabbit CLI 在本机不可用，因此没有把 CodeRabbit 输出冒充第二方审查；源码问题由手工调用链追踪、并行独立复核和真实 gate/试用交叉确认。
 - “全部远端”限于 Git remote 中已配置的 `origin` 及其公开 GitHub 表面；不存在的私有服务、未配置 remote 或未提交本地资料不可被推断。
 
 ### 2.3 防幻觉分级
 
-- `REPRODUCED`：本次命令或真实试用已经触发。
+- `REPRODUCED`：当前命令、门禁或与当前源树一致的真实试用已触发。
 - `SOURCE-CONFIRMED`：入口、输入、错误分支和影响链在当前源码上闭合，但没有执行破坏性/外部复现。
-- `TRIAL-OBSERVED`：已有真实 Tauri 试用和截图记录，本次重新核对了代码与报告。
-- `CANDIDATE`：存在危险结构，但普通产品可达性或最终影响仍需 fault injection。
-- `UNKNOWN`：本次证据不足，禁止当作完成或不存在。
+- `HISTORICAL-EVIDENCE`：V4/roadshow/旧 SHA/旧 artifact 的实现、门禁或试用证据；可用于解释历史，不能自动继承为当前 closure。
+- `UNKNOWN`：当前 SHA 证据不足，包括原审计中只有危险结构而未完成 fault injection 的候选风险；禁止当作完成或不存在。
 
 ## 3. 仓库与远端现实
 
@@ -67,32 +69,33 @@ OpenLife 不是普通聊天应用，也不只是人生规划工具。它当前�
 
 | 层级 | 当前事实 | 判断 |
 | --- | --- | --- |
-| 远端长期主线 | `origin/main = 7a167f4` | 已合入 Phase4E 前端原子切换 |
-| 当前本地/远端 PR 分支 | `83dc3ac`，比 main 多 2 个提交 | Phase4F 真实桌面验收与修复，尚未合入 |
-| 开放 PR | GitHub PR #64 | 唯一开放 PR，等待人类合并审查 |
-| 远端 main CI | `7a167f4` 的 Frontend、Rust、Smoke、Security 等公开 jobs 成功 | 证明主线机械门为绿，不等于产品 Trial Green |
-| PR #64 | 开放、2 个提交、尚无人类 review | PR 当前检查状态未通过已认证 API 复核，记为 `UNKNOWN` |
+| 远端长期主线 | `origin/main = 74059dbc819851f0ef4597f055d0d6c956e0cd77` | PR #64 已合入；当前唯一产品代码基线 |
+| 当前 cleanup 分支 | `bbb1481469d19a86702c15ab809b0971b2bf1ff4` | 直接基于新 `origin/main`；当前只比 main 多 `AGENTS.md` 与本审计报告 |
+| PR #64 | `MERGED`，merge commit `74059db`，7 个提交 | 最终 10 个 GitHub checks 全部 `SUCCESS`；GitHub `reviews=[]`，没有记录在 PR review 对象中的人类 approval |
+| 开放 PR | `0` | cleanup PR 尚未创建，禁止写成已 review/已合入 |
+| PR #64 CI | Rust Linux/macOS/Windows、Rust Coverage、Frontend Check/Coverage、Security、Smoke、两个退役 Stage 合同 job 全绿 | 证明 PR head 的机械门通过，不等于产品 Trial Green；退役 job 的绿不是当前 E2E 信用 |
 | Roadshow 冻结输入 | tag `backend-freeze-c9e75c8` | 已被主线后续历史吸收，作为冻结证据而非第二主线 |
-| Backend Remediation WIP | 多个历史 slice/local/remote ref | 物理 worktree 已清理；refs 只作语义或证据参考，不能逐个视作待合并产品分支 |
+| 物理 checkout | `/Users/tw/Desktop/open-life` 共 1 个 registered worktree | 唯一可写开发入口已建立；这不表示历史 refs 已清理 |
+| 当前 ref 债务 | 28 个 local branch；8 个本地 remote-tracking ref；`git ls-remote --heads origin` 实时返回 42 个远端 branch head | archive aggregate tags 尚未创建，41 个非 main 远端 head 和历史 local refs 尚未删除；Gate2 未完成 |
 
-`origin/main..HEAD` 的两个独有提交是：`52571d0`（Phase4F 前端修复）与 `83dc3ac`（试用记录/证据）。`openlife-core/`、`src-tauri/` 相对 main 没有差异；本地独有生产改动集中在 frontend，另外是 docs/plans 和试用截图。工作树相对 HEAD 没有未提交生产源码修改；本报告自身是新增的未跟踪审查产物。
+PR #64 head `d7df32259b8774790044c91fb9beb426ecb62e76` 已是 `origin/main` 祖先。cleanup 分支的父提交和 merge-base 都是 `74059db`；当前 `origin/main...HEAD` 只有一个保护提交，修改 `AGENTS.md` 并跟踪本报告，没有 Rust/Tauri/React 产品行为差异。在本次文档同步前，工作树为 clean。
 
-远端仓库公开，GitHub 显示 1 个开放 PR；公开 backlog 与仓库内 72 项 V4 发现明显脱节，真正的 backlog authority 目前仍在仓库 JSON/Markdown，而不是 GitHub Issues。
+远端仓库公开，GitHub 当前显示 0 个开放 PR、2 个开放 Issue；公开 backlog 与仓库内 72 项 V4 发现明显脱节。真正的历史 backlog/evidence input 仍在仓库 JSON/Markdown，但它们必须从当前 SHA 重新证明，不是自动的开发顺序。
 
-V4 不能直接续跑还有一条机械证据：`git merge-tree --write-tree origin/main codex/wip-openlife-backend-remediation-v4` 在 `main_chat_agent_v1.rs`、`main_chat_event_stream.rs`、`main_chat_turn_runtime.rs`、`main_chat_runtime_module_tests.rs` 和三份 V4 traceability/finding JSON 上产生冲突。V4 的 13 个独有提交应逐项做 semantic port/closure review，不能合并整个分支。
+V4 不能直接续跑还有一条机械证据：原始 `git merge-tree --write-tree` 审计在 `main_chat_agent_v1.rs`、`main_chat_event_stream.rs`、`main_chat_turn_runtime.rs`、`main_chat_runtime_module_tests.rs` 和三份 V4 traceability/finding JSON 上产生冲突。当前 V4 仍有 13 个独有提交，相对新 main 落后 203 个提交。Gate1 清单已经形成 `integrated / superseded / evidence-only / still-needed-port` 逐项归类；第一次第二只读审查发现证据定位问题并阻止删除 refs，修正后于 2026-07-23 通过第二轮只读复审。所有 V4 finding closure 继续保持历史证据或 `UNKNOWN` 边界。
 
 ### 3.2 规模与集中度
 
-统计口径：文件数来自 `git ls-files`；行数只统计表中标出的 tracked 文本扩展名。未跟踪的本报告不进入下面的 docs 数字。
+统计口径：文件数来自 `git ls-files`；行数只统计表中标出的 tracked 文本扩展名。本报告现在已由 cleanup 保护提交跟踪，因此进入 docs 数字。
 
 | 区域 | tracked 文件数 | tracked 文本行数 |
 | --- | ---: | ---: |
 | `openlife-core/src` | 132 | 202,754 `.rs` |
 | `src-tauri/src` | 107 | 193,371 `.rs` |
-| `frontend/src` | 129 | 39,836 `.ts/.tsx/.css` |
+| `frontend/src` | 129 | 40,492 `.ts/.tsx/.css` |
 | `frontend/e2e` | 3 | 2,129 `.ts` |
-| `docs` | 418 | 23,795 `.md/.json` |
-| `plans` | 214 | 71,480 `.md/.json` |
+| `docs` | 419 | 24,674 `.md/.json` |
+| `plans` | 214 | 71,481 `.md/.json` |
 
 最大源码文件包括：
 
@@ -124,12 +127,25 @@ V4 不能直接续跑还有一条机械证据：`git merge-tree --write-tree ori
 - 删除 26 个旧 registered worktree checkout，保留唯一 `/Users/tw/Desktop/open-life`；旧分支 refs 没有随 checkout 删除。
 - 删除 `open-life-roadshow` 的 56.2 GiB Cargo target；其 HEAD 已在 main，远端 ref 与 freeze tag 仍在。
 - 用 `cargo clean --target-dir` 删除 4 个只包含 Cargo `debug/tmp/CACHEDIR.TAG` 的 review target，共约 27.9 GiB。
-- 删除 15 个已经合入 main 的冗余本地分支；本地分支从 42 降至 27，26 个未合入 ref 暂留给 V4 语义分类。
-- 在 `.git/cleanup-backups/openlife-all-refs-before-single-worktree-20260722.bundle` 保存并验证了清理前全部 109 个 refs。
+- 删除 15 个已经合入 main 的冗余本地分支；当时本地分支从 42 降至 27。PR #64 合入后又在唯一 checkout 中创建短期 cleanup 分支，当前总数为 28。
+- 在 `.git/cleanup-backups/openlife-all-refs-before-single-worktree-20260722.bundle` 保存并验证了清理前全部 109 个 refs；当前 SHA-256 为 `5182b5229e641642f2ea90caa272172da3e435925a2f9a591b9ba9e78ac1fe21`，`git bundle verify` 报告 complete history。
 - APFS 可用空间从约 8 GiB 增至约 92 GiB；当前正在运行的主仓库 `target`、`.env*`、试用截图和 `frontend/test-results` 未触碰。
 - `AGENTS.md` 已加入唯一可写 checkout 规则：未经用户当次明确授权，不得再创建 roadshow、D0xx 或其他 sibling worktree。
 
 桌面还保留 `open-life-uiux-audit-2026-06-21`，它不是 Git worktree，而是独有报告/截图证据，不作为开发入口。现在 Git 层面只有一个物理开发入口。
+
+### 3.4 当前 refs、archive 与派生物边界
+
+以下是 cleanup 动作前的当前事实，不是已完成清理清单：
+
+- 只有 1 个 registered worktree，但仍有 28 个 local branch。本地只 fetch 了 8 个 `origin/*` remote-tracking branch ref，它们不是远端完整集合；`git ls-remote --heads origin` 实时确认远端仍有 42 个 branch head，其中 41 个非 main。
+- `archive/pre-restart-local-refs-20260722` 与 `archive/pre-restart-remote-refs-20260722` 都尚未创建；因此尚不得删除对应历史 ref。
+- `plans/openlife_restart_baseline_cleanup.json` 已创建并通过本地结构校验；它覆盖 28 个 local branch、42 个实时远端 head、13 个 V4 独有提交和 72 个 finding。第二轮只读复审已验证 refs、SHA、分类、路径、owner 与历史证据 locator 并给出 `PASS`。archive tags 尚未创建和验证，因此此时仍不得删除 refs。
+- 当前待删除的 ignored/untracked 派生物仍存在：`frontend/dist` 约 432 KiB、`frontend/dist-phase4d` 约 404 KiB、`frontend/playwright-report` 约 512 KiB、`src-tauri/gen` 约 916 KiB，以及仓库缓存目录外可见的 8 个 `.DS_Store`。
+- 当前明确保留：根 `target` 约 21 GiB、`frontend/node_modules` 约 223 MiB、`.env`、`.env.live.local`、`frontend/test-results` 约 32 KiB、已跟踪的 16 张 Phase4F 截图和桌面 UI/UX 审计证据。本文不读取 secret 内容。
+- `~/Library/Application Support` 下的默认 release/dev/QA 产品数据，以及只确认目录名存在、未检查内容的 `OpenLifeQA` 历史样式目录，都在本轮范围外；由于 `.env` 内容刻意未读取且 `OPENLIFE_DATA_DIR` 可覆盖默认位置，任何实际配置的 custom data path 也必须保留，其当前值为 `UNKNOWN`。“保留”不等于跨 profile/凭据一致性已验证。
+
+由于 production build 会重建 `frontend/dist`，Playwright 也可能重建报告/结果，最终派生物 absence 必须在全部 Gate3 验证之后再执行和记录；当前不得写为已清理。
 
 ## 4. 产品与架构的真实认知
 
@@ -147,10 +163,12 @@ OpenLife 的差异化不在于多一个聊天 UI，而在于四个组合：
 ### 4.2 当前主运行链
 
 ```text
-React Workbench
-  -> frontend/src/tauri.ts
-  -> Tauri command: send_message / start_stream_message
-  -> OpenLifeTurnRuntime
+Current React Workbench conversation
+  -> frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts
+  -> frontend/src/tauri.ts sendMessageV2
+  -> Tauri command: send_message
+  -> src-tauri/src/main_chat_send.rs
+  -> OpenLifeTurnRuntime::run_buffered
        -> AgentRun / TaskSession / transcript / event evidence
        -> IntentFrame
        -> PolicyRouter
@@ -165,7 +183,16 @@ React Workbench
   -> Today / Workspace / Tasks / Review / LifeModel / Settings
 ```
 
-send 与 stream 是并列传输入口，不互相调用；它们共同委托同一 Runtime owner。`src-tauri/src/lib.rs` 是命令注册和 AppState 组合位置，不是 Main Chat 运行时本身。
+另有一个已发布但当前没有生产前端 caller 的并列 streaming command：
+
+```text
+frontend/src/tauri.ts startStreamMessage
+  -> Tauri command: start_stream_message
+  -> src-tauri/src/main_chat_streaming.rs
+  -> OpenLifeTurnRuntime::run_streaming
+```
+
+send 与 stream 不互相调用，并共同委托同一 Runtime owner；但当前 Workbench 只消费 buffered send。streaming command 的保留意图与未来生产 consumer 是 `UNKNOWN`，应进入下一轮正式 Review。`src-tauri/src/lib.rs` 是命令注册和 AppState 组合位置，不是 Main Chat 运行时本身。
 
 ### 4.3 路由与模型
 
@@ -230,52 +257,61 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 
 ## 5. 当前验证结果
 
-### 5.1 本次重新执行
+### 5.1 原始全仓审计门（`HISTORICAL-EVIDENCE`）
 
-| Gate | 结果 |
+下表是 PR #64 合入前的原始审计时点记录，不冒充 `74059db` 合入后的重跑：
+
+| Gate | 原始结果 |
 | --- | --- |
-| tracked worktree `git diff --check` | PASS；本报告另经 `git diff --no-index --check` |
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --all --locked -- -D warnings` | PASS |
 | `cargo test --all --locked` | PASS；全 workspace 无失败，Tauri 主 lib 最终段为 1,179 passed / 13 ignored |
 | 前端 typecheck / format check / production build / absence guard | PASS |
-| 前端 Vitest | 37 files / 273 tests PASS |
+| 前端 Vitest | 原始审计记录为 37 files / 273 tests PASS；不用该数量推断合入后精确测试数 |
 | `pnpm audit --json` | 1 critical / 5 high / 7 moderate / 1 low |
 | `cargo audit --no-fetch` | 未报告已知 vulnerability；17 unmaintained + 1 unsound warning |
 | `cargo audit` 在线模式 | advisory DB 已更新；crates.io yanked 查询超时，因此 yanked 状态 `UNKNOWN` |
-| `playwright test --list` | FAIL；2 个已删除模块 import，0 tests collected |
-| 当前 `e2e/smoke.spec.ts` | 5/5 FAIL；全部仍断言旧路由/旧文案 |
+| `corepack pnpm --dir frontend exec playwright test --list --reporter=line` | `REPRODUCED` FAIL；exit 1，缺少 `frontend/src/stage1BrowserEvidence` 和 `frontend/src/step6ProductAcceptance`，`Total: 0 tests in 0 files` |
+| 单独运行旧 `e2e/smoke.spec.ts` | `HISTORICAL-EVIDENCE`；5/5 FAIL，全部仍断言旧路由/旧文案 |
 
-这些结果证明编译、静态合同和大量单元/集成测试相当健康；同时 Playwright 与本次源码问题证明，绿门没有覆盖真实 Rust 序列化 shape、枚举穷尽、运行期 store 故障、跨进程密钥争用和当前产品路由。这是“测试很多但证据错位”，不是“项目没有测试”。
+Playwright 收集失败对当前源树仍是 `REPRODUCED`，因为 PR #64 没有改动这三个退役 spec 或其默认入口。新 Workbench browser smoke、当前 Playwright 收集大于 0 和 CI job 证据分级都尚未实施；它们是 Gate2 工作，不能写成已通过。
 
-### 5.2 Phase4F 原生试用
+### 5.2 PR #64 合入事实（`REPRODUCED`）
 
-已证明：
+PR #64 于 2026-07-22 19:16:50 +08:00 合入，head 为 `d7df32259b8774790044c91fb9beb426ecb62e76`，merge commit 为 `74059dbc819851f0ef4597f055d0d6c956e0cd77`。GitHub API 核对的最终检查全部 `SUCCESS`：
 
-- 真实打包 Tauri 产品启动；
-- 六个规范路由可达；
-- Today/Workspace/Tasks/LifeModel/Settings 的未知、错误、过期状态不伪装成完成；
-- Settings 脱敏配置不再崩溃；
-- 结构化 Tauri 错误不再显示 `[object Object]`；
-- 路由焦点、Inspector 焦点返回、live region 修复；
-- Safe Mode 恢复动作可达且有双重确认。
+- Rust Check、Rust Check (macOS)、Rust Check (Windows)、Rust Coverage；
+- Frontend Check、Frontend Coverage；
+- Security Audit、Smoke Test；
+- Retired Stage 1 Tauri Dogfood Contract、Retired Step 6 Tauri Acceptance Contract。
 
-未证明或失败：
+这些 checks 是 PR head 的编译/单测/静态合同证据。`Smoke Test` 并没有启动真实桌面产品，两个 Retired job 也不是当前 E2E 信用。GitHub `reviews=[]`，所以只能记录本地独立只读复核和合并事实，不能声称有 GitHub 人类 approval 记录。
 
-- permission -> review -> refresh -> resume：BLOCKED；
-- proposal -> decision -> application：BLOCKED；
-- provider test -> save -> boundary refresh：BLOCKED；
-- credential recovery -> restart：FAILED_FAIL_CLOSED；
-- external provider：BLOCKED；
-- VoiceOver 人工验证：BLOCKED。
+### 5.3 Phase4F 原生 Settings 证据边界
 
-所以当前 `PHASE4F_COMPLETE=NO`、`PHASE7_TRIAL_GREEN=NO` 是正确结论。
+最新可归属到当前产品源树的原生 Settings 证据绑定于：
+
+| 字段 | 值 |
+| --- | --- |
+| source SHA | `a278f199b96b32fd941541253029e9d4ab362726` |
+| binary SHA-256 | `aaab9b3580b0041c85d6c9ff69d5898e00dae4d201ea18ac21f67f3830ad4f0a` |
+| CDHash | `9e6046ff1bfa36a0c397eab90e6f907d619ce43a` |
+| 产品源树关系 | `a278f19`、PR head `d7df322` 与 merge `74059db` 的 `frontend/src` tree 均为 `cf748eba98e14142050c0bad51bfcc9ab1f32ab8` |
+| 签名验证 | root executable ad-hoc verify `PASS`；bundled executable/app bundle strict verify `FAIL_RESOURCE_SEAL` |
+| 原生观察 | `/today` 可打开；`/settings` 渲染脱敏配置、焦点正确、边界 unknown/Safe Mode、test/save 禁用、凭据恢复动作缺席 |
+| 证据信用 | `SETTINGS_ONLY_PASS_AT_EXACT_ARTIFACT` |
+
+从 `a278f19` 到 PR head 只改了 Phase4F 证据文档，merge commit 也没有改变产品源树，因此该 artifact 可作为当前产品源树等价的 Settings 证据。但 `74059db` merge commit 本身尚未被重新 build/launch，所以“合入后 main 原生重跑”仍是 `UNKNOWN`。
+
+广泛六路由、Inspector、恢复对话框和旧凭据尝试都是 `HISTORICAL-EVIDENCE`，不自动继承到新 artifact。历史恢复尝试跨重启失败；当前产品因没有后端 typed eligibility 而移除了通用恢复动作。
+
+仍未证明：permission -> review -> refresh -> resume、proposal -> decision -> application、provider test -> save -> boundary refresh、external provider、凭据跨重启恢复和 VoiceOver 人工验证。所以当前 `PHASE4F_COMPLETE=NO`、`PHASE7_TRIAL_GREEN=NO` 是正确结论。
 
 ## 6. 当前源码问题清单
 
 ### 6.1 先看总账，而不是把“implemented”当“closed”
 
-当前 V4 discovered finding registry 已有 72 项，而不是最初的 35 项。追踪 JSON 的机械统计为：
+当前 V4 discovered finding registry 已有 72 项，而不是最初的 35 项。以下是旧 V4 traceability JSON 的机械历史统计，不是 restart baseline 的当前 closure 结论：
 
 | 维度 | 统计 |
 | --- | --- |
@@ -283,7 +319,7 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 | verification | 10 complete / 55 partial / 7 none |
 | closure | 64 open / 7 closure candidate / 1 independently verified |
 
-因此，“做过代码”远多于“独立证明关闭”。下面是本次从当前 `origin/main`/HEAD 源码重新确认的高信号问题；它们不是用来另建第二份 72 项 backlog，而是用于把旧 finding 重组为根因计划。完整历史 finding 仍以 `plans/openlife_backend_remediation_v4_discovered_findings.json` 和 `plans/openlife_backend_remediation_v4_discovered_traceability.json` 为底稿。
+因此，“做过代码”远多于“独立证明关闭”。restart-baseline 清单把 72 项当前 closure 全部保持为 `UNKNOWN`，等待下一轮逐项当前-SHA Review；历史上的一个 `independently_verified` 也不自动继承。下面是本次从当前 `origin/main`/HEAD 源码重新确认的高信号问题；它们不是用来另建第二份 72 项 backlog。完整历史 finding 仍以 `plans/openlife_backend_remediation_v4_discovered_findings.json` 和 `plans/openlife_backend_remediation_v4_discovered_traceability.json` 为底稿。
 
 ### 6.2 P0 / 恢复开发前必须处理
 
@@ -301,24 +337,21 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 
 #### P0-02 开发凭据身份不能形成可重复重启基线
 
-`TRIAL-OBSERVED + SOURCE-CONFIRMED`。
+`HISTORICAL-EVIDENCE + SOURCE-CONFIRMED`。
 
-- Phase4F 的交互恢复在当前进程中把四类凭据显示为 available，但完全退出并以 ad-hoc bundle 或 `make dev` 重启后仍回到 Safe Mode。
+- Phase4F 的历史交互恢复在当前进程中把四类凭据显示为 available，但完全退出并以 ad-hoc bundle 或 `make dev` 重启后仍回到 Safe Mode。该恢复 UI 后经 review 被判定没有 typed eligibility，当前主线已保持动作不可用。
 - 现有 macOS Keychain ACL 绑定旧 worktree executable/cdhash；重新编译的 ad-hoc binary 身份变化。
 - 所有 provider、search、event integrity、action queue、task store、run receipt、MCP audit 引用又共用固定 service/account 命名空间，进一步放大 profile 迁移风险。
 
 在稳定身份、可回滚迁移和两次完整进程重启通过之前，外部 Provider、durable proposal 和权限恢复都不能获得产品信用。
 
-#### P0-REMOTE 远端 main 仍保留真实 Settings 崩溃，本地 PR 才修复
+#### 已合入、但最终主线原生复核仍待完成的精确修复：Settings 脱敏配置崩溃
 
-`REPRODUCED/TRIAL-OBSERVED` 于 Phase4F；当前本地 HEAD 已修，`origin/main` 未修。
+`HISTORICAL-EVIDENCE + REPRODUCED`。
 
-- Rust `LlmConfig.openai_key` 使用 `skip_serializing`；真实 `get_config` 不会返回该 secret 字段。
-- `origin/main` 的 `frontend/src/tauri.ts` 把它声明为必填，Settings presentation 对 `undefined` 直接 `.trim()`。
-- 单测使用手造的 `"***"` fixture，掩盖真实 Rust shape。
-- 当前提交 `52571d0` 已把字段改为可选并使用 `openai_key_ref`；PR #64 尚未 review/merge。
-
-恢复开发若直接从 `origin/main` 新开分支而不先吸收这项修复，会重新带回崩溃。
+- Rust `LlmConfig.openai_key` 使用 `skip_serializing`；真实 `get_config` 不会返回该 secret 字段。旧 main 的 TypeScript/presentation 错误地对缺失字段 `.trim()`，Phase4F 原生试用因此崩溃。
+- PR #64 已把该字段改为可选并使用 `openai_key_ref`，增加真实 omitted-secret 契约测试，并在等价产品源树的原生 artifact 上重现 Settings 可渲染。
+- 修复已进入 `origin/main = 74059db`，源码与精确产品树等价 artifact 已通过；但 cleanup 合入后的最终 main 原生重跑尚未发生，因此本轮不把关联 finding 写成 closed。这也不关闭凭据、Provider、耐久写入或整体 Phase4F。
 
 ### 6.3 P1 / 当前主线的安全、真相和产品阻断问题
 
@@ -332,16 +365,13 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 
 这是当前最明确的“假绿”实现，违反项目自己的 fail-closed 产品规则。
 
-#### P1-02 Rust 的 `remote_unknown` 任务状态会让 Tasks/Workspace 崩溃
+#### 已闭合的精确契约间隙：Task `remote_unknown`
 
-`SOURCE-CONFIRMED`，临时单测已确认 presentation 返回 `undefined`。
+`HISTORICAL-EVIDENCE + SOURCE-CONFIRMED`。
 
-- `openlife-core/src/agent/tasks_view_model.rs` 定义并实际生成 `TaskLifecycleStatus::RemoteUnknown`。
-- `frontend/src/tauri.ts` 的 `TaskLifecycleStatus` 联合类型遗漏 `"remote_unknown"`。
-- `readOnlySpinePresentation.ts` 的 switch 无该分支、也无 default；`TasksReadOnlyView.tsx` 随后解引用 `lifecycle.label/status`。
-- Workspace 使用同一个 presentation，故同样受影响。
-
-远端和当前本地都未修。这是第二个被全绿 typecheck/单测漏掉的真实跨语言契约问题。
+- `openlife-core/src/agent/tasks_view_model.rs` 定义并生成 `TaskLifecycleStatus::RemoteUnknown`；旧 TypeScript 联合与 presentation switch 遗漏它，可让 Tasks/Workspace 解引用空 presentation。
+- PR #64 已在 bridge 和 presentation 中增加 `remote_unknown` 并加回归测试；修复已进入 `origin/main`。
+- 这一精确枚举间隙已修复，但 4,700+ 行手写 bridge 缺少共享 schema/codegen 的系统性风险仍在，应进入下一轮正式 Review，不在本轮 cleanup 修复。
 
 #### P1-03 Snapshot 版本字符串可越出 snapshot 目录读取 YAML
 
@@ -406,7 +436,7 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 
 #### P1-10 CI 的绿色 Smoke/Acceptance 名称大于证据
 
-`SOURCE-CONFIRMED + 远端运行已核对`。
+`SOURCE-CONFIRMED + REPRODUCED`；远端运行结论另列为 GitHub check 事实。
 
 - GitHub `Smoke Test` 只运行 `scripts/smoke.sh`；该脚本做 Rust 编译/库测试、Vitest、macOS 路径探测和函数名存在性扫描，不启动桌面产品。
 - 主 CI 不执行 `tauri build`、安装包启动、Playwright、旧数据库到当前版本升级或 resolved-capability artifact proof。
@@ -431,7 +461,7 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 | runtime status 假阴性 | Kernel 实际可跑 AgentLoop，但 TurnRuntime 把两个 observed 布尔硬编码 false，诊断永远不能给 AgentLoop credit。 |
 | dev tool success 可无 AgentRun | dev `execute_tool_call` 先执行 effect，再忽略 `create_run` 错误，IPC 可返回成功与不存在的审计链。 |
 | audit key rotation 有旧 writer | ToolGateway snapshot Clone `McpAuditStore`；rotation 只替换 AppState 实例，已捕获上下文可继续用旧 epoch 写入。 |
-| Settings 深链不自动加载 | 直接打开/刷新 `/settings` 只加载 Today，不调用 Settings data source，显示“暂不可用”直到手动刷新。 |
+| 已合入、最终主线原生复核待完成：Settings cold route | PR #64 已让 `/settings` 挂载时触发 `ensureLoaded()`，并在与当前产品源树等价的原生 artifact 上验证直接进入 Settings 可渲染；合入 SHA `74059db` 本身尚未重新构建/启动，因此 post-merge native rerun 仍为 `UNKNOWN`，也不由此继承完整 Settings/Provider journey 信用。 |
 | Tauri bridge 无运行时 schema | 4,700+ 行手写 `tauri.ts` 仅用泛型强转；AppConfig shape 与 enum variant 完整性无共享 schema/codegen，正是两个崩溃穿过绿门的根因。 |
 | Today 仍携带旧 route refs | 生产 bundle 中保留 `route:companion`、`route:mailbox` action metadata，实际点击却去 Workspace/Review，遥测/自动化语义冲突。 |
 | 关键 UI 覆盖率接近零 | 全局 coverage gate 可通过，但 WorkspaceConversationPanel/SettingsPrivacyView 等关键页面接近零，无法阻止真实 route/serialization 崩溃。 |
@@ -460,7 +490,7 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 - release A2A 不可达，dev HTTP sidecar 默认关闭、仅 loopback、需要强 pairing token；未认证、超大 body 和 ContextManifest 拒绝有真实测试。
 - release CSP 严格；`csp:null` 只在 dev config。
 - 未找到普通产品输入可直接触发的 production `unwrap/panic`。
-- 全 workspace 测试、严格 Clippy、前端 build/typecheck/Vitest 都通过；问题在盲区，不在基本工程门完全失效。
+- 原始审计 SHA 的全 workspace 测试/严格 Clippy，以及 PR #64 head 的前端 build/typecheck/Vitest 与远端门均通过；cleanup 分支和最终 main 的完整本地门仍为 `UNKNOWN`，必须在 Gate3 重跑。
 
 ## 7. AI Coding 偏移审计
 
@@ -513,7 +543,7 @@ Backend Remediation 最初 35 项，追加发现已到 D072。追踪表显示：
 
 #### 已缓解：物理 worktree 碎片化；历史 refs 仍待分类
 
-审计开始时本机存在大量 D0xx slice、RED/GREEN、WIP 和 integration worktree。本次已经收敛为唯一 `/Users/tw/Desktop/open-life` checkout，并删除全部已合入 main 的冗余本地分支。剩余 26 个未合入 local ref 和少量 remote ref 只用于语义/证据分类；在完成 V4 13 个独有提交的归类前不删除，也不重新创建 checkout。
+审计开始时本机存在大量 D0xx slice、RED/GREEN、WIP 和 integration worktree。本次已经收敛为唯一 `/Users/tw/Desktop/open-life` checkout，并删除全部已合入 main 的冗余本地分支。当前仍有 28 个 local branch；本地只 fetch 到 8 个 `origin/*` remote-tracking ref，而 `git ls-remote --heads origin` 实时确认服务器上有 42 个 branch head（`main` + 41 个非 main）。archive aggregate tags、逐 tip 可恢复性和 V4 13 个独有提交分类完成前，不删除这些 refs，也不重新创建 checkout。
 
 #### P2：公开 backlog 与真实 backlog 脱节
 
@@ -525,7 +555,7 @@ GitHub 只有两个旧 LifeModel-HS Issue；真实工作由仓库内 JSON/plan �
 
 ### 7.3 过去开发中反复犯过的错误与防复发规则
 
-Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2026-04-23 起约 586 个提交，其中 554 个非 merge；2026-07-15 单日 61 个提交，7 月 14 日 40 个，7 月 16 日 32 个。高速度本身不是错误，但结合超大 checkpoint、长期 worktree 和独立验证滞后，形成了稳定的失败模式。
+Git 历史提供了比阶段名称更可信的过程证据：当前 `origin/main` 自 2026-04-23 起共有 594 个提交，其中 561 个非 merge；2026-07-15 单日 61 个提交，7 月 14 日 40 个，7 月 16 日 32 个。高速度本身不是错误，但结合超大 checkpoint、长期 worktree 和独立验证滞后，形成了稳定的失败模式。
 
 几个代表性事实：
 
@@ -546,8 +576,8 @@ Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2
 | 用 source-string/static guard 当行为 GREEN | 数十个 `include_str!` guard、假 smoke | 静态 guard 只算 absence/shape 证据，不计用户行为、迁移、并发或外部 live credit。 |
 | 大 checkpoint 混合多类改动 | 236k/53k/45k 行级提交 | 默认一个 invariant/一个失败模式/一个 closure 证据包；checkpoint 不得直接进入长期主线。 |
 | 阶段名和完成文案先于真实试用 | 多轮 Beta/Stage/final gate 后仍 Trial RED | 完成状态只由固定真实 journey、重启与 failure recovery 证据生成；文档/测试不能自证完成。 |
-| 每个 finding 建长期分支/worktree | 27 worktree、42 local branches、V4 13/195 分叉 | `/Users/tw/Desktop/open-life` 是唯一开发入口；短期 worktree 必须有 owner、expiry、remote preservation、删除条件。 |
-| 修复提交停在 feature branch | `origin/main` 仍有 Settings crash，PR #64 未 review | 恢复开发前先清空关键 integration gap；主线红问题不能靠“本地已修”计入完成。 |
+| 每个 finding 建长期分支/worktree | 原始 27 worktree、42 local branches；V4 当前相对 main 为 13 ahead / 203 behind | `/Users/tw/Desktop/open-life` 是唯一开发入口；本轮禁止新 worktree，历史 refs 只在清单、archive tag 和 bundle 可恢复后删除。 |
+| 修复提交停在 feature branch | Settings 修复曾只在 PR #64 head，之后才进入 `origin/main = 74059db` | feature branch 修复只有合入 main 并绑定当前 SHA 证据后才能获得集成信用；GitHub review 记录与本地/独立审查证据必须分开陈述。 |
 | 安全/一致性修复只覆盖一个 Store | Task/Run 严格 enum，Proposal/Patch/Memory 仍 fallback | 每个 store-level 修复必须附横向 inventory 和 corrupt-row matrix，防止局部 remediation。 |
 | read model 混入 repair write | Task detail read 会 reconciliation 写入 | Query 与 repair command 分开；read model 不应在用户刷新时隐式产生 durable effect。 |
 | 清理只看小缓存或盲删 ignored files | Cargo target 76.6 GiB；证据与 `.env` 也在 ignored 集合 | 先 `du`/worktree/source 分类，再 path-limited 清理；保留 secrets 配置和 trial evidence。 |
@@ -565,7 +595,7 @@ Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2
 | --- | --- | --- |
 | MCP audit key/profile/single-writer 未绑定 | P0 | 并发/profile key 覆盖可让历史审计密文不可解密 |
 | Keychain/二进制身份不稳定 | P0 | 重启后 Safe Mode，阻断真实 durable/live journey |
-| 远端 main Settings 崩溃尚未合入修复 | P0-REMOTE | 从 main 直接恢复会重新遇到真实页面崩溃 |
+| 合入 SHA 的原生 Settings 重跑尚缺 | UNKNOWN | 等价产品源树 artifact 已通过精确 Settings 验证，但 `74059db` 本身未重新构建/启动，不能把 source equivalence 写成 post-merge native pass |
 | 真实纵向闭环未绿 | P0 | 产品可能“很安全但做不成事” |
 | Projection/read model error-to-zero | P1 | 待审、阻塞、授权可消失且 UI 仍显示 Ready/ok |
 | Snapshot 越界与 MCP secret 边界 | P1 | WebView 可越界读 YAML；确认后的 credential 可能发往 MCP |
@@ -575,7 +605,7 @@ Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2
 | 72 项发现仅 1 项独立验证 | P1 | 完成声明与真实可信度之间存在巨大间隙 |
 | 多存储/多事实副本一致性 | P1 | crash、cancel、retry、delete、migration 时易分叉 |
 | 文档与源码漂移 | P1 | 后续 Agent 被过时路径/数量/页面名误导 |
-| 历史分支 refs | P2-MITIGATED | 物理 worktree 已收敛为 1；未合入 refs 仍需语义分类，禁止重新 checkout 并行开发 |
+| 历史分支 refs | P2-MITIGATED | 物理 worktree已收敛为 1；当前仍有 28 个 local branch 和远端 41 个非 main head，archive/recoverability 尚未完成，禁止重新 checkout 并行开发 |
 | 外部 Provider/MCP 真实证据不足 | P1 | 核心 Agent 能力仍主要由 scripted/local proof 支撑 |
 | UI 合同成熟度高于任务完成度 | P2 | 容易产生“看起来产品化”的错误信心 |
 | GitHub backlog 失真 | P2 | 人类无法从远端快速理解真实优先级 |
@@ -597,7 +627,7 @@ Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2
 | 文档治理 | 权威链清晰，存量和漂移仍严重 |
 | 发布成熟度 | 不适合宣告 Beta complete；适合受控开发试用与修复 |
 
-如果用一句话定位：OpenLife 已经跨过“玩具原型”，进入“复杂系统重构后的受控 Alpha”；它最大的危险不是做不出功能，而是继续用更多功能、合同和阶段名掩盖尚未完成的真实闭环与复杂度偿还。
+如果用一句话定位：当前权威状态仍是 `Phase7 red-until-trial-green`，并正在执行 Restart Baseline cleanup；架构已跨过玩具原型，但真实产品闭环与发布成熟度尚未获得对应信用。
 
 ## 10. 发展指导与优先级
 
@@ -606,25 +636,25 @@ Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2
 - 暂停新产品能力、新路由、新 Provider、新 Skill/MCP 表面。
 - 暂停新 Phase/Stage 命名；除非旧阶段有明确 closure，不再创建新路线图层。
 - 暂停以“再加一组大测试”替代真实桌面纵向验证。
-- 暂停为每个发现默认创建独立长期 worktree；优先在单一集成入口做经过批准的窄切片。
+- 未经当前任务对精确目标的明确授权，不得创建任何新 worktree、roadshow/D0xx checkout 或 sibling `open-life-*` 开发目录；短期分支也只在唯一 checkout 内切换。
 - 不重建任何已删除旧命令、页面或 fallback。
 
 ### 10.2 第一优先级：建立 Restart Baseline
 
-目标不是立刻做 Developer ID 发布，也不是给旧 V4 换一个新阶段名，而是得到一个唯一、可复现、没有已知 P0 的开发底座：
+目标不是立刻关闭产品 P0/P1，也不是给旧 V4 换一个新阶段名，而是得到一个唯一、可恢复、可复现、适合下一轮正式全仓 Review 的主线 SHA。当前授权范围只包括事实与开发基线清理：
 
-1. 人工 review PR #64；将有效修复合入最新 `origin/main`，并在合入 SHA 重跑机械门与真实 `/settings`。
-2. 在同一个 `/Users/tw/Desktop/open-life` checkout 内切到更新后的 main，再创建短期稳定化分支；不恢复 roadshow/D0xx worktree，不做旧 V4 整分支 merge。
-3. 逐个审查 V4 的 13 个独有提交：标为 `already semantically present`、`still needed-port`、`obsolete` 或 `evidence-only`。
-4. 修复 MCP audit key 的 profile/store identity、原子创建、共享 active generation 和跨进程单写者。
-5. dev/qa/release credential namespace 明确隔离；现有 canonical key 有非旋转、可回滚迁移；测试 binary 不占产品 slot。
-6. 关闭 snapshot containment、MCP secret redaction、Projection error-to-zero、Task `remote_unknown` 和 Proposal strict decode。
-7. 删除/隔离 dormant mutation 命令，建立 shipped command allowlist。
-8. 退役旧 Stage1/Step6 默认 E2E，先让“当前六条 Workbench 路由”的 Playwright collection 与 smoke 真实变绿。
+1. **Gate 0 / Phase4F integration**：PR #64 已合入 `origin/main = 74059db`，最终 10 个 GitHub checks 全绿；GitHub `reviews=[]`。等价产品源树的精确原生 Settings artifact 已通过，但 merge SHA 本身的 native rerun 仍为 `UNKNOWN`，最终冻结前必须单独验证，不能由 source equivalence 自动继承。
+2. **Gate 1 / Facts**：机器清单必须覆盖 baseline、bundle、worktree、磁盘、dirty state、所有 local/remote refs、V4 13 个独有提交和全部 72 个 finding。第二个只读审查者必须确认 ref 覆盖、SHA 可解析、计数一致且没有把未合入实现写成 main 已有。
+3. **Gate 2 / Refs**：先验证现有 bundle，再分别建立 local/remote aggregate archive tag；local tag 不推送，remote tag 只允许以已公开对象为 parent。逐个 tip 通过 archive reachability 或 bundle recoverability 后才能删除。实时远端事实是 42 个 head（41 个非 main），不能用本地 8 个 remote-tracking ref 代替服务器全集；最终本地和远端 branch 都只能剩 `main`。
+4. **Gate 2 / Authority and evidence entrypoints**：活跃文档只授权当前 single-system；Roadshow/V4/Stage/Step6 仅作历史证据。默认 Playwright 退出退役 spec，新增诚实的 Workbench browser-shell smoke；CI 名称必须区分 compile/unit-contract、browser shell、真实 Tauri 和 external-live credit。
+5. **Gate 2 / Derived artifacts**：删除清单明确列出的 `frontend/dist`、`frontend/dist-phase4d`、`frontend/playwright-report`、`src-tauri/gen` 和仓库 `.DS_Store`；保留 `target`、`frontend/node_modules`、环境文件、test-results、Phase4F/UIUX 证据、默认 Application Support 产品数据和任何实际配置但当前未知的 custom data path。
+6. **Gate 3 / Freeze**：cleanup PR 只能包含治理文档、机器清单、测试/CI 入口和派生产物清理，不得夹带 Rust/Tauri/React 产品行为修改。PR 必须经过记录在案的人类 review 后才可合入；合入后更新唯一 checkout 的 main，从该最终 main 启动真实 Tauri 并复核 `/settings`，随后验证 archive/recoverability、删除 cleanup 与历史 branch refs、生成 handoff snapshot，然后停止。
 
-凭据完成证据必须包含两次全进程重启，而不是当前进程的 `available`；所有故障必须保持 Safe Mode，不删除/重建 canonical data。
+`ReflexEngine`、V4 无效 config、`save_chat_message`、旧 route refs、Projection error-to-zero、credential/MCP audit 等生产问题继续保留现场并进入下一轮正式 Review；本轮不得借“清理”实施修复或把它们改为 closed。
 
-### 10.3 第二优先级：只做三条真实纵向闭环
+以下 10.3–10.6 是基线冻结后的正式 Review 输入，不属于本轮已授权的实现计划，也不代表相关 finding 已关闭。
+
+### 10.3 正式 Review 输入：三条真实纵向闭环
 
 建议把 Trial Green 限定为：
 
@@ -646,68 +676,52 @@ Git 历史提供了比阶段名称更可信的过程证据：`origin/main` 自 2
 
 优先拆的是“可独立证明的纯合同/状态转换”，而不是把文件按行数机械切开。
 
-### 10.5 第四优先级：收缩 backlog 与证据
+### 10.5 延后候选：收缩 backlog 与证据
 
 - 把 72 项发现聚合为不超过 8 个 root-cause program，而不是 72 条并行开发线。
 - closure candidate 必须安排独立只读验证，否则不能继续积累新的 implemented 状态。
 - 对每一种 durable fact 说明唯一用途、唯一 owner、保留期和删除/恢复语义。
-- 把 GitHub Issues 更新为当前 8 个 program 和 Trial Green milestone，使远端对人可读。
+- 是否把 GitHub Issues 重组为少量 program 与 milestone，留待正式 Review 后另行批准；本轮不执行外部 backlog 写入。
 
-### 10.6 第五优先级：文档减负
+### 10.6 延后候选：文档减负
 
 - 保持当前四级权威链。
 - 修复当前 source-backed docs 的明显漂移（workspace member、路由名、已删除文件引用）。
-- 为历史 plans 生成机器可读索引和默认排除规则；不要移动 ADR 0013，也不要为归档创建新的活跃命名空间。
+- 是否为历史 plans 新增进一步索引，留待正式 Review 后决定；本轮不创建 archive 命名空间，不移动 ADR 0013。
 - 新报告必须以当前 SHA、验证日期和 UNKNOWN 边界开头。
 - 不再为每个小修复创建 5-10 个长期 Markdown；优先更新一个当前决策记录和一个证据附件。
 
-## 11. 建议的下一开发计划与里程碑
+## 11. 本轮唯一执行计划与退出条件
 
-### 11.1 Gate A：`OpenLife Restart Baseline`
+### 11.1 Gate 1：事实基线
 
-这是恢复开发的入口，不是产品完成里程碑。退出条件：
+- `plans/openlife_restart_baseline_cleanup.json` 覆盖完整 local/server refs、bundle、V4 13 commits、72 findings、当前 source map 与保留/删除边界。
+- 第二只读审查确认 ref 覆盖、SHA 可解析、计数一致，且没有把历史实现或未合入代码冒充当前 main closure。
+- finding 当前证据只能使用四种状态；缺少当前 SHA closure 的项目继续为 `UNKNOWN`。
 
-- PR #64 经人工 review 后合入，并在新的 `origin/main` SHA 重新通过机械门与真实 `/settings`；
-- 旧 V4 的 13 个独有提交完成四类语义归档，不进行整分支 merge；
-- 当前已知 P0 为零；credential 和 MCP audit key 能在隔离 profile 下跨两次完整进程重启保持一致且 fail closed；
-- MCP audit 另须通过同路径双进程 writer rejection、并发首次建 key 只产生一个 generation、rotation 时旧 writer 拒绝或受控交接，以及旧密文持续可解密；
-- Projection error-to-zero、Snapshot containment、MCP secret redaction、Proposal strict decode、Task `remote_unknown` 等直接安全/真相 P1 已关闭；
-- 默认 Playwright 能收集现行 Workbench 测试，至少有一个会真实启动桌面产品的 smoke；
-- 始终只保留 `/Users/tw/Desktop/open-life` 一个物理开发入口；旧 checkout 清理和全 refs bundle 已完成，剩余历史 refs 只做语义分类，不用于并行开发。
+### 11.2 Gate 2：开发基线清理
 
-### 11.2 Gate B：`OpenLife Trial Green 1`
+- 活跃权威只描述当前 single-system；V4、Roadshow、Stage/Step6 退出当前执行入口。
+- 默认 Playwright 只收集当前 Workbench browser-shell smoke；该 job 不获得 Tauri、迁移或 external-live 信用。
+- compile/unit-contract job 使用诚实名称；退役 workflow 退出 push/PR 默认触发。
+- 指定派生物删除，热缓存、环境文件、试用证据、默认和 custom 产品数据保持不动。
+- cleanup PR head 冻结后建立并验证 archive tags；local tag 不推送，remote tag 只引用已公开历史对象。
 
-进入条件：
+### 11.3 Gate 3：合入与冻结
 
-- `Restart Baseline` 已绿；
-- 选择三个纵向闭环的固定隔离数据集、用户脚本和恢复脚本；
-- 每条闭环的唯一 runtime/store/projection owner 已画清，不再新增平行 authority。
+- cleanup PR 不含 Rust/Tauri/React 产品行为修改，全部门禁通过，并取得计划要求的人类 review 记录。
+- 合入后更新唯一 checkout 的 `main`，从最终 main 启动真实 Tauri 并重新验证 `/settings`。
+- 每个待删 tip 经 archive tag 或 verified bundle 可恢复后，删除全部非 main local/remote branch；最终 `git status` clean、server/local branch 都只剩 `main`。
+- handoff snapshot 记录最终 main SHA、P0/P1/UNKNOWN、72 finding 状态和正式全仓 Review 入口；随后停止。
 
-退出条件：
-
-- 三条纵向闭环全部在真实 Tauri Workbench 完成；
-- 至少一次完整应用重启后状态、权限、提案和结果一致；
-- 没有 silent durable write；
-- 没有 proposal-only 被标为 completed；
-- 没有 fixture/mock 获得真实产品信用；
-- 每条闭环都有最小 transcript、receipt、projection 和人工可读截图；
-- 当前 P0 为零；
-- Backend Remediation 中与这三条闭环直接相关的 finding 完成独立验证。
-
-非目标：
-
-- 不追求所有 72 项一次关闭；
-- 不追求完整 Beta；
-- 不增加新功能表面；
-- 不进行全仓重写；
-- 不恢复旧页面或旧 runtime。
+产品修复、Trial Green 场景选择、新功能路线和 72 项优先级重组全部延后到正式 Review；它们的顺序目前是 `UNKNOWN`，不由本报告预先决定。
 
 ## 12. 最终结论
 
 OpenLife 最值得保留的是它对私人 Agent 的核心判断：模型输出、工具动作、长期记忆和人生模型真相必须被区分，并且用户应拥有最后的治理权。项目已经为这个判断构建了罕见的深度基础设施，不能把它当作失败的原型推倒重来。
 
-但必须改变后续开发节奏。过去的 AI Coding 强项是高速扩展和快速补证；现在这正成为负担。下一阶段的成功标准不是新增多少模块、测试、计划或“完成项”，而是能否让一个真实用户在稳定开发环境中完成少数关键任务，并在重启、失败、取消、审批和回滚后仍得到一致、可信、可理解的结果。
+但必须改变后续开发节奏。过去的 AI Coding 强项是高速扩展和快速补证；现在这正成为负担。本轮的成功标准不是新增功能或关闭产品 finding，而是得到一个唯一、可恢复、诚实标注证据等级、适合正式 Review 的干净主线 SHA。
 
-我的指导结论是：**选择“重新组织开发”，不是“沿旧 V4 分支继续”，也不是“全仓重写”。保留产品理念与 single-system 架构，冻结功能扩张，先建立 Restart Baseline，再用三条真实纵向闭环把产品从“合同可信”推进到“使用可信”，同时对万行核心和 72 项 backlog 进行根因级收缩。**
+我的指导结论是：**选择“重新组织开发”，不是沿旧 V4 分支继续，也不是全仓重写。保留产品理念与 single-system 架构，先完成 Restart Baseline；随后从干净 main 做正式全仓 Review，再决定 remediation、Trial Green 与后续开发顺序。**
 
-在这之前，项目应被公开描述为“受控 Alpha / Trial Green remediation”，而不是 Beta complete、Phase7 complete 或完整个人 AI OS。
+当前权威状态是 `Phase7 red-until-trial-green; Restart Baseline cleanup in progress`。不得描述为 Beta complete、Phase7 complete 或完整个人 AI OS。
