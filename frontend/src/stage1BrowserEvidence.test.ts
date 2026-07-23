@@ -461,24 +461,15 @@ describe("stage1 browser evidence report builder", () => {
     expect(result.status).toBe(0);
   });
 
-  it("keeps Playwright dogfood on the shared Stage 1 scenario matrix", () => {
-    const spec = fs.readFileSync(
-      path.resolve(process.cwd(), "e2e/main-chat-stage1-dogfood.spec.ts"),
-      "utf8"
-    );
+  it("keeps retired Stage 1 Playwright out of the current browser-shell collection", () => {
+    const retiredSpecPath = path.resolve(process.cwd(), "e2e/main-chat-stage1-dogfood.spec.ts");
+    const currentSpecPath = path.resolve(process.cwd(), "e2e/workbench-browser-shell.spec.ts");
 
-    expect(spec).toContain("STAGE1_DOGFOOD_SCENARIOS");
-    expect(spec).toContain("stage1_browser_prep_task_id_unsafe");
-    expect(spec).toContain("metadataSafeLabel(taskSessionId)");
-    expect(spec).toContain("stage1_selected_skill_input_missing");
-    expect(spec).toContain("stage1_selected_skill_not_applied");
-    expect(spec).toContain('getAttribute("aria-label")');
-    expect(spec).toContain('getAttribute("title")');
-    expect(spec).not.toContain("const SCENARIOS:");
-    expect(spec).not.toContain("function s(");
+    expect(fs.existsSync(retiredSpecPath)).toBe(false);
+    expect(fs.existsSync(currentSpecPath)).toBe(true);
   });
 
-  it("exposes a checked-in Tauri WebDriver runner entrypoint for supported platforms", () => {
+  it("keeps the retired Tauri WebDriver runner as historical evidence only", () => {
     const packageJson = JSON.parse(
       fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8")
     );
@@ -487,7 +478,7 @@ describe("stage1 browser evidence report builder", () => {
       "utf8"
     );
 
-    expect(packageJson.scripts["test:e2e:tauri"]).toBe("node scripts/stage1-tauri-webdriver.mjs");
+    expect(packageJson.scripts).not.toHaveProperty("test:e2e:tauri");
     expect(fs.existsSync(path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs"))).toBe(
       true
     );
@@ -613,10 +604,7 @@ describe("stage1 browser evidence report builder", () => {
   });
 
   it("maps seeded continuity transcript events to Stage1 browser final evidence", () => {
-    const files = [
-      path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs"),
-      path.resolve(process.cwd(), "e2e/main-chat-stage1-dogfood.spec.ts"),
-    ];
+    const files = [path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs")];
 
     for (const file of files) {
       const source = fs.readFileSync(file, "utf8");
@@ -640,6 +628,9 @@ describe("stage1 browser evidence report builder", () => {
     );
     const workflow = fs.readFileSync(workflowPath, "utf8");
 
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).not.toMatch(/^\s+pull_request:/m);
+    expect(workflow).not.toMatch(/^\s+push:/m);
     expect(workflow).toContain("runs-on: ubuntu-22.04");
     expect(workflow).toContain("Retired Stage 1 Tauri Dogfood Contract");
     expect(workflow).not.toContain("webkit2gtk-driver");
@@ -660,10 +651,7 @@ describe("stage1 browser evidence report builder", () => {
   });
 
   it("keeps browser observation helpers from using broad assistant text as evidence", () => {
-    const files = [
-      path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs"),
-      path.resolve(process.cwd(), "e2e/main-chat-stage1-dogfood.spec.ts"),
-    ];
+    const files = [path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs")];
     for (const file of files) {
       const source = fs.readFileSync(file, "utf8");
       expect(source).not.toContain('text.includes("Actions")');

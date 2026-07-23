@@ -1,10 +1,10 @@
 # OpenLife Single-System Development Preparation
 
-> Date: 2026-07-06
-> Status: development-preparation artifact, not implementation completion
-> Scope: prepare the next large development round whose acceptance standard is
-> that every product domain has one authoritative system and old routes are
-> removed, not hidden.
+> Date: 2026-07-23
+> Status: active single-system boundary, not implementation completion
+> Scope: preserve the one-authority-per-domain contract. Sections explicitly
+> marked historical record the 2026-07-06 preparation and do not define the
+> current source map, task order, or finding closure.
 
 ## 1. Objective
 
@@ -23,29 +23,65 @@ iteration. The target is a cleaner product architecture:
 The development rule is: a phase is not complete if it only adds a new system
 while leaving the old product route alive.
 
-## 2. Preparation Work Completed In This Pass
+## 2. Preparation Evidence Boundary
 
-Current local baseline:
+### Historical 2026-07-06 Snapshot
 
-- Branch checked: `codex/openlife-product-core-baseline`.
-- Worktree checked: clean before this document edit.
-- Product source scan covered `src-tauri/src`, `openlife-core/src`, and
-  `frontend/src`.
-- Active command surface scan covered `src-tauri/src/lib.rs`,
-  `src-tauri/src/commands/**`, and `frontend/src/tauri.ts`.
-- Direct durable write scan covered proposal, LifeModel, memory, evidence,
-  LifeEvent, patch, and state write symbols.
-- Frontend read-model scan covered Today, Mailbox, Chat, Companion,
-  LifeModel, Settings, and LifeModelEditor state sources.
-- Industry-practice check is anchored to primary or official references only:
-  OpenAI Agents SDK guardrails/tracing, Anthropic/Claude tool and prompt
-  safety guidance, LangGraph persistence/HITL docs, and OWASP LLM risk
-  guidance.
+The original preparation was performed on
+`codex/openlife-product-core-baseline`. Its source scans covered
+`src-tauri/src`, `openlife-core/src`, `frontend/src`, the shipped command
+surface, direct durable-write symbols, and then-current frontend page state
+sources. Those branch, worktree, path, and implementation observations are
+point-in-time evidence only.
 
-This document intentionally does not claim the implementation is done. It is the
-entry contract for doing the implementation cleanly.
+Several paths named later in this document were subsequently deleted under the
+Phase7 contract. Their absence is expected evidence, not a reason to restore
+them. Industry-practice references remain background guidance rather than
+current repository proof.
 
-## 3. Current Architecture Findings That Drive The Plan
+### Current Restart Baseline
+
+- `/Users/tw/Desktop/open-life` is the only writable checkout.
+- `main` is the only long-term branch; the cleanup branch is a short-lived PR
+  branch in that checkout.
+- PR #64 is merged at the baseline recorded in
+  `plans/openlife_restart_baseline_cleanup.json`.
+- That JSON owns current ref facts, the V4 13-commit classification, all 72
+  finding states, retention/deletion boundaries, and exact evidence status.
+- `plans/openlife_single_system_deletion_manifest.md` owns current
+  expected-absent and product-authority disposition.
+- Phase7 remains `red-until-trial-green`. No historical observation or passing
+  test independently closes a finding.
+- The current restart cleanup deliberately does not change Rust, Tauri, React,
+  product DTOs, SQLite schema, or product behavior.
+
+Current source-map anchors are:
+
+- Workbench conversation:
+  `frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts`
+  -> `frontend/src/tauri.ts` -> `send_message`;
+- registered streaming: `start_stream_message` remains a parallel shipped
+  command but has no current production frontend consumer;
+- shared turn owner: `src-tauri/src/main_chat_turn_runtime.rs`,
+  `src-tauri/src/main_chat_kernel.rs`, and
+  `openlife-core/src/agent/main_chat_agent_v1.rs`;
+- governed writes: `openlife-core/src/agent/review_workflow.rs`,
+  `openlife-core/src/memory_gateway.rs`,
+  `openlife-core/src/life_model_write_gateway.rs`, and
+  `openlife-core/src/agent/tool_gateway.rs`, with Tauri adapters beneath the
+  same authority boundary;
+- product projection: `src-tauri/src/life_state_projection.rs`, consumed by
+  current read-only, Settings/Privacy, and LifeModel read-model surfaces;
+- canonical routes: `frontend/src/App.tsx` and
+  `frontend/src/ui/productRouteContract.ts`.
+
+## 3. Historical Architecture Findings That Drove The Plan
+
+This section preserves the 2026-07-06 problem statement. It is not a current
+path inventory. Current paths must be taken from the source-map anchors above,
+the restart cleanup JSON, and the deletion manifest. Deleted page, stage,
+strategy, migration, and fallback paths below are expected-absent historical
+objects and must not be recreated.
 
 ### 3.1 Main Chat still has multiple product-shaped runtimes
 
@@ -254,7 +290,12 @@ Reference sources selected as verification anchors for this preparation:
 - No broad heavy test matrix as a substitute for clear architecture. Use narrow
   contract gates plus realistic Computer Use trials.
 
-## 6. Seven-Phase Preparation Plan
+## 6. Historical Seven-Phase Design Decomposition
+
+The seven phases below preserve the original design decomposition. They are not
+the current execution order and they do not imply that a phase is open, closed,
+or ready. Current status comes only from the deletion manifest, the restart
+cleanup JSON, current-SHA gates, and exact credited trial evidence.
 
 ### Phase 1: Single-System Authority Map And Deletion Contract
 
@@ -678,9 +719,11 @@ Use these checks before and after every phase:
 - If the goal says "avoid heavy tests", do not replace architecture cleanup with
   another large brittle matrix.
 
-## 8. Required Static Guards
+## 8. Required Static Guard Invariants
 
-The implementation phase should add focused static guards for:
+The following invariants remain required. Their implementation and pass/fail
+state must be verified at the current SHA; this document does not grant guard
+coverage merely by listing them:
 
 - ordinary send/stream cannot call retired strategy/fallback helpers;
 - product code cannot call `ProposalStore::create_proposal` outside
@@ -716,16 +759,29 @@ Review pass 3, risk:
   phase boundaries, static guards, and contract tests.
 - Heavy e2e matrices should be deferred until the single product route exists.
 
-## 10. Next Development Entry
+## 10. Current Development Entry
 
-The next coding step should start with Phase 1 only:
+The current entry is the restart-baseline cleanup, not a return to Phase 1:
 
-1. create the authority/deletion guard files or tests;
-2. update active plan governance so old plans cannot steer new work;
-3. establish the first static checks over command surface and direct writes;
-4. only then enter Main Chat runtime code changes.
+1. keep the independently reviewed restart fact manifest authoritative;
+2. create and verify recovery tags before deleting any classified branch ref;
+3. remove V4, roadshow, Stage, and Step6 from active execution authority;
+4. replace retired default E2E/CI entrypoints with honest compile/unit-contract
+   and Workbench browser-shell evidence;
+5. delete only the approved derived artifacts while retaining build caches,
+   credentials, trial evidence, and product data;
+6. run the complete pre-merge gate set, open the cleanup PR, and require the
+   recorded human review before merge;
+7. update `main`, rerun native Tauri `/settings` against that exact merged SHA,
+   remove the cleanup/historical branch refs only after recovery checks, freeze
+   the clean baseline, and stop this cleanup.
 
-## 11. Stage4C Repository Missing-Record Closure
+The following task is a separate formal full-repository review. It consumes the
+72-finding registry and current source evidence before proposing production
+fixes or a new development roadmap. This cleanup must not pre-empt that review
+by refactoring the preserved problem surface.
+
+## 11. Historical Stage4C Repository Missing-Record Closure
 
 Stage4C keeps this preparation document subordinate to the Phase7 deletion
 manifest and closes the repository-link baseline's remaining active missing

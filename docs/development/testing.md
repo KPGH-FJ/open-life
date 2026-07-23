@@ -2,220 +2,204 @@
 
 ## Status
 
-Stage3-A source-backed testing map. This page explains current local validation
-commands and their interpretation. It does not turn local/scripted evidence into
-external live provider readiness. Stage5A repaired the inherited
-runtime-module guard, but that repair is not Phase7 completion, Main Chat Agent
-Execution v1 completion, or external live-provider completion.
+Current Phase7 testing and evidence map for the restart-baseline cleanup.
+Passing a command proves only the layer named below. It does not close a
+finding, make Phase7 green, or convert local/scripted evidence into native
+desktop or external-live credit.
 
 ## Authority
 
 Authority remains with `AGENTS.md`, `plans/README.md`,
-`plans/openlife_single_system_deletion_manifest.md`, and
-`plans/openlife_single_system_development_preparation.md`. This page is a
-developer explainer beneath the active authority docs.
+`plans/openlife_single_system_deletion_manifest.md`,
+`plans/openlife_single_system_development_preparation.md`, and the
+machine-readable restart facts in
+`plans/openlife_restart_baseline_cleanup.json`. This page is a developer
+explainer beneath that stack.
 
-## Last verified
+## Last Fact Sync
 
-2026-07-07 during Stage3-A source-map reading. The Stage3-A validation record is
-kept in `plans/openlife_repository_knowledge_architecture_cleanup_preparation.md`
-after the command set is run.
+2026-07-23 during restart-baseline cleanup. Command results are not inherited
+from this date: every claimed pass must identify the SHA and invocation on which
+it was reproduced.
 
-## Source map
+## Current Source Map
 
-- `Cargo.toml`
-- `openlife-core/Cargo.toml`
-- `src-tauri/Cargo.toml`
-- `frontend/package.json`
-- `frontend/pnpm-lock.yaml`
-- `plans/openlife_single_system_development_preparation.md`
-- `plans/openlife_repository_document_inventory.json`
-- `plans/openlife_repository_document_link_baseline.json`
-- `src-tauri/src/single_system_authority_tests.rs`
-- `src-tauri/src/main_chat_runtime_module_tests.rs`
-- `src-tauri/src/main_chat_command_surface_tests.rs`
-- `src-tauri/src/main_chat_live_provider_tests.rs`
+- Rust workspace and crates: `Cargo.toml`, `openlife-core/Cargo.toml`,
+  `src-tauri/Cargo.toml`
+- frontend scripts and lockfile: `frontend/package.json`,
+  `frontend/pnpm-lock.yaml`
+- browser-shell runner: `frontend/playwright.config.ts`
+- current browser-shell spec:
+  `frontend/e2e/workbench-browser-shell.spec.ts`
+- default CI: `.github/workflows/ci.yml`
+- current single-system guards:
+  `src-tauri/src/single_system_authority_tests.rs`
+- current Main Chat owner-shape guards:
+  `src-tauri/src/main_chat_runtime_module_tests.rs`
+- local live-provider contract harness:
+  `src-tauri/src/main_chat_live_provider_tests.rs`
+- exact native Phase4F report:
+  `docs/phase4f_desktop_product_acceptance/03_native_trial_report.md`
 
-## Stage5B Current Guard Status
+The retired Stage1, Step6, and generic smoke specs are expected absent from the
+default Playwright collection:
 
-`cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` now
-passes after Stage5A updated the guard to the current Phase7 owner shape. The
-current owner shape keeps final-gate aggregation and live-provider report
-builders in `src-tauri/src/main_chat_final_gate.rs`, live-provider harness
-contract tests in `src-tauri/src/main_chat_live_provider_tests.rs`, and keeps
-the retired final acceptance command/test owner absent.
+- `frontend/e2e/main-chat-stage1-dogfood.spec.ts`
+- `frontend/e2e/main-chat-step6-product-acceptance.spec.ts`
+- `frontend/e2e/smoke.spec.ts`
 
-Older Stage2/Stage3/Stage4 validation rows below that record this command as
-failed are preserved as original time-point evidence. They are superseded for
-current status by the Stage5A run; they must not be read as current truth.
+Their absence is not a broken link to repair.
 
-## Stage5B Validation Commands
+## Evidence Levels
 
-Run this set after Stage5B status-sync documentation edits:
+### 1. Compile And Unit-Contract
+
+The CI check named `Compile and Unit Contract Checks` and the corresponding
+local commands may prove:
+
+- Rust/frontend compilation and type correctness;
+- unit and focused contract behavior;
+- static single-system and expected-absent guards;
+- package/build integrity.
+
+They do not launch a browser or Tauri shell and do not prove route usability,
+native process identity, durable application, or external provider behavior.
+
+### 2. Workbench Browser Shell
+
+The CI check named `Workbench Browser Shell Smoke` runs the current Workbench
+through Vite and Chromium. Its contract is bounded to:
+
+- non-empty Playwright collection;
+- `/today`, `/workspace`, `/tasks`, `/review`, `/life-model`, and `/settings`
+  render their expected route heading;
+- a retired route renders explicit old-page-unavailable state;
+- an unknown route renders explicit path-unavailable state;
+- uncaught JavaScript page errors fail the run.
+
+The spec must not skip, conditionally return, catch-and-ignore, or otherwise
+turn blocked state into a pass. This layer uses no Tauri IPC mock to claim
+native behavior, invokes no external provider, and performs no approved durable
+write.
+
+This is browser-shell evidence only. It is not Tauri, migration, provider,
+permission/resume, or durable-application credit.
+
+### 3. Native Tauri
+
+Native credit requires all of the following:
+
+- exact source SHA;
+- exact executable/app artifact identity;
+- profile and data-directory boundary;
+- observed Tauri process and desktop route;
+- explicit record of every interaction not performed.
+
+The Phase4F report grants current credit only to its exact reviewed artifact:
+Today opened fail-closed and Settings rendered/focused with unknown boundary,
+no recovery action, and disabled provider test/save. The earlier broad
+six-route walk and credential-recovery attempt are historical evidence from a
+different artifact.
+
+After restart cleanup merges, `/settings` must be rerun from the exact merged
+`main`. Browser-shell and old native results cannot be inherited by that SHA.
+
+### 4. External Live
+
+External-live credit requires a dedicated, authorized live-provider report for
+the exact scenario and artifact. Direct generation, web AgentLoop, registered
+MCP AgentLoop, and proposal/permission behavior remain separate claims.
+
+The following do not count as external-live evidence:
+
+- local HTTP OpenAI-compatible servers;
+- scripted provider output;
+- mock IPC;
+- fixture-backed web reads;
+- command-surface tests;
+- native shell launch without an authorized external request;
+- passing unit, contract, browser-shell, or Tauri startup checks.
+
+Missing trace, fallback, silent write, synthetic/local provider, malformed
+evidence, or an unapproved sensitive action remains a blocker.
+
+## Current Default Local Gates
+
+Choose the smallest gate matching a bounded edit. The final restart baseline
+must run the full set required by its cleanup plan.
+
+Frontend:
+
+```sh
+corepack pnpm --dir frontend format:check
+corepack pnpm --dir frontend typecheck
+corepack pnpm --dir frontend test
+corepack pnpm --dir frontend build
+corepack pnpm --dir frontend verify:release-absence
+corepack pnpm --dir frontend test:e2e
+```
+
+`test:e2e` must collect at least one test and execute only the current Workbench
+browser-shell spec by default.
+
+Focused Rust:
+
+```sh
+cargo fmt --check
+cargo test -p openlife-tauri single_system -- --nocapture
+cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture
+```
+
+Final Rust:
+
+```sh
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --all --locked
+```
+
+Repository and fact integrity:
 
 ```sh
 git diff --check
-cargo fmt --check
-python3 -m json.tool plans/openlife_repository_document_link_baseline.json >/tmp/openlife_repository_document_link_baseline_stage5b.json
-python3 -m json.tool plans/openlife_repository_document_inventory.json >/tmp/openlife_repository_document_inventory_stage5b.json
-cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture
-cargo test -p openlife-tauri single_system -- --nocapture
-cargo test -p openlife-tauri main_chat_live_provider -- --nocapture
+jq empty plans/openlife_restart_baseline_cleanup.json
 test ! -f src-tauri/src/main_chat_final_acceptance_tests.rs
-rg -n "run_main_chat_agent_execution_v1_final_acceptance_gate" src-tauri/src/lib.rs src-tauri/src/commands frontend/src/tauri.ts || true
+rg -n "run_main_chat_agent_execution_v1_final_acceptance_gate" \
+  src-tauri/src/lib.rs src-tauri/src/commands frontend/src/tauri.ts
 ```
 
-Expected interpretation: the three targeted Rust suites pass, the old
-final-acceptance test owner is absent, and the retired final acceptance command
-has no shipped-surface matches. This does not recompute the document link
-baseline and does not create external live-provider evidence.
+The retired-command scan is expected to have no shipped-surface match and
+therefore return exit status 1. Its raw output must still be classified by
+surface before any absence claim.
 
-## Workspace Shape
+## Historical Entrypoints
 
-The root `Cargo.toml` is a Cargo workspace with two members:
-`src-tauri` and `openlife-core`.
+`.github/workflows/stage1-tauri-dogfood.yml` and
+`.github/workflows/step6-tauri-product-acceptance.yml` are manual
+`workflow_dispatch` historical contract runners only. They are not default
+push/pull-request gates and do not define current product acceptance.
 
-`openlife-core/Cargo.toml` defines the Rust core crate and its storage,
-privacy, vector, and async dependencies. `src-tauri/Cargo.toml` defines the
-Tauri crate, depends on `openlife-core`, and disables doctests for the library.
+Archived Stage1/Step6 frontend helpers or Vitest contract fixtures may remain
+under explicit test/archive paths. Their presence does not restore a product
+route; their pass result does not grant current browser-shell, native-Tauri, or
+external-live credit.
 
-The frontend package is under `frontend/`. `frontend/package.json` uses
-`pnpm@9.1.0`, React 18, Tauri API packages, Vite, Vitest, Playwright, and
-TypeScript. `frontend/pnpm-lock.yaml` is the lockfile for those frontend
-dependencies.
+Historical Stage3-A, Stage5A/5B, and older command records remain recoverable
+through Git and their point-in-time reports. They are not commands to run as
+the current default entry.
 
-## Stage3-A Validation Commands
+## Interpretation Rules
 
-Run this set after Stage3-A documentation edits:
-
-```sh
-git diff --check
-cargo fmt --check
-python3 -m json.tool plans/openlife_repository_document_inventory.json >/tmp/openlife_repository_document_inventory_stage3a_pretty.json
-python3 -m json.tool plans/openlife_repository_document_link_baseline.json >/tmp/openlife_repository_document_link_baseline_stage3a_pretty.json
-python3 - <<'PY'
-from pathlib import Path
-
-doc_path = Path("plans/openlife_repository_stage2c_phase_c_readiness_decision.md")
-doc = doc_path.read_text()
-section = doc.split("## Source-Map Starting Points", 1)[1].split(
-    "## Claims Prohibited In Phase C", 1
-)[0]
-paths = []
-for line in section.splitlines():
-    line = line.strip()
-    if line.startswith("- `") and line.endswith("`"):
-        paths.append(line[3:-1])
-unique_paths = list(dict.fromkeys(paths))
-missing = [path for path in unique_paths if not Path(path).exists()]
-print(f"source_map_path_count={len(unique_paths)}")
-print(f"missing_count={len(missing)}")
-for path in missing:
-    print(path)
-raise SystemExit(1 if missing else 0)
-PY
-rg -n "run_main_chat_agent_execution_v1_final_acceptance_gate" src-tauri/src/lib.rs src-tauri/src/commands frontend/src/tauri.ts
-rg -n "Phase7 complete|Main Chat Agent Execution v1 complete|live-provider evidence complete|runtime-module guard is fixed by docs cleanup|run_main_chat_agent_execution_v1_final_acceptance_gate" AGENTS.md README.md CONTRIBUTING.md docs/ARCHITECTURE.md docs/DEV_HANDOVER.md OpenLife_Final_PRD.md plans/README.md
-cargo test -p openlife-tauri single_system -- --nocapture
-cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture
-```
-
-## Stage3-B Validation Commands
-
-Run this set after Stage3-B inventory, link-baseline, and document-governance
-edits:
-
-```sh
-git diff --check
-cargo fmt --check
-python3 -m json.tool plans/openlife_repository_document_inventory.json >/tmp/openlife_repository_document_inventory_stage3b_pretty.json
-python3 -m json.tool plans/openlife_repository_document_link_baseline.json >/tmp/openlife_repository_document_link_baseline_stage3b_pretty.json
-python3 - <<'PY'
-from pathlib import Path
-
-doc_path = Path("plans/openlife_repository_stage2c_phase_c_readiness_decision.md")
-doc = doc_path.read_text()
-section = doc.split("## Source-Map Starting Points", 1)[1].split(
-    "## Claims Prohibited In Phase C", 1
-)[0]
-paths = []
-for line in section.splitlines():
-    line = line.strip()
-    if line.startswith("- `") and line.endswith("`"):
-        paths.append(line[3:-1])
-unique_paths = list(dict.fromkeys(paths))
-missing = [path for path in unique_paths if not Path(path).exists()]
-print(f"source_map_path_count={len(unique_paths)}")
-print(f"missing_count={len(missing)}")
-for path in missing:
-    print(path)
-raise SystemExit(1 if missing else 0)
-PY
-python3 - <<'PY'
-import json
-from pathlib import Path
-
-baseline = json.loads(
-    Path("plans/openlife_repository_document_link_baseline.json").read_text()
-)
-summary = baseline["summary"]
-print(f"missing_local_path_records={summary['missing_local_path_records']}")
-print(f"active_doc_broken_links={summary['active_doc_broken_links']}")
-print(
-    "stage3a_new_document_broken_link_records="
-    f"{summary['stage3a_new_document_broken_link_records']}"
-)
-print(f"uncategorized_broken_records={summary['uncategorized_broken_records']}")
-raise SystemExit(
-    0
-    if summary["stage3a_new_document_broken_link_records"] == 0
-    and summary["uncategorized_broken_records"] == 0
-    else 1
-)
-PY
-rg -n "run_main_chat_agent_execution_v1_final_acceptance_gate" src-tauri/src/lib.rs src-tauri/src/commands frontend/src/tauri.ts
-rg -n "Phase7 complete|Main Chat Agent Execution v1 complete|live-provider evidence complete|runtime-module guard is fixed by docs cleanup|run_main_chat_agent_execution_v1_final_acceptance_gate" AGENTS.md README.md CONTRIBUTING.md docs/ARCHITECTURE.md docs/DEV_HANDOVER.md OpenLife_Final_PRD.md plans/README.md docs/repository_document_governance.md
-cargo test -p openlife-tauri single_system -- --nocapture
-cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture
-```
-
-## Interpretation
-
-`git diff --check` checks patch whitespace only. It is not runtime evidence.
-
-`cargo fmt --check` verifies Rust formatting. Stage3-A should not edit Rust
-source, but the check confirms the repo still formats cleanly.
-
-The two `python3 -m json.tool` commands verify that the Stage 1 document
-inventory and link-baseline JSON files remain parseable.
-
-The source-map existence check verifies that every Stage2C source-map path
-exists. It should print `source_map_path_count=62` and `missing_count=0`.
-
-The retired-command scan over `src-tauri/src/lib.rs`, `src-tauri/src/commands`,
-and `frontend/src/tauri.ts` should have no matches and exit 1. That no-match
-exit is the desired result for this scan.
-
-The active-doc claim scan may find blocker or historical contexts in active
-docs. It must not find a new completion or restoration claim.
-
-`cargo test -p openlife-tauri single_system -- --nocapture` is the current
-single-system authority guard set. Stage2C recorded it as green with 17 tests.
-
-`cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` was a
-known inherited blocker during Stage2/Stage3/Stage4. Those rows recorded 24
-passed and 2 failed around final-gate aggregation and live-provider
-completed-report builder ownership. Stage5A supersedes that current status:
-the guard now passes by checking the current owner shape without restoring the
-retired final acceptance command or old test owner.
-
-## Local, Core, And Live Evidence
-
-Local command-surface tests and local HTTP provider-client proof can demonstrate
-ordinary send/stream shape and local provider-client behavior. They do not
-count as external live provider completion.
-
-Live provider credit requires the dedicated live harness and final gate evidence
-for direct generation, web AgentLoop, registered MCP AgentLoop, and
-proposal-permission scenarios. Missing trace, fallback, silent writes,
-synthetic/local providers, or malformed evidence remain blockers.
+- `git diff --check` checks patch whitespace only.
+- `cargo fmt --check` checks Rust formatting only.
+- typecheck/build success does not prove runtime state coherence.
+- a test pass does not independently close any of the 72 restart findings.
+- proposal creation is not durable application.
+- browser-shell pass is not native-Tauri pass.
+- native-Tauri launch is not external-live provider pass.
+- an `UNKNOWN` state remains `UNKNOWN` until the required current-SHA evidence
+  exists.
+- `frontend/test-results` and Phase4F screenshots are retained evidence; do not
+  delete them as disposable build output.
+- validation must not access external providers, approve a real durable write,
+  delete Keychain material, or mutate release/dev/QA product data unless a
+  later task explicitly authorizes that exact action.
