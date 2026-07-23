@@ -3,10 +3,10 @@
 > - 原始审计日期：2026-07-22（Asia/Shanghai）
 > - 本次事实同步：2026-07-23，PR #64 合入后的 restart-baseline cleanup 分支
 > - 审计性质：生产源码只读、源码优先、本地与远端交叉核验
-> - 源码基线 SHA：`bbb1481469d19a86702c15ab809b0971b2bf1ff4`（`codex/restart-baseline-cleanup`）；本次报告同步尚未包含在该提交中
-> - 远端主线 SHA：`74059dbc819851f0ef4597f055d0d6c956e0cd77`（`origin/main`，PR #64 merge commit）
+> - 远端产品源码基线 SHA：`74059dbc819851f0ef4597f055d0d6c956e0cd77`（`origin/main`，PR #64 merge commit）
+> - Gate1 事实提交：`b5a5d82`；当前 Gate2 报告同步仍在 dirty cleanup worktree，提交 SHA 在提交前为 `UNKNOWN`
 > - 报告/清理提交：由 cleanup PR 与最终 handoff 记录；不得把未提交工作树内容归因给源码基线 SHA
-> - 时点规则：本文保留原始审计的历史问题证据，但“当前”只指上述 SHA；V4/roadshow/Phase4F 旧 artifact 一律标为历史证据，不自动继承到新基线。
+> - 时点规则：本文同时保留原始审计、Gate1 snapshot 和明确标记的 Gate2 worktree 事实；每项“当前”必须绑定其明示时点，V4/roadshow/Phase4F 旧 artifact 不自动继承到新基线。
 > 总体结论：不能回到旧 V4 分支续跑，也不应推倒重写。PR #64 已合入唯一主线；当前任务只是建立可恢复、可复现的事实基线，完成 refs/文档/测试入口/派生物清理后再启动正式全仓 Review。当前 72 项 V4 finding 仍是历史 backlog/evidence input，不因 PR 或测试通过而自动关闭。
 
 ## 1. 执行摘要
@@ -70,15 +70,15 @@ OpenLife 不是普通聊天应用，也不只是人生规划工具。它当前�
 | 层级 | 当前事实 | 判断 |
 | --- | --- | --- |
 | 远端长期主线 | `origin/main = 74059dbc819851f0ef4597f055d0d6c956e0cd77` | PR #64 已合入；当前唯一产品代码基线 |
-| 当前 cleanup 分支 | `bbb1481469d19a86702c15ab809b0971b2bf1ff4` | 直接基于新 `origin/main`；当前只比 main 多 `AGENTS.md` 与本审计报告 |
+| 当前 cleanup 分支 | committed HEAD `b5a5d82f593c`，另有未提交 Gate2 worktree | 直接基于新 `origin/main`；两项已提交 checkpoint 为唯一-checkout 规则/审计与 Gate1 事实清单，Gate2 docs/test/CI 清理尚未提交 |
 | PR #64 | `MERGED`，merge commit `74059db`，7 个提交 | 最终 10 个 GitHub checks 全部 `SUCCESS`；GitHub `reviews=[]`，没有记录在 PR review 对象中的人类 approval |
 | 开放 PR | `0` | cleanup PR 尚未创建，禁止写成已 review/已合入 |
 | PR #64 CI | Rust Linux/macOS/Windows、Rust Coverage、Frontend Check/Coverage、Security、Smoke、两个退役 Stage 合同 job 全绿 | 证明 PR head 的机械门通过，不等于产品 Trial Green；退役 job 的绿不是当前 E2E 信用 |
 | Roadshow 冻结输入 | tag `backend-freeze-c9e75c8` | 已被主线后续历史吸收，作为冻结证据而非第二主线 |
 | 物理 checkout | `/Users/tw/Desktop/open-life` 共 1 个 registered worktree | 唯一可写开发入口已建立；这不表示历史 refs 已清理 |
-| 当前 ref 债务 | 28 个 local branch；8 个本地 remote-tracking ref；`git ls-remote --heads origin` 实时返回 42 个远端 branch head | archive aggregate tags 尚未创建，41 个非 main 远端 head 和历史 local refs 尚未删除；Gate2 未完成 |
+| 当前 ref 债务 | 28 个 local branch；8 个本地 remote-tracking ref；`git ls-remote --heads origin` 实时返回 42 个远端 branch head | local/remote archive aggregate tags 已验证；41 个非 main 远端 head 和历史 local refs 要等 cleanup PR 合入、最终 main 原生复核与可恢复性复核后删除 |
 
-PR #64 head `d7df32259b8774790044c91fb9beb426ecb62e76` 已是 `origin/main` 祖先。cleanup 分支的父提交和 merge-base 都是 `74059db`；当前 `origin/main...HEAD` 只有一个保护提交，修改 `AGENTS.md` 并跟踪本报告，没有 Rust/Tauri/React 产品行为差异。在本次文档同步前，工作树为 clean。
+PR #64 head `d7df32259b8774790044c91fb9beb426ecb62e76` 已是 `origin/main` 祖先。cleanup 分支的 merge-base 是 `74059db`；committed HEAD 当前比 main 多两个 checkpoint，涉及 `AGENTS.md`、本报告和 restart JSON。未提交 Gate2 worktree 只改治理文档、测试/CI 入口和清理证据，没有 Rust/Tauri/React 产品行为差异；不得把该 dirty 内容归因给 `b5a5d82`。
 
 远端仓库公开，GitHub 当前显示 0 个开放 PR、2 个开放 Issue；公开 backlog 与仓库内 72 项 V4 发现明显脱节。真正的历史 backlog/evidence input 仍在仓库 JSON/Markdown，但它们必须从当前 SHA 重新证明，不是自动的开发顺序。
 
@@ -86,14 +86,14 @@ V4 不能直接续跑还有一条机械证据：原始 `git merge-tree --write-t
 
 ### 3.2 规模与集中度
 
-统计口径：文件数来自 `git ls-files`；行数只统计表中标出的 tracked 文本扩展名。本报告现在已由 cleanup 保护提交跟踪，因此进入 docs 数字。
+统计口径：HEAD 文件数来自 `git ls-files`；行数只统计表中标出的 tracked 文本扩展名。`frontend/e2e` 另列 Gate2 dirty worktree 的目标值，避免把删除/新增尚未提交的 spec 冒充 HEAD。本文档已由 cleanup 保护提交跟踪，因此进入 HEAD docs 数字。
 
 | 区域 | tracked 文件数 | tracked 文本行数 |
 | --- | ---: | ---: |
 | `openlife-core/src` | 132 | 202,754 `.rs` |
 | `src-tauri/src` | 107 | 193,371 `.rs` |
 | `frontend/src` | 129 | 40,492 `.ts/.tsx/.css` |
-| `frontend/e2e` | 3 | 2,129 `.ts` |
+| `frontend/e2e` | HEAD 3；Gate2 target 1 | HEAD 2,129；Gate2 target 61 `.ts` |
 | `docs` | 419 | 24,674 `.md/.json` |
 | `plans` | 214 | 71,481 `.md/.json` |
 
@@ -136,16 +136,16 @@ V4 不能直接续跑还有一条机械证据：原始 `git merge-tree --write-t
 
 ### 3.4 当前 refs、archive 与派生物边界
 
-以下是 cleanup 动作前的当前事实，不是已完成清理清单：
+以下先保留 Gate1 cleanup 前事实，再明确 Gate2 的执行状态：
 
 - 只有 1 个 registered worktree，但仍有 28 个 local branch。本地只 fetch 了 8 个 `origin/*` remote-tracking branch ref，它们不是远端完整集合；`git ls-remote --heads origin` 实时确认远端仍有 42 个 branch head，其中 41 个非 main。
-- `archive/pre-restart-local-refs-20260722` 与 `archive/pre-restart-remote-refs-20260722` 都尚未创建；因此尚不得删除对应历史 ref。
-- `plans/openlife_restart_baseline_cleanup.json` 已创建并通过本地结构校验；它覆盖 28 个 local branch、42 个实时远端 head、13 个 V4 独有提交和 72 个 finding。第二轮只读复审已验证 refs、SHA、分类、路径、owner 与历史证据 locator 并给出 `PASS`。archive tags 尚未创建和验证，因此此时仍不得删除 refs。
-- 当前待删除的 ignored/untracked 派生物仍存在：`frontend/dist` 约 432 KiB、`frontend/dist-phase4d` 约 404 KiB、`frontend/playwright-report` 约 512 KiB、`src-tauri/gen` 约 916 KiB，以及仓库缓存目录外可见的 8 个 `.DS_Store`。
+- `archive/pre-restart-local-refs-20260722` 已在本地建立且未推送；其 aggregate commit 以创建时全部 27 个 non-main local tip 为 parent，并逐 tip 通过 reachability。`archive/pre-restart-remote-refs-20260722` 已推送，41 个 parent 全部来自创建前实时 `git ls-remote --heads origin` 的公开 non-main tip，远端 tag 与 peeled aggregate commit 均已核对。
+- `plans/openlife_restart_baseline_cleanup.json` 已创建并通过本地结构校验；它覆盖 Gate1 的 28 个 local branch、42 个实时远端 head、13 个 V4 独有提交和 72 个 finding。第二轮只读复审已验证 refs、SHA、分类、路径、owner 与历史证据 locator 并给出 `PASS`；两个 archive tag 也已建立并验证。branch 删除仍必须等 cleanup PR 合入，使最终 cleanup tip 可由最终 main 恢复，并再次逐 tip 核验后执行。
+- Gate1 时待删除的 ignored/untracked 派生物为：`frontend/dist` 约 432 KiB、`frontend/dist-phase4d` 约 404 KiB、`frontend/playwright-report` 约 512 KiB、`src-tauri/gen` 约 916 KiB，以及 8 个仓库内 `.DS_Store`。Gate2 已将这 12 个精确目标移入 macOS 废纸篓；Gate3 本地门禁重建的 `frontend/dist`、`frontend/playwright-report`、`src-tauri/gen` 也已再次精确移入废纸篓。最终检查确认全部删除目标缺席，保留目标仍在。
 - 当前明确保留：根 `target` 约 21 GiB、`frontend/node_modules` 约 223 MiB、`.env`、`.env.live.local`、`frontend/test-results` 约 32 KiB、已跟踪的 16 张 Phase4F 截图和桌面 UI/UX 审计证据。本文不读取 secret 内容。
 - `~/Library/Application Support` 下的默认 release/dev/QA 产品数据，以及只确认目录名存在、未检查内容的 `OpenLifeQA` 历史样式目录，都在本轮范围外；由于 `.env` 内容刻意未读取且 `OPENLIFE_DATA_DIR` 可覆盖默认位置，任何实际配置的 custom data path 也必须保留，其当前值为 `UNKNOWN`。“保留”不等于跨 profile/凭据一致性已验证。
 
-由于 production build 会重建 `frontend/dist`，Playwright 也可能重建报告/结果，最终派生物 absence 必须在全部 Gate3 验证之后再执行和记录；当前不得写为已清理。
+本地 pre-merge Gate3 门禁之后的最终派生物 absence 已 `REPRODUCED`；后续合入后原生 Tauri 启动若再次生成 `src-tauri/gen`，冻结前仍需执行一次同样的精确复核。本结论不涉及 `target`、`node_modules`、`test-results`、环境文件或任何产品数据。
 
 ## 4. 产品与架构的真实认知
 
@@ -274,7 +274,7 @@ Phase4E 已把生产 UI 切换到 `OpenLifeWorkbenchShell`，规范路由只有�
 | `corepack pnpm --dir frontend exec playwright test --list --reporter=line` | `REPRODUCED` FAIL；exit 1，缺少 `frontend/src/stage1BrowserEvidence` 和 `frontend/src/step6ProductAcceptance`，`Total: 0 tests in 0 files` |
 | 单独运行旧 `e2e/smoke.spec.ts` | `HISTORICAL-EVIDENCE`；5/5 FAIL，全部仍断言旧路由/旧文案 |
 
-Playwright 收集失败对当前源树仍是 `REPRODUCED`，因为 PR #64 没有改动这三个退役 spec 或其默认入口。新 Workbench browser smoke、当前 Playwright 收集大于 0 和 CI job 证据分级都尚未实施；它们是 Gate2 工作，不能写成已通过。
+这组 Playwright 失败是 Gate2 修改前的 `HISTORICAL-EVIDENCE`：PR #64 的确没有改动三个退役 spec 或默认入口，但 cleanup 分支已经删除这些 spec 并替换默认入口。它不能再被描述为当前 cleanup HEAD 的结果。
 
 ### 5.2 PR #64 合入事实（`REPRODUCED`）
 
@@ -306,6 +306,16 @@ PR #64 于 2026-07-22 19:16:50 +08:00 合入，head 为 `d7df32259b8774790044c91
 广泛六路由、Inspector、恢复对话框和旧凭据尝试都是 `HISTORICAL-EVIDENCE`，不自动继承到新 artifact。历史恢复尝试跨重启失败；当前产品因没有后端 typed eligibility 而移除了通用恢复动作。
 
 仍未证明：permission -> review -> refresh -> resume、proposal -> decision -> application、provider test -> save -> boundary refresh、external provider、凭据跨重启恢复和 VoiceOver 人工验证。所以当前 `PHASE4F_COMPLETE=NO`、`PHASE7_TRIAL_GREEN=NO` 是正确结论。
+
+### 5.4 Gate2 开发入口清理（`REPRODUCED`）
+
+- 默认 Playwright 现在只收集 `frontend/e2e/workbench-browser-shell.spec.ts`；收集 8 项并通过 8 项：六个 canonical route、`/builder` 明确退役、`/chat` 明确不可用。
+- 每项 browser-shell 测试都断言准确 H1、shell mode、ErrorBoundary 不出现且 `pageerror` 为空；没有 Tauri mock、Provider 调用、durable write、skip 或 blocked 早退假绿。
+- Playwright result 与 HTML report 已移入根 `target`；旧 Stage1、Step6 和 generic smoke spec 已删除，历史由 Git 保留。
+- CI 默认 push/PR 只面向 `main`；`Smoke Test` 已替换为 `Compile and Unit Contract Checks`，并新增独立 `Workbench Browser Shell Smoke`。退役 Stage1/Step6 workflow 仅保留 `workflow_dispatch`。
+- `scripts/compile-unit-contract.sh` 完整通过：Core 1,486 passed / 0 failed / 3 ignored；Tauri 1,179 passed / 0 failed / 13 ignored；frontend 37 files / 286 tests passed。
+
+上述结果只证明 compile/unit-contract 与 Vite/Chromium browser-shell。它不获得 native Tauri、迁移、真实产品数据、durable write 或 external-live 信用。
 
 ## 6. 当前源码问题清单
 
@@ -425,24 +435,24 @@ PR #64 于 2026-07-22 19:16:50 +08:00 合入，head 为 `d7df32259b8774790044c91
 - 它不经过 `OpenLifeTurnRuntime`、AgentRun、terminal owner、PolicyRouter 或 final-delivery proof。
 - 当前 UI 使用 `sendMessageV2`，说明该命令更像旧兼容写入口；按 Phase7 应删除或证明唯一合法用途。
 
-#### P1-09 默认 Playwright 与现行产品完全脱节
+#### P1-09 默认 Playwright 与现行产品完全脱节（Gate2 前；cleanup 分支已修）
 
-`REPRODUCED`。
+`HISTORICAL-EVIDENCE` 对应 `origin/main=74059db`；cleanup worktree 当前为 `REPRODUCED` 修复证据，尚未合入。
 
-- `playwright test --list` 因 `stage1BrowserEvidence`、`step6ProductAcceptance` 已删除/迁移而收集失败，结果为 0 tests。
-- 单独运行 `e2e/smoke.spec.ts` 5/5 失败；它仍断言 `/#/chat`、`/#/builder`、`/#/mailbox` 和旧 Settings 文案。
-- 两个旧 Stage spec 在非 Tauri 环境可写 blocked report 后 return，通过本身也不能证明产品能力。
-- 旧 spec、webdriver、archive helper 约 8,524 行，是 V4/Stage 遗留，不应只修 import 后继续冒充现行 E2E。
+- Gate2 前，`playwright test --list` 因 `stage1BrowserEvidence`、`step6ProductAcceptance` 已删除/迁移而收集失败，结果为 0 tests；旧 `smoke.spec.ts` 也断言退役路由与旧文案。
+- cleanup worktree 已删除三个退役 spec，默认只收集当前 Workbench browser-shell spec；主任务复核为 8 collected / 8 passed。
+- 新 spec 没有 blocked report、skip、catch 或早退假绿，并明确不获得 Tauri、迁移、durable-write 或 external-live 信用。
+- 历史 webdriver/archive helper 仍只作手动合同证据，不进入默认 E2E；origin/main 在 cleanup PR 合入前仍保持旧状态。
 
-#### P1-10 CI 的绿色 Smoke/Acceptance 名称大于证据
+#### P1-10 CI 的绿色 Smoke/Acceptance 名称大于证据（Gate2 前；cleanup 分支已修）
 
-`SOURCE-CONFIRMED + REPRODUCED`；远端运行结论另列为 GitHub check 事实。
+`HISTORICAL-EVIDENCE` 对应当前 `origin/main`；cleanup worktree 的新 job shape 为 `SOURCE-CONFIRMED`，远端运行仍待 PR。
 
-- GitHub `Smoke Test` 只运行 `scripts/smoke.sh`；该脚本做 Rust 编译/库测试、Vitest、macOS 路径探测和函数名存在性扫描，不启动桌面产品。
-- 主 CI 不执行 `tauri build`、安装包启动、Playwright、旧数据库到当前版本升级或 resolved-capability artifact proof。
-- Stage1/Step6 workflow 都标为 Retired，却仍在每次相关 push/PR 上运行静态合同并快速变绿。
+- origin/main 的旧 `Smoke Test` 只运行 `scripts/smoke.sh`，且 Retired Stage1/Step6 workflow 仍随 push/PR 触发；它们不启动桌面产品。
+- cleanup worktree 已用 `Compile and Unit Contract Checks` 取代旧名称，新增独立 `Workbench Browser Shell Smoke`，并把两个历史 workflow 收敛为 `workflow_dispatch` only。
+- 新 CI 仍不冒充 `tauri build`、安装包启动、数据库迁移、resolved-capability artifact 或 external-live proof；这些证据层继续分离。
 
-因此远端 main CI 全绿是真实事实，但不能被解释为桌面产品、IPC、迁移或真实 journey 通过。
+因此旧远端 main CI 全绿不能被解释为桌面产品、IPC、迁移或真实 journey 通过；新命名和 browser job 只有在 cleanup PR 远端 checks 实际运行后才能获得对应 CI 信用。
 
 ### 6.4 P2 / 应在恢复功能扩张前进入稳定化 backlog
 
@@ -490,7 +500,7 @@ PR #64 于 2026-07-22 19:16:50 +08:00 合入，head 为 `d7df32259b8774790044c91
 - release A2A 不可达，dev HTTP sidecar 默认关闭、仅 loopback、需要强 pairing token；未认证、超大 body 和 ContextManifest 拒绝有真实测试。
 - release CSP 严格；`csp:null` 只在 dev config。
 - 未找到普通产品输入可直接触发的 production `unwrap/panic`。
-- 原始审计 SHA 的全 workspace 测试/严格 Clippy，以及 PR #64 head 的前端 build/typecheck/Vitest 与远端门均通过；cleanup 分支和最终 main 的完整本地门仍为 `UNKNOWN`，必须在 Gate3 重跑。
+- cleanup worktree 的完整 pre-merge 本地门已通过：frontend format/typecheck、37 文件 286 项 Vitest、production build/absence guard、Workbench browser-shell 8/8；Rust fmt、严格 Clippy、single-system 44 项、main-chat runtime 30 项和 `cargo test --all --locked` 全绿。最终 main 的合入后原生 `/settings` 仍为 `UNKNOWN`，且这些本地门不授予外部 Provider、迁移、durable write 或产品 Trial Green 信用。
 
 ## 7. AI Coding 偏移审计
 
@@ -541,9 +551,9 @@ Backend Remediation 最初 35 项，追加发现已到 D072。追踪表显示：
 
 `plans` 有 214 个文件、约 7.1 万行；大量历史文档仍在仓库根和 plans 中。虽然权威链已修正，但 AI 仍可能搜索到过时符号并被带偏。当前源支持文档也出现漂移：例如 testing 文档仍说 Cargo workspace 有两个 member，而实际已有第三个 A2A server；README 的“主产品页面”叙述与当前规范路由也不完全一致。
 
-#### 已缓解：物理 worktree 碎片化；历史 refs 仍待分类
+#### 已缓解：物理 worktree 碎片化；历史 refs 已归档保护、仍待删除
 
-审计开始时本机存在大量 D0xx slice、RED/GREEN、WIP 和 integration worktree。本次已经收敛为唯一 `/Users/tw/Desktop/open-life` checkout，并删除全部已合入 main 的冗余本地分支。当前仍有 28 个 local branch；本地只 fetch 到 8 个 `origin/*` remote-tracking ref，而 `git ls-remote --heads origin` 实时确认服务器上有 42 个 branch head（`main` + 41 个非 main）。archive aggregate tags、逐 tip 可恢复性和 V4 13 个独有提交分类完成前，不删除这些 refs，也不重新创建 checkout。
+审计开始时本机存在大量 D0xx slice、RED/GREEN、WIP 和 integration worktree。本次已经收敛为唯一 `/Users/tw/Desktop/open-life` checkout，并删除全部已合入 main 的冗余本地分支。当前仍有 28 个 local branch；本地只 fetch 到 8 个 `origin/*` remote-tracking ref，而 `git ls-remote --heads origin` 实时确认服务器上有 42 个 branch head（`main` + 41 个非 main）。V4 13 个独有提交已分类，local/remote archive aggregate tags 与逐 tip 可恢复性已验证；物理删除仍必须等 cleanup PR 合入、最终 main 原生复核和最后一次可恢复性复核，不重新创建 checkout。
 
 #### P2：公开 backlog 与真实 backlog 脱节
 
@@ -600,12 +610,12 @@ Git 历史提供了比阶段名称更可信的过程证据：当前 `origin/main
 | Projection/read model error-to-zero | P1 | 待审、阻塞、授权可消失且 UI 仍显示 Ready/ok |
 | Snapshot 越界与 MCP secret 边界 | P1 | WebView 可越界读 YAML；确认后的 credential 可能发往 MCP |
 | 跨语言 DTO/enum 漂移 | P1 | Rust 可合法返回前端无法处理的 shape，运行时直接崩溃 |
-| 现行 E2E 为 0，CI smoke 非产品 smoke | P1 | 主线全绿无法防止当前路由、IPC、迁移和桌面 journey 回归 |
+| origin/main 默认 E2E 为 0；cleanup worktree 已 8/8，但 CI 尚未合入 | P1-MITIGATED-PENDING-MERGE | 当前分支已覆盖 browser shell；IPC、迁移和桌面 journey 仍需各自证据，且远端新 checks 尚未运行 |
 | 万行级核心模块 | P1 | 修复易产生远端副作用，AI 难以建立完整上下文 |
 | 72 项发现仅 1 项独立验证 | P1 | 完成声明与真实可信度之间存在巨大间隙 |
 | 多存储/多事实副本一致性 | P1 | crash、cancel、retry、delete、migration 时易分叉 |
 | 文档与源码漂移 | P1 | 后续 Agent 被过时路径/数量/页面名误导 |
-| 历史分支 refs | P2-MITIGATED | 物理 worktree已收敛为 1；当前仍有 28 个 local branch 和远端 41 个非 main head，archive/recoverability 尚未完成，禁止重新 checkout 并行开发 |
+| 历史分支 refs | P2-MITIGATED-PENDING-DELETION | 物理 worktree 已收敛为 1，archive/recoverability 已验证；当前仍有 28 个 local branch 和远端 41 个非 main head，必须等 cleanup PR 合入与最终复核后删除，期间禁止重新 checkout 并行开发 |
 | 外部 Provider/MCP 真实证据不足 | P1 | 核心 Agent 能力仍主要由 scripted/local proof 支撑 |
 | UI 合同成熟度高于任务完成度 | P2 | 容易产生“看起来产品化”的错误信心 |
 | GitHub backlog 失真 | P2 | 人类无法从远端快速理解真实优先级 |
@@ -644,11 +654,11 @@ Git 历史提供了比阶段名称更可信的过程证据：当前 `origin/main
 目标不是立刻关闭产品 P0/P1，也不是给旧 V4 换一个新阶段名，而是得到一个唯一、可恢复、可复现、适合下一轮正式全仓 Review 的主线 SHA。当前授权范围只包括事实与开发基线清理：
 
 1. **Gate 0 / Phase4F integration**：PR #64 已合入 `origin/main = 74059db`，最终 10 个 GitHub checks 全绿；GitHub `reviews=[]`。等价产品源树的精确原生 Settings artifact 已通过，但 merge SHA 本身的 native rerun 仍为 `UNKNOWN`，最终冻结前必须单独验证，不能由 source equivalence 自动继承。
-2. **Gate 1 / Facts**：机器清单必须覆盖 baseline、bundle、worktree、磁盘、dirty state、所有 local/remote refs、V4 13 个独有提交和全部 72 个 finding。第二个只读审查者必须确认 ref 覆盖、SHA 可解析、计数一致且没有把未合入实现写成 main 已有。
-3. **Gate 2 / Refs**：先验证现有 bundle，再分别建立 local/remote aggregate archive tag；local tag 不推送，remote tag 只允许以已公开对象为 parent。逐个 tip 通过 archive reachability 或 bundle recoverability 后才能删除。实时远端事实是 42 个 head（41 个非 main），不能用本地 8 个 remote-tracking ref 代替服务器全集；最终本地和远端 branch 都只能剩 `main`。
-4. **Gate 2 / Authority and evidence entrypoints**：活跃文档只授权当前 single-system；Roadshow/V4/Stage/Step6 仅作历史证据。默认 Playwright 退出退役 spec，新增诚实的 Workbench browser-shell smoke；CI 名称必须区分 compile/unit-contract、browser shell、真实 Tauri 和 external-live credit。
-5. **Gate 2 / Derived artifacts**：删除清单明确列出的 `frontend/dist`、`frontend/dist-phase4d`、`frontend/playwright-report`、`src-tauri/gen` 和仓库 `.DS_Store`；保留 `target`、`frontend/node_modules`、环境文件、test-results、Phase4F/UIUX 证据、默认 Application Support 产品数据和任何实际配置但当前未知的 custom data path。
-6. **Gate 3 / Freeze**：cleanup PR 只能包含治理文档、机器清单、测试/CI 入口和派生产物清理，不得夹带 Rust/Tauri/React 产品行为修改。PR 必须经过记录在案的人类 review 后才可合入；合入后更新唯一 checkout 的 main，从该最终 main 启动真实 Tauri 并复核 `/settings`，随后验证 archive/recoverability、删除 cleanup 与历史 branch refs、生成 handoff snapshot，然后停止。
+2. **Gate 1 / Facts — PASS**：机器清单覆盖 baseline、bundle、worktree、磁盘、dirty state、所有 local/remote refs、V4 13 个独有提交和全部 72 个 finding；第二轮只读审查确认 refs/SHA/计数、replacement evidence 和历史 locator，没有把未合入实现写成 main 已有。
+3. **Gate 2 / Refs — ARCHIVE PASS, DELETION PENDING**：现有 bundle 已验证；local aggregate tag 覆盖创建时 27 个 non-main local tip 且未推送，remote aggregate tag 覆盖创建前公开的 41 个 non-main origin tip 且已推送。branch 删除仍须等 cleanup PR 合入和最终 tip recoverability 复核；实时远端事实不能用本地 remote-tracking refs 代替，最终本地和远端 branch 都只能剩 `main`。
+4. **Gate 2 / Authority and evidence entrypoints — IMPLEMENTED, PRE-MERGE**：活跃文档只授权当前 single-system；Roadshow/V4/Stage/Step6 仅作历史证据。默认 Playwright 退出退役 spec，当前 Workbench browser-shell smoke 8/8 通过；CI 已区分 compile/unit-contract、browser shell、真实 Tauri 和 external-live credit。
+5. **Gate 2 / Derived artifacts — PRE-MERGE PASS**：清单目标已移入废纸篓；本地完整门禁重建的三个路径也已再次精确清理并验证缺席。`target`、`frontend/node_modules`、环境文件、test-results、Phase4F/UIUX 证据、默认 Application Support 产品数据和任何实际配置但当前未知的 custom data path 均保持不动。合入后原生启动若再生成目标，冻结前仍须复核。
+6. **Gate 3 / Freeze — LOCAL GATES PASS, PR PENDING**：cleanup worktree 的 frontend、Rust、focused/full tests 与 browser-shell smoke 已全绿，且没有 Rust/Tauri/React 产品行为修改。cleanup PR 尚未创建；它必须经过远端 checks 和记录在案的人类 review 后才可合入。合入后更新唯一 checkout 的 main，从该最终 main 启动真实 Tauri 并复核 `/settings`，随后验证 archive/recoverability、删除 cleanup 与历史 branch refs、生成 handoff snapshot，然后停止。
 
 `ReflexEngine`、V4 无效 config、`save_chat_message`、旧 route refs、Projection error-to-zero、credential/MCP audit 等生产问题继续保留现场并进入下一轮正式 Review；本轮不得借“清理”实施修复或把它们改为 closed。
 
@@ -698,6 +708,7 @@ Git 历史提供了比阶段名称更可信的过程证据：当前 `origin/main
 - `plans/openlife_restart_baseline_cleanup.json` 覆盖完整 local/server refs、bundle、V4 13 commits、72 findings、当前 source map 与保留/删除边界。
 - 第二只读审查确认 ref 覆盖、SHA 可解析、计数一致，且没有把历史实现或未合入代码冒充当前 main closure。
 - finding 当前证据只能使用四种状态；缺少当前 SHA closure 的项目继续为 `UNKNOWN`。
+- 状态：`PASS`。该 Gate1 只确认事实清单；之后建立的 archive tags 也不授权在 cleanup PR 合入前提前删除 ref。
 
 ### 11.2 Gate 2：开发基线清理
 
@@ -705,7 +716,8 @@ Git 历史提供了比阶段名称更可信的过程证据：当前 `origin/main
 - 默认 Playwright 只收集当前 Workbench browser-shell smoke；该 job 不获得 Tauri、迁移或 external-live 信用。
 - compile/unit-contract job 使用诚实名称；退役 workflow 退出 push/PR 默认触发。
 - 指定派生物删除，热缓存、环境文件、试用证据、默认和 custom 产品数据保持不动。
-- cleanup PR head 冻结后建立并验证 archive tags；local tag 不推送，remote tag 只引用已公开历史对象。
+- archive tags 已建立并验证：local tag 不推送，remote tag 只引用创建前已公开历史对象；最终 cleanup tip 在合入后必须由 final main 恢复。
+- 状态：authority、E2E/CI、本地完整门禁后的派生物 absence 和 archive protection 已完成；PR checks、人类 review、合入后原生复核与 branch 删除尚未完成。
 
 ### 11.3 Gate 3：合入与冻结
 

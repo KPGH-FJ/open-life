@@ -402,15 +402,19 @@ describe("Step6 product acceptance evidence", () => {
     expect(report.blockers).toContain("real_tauri_browser_command_surface_unavailable");
   });
 
-  it("exposes a Step 6 Tauri WebDriver entry point with the same journey matrix", () => {
+  it("keeps the Step 6 WebDriver runner as historical evidence outside default E2E", () => {
     const packageJson = JSON.parse(
       fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8")
     );
     const scriptPath = path.resolve(process.cwd(), "scripts/step6-tauri-webdriver.mjs");
     const script = fs.readFileSync(scriptPath, "utf8");
-    const playwrightSpec = fs.readFileSync(
-      path.resolve(process.cwd(), "e2e/main-chat-step6-product-acceptance.spec.ts"),
-      "utf8"
+    const retiredPlaywrightSpecPath = path.resolve(
+      process.cwd(),
+      "e2e/main-chat-step6-product-acceptance.spec.ts"
+    );
+    const currentPlaywrightSpecPath = path.resolve(
+      process.cwd(),
+      "e2e/workbench-browser-shell.spec.ts"
     );
     const result = spawnSync(process.execPath, [scriptPath, "--validate-journeys-only"], {
       cwd: process.cwd(),
@@ -425,12 +429,10 @@ describe("Step6 product acceptance evidence", () => {
       }
     );
 
-    expect(packageJson.scripts["test:e2e:tauri:step6"]).toBe(
-      "node scripts/step6-tauri-webdriver.mjs"
-    );
-    expect(packageJson.scripts["test:e2e:tauri:step6:local"]).toBe(
-      "node scripts/step6-tauri-webdriver.mjs --allow-blocked-live"
-    );
+    expect(packageJson.scripts).not.toHaveProperty("test:e2e:tauri:step6");
+    expect(packageJson.scripts).not.toHaveProperty("test:e2e:tauri:step6:local");
+    expect(fs.existsSync(retiredPlaywrightSpecPath)).toBe(false);
+    expect(fs.existsSync(currentPlaywrightSpecPath)).toBe(true);
     expect(result.status).toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain(
       "validated_step6_product_acceptance_journeys=11"
@@ -512,11 +514,6 @@ describe("Step6 product acceptance evidence", () => {
     expect(script).toContain("localDeterministicReady");
     expect(script).not.toContain("step6_tauri_webdriver_executor_not_implemented");
     expect(script).toContain("tauri_webdriver_macos_not_supported_by_tauri_driver");
-    expect(playwrightSpec).not.toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
-    expect(playwrightSpec).not.toContain("prepare_main_chat_step6_live_provider_eval_state");
-    expect(playwrightSpec).toContain("step6LiveProviderStateReady");
-    expect(playwrightSpec).toContain("isExternalProviderLabel");
-    expect(playwrightSpec).toContain("localFixtureCreditedAsExternalLive");
   });
 
   it("keeps the retired Step 6 workflow on static contract checks without fake live credit", () => {
@@ -532,6 +529,8 @@ describe("Step6 product acceptance evidence", () => {
     expect(workflow).toContain("runs-on: ubuntu-22.04");
     expect(workflow).toContain("Retired Step 6 Tauri Acceptance Contract");
     expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).not.toMatch(/^\s+pull_request:/m);
+    expect(workflow).not.toMatch(/^\s+push:/m);
     expect(workflow).toContain("run_external_live:");
     expect(workflow).not.toContain("webkit2gtk-driver");
     expect(workflow).not.toContain("xvfb");

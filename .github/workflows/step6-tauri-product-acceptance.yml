@@ -8,24 +8,6 @@ on:
         required: false
         type: boolean
         default: false
-  pull_request:
-    branches: [main, dev]
-    paths:
-      - ".github/workflows/step6-tauri-product-acceptance.yml"
-      - "frontend/**"
-      - "src-tauri/**"
-      - "openlife-core/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-  push:
-    branches: [main, dev]
-    paths:
-      - ".github/workflows/step6-tauri-product-acceptance.yml"
-      - "frontend/**"
-      - "src-tauri/**"
-      - "openlife-core/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
 
 permissions:
   contents: read

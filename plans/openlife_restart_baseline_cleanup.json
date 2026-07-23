@@ -2,6 +2,8 @@
   "schema_version": "1.0.0",
   "manifest_id": "openlife-restart-baseline-cleanup-20260722",
   "generated_at": "2026-07-23T14:32:07+08:00",
+  "last_updated_at": "2026-07-23T15:45:24+08:00",
+  "timestamp_semantics": "generated_at is the initial Gate 1 snapshot creation time; last_updated_at advances when reviewed Gate 2 or local pre-merge Gate 3 execution evidence is appended.",
   "authority": {
     "purpose": "Machine-readable restart baseline, ref inventory, fact boundary, and deletion evidence contract.",
     "scope": "Facts and development-baseline cleanup only; no product defect closure or production behavior changes.",
@@ -46,7 +48,12 @@
       "status": "SOURCE-CONFIRMED",
       "path": "plans/README.md",
       "fact": "The baseline file still grants current precedence or active-document status to V4 and roadshow inputs.",
-      "required_resolution": "Gate 2 must move V4, roadshow, Stage, and Step6 to historical evidence before the cleanup baseline can freeze."
+      "required_resolution": "Gate 2 must move V4, roadshow, Stage, and Step6 to historical evidence before the cleanup baseline can freeze.",
+      "gate2_resolution": {
+        "resolved": true,
+        "resolution": "V4, roadshow, Stage, and Step6 are historical reference/evidence only and are absent from current precedence and Active Documents.",
+        "evidence_status": "SOURCE-CONFIRMED"
+      }
     },
     "closure_rule": "No finding may be closed without current-baseline-SHA implementation, independent verification, and closure evidence. Passing tests alone is insufficient."
   },
@@ -64,6 +71,12 @@
     "cleanup_checkout": {
       "branch": "codex/restart-baseline-cleanup",
       "sha": "bbb1481469d19a86702c15ab809b0971b2bf1ff4",
+      "snapshot_boundary": "initial Gate 1 audit checkpoint",
+      "evidence_status": "SOURCE-CONFIRMED"
+    },
+    "gate1_facts_commit": {
+      "sha": "b5a5d82f593c22b660cc37fc7481fce92e3b4656",
+      "subject": "docs: establish restart baseline facts",
       "evidence_status": "SOURCE-CONFIRMED"
     },
     "pull_request_64": {
@@ -120,14 +133,29 @@
       {
         "name": "archive/pre-restart-local-refs-20260722",
         "push": false,
-        "scope": "all local historical tips selected for deletion",
-        "status": "UNKNOWN"
+        "scope": "all 27 local non-main tips present at tag creation, including the temporary cleanup checkpoint",
+        "status": "REPRODUCED",
+        "created_at": "2026-07-23T15:38:44+08:00",
+        "tag_object": "8d9e0c8cbb2844c35361b55cca6ae24df5a4e405",
+        "aggregate_commit": "06831a9f6d5ccddeee45de2b838a1f0db9f20406",
+        "parent_count": 27,
+        "all_recorded_local_non_main_tips_reachable": true,
+        "verified_absent_from_origin": true,
+        "evidence_status": "REPRODUCED"
       },
       {
         "name": "archive/pre-restart-remote-refs-20260722",
         "push": true,
-        "scope": "only objects already public on origin",
-        "status": "UNKNOWN"
+        "scope": "all 41 non-main branch tips returned by origin before the cleanup branch was published; every parent was already public",
+        "status": "REPRODUCED",
+        "created_at": "2026-07-23T15:38:44+08:00",
+        "tag_object": "65b3d9304b06884f9e19dffb10e1c724d0b288d5",
+        "aggregate_commit": "781c5a74583589911d1907ff3d07750bb852bbda",
+        "parent_count": 41,
+        "all_recorded_remote_non_main_tips_reachable": true,
+        "parents_sourced_from_live_origin_heads": true,
+        "pushed_and_peeled_commit_verified_on_origin": true,
+        "evidence_status": "REPRODUCED"
       }
     ],
     "deletion_precondition": "Every deleted tip must be recoverable from the applicable archive tag or the verified bundle."
@@ -8419,6 +8447,20 @@
         "blocked state must fail rather than return as pass"
       ],
       "baseline_present": false,
+      "gate2_present": true,
+      "path": "frontend/e2e/workbench-browser-shell.spec.ts",
+      "collected_test_count": 8,
+      "passed_test_count": 8,
+      "failed_test_count": 0,
+      "execution_credit": "Vite and Chromium browser-shell only",
+      "prohibited_credit": [
+        "native Tauri",
+        "migration",
+        "durable write",
+        "real product data",
+        "external provider live"
+      ],
+      "gate2_execution_status": "REPRODUCED",
       "evidence_status": "SOURCE-CONFIRMED"
     },
     "ci": {
@@ -8432,11 +8474,82 @@
         ".github/workflows/stage1-tauri-dogfood.yml",
         ".github/workflows/step6-tauri-product-acceptance.yml"
       ],
+      "gate2_default_branches": [
+        "main"
+      ],
+      "gate2_new_or_replacement_job_names": [
+        "Compile and Unit Contract Checks",
+        "Workbench Browser Shell Smoke"
+      ],
+      "target_required_status_checks": [
+        "Rust Check",
+        "Frontend Check",
+        "Frontend Coverage",
+        "Rust Check (macOS)",
+        "Rust Check (Windows)",
+        "Rust Coverage",
+        "Security Audit",
+        "Compile and Unit Contract Checks",
+        "Workbench Browser Shell Smoke"
+      ],
+      "gate2_retired_workflow_trigger": "workflow_dispatch only",
+      "gate2_validation": {
+        "compile_unit_contract": "REPRODUCED",
+        "core_tests": {
+          "passed": 1486,
+          "failed": 0,
+          "ignored": 3
+        },
+        "tauri_tests": {
+          "passed": 1179,
+          "failed": 0,
+          "ignored": 13
+        },
+        "frontend_tests": {
+          "files_passed": 37,
+          "tests_passed": 286,
+          "failed": 0
+        }
+      },
       "browser_smoke_credit_must_remain_separate_from": [
         "Tauri native trial",
         "migration credit",
         "external provider live credit"
       ]
+    },
+    "gate3_local_premerge_validation": {
+      "performed_at": "2026-07-23T15:45:24+08:00",
+      "frontend": {
+        "format_check": "REPRODUCED",
+        "typecheck": "REPRODUCED",
+        "vitest_files_passed": 37,
+        "vitest_tests_passed": 286,
+        "production_build": "REPRODUCED",
+        "production_absence_guard": "REPRODUCED",
+        "playwright_collected": 8,
+        "playwright_passed": 8,
+        "playwright_credit": "Vite and Chromium browser-shell only"
+      },
+      "rust": {
+        "cargo_fmt_check": "REPRODUCED",
+        "strict_clippy_all_locked": "REPRODUCED",
+        "single_system_tests_passed": 44,
+        "main_chat_runtime_module_tests_passed": 30,
+        "cargo_test_all_locked": "REPRODUCED",
+        "openlife_core_tests_passed": 1486,
+        "openlife_core_tests_failed": 0,
+        "openlife_core_tests_ignored": 3,
+        "openlife_tauri_tests_passed": 1179,
+        "openlife_tauri_tests_failed": 0,
+        "openlife_tauri_tests_ignored": 13,
+        "real_os_keychain_test_executed": false
+      },
+      "native_tauri_settings_on_merged_cleanup_main": "UNKNOWN",
+      "github_cleanup_pr_checks": "UNKNOWN",
+      "human_review": "UNKNOWN",
+      "external_provider_called": false,
+      "durable_product_write_approved": false,
+      "evidence_status": "REPRODUCED"
     }
   },
   "retention_and_deletion": {
@@ -8560,6 +8673,42 @@
       "contents_inspected": false,
       "delete_authorized": false
     },
+    "cleanup_execution": {
+      "performed_at": "2026-07-23T15:08:00+08:00",
+      "method": "moved_to_macos_trash",
+      "recoverable_from_trash": true,
+      "deleted_path_count": 12,
+      "all_listed_delete_paths_absent_after_cleanup": true,
+      "protected_paths_verified_present_after_cleanup": [
+        "target",
+        "frontend/node_modules",
+        "frontend/test-results",
+        ".env",
+        ".env.live.local"
+      ],
+      "product_data_touched": false,
+      "evidence_status": "REPRODUCED"
+    },
+    "final_post_gate_cleanup": {
+      "performed_at": "2026-07-23T15:45:24+08:00",
+      "method": "moved_regenerated_paths_to_macos_trash",
+      "recoverable_from_trash": true,
+      "regenerated_paths_moved": [
+        "frontend/dist",
+        "frontend/playwright-report",
+        "src-tauri/gen"
+      ],
+      "all_listed_delete_paths_absent_after_cleanup": true,
+      "protected_paths_verified_present_after_cleanup": [
+        "target",
+        "frontend/node_modules",
+        "frontend/test-results",
+        ".env",
+        ".env.live.local"
+      ],
+      "product_data_touched": false,
+      "evidence_status": "REPRODUCED"
+    },
     "cleanup_script_boundary": {
       "path": "scripts/clean-ui-artifacts.sh",
       "protects_release_path_only": true,
@@ -8600,6 +8749,6 @@
     "PR #64 checks do not grant unrelated finding closure.",
     "External providers, durable writes, Keychain mutation, and product-data deletion were not exercised.",
     "Remote ref inventory comes from live git ls-remote; local remote-tracking refs are intentionally not treated as complete.",
-    "Archive tags and branch deletions remain future gated actions and are UNKNOWN until independently verified."
+    "Archive tags are verified; branch deletion remains gated on cleanup PR merge, final-main native verification, and a final recoverability check."
   ]
 }

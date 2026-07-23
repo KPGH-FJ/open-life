@@ -1,7 +1,8 @@
 # OpenLife Single-System Deletion Manifest
 
-> Date: 2026-07-21
-> Status: Phase7 rerun deletion manifest with Phase 4E frontend authority switch
+> Date: 2026-07-23
+> Status: Phase7 restart-baseline cleanup after the Phase4F merge;
+> `red-until-trial-green`
 > Authority: active Phase7 contract evidence only. Historical stage, beta,
 > migration, cutover, productization, maturity, step6, multi-strategy, react
 > beta, and legacy-write artifacts do not define the current product path.
@@ -12,6 +13,14 @@ page/component surface, product bridge, and active docs. Objects that still
 exist only under test/archive/dev paths are classified explicitly and are not
 counted as product completion evidence.
 
+`/Users/tw/Desktop/open-life` is the only writable checkout. `main` is the only
+long-term local and remote branch; a short-lived cleanup branch may exist only
+in that checkout until its reviewed PR is merged. Archive tags and the verified
+bundle are recovery evidence, not development branches or alternate checkouts.
+Exact refs, SHA reachability, retention boundaries, V4 classification, and
+finding states are recorded in
+`plans/openlife_restart_baseline_cleanup.json`.
+
 ## Disposition Vocabulary
 
 | Disposition | Meaning |
@@ -19,6 +28,7 @@ counted as product completion evidence.
 | `done` | Removed from product build, product UI, product bridge, shipped command handler, and active docs. |
 | `product-valid-rename` | Useful logic was moved into a semantically current module name; the old shell was deleted. |
 | `test-only-archive` | May remain only under test/archive/dev paths and cannot be imported by product pages or product crate modules. |
+| `manual-historical-runner` | May remain only as a `workflow_dispatch` contract runner, with no default trigger and no current product-acceptance credit. |
 | `historical-doc-only` | May remain only as non-authoritative history outside the active docs index. |
 | `product-valid` | Current single-system product authority; not an old Phase7 object. |
 | `red-until-trial-green` | Product trial blocker remains; Phase7 must not be called complete. |
@@ -74,9 +84,12 @@ counted as product completion evidence.
 | `frontend/src/stage1BrowserEvidence.ts` | `test-only-archive` | `done` | Moved to `frontend/src/test/archive/stage1BrowserEvidence.ts`; not a product import. |
 | `frontend/src/stage1DogfoodScenarios.ts` | `test-only-archive` | `done` | Moved to `frontend/src/test/archive/stage1DogfoodScenarios.ts`; not a product import. |
 | `frontend/src/step6ProductAcceptance.ts` | `test-only-archive` | `done` | Moved to `frontend/src/test/archive/step6ProductAcceptance.ts`; not a product import. |
+| Retired `frontend/e2e/smoke.spec.ts`, `frontend/e2e/main-chat-stage1-dogfood.spec.ts`, and `frontend/e2e/main-chat-step6-product-acceptance.spec.ts` | `delete-now` | `done` | Removed from the default Playwright collection. Historical behavior remains recoverable through Git; no current gate imports or executes these specs. |
+| `frontend/e2e/workbench-browser-shell.spec.ts` | `product-valid` | `product-valid` | Current Chromium/Vite shell smoke covers the six canonical routes, explicit unavailable old/unknown routes, and uncaught page errors. It grants no native-Tauri, migration, durable-write, or external-provider credit. |
+| `.github/workflows/stage1-tauri-dogfood.yml` and `.github/workflows/step6-tauri-product-acceptance.yml` | `manual-historical-runner` | `done` | Historical contract workflows are manual `workflow_dispatch` only and are absent from default push/pull-request entrypoints. |
 | Active README Stage/Beta/legacy route narrative | `delete-now` | `done` | Root `README.md` now describes only the current single-system path, current blockers, and trial entry. |
-| Active plans index old route recommendations | `delete-now` | `done` | `plans/README.md` keeps single-system authority rules and active files only; old route docs are not active index recommendations. |
-| Historical stage/beta/migration/cutover/step docs under `plans/` | `historical-doc-only` | `done` | They may exist only outside the active index and do not carry current development authority. |
+| Active plans index old route recommendations | `delete-now` | `done` | `plans/README.md` keeps the current single-system authority stack only. V4, roadshow, Stage, Step6, and old-route documents are outside current precedence and active execution lists. |
+| Historical V4/roadshow/stage/beta/migration/cutover/step docs under `plans/` | `historical-doc-only` | `done` | They may remain as point-in-time evidence outside the active index and do not carry current development authority, even if an internal historical header says `active`. |
 
 ## Product-Valid Current Authorities
 
@@ -85,9 +98,10 @@ route cleanup.
 
 | Current object | Authority boundary |
 | --- | --- |
-| `src-tauri/src/main_chat_kernel.rs` | Current Main Chat product runtime authority used by send/stream. |
+| `src-tauri/src/main_chat_kernel.rs` | Current Main Chat runtime authority shared after the buffered and streaming transport wrappers. |
 | `src-tauri/src/main_chat_turn_runtime.rs` | Single turn terminal/read-model wrapper for product command transport. |
-| `src-tauri/src/main_chat_send.rs` and `src-tauri/src/main_chat_streaming.rs` | Product command executors for ordinary send and stream. |
+| `src-tauri/src/main_chat_send.rs` | Buffered product command executor currently consumed by the Workbench conversation data source. |
+| `src-tauri/src/main_chat_streaming.rs` | Registered parallel streaming command executor; it does not currently have a production frontend consumer and receives no consumer credit from the buffered route. |
 | `src-tauri/src/main_chat_task_controls.rs` | Product task resume/cancel/retry/replay controls. |
 | `src-tauri/src/main_chat_runtime_status.rs` | Product runtime/readiness evidence; frontend product pages must not use legacy fallback UI state. |
 | `src-tauri/src/main_chat_memory_proposals.rs` | Product-valid pending memory proposal edit helper. |
@@ -104,6 +118,7 @@ route cleanup.
 | `frontend/src/ui/journeys/governedAction/**` | Workspace conversation, task controls, and Review decisions over backend-owned read models and governed commands. |
 | `frontend/src/ui/journeys/durableTruth/**` | LifeModel/Memory durable-truth presentation and first-build proposal flow; approval remains separate from application. |
 | `frontend/src/ui/journeys/settingsPrivacy/**` | Sanitized settings draft/test/save orchestration with ProviderPrivacyBoundarySummary as product boundary truth and direct `LifeStateProjection.safeMode` consumption for generic protection state. Credential recovery stays unavailable until backend-owned typed eligibility exists. |
+| `frontend/e2e/workbench-browser-shell.spec.ts` | Current browser-shell smoke only. It is not a Tauri shell, native product trial, migration proof, durable-write proof, or external-live provider proof. |
 
 ## Shipped Command Surface Result
 
@@ -210,6 +225,16 @@ Phase7 hard-delete guards now require:
   helpers remain absent;
 - the production bundle contains the Workbench owner and contains no Phase 4
   dev harness, fixture selector, preview route, or compatibility redirect;
+- the default Playwright collection is non-empty and owns only the current
+  Workbench browser-shell spec;
+- the current browser-shell smoke covers `/today`, `/workspace`, `/tasks`,
+  `/review`, `/life-model`, and `/settings`, while retired and unknown routes
+  render explicit unavailable state;
+- browser smoke has no conditional early-return, skip, or swallowed exception
+  that can turn a blocked route into a pass, and uncaught page errors fail the
+  test;
+- retired Stage1, Step6, and generic smoke specs are absent from the default
+  collection, and retired workflows have no push/pull-request trigger;
 - D049 exact retired symbols and semantic rename markers are absent across
   production Rust source, including the ordinary-chat auto-check-in write
   admission kind. BR4-D052 separately guards the former product-wired
@@ -239,7 +264,21 @@ The manifest keeps the exact Phase7 evidence paths above because those entries
 prove deletion/retirement. Removing those path mentions would weaken the audit
 trail; recreating the absent targets would violate the single-system contract.
 
-## Computer Use Trial Status
+## Evidence Credit Boundaries
+
+1. Compile and unit-contract checks prove compilation, type, focused contracts,
+   and static absence only. They do not prove a browser or desktop journey.
+2. Workbench browser-shell smoke proves the rendered Vite/Chromium shell,
+   canonical routes, unavailable route behavior, and absence of uncaught
+   JavaScript page errors. It does not run Tauri.
+3. Native-Tauri evidence requires an exact source SHA, artifact identity,
+   profile/data boundary, and observed desktop journey. Browser results cannot
+   supply this credit.
+4. External-live evidence requires its own authorized provider/network/action
+   proof. Local HTTP, mock IPC, fixtures, scripted responses, native shell
+   launch, and passing unit tests do not supply it.
+
+## Native Desktop Trial Status
 
 Current durable desktop rerun report:
 `docs/phase4f_desktop_product_acceptance/03_native_trial_report.md`.
@@ -251,13 +290,22 @@ absent from a clean checkout.
 
 Status: `red-until-trial-green`.
 
-The Phase 4F rerun observed the packaged single Workbench, canonical routes,
-Safe Mode, and bounded fail-closed missing/error cases. A recovery attempt was
-authorized and returned interactive access, but it is historical evidence:
-review found that generic Safe Mode is not valid recovery eligibility, so the
-current frontend keeps that action unavailable. The attempt also failed
-non-interactive restart under the ad-hoc identity. Governed permission/review/
-resume, durable proposal/application, external provider, stable-signed
-credential recovery, and manual VoiceOver still lack green real evidence.
-Phase7 therefore remains red; fixtures and automated presentation tests do not
-replace those blocked or failed journeys.
+The broad Phase4F six-route walk, Safe Mode observations, and credential
+recovery attempt belong to the pre-review artifact and remain
+`HISTORICAL-EVIDENCE`. Independent review found that generic Safe Mode is not
+valid recovery eligibility; the reviewed frontend therefore keeps that action
+unavailable.
+
+The exact reviewed artifact at source
+`a278f199b96b32fd941541253029e9d4ab362726` grants only the bounded credit
+recorded by the report: Today opened fail-closed, Settings rendered and focused,
+privacy/transmission truth remained unknown, recovery was absent, and
+provider-test/save controls remained disabled. That evidence does not transfer
+automatically to the restart-cleanup branch or final merged `main`.
+
+After the cleanup PR is merged, native `/settings` must be rerun against that
+exact `main` SHA. Governed permission/review/resume, durable
+proposal/application, external provider, stable credential recovery, and manual
+VoiceOver still lack green real evidence. Phase7 therefore remains red;
+browser-shell smoke, fixtures, and automated presentation tests do not replace
+those blocked, failed, or unknown native journeys.

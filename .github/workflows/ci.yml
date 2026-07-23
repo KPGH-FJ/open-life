@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
 
 permissions:
   contents: read
@@ -19,7 +19,7 @@ env:
 
 jobs:
   # ============================================
-  # 快速检查（Ubuntu）- feature → dev 时使用
+  # 快速检查（Ubuntu）
   # ============================================
   rust-check:
     name: Rust Check
@@ -91,7 +91,7 @@ jobs:
 
       - name: Check formatting
         working-directory: frontend
-        run: corepack pnpm exec prettier --check "src/**/*.{ts,tsx}"
+        run: corepack pnpm format:check
 
       - name: Type check
         working-directory: frontend
@@ -104,6 +104,33 @@ jobs:
       - name: Run tests
         working-directory: frontend
         run: corepack pnpm vitest run
+
+  workbench-browser-shell:
+    name: Workbench Browser Shell Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: corepack pnpm exec playwright install --with-deps chromium
+
+      - name: Run Workbench browser shell smoke
+        working-directory: frontend
+        run: corepack pnpm test:e2e
 
   frontend-coverage:
     name: Frontend Coverage
@@ -142,7 +169,7 @@ jobs:
           echo "✅ Coverage ${COVERAGE}% meets 60% threshold"
 
   # ============================================
-  # 全平台检查（严格模式）- dev → main 时使用
+  # 全平台检查（严格模式）
   # ============================================
   rust-check-macos:
     name: Rust Check (macOS)
@@ -195,7 +222,7 @@ jobs:
         run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   # ============================================
-  # Rust 覆盖率（可选，仅在 dev → main 时运行）
+  # Rust 覆盖率（可选，仅在 main 时运行）
   # ============================================
   rust-coverage:
     name: Rust Coverage
@@ -244,10 +271,10 @@ jobs:
             cargo-audit.json plans/openlife_rust_advisory_ownership.json
 
   # ============================================
-  # 端到端验证
+  # 编译与单元契约验证
   # ============================================
-  smoke-test:
-    name: Smoke Test
+  compile-unit-contract:
+    name: Compile and Unit Contract Checks
     runs-on: ubuntu-latest
     needs: [rust-check, frontend-check]
     steps:
@@ -282,12 +309,5 @@ jobs:
         working-directory: frontend
         run: corepack pnpm install --frozen-lockfile
 
-      - name: Run smoke test
-        run: |
-          chmod +x scripts/smoke.sh
-          ./scripts/smoke.sh
-
-      # NOTE: Playwright E2E tests (frontend/e2e/smoke.spec.ts) are dev-only.
-      # They require the Vite dev server + Tauri backend on localhost:5173.
-      # See frontend/playwright.config.ts and docs/decisions/e2e-strategy.md
-      # for running them locally: `cd frontend && npx playwright test`
+      - name: Run compile and unit contract checks
+        run: bash scripts/compile-unit-contract.sh
