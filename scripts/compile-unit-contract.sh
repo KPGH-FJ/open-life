@@ -11,4 +11,7 @@ cargo check -p openlife-core --locked
 cargo check -p openlife-tauri --locked
 cargo test -p openlife-core --lib --locked
 cargo test -p openlife-tauri --lib --locked
-corepack pnpm --dir frontend test
+(
+  cd frontend
+  corepack pnpm test
+)
