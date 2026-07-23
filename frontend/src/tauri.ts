@@ -228,12 +228,15 @@ const MANUAL_SNAPSHOT_RESTORE_REQUEST = {
   createPreChangeSnapshot: true,
 } as const;
 
-const MANUAL_DATA_IMPORT_REQUEST = {
-  purpose: "manual_restore",
-  explicitUserIntent: true,
-  createPreChangeSnapshot: true,
-  importTargets: ["life_model", "messages", "vectors"],
-} as const;
+function manualDataImportRequest(operationId: string) {
+  return {
+    operationId,
+    purpose: "manual_restore",
+    explicitUserIntent: true,
+    createPreChangeSnapshot: true,
+    importTargets: ["life_model", "messages", "vectors", "state_store"],
+  } as const;
+}
 
 export async function saveLifeModel(model: LifeModel): Promise<void> {
   return safeInvoke("save_life_model", {
@@ -270,7 +273,11 @@ export interface AppConfig {
       | "zhipu"
       | "custom";
     openai_base: string;
-    openai_key: string;
+    // Rust omits the runtime secret when serializing get_config. The field is
+    // present only when the user submits a replacement credential.
+    openai_key?: string;
+    // Non-secret credential-store reference used only to represent presence.
+    openai_key_ref?: string;
     credential_version?: number;
     embedding_model: string;
     chat_model: string;
@@ -285,6 +292,9 @@ export interface AppConfig {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     safe_paths?: string[];
+    search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
+    search_provider_key?: string;
+    searxng_url?: string;
     network_policy?: NetworkPolicy;
   };
 }
@@ -303,6 +313,21 @@ export async function getConfig(): Promise<AppConfig> {
 
 export async function saveConfig(config: AppConfig): Promise<void> {
   return safeInvoke("save_config", { config });
+}
+
+export interface CredentialRecoveryItem {
+  purpose: "agent_run_receipts" | "main_chat_events" | "action_queue" | "task_store";
+  status: "available" | "created" | "missing_existing_data" | "invalid" | "unavailable";
+}
+
+export interface CredentialRecoveryReport {
+  items: CredentialRecoveryItem[];
+  allRequiredCredentialsReady: boolean;
+  restartRequired: boolean;
+}
+
+export async function recoverRequiredCredentialAccess(): Promise<CredentialRecoveryReport> {
+  return safeInvoke<CredentialRecoveryReport>("recover_required_credential_access");
 }
 
 // DEPRECATED: use sendMessageV2 for full trace support
@@ -369,6 +394,12 @@ export type ToolTransportStatus =
 
 export type ToolEffectStatus = "not_attempted" | "confirmed" | "unknown";
 export type ToolExecutionOutcome = "not_observed" | "succeeded" | "failed" | "unknown";
+export type ToolAuditPersistenceStatus =
+  | "not_required"
+  | "pending"
+  | "committed"
+  | "failed"
+  | "unknown";
 
 export interface ProductToolExecutionReceipt {
   receiptRef: string;
@@ -381,6 +412,7 @@ export interface ProductToolExecutionReceipt {
   transportStatus: ToolTransportStatus;
   effectStatus: ToolEffectStatus;
   outcome: ToolExecutionOutcome;
+  auditPersistenceStatus: ToolAuditPersistenceStatus;
   verified: boolean;
 }
 
@@ -574,6 +606,44 @@ export interface SendMessageResult {
   model_invoked?: boolean;
   tool_invoked?: boolean;
   turn_terminal?: OpenLifeTurnTerminal;
+}
+
+export interface ImportedResourceReceipt {
+  resourceId: string;
+  bindingId: string;
+  filename: string;
+  digest: string;
+  byteCount: number;
+  chunkCount: number;
+  reusedExisting: boolean;
+  eventId?: string | null;
+}
+
+export interface ResourceImportReceipt {
+  operationId: string;
+  messageId: string;
+  resources: ImportedResourceReceipt[];
+  committedAt: string;
+}
+
+export interface ResourceImportSelectionResult {
+  cancelled: boolean;
+  receipt: ResourceImportReceipt | null;
+}
+
+export interface ResourceImportStatus {
+  status: "active" | "committed" | "not_found";
+  receipt: ResourceImportReceipt | null;
+}
+
+export interface ResourceDetachReceipt {
+  operationId: string;
+  messageId: string;
+  resourceId: string;
+  bindingRemoved: boolean;
+  resourceDeleted: boolean;
+  eventId: string;
+  committedAt: string;
 }
 
 export type ProviderInvocationStatus =
@@ -1550,6 +1620,47 @@ export async function startStreamMessage(
   });
 }
 
+export async function pickAndImportResources(
+  importOperationId: string,
+  turnOperationId: string
+): Promise<ResourceImportSelectionResult> {
+  return safeInvoke<ResourceImportSelectionResult>("pick_and_import_resources", {
+    importOperationId,
+    import_operation_id: importOperationId,
+    turnOperationId,
+    turn_operation_id: turnOperationId,
+  });
+}
+
+export async function cancelResourceImport(operationId: string): Promise<boolean> {
+  return safeInvoke<boolean>("cancel_resource_import", {
+    operationId,
+    operation_id: operationId,
+  });
+}
+
+export async function getResourceImportStatus(operationId: string): Promise<ResourceImportStatus> {
+  return safeInvoke<ResourceImportStatus>("get_resource_import_status", {
+    operationId,
+    operation_id: operationId,
+  });
+}
+
+export async function detachResourceFromTurn(
+  operationId: string,
+  turnOperationId: string,
+  resourceId: string
+): Promise<ResourceDetachReceipt> {
+  return safeInvoke<ResourceDetachReceipt>("detach_resource_from_turn", {
+    operationId,
+    operation_id: operationId,
+    turnOperationId,
+    turn_operation_id: turnOperationId,
+    resourceId,
+    resource_id: resourceId,
+  });
+}
+
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
 
 export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
@@ -2003,6 +2114,7 @@ export type ReviewActionBase = {
   requiresConfirmation?: boolean;
   targetReviewItemId: string;
   expectedMaterializationStatusAfterDispatch?: ReviewItemMaterializationStatus;
+  completionProofAfterDispatch: boolean;
 };
 
 export type ReviewActionKindEffectInvariant =
@@ -2118,12 +2230,67 @@ export type ReviewItemTaskResumeRelation = {
   blockedReason?: string;
 };
 
+export type ReviewReadableValue = {
+  kind: "text" | "number" | "boolean" | "list" | "object" | "redacted" | "unknown";
+  summary: string;
+  detail?: string;
+  sensitivity: "public" | "local_private" | "sensitive" | "redacted";
+  truncated: boolean;
+};
+
+export type PermissionTransmissionBoundary = {
+  externalTransmission: "not_sent" | "sent" | "possible" | "unknown";
+  summary: string;
+  targetLabel?: string;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type PermissionDecisionContext = {
+  status: "ready" | "incomplete";
+  scopeKind: "action_bound" | "network_policy" | "unknown";
+  policy: "allow_once" | "unknown";
+  toolLabel: string;
+  toolName?: string;
+  capabilityLabels: string[];
+  requestedTargetLabel?: string;
+  resolvedTargetLabel?: string;
+  purposeSummary: string;
+  scopeDigest?: string;
+  requestDigestKind: "input" | "endpoint" | "unknown";
+  requestDigest?: string;
+  requestLengthBytes?: number;
+  blockedRunId?: string;
+  blockedStepIndex?: number;
+  networkPolicyDecisionId?: string;
+  transmissionBoundary: PermissionTransmissionBoundary;
+  expiresAt?: string;
+  revocationSummary: string;
+  missingFields: string[];
+  evidenceRefs: EvidenceRef[];
+};
+
+export type ReviewDecisionContext = {
+  reviewItemId: string;
+  title: string;
+  summary: string;
+  before?: ReviewReadableValue;
+  after: ReviewReadableValue;
+  reasonSummary: string;
+  sourceSummary: string;
+  impactSummary: string;
+  affectedObjectLabels: string[];
+  expiresAt?: string;
+  permission?: PermissionDecisionContext;
+  evidenceRefs: EvidenceRef[];
+};
+
 export type ReviewItem = {
   id: string;
   type: ReviewItemType;
   source: ReviewItemSource;
   status: ReviewItemDecisionStatus;
   materializationStatus: ReviewItemMaterializationStatus;
+  decisionContext: ReviewDecisionContext;
   allowedActions: ReviewAction[];
   risk: ProductRiskLevel;
   expiresAt?: string;
@@ -2141,7 +2308,24 @@ export type ReviewCenterSummary = {
   byMaterializationStatus: Record<string, number>;
 };
 
+export type ReviewBatchDomain =
+  | "memory"
+  | "life_model"
+  | "tool_permission"
+  | "external_action"
+  | "other";
+
+export type ReviewBatch = {
+  id: string;
+  domain: ReviewBatchDomain;
+  sessionId?: string;
+  itemIds: string[];
+  actionRequiredCount: number;
+  highestRisk: ProductRiskLevel;
+};
+
 export type ReviewCenterViewModel = {
+  batches: ReviewBatch[];
   items: ReviewItem[];
   summary: ReviewCenterSummary;
 };
@@ -2288,6 +2472,7 @@ export type TaskLifecycleStatus =
   | "waiting_permission"
   | "blocked"
   | "failed"
+  | "remote_unknown"
   | "cancelled"
   | "completed"
   | "completed_with_pending_review"
@@ -2382,20 +2567,40 @@ export type TasksViewModel = {
   contractLimitations: string[];
 };
 
-export type WorkspaceTimelineItem = {
+export type WorkspaceActivityKind =
+  | "user_input"
+  | "route_decision"
+  | "plan"
+  | "action"
+  | "observation"
+  | "follow_up"
+  | "permission_request"
+  | "proposal_request"
+  | "error"
+  | "retry"
+  | "final_result"
+  | "fallback"
+  | "blocker"
+  | "durable_lifecycle"
+  | "unknown";
+
+export type WorkspaceActivityItem = {
   id: string;
+  kind: WorkspaceActivityKind;
   label: string;
-  status: TaskLifecycleStatus;
+  summary: string;
+  status: "recorded" | "waiting_decision" | "blocked" | "failed" | "completed" | "unknown";
   evidenceRefs: EvidenceRef[];
-  updatedAt?: string;
+  occurredAt?: string;
 };
 
 export type WorkspaceViewModel = {
-  activeTaskRef?: BackendEntityRef;
+  activeTask?: TaskViewModelItem;
   recentTaskRefs: BackendEntityRef[];
-  pendingReviewItemRefs: BackendEntityRef[];
-  timeline: WorkspaceTimelineItem[];
+  pendingReviewItems: ReviewItem[];
+  activity: WorkspaceActivityItem[];
   providerPrivacyBoundarySummary: ProviderPrivacyBoundarySummary;
+  activityRedactionState: string;
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };
@@ -2559,6 +2764,10 @@ export async function listMcpServers(): Promise<McpServerInfo[]> {
 
 export async function listMcpAuditLogs(limit = 20): Promise<McpAuditLogEntry[]> {
   return safeInvoke<McpAuditLogEntry[]>("list_mcp_audit_logs", { limit });
+}
+
+export async function clearMcpAuditLogs(days: number): Promise<number> {
+  return safeInvoke<number>("clear_mcp_audit_logs", { days });
 }
 
 export async function listMcpTools(): Promise<any[]> {
@@ -3243,8 +3452,26 @@ export interface ExportedVectorChunk {
   last_accessed_at: string;
 }
 
-export interface ExportPayload {
-  version: string;
+export interface PortableDailyTaskV1 {
+  title: string;
+  status: "pending" | "completed";
+  dueAt?: string | null;
+  timeBlock?: { start: string; end: string } | null;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}
+
+export interface PortableDailyTaskArchiveV1 {
+  schema: "openlife.state-store-daily-tasks-portable.v1";
+  exportedAt: string;
+  canonicalDigest: string;
+  payloadDigest: string;
+  skippedExpiredCount: number;
+  dailyTasks: PortableDailyTaskV1[];
+}
+
+interface ExportPayloadBase {
   app_version?: string;
   exported_at: string;
   life_model: LifeModel;
@@ -3252,9 +3479,93 @@ export interface ExportPayload {
   vectors: ExportedVectorChunk[];
 }
 
+export interface ExportPayloadV1 extends ExportPayloadBase {
+  version: "1.0";
+}
+
+export interface ExportPayloadV2 extends ExportPayloadBase {
+  version: "2.0";
+  state_store: PortableDailyTaskArchiveV1;
+}
+
+export type ExportPayload = ExportPayloadV1 | ExportPayloadV2;
+
+export const MAX_OPENLIFE_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_OPENLIFE_IMPORT_MESSAGES = 50_000;
+export const MAX_OPENLIFE_IMPORT_VECTORS = 50_000;
+export const MAX_OPENLIFE_IMPORT_STATE_TASKS = 512;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isPortableDailyTask(value: unknown): value is PortableDailyTaskV1 {
+  return (
+    isRecord(value) &&
+    typeof value.title === "string" &&
+    (value.status === "pending" || value.status === "completed") &&
+    isNullableString(value.dueAt) &&
+    (value.timeBlock === undefined ||
+      value.timeBlock === null ||
+      (isRecord(value.timeBlock) &&
+        typeof value.timeBlock.start === "string" &&
+        typeof value.timeBlock.end === "string")) &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string" &&
+    typeof value.expiresAt === "string"
+  );
+}
+
+export function parseOpenLifeExportPayload(text: string): ExportPayload {
+  if (text.length > MAX_OPENLIFE_IMPORT_FILE_BYTES) {
+    throw new Error("OpenLife 备份超过 64 MiB 导入上限");
+  }
+  const value: unknown = JSON.parse(text);
+  if (
+    !isRecord(value) ||
+    (value.version !== "1.0" && value.version !== "2.0") ||
+    typeof value.exported_at !== "string" ||
+    !isRecord(value.life_model) ||
+    !Array.isArray(value.messages) ||
+    !Array.isArray(value.vectors)
+  ) {
+    throw new Error("OpenLife 备份格式无效或版本不受支持");
+  }
+  if (value.messages.length > MAX_OPENLIFE_IMPORT_MESSAGES) {
+    throw new Error("OpenLife 备份超过消息条目导入上限");
+  }
+  if (value.vectors.length > MAX_OPENLIFE_IMPORT_VECTORS) {
+    throw new Error("OpenLife 备份超过向量条目导入上限");
+  }
+  if (value.version === "2.0") {
+    const stateStore = value.state_store;
+    if (
+      !isRecord(stateStore) ||
+      stateStore.schema !== "openlife.state-store-daily-tasks-portable.v1" ||
+      typeof stateStore.exportedAt !== "string" ||
+      typeof stateStore.canonicalDigest !== "string" ||
+      typeof stateStore.payloadDigest !== "string" ||
+      typeof stateStore.skippedExpiredCount !== "number" ||
+      !Array.isArray(stateStore.dailyTasks) ||
+      stateStore.dailyTasks.length > MAX_OPENLIFE_IMPORT_STATE_TASKS ||
+      !stateStore.dailyTasks.every(isPortableDailyTask)
+    ) {
+      throw new Error("OpenLife v2 备份缺少有效的 StateStore portable archive");
+    }
+  } else if ("state_store" in value) {
+    throw new Error("OpenLife v1 备份不得伪装携带 v2 StateStore archive");
+  }
+  return value as unknown as ExportPayload;
+}
+
 export type DangerActionType =
   | "data_export"
   | "data_import_overwrite"
+  | "data_import_abandon_recovery"
   | "mcp_audit_export"
   | "mcp_audit_cleanup"
   | "mcp_audit_key_rotation"
@@ -3283,6 +3594,10 @@ export interface DangerActionPreflightView {
   safeModeBlocked: boolean;
   blockingReasons: string[];
   sourceRefs: string[];
+  /** Metadata-only pointer to an interrupted governed import, when one exists. */
+  recoveryOperationId?: string | null;
+  /** Metadata-only durable journal stage for the interrupted import. */
+  recoveryStage?: string | null;
 }
 
 export interface DangerActionConfirmationEvidence {
@@ -3311,7 +3626,7 @@ export function buildDangerActionConfirmationEvidence(
 export async function getDangerActionPreflight(
   actionType: DangerActionType,
   safeMode: boolean,
-  options: { targetIds?: string[]; affectedCount?: number; retentionDays?: number } = {}
+  options: { targetIds?: string[]; affectedCount?: number } = {}
 ): Promise<DangerActionPreflightView> {
   return safeInvoke<DangerActionPreflightView>("get_danger_action_preflight", {
     actionType,
@@ -3322,9 +3637,6 @@ export async function getDangerActionPreflight(
     ...(options.affectedCount !== undefined
       ? { affectedCount: options.affectedCount, affected_count: options.affectedCount }
       : {}),
-    ...(options.retentionDays !== undefined
-      ? { retentionDays: options.retentionDays, retention_days: options.retentionDays }
-      : {}),
   });
 }
 
@@ -3334,25 +3646,121 @@ export async function exportAllData(): Promise<ExportPayload> {
 
 export interface DataImportResult {
   success: boolean;
+  status?:
+    | "completed"
+    | "replayed"
+    | "recovery_completed_restart_required"
+    | "projection_degraded_recovery_required"
+    | string;
   legacy: boolean;
   warning: string;
   metadata_safe: boolean;
   durable_lifemodel_write: boolean;
   imported_message_count: number;
-  imported_vector_count: number;
+  /** Null on a historical replay when execution-only vector counts were not durably recorded. */
+  imported_vector_count: number | null;
+  state_store_targeted?: boolean;
+  state_store_replayed?: boolean;
+  state_store_restored_count?: number;
+  state_store_skipped_expired_count?: number;
+  state_store_projection_status?: "not_requested" | "pending" | "applied" | "degraded" | string;
+}
+
+export function describeDataImportResult(result: DataImportResult): string {
+  const projectionRecoveryRequired =
+    result.status === "projection_degraded_recovery_required" ||
+    // Older backend builds used this status. Keep it fail-closed while rolling forward.
+    result.status === "completed_with_projection_degraded" ||
+    result.state_store_projection_status === "degraded";
+
+  if (projectionRecoveryRequired) {
+    return "导入未完成：canonical 数据已经写入，但兼容投影处于降级恢复状态；请勿将投影页面视为最新事实，并按诊断提示恢复。";
+  }
+  if (result.status === "recovery_completed_restart_required") {
+    return "中断的导入已恢复完成；当前进程仍处于恢复隔离状态，请重启 OpenLife 后再继续使用数据功能。";
+  }
+  if (result.state_store_replayed || result.status === "replayed") {
+    return "同一导入操作已安全重放，没有重复写入。";
+  }
+  if (result.success && result.status === "completed") {
+    return "导入成功，请刷新页面以查看最新数据";
+  }
+
+  const status = result.status?.trim() || "unknown";
+  return `导入未完成：后端返回 ${status} 状态，请保留原备份并检查数据诊断。`;
 }
 
 export async function importAllData(
   payload: ExportPayload,
-  confirmationEvidence?: DangerActionConfirmationEvidence
+  confirmationEvidence?: DangerActionConfirmationEvidence,
+  operationId: string = crypto.randomUUID()
 ): Promise<DataImportResult> {
+  const importRequest = manualDataImportRequest(operationId);
   return safeInvoke<DataImportResult>("import_all_data", {
     payload,
-    importRequest: MANUAL_DATA_IMPORT_REQUEST,
-    import_request: MANUAL_DATA_IMPORT_REQUEST,
+    importRequest,
+    import_request: importRequest,
     ...(confirmationEvidence
       ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
       : {}),
+  });
+}
+
+export interface GovernedDataImportAbandonmentResult {
+  success: true;
+  status: "abandoned_preserving_current_restart_required" | "abandoned_preserving_current";
+  operation_id: string;
+  stage: "abandoned_preserving_current";
+  recovery_terminalized: true;
+  original_import_completed: false;
+  rollback_completed: false;
+  preserved_current_canonical_data: boolean;
+  abandonment_mutated_canonical_owners: false;
+  original_import_effect_state: "preserved_current_observed_per_owner";
+  owner_resolution_counts: {
+    before: number;
+    target: number;
+    other: number;
+  };
+  resolution_evidence_count: number;
+  restart_required: boolean;
+}
+
+export interface GovernedDataImportStatusView {
+  status: string;
+  operationId: string | null;
+  stage: string | null;
+  terminal: boolean;
+  terminalAt: string | null;
+  recoveryRequired: boolean;
+  runtimeRecoveryIsolationActive: boolean;
+  restartRequired: boolean;
+  originalImportCompleted: boolean;
+  rollbackCompleted: boolean;
+  preservedCurrent: boolean;
+  ownerCount: number;
+  resolutionEvidenceCount: number;
+  ownerResolutionCounts: {
+    before: number;
+    target: number;
+    other: number;
+  };
+  observedAt: string;
+}
+
+export async function getGovernedDataImportStatus(): Promise<GovernedDataImportStatusView> {
+  return safeInvoke<GovernedDataImportStatusView>("get_governed_data_import_status");
+}
+
+export async function abandonGovernedDataImportRecovery(
+  operationId: string,
+  confirmationEvidence: DangerActionConfirmationEvidence
+): Promise<GovernedDataImportAbandonmentResult> {
+  return safeInvoke<GovernedDataImportAbandonmentResult>("abandon_governed_data_import_recovery", {
+    operationId,
+    operation_id: operationId,
+    confirmationEvidence,
+    confirmation_evidence: confirmationEvidence,
   });
 }
 
@@ -3360,7 +3768,25 @@ export interface LlmConnectionTestResult {
   ok: boolean;
   provider: string;
   message: string;
-  validation_status?: string;
+  validation_status: string;
+  network_policy_decision_id?: string;
+  effective_network_policy_decision_id?: string;
+  consent_status?: string;
+  review_proposal_id?: string;
+  permission_id?: string;
+  provider_invocation_receipt?: ProviderInvocationReceipt;
+}
+
+export interface ProviderInvocationReceipt {
+  request_id: string;
+  provider: string;
+  model: string;
+  status: ProviderInvocationStatus;
+  started_at: string;
+  finished_at: string;
+  error_digest?: string;
+  simulated: boolean;
+  policy_evidence?: Record<string, unknown>;
 }
 
 export async function testLlmConnection(config: AppConfig): Promise<LlmConnectionTestResult> {
@@ -3390,38 +3816,6 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
   return safeInvoke("delete_chat_session", sessionArgs(sessionId));
 }
 
-export async function recordState(
-  operationId: string,
-  dimensionName: string,
-  value: number,
-  unit: string,
-  note?: string,
-  minThreshold?: number,
-  maxThreshold?: number,
-  alertDays?: number
-): Promise<{
-  operationId: string;
-  operationDigest: string;
-  stateEntryId: number;
-  replayed: boolean;
-}> {
-  return safeInvoke("record_state", {
-    operationId,
-    operation_id: operationId,
-    dimensionName,
-    dimension_name: dimensionName,
-    value,
-    unit,
-    note,
-    minThreshold,
-    min_threshold: minThreshold,
-    maxThreshold,
-    max_threshold: maxThreshold,
-    alertDays,
-    alert_days: alertDays,
-  });
-}
-
 export async function getStateHistory(
   dimensionName: string,
   limit: number
@@ -3439,44 +3833,6 @@ export async function getStateAlerts(): Promise<StateAlert[]> {
 
 export async function getDailyGoals(): Promise<DailyGoal[]> {
   return safeInvoke<DailyGoal[]>("get_daily_goals");
-}
-
-export async function addDailyGoal(
-  operationId: string,
-  name: string,
-  timeBlock?: { start: string; end: string }
-): Promise<{
-  operationId: string;
-  operationDigest: string;
-  replayed: boolean;
-  canonicalCommitted: boolean;
-}> {
-  return safeInvoke("add_daily_goal", {
-    operationId,
-    operation_id: operationId,
-    name,
-    ...optionalDualArg("timeBlock", "time_block", timeBlock),
-  });
-}
-
-export async function updateDailyGoal(
-  index: number,
-  name: string,
-  timeBlock?: { start: string; end: string }
-): Promise<void> {
-  return safeInvoke("update_daily_goal", {
-    index,
-    name,
-    ...optionalDualArg("timeBlock", "time_block", timeBlock),
-  });
-}
-
-export async function deleteDailyGoal(index: number): Promise<void> {
-  return safeInvoke("delete_daily_goal", { index });
-}
-
-export async function toggleDailyGoal(index: number): Promise<boolean> {
-  return safeInvoke<boolean>("toggle_daily_goal", { index });
 }
 
 // ── Milestone D: Hot Memory Cache ──
@@ -4238,6 +4594,18 @@ export interface PatchApplyResult {
   error?: string;
 }
 
+export interface ArtifactMaterializationReceipt {
+  artifactId: string;
+  proposalId: string;
+  targetReference: string;
+  targetReferenceDigest: string;
+  contentDigest: string;
+  observedContentDigest: string;
+  byteSize: number;
+  mediaType: string;
+  status: "confirmed";
+}
+
 export interface AcceptProposalResult {
   success: boolean;
   patchResult: PatchApplyResult;
@@ -4257,6 +4625,7 @@ export interface AcceptProposalResult {
     reasonCode?: string;
     errorDigest?: string;
   };
+  artifactMaterialization?: ArtifactMaterializationReceipt;
   blockedAction?: unknown;
   canContinue?: boolean;
 }

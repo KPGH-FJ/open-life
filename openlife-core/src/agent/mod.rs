@@ -33,6 +33,7 @@ pub mod proposal_store;
 pub mod provider_privacy_boundary;
 pub mod reasoning;
 pub mod regression_suite;
+pub mod review_decision_context;
 pub mod review_item;
 pub mod review_workflow;
 pub mod runtime;
@@ -49,8 +50,9 @@ pub mod types;
 mod tests;
 
 pub use crate::tool_execution_receipt::{
-    ToolActionEffect, ToolDispatchKind, ToolEffectStatus, ToolExecutionOutcome,
-    ToolExecutionReceipt, ToolExecutionReceiptRegistration, ToolTransportStatus,
+    ToolActionEffect, ToolAuditPersistenceStatus, ToolDispatchKind, ToolEffectStatus,
+    ToolExecutionOutcome, ToolExecutionReceipt, ToolExecutionReceiptRegistration,
+    ToolTransportStatus,
 };
 pub use accepted_guidance::{
     build_lifemodel_version_read_model, create_accepted_guidance_from_maturation_candidate,
@@ -60,7 +62,8 @@ pub use accepted_guidance::{
 };
 pub use action_executor::{
     A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
-    ActionExecutorConfig, AgentActionRequest, DurableToolExecutionOwner, ToolDispatchAttempt,
+    ActionExecutorConfig, AgentActionRequest, DurableStoreFailureObserver,
+    DurableToolExecutionOwner, ToolAuditPersistenceObserver, ToolDispatchAttempt,
     ToolDispatchObserver, ToolStartedTransitionObserver,
 };
 pub use agent_loop::apply_react_guidance_to_config;
@@ -227,7 +230,10 @@ pub use proposal_outcome::{
     evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
-pub use proposal_store::ProposalStore;
+pub use proposal_store::{
+    ArtifactEffectRecord, ArtifactEffectState, ProposalStore, ProposalTerminalRelationKind,
+    ProposalTerminalRelationProjectionProof, TerminalOwnerOriginBinding,
+};
 pub use provider_privacy_boundary::{
     build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
 };
@@ -239,15 +245,23 @@ pub use reasoning::{
 pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
+pub use review_decision_context::{
+    build_review_decision_context, PermissionDecisionContext, PermissionDecisionContextStatus,
+    PermissionPolicyKind, PermissionRequestDigestKind, PermissionScopeKind,
+    PermissionTransmissionBoundary, ReviewDecisionContext, ReviewReadableValue,
+    ReviewReadableValueKind,
+};
 pub use review_item::{
-    build_review_center_view_model, build_review_item, ReviewCenterBuildInput, ReviewCenterSummary,
-    ReviewCenterViewModel, ReviewItem, ReviewItemDecisionStatus, ReviewItemSource,
-    ReviewItemSourceKind, ReviewItemTaskResumeRelation, ReviewItemType,
+    build_review_center_view_model, build_review_item, ReviewBatch, ReviewBatchDomain,
+    ReviewCenterBuildInput, ReviewCenterSummary, ReviewCenterViewModel, ReviewItem,
+    ReviewItemDecisionStatus, ReviewItemSource, ReviewItemSourceKind, ReviewItemTaskResumeRelation,
+    ReviewItemType,
 };
 pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
     DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     MaterializedReviewAcceptanceSnapshot, ReviewWorkflow, ReviewWorkflowOutcome,
+    TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{
@@ -257,7 +271,11 @@ pub use runtime_strategy_contract::{
     RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,
     StrategySelectionReport,
 };
-pub use store::AgentRunStore;
+pub use store::{
+    issue_agent_run_review_relation_projection_lane, AgentRunReviewRelationProjectionLane,
+    AgentRunReviewRelationProjectionLaneAdmission, AgentRunReviewRelationProjectionOutcome,
+    AgentRunStore, AgentRunTerminalRelationTargetIntentAdmission,
+};
 pub use strategy_runtime::{
     PlanExecuteRuntimeStrategy, ReActRuntimeStrategy, RuntimeStrategy,
     RuntimeStrategyDeclarativeDescriptor, RuntimeStrategyDescriptor,
@@ -269,8 +287,9 @@ pub use tasks_view_model::{
     build_tasks_view_model, build_workspace_view_model, TaskControl, TaskControlEffect,
     TaskControlKind, TaskLatestResultPreview, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
     TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
-    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceTimelineItem,
-    WorkspaceViewModel,
+    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceActivityItem,
+    WorkspaceActivityKind, WorkspaceActivityStatus, WorkspaceViewModel,
+    WorkspaceViewModelBuildInput,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use tool_execution_owner::AgentRunToolExecutionFaultPoint;

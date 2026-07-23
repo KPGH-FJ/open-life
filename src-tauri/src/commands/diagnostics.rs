@@ -66,6 +66,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
     let persistence_health = state.persistence_coordinator.snapshot();
     let policy_router = current_policy_router_status();
     let provider_runtime = state.provider_runtime_snapshot().await;
+    #[cfg(feature = "dev-extensions")]
     let (mcp_server_count, mcp_tool_count) = {
         let registry = state.mcp_registry.lock().await;
         (
@@ -73,8 +74,29 @@ pub(crate) async fn get_system_diagnostics_with_state(
             registry.list_all_tools().len(),
         )
     };
-    let (mcp_recent_audit_count, mcp_recent_pii_count) =
-        state.mcp_audit_read_gateway.diagnostic_counts(state).await;
+    #[cfg(not(feature = "dev-extensions"))]
+    let (mcp_server_count, mcp_tool_count) = (0, 0);
+    #[cfg(feature = "dev-extensions")]
+    let (mcp_recent_audit_count, mcp_recent_pii_count) = {
+        if state
+            .persistence_coordinator
+            .require_trusted_read("McpAuditStore")
+            .is_ok()
+        {
+            let audit = state.mcp_audit_store.lock().await;
+            match audit.list_logs(50) {
+                Ok(logs) => {
+                    let pii_count = logs.iter().filter(|log| log.pii_found).count();
+                    (logs.len(), pii_count)
+                }
+                Err(_) => (0, 0),
+            }
+        } else {
+            (0, 0)
+        }
+    };
+    #[cfg(not(feature = "dev-extensions"))]
+    let (mcp_recent_audit_count, mcp_recent_pii_count) = (0, 0);
     let (
         memory_chunk_count,
         vector_corrupt_embedding_count,
@@ -266,7 +288,10 @@ pub(crate) async fn get_system_diagnostics_with_state(
             (0, "unavailable".to_string())
         } else if let Some(ref agent_run_store_arc) = state.agent_run_store {
             let store = agent_run_store_arc.lock().await;
-            match store.run_count() {
+            match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store.run_count().map_err(|error| error.to_string()),
+            ) {
                 Ok(count) => (count as usize, "ok".to_string()),
                 Err(_) => (0, "error".to_string()),
             }

@@ -1,0 +1,86 @@
+:root {
+  color-scheme: light;
+
+  --ol-font-ui:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "PingFang SC", "Microsoft YaHei",
+    sans-serif;
+  --ol-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --ol-type-caption: 12px;
+  --ol-type-body: 14px;
+  --ol-type-reading: 15px;
+  --ol-type-section: 15px;
+  --ol-type-surface: 20px;
+  --ol-type-display: 24px;
+
+  --ol-line-caption: 18px;
+  --ol-line-body: 22px;
+  --ol-line-reading: 24px;
+  --ol-line-section: 22px;
+  --ol-line-surface: 28px;
+  --ol-line-display: 32px;
+
+  --ol-space-1: 4px;
+  --ol-space-2: 8px;
+  --ol-space-3: 12px;
+  --ol-space-4: 16px;
+  --ol-space-5: 20px;
+  --ol-space-6: 24px;
+  --ol-space-8: 32px;
+  --ol-space-10: 40px;
+  --ol-space-12: 48px;
+
+  --ol-radius-1: 4px;
+  --ol-radius-2: 6px;
+  --ol-radius-3: 8px;
+
+  --ol-canvas: #ffffff;
+  --ol-sidebar: #f5f5f5;
+  --ol-surface: #ffffff;
+  --ol-surface-subtle: #fafafa;
+  --ol-surface-sunken: #f2f2f2;
+  --ol-line: #e6e6e6;
+  --ol-line-strong: #d4d4d4;
+  --ol-control-boundary: #858585;
+  --ol-ink: #111111;
+  --ol-ink-secondary: #4f4f4f;
+  --ol-ink-muted: #666666;
+  --ol-accent: #111111;
+  --ol-accent-hover: #000000;
+  --ol-accent-soft: #f2f2f2;
+  --ol-on-accent: #ffffff;
+  --ol-amber: #805b10;
+  --ol-amber-soft: #fffaf0;
+  --ol-red: #9f3a35;
+  --ol-red-soft: #fff7f6;
+  --ol-green: #2e7d4f;
+  --ol-green-soft: #f7fbf8;
+  --ol-information: #4f4f4f;
+  --ol-information-soft: #f7f7f7;
+  --ol-focus: #2563eb;
+  --ol-overlay-scrim: rgb(17 17 17 / 28%);
+
+  --ol-control-height: 36px;
+  --ol-control-height-mobile: 44px;
+  --ol-icon-button-size: 36px;
+  --ol-icon-button-size-mobile: 44px;
+  --ol-toggle-hit-size: 44px;
+  --ol-toggle-track-width: 40px;
+  --ol-toggle-track-height: 22px;
+  --ol-toggle-track-radius: 11px;
+  --ol-toggle-thumb-size: 16px;
+  --ol-toggle-thumb-inset: 3px;
+  --ol-toggle-thumb-travel: 18px;
+  --ol-nav-row-height: 48px;
+  --ol-nav-icon-size: 22px;
+  --ol-shell-sidebar-width: 232px;
+  --ol-shell-inspector-width: 344px;
+  --ol-shell-context-height: 56px;
+  --ol-shell-min-width: 1024px;
+  --ol-divider-width: 1px;
+  --ol-focus-width: 2px;
+  --ol-focus-offset: 2px;
+  --ol-shadow-overlay: 0 14px 40px rgb(17 17 17 / 14%);
+  --ol-motion-fast: 120ms;
+  --ol-motion-panel: 160ms;
+}

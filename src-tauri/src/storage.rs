@@ -1,50 +1,18 @@
 use crate::errors::AppError;
+#[cfg(test)]
+use once_cell::sync::Lazy as LazyLock;
 use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Mutex;
 
 const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
 const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";
 const QA_APP_DIR_NAME: &str = "ai.openlife.app.qa";
-
-#[cfg(test)]
-std::thread_local! {
-    static MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH: std::cell::RefCell<Option<std::path::PathBuf>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Thread-local fault injection used by D064 to fail only the post-hydration
-/// reference save. This keeps the keyring path genuinely missing during load,
-/// which is distinct from an invalid/unreadable pre-existing reference store.
-#[cfg(test)]
-pub(crate) struct McpAuditKeyringSaveFailureGuard {
-    previous: Option<std::path::PathBuf>,
-}
-
-#[cfg(test)]
-impl Drop for McpAuditKeyringSaveFailureGuard {
-    fn drop(&mut self) {
-        MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH.with(|slot| {
-            slot.replace(self.previous.take());
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn inject_mcp_audit_keyring_save_failure_for_test(
-    path: std::path::PathBuf,
-) -> McpAuditKeyringSaveFailureGuard {
-    let previous = MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH.with(|slot| slot.replace(Some(path)));
-    McpAuditKeyringSaveFailureGuard { previous }
-}
-
-#[cfg(test)]
-fn mcp_audit_keyring_save_failure_injected(path: &std::path::Path) -> bool {
-    MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH.with(|slot| {
-        slot.borrow()
-            .as_deref()
-            .is_some_and(|injected| injected == path)
-    })
-}
 
 pub fn openlife_profile() -> String {
     normalize_openlife_profile(std::env::var("OPENLIFE_PROFILE").ok().as_deref()).to_string()
@@ -99,11 +67,35 @@ pub(crate) fn mcp_audit_keyring_path() -> std::path::PathBuf {
     app_data_dir().join("mcp_audit_keys.json")
 }
 
-pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> Vec<AuditKeyConfig> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<AuditKeyConfig>>(&text).ok())
-        .unwrap_or_default()
+#[derive(Debug, Clone)]
+pub(crate) enum McpAuditKeyringLoad {
+    Absent,
+    Present(Vec<AuditKeyConfig>),
+    PresentInvalid { error: String },
+    Unreadable { error: String },
+}
+
+pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> McpAuditKeyringLoad {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return McpAuditKeyringLoad::Absent;
+        }
+        Err(error) => {
+            return McpAuditKeyringLoad::Unreadable {
+                error: error.to_string(),
+            };
+        }
+    };
+    match serde_json::from_slice::<Vec<AuditKeyConfig>>(&bytes) {
+        Ok(configs) if configs.is_empty() => McpAuditKeyringLoad::PresentInvalid {
+            error: "MCP audit keyring is present but contains no key authority".into(),
+        },
+        Ok(configs) => McpAuditKeyringLoad::Present(configs),
+        Err(error) => McpAuditKeyringLoad::PresentInvalid {
+            error: error.to_string(),
+        },
+    }
 }
 
 pub(crate) fn save_mcp_audit_keyring_to_path(
@@ -111,13 +103,53 @@ pub(crate) fn save_mcp_audit_keyring_to_path(
     configs: &[AuditKeyConfig],
 ) -> Result<(), AppError> {
     #[cfg(test)]
-    if mcp_audit_keyring_save_failure_injected(path) {
+    let injected_failure = MCP_AUDIT_KEYRING_SAVE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path);
+    #[cfg(test)]
+    if injected_failure == Some(McpAuditKeyringSaveFailure::BeforeWrite) {
         return Err(AppError::db(
-            "injected_mcp_audit_keyring_reference_save_failure",
+            "injected MCP audit key-reference save failure",
         ));
     }
     let text = serde_json::to_string_pretty(configs).map_err(AppError::from)?;
-    openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)
+    openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)?;
+    #[cfg(test)]
+    if injected_failure == Some(McpAuditKeyringSaveFailure::AfterWrite) {
+        return Err(AppError::db(
+            "injected MCP audit key-reference post-rename durability failure",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpAuditKeyringSaveFailure {
+    BeforeWrite,
+    AfterWrite,
+}
+
+#[cfg(test)]
+static MCP_AUDIT_KEYRING_SAVE_FAILURES: LazyLock<
+    Mutex<HashMap<PathBuf, McpAuditKeyringSaveFailure>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn fail_next_mcp_audit_keyring_save_for_test(path: impl Into<PathBuf>) {
+    MCP_AUDIT_KEYRING_SAVE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.into(), McpAuditKeyringSaveFailure::BeforeWrite);
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_mcp_audit_keyring_save_after_write_for_test(path: impl Into<PathBuf>) {
+    MCP_AUDIT_KEYRING_SAVE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.into(), McpAuditKeyringSaveFailure::AfterWrite);
 }
 
 #[cfg(test)]
@@ -174,8 +206,40 @@ mod tests {
         });
 
         save_mcp_audit_keyring_to_path(&path, &configs).unwrap();
-        let loaded = load_mcp_audit_keyring_from_path(&path);
+        let McpAuditKeyringLoad::Present(loaded) = load_mcp_audit_keyring_from_path(&path) else {
+            panic!("saved MCP audit keyring must be present");
+        };
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[1].epoch, 123);
+    }
+
+    #[test]
+    fn missing_invalid_and_unreadable_mcp_audit_keyrings_remain_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_audit_keys.json");
+
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::Absent
+        ));
+
+        std::fs::write(&path, b"[]\n").unwrap();
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::PresentInvalid { .. }
+        ));
+
+        std::fs::write(&path, b"{ malformed\n").unwrap();
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::PresentInvalid { .. }
+        ));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::Unreadable { .. }
+        ));
     }
 }

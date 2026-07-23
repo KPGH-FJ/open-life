@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+/// Canonical owner for a LifeModel-shaped field.
+///
+/// Some fields remain in the YAML schema only as compatibility projections.
+/// A governed LifeModel write is still not allowed to turn those fields back
+/// into a second product truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifeModelFieldAuthority {
+    CanonicalLifeModel,
+    StateStoreCanonical,
+    DerivedProjection,
+}
+
+pub fn life_model_field_authority(path: &str) -> LifeModelFieldAuthority {
+    let normalized = path
+        .trim()
+        .trim_matches(|character| character == '.' || character == '/')
+        .split(['.', '/'])
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+        .to_ascii_lowercase();
+    if normalized == "goals.daily" || normalized.starts_with("goals.daily.") {
+        LifeModelFieldAuthority::StateStoreCanonical
+    } else if normalized == "state.alerts" || normalized.starts_with("state.alerts.") {
+        LifeModelFieldAuthority::DerivedProjection
+    } else {
+        LifeModelFieldAuthority::CanonicalLifeModel
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifeModelWriteIntentKind {
@@ -231,6 +261,30 @@ impl LifeModelWriteGateway {
 #[cfg(test)]
 mod life_model_write_gateway_tests {
     use super::*;
+
+    #[test]
+    fn lifemodel_path_authority_separates_canonical_transient_and_derived_fields() {
+        assert_eq!(
+            life_model_field_authority("goals.short_term"),
+            LifeModelFieldAuthority::CanonicalLifeModel
+        );
+        assert_eq!(
+            life_model_field_authority("goals.daily"),
+            LifeModelFieldAuthority::StateStoreCanonical
+        );
+        assert_eq!(
+            life_model_field_authority("goals.daily.0.done"),
+            LifeModelFieldAuthority::StateStoreCanonical
+        );
+        assert_eq!(
+            life_model_field_authority("state.alerts"),
+            LifeModelFieldAuthority::DerivedProjection
+        );
+        assert_eq!(
+            life_model_field_authority("state.alerts.0.message"),
+            LifeModelFieldAuthority::DerivedProjection
+        );
+    }
 
     #[test]
     fn life_model_write_gateway_accepts_proposal_materialization() {

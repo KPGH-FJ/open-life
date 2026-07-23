@@ -68,7 +68,10 @@ pub(crate) const RUNTIME_FACT_KEY_AGENT_TRACE_GAP: &str = "agent.self_state.trac
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(clippy::enum_variant_names)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
+)]
 pub(crate) enum MainChatRuntimeClockIntent {
     AskCurrentWeekday,
     AskCurrentDate,

@@ -372,152 +372,377 @@
     ,{"id":"BR4-D053","discovered_at":"2026-07-12T06:00:00+08:00","severity_at_discovery":"P1","classification":"net_new_root_cause","related_frozen_findings":["P1-05","P2-01","P2-02"],"why_not_fully_subsumed":"BR4-D052 corrects the deleted ProposalEngine evidence and requires capability non-regression, but it does not cover the current replacement behavior that blocks the answer and creates one proposal per inferred candidate. Frozen MEM-04 and the Phase 3 contract explicitly require non-blocking deferred review and batching.","title":"Inferred memory governance blocks answers and emits per-candidate proposals","observed_symptom":"An inferred preference or stable-fact turn exits through a fixed governance-plan answer instead of the normal conversation, then stages one Proposal per candidate; implicit candidates are described as user-requested and canonical duplicates are not checked before proposal creation.","root_cause_hypothesis":"Candidate extraction, action routing and ReviewWorkflow submission were fused into a terminal Kernel strategy, so the existence of any memory artifact preempts ProviderGeneration and the materializer loop treats candidates as independent proposals rather than one deduplicated domain review batch.","affected_surfaces":["openlife-core/src/agent/main_chat_memory_candidate.rs","openlife-core/src/agent/main_chat_agent_v1.rs","src-tauri/src/main_chat_kernel.rs","openlife-core/src/agent/review_workflow.rs","openlife-core/src/agent/memory_lifecycle.rs"],"broken_invariants":["I01","I02","I06","I08","I10","I12","I17"],"target_phase":"Phase 3","owner_module":"PolicyRouter inferred-memory plan and ReviewWorkflow batch admission","acceptance":["MEM-04 produces the normal helpful answer and does not block ProviderGeneration","All eligible inferred candidates in one domain and conversation become at most one deferred ReviewBatch","Canonical fact keys suppress or reuse duplicate pending/accepted facts before staging","Implicit candidates are never described as an explicit user request","No canonical Memory or HS change occurs before acceptance","Sensitive, identity, injected, unstable and low-confidence variants remain review-only, blocked or no-op as specified","Proposal fatigue and capability success metrics remain within the frozen thresholds"],"deletion_targets":["run_memory_governance_turn as a terminal inferred-memory strategy","Per-candidate ReviewWorkflow submit loop for inferred memory","Implicit-candidate User requested reason text","Proposal staging without canonical fact-key deduplication"],"immutable_fingerprint":"d71e5254266d74f15418c9cbfb811cd97530336e0aff201fd454c112a1474d9a"}
     ,{"id":"BR4-D054","discovered_at":"2026-07-13T13:30:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-17","P2-02","P2-11"],"why_not_fully_subsumed":"D050 bound the Task receipt to raw durable columns, but the same final owner graph still deserializes Transcript and ActionQueue enum values through lossy fallbacks before hashing; the frozen migration and truth findings did not cover same-object and same-digest corruption through persisted enum coercion.","title":"Persisted final-owner enum fallbacks erase corruption and preserve digest equality","observed_symptom":"An unknown Transcript kind can reopen as a legitimate Error entry, and an unknown Action replay certainty can reopen as dispatched_unknown; both produce the same typed object and final-owner digest as the legal value. Unknown Task strategy and status values also reopen as apparently valid product state before the first final receipt is written.","root_cause_hypothesis":"Canonical store row decoders use permissive wildcard defaults and a current-schema rewrite instead of strict one-to-one persisted enum parsing, so corruption is normalized before validation and durable receipt construction.","affected_surfaces":["openlife-core/src/agent/main_chat_agent_v1.rs::MainChatAgentStrategy::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::AgentTaskSessionStatus::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::ExecutionTranscriptEntryKind::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::ActionReplayEffectCertainty::from_str","openlife-core/src/agent/main_chat_agent_v1.rs::row_to_persisted_agent_task_session","openlife-core/src/agent/main_chat_agent_v1.rs::row_to_transcript_entry","openlife-core/src/agent/main_chat_agent_v1.rs::row_to_queued_action","src-tauri/src/main_chat_turn_runtime.rs"],"broken_invariants":["I08","I12","I13"],"target_phase":"Phase 2 and Phase 5","owner_module":"Strict canonical owner row decoders","acceptance":["Every persisted Task strategy, Task status, Transcript kind and Action replay certainty has an explicit one-to-one parser and unknown values fail before typed materialization","Current-schema unknown values are never rewritten into a valid conservative state","Corrupt Transcript and Action rows cannot reproduce a legal owner object or final digest","Recovery rejects corrupt rows without provider, tool or canonical effect redispatch","All legal historical enum values retain deterministic round-trip and capability behavior"],"deletion_targets":["Unknown MainChatAgentStrategy fallback to DirectAnswer","Unknown AgentTaskSessionStatus fallback to Running","Unknown ExecutionTranscriptEntryKind fallback to Error","Unknown ActionReplayEffectCertainty fallback to DispatchedUnknown","Current-schema rewrite that erases unknown replay certainty"],"immutable_fingerprint":"beb215bba58757bad61e51db0c20d78f51c87c659524d3e988b9966b27fdd99d"}
     ,{"id":"BR4-D055","discovered_at":"2026-07-13T13:30:00+08:00","severity_at_discovery":"P1","classification":"frozen_finding_scope_expansion","related_frozen_findings":["P1-02","P1-05","P1-17","P2-02"],"why_not_fully_subsumed":"D050 added stable identities and owner digests, but final persistence and recovery still read independently mutable Action, Task, Transcript, Run and ToolEvent stores without one terminalization epoch; the frozen concurrency findings did not model this cross-owner final receipt race or legal post-final ReviewWorkflow successors.","title":"Turn finalization snapshots mutable owners without a linearization boundary","observed_symptom":"A Proposal accept or another legitimate owner mutation can commit between final-owner snapshots or between the last snapshot and final append, allowing a successful final receipt that immediately fails recovery. A legal post-final proposal reconciliation is also indistinguishable from unproven owner drift because recovery requires current mutable heads to equal the historical final snapshot.","root_cause_hypothesis":"TurnRuntime constructs a terminal fact from sequential cross-store reads and appends it later, while product writers mutate the same owner graph through direct store APIs with no shared terminalization epoch, CAS transition receipt or proven successor model.","affected_surfaces":["src-tauri/src/main_chat_turn_runtime.rs::persist_openlife_turn_final_delivery_receipt","src-tauri/src/main_chat_turn_runtime.rs::recover_openlife_turn_from_durable_final","src-tauri/src/commands/proposal.rs","src-tauri/src/main_chat_task_controls.rs","src-tauri/src/main_chat_runtime_support.rs","openlife-core/src/agent/main_chat_agent_v1.rs","openlife-core/src/agent/store.rs","openlife-core/src/agent/tool_gateway.rs"],"broken_invariants":["I01","I06","I08","I09","I10","I12","I13"],"target_phase":"Phase 2, Phase 3 and Phase 5","owner_module":"Turn owner graph gateway and durable terminalization coordinator","acceptance":["Each operation has one durable open, sealing and sealed terminalization epoch bound to the immutable final event","Final append and sealed epoch commit atomically inside the event store transaction","Every production mutation of Action, Task, Transcript, Run and ToolEvent enters one gateway with expected revision or transition receipt; direct product writers are absent","Proposal review cannot race an unsealed origin turn, and a legal post-final review change is represented as a provenance-bound successor without rewriting final","Barrier tests prove snapshot-to-append and recovery races cannot create false success, false drift or duplicate redispatch","No shared store guard is held across provider, tool, network or user await, and lock order is mechanically fixed","Legacy receipts remain explicitly strict or migrated; unknown history is not silently accepted"],"deletion_targets":["Sequential unlocked owner snapshots followed by a later final append","Direct product mutations that bypass the turn owner graph gateway","Current-head equality as the only historical final recovery rule","Unproven post-final owner mutation"],"immutable_fingerprint":"7909acf1cfe17f054d0c45a3ad98469ca5ecc94ef9d8642de7ea0864e275469a"}
-    ,{"id":"BR4-D056","discovered_at":"2026-07-13T14:00:00+08:00","severity_at_discovery":"P2","classification":"evidence_gap","related_frozen_findings":["P2-03","P2-07"],"why_not_fully_subsumed":"The frozen evidence findings require mechanical proof, but did not define one executable append-only registry path that canonicalizes fingerprints, owns the classification taxonomy, and proves that the guard actually executed after every registry edit.","title":"Discovered-finding registry admitted invalid fingerprints and an incomplete taxonomy guard","observed_symptom":"D044 through D053 retained their first immutable definitions but carried fingerprints that did not match the Rust canonical algorithm, D052 used a legitimate classification rejected by the guard, and an incorrectly filtered Cargo invocation executed zero tests while appearing successful.","root_cause_hypothesis":"Finding definitions, fingerprint generation, classification validation and evidence commands were maintained through separate ad hoc steps, so draft hashes or newline-bearing hashes could be recorded without immediately running the one authoritative gate.","affected_surfaces":["plans/openlife_backend_remediation_v4_discovered_findings.json","plans/openlife_backend_remediation_v4_discovered_traceability.json","src-tauri/src/backend_remediation_phase0_tests.rs","CI Phase0 evidence gate"],"broken_invariants":["I12","I18"],"target_phase":"Phase 0 and Phase 6","owner_module":"Discovered-finding append-only evidence gate","acceptance":["Every effective registry fingerprint equals the canonical no-trailing-newline Rust digest; a noncanonical stored historical value is accepted only through an exact append-only correction bound to the trusted immutable prefix","The first recorded immutable finding bodies remain unchanged while incorrect derived fingerprint metadata is corrected with provenance","The classification taxonomy has one explicit schema-owned allowlist that includes evidence_gap_and_scope_correction","Every registry edit runs a command that executes the named Phase0 test rather than matching zero tests","CI compares against the merge base and rejects deletion, reordering or immutable-body rewrite while allowing append-only findings and dynamic trace updates"],"deletion_targets":["Ad hoc draft or summary fingerprint generation","Trailing-newline-dependent fingerprint generation","Classification tokens duplicated outside the Phase0 schema guard","Zero-test Cargo invocations accepted as registry evidence"],"immutable_fingerprint":"8cc97bf3ad8538c8a5fcc26092ccb938fa2df65cc427c2fc65bd1302782de02d"},
-    {
+    ,{"id":"BR4-D056","discovered_at":"2026-07-13T14:00:00+08:00","severity_at_discovery":"P2","classification":"evidence_gap","related_frozen_findings":["P2-03","P2-07"],"why_not_fully_subsumed":"The frozen evidence findings require mechanical proof, but did not define one executable append-only registry path that canonicalizes fingerprints, owns the classification taxonomy, and proves that the guard actually executed after every registry edit.","title":"Discovered-finding registry admitted invalid fingerprints and an incomplete taxonomy guard","observed_symptom":"D044 through D053 retained their first immutable definitions but carried fingerprints that did not match the Rust canonical algorithm, D052 used a legitimate classification rejected by the guard, and an incorrectly filtered Cargo invocation executed zero tests while appearing successful.","root_cause_hypothesis":"Finding definitions, fingerprint generation, classification validation and evidence commands were maintained through separate ad hoc steps, so draft hashes or newline-bearing hashes could be recorded without immediately running the one authoritative gate.","affected_surfaces":["plans/openlife_backend_remediation_v4_discovered_findings.json","plans/openlife_backend_remediation_v4_discovered_traceability.json","src-tauri/src/backend_remediation_phase0_tests.rs","CI Phase0 evidence gate"],"broken_invariants":["I12","I18"],"target_phase":"Phase 0 and Phase 6","owner_module":"Discovered-finding append-only evidence gate","acceptance":["Every effective registry fingerprint equals the canonical no-trailing-newline Rust digest; a noncanonical stored historical value is accepted only through an exact append-only correction bound to the trusted immutable prefix","The first recorded immutable finding bodies remain unchanged while incorrect derived fingerprint metadata is corrected with provenance","The classification taxonomy has one explicit schema-owned allowlist that includes evidence_gap_and_scope_correction","Every registry edit runs a command that executes the named Phase0 test rather than matching zero tests","CI compares against the merge base and rejects deletion, reordering or immutable-body rewrite while allowing append-only findings and dynamic trace updates"],"deletion_targets":["Ad hoc draft or summary fingerprint generation","Trailing-newline-dependent fingerprint generation","Classification tokens duplicated outside the Phase0 schema guard","Zero-test Cargo invocations accepted as registry evidence"],"immutable_fingerprint":"8cc97bf3ad8538c8a5fcc26092ccb938fa2df65cc427c2fc65bd1302782de02d"}
+    ,{
       "id": "BR4-D057",
       "discovered_at": "2026-07-13T16:30:00+08:00",
       "severity_at_discovery": "P0",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-16", "P1-17", "P2-11"],
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-11"
+      ],
       "why_not_fully_subsumed": "The frozen MCP audit finding covered encryption and rotation semantics, but not the shipped authority-file loader that aliases a missing file, an unreadable file and malformed JSON before bootstrap creates and persists a replacement key epoch.",
       "title": "Malformed MCP audit keyring is treated as first boot and overwritten with new authority",
       "observed_symptom": "A malformed or unreadable mcp_audit_keys.json becomes an empty keyring, bootstrap creates a new keychain epoch and rewrites the file, and historical audit rows can remain visible only as decrypt-failed placeholders while the original key references are no longer configured.",
       "root_cause_hypothesis": "The key-reference loader returns an untyped empty vector for every read or decode failure, hydration silently deduplicates epochs and treats empty as first boot, and bootstrap activates key material without proving that the reference file and existing audit database agree on the complete epoch set.",
-      "affected_surfaces": ["src-tauri/src/storage.rs::load_mcp_audit_keyring_from_path", "src-tauri/src/secret_store.rs::hydrate_or_create_mcp_audit_keys", "src-tauri/src/bootstrap.rs", "openlife-core/src/mcp_audit.rs::McpAuditStore"],
-      "broken_invariants": ["I08", "I12", "I15"],
+      "affected_surfaces": [
+        "src-tauri/src/storage.rs::load_mcp_audit_keyring_from_path",
+        "src-tauri/src/secret_store.rs::hydrate_or_create_mcp_audit_keys",
+        "src-tauri/src/bootstrap.rs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I15"
+      ],
       "target_phase": "Phase 1 and Phase 5",
       "owner_module": "MCP audit key authority bootstrap",
-      "acceptance": ["Missing, present-valid, present-invalid and unreadable keyring states remain distinct", "A present-invalid keyring or a missing keyring beside an existing non-empty audit database creates no secret, performs no rotation or overwrite, and enters explicit unavailable or read-only state", "Duplicate or structurally invalid epochs fail instead of being deduplicated", "A genuine first boot creates exactly one durable key reference and all configured historical epochs remain readable"],
-      "deletion_targets": ["read-or-decode-error to empty-keyring fallback", "Silent audit epoch deduplication", "Automatic key creation when an existing audit database has no proven keyring", "Missing-epoch fallback to the active audit key"] ,
+      "acceptance": [
+        "Missing, present-valid, present-invalid and unreadable keyring states remain distinct",
+        "A present-invalid keyring or a missing keyring beside an existing non-empty audit database creates no secret, performs no rotation or overwrite, and enters explicit unavailable or read-only state",
+        "Duplicate or structurally invalid epochs fail instead of being deduplicated",
+        "A genuine first boot creates exactly one durable key reference and all configured historical epochs remain readable"
+      ],
+      "deletion_targets": [
+        "read-or-decode-error to empty-keyring fallback",
+        "Silent audit epoch deduplication",
+        "Automatic key creation when an existing audit database has no proven keyring",
+        "Missing-epoch fallback to the active audit key"
+      ],
       "immutable_fingerprint": "a44348002ac0c6e552db7d30b9476eb0bc8be7ec3499b1defe8ca6e3a310af77"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D058",
       "discovered_at": "2026-07-13T16:31:00+08:00",
       "severity_at_discovery": "P1",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-02", "P1-05", "P1-17", "P2-02"],
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-02"
+      ],
       "why_not_fully_subsumed": "The frozen tool and persistence findings did not distinguish pre-ToolGateway governance blockers from runtime-issued tool receipts, while finalization still assumes every rendered tool-call receipt has one durable terminal ToolEvent owner.",
       "title": "Pre-ToolGateway blockers mint non-authoritative tool receipts that finalization treats as durable terminal owners",
       "observed_symptom": "A missing workspace file or lexical traversal is blocked before ToolGateway, but Kernel manufactures a caller-only failed-before-dispatch receipt; regular event projection excludes that non-runtime receipt while final persistence requires a matching terminal ToolEvent and fails with turn_final_tool_terminal_owner_missing.",
       "root_cause_hypothesis": "Pre-gateway blockers, live ToolGateway receipts, ActionQueue owners and durable ToolEvent owners are modeled as a positional one-to-one set, while regular projection and final recovery use different receipt-admission predicates and fallback code manufactures render-only receipt authority.",
-      "affected_surfaces": ["src-tauri/src/main_chat_kernel.rs::blocked_kernel_read_tool_execution", "src-tauri/src/main_chat_kernel.rs::record_kernel_tool_call_evidence", "src-tauri/src/main_chat_turn_runtime.rs", "src-tauri/src/main_chat_event_stream.rs", "openlife-core/src/agent/tool_gateway.rs"],
-      "broken_invariants": ["I01", "I05", "I08", "I12", "I13"],
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs::blocked_kernel_read_tool_execution",
+        "src-tauri/src/main_chat_kernel.rs::record_kernel_tool_call_evidence",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "src-tauri/src/main_chat_event_stream.rs",
+        "openlife-core/src/agent/tool_gateway.rs"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I05",
+        "I08",
+        "I12",
+        "I13"
+      ],
       "target_phase": "Phase 2, Phase 4 and Phase 5",
       "owner_module": "ToolGateway blocker and terminal-owner projection contract",
-      "acceptance": ["Missing-file and traversal admission failures return a structured blocker with failed ActionQueue state, zero Proposal and no synthetic ToolExecutionReceipt or ToolEvent owner", "A real quoted or successful workspace read enters ToolGateway and owns exactly one runtime receipt and terminal event", "A runtime-issued receipt with a missing, duplicate or conflicting terminal owner fails closed", "Buffered, streaming and durable final recovery retain the same keyed blocker and tool-owner truth"],
-      "deletion_targets": ["Production failed_before_dispatch receipt creation in blocked_kernel_read_tool_execution", "Missing-receipt fallback that manufactures a fake tool owner", "Positional ActionQueue-count equals receipt-count equals terminal-event-count recovery assumption", "Pre-gateway blocker metadata carrying a synthetic toolExecutionReceipt"],
+      "acceptance": [
+        "Missing-file and traversal admission failures return a structured blocker with failed ActionQueue state, zero Proposal and no synthetic ToolExecutionReceipt or ToolEvent owner",
+        "A real quoted or successful workspace read enters ToolGateway and owns exactly one runtime receipt and terminal event",
+        "A runtime-issued receipt with a missing, duplicate or conflicting terminal owner fails closed",
+        "Buffered, streaming and durable final recovery retain the same keyed blocker and tool-owner truth"
+      ],
+      "deletion_targets": [
+        "Production failed_before_dispatch receipt creation in blocked_kernel_read_tool_execution",
+        "Missing-receipt fallback that manufactures a fake tool owner",
+        "Positional ActionQueue-count equals receipt-count equals terminal-event-count recovery assumption",
+        "Pre-gateway blocker metadata carrying a synthetic toolExecutionReceipt"
+      ],
       "immutable_fingerprint": "b45517f3d86fe0f931b3aba0bf4c1a7d57d0a52010abea009a4563569d5dab25"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D059",
       "discovered_at": "2026-07-13T16:32:00+08:00",
       "severity_at_discovery": "P1",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-17", "P2-02", "P2-11"],
+      "related_frozen_findings": [
+        "P1-17",
+        "P2-02",
+        "P2-11"
+      ],
       "why_not_fully_subsumed": "The frozen database and migration findings did not cover malformed required or present-optional JSON being decoded as null, absence or an empty collection before canonical identity, governance, migration and projection decisions.",
       "title": "Canonical persisted JSON corruption is normalized into valid domain defaults",
       "observed_symptom": "Legacy transcript metadata can be rewritten from malformed JSON to null while its payload version advances; Patch, Proposal, Memory and MemoryLifecycle rows can reopen with corrupted before, after, tags, evidence, conflict or rollback arrays silently replaced by legal empty values.",
       "root_cause_hypothesis": "Canonical row decoders and one legacy migration use ok, unwrap_or_default or unwrap_or(null) instead of distinguishing SQL NULL from present-invalid JSON, and downstream projections can swallow the resulting store error into a healthy empty read model.",
-      "affected_surfaces": ["openlife-core/src/agent/main_chat_agent_v1.rs::legacy transcript migration", "openlife-core/src/life_model/patch_store.rs::row_to_patch", "openlife-core/src/agent/proposal_store.rs::row_to_proposal", "openlife-core/src/memory.rs", "openlife-core/src/agent/memory_lifecycle.rs", "src-tauri/src/life_state_projection.rs"],
-      "broken_invariants": ["I08", "I09", "I12", "I13", "I15", "I17"],
+      "affected_surfaces": [
+        "openlife-core/src/agent/main_chat_agent_v1.rs::legacy transcript migration",
+        "openlife-core/src/life_model/patch_store.rs::row_to_patch",
+        "openlife-core/src/agent/proposal_store.rs::row_to_proposal",
+        "openlife-core/src/memory.rs",
+        "openlife-core/src/agent/memory_lifecycle.rs",
+        "src-tauri/src/life_state_projection.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I09",
+        "I12",
+        "I13",
+        "I15",
+        "I17"
+      ],
       "target_phase": "Phase 2, Phase 3, Phase 5 and Phase 6",
       "owner_module": "Strict canonical JSON row decoders and degraded projections",
-      "acceptance": ["Required and present-optional canonical JSON fail before typed materialization, identity digest, effect dispatch or migration version advance", "A mixed valid-and-corrupt legacy migration rolls back the whole batch and preserves the original bytes for reconciliation", "Canonical and audit owners never synthesize null, absence or empty arrays from a decode error", "Derived views may rebuild but expose projection-degraded rather than healthy empty truth", "Review and LifeState projections propagate owner decode failure as unavailable or unknown instead of ok with zero items"],
-      "deletion_targets": ["Malformed legacy transcript metadata to JSON null migration", "Patch before and after JSON semantic defaults", "Proposal present-before JSON to absence", "Memory tags JSON to empty tags", "MemoryLifecycle canonical and rollback JSON to empty arrays", "Projection store-error to healthy-empty fallback"],
+      "acceptance": [
+        "Required and present-optional canonical JSON fail before typed materialization, identity digest, effect dispatch or migration version advance",
+        "A mixed valid-and-corrupt legacy migration rolls back the whole batch and preserves the original bytes for reconciliation",
+        "Canonical and audit owners never synthesize null, absence or empty arrays from a decode error",
+        "Derived views may rebuild but expose projection-degraded rather than healthy empty truth",
+        "Review and LifeState projections propagate owner decode failure as unavailable or unknown instead of ok with zero items"
+      ],
+      "deletion_targets": [
+        "Malformed legacy transcript metadata to JSON null migration",
+        "Patch before and after JSON semantic defaults",
+        "Proposal present-before JSON to absence",
+        "Memory tags JSON to empty tags",
+        "MemoryLifecycle canonical and rollback JSON to empty arrays",
+        "Projection store-error to healthy-empty fallback"
+      ],
       "immutable_fingerprint": "f98cae8ec6e292624e0f7f1b90350a785497e27f9a55731d2d6264ef6444f2d2"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D060",
       "discovered_at": "2026-07-13T16:33:00+08:00",
       "severity_at_discovery": "P1",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-07", "P1-17", "P2-08", "P2-11"],
+      "related_frozen_findings": [
+        "P1-07",
+        "P1-17",
+        "P2-08",
+        "P2-11"
+      ],
       "why_not_fully_subsumed": "The frozen plugin and tool-authority findings did not cover the persisted user enable override being lost on read or parse failure; current plugin tools are intentionally non-executable, so the confirmed impact is product permission truth rather than a proven tool side effect.",
       "title": "Malformed plugin enable overrides restore manifest defaults as valid product state",
       "observed_symptom": "If enabled_overrides.json is malformed or unreadable, PluginRegistry starts with an empty override map and a manifest carrying enabled true is listed as enabled even when the user had durably disabled it.",
       "root_cause_hypothesis": "PluginRegistry construction erases the error with unwrap_or_default, reload cannot distinguish a missing override file from corrupt authority, and bootstrap registers the registry read-write because manifest reload itself succeeds.",
-      "affected_surfaces": ["openlife-core/src/plugins.rs::PluginRegistry::new", "openlife-core/src/plugins.rs::load_enabled_overrides", "openlife-core/src/plugins.rs::save_enabled_overrides", "src-tauri/src/bootstrap.rs", "src-tauri/src/commands/execution.rs"],
-      "broken_invariants": ["I05", "I08", "I12", "I17"],
+      "affected_surfaces": [
+        "openlife-core/src/plugins.rs::PluginRegistry::new",
+        "openlife-core/src/plugins.rs::load_enabled_overrides",
+        "openlife-core/src/plugins.rs::save_enabled_overrides",
+        "src-tauri/src/bootstrap.rs",
+        "src-tauri/src/commands/execution.rs"
+      ],
+      "broken_invariants": [
+        "I05",
+        "I08",
+        "I12",
+        "I17"
+      ],
       "target_phase": "Phase 4 and Phase 6",
       "owner_module": "PluginRegistry enable-authority loader",
-      "acceptance": ["Missing override and present-invalid or unreadable override states remain distinct", "Corrupt authority never restores a manifest default as a trusted user enable decision", "Registry and product read models expose unavailable or unknown while preserving the original override bytes", "Valid enable and disable overrides survive restart", "Plugin tools and skills remain absent from executable product registries until a separate reviewed ToolGateway contract exists"],
-      "deletion_targets": ["Plugin enable-override load error to empty map", "Non-atomic enabled_overrides.json rewrite", "Product read-write registration after override authority failed to load"],
+      "acceptance": [
+        "Missing override and present-invalid or unreadable override states remain distinct",
+        "Corrupt authority never restores a manifest default as a trusted user enable decision",
+        "Registry and product read models expose unavailable or unknown while preserving the original override bytes",
+        "Valid enable and disable overrides survive restart",
+        "Plugin tools and skills remain absent from executable product registries until a separate reviewed ToolGateway contract exists"
+      ],
+      "deletion_targets": [
+        "Plugin enable-override load error to empty map",
+        "Non-atomic enabled_overrides.json rewrite",
+        "Product read-write registration after override authority failed to load"
+      ],
       "immutable_fingerprint": "49598afd20ee336168364aadc1e27359e56fe49cd2e6aa8b33cdf837bb2a3168"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D061",
       "discovered_at": "2026-07-13T16:34:00+08:00",
       "severity_at_discovery": "P1",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-17", "P2-02", "P2-11"],
+      "related_frozen_findings": [
+        "P1-17",
+        "P2-02",
+        "P2-11"
+      ],
       "why_not_fully_subsumed": "BR4-D054 covered persisted Main Chat Task, Transcript and ActionQueue enums only; PatchStore, ProposalStore and MemoryLifecycle retain separate enum and timestamp coercions whose current-schema, legacy-schema and read-only reachability require their own RED audit.",
       "title": "Non-JSON persisted enum and timestamp defaults can fabricate valid owner state",
       "observed_symptom": "Unknown Patch operation, source, risk or status values reopen as Replace, Manual, Medium or Pending; unknown Proposal type or risk becomes Unsupported or Medium; malformed optional timestamps disappear or MemoryLifecycle timestamps become the current time.",
       "root_cause_hypothesis": "Several owner row decoders reuse permissive domain parsers or inline wildcard defaults for persisted input, and optional timestamp parsing collapses present-invalid text into absence or Utc::now instead of a database conversion failure.",
-      "affected_surfaces": ["openlife-core/src/life_model/patch_store.rs::row_to_patch", "openlife-core/src/agent/proposal_store.rs::row_to_proposal", "openlife-core/src/agent/memory_lifecycle.rs::row_to_record", "openlife-core/src/agent/memory_lifecycle.rs::row_to_rollback_event", "openlife-core/src/agent/memory_lifecycle.rs::parse_time"],
-      "broken_invariants": ["I08", "I12", "I13"],
+      "affected_surfaces": [
+        "openlife-core/src/life_model/patch_store.rs::row_to_patch",
+        "openlife-core/src/agent/proposal_store.rs::row_to_proposal",
+        "openlife-core/src/agent/memory_lifecycle.rs::row_to_record",
+        "openlife-core/src/agent/memory_lifecycle.rs::row_to_rollback_event",
+        "openlife-core/src/agent/memory_lifecycle.rs::parse_time"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13"
+      ],
       "target_phase": "Phase 3 and Phase 5",
       "owner_module": "Strict non-JSON canonical owner row decoders",
-      "acceptance": ["Every persisted enum has an explicit one-to-one database parser and unknown values fail before typed materialization or owner digest", "Present-invalid timestamps fail instead of becoming None or the current time", "All legal historical enum and timestamp values retain deterministic round-trip", "Current schema constraints, legacy schemas and read-only recovery paths are audited separately", "No D054 or D059 evidence is reused as closure credit for this owner set"],
-      "deletion_targets": ["Patch unknown operation, source, risk and status defaults", "Proposal unknown type and risk defaults", "Malformed Patch and Proposal optional timestamps to absence", "MemoryLifecycle unknown status to Candidate and materialization status to NotRequired on persisted reads", "MemoryLifecycle malformed timestamp to Utc::now"],
+      "acceptance": [
+        "Every persisted enum has an explicit one-to-one database parser and unknown values fail before typed materialization or owner digest",
+        "Present-invalid timestamps fail instead of becoming None or the current time",
+        "All legal historical enum and timestamp values retain deterministic round-trip",
+        "Current schema constraints, legacy schemas and read-only recovery paths are audited separately",
+        "No D054 or D059 evidence is reused as closure credit for this owner set"
+      ],
+      "deletion_targets": [
+        "Patch unknown operation, source, risk and status defaults",
+        "Proposal unknown type and risk defaults",
+        "Malformed Patch and Proposal optional timestamps to absence",
+        "MemoryLifecycle unknown status to Candidate and materialization status to NotRequired on persisted reads",
+        "MemoryLifecycle malformed timestamp to Utc::now"
+      ],
       "immutable_fingerprint": "42d9a7c8534f0c2ec7463e2853dc246f8c680736a099dfeb9eff9a623a521ed1"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D062",
       "discovered_at": "2026-07-13T17:10:00+08:00",
       "severity_at_discovery": "P1",
       "classification": "evidence_gap_and_scope_correction",
-      "related_frozen_findings": ["P1-02", "P1-05", "P1-17", "P2-03"],
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-03"
+      ],
       "why_not_fully_subsumed": "BR4-D058 correctly identified a missing terminal owner, but its initial acceptance grouped a missing file with lexical traversal as pre-ToolGateway admission failures. A missing file is known only after canonicalize, metadata or read touches the operating system, so keeping that observation outside ToolGateway would preserve a second product tool executor while making the new tests green.",
       "title": "D058 conflated lexical admission blockers with filesystem execution failures",
       "observed_symptom": "Workspace path traversal and a missing workspace file currently fail before ToolGateway and share a synthetic failed-before-dispatch path even though the first is a pure policy decision and the second is a real filesystem execution result.",
       "root_cause_hypothesis": "Workspace tool admission, path-policy validation and actual filesystem I/O were collapsed in Kernel and WorkspaceFileResolver, and the first D058 evidence contract copied that implementation boundary instead of enforcing ToolGateway as the only product execution authority.",
-      "affected_surfaces": ["src-tauri/src/main_chat_kernel.rs", "src-tauri/src/workspace_file_resolver.rs", "openlife-core/src/agent/action_executor/tool_executor.rs", "openlife-core/src/agent/action_executor/execution_tools.rs", "openlife-core/src/agent/tool_gateway.rs", "src-tauri/src/main_chat_turn_runtime.rs", "plans/openlife_backend_remediation_v4_discovered_findings.json", "plans/openlife_backend_remediation_v4_discovered_traceability.json"],
-      "broken_invariants": ["I01", "I05", "I08", "I12", "I13"],
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs",
+        "src-tauri/src/workspace_file_resolver.rs",
+        "openlife-core/src/agent/action_executor/tool_executor.rs",
+        "openlife-core/src/agent/action_executor/execution_tools.rs",
+        "openlife-core/src/agent/tool_gateway.rs",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "plans/openlife_backend_remediation_v4_discovered_findings.json",
+        "plans/openlife_backend_remediation_v4_discovered_traceability.json"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I05",
+        "I08",
+        "I12",
+        "I13"
+      ],
       "target_phase": "Phase 2, Phase 4 and Phase 5",
       "owner_module": "ToolGateway filesystem adapter and identity-keyed final owner binding",
-      "acceptance": ["Pure lexical traversal, absolute-path and outside-workspace policy violations may fail before ToolGateway with a typed ActionQueue blocker and no ToolExecutionReceipt or ToolEvent", "Canonicalize, metadata, open and read operations occur only inside ToolGateway or its bounded filesystem adapter", "A missing file produces one runtime-bound failed ToolExecutionReceipt, exactly one matching tool.failed terminal event and a versioned identity-keyed final owner binding", "Final persistence and recovery match each action to its owner by stable identity; missing, duplicate, conflicting and unknown bindings fail closed without positional zip or count inference", "Quoted and successful workspace reads retain real ToolGateway lifecycle, and legacy version-one finals containing real tool owners remain recoverable"],
-      "deletion_targets": ["Filesystem canonicalize, metadata, open or read outside ToolGateway", "Missing-file pre-gateway no-receipt hypothesis", "Synthetic failed_before_dispatch ToolExecutionReceipt for lexical policy blockers", "Positional tool owner zip or count recovery model"],
+      "acceptance": [
+        "Pure lexical traversal, absolute-path and outside-workspace policy violations may fail before ToolGateway with a typed ActionQueue blocker and no ToolExecutionReceipt or ToolEvent",
+        "Canonicalize, metadata, open and read operations occur only inside ToolGateway or its bounded filesystem adapter",
+        "A missing file produces one runtime-bound failed ToolExecutionReceipt, exactly one matching tool.failed terminal event and a versioned identity-keyed final owner binding",
+        "Final persistence and recovery match each action to its owner by stable identity; missing, duplicate, conflicting and unknown bindings fail closed without positional zip or count inference",
+        "Quoted and successful workspace reads retain real ToolGateway lifecycle, and legacy version-one finals containing real tool owners remain recoverable"
+      ],
+      "deletion_targets": [
+        "Filesystem canonicalize, metadata, open or read outside ToolGateway",
+        "Missing-file pre-gateway no-receipt hypothesis",
+        "Synthetic failed_before_dispatch ToolExecutionReceipt for lexical policy blockers",
+        "Positional tool owner zip or count recovery model"
+      ],
       "immutable_fingerprint": "971e183ba25d91505eae948debdf3deecfad4c338ff7281ec0c9d858bd250c29"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D063",
       "discovered_at": "2026-07-13T17:30:00+08:00",
       "severity_at_discovery": "P1",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-17", "P1-20", "P2-03"],
+      "related_frozen_findings": [
+        "P1-17",
+        "P1-20",
+        "P2-03"
+      ],
       "why_not_fully_subsumed": "The frozen dangerous-action, persistence and command-surface findings did not cover a second shipped MCP audit deletion command and page that bypass both the effects gate and Rust-owned native confirmation while a governed Settings cleanup command already exists.",
       "title": "Shipped MCP page keeps an ungoverned second audit-log deletion authority",
       "observed_symptom": "McpPage authorizes cleanup with a client-only dialog and invokes clear_mcp_audit_logs, a release-registered command that calls the public clear_old_logs mutation directly; negative days produce a future cutoff and can delete every audit row, while the separate Settings command uses the persistence effects gate and native confirmation.",
       "root_cause_hypothesis": "MCP audit maintenance is split between commands/mcp.rs and commands/settings.rs, and a public store mutation plus a frontend wrapper lets page-local UX act as durable deletion authority instead of routing through one governed maintenance gateway.",
-      "affected_surfaces": ["frontend/src/pages/McpPage.tsx", "frontend/src/tauri.ts::clearMcpAuditLogs", "src-tauri/src/lib.rs", "src-tauri/src/commands/mcp.rs::clear_mcp_audit_logs", "src-tauri/src/commands/settings.rs::cleanup_mcp_audit_logs", "openlife-core/src/mcp_audit.rs::McpAuditStore::clear_old_logs"],
-      "broken_invariants": ["I06", "I08", "I18"],
+      "affected_surfaces": [
+        "frontend/src/pages/McpPage.tsx",
+        "frontend/src/tauri.ts::clearMcpAuditLogs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/mcp.rs::clear_mcp_audit_logs",
+        "src-tauri/src/commands/settings.rs::cleanup_mcp_audit_logs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::clear_old_logs"
+      ],
+      "broken_invariants": [
+        "I06",
+        "I08",
+        "I18"
+      ],
       "target_phase": "Phase 5 and Phase 6",
       "owner_module": "Governed MCP audit maintenance gateway",
-      "acceptance": ["Exactly one shipped MCP audit deletion command and one domain mutation entry remain", "Degraded persistence, missing or invalid native confirmation, and invalid retention input perform zero deletion", "Negative, zero and overflow retention values fail closed before database mutation", "A valid native grant deletes only records older than the bounded retention cutoff and preserves recent records", "McpPage reuses or links to the governed workflow and has no independent client-confirmation write authority"],
-      "deletion_targets": ["clear_mcp_audit_logs backend command, import and shipped handler registration", "Frontend clearMcpAuditLogs wrapper and McpPage direct cleanup call", "Public second mutation entry McpAuditStore::clear_old_logs", "Client-only confirmation as durable deletion authorization", "Unvalidated negative, zero or overflow retention deletion semantics"],
+      "acceptance": [
+        "Exactly one shipped MCP audit deletion command and one domain mutation entry remain",
+        "Degraded persistence, missing or invalid native confirmation, and invalid retention input perform zero deletion",
+        "Negative, zero and overflow retention values fail closed before database mutation",
+        "A valid native grant deletes only records older than the bounded retention cutoff and preserves recent records",
+        "McpPage reuses or links to the governed workflow and has no independent client-confirmation write authority"
+      ],
+      "deletion_targets": [
+        "clear_mcp_audit_logs backend command, import and shipped handler registration",
+        "Frontend clearMcpAuditLogs wrapper and McpPage direct cleanup call",
+        "Public second mutation entry McpAuditStore::clear_old_logs",
+        "Client-only confirmation as durable deletion authorization",
+        "Unvalidated negative, zero or overflow retention deletion semantics"
+      ],
       "immutable_fingerprint": "92c6242909678d83dcade1755ce2322737470c584169f36fa9f404e7c2ebb1de"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D064",
       "discovered_at": "2026-07-13T17:31:00+08:00",
       "severity_at_discovery": "P0",
       "classification": "frozen_finding_scope_expansion",
-      "related_frozen_findings": ["P1-16", "P1-17", "P2-11"],
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-11"
+      ],
       "why_not_fully_subsumed": "The frozen audit encryption and rotation findings and BR4-D057 cover keyring load corruption, but not the global epoch-only keychain namespace or the absence of one cross-process writable owner binding key-reference, database and secret activation.",
       "title": "Global epoch-only MCP audit secret references and lease-free writers can orphan ciphertext across profiles and processes",
       "observed_symptom": "Release, development, QA or custom-data-dir stores that create or rotate in the same epoch use the same global keychain reference; set_password overwrites that credential while each store can retain different in-memory key bytes, and multiple McpAuditStore instances or processes can independently open the same database for writes without an owner lease.",
       "root_cause_hypothesis": "The implementation conflates numeric rotation order with globally unique store identity, permits replacement writes for newly generated audit secrets, does not bind key references to a canonical store identity, and activates JSON references, keychain material and SQLite state without one OS-backed ownership protocol.",
-      "affected_surfaces": ["src-tauri/src/secret_store.rs::MCP_AUDIT_KEY_REF_PREFIX", "src-tauri/src/secret_store.rs::create_mcp_audit_key_material", "src-tauri/src/secret_store.rs::KeyringSecretStore", "src-tauri/src/storage.rs::app_data_dir", "src-tauri/src/bootstrap.rs", "src-tauri/src/commands/settings.rs::rotate_mcp_audit_key", "openlife-core/src/mcp_audit.rs::McpAuditStore", "openlife-core/src/sqlite_migration.rs::SqliteSlotOwnerLease"],
-      "broken_invariants": ["I06", "I08", "I12", "I15"],
+      "affected_surfaces": [
+        "src-tauri/src/secret_store.rs::MCP_AUDIT_KEY_REF_PREFIX",
+        "src-tauri/src/secret_store.rs::create_mcp_audit_key_material",
+        "src-tauri/src/secret_store.rs::KeyringSecretStore",
+        "src-tauri/src/storage.rs::app_data_dir",
+        "src-tauri/src/bootstrap.rs",
+        "src-tauri/src/commands/settings.rs::rotate_mcp_audit_key",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore",
+        "openlife-core/src/sqlite_migration.rs::SqliteSlotOwnerLease"
+      ],
+      "broken_invariants": [
+        "I06",
+        "I08",
+        "I12",
+        "I15"
+      ],
       "target_phase": "Phase 1 and Phase 5",
       "owner_module": "MCP audit key-reference authority and SQLite writable-owner protocol",
-      "acceptance": ["Each canonical audit store owns a durable random store identity and each new key uses a collision-resistant store-bound reference; numeric epoch is ordering metadata only", "Creating a new secret is create-only: a collision preserves existing keychain bytes, reference-file bytes and database state", "Exactly one OS-backed writable owner exists per canonical audit database across clones and processes, and connection identity is revalidated before use", "The versioned mcp_audit_keys.json remains the sole canonical key-reference owner; database and lease metadata may retain only version, digest and verifier data and cannot reconstruct or guess references", "A missing keyring beside a non-empty audit database enters exactly Unavailable, creates no secret and performs no reference guessing, keychain enumeration or claimed read-only recovery", "Read-only recovery is allowed only when the keyring is present and structurally valid, every referenced secret hydrates, and ciphertext verification succeeds; BR4-D057 strict loader-state validation is a prerequisite for the BR4-D064 migration", "Legacy epoch-only references are read-only recovery inputs and are never overwritten or automatically deleted; new writes use unique references and restart reads both generations"],
-      "deletion_targets": ["Global prefix-plus-epoch identity for newly created MCP audit keys", "Unconditional secret replacement for newly generated audit key material", "Writable McpAuditStore without SqliteSlotOwnerLease or equivalent no-create cross-process authority lease", "Per-operation writable Connection::open path detached from the held owner identity", "Missing-keyring reference guessing, keychain scanning or duplicate database key-reference authority", "Legacy global epoch references as active-write or automatic-delete targets", "Unleased key-reference, keychain and database activation sequence"],
+      "acceptance": [
+        "Each canonical audit store owns a durable random store identity and each new key uses a collision-resistant store-bound reference; numeric epoch is ordering metadata only",
+        "Creating a new secret is create-only: a collision preserves existing keychain bytes, reference-file bytes and database state",
+        "Exactly one OS-backed writable owner exists per canonical audit database across clones and processes, and connection identity is revalidated before use",
+        "The versioned mcp_audit_keys.json remains the sole canonical key-reference owner; database and lease metadata may retain only version, digest and verifier data and cannot reconstruct or guess references",
+        "A missing keyring beside a non-empty audit database enters exactly Unavailable, creates no secret and performs no reference guessing, keychain enumeration or claimed read-only recovery",
+        "Read-only recovery is allowed only when the keyring is present and structurally valid, every referenced secret hydrates, and ciphertext verification succeeds; BR4-D057 strict loader-state validation is a prerequisite for the BR4-D064 migration",
+        "Legacy epoch-only references are read-only recovery inputs and are never overwritten or automatically deleted; new writes use unique references and restart reads both generations"
+      ],
+      "deletion_targets": [
+        "Global prefix-plus-epoch identity for newly created MCP audit keys",
+        "Unconditional secret replacement for newly generated audit key material",
+        "Writable McpAuditStore without SqliteSlotOwnerLease or equivalent no-create cross-process authority lease",
+        "Per-operation writable Connection::open path detached from the held owner identity",
+        "Missing-keyring reference guessing, keychain scanning or duplicate database key-reference authority",
+        "Legacy global epoch references as active-write or automatic-delete targets",
+        "Unleased key-reference, keychain and database activation sequence"
+      ],
       "immutable_fingerprint": "0ff3398ef9c35c9616c09fd20f2fe6d1809cdcfe6ccf797ee70e42096a313296"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D065",
       "discovered_at": "2026-07-13T19:00:00+08:00",
       "severity_at_discovery": "P1",
@@ -561,8 +786,8 @@
         "Per-row decrypt failure rendered as a successful decrypt-failed log entry"
       ],
       "immutable_fingerprint": "81df31ee962ac04b902490a219457a135091e5fbd455bc9147f28f7e92f3f574"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D066",
       "discovered_at": "2026-07-13T19:01:00+08:00",
       "severity_at_discovery": "P1",
@@ -604,8 +829,8 @@
         "Rotation rollback based on cloning and replacing mutable key authority"
       ],
       "immutable_fingerprint": "6f67d6d3aeb1f2f45297f28e12f41eff91f95e2b858f684471e42af701cfff30"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D067",
       "discovered_at": "2026-07-13T19:02:00+08:00",
       "severity_at_discovery": "P1",
@@ -648,8 +873,8 @@
         "Continued healthy effect admission after a runtime MCP audit store failure"
       ],
       "immutable_fingerprint": "3ec8fd15d7d75461478bfbffac9b94334434a9b4abb26930e409a71a52551d13"
-    },
-    {
+    }
+    ,{
       "id": "BR4-D068",
       "discovered_at": "2026-07-13T20:00:00+08:00",
       "severity_at_discovery": "P0",
@@ -699,6 +924,191 @@
         "D057 or D065 completion credit reused as D068 closure"
       ],
       "immutable_fingerprint": "7f78be9990b20301fea9e5f7d69aed51893bd74468704153a6e0a51808b416ec"
+    },
+    {
+      "id": "BR4-D069",
+      "discovered_at": "2026-07-16T23:01:44+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-02",
+        "P1-05",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "D055 introduced immutable Proposal origin bindings and one proven post-final successor, but did not distinguish a newly created current-turn review item from an idempotently reused pending Proposal, model more than one legal successor on the same TaskSession, or require product Review and Tasks projections to consume the canonical binding instead of descriptive Proposal fields.",
+      "title": "Proposal reuse and multi-review transitions conflate review identity with current task ownership",
+      "observed_symptom": "Repeating an explicit governed Memory request reused the existing pending Proposal but attempted to bind it to the new TaskSession and failed the turn; a newly created Proposal could leave TaskSession waiting while the final delivery claimed completed-with-pending-items; accepting two artifact Proposals for one task failed on the second transition because every successor was required to start from the original final head; Tasks and ReviewCenter could also infer task linkage from source_detail, payload or run strings.",
+      "root_cause_hypothesis": "ReviewWorkflow admission exposed the Proposal object without a current-turn-created versus reused disposition, while OpenLifeTurnRuntime and product projections treated every visible Proposal as a current task owner and the terminal owner graph modeled a single successor rather than a verified revision chain.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_kernel.rs",
+        "src-tauri/src/main_chat_turn_runtime.rs",
+        "src-tauri/src/main_chat_event_stream.rs",
+        "src-tauri/src/terminal_owner_write_gateway.rs",
+        "src-tauri/src/read_models/review_center.rs",
+        "src-tauri/src/read_models/tasks.rs",
+        "openlife-core/src/agent/review_item.rs",
+        "src-tauri/src/main_chat_command_surface_eval.rs"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I06",
+        "I08",
+        "I10",
+        "I12",
+        "I13",
+        "I17"
+      ],
+      "target_phase": "Phase 2, Phase 3, Phase 5 and Phase 6",
+      "owner_module": "ReviewWorkflow admission projection and terminal owner successor graph",
+      "acceptance": [
+        "Review admission records whether a pending Proposal was created for the current turn or reused from an existing canonical review",
+        "Only a newly created current-turn Proposal can block and own the current TaskSession; an idempotently reused Proposal retains its original terminal origin and is a nonblocking deferred review reference",
+        "TaskSession blocker state, pendingBlockerCount and terminal delivery status agree for every new and reused Proposal path",
+        "Multiple accepted Proposals for one task advance a contiguous revision and digest successor chain, while gaps, overflow, identity mismatch and unproven drift fail closed",
+        "TasksViewModel and ReviewCenter task relations and batch owners consume ProposalStore terminal origin bindings only; source_detail, payload task strings and run_id cannot mint ownership",
+        "Send, stream, restart and partial multi-artifact acceptance remain idempotent with one effect and one immutable successor per Proposal"
+      ],
+      "deletion_targets": [
+        "Rebinding one idempotently reused Proposal to a later TaskSession",
+        "Treating every visible Proposal as a current-turn blocker",
+        "Comparing every legal successor only with the original final owner head",
+        "Tasks or Review projections deriving task ownership from source_detail, payload or run strings",
+        "Terminal completion wording that contradicts TaskSession waiting-permission state"
+      ],
+      "immutable_fingerprint": "6e1acbc4e583e70f6103223fc4b9d8ac6649e216ae599d426d16c5c695ff3ef7"
+    },
+    {
+      "id": "BR4-D070",
+      "discovered_at": "2026-07-16T23:01:44+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-08",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "D067 added audit persistence truth to normal ToolGateway terminalization, but a runtime-dropped ToolGateway future can leave an already finished transport receipt at audit_persistence=pending, and the cancellation epoch previously skipped every finished registration instead of settling that remaining durability uncertainty.",
+      "title": "Runtime cancellation can leave a finished tool receipt with pending audit persistence",
+      "observed_symptom": "Cancelling a real hanging MCP replay after dispatch produced invalid_tool_execution_receipt:tool_receipt_terminal_audit_persistence_pending and then a secondary final-delivery schema failure instead of the stable local-abort result. Two restart fixtures also bypassed the new PersistenceCoordinator effect gate by calling the product before_dispatch observer while bootstrap was intentionally unsealed.",
+      "root_cause_hypothesis": "Tool transport completion and audit durability are separate terminal dimensions, but MainChatExecutionEpoch treated finished_at as proof that no registration finalization remained; test crash simulation also reused the product dispatch-admission entry instead of a test-only exact prepared-fact seam.",
+      "affected_surfaces": [
+        "openlife-core/src/tool_execution_receipt.rs::ToolExecutionReceiptRegistration",
+        "src-tauri/src/main_chat_cancellation.rs::MainChatExecutionEpoch",
+        "src-tauri/src/main_chat_event_stream.rs::MainChatToolLifecycleObserver",
+        "src-tauri/src/main_chat_task_control_tests.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I11",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2, Phase 4 and Phase 6",
+      "owner_module": "Tool receipt runtime finalizer and Main Chat cancellation epoch",
+      "acceptance": [
+        "Local abort and runtime-failure finalizers settle audit_persistence=pending to unknown without changing a committed or failed audit disposition",
+        "A finished transport receipt is still revisited when audit persistence remains pending, and the resulting terminal receipt is mechanically valid",
+        "A real hanging MCP replay aborts locally within one second, records remote or audit uncertainty truthfully, and performs no late durable commit",
+        "PersistenceCoordinator remains fail closed during release bootstrap; historical crash fixtures persist an exact prepared fact only through a cfg(test) seam and cannot dispatch a tool",
+        "Normal ToolGateway audit commit and failure paths retain their D067 semantics without retrying the tool"
+      ],
+      "deletion_targets": [
+        "Skipping all finished receipt registrations during cancellation finalization",
+        "Terminal tool receipts with audit_persistence pending",
+        "Crash fixtures calling the shipped before_dispatch admission while persistence is Initializing",
+        "Audit-pending validation errors masking the canonical local cancellation result"
+      ],
+      "immutable_fingerprint": "b515e32ffa41e43734b0375a0a20bc1d65e7af4a0101bc680619438362e7a905"
+    },
+    {
+      "id": "BR4-D071",
+      "discovered_at": "2026-07-16T23:17:22+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P0-01",
+        "P1-02",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen wire-truth, cancellation and inferred-runtime-fact findings require truthful provider reporting, but they did not cover a valid adapter start followed by conflicting attempt metadata: the runtime failed closed correctly, then recomputed model_invoked from the invalid aggregate state and erased the already observed dispatch.",
+      "title": "Provider attempt metadata conflict erases an already observed adapter dispatch",
+      "observed_symptom": "A provider request emitted a valid provider_started edge and remained in flight; injecting a conflicting model terminal correctly poisoned the attempt state and failed the turn with remote state unknown, but the final delivery returned model_invoked=false and omitted the proven provider start from durable lifecycle facts.",
+      "root_cause_hypothesis": "ProviderInvocationState::Invalid intentionally does not imply dispatch, but finalization used that aggregate enum as the sole invocation authority and the invalid-state terminalizer discarded valid earlier kernel lifecycle evidence instead of persisting only the proof-backed prefix.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_turn_runtime.rs::CancellationAwareMainChatEventSink",
+        "src-tauri/src/main_chat_turn_runtime.rs::terminalize_main_chat_kernel_failure",
+        "src-tauri/src/main_chat_turn_runtime.rs::finalize_openlife_turn_result",
+        "src-tauri/src/backend_remediation_phase2_tests.rs::conflicting_provider_attempt_metadata_finalizes_failed_with_unknown_receipt_state"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 2 and Phase 6",
+      "owner_module": "OpenLifeTurnRuntime provider lifecycle terminalization and FinalDelivery projection",
+      "acceptance": [
+        "A valid adapter start that precedes provider-attempt state corruption is persisted only when the exact scheduler durability proof exists",
+        "The turn and provider attempt remain failed closed as invalid and remote unknown; no provider.completed or remote-cancel confirmation is invented",
+        "FinalDelivery model_invoked is true only from a typed invocation state or an exact same-run durable provider_request lifecycle fact",
+        "A receipt-state failure without a proven provider start leaves model_invoked false",
+        "Provider lifecycle facts, receipt-state failure and turn failure keep one canonical run identity and survive buffered and streamed projection"
+      ],
+      "deletion_targets": [
+        "Invalid provider aggregate state erasing an earlier proven adapter start",
+        "model_invoked derived only from ProviderInvocationState after state corruption",
+        "Provider receipt-state failure presented as proof that no provider dispatch occurred",
+        "Invented provider completion or remote cancellation confirmation after metadata conflict"
+      ],
+      "immutable_fingerprint": "6d84efd9513db4357554104d113a9c5aaf213bd4e45313481a873e4419e1c6ef"
+    },
+    {
+      "id": "BR4-D072",
+      "discovered_at": "2026-07-16T23:43:49+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P0-01",
+        "P1-02",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen provider-truth and cancellation findings and BR4-D071 require truthful lifecycle facts, but they did not require nested candidate-ranking and AgentLoop provider attempts to share the TurnRuntime durability-proof scope or preserve their real chronological order when cancellation drops the kernel future.",
+      "title": "Nested AgentLoop provider attempts lose durability proof and reorder cancellation facts",
+      "observed_symptom": "A two-stage ReAct turn completed its provider-backed candidate ranking, started a second AgentLoop provider request and was locally cancelled while that request hung. The cancellation terminalizer could not prove the nested in-flight start, emitted provider.receipt_state_failed, and could order the second start before the first completion because same-kind facts were sorted by stable object id rather than occurrence time.",
+      "root_cause_hypothesis": "OpenLifeTurnRuntime did not own one fresh per-turn ProviderReceiptCollector. Candidate ranking used the captured scheduler collector while AgentLoop rebound a separate execution-local collector hidden inside the dropped future; cancellation could observe progress events without the matching durability authority, and its batch normalized receipt timestamps to the cancellation instant before stable-id ordering.",
+      "affected_surfaces": [
+        "src-tauri/src/main_chat_turn_runtime.rs::OpenLifeTurnRuntime::execute",
+        "src-tauri/src/main_chat_turn_runtime.rs::persist_main_chat_cancellation_events",
+        "src-tauri/src/main_chat_react_runtime.rs::try_run_main_chat_react_agent_loop",
+        "src-tauri/src/main_chat_event_stream.rs::MainChatAgentRuntimeEventInput",
+        "src-tauri/src/backend_remediation_phase2_tests.rs::cancelled_hanging_agent_loop_generation_keeps_completed_ranking_fact"
+      ],
+      "broken_invariants": [
+        "I01",
+        "I08",
+        "I11",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 2 and Phase 6",
+      "owner_module": "OpenLifeTurnRuntime per-turn provider proof scope and cancellation event batch",
+      "acceptance": [
+        "OpenLifeTurnRuntime installs one fresh ProviderReceiptCollector per turn and every nested provider route in that turn shares it without leaking receipts across turns",
+        "Cancelling after a completed ranking request and a started hanging AgentLoop request preserves the first started and completed facts and the second proof-backed started plus remote_unknown facts",
+        "The durable order is ranking start before ranking completion before AgentLoop start before cancel_requested before AgentLoop remote_unknown before local_aborted",
+        "The hanging request receives no provider.completed fact and local abort does not claim remote provider cancellation",
+        "Provider proof collection remains bound to the captured coherent provider generation and Phase 2, task-control, runtime, command-surface and single-system gates remain green"
+      ],
+      "deletion_targets": [
+        "Separate candidate-ranking and AgentLoop ProviderReceiptCollectors inside one turn",
+        "A dropped AgentLoop future owning the only durability proof for its in-flight provider request",
+        "Cancellation receipt timestamps rewritten to the cancellation instant",
+        "Same-kind provider lifecycle facts ordered by stable object id before occurrence time",
+        "provider.receipt_state_failed used as fallback for an otherwise proof-backed nested start"
+      ],
+      "immutable_fingerprint": "effa1cd6aa7afbae4cd09d9ff010d7bea9b3b99d1ec4ba5b2b8d00b63aa4a30b"
     }
   ]
 }

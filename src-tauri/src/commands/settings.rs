@@ -1,24 +1,27 @@
 use crate::errors::AppError;
+use once_cell::sync::Lazy as LazyLock;
 use openlife_core::config::AppConfig;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::{
     chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
     provider_label, ProviderInvocationReceipt, ProviderInvocationStatus,
 };
-use openlife_core::mcp_audit::{
-    AuditExport, McpAuditCleanupScopeChanged, McpAuditRetentionDays, MCP_AUDIT_RETENTION_MAX_DAYS,
-};
+use openlife_core::mcp_audit::AuditExport;
 use openlife_core::network_client::resolve_network_policy_decision;
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, LazyLock};
-use tauri::State;
-
+use std::collections::BTreeSet;
 #[cfg(test)]
-#[path = "../mcp_audit_export_gateway_tests.rs"]
-mod mcp_audit_export_gateway_tests;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+use tauri::State;
+use uuid::{Uuid, Version};
 
 use crate::danger_action_confirmation::{
     issue_danger_action_challenge, require_native_danger_action_confirmation,
@@ -28,11 +31,17 @@ use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
+use crate::persistence_coordinator::{
+    GovernedDataImportRecoveryAdmission, GovernedDataImportRecoveryOwner,
+};
 use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_mcp_audit_key_material, stage_config_secrets, KeyringSecretStore, SecretStore,
+    create_mcp_audit_key_material, hydrate_or_create_canonical_store_integrity_key,
+    hydrate_or_create_integrity_key, inspect_integrity_key_access, stage_config_secrets,
+    IntegrityKeyInspection, KeyringSecretStore, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
+    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::storage::{
     app_data_dir, mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
@@ -40,61 +49,152 @@ use crate::storage::{
 };
 use crate::AppState;
 use crate::{life_model_write_gateway, memory_gateway};
+use openlife_core::persistence_outbox::{
+    metadata_digest, GovernedDataImportJournal, GovernedDataImportOwnerObservation,
+    GovernedDataImportOwnerPlan, GovernedDataImportOwnerReceipt, GovernedDataImportOwnerResolution,
+    GovernedDataImportOwnerStatus, GovernedDataImportOwnerUpdate, GovernedDataImportPrepare,
+    GovernedDataImportReceipt, GovernedDataImportResolutionClassification, GovernedDataImportStage,
+    ProjectionDeliveryState, GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
+};
 
 static GOVERNED_DATA_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+#[cfg(test)]
+struct GovernedImportTerminalObservationBarrier {
+    observed_first_owner: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(test)]
+static GOVERNED_IMPORT_TERMINAL_OBSERVATION_BARRIERS: LazyLock<
+    StdMutex<HashMap<String, GovernedImportTerminalObservationBarrier>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+const MAX_GOVERNED_IMPORT_JSON_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GOVERNED_IMPORT_STRING_BYTES: usize = 1024 * 1024;
+const MAX_GOVERNED_IMPORT_CONTAINER_ITEMS: usize = 100_000;
+const MAX_GOVERNED_IMPORT_MESSAGES: usize = 50_000;
+const MAX_GOVERNED_IMPORT_VECTORS: usize = 50_000;
+const MAX_GOVERNED_IMPORT_STATE_TASKS: usize = 512;
+const MAX_GOVERNED_IMPORT_JSON_DEPTH: usize = 64;
 pub(crate) static CONFIG_WRITE_COORDINATOR: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+static CREDENTIAL_RECOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-const MCP_AUDIT_CLEANUP_PREDICATE_VERSION: &str = "mcp-audit-created-before-request-cutoff-v1";
+struct CredentialRecoveryActivityGuard;
 
-fn invalid_mcp_audit_retention_error() -> AppError {
-    AppError::Config {
-        message: "invalid_mcp_audit_retention_days".into(),
-        hint: Some(format!(
-            "retention_days_must_be_1_through_{MCP_AUDIT_RETENTION_MAX_DAYS}"
-        )),
+impl Drop for CredentialRecoveryActivityGuard {
+    fn drop(&mut self) {
+        CREDENTIAL_RECOVERY_ACTIVE.store(false, Ordering::Release);
     }
-}
-
-fn validate_mcp_audit_retention_days(
-    retention_days: i64,
-) -> Result<McpAuditRetentionDays, AppError> {
-    McpAuditRetentionDays::try_from(retention_days).map_err(|_| invalid_mcp_audit_retention_error())
-}
-
-fn mcp_audit_cleanup_preflight_scope_arguments(
-    retention_days: i64,
-    candidate_count: usize,
-) -> serde_json::Value {
-    serde_json::json!({
-        "retention_days": retention_days,
-        "predicate_version": MCP_AUDIT_CLEANUP_PREDICATE_VERSION,
-        "candidate_count": candidate_count,
-    })
-}
-
-fn map_mcp_audit_cleanup_error(error: anyhow::Error) -> AppError {
-    if error
-        .downcast_ref::<McpAuditCleanupScopeChanged>()
-        .is_some()
-    {
-        AppError::permission("mcp_audit_cleanup_scope_changed_refresh_preflight")
-    } else {
-        AppError::db_with_hint(error.to_string(), "mcp_audit_store_error")
-    }
-}
-
-fn require_mcp_audit_cleanup_effects_allowed(state: &Arc<AppState>) -> Result<(), AppError> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct CredentialRecoveryItem {
+    pub purpose: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRecoveryReport {
+    pub items: Vec<CredentialRecoveryItem>,
+    pub all_required_credentials_ready: bool,
+    pub restart_required: bool,
+}
+
+fn recover_one_required_credential(
+    data_dir: &Path,
+    store: &dyn SecretStore,
+    purpose: &str,
+    secret_ref: &'static str,
+    protected_files: &[&str],
+) -> CredentialRecoveryItem {
+    let status = match inspect_integrity_key_access(secret_ref, store) {
+        IntegrityKeyInspection::Available => "available",
+        IntegrityKeyInspection::Invalid => "invalid",
+        IntegrityKeyInspection::Unavailable => "unavailable",
+        IntegrityKeyInspection::Missing => {
+            if protected_files
+                .iter()
+                .any(|name| data_dir.join(name).exists())
+            {
+                "missing_existing_data"
+            } else {
+                let created = if secret_ref == TASK_STORE_AUTHORITY_KEY_REF {
+                    hydrate_or_create_canonical_store_integrity_key(
+                        secret_ref,
+                        &data_dir.join("tasks.db"),
+                        store,
+                    )
+                } else {
+                    hydrate_or_create_integrity_key(secret_ref, store)
+                };
+                if created.is_ok() {
+                    "created"
+                } else {
+                    "unavailable"
+                }
+            }
+        }
+    };
+    CredentialRecoveryItem {
+        purpose: purpose.into(),
+        status: status.into(),
+    }
+}
+
+fn recover_required_credential_access_with_store(
+    data_dir: &Path,
+    store: &dyn SecretStore,
+) -> CredentialRecoveryReport {
+    let items = vec![
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "agent_run_receipts",
+            AGENT_RUN_RECEIPT_KEY_REF,
+            &[
+                "agent_runs.db",
+                "life_events.db",
+                "main_chat_agent_sessions.db",
+            ],
+        ),
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "main_chat_events",
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            &["main_chat_agent_events.db"],
+        ),
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "action_queue",
+            ACTION_QUEUE_AUTHORITY_KEY_REF,
+            &["main_chat_action_queue.db"],
+        ),
+        recover_one_required_credential(
+            data_dir,
+            store,
+            "task_store",
+            TASK_STORE_AUTHORITY_KEY_REF,
+            &["tasks.db"],
+        ),
+    ];
+    let all_required_credentials_ready = items
+        .iter()
+        .all(|item| matches!(item.status.as_str(), "available" | "created"));
+    CredentialRecoveryReport {
+        items,
+        all_required_credentials_ready,
+        restart_required: all_required_credentials_ready,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GovernedDataImportRequest {
+    pub operation_id: String,
     pub purpose: String,
     pub explicit_user_intent: bool,
     pub create_pre_change_snapshot: bool,
@@ -119,9 +219,12 @@ pub(crate) struct DangerActionConfirmationRequest<'a> {
     pub requested_target: Option<&'a str>,
     pub affected_count: Option<usize>,
     pub reference: Option<&'a DangerActionConfirmationReference>,
-    pub preflight_scope_arguments: Option<&'a serde_json::Value>,
     pub arguments: &'a serde_json::Value,
     pub arguments_summary: &'a str,
+    /// Unforgeable, journal-bound capability used only to let the same
+    /// confirmed import operation enter its recovery path while every ordinary
+    /// effect remains fail-closed.
+    pub governed_data_import_recovery: Option<&'a GovernedDataImportRecoveryAdmission<'a>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,13 +250,16 @@ pub struct DangerActionPreflightView {
     pub safe_mode_blocked: bool,
     pub blocking_reasons: Vec<String>,
     pub source_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_stage: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DangerActionPreflightScope {
     target_ids: Vec<String>,
     affected_count: Option<usize>,
-    preflight_scope_arguments: Option<serde_json::Value>,
 }
 
 fn validate_scope_target_ids(target_ids: &[String]) -> Result<Vec<String>, AppError> {
@@ -185,6 +291,7 @@ fn danger_action_requires_native_confirmation(action_type: &str) -> bool {
         action_type,
         "data_export"
             | "data_import_overwrite"
+            | "data_import_abandon_recovery"
             | "mcp_audit_export"
             | "mcp_audit_cleanup"
             | "mcp_audit_key_rotation"
@@ -198,14 +305,12 @@ fn danger_action_scope_digest(
     action_type: &str,
     target_ids: &[String],
     affected_count: usize,
-    preflight_scope_arguments: Option<&serde_json::Value>,
 ) -> Result<String, AppError> {
     let canonical = serde_json::json!({
         "action_type": action_type,
         "affected_count": affected_count,
         "target_id_count": target_ids.len(),
         "target_ids": target_ids,
-        "preflight_scope_arguments": preflight_scope_arguments,
     });
     let bytes = serde_json::to_vec(&canonical)?;
     let mut hasher = Sha256::new();
@@ -239,12 +344,7 @@ fn danger_action_preflight_for_action_scoped(
         .affected_count
         .unwrap_or(safe_target_ids.len())
         .max(safe_target_ids.len());
-    let scope_digest = danger_action_scope_digest(
-        action_type,
-        &safe_target_ids,
-        affected_count,
-        scope.preflight_scope_arguments.as_ref(),
-    )?;
+    let scope_digest = danger_action_scope_digest(action_type, &safe_target_ids, affected_count)?;
     let confirmation_phrase = None;
     let requires_typed_confirmation = false;
     let confirmation_required = danger_action_requires_native_confirmation(action_type);
@@ -257,8 +357,13 @@ fn danger_action_preflight_for_action_scoped(
             action_type: "data_export".into(),
             risk_tier: "high".into(),
             scope_summary:
-                "导出本地 LifeModel、聊天记录和向量记忆到用户选择的本地 JSON 文件。".into(),
-            data_categories: vec!["life_model".into(), "messages".into(), "vectors".into()],
+                "导出本地 LifeModel、StateStore 日任务、聊天记录和向量记忆到用户选择的本地 JSON 文件。".into(),
+            data_categories: vec![
+                "life_model".into(),
+                "state_store".into(),
+                "messages".into(),
+                "vectors".into(),
+            ],
             writes_durable_state: false,
             privacy_sensitive: true,
             external_transmission: "not_sent_externally".into(),
@@ -279,19 +384,26 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:export_all_data".into(),
                 "governance:slice5b_danger_action_preflight".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "data_import_overwrite" => DangerActionPreflightView {
             action_type: "data_import_overwrite".into(),
             risk_tier: "critical".into(),
             scope_summary:
-                "读取用户选择的 OpenLife JSON 备份，并覆盖当前 LifeModel、聊天记录和向量记忆。"
+                "读取用户选择的 OpenLife JSON 备份，并覆盖当前 LifeModel、StateStore 日任务、聊天记录和向量记忆。执行前只为 LifeModel 创建 durable snapshot；其他 owner 依赖 CAS、故障 journal 和前向恢复，不存在自动完整回滚副本。"
                     .into(),
-            data_categories: vec!["life_model".into(), "messages".into(), "vectors".into()],
+            data_categories: vec![
+                "life_model".into(),
+                "state_store".into(),
+                "messages".into(),
+                "vectors".into(),
+            ],
             writes_durable_state: true,
             privacy_sensitive: true,
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
-            backup_status: "will_create_on_execute".into(),
+            backup_status: "lifemodel_snapshot_only_other_owners_forward_recovery".into(),
             requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
@@ -305,9 +417,45 @@ fn danger_action_preflight_for_action_scoped(
             source_refs: vec![
                 "settings_command:get_danger_action_preflight".into(),
                 "final_command:import_all_data".into(),
-                "governed_request:create_pre_change_snapshot_on_execute".into(),
+                "governed_request:create_lifemodel_pre_change_snapshot_on_execute".into(),
                 "governance:slice5b_danger_action_preflight".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
+        },
+        "data_import_abandon_recovery" => DangerActionPreflightView {
+            action_type: "data_import_abandon_recovery".into(),
+            risk_tier: "critical".into(),
+            scope_summary:
+                "不重新执行或回滚中断的导入；重新观察每个 canonical owner，只保存 digest、分类、时间和 StateStore 投递引用，然后以 abandoned_preserving_current 终止恢复。当前数据保持原样，应用必须重启后才能恢复普通副作用。"
+                    .into(),
+            data_categories: vec![
+                "governed_import_journal_metadata".into(),
+                "canonical_owner_digest_evidence".into(),
+                "state_projection_delivery_metadata".into(),
+            ],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "not_applicable_preserves_current_canonical_data".into(),
+            requires_typed_confirmation,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:abandon_governed_data_import_recovery".into(),
+                "governed_import_resolution:metadata_only_preserve_current".into(),
+            ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "mcp_audit_export" => DangerActionPreflightView {
             action_type: "mcp_audit_export".into(),
@@ -341,6 +489,8 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:export_mcp_audit_logs".into(),
                 "governance:slice5b_danger_action_preflight".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "mcp_audit_cleanup" => DangerActionPreflightView {
             action_type: "mcp_audit_cleanup".into(),
@@ -367,6 +517,8 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:cleanup_mcp_audit_logs".into(),
                 "governance:slice5b_danger_action_preflight".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "mcp_audit_key_rotation" => DangerActionPreflightView {
             action_type: "mcp_audit_key_rotation".into(),
@@ -394,6 +546,8 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:rotate_mcp_audit_key".into(),
                 "governance:slice5b_danger_action_preflight".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "agent_run_delete" => DangerActionPreflightView {
             action_type: "agent_run_delete".into(),
@@ -422,6 +576,8 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:delete_agent_run".into(),
                 "governance:slice5c_danger_zone_consolidation".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "agent_run_bulk_delete" => DangerActionPreflightView {
             action_type: "agent_run_bulk_delete".into(),
@@ -450,6 +606,8 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:delete_agent_run".into(),
                 "governance:slice5c_danger_zone_consolidation".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         "vector_rebuild" => DangerActionPreflightView {
             action_type: "vector_rebuild".into(),
@@ -478,6 +636,8 @@ fn danger_action_preflight_for_action_scoped(
                 "final_command:rebuild_memory_index".into(),
                 "governance:slice5c_danger_zone_consolidation".into(),
             ],
+            recovery_operation_id: None,
+            recovery_stage: None,
         },
         _ => {
             return Err(AppError::permission(
@@ -510,6 +670,67 @@ pub(crate) async fn danger_action_safe_mode_active(state: &Arc<AppState>) -> boo
         .unwrap_or(true)
 }
 
+async fn governed_import_recovery_has_no_other_safe_mode_blocker(state: &Arc<AppState>) -> bool {
+    // Recovery admission is based on coordinator-owned typed reason codes,
+    // never on human-readable bootstrap warning text. The journal-bound
+    // capability minted below remains the final authority for the exact
+    // operation and owners.
+    let persistence = state.persistence_coordinator.snapshot();
+    if persistence.global_reason_codes.as_slice() != [GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON]
+    {
+        return false;
+    }
+    state
+        .vector_store
+        .lock()
+        .await
+        .integrity_report()
+        .is_ok_and(|report| report.corrupt_embedding_count == 0)
+}
+
+fn required_governed_data_import_journal(
+    state: &AppState,
+) -> Result<Arc<GovernedDataImportJournal>, AppError> {
+    state
+        .governed_data_import_journal
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| {
+            AppError::db_with_hint(
+                "governed data-import journal was unavailable during bootstrap; effects remain fail-closed",
+                "data_import_journal_unavailable",
+            )
+        })
+}
+
+async fn governed_import_recovery_preflight_receipt(
+    state: &Arc<AppState>,
+) -> Result<Option<GovernedDataImportReceipt>, AppError> {
+    if !governed_import_recovery_has_no_other_safe_mode_blocker(state).await {
+        return Ok(None);
+    }
+    let journal = required_governed_data_import_journal(state)?;
+    let Some(receipt) = journal.recovery_requirement().map_err(|error| {
+        AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+    })?
+    else {
+        return Ok(None);
+    };
+    state
+        .persistence_coordinator
+        .mint_governed_data_import_recovery_admission(
+            &journal,
+            &receipt,
+            &receipt.operation_id,
+            &receipt.payload_digest,
+            &receipt.request_digest,
+        )
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+        })?;
+    Ok(Some(receipt))
+}
+
 pub(crate) async fn require_danger_action_confirmation(
     request: DangerActionConfirmationRequest<'_>,
     window: &tauri::WebviewWindow,
@@ -518,10 +739,17 @@ pub(crate) async fn require_danger_action_confirmation(
     let scope = DangerActionPreflightScope {
         target_ids: request.target_ids_for_new_challenge.to_vec(),
         affected_count: request.affected_count,
-        preflight_scope_arguments: request.preflight_scope_arguments.cloned(),
     };
     let expected = danger_action_preflight_for_action_scoped(request.action_type, false, scope)?;
-    if expected.writes_durable_state && danger_action_safe_mode_active(state).await {
+    let recovery_safe_mode_override = matches!(
+        request.action_type,
+        "data_import_overwrite" | "data_import_abandon_recovery"
+    ) && request.governed_data_import_recovery.is_some()
+        && governed_import_recovery_has_no_other_safe_mode_blocker(state).await;
+    if expected.writes_durable_state
+        && danger_action_safe_mode_active(state).await
+        && !recovery_safe_mode_override
+    {
         return Err(AppError::permission(
             "danger action blocked because Safe Mode is active",
         ));
@@ -536,7 +764,6 @@ pub(crate) async fn require_danger_action_confirmation(
             target_ids_for_new_challenge: request.target_ids_for_new_challenge,
             requested_target: request.requested_target,
             affected_count: expected.affected_item_count,
-            preflight_scope_arguments: request.preflight_scope_arguments,
             arguments: request.arguments,
             arguments_summary: request.arguments_summary,
             scope_summary: &expected.scope_summary,
@@ -554,30 +781,42 @@ pub async fn get_danger_action_preflight(
     safe_mode: Option<bool>,
     target_ids: Option<Vec<String>>,
     affected_count: Option<usize>,
-    retention_days: Option<i64>,
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<DangerActionPreflightView, AppError> {
-    let mut effective_safe_mode = safe_mode.unwrap_or(false);
-    if danger_action_safe_mode_active(state.inner()).await {
+    let requested_safe_mode = safe_mode.unwrap_or(false);
+    let recovery = if matches!(
+        action_type.as_str(),
+        "data_import_overwrite" | "data_import_abandon_recovery"
+    ) {
+        governed_import_recovery_preflight_receipt(state.inner()).await?
+    } else {
+        None
+    };
+    let mut effective_safe_mode = requested_safe_mode;
+    if danger_action_safe_mode_active(state.inner()).await
+        && (recovery.is_none() || requested_safe_mode)
+    {
         effective_safe_mode = true;
     }
-    let target_ids = target_ids.unwrap_or_default();
-    let mut preflight_scope_arguments = None;
-    let effective_affected_count = if action_type == "mcp_audit_cleanup" {
-        let retention_days = retention_days.ok_or_else(invalid_mcp_audit_retention_error)?;
-        let retention = validate_mcp_audit_retention_days(retention_days)?;
-        let candidate_count = {
-            let store = state.mcp_audit_store.lock().await;
-            store
-                .count_cleanup_candidates(&retention)
-                .map_err(map_mcp_audit_cleanup_error)?
-        };
-        preflight_scope_arguments = Some(mcp_audit_cleanup_preflight_scope_arguments(
-            retention_days,
-            candidate_count,
-        ));
-        Some(candidate_count)
+    let target_ids = if action_type == "data_import_abandon_recovery" {
+        vec![recovery
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::permission("no governed data-import recovery is pending for abandonment")
+            })?
+            .operation_id
+            .clone()]
+    } else {
+        target_ids.unwrap_or_default()
+    };
+    let effective_affected_count = if action_type == "data_import_abandon_recovery" {
+        Some(
+            recovery
+                .as_ref()
+                .map(|receipt| receipt.owners.len())
+                .unwrap_or_default(),
+        )
     } else if action_type == "vector_rebuild" && affected_count.is_none() {
         let store = state.memory_store.lock().await;
         Some(store.export_all_messages().map_err(AppError::from)?.len())
@@ -590,30 +829,23 @@ pub async fn get_danger_action_preflight(
         DangerActionPreflightScope {
             target_ids: target_ids.clone(),
             affected_count: effective_affected_count,
-            preflight_scope_arguments: preflight_scope_arguments.clone(),
         },
     )?;
-    if action_type == "mcp_audit_cleanup" {
-        let retention_days = retention_days.ok_or_else(invalid_mcp_audit_retention_error)?;
-        view.scope_summary = format!(
-            "按服务端时钟删除创建时间早于当前请求时间减去 {retention_days} 天的本地 MCP 审计日志；影响数量来自后端候选快照。"
-        );
-        view.source_refs
-            .push("mcp_audit_store:server_candidate_snapshot".into());
-        view.source_refs.push(format!(
-            "cleanup_predicate:{MCP_AUDIT_CLEANUP_PREDICATE_VERSION}"
-        ));
-    }
     if view.confirmation_required && view.final_action_enabled {
         view.preflight_id = issue_danger_action_challenge(
             window.label(),
             &action_type,
             &target_ids,
             view.affected_item_count,
-            preflight_scope_arguments.as_ref(),
         )?;
         view.source_refs
             .push("native_confirmation:server_challenge_pending".into());
+    }
+    if let Some(receipt) = recovery {
+        view.recovery_operation_id = Some(receipt.operation_id);
+        view.recovery_stage = Some(receipt.stage.as_str().into());
+        view.source_refs
+            .push("governed_data_import:recovery_preflight".into());
     }
     Ok(view)
 }
@@ -622,22 +854,39 @@ impl GovernedDataImportRequest {
     #[cfg(test)]
     fn manual_restore_all_targets() -> Self {
         Self {
+            operation_id: Uuid::new_v4().hyphenated().to_string(),
             purpose: "manual_restore".into(),
             explicit_user_intent: true,
             create_pre_change_snapshot: true,
-            import_targets: vec!["life_model".into(), "messages".into(), "vectors".into()],
+            import_targets: vec![
+                "life_model".into(),
+                "messages".into(),
+                "vectors".into(),
+                "state_store".into(),
+            ],
         }
     }
 
     fn is_valid(&self) -> bool {
-        self.explicit_user_intent
+        let unique_targets = self
+            .import_targets
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        Uuid::parse_str(&self.operation_id).is_ok_and(|operation_id| {
+            operation_id.get_version() == Some(Version::Random)
+                && operation_id.hyphenated().to_string() == self.operation_id
+        }) && self.explicit_user_intent
             && self.create_pre_change_snapshot
             && matches!(self.purpose.as_str(), "manual_restore" | "migration")
             && !self.import_targets.is_empty()
-            && self
-                .import_targets
-                .iter()
-                .all(|target| matches!(target.as_str(), "life_model" | "messages" | "vectors"))
+            && unique_targets.len() == self.import_targets.len()
+            && self.import_targets.iter().all(|target| {
+                matches!(
+                    target.as_str(),
+                    "life_model" | "messages" | "vectors" | "state_store"
+                )
+            })
     }
 }
 
@@ -660,10 +909,112 @@ fn hash_json_value(value: &serde_json::Value) -> Result<String, AppError> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+fn hash_serializable_value<T: Serialize>(value: &T) -> Result<String, AppError> {
+    hash_json_value(&serde_json::to_value(value).map_err(AppError::from)?)
+}
+
+fn validate_import_json_budget(payload: &serde_json::Value) -> Result<(), AppError> {
+    fn charge(remaining: &mut usize, amount: usize) -> Result<(), AppError> {
+        if amount > *remaining {
+            return Err(AppError::external(
+                "OpenLife backup exceeds the bounded import size limit",
+            ));
+        }
+        *remaining -= amount;
+        Ok(())
+    }
+
+    fn visit(
+        value: &serde_json::Value,
+        depth: usize,
+        remaining: &mut usize,
+    ) -> Result<(), AppError> {
+        if depth > MAX_GOVERNED_IMPORT_JSON_DEPTH {
+            return Err(AppError::external(
+                "OpenLife backup exceeds the bounded JSON nesting limit",
+            ));
+        }
+        charge(remaining, 16)?;
+        match value {
+            serde_json::Value::String(text) => {
+                if text.len() > MAX_GOVERNED_IMPORT_STRING_BYTES {
+                    return Err(AppError::external(
+                        "OpenLife backup contains an oversized text field",
+                    ));
+                }
+                charge(remaining, text.len())
+            }
+            serde_json::Value::Array(items) => {
+                if items.len() > MAX_GOVERNED_IMPORT_CONTAINER_ITEMS {
+                    return Err(AppError::external(
+                        "OpenLife backup contains an oversized JSON array",
+                    ));
+                }
+                for item in items {
+                    visit(item, depth + 1, remaining)?;
+                }
+                Ok(())
+            }
+            serde_json::Value::Object(fields) => {
+                if fields.len() > MAX_GOVERNED_IMPORT_CONTAINER_ITEMS {
+                    return Err(AppError::external(
+                        "OpenLife backup contains an oversized JSON object",
+                    ));
+                }
+                for (key, value) in fields {
+                    if key.len() > MAX_GOVERNED_IMPORT_STRING_BYTES {
+                        return Err(AppError::external(
+                            "OpenLife backup contains an oversized object key",
+                        ));
+                    }
+                    charge(remaining, key.len())?;
+                    visit(value, depth + 1, remaining)?;
+                }
+                Ok(())
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                Ok(())
+            }
+        }
+    }
+
+    let mut remaining = MAX_GOVERNED_IMPORT_JSON_BYTES;
+    visit(payload, 0, &mut remaining)
+}
+
 fn validate_import_payload_shape(payload: &serde_json::Value) -> Result<(), AppError> {
     let object = payload
         .as_object()
         .ok_or_else(|| AppError::external("导入 payload 必须是 JSON object"))?;
+    validate_import_json_budget(payload)?;
+    if object
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.len() > MAX_GOVERNED_IMPORT_MESSAGES)
+    {
+        return Err(AppError::external(
+            "OpenLife backup exceeds the bounded message import limit",
+        ));
+    }
+    if object
+        .get("vectors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.len() > MAX_GOVERNED_IMPORT_VECTORS)
+    {
+        return Err(AppError::external(
+            "OpenLife backup exceeds the bounded vector import limit",
+        ));
+    }
+    if object
+        .get("state_store")
+        .and_then(|state| state.get("dailyTasks"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.len() > MAX_GOVERNED_IMPORT_STATE_TASKS)
+    {
+        return Err(AppError::external(
+            "OpenLife backup exceeds the bounded StateStore daily-task import limit",
+        ));
+    }
     for key in object.keys() {
         if !matches!(
             key.as_str(),
@@ -674,6 +1025,7 @@ fn validate_import_payload_shape(payload: &serde_json::Value) -> Result<(), AppE
                 | "life_model"
                 | "messages"
                 | "vectors"
+                | "state_store"
         ) {
             return Err(AppError::permission(format!(
                 "import_all_data received unsupported import target: {key}"
@@ -682,6 +1034,25 @@ fn validate_import_payload_shape(payload: &serde_json::Value) -> Result<(), AppE
     }
     if !object.contains_key("life_model") {
         return Err(AppError::external("导入 payload 缺少 life_model"));
+    }
+    match object.get("version").and_then(serde_json::Value::as_str) {
+        Some("1.0") if object.contains_key("state_store") => {
+            return Err(AppError::permission(
+                "OpenLife v1 backup cannot carry a v2 state_store archive",
+            ));
+        }
+        Some("1.0") => {}
+        Some("2.0") if !object.contains_key("state_store") => {
+            return Err(AppError::external(
+                "OpenLife v2 backup is missing the required state_store archive",
+            ));
+        }
+        Some("2.0") => {}
+        _ => {
+            return Err(AppError::external(
+                "OpenLife backup version is missing or unsupported",
+            ));
+        }
     }
     Ok(())
 }
@@ -693,7 +1064,7 @@ fn validate_import_targets_cover_payload(
     let object = payload
         .as_object()
         .ok_or_else(|| AppError::external("导入 payload 必须是 JSON object"))?;
-    for target in ["life_model", "messages", "vectors"] {
+    for target in ["life_model", "messages", "vectors", "state_store"] {
         if object.contains_key(target) && !request.import_targets.iter().any(|item| item == target)
         {
             return Err(AppError::permission(format!(
@@ -715,22 +1086,26 @@ pub struct LastModelError {
 pub async fn get_last_model_error(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<LastModelError>, AppError> {
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let runs = store.list_runs(10, 0).map_err(AppError::from)?;
-        let last_error = runs
-            .iter()
-            .find(|r| r.error.is_some())
-            .and_then(|r| r.error.as_ref())
-            .map(|e| LastModelError {
-                message: e.message.clone(),
-                phase: e.phase.clone(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            });
-        Ok(last_error)
-    } else {
-        Ok(None)
-    }
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("agent_run_store_unavailable"))?;
+    let store = store_arc.lock().await;
+    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state.inner(),
+        store.list_runs(10, 0).map_err(|error| error.to_string()),
+    )
+    .map_err(AppError::internal)?;
+    let last_error = runs
+        .iter()
+        .find(|r| r.error.is_some())
+        .and_then(|r| r.error.as_ref())
+        .map(|e| LastModelError {
+            message: e.message.clone(),
+            phase: e.phase.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
+    Ok(last_error)
 }
 
 /// Mask for sensitive API keys sent to the frontend.
@@ -807,6 +1182,45 @@ fn resolved_provider_credential_version(submitted: &AppConfig, current: &AppConf
 
 async fn replace_runtime_provider_config(state: &Arc<AppState>, config: AppConfig) {
     state.replace_provider_runtime_config(config).await;
+}
+
+/// User-initiated recovery for OS credential ACL changes after an application
+/// update or development re-sign. Startup intentionally stays non-interactive
+/// and bounded; this command is the only product path that may let the OS show
+/// its credential authorization UI. It returns status only and never exposes
+/// key material to the webview.
+#[tauri::command]
+pub async fn recover_required_credential_access(
+    window: tauri::WebviewWindow,
+) -> Result<CredentialRecoveryReport, AppError> {
+    CREDENTIAL_RECOVERY_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| AppError::permission("credential recovery is already in progress"))?;
+    let _activity_guard = CredentialRecoveryActivityGuard;
+    require_native_danger_action_confirmation(
+        &window,
+        NativeDangerActionRequest {
+            action_type: "credential_store_recovery",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: 4,
+            arguments: &serde_json::json!({
+                "operation": "inspect_or_initialize_required_integrity_keys",
+                "existing_canonical_data_policy": "never_replace_missing_key",
+            }),
+            arguments_summary:
+                "检查四类内部完整性密钥；仅在没有对应 canonical 文件时初始化缺失密钥。",
+            scope_summary: "AgentRun、Main Chat 事件、ActionQueue 与 TaskStore 的系统凭据",
+            challenge_id: None,
+        },
+    )
+    .await?;
+    let data_dir = app_data_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        recover_required_credential_access_with_store(&data_dir, &KeyringSecretStore)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("credential recovery worker failed: {error}")))
 }
 
 #[tauri::command]
@@ -893,13 +1307,13 @@ pub async fn export_all_data(
             requested_target: None,
             affected_count: None,
             reference: None,
-            preflight_scope_arguments: None,
             arguments: &serde_json::json!({
                 "export_digest": export_digest,
-                "data_categories": ["life_model", "messages", "vectors"],
+                "data_categories": ["life_model", "state_store", "messages", "vectors"],
             }),
             arguments_summary:
-                "导出当前 LifeModel、聊天和向量数据快照；原始内容不会复制进 confirmation grant。",
+                "导出当前 LifeModel、StateStore 日任务、聊天和向量数据快照；原始内容不会复制进 confirmation grant。",
+            governed_data_import_recovery: None,
         },
         &window,
         state.inner(),
@@ -909,10 +1323,31 @@ pub async fn export_all_data(
 }
 
 async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json::Value, AppError> {
-    let life_model = {
+    let exported_at = chrono::Utc::now();
+    let mut life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
+    // `goals.daily` and `state.alerts` are compatibility projections. Their
+    // portable owner is StateStore; copying them into the LifeModel payload
+    // would create a second backup truth and make OpenLife's own archive fail
+    // its field-authority guard on restore.
+    life_model.goals.daily.clear();
+    life_model.state.alerts.clear();
+    let state_store = state.state_store.as_ref().ok_or_else(|| {
+        AppError::db_with_hint(
+            "StateStore is unavailable; a complete OpenLife v2 backup cannot be produced",
+            "canonical_state_unknown",
+        )
+    })?;
+    let state_store_archive = state_store
+        .export_portable_daily_tasks(exported_at)
+        .map_err(|error| {
+            AppError::db_with_hint(
+                format!("StateStore portable export failed: {error}"),
+                "canonical_state_unknown",
+            )
+        })?;
     let messages = {
         let store = state.memory_store.lock().await;
         store.export_all_messages().map_err(AppError::from)?
@@ -922,11 +1357,12 @@ async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json:
         store.export_portable_chunks().map_err(AppError::from)?
     };
     Ok(serde_json::json!({
-        "version": "1.0",
+        "version": "2.0",
         "app_version": env!("CARGO_PKG_VERSION"),
-        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "exported_at": exported_at.to_rfc3339(),
         "vector_export_semantics": "portable_only_canonical_and_chat_projections_derived",
         "life_model": life_model,
+        "state_store": state_store_archive,
         "messages": messages,
         "vectors": vectors,
     }))
@@ -940,14 +1376,46 @@ pub async fn import_all_data(
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
     let request = require_governed_data_import_request(import_request.as_ref())?.clone();
     validate_import_payload_shape(&payload)?;
     validate_import_targets_cover_payload(&payload, &request)?;
     let payload_digest = hash_json_value(&payload)?;
+    let request_digest = hash_serializable_value(&request)?;
+    // Normal imports use the ordinary product effect gate. A restarted,
+    // non-terminal import can reach only this same command and only after its
+    // exact durable journal binding has minted an unforgeable recovery token.
+    let recovery_journal = required_governed_data_import_journal(state.inner())?;
+    let recovery_receipt = recovery_journal.recovery_requirement().map_err(|error| {
+        AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+    })?;
+    let recovery_admission = if state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .is_ok()
+    {
+        None
+    } else {
+        let receipt = recovery_receipt.as_ref().ok_or_else(|| {
+            AppError::db_with_hint(
+                "persistence effects are blocked and no exact data-import recovery is pending",
+                "read_only_degraded",
+            )
+        })?;
+        Some(
+            state
+                .persistence_coordinator
+                .mint_governed_data_import_recovery_admission(
+                    &recovery_journal,
+                    receipt,
+                    &request.operation_id,
+                    &payload_digest,
+                    &request_digest,
+                )
+                .map_err(|error| {
+                    AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+                })?,
+        )
+    };
     let confirmation_arguments = serde_json::json!({
         "payload_digest": payload_digest,
         "governed_request": request,
@@ -959,16 +1427,480 @@ pub async fn import_all_data(
             requested_target: None,
             affected_count: None,
             reference: confirmation_evidence.as_ref(),
-            preflight_scope_arguments: None,
             arguments: &confirmation_arguments,
             arguments_summary:
                 "覆盖导入已校验的 OpenLife 备份；参数已绑定到 payload digest 和 governed request。",
+            governed_data_import_recovery: recovery_admission.as_ref(),
         },
         &window,
         state.inner(),
     )
     .await?;
     import_all_data_governed_operation(payload, state.inner(), &request).await
+}
+
+async fn observe_governed_import_owner_resolutions(
+    state: &Arc<AppState>,
+    receipt: &GovernedDataImportReceipt,
+) -> Result<Vec<GovernedDataImportOwnerObservation>, AppError> {
+    let mut resolutions = Vec::with_capacity(receipt.owners.len());
+    for owner in &receipt.owners {
+        let observed_at = chrono::Utc::now();
+        let (
+            observed_digest,
+            state_restore_request_digest,
+            state_restore_payload_digest,
+            state_restore_before_canonical_digest,
+            state_restore_after_canonical_digest,
+            state_restore_outbox_event_id,
+            state_projection_delivery_state,
+        ) = match owner.import_target.as_str() {
+            "life_model" => (
+                current_lifemodel_owner_digest(state).await?,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            "messages" => (
+                state
+                    .memory_store
+                    .lock()
+                    .await
+                    .export_canonical_message_archive()
+                    .map_err(AppError::from)?
+                    .digest,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            "vectors" => (
+                state
+                    .vector_store
+                    .lock()
+                    .await
+                    .export_portable_archive()
+                    .map_err(AppError::from)?
+                    .digest,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            "state_store" => {
+                let store = state.state_store.as_ref().ok_or_else(|| {
+                    AppError::db_with_hint(
+                        "StateStore unavailable while resolving governed import",
+                        "canonical_state_unknown",
+                    )
+                })?;
+                let observed = store
+                    .export_portable_daily_tasks(receipt.created_at)
+                    .map_err(|error| {
+                        AppError::db_with_hint(error.to_string(), "canonical_state_unknown")
+                    })?
+                    .canonical_digest;
+                let state_receipt = store
+                    .portable_daily_task_restore_receipt(&receipt.operation_id, true)
+                    .map_err(|error| {
+                        AppError::db_with_hint(error.to_string(), "canonical_state_unknown")
+                    })?;
+                match state_receipt {
+                    Some(state_receipt) => {
+                        if state_receipt.request_digest != receipt.request_digest
+                            || state_receipt.payload_digest != owner.target_digest
+                            || state_receipt.before_canonical_digest != owner.before_digest
+                            || state_receipt.committed_at != receipt.created_at
+                        {
+                            return Err(AppError::db_with_hint(
+                                    "StateStore restore evidence is not bound to the exact governed import",
+                                    "canonical_state_unknown",
+                                ));
+                        }
+                        let delivery_state = store
+                            .projection_delivery_state_for_event(&state_receipt.outbox_event_id)
+                            .map_err(|error| {
+                                AppError::db_with_hint(error.to_string(), "canonical_state_unknown")
+                            })?;
+                        (
+                            observed,
+                            Some(state_receipt.request_digest),
+                            Some(state_receipt.payload_digest),
+                            Some(state_receipt.before_canonical_digest),
+                            Some(state_receipt.after_canonical_digest),
+                            Some(state_receipt.outbox_event_id),
+                            Some(delivery_state),
+                        )
+                    }
+                    // A crash before the StateStore lane legitimately has
+                    // no restore event. The before/current digest is still
+                    // durable owner evidence; the journal core decides
+                    // whether the absence is valid for this resolution.
+                    None => (observed, None, None, None, None, None, None),
+                }
+            }
+            unsupported => {
+                return Err(AppError::db_with_hint(
+                    format!("unsupported governed import owner target: {unsupported}"),
+                    "canonical_state_unknown",
+                ));
+            }
+        };
+        resolutions.push(GovernedDataImportOwnerObservation {
+            owner: owner.owner.clone(),
+            observed_digest,
+            observed_at,
+            state_restore_request_digest,
+            state_restore_payload_digest,
+            state_restore_before_canonical_digest,
+            state_restore_after_canonical_digest,
+            state_restore_outbox_event_id,
+            state_projection_delivery_state,
+        });
+    }
+    Ok(resolutions)
+}
+
+fn governed_import_resolution_confirmation_facts(
+    resolutions: &[GovernedDataImportOwnerResolution],
+) -> Result<(String, String), AppError> {
+    let mut before = 0usize;
+    let mut target = 0usize;
+    let mut other = 0usize;
+    let mut owner_classifications = Vec::with_capacity(resolutions.len());
+    let facts = resolutions
+        .iter()
+        .map(|resolution| {
+            match resolution.classification {
+                GovernedDataImportResolutionClassification::Before => before += 1,
+                GovernedDataImportResolutionClassification::Target => target += 1,
+                GovernedDataImportResolutionClassification::Other => other += 1,
+            }
+            let owner_label = match resolution.owner.as_str() {
+                "LifeModelFileStore" => "LifeModel",
+                "MemoryStore" => "Memory",
+                "VectorStore" => "Vector",
+                "StateStore" => "StateStore",
+                _ => "UnknownOwner",
+            };
+            let classification_label = match resolution.classification {
+                GovernedDataImportResolutionClassification::Before => "before",
+                GovernedDataImportResolutionClassification::Target => "target",
+                GovernedDataImportResolutionClassification::Other => "other",
+            };
+            owner_classifications.push(format!(
+                "{owner_label}={classification_label}"
+            ));
+            serde_json::json!({
+                "owner": resolution.owner,
+                "observed_digest": resolution.observed_digest,
+                "classification": resolution.classification,
+                "state_restore_request_digest": resolution.state_restore_request_digest,
+                "state_restore_payload_digest": resolution.state_restore_payload_digest,
+                "state_restore_before_canonical_digest": resolution.state_restore_before_canonical_digest,
+                "state_restore_after_canonical_digest": resolution.state_restore_after_canonical_digest,
+                "state_restore_outbox_event_id": resolution.state_restore_outbox_event_id,
+                "state_projection_delivery_state": resolution.state_projection_delivery_state,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        hash_json_value(&serde_json::Value::Array(facts))?,
+        format!(
+            "owner 分类：{}；合计 before={before}, target={target}, other={other}",
+            owner_classifications.join(", ")
+        ),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernedDataImportResolutionCounts {
+    pub before: usize,
+    pub target: usize,
+    pub other: usize,
+}
+
+fn governed_import_resolution_counts(
+    receipt: &GovernedDataImportReceipt,
+) -> GovernedDataImportResolutionCounts {
+    let mut counts = GovernedDataImportResolutionCounts::default();
+    for evidence in &receipt.resolution_evidence {
+        match evidence.resolution.classification {
+            GovernedDataImportResolutionClassification::Before => counts.before += 1,
+            GovernedDataImportResolutionClassification::Target => counts.target += 1,
+            GovernedDataImportResolutionClassification::Other => counts.other += 1,
+        }
+    }
+    counts
+}
+
+fn governed_import_runtime_recovery_isolation_active(state: &Arc<AppState>) -> bool {
+    state
+        .persistence_coordinator
+        .snapshot()
+        .global_reason_codes
+        .iter()
+        .any(|reason| reason == GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON)
+}
+
+fn governed_import_abandonment_result(
+    receipt: &GovernedDataImportReceipt,
+    restart_required: bool,
+) -> serde_json::Value {
+    let counts = governed_import_resolution_counts(receipt);
+    serde_json::json!({
+        "success": true,
+        "status": if restart_required {
+            "abandoned_preserving_current_restart_required"
+        } else {
+            "abandoned_preserving_current"
+        },
+        "operation_id": receipt.operation_id,
+        "stage": receipt.stage.as_str(),
+        "recovery_terminalized": true,
+        "original_import_completed": false,
+        "rollback_completed": false,
+        "preserved_current_canonical_data": true,
+        "abandonment_mutated_canonical_owners": false,
+        "original_import_effect_state": "preserved_current_observed_per_owner",
+        "owner_resolution_counts": counts,
+        "resolution_evidence_count": receipt.resolution_evidence.len(),
+        "restart_required": restart_required,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernedDataImportStatusView {
+    pub status: String,
+    pub operation_id: Option<String>,
+    pub stage: Option<String>,
+    pub terminal: bool,
+    pub terminal_at: Option<String>,
+    pub recovery_required: bool,
+    pub runtime_recovery_isolation_active: bool,
+    pub restart_required: bool,
+    pub original_import_completed: bool,
+    pub rollback_completed: bool,
+    pub preserved_current: bool,
+    pub owner_count: usize,
+    pub resolution_evidence_count: usize,
+    pub owner_resolution_counts: GovernedDataImportResolutionCounts,
+    pub observed_at: String,
+}
+
+fn governed_data_import_status_view(
+    receipt: Option<&GovernedDataImportReceipt>,
+    isolation_active: bool,
+    observed_at: String,
+) -> GovernedDataImportStatusView {
+    let Some(receipt) = receipt else {
+        return GovernedDataImportStatusView {
+            status: "idle".into(),
+            operation_id: None,
+            stage: None,
+            terminal: false,
+            terminal_at: None,
+            recovery_required: false,
+            runtime_recovery_isolation_active: isolation_active,
+            restart_required: false,
+            original_import_completed: false,
+            rollback_completed: false,
+            preserved_current: false,
+            owner_count: 0,
+            resolution_evidence_count: 0,
+            owner_resolution_counts: GovernedDataImportResolutionCounts::default(),
+            observed_at,
+        };
+    };
+    let terminal = receipt.stage.is_terminal();
+    GovernedDataImportStatusView {
+        status: receipt.stage.as_str().into(),
+        operation_id: Some(receipt.operation_id.clone()),
+        stage: Some(receipt.stage.as_str().into()),
+        terminal,
+        terminal_at: receipt
+            .terminal_at
+            .as_ref()
+            .map(chrono::DateTime::to_rfc3339),
+        recovery_required: !terminal,
+        runtime_recovery_isolation_active: isolation_active,
+        restart_required: terminal && isolation_active,
+        original_import_completed: receipt.stage == GovernedDataImportStage::Completed,
+        rollback_completed: receipt.stage == GovernedDataImportStage::Compensated,
+        preserved_current: receipt.stage == GovernedDataImportStage::AbandonedPreservingCurrent,
+        owner_count: receipt.owners.len(),
+        resolution_evidence_count: receipt.resolution_evidence.len(),
+        owner_resolution_counts: governed_import_resolution_counts(receipt),
+        observed_at,
+    }
+}
+
+/// Bounded, metadata-only durable status. This makes an abandonment visible
+/// after an IPC response loss and clean restart without recreating a ledger or
+/// exposing import bodies/digests to the webview.
+#[tauri::command]
+pub async fn get_governed_data_import_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<GovernedDataImportStatusView, AppError> {
+    let journal = required_governed_data_import_journal(state.inner())?;
+    let receipt = journal.latest_receipt().map_err(|error| {
+        AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+    })?;
+    let isolation_active = governed_import_runtime_recovery_isolation_active(state.inner());
+    Ok(governed_data_import_status_view(
+        receipt.as_ref(),
+        isolation_active,
+        chrono::Utc::now().to_rfc3339(),
+    ))
+}
+
+/// Payload-independent recovery exit. It changes no canonical owner and does
+/// not claim that the interrupted import completed or rolled back. The only
+/// durable write is metadata-only resolution evidence plus the journal's
+/// explicit `abandoned_preserving_current` terminal state.
+#[tauri::command]
+pub async fn abandon_governed_data_import_recovery(
+    operation_id: String,
+    confirmation_evidence: Option<DangerActionConfirmationReference>,
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, AppError> {
+    let journal = required_governed_data_import_journal(state.inner())?;
+    if let Some(terminal) = journal.terminal_receipt(&operation_id).map_err(|error| {
+        AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+    })? {
+        if terminal.stage == GovernedDataImportStage::AbandonedPreservingCurrent {
+            let restart_required = governed_import_runtime_recovery_isolation_active(state.inner());
+            return Ok(governed_import_abandonment_result(
+                &terminal,
+                restart_required,
+            ));
+        }
+        return Err(AppError::permission(
+            "governed data-import operation is already terminal and cannot be abandoned",
+        ));
+    }
+    let confirmed_receipt = journal
+        .recovery_requirement()
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+        })?
+        .ok_or_else(|| {
+            AppError::permission("no governed data-import recovery is pending for abandonment")
+        })?;
+    if confirmed_receipt.operation_id != operation_id {
+        return Err(AppError::permission(
+            "governed data-import abandonment operation does not match durable recovery truth",
+        ));
+    }
+    let recovery_admission = state
+        .persistence_coordinator
+        .mint_governed_data_import_recovery_admission(
+            &journal,
+            &confirmed_receipt,
+            &confirmed_receipt.operation_id,
+            &confirmed_receipt.payload_digest,
+            &confirmed_receipt.request_digest,
+        )
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+        })?;
+    let confirmed_observations =
+        observe_governed_import_owner_resolutions(state.inner(), &confirmed_receipt).await?;
+    let confirmed_resolutions = journal
+        .preview_abandonment_resolutions(&confirmed_receipt.operation_id, &confirmed_observations)
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+        })?;
+    let (confirmed_resolution_digest, confirmed_resolution_summary) =
+        governed_import_resolution_confirmation_facts(&confirmed_resolutions)?;
+    let target_ids = vec![operation_id.clone()];
+    let confirmation_arguments = serde_json::json!({
+        "operation_id": operation_id.clone(),
+        "payload_digest": confirmed_receipt.payload_digest.clone(),
+        "request_digest": confirmed_receipt.request_digest.clone(),
+        "observed_stage": confirmed_receipt.stage.as_str(),
+        "disposition": "abandoned_preserving_current",
+        "owner_resolution_facts_digest": confirmed_resolution_digest,
+        "owner_resolution_summary": confirmed_resolution_summary,
+    });
+    let arguments_summary = format!(
+        "保留当前 canonical 数据并终止中断的导入；{}；观测证据已绑定到本次系统确认，完成后必须重启。",
+        confirmed_resolution_summary
+    );
+    require_danger_action_confirmation(
+        DangerActionConfirmationRequest {
+            action_type: "data_import_abandon_recovery",
+            target_ids_for_new_challenge: &target_ids,
+            requested_target: Some(target_ids[0].as_str()),
+            affected_count: Some(confirmed_receipt.owners.len()),
+            reference: confirmation_evidence.as_ref(),
+            arguments: &confirmation_arguments,
+            arguments_summary: &arguments_summary,
+            governed_data_import_recovery: Some(&recovery_admission),
+        },
+        &window,
+        state.inner(),
+    )
+    .await?;
+
+    let _import_guard = GOVERNED_DATA_IMPORT_LOCK.lock().await;
+    let _resolution_fence = state
+        .persistence_coordinator
+        .acquire_governed_data_import_resolution_fence(&journal, &confirmed_receipt)
+        .await
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+        })?;
+    let current = journal
+        .recovery_requirement()
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+        })?
+        .ok_or_else(|| {
+            AppError::permission(
+                "governed data-import recovery changed after confirmation; run a fresh preflight",
+            )
+        })?;
+    if current != confirmed_receipt {
+        return Err(AppError::permission(
+            "governed data-import recovery changed after confirmation; run a fresh preflight",
+        ));
+    }
+    let observations = observe_governed_import_owner_resolutions(state.inner(), &current).await?;
+    let current_resolutions = journal
+        .preview_abandonment_resolutions(&current.operation_id, &observations)
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+        })?;
+    let (current_resolution_digest, _) =
+        governed_import_resolution_confirmation_facts(&current_resolutions)?;
+    if current_resolution_digest != confirmed_resolution_digest {
+        return Err(AppError::permission(
+            "canonical owner facts changed after confirmation; run a fresh abandonment preflight",
+        ));
+    }
+    let reason_digest = metadata_digest("explicit native-confirmed preserve-current abandonment");
+    let terminal = journal
+        .abandon_preserving_current(&current.operation_id, &observations, &reason_digest)
+        .map_err(|error| {
+            mark_governed_import_recovery_required(state.inner());
+            AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+        })?;
+    // The coordinator is intentionally monotonic for the life of this
+    // process. A clean bootstrap must re-read the now-terminal journal before
+    // provider, tool, or canonical effects resume.
+    mark_governed_import_recovery_required(state.inner());
+    Ok(governed_import_abandonment_result(&terminal, true))
 }
 
 #[cfg(test)]
@@ -998,190 +1930,1680 @@ async fn import_all_data_with_state_gated(
     import_all_data_governed_operation(payload, state, request).await
 }
 
+fn governed_import_lifemodel_owner_digest(model: &LifeModel) -> Result<String, AppError> {
+    let mut owner_view = model.clone();
+    owner_view.goals.daily.clear();
+    owner_view.state.alerts.clear();
+    life_model_write_gateway::hash_life_model(&owner_view).map_err(AppError::from)
+}
+
+fn governed_import_owner<'a>(
+    receipt: &'a GovernedDataImportReceipt,
+    import_target: &str,
+) -> Result<&'a GovernedDataImportOwnerReceipt, AppError> {
+    receipt
+        .owners
+        .iter()
+        .find(|owner| owner.import_target == import_target)
+        .ok_or_else(|| {
+            AppError::internal(format!(
+                "governed data-import journal is missing owner for {import_target}"
+            ))
+        })
+}
+
+fn owner_applied_status(owner: &GovernedDataImportOwnerReceipt) -> GovernedDataImportOwnerStatus {
+    if owner.before_digest == owner.target_digest {
+        GovernedDataImportOwnerStatus::Skipped
+    } else {
+        GovernedDataImportOwnerStatus::Applied
+    }
+}
+
+fn state_restore_owner_applied_status(
+    receipt: &openlife_core::state_store::PortableDailyTaskRestoreReceipt,
+) -> GovernedDataImportOwnerStatus {
+    if receipt.before_canonical_digest == receipt.after_canonical_digest {
+        GovernedDataImportOwnerStatus::Skipped
+    } else {
+        GovernedDataImportOwnerStatus::Applied
+    }
+}
+
+fn mark_governed_import_recovery_required(state: &Arc<AppState>) {
+    state
+        .persistence_coordinator
+        .degrade_globally(GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON);
+}
+
+fn transition_governed_import(
+    journal: &GovernedDataImportJournal,
+    state: &Arc<AppState>,
+    operation_id: &str,
+    stage: GovernedDataImportStage,
+    updates: &[GovernedDataImportOwnerUpdate],
+    evidence: Option<&str>,
+) -> Result<GovernedDataImportReceipt, AppError> {
+    journal
+        .transition(operation_id, stage, updates, evidence)
+        .map_err(|error| {
+            mark_governed_import_recovery_required(state);
+            AppError::db_with_hint(
+                format!("governed data-import journal transition failed: {error}"),
+                "data_import_recovery_required",
+            )
+        })
+}
+
+async fn current_lifemodel_owner_digest(state: &Arc<AppState>) -> Result<String, AppError> {
+    let current = state
+        .life_model_manager
+        .lock()
+        .await
+        .load()
+        .map_err(AppError::from)?;
+    governed_import_lifemodel_owner_digest(&current)
+}
+
+async fn apply_imported_lifemodel(
+    state: &Arc<AppState>,
+    model: &LifeModel,
+    expected_physical_hash: &str,
+    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
+) -> Result<(), AppError> {
+    let caller = LifeModelMaterializerCallerContext::new(
+        "data_import_governed_operation",
+        LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+        LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
+    );
+    if let Some(recovery) = recovery {
+        life_model_write_gateway::restore_life_model_with_gateway_for_import_recovery(
+            state,
+            model,
+            caller,
+            Some(expected_physical_hash),
+            recovery,
+        )
+        .await
+    } else {
+        life_model_write_gateway::restore_life_model_with_gateway(
+            state,
+            model,
+            caller,
+            Some(expected_physical_hash),
+        )
+        .await
+    }
+}
+
+async fn replace_import_owner_memory(
+    state: &Arc<AppState>,
+    messages: Option<&[openlife_core::memory::ExportedMessage]>,
+    vectors: Option<&[openlife_core::vectors::ExportedVectorChunk]>,
+    expected: memory_gateway::ImportedMemoryExpectedDigests,
+    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
+) -> Result<memory_gateway::ImportedMemoryReplaceReport, AppError> {
+    if let Some(recovery) = recovery {
+        memory_gateway::replace_imported_memory_with_state_guarded_for_import_recovery(
+            state, messages, vectors, expected, recovery,
+        )
+        .await
+    } else {
+        memory_gateway::replace_imported_memory_with_state_guarded(
+            state, messages, vectors, expected,
+        )
+        .await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GovernedImportFault {
+    None,
+    #[cfg(test)]
+    AfterSnapshotBeforeJournalPrepare,
+    #[cfg(test)]
+    AfterLifeModelCommitBeforeJournal,
+    #[cfg(test)]
+    AfterMemoryCommitBeforeJournal,
+    #[cfg(test)]
+    AfterMemoryCommitWithLateDrift,
+    #[cfg(test)]
+    AfterVectorCommitBeforeJournal,
+    #[cfg(test)]
+    AfterStateCommitBeforeJournal,
+    #[cfg(test)]
+    BeforeTerminalVerificationWithMemoryDrift,
+}
+
 async fn import_all_data_governed_operation(
     payload: serde_json::Value,
     state: &Arc<AppState>,
     request: &GovernedDataImportRequest,
 ) -> Result<serde_json::Value, AppError> {
+    import_all_data_governed_operation_with_fault(
+        payload,
+        state,
+        request,
+        GovernedImportFault::None,
+    )
+    .await
+}
+
+async fn import_all_data_governed_operation_with_fault(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+    request: &GovernedDataImportRequest,
+    fault: GovernedImportFault,
+) -> Result<serde_json::Value, AppError> {
+    // Production always passes `None`; tests use the closed variants below to
+    // prove recovery at owner-commit / journal-transition crash boundaries.
+    let _ = fault;
     validate_import_payload_shape(&payload)?;
     validate_import_targets_cover_payload(&payload, request)?;
-    // Import snapshots, canonical replacement, and compensation form one
-    // process-local destructive operation. Serializing the whole sequence
-    // prevents two confirmed imports from interleaving their rollback truth.
     let _import_guard = GOVERNED_DATA_IMPORT_LOCK.lock().await;
     let import_payload_hash = hash_json_value(&payload)?;
-    let life_model: LifeModel = serde_json::from_value(
+    let request_digest = hash_serializable_value(request)?;
+    let backup_version = payload
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .expect("validated backup version");
+    let mut imported_model: LifeModel = serde_json::from_value(
         payload
             .get("life_model")
             .cloned()
             .unwrap_or(serde_json::Value::Null),
     )
-    .map_err(|e| AppError::external(format!("解析 life_model 失败: {}", e)))?;
-    // Missing means "not targeted", while an explicit empty array means
-    // "replace this target with an empty set". Conflating the two silently
-    // erased untargeted stores in the former import route.
+    .map_err(|error| AppError::external(format!("解析 life_model 失败: {error}")))?;
+    let state_store_archive: Option<openlife_core::state_store::PortableDailyTaskArchiveV1> =
+        payload
+            .get("state_store")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                AppError::external(format!("解析 state_store portable archive 失败: {error}"))
+            })?;
+    match backup_version {
+        "1.0" if !imported_model.goals.daily.is_empty() => {
+            return Err(AppError::external(
+                "OpenLife v1 backup contains daily tasks without canonical expiry metadata; the daily-task category is quarantined instead of inventing a TTL. Re-export with OpenLife backup v2 before restoring this category.",
+            ));
+        }
+        "2.0"
+            if !imported_model.goals.daily.is_empty()
+                || !imported_model.state.alerts.is_empty() =>
+        {
+            return Err(AppError::permission(
+                "OpenLife v2 backup duplicates StateStore-owned derived fields inside life_model",
+            ));
+        }
+        _ => {}
+    }
     let messages: Option<Vec<openlife_core::memory::ExportedMessage>> = payload
         .get("messages")
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|e| AppError::external(format!("解析 messages 失败: {}", e)))?;
+        .map_err(|error| AppError::external(format!("解析 messages 失败: {error}")))?;
     let vectors: Option<Vec<openlife_core::vectors::ExportedVectorChunk>> = payload
         .get("vectors")
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|e| AppError::external(format!("解析 vectors 失败: {}", e)))?;
-    let messages_targeted = messages.is_some();
-    let vectors_targeted = vectors.is_some();
-    let previous_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
-    let previous_model_hash =
+        .map_err(|error| AppError::external(format!("解析 vectors 失败: {error}")))?;
+
+    let previous_model = state
+        .life_model_manager
+        .lock()
+        .await
+        .load()
+        .map_err(AppError::from)?;
+    imported_model.goals.daily = previous_model.goals.daily.clone();
+    imported_model.state.alerts = previous_model.state.alerts.clone();
+    let previous_model_physical_hash =
         life_model_write_gateway::hash_life_model(&previous_model).map_err(AppError::from)?;
-    let imported_model_hash =
-        life_model_write_gateway::hash_life_model(&life_model).map_err(AppError::from)?;
-    let pre_import_snapshot_version = {
-        let vm = state.version_manager.lock().await;
+    let imported_model_physical_hash =
+        life_model_write_gateway::hash_life_model(&imported_model).map_err(AppError::from)?;
+    let current_model_owner_digest = governed_import_lifemodel_owner_digest(&previous_model)?;
+    let target_model_owner_digest = governed_import_lifemodel_owner_digest(&imported_model)?;
+    let previous_messages = if messages.is_some() {
         Some(
-            vm.ensure_projection_snapshot(
-                &previous_model,
-                &format!("pre-change:import:{import_payload_hash}:{previous_model_hash}"),
-                "auto:pre-import",
-                "导入覆盖之前自动备份",
+            state
+                .memory_store
+                .lock()
+                .await
+                .export_canonical_message_archive()
+                .map_err(AppError::from)?,
+        )
+    } else {
+        None
+    };
+    let previous_vectors = if vectors.is_some() {
+        Some(
+            state
+                .vector_store
+                .lock()
+                .await
+                .export_portable_archive()
+                .map_err(AppError::from)?,
+        )
+    } else {
+        None
+    };
+    let state_store = if state_store_archive.is_some() {
+        Some(state.state_store.as_ref().ok_or_else(|| {
+            AppError::db_with_hint(
+                "StateStore is unavailable; governed v2 restore cannot continue",
+                "canonical_state_unknown",
             )
-            .map_err(AppError::from)?
-            .version,
+        })?)
+    } else {
+        None
+    };
+    let previous_state_archive = match state_store {
+        Some(store) => Some(
+            store
+                .export_portable_daily_tasks(chrono::Utc::now())
+                .map_err(|error| {
+                    AppError::db_with_hint(error.to_string(), "canonical_state_unknown")
+                })?,
+        ),
+        None => None,
+    };
+
+    let journal = required_governed_data_import_journal(state)?;
+    let existing = journal.receipt(&request.operation_id).map_err(|error| {
+        AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+    })?;
+    if existing.is_none() {
+        state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    }
+    // The snapshot must durably precede the saga receipt. Therefore any
+    // existing receipt proves that its pre-change snapshot completed before a
+    // canonical owner could have been touched. A crash after the idempotent
+    // snapshot and before `prepare` leaves no saga and is safe to retry.
+    let pre_import_snapshot_version = if existing.is_some() {
+        None
+    } else {
+        Some(
+            state
+                .version_manager
+                .lock()
+                .await
+                .ensure_projection_snapshot(
+                    &previous_model,
+                    &format!(
+                        "pre-change:import:{import_payload_hash}:{previous_model_physical_hash}"
+                    ),
+                    "auto:pre-import",
+                    "导入覆盖之前自动备份",
+                )
+                .map_err(AppError::from)?
+                .version,
         )
     };
-    let previous_messages = if messages_targeted {
-        let store = state.memory_store.lock().await;
-        Some(store.export_all_messages().map_err(AppError::from)?)
-    } else {
-        None
+    #[cfg(test)]
+    if fault == GovernedImportFault::AfterSnapshotBeforeJournalPrepare {
+        return Err(AppError::internal(
+            "injected crash after pre-import snapshot before journal prepare",
+        ));
+    }
+    let before_digest = |target: &str, observed: &str| -> Result<String, AppError> {
+        match existing.as_ref() {
+            Some(receipt) => Ok(governed_import_owner(receipt, target)?
+                .before_digest
+                .clone()),
+            None => Ok(observed.to_string()),
+        }
     };
-    let previous_vectors = if vectors_targeted {
-        let store = state.vector_store.lock().await;
-        Some(store.export_portable_chunks().map_err(AppError::from)?)
-    } else {
+    let mut owners = vec![GovernedDataImportOwnerPlan {
+        owner: "LifeModelFileStore".into(),
+        import_target: "life_model".into(),
+        before_digest: before_digest("life_model", &current_model_owner_digest)?,
+        target_digest: target_model_owner_digest.clone(),
+        item_count: 1,
+    }];
+    if let (Some(messages), Some(previous)) = (messages.as_ref(), previous_messages.as_ref()) {
+        owners.push(GovernedDataImportOwnerPlan {
+            owner: "MemoryStore".into(),
+            import_target: "messages".into(),
+            before_digest: before_digest("messages", &previous.digest)?,
+            target_digest: openlife_core::memory::canonical_message_archive_digest(messages),
+            item_count: u64::try_from(messages.len())
+                .map_err(|_| AppError::internal("message import count exceeds u64"))?,
+        });
+    }
+    if let (Some(vectors), Some(previous)) = (vectors.as_ref(), previous_vectors.as_ref()) {
+        owners.push(GovernedDataImportOwnerPlan {
+            owner: "VectorStore".into(),
+            import_target: "vectors".into(),
+            before_digest: before_digest("vectors", &previous.digest)?,
+            target_digest: openlife_core::vectors::portable_vector_archive_digest(vectors),
+            item_count: u64::try_from(vectors.len())
+                .map_err(|_| AppError::internal("vector import count exceeds u64"))?,
+        });
+    }
+    if let (Some(archive), Some(previous)) = (
+        state_store_archive.as_ref(),
+        previous_state_archive.as_ref(),
+    ) {
+        owners.push(GovernedDataImportOwnerPlan {
+            owner: "StateStore".into(),
+            import_target: "state_store".into(),
+            before_digest: before_digest("state_store", &previous.canonical_digest)?,
+            // StateStore creates fresh canonical asset ids, so its pre-write
+            // target identity is the validated portable payload. Commit truth
+            // is proven later by the owner receipt and its after digest.
+            target_digest: archive.payload_digest.clone(),
+            item_count: u64::try_from(archive.daily_tasks.len())
+                .map_err(|_| AppError::internal("StateStore import count exceeds u64"))?,
+        });
+    }
+    let prepared = journal
+        .prepare(GovernedDataImportPrepare {
+            operation_id: request.operation_id.clone(),
+            payload_digest: import_payload_hash.clone(),
+            request_digest: request_digest.clone(),
+            owners,
+        })
+        .map_err(|error| {
+            AppError::db_with_hint(error.to_string(), "data_import_journal_unavailable")
+        })?;
+    let mut saga = prepared.receipt;
+    if prepared.replayed && saga.stage == GovernedDataImportStage::Compensated {
+        return Err(AppError::permission(
+            "this governed import operation was compensated; retry requires a new operationId",
+        ));
+    }
+    if prepared.replayed && saga.stage == GovernedDataImportStage::AbandonedPreservingCurrent {
+        return Err(AppError::permission(
+            "this governed import operation was abandoned while preserving current data; a new import requires a new operationId",
+        ));
+    }
+    let recovery_admission = if state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .is_ok()
+    {
         None
+    } else {
+        Some(
+            state
+                .persistence_coordinator
+                .mint_governed_data_import_recovery_admission(
+                    &journal,
+                    &saga,
+                    &request.operation_id,
+                    &import_payload_hash,
+                    &request_digest,
+                )
+                .map_err(|error| {
+                    AppError::db_with_hint(error.to_string(), "data_import_recovery_required")
+                })?,
+        )
     };
-    let durable_lifemodel_write = serde_json::to_value(&previous_model).map_err(AppError::from)?
-        != serde_json::to_value(&life_model).map_err(AppError::from)?;
+    let recovery_binding = recovery_admission.as_ref().map(|token| {
+        (
+            token,
+            request.operation_id.as_str(),
+            import_payload_hash.as_str(),
+            request_digest.as_str(),
+        )
+    });
 
-    let memory_report = match apply_import_payload(
-        state.clone(),
-        life_model,
-        messages,
-        vectors,
-        Some(previous_model_hash.clone()),
+    let state_restore_command = match (state_store, state_store_archive.as_ref()) {
+        (Some(store), Some(archive)) => {
+            let owner = governed_import_owner(&saga, "state_store")?;
+            let command = openlife_core::state_store::RestorePortableDailyTasksCommand {
+                operation_id: request.operation_id.clone(),
+                request_digest: request_digest.clone(),
+                expected_before_digest: owner.before_digest.clone(),
+                archive: archive.clone(),
+                // This durable timestamp is stable across restart and is also
+                // bound by the StateStore owner receipt.
+                restored_at: saga.created_at,
+            };
+            if let Err(error) = store.preflight_portable_daily_task_restore(&command) {
+                if !prepared.replayed {
+                    let updates = saga
+                        .owners
+                        .iter()
+                        .map(|owner| GovernedDataImportOwnerUpdate {
+                            owner: owner.owner.clone(),
+                            status: GovernedDataImportOwnerStatus::Skipped,
+                        })
+                        .collect::<Vec<_>>();
+                    let _ = transition_governed_import(
+                        &journal,
+                        state,
+                        &request.operation_id,
+                        GovernedDataImportStage::Compensated,
+                        &updates,
+                        Some(&metadata_digest(
+                            "state restore preflight rejected before effects",
+                        )),
+                    );
+                } else {
+                    mark_governed_import_recovery_required(state);
+                }
+                return Err(AppError::external(format!(
+                    "StateStore restore payload preflight failed before product write: {error}"
+                )));
+            }
+            Some(command)
+        }
+        _ => None,
+    };
+
+    if saga.stage == GovernedDataImportStage::Completed {
+        let durable_lifemodel_write = {
+            let owner = governed_import_owner(&saga, "life_model")?;
+            owner.before_digest != owner.target_digest
+        };
+        return governed_import_result(
+            state,
+            request,
+            &import_payload_hash,
+            &previous_model_physical_hash,
+            &imported_model_physical_hash,
+            messages.as_deref(),
+            vectors.as_deref(),
+            None,
+            None,
+            state_store,
+            true,
+            pre_import_snapshot_version,
+            recovery_admission.is_some(),
+            durable_lifemodel_write,
+            None,
+        )
+        .await;
+    }
+    if saga.stage == GovernedDataImportStage::CompensationUnknown {
+        return abandon_governed_import_after_exact_observation(
+            state,
+            &journal,
+            &saga,
+            "resumed import already had an unknown owner state",
+        )
+        .await;
+    }
+
+    // Prepared -> LifeModelApplied. Recovery observes before/target first, so a
+    // crash after the owner commit but before the journal transition is a
+    // replay, not a duplicate write.
+    if saga.stage == GovernedDataImportStage::Prepared {
+        let owner = governed_import_owner(&saga, "life_model")?.clone();
+        let observed = current_lifemodel_owner_digest(state).await?;
+        if observed == owner.before_digest && observed != owner.target_digest {
+            let current_physical = current_lifemodel_file_hash(state).await?;
+            let apply = apply_imported_lifemodel(
+                state,
+                &imported_model,
+                &current_physical,
+                recovery_binding,
+            )
+            .await;
+            let after = current_lifemodel_owner_digest(state).await?;
+            if after != owner.target_digest {
+                let import_error = apply
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "LifeModel owner digest mismatch after restore".into());
+                if after != owner.before_digest {
+                    return mark_governed_import_owner_unknown(
+                        state,
+                        &journal,
+                        &saga,
+                        &owner.owner,
+                        "LifeModel changed after restore before its journal transition",
+                    )
+                    .await;
+                }
+                return fail_or_compensate_governed_import(
+                    state,
+                    &journal,
+                    &saga,
+                    prepared.replayed,
+                    &previous_model,
+                    previous_messages.as_ref(),
+                    previous_vectors.as_ref(),
+                    &imported_model_physical_hash,
+                    import_error,
+                )
+                .await;
+            }
+        } else if observed != owner.target_digest {
+            return mark_governed_import_owner_unknown(
+                state,
+                &journal,
+                &saga,
+                &owner.owner,
+                "LifeModel owner is neither journal before nor target digest",
+            )
+            .await;
+        }
+        #[cfg(test)]
+        if fault == GovernedImportFault::AfterLifeModelCommitBeforeJournal {
+            return Err(AppError::internal(
+                "injected crash after LifeModel commit before journal transition",
+            ));
+        }
+        saga = transition_governed_import(
+            &journal,
+            state,
+            &request.operation_id,
+            GovernedDataImportStage::LifeModelApplied,
+            &[GovernedDataImportOwnerUpdate {
+                owner: owner.owner.clone(),
+                status: owner_applied_status(&owner),
+            }],
+            None,
+        )?;
+    }
+
+    let mut message_report = None;
+    if saga.stage == GovernedDataImportStage::LifeModelApplied {
+        let update = if let Some(messages) = messages.as_deref() {
+            let owner = governed_import_owner(&saga, "messages")?.clone();
+            let observed = state
+                .memory_store
+                .lock()
+                .await
+                .export_canonical_message_archive()
+                .map_err(AppError::from)?
+                .digest;
+            if observed == owner.before_digest && observed != owner.target_digest {
+                let result = replace_import_owner_memory(
+                    state,
+                    Some(messages),
+                    None,
+                    memory_gateway::ImportedMemoryExpectedDigests {
+                        messages: Some(owner.before_digest.clone()),
+                        vectors: None,
+                    },
+                    recovery_binding,
+                )
+                .await;
+                #[cfg(test)]
+                if fault == GovernedImportFault::AfterMemoryCommitWithLateDrift {
+                    tests::inject_governed_import_memory_drift(
+                        state,
+                        "governed-import-late-drift",
+                        "LATE_MEMORY_WRITE_MUST_NOT_BE_COMPENSATED_AWAY",
+                    )
+                    .await;
+                }
+                let after = state
+                    .memory_store
+                    .lock()
+                    .await
+                    .export_canonical_message_archive()
+                    .map_err(AppError::from)?
+                    .digest;
+                if after != owner.target_digest {
+                    let import_error = result
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "Memory owner digest mismatch after replace".into());
+                    if after != owner.before_digest {
+                        return mark_governed_import_owner_unknown(
+                            state,
+                            &journal,
+                            &saga,
+                            &owner.owner,
+                            "Memory changed after replace before its journal transition",
+                        )
+                        .await;
+                    }
+                    return fail_or_compensate_governed_import(
+                        state,
+                        &journal,
+                        &saga,
+                        prepared.replayed,
+                        &previous_model,
+                        previous_messages.as_ref(),
+                        previous_vectors.as_ref(),
+                        &imported_model_physical_hash,
+                        import_error,
+                    )
+                    .await;
+                }
+                message_report = result.ok();
+            } else if observed != owner.target_digest {
+                return mark_governed_import_owner_unknown(
+                    state,
+                    &journal,
+                    &saga,
+                    &owner.owner,
+                    "Memory owner is neither journal before nor target digest",
+                )
+                .await;
+            }
+            vec![GovernedDataImportOwnerUpdate {
+                owner: owner.owner.clone(),
+                status: owner_applied_status(&owner),
+            }]
+        } else {
+            Vec::new()
+        };
+        #[cfg(test)]
+        if fault == GovernedImportFault::AfterMemoryCommitBeforeJournal {
+            return Err(AppError::internal(
+                "injected crash after Memory commit before journal transition",
+            ));
+        }
+        saga = transition_governed_import(
+            &journal,
+            state,
+            &request.operation_id,
+            GovernedDataImportStage::MemoryApplied,
+            &update,
+            None,
+        )?;
+    }
+
+    let mut vector_report = None;
+    if saga.stage == GovernedDataImportStage::MemoryApplied {
+        let update = if let Some(vectors) = vectors.as_deref() {
+            let owner = governed_import_owner(&saga, "vectors")?.clone();
+            let observed = state
+                .vector_store
+                .lock()
+                .await
+                .export_portable_archive()
+                .map_err(AppError::from)?
+                .digest;
+            if observed == owner.before_digest && observed != owner.target_digest {
+                let result = replace_import_owner_memory(
+                    state,
+                    None,
+                    Some(vectors),
+                    memory_gateway::ImportedMemoryExpectedDigests {
+                        messages: None,
+                        vectors: Some(owner.before_digest.clone()),
+                    },
+                    recovery_binding,
+                )
+                .await;
+                let after = state
+                    .vector_store
+                    .lock()
+                    .await
+                    .export_portable_archive()
+                    .map_err(AppError::from)?
+                    .digest;
+                if after != owner.target_digest {
+                    let import_error = result
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "Vector owner digest mismatch after replace".into());
+                    if after != owner.before_digest {
+                        return mark_governed_import_owner_unknown(
+                            state,
+                            &journal,
+                            &saga,
+                            &owner.owner,
+                            "Vector changed after replace before its journal transition",
+                        )
+                        .await;
+                    }
+                    return fail_or_compensate_governed_import(
+                        state,
+                        &journal,
+                        &saga,
+                        prepared.replayed,
+                        &previous_model,
+                        previous_messages.as_ref(),
+                        previous_vectors.as_ref(),
+                        &imported_model_physical_hash,
+                        import_error,
+                    )
+                    .await;
+                }
+                vector_report = result.ok();
+            } else if observed != owner.target_digest {
+                return mark_governed_import_owner_unknown(
+                    state,
+                    &journal,
+                    &saga,
+                    &owner.owner,
+                    "Vector owner is neither journal before nor target digest",
+                )
+                .await;
+            }
+            vec![GovernedDataImportOwnerUpdate {
+                owner: owner.owner.clone(),
+                status: owner_applied_status(&owner),
+            }]
+        } else {
+            Vec::new()
+        };
+        #[cfg(test)]
+        if fault == GovernedImportFault::AfterVectorCommitBeforeJournal {
+            return Err(AppError::internal(
+                "injected crash after Vector commit before journal transition",
+            ));
+        }
+        saga = transition_governed_import(
+            &journal,
+            state,
+            &request.operation_id,
+            GovernedDataImportStage::VectorApplied,
+            &update,
+            None,
+        )?;
+    }
+
+    let mut state_restore_receipt = None;
+    if saga.stage == GovernedDataImportStage::VectorApplied {
+        let update = if let (Some(store), Some(command)) =
+            (state_store, state_restore_command.clone())
+        {
+            let owner = governed_import_owner(&saga, "state_store")?.clone();
+            let state_write_admission = state
+                .persistence_coordinator
+                .require_normal_or_governed_data_import_write(
+                    GovernedDataImportRecoveryOwner::StateStore,
+                    recovery_admission.as_ref(),
+                    &request.operation_id,
+                    &import_payload_hash,
+                    &request_digest,
+                )
+                .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+            let state_commit_permit = state
+                .persistence_coordinator
+                .acquire_canonical_commit_permit(&state_write_admission)
+                .await
+                .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+            let result = store.restore_portable_daily_tasks(command.clone());
+            drop(state_commit_permit);
+            let receipt = match result {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    if let Some(receipt) = store
+                        .portable_daily_task_restore_receipt(&request.operation_id, true)
+                        .map_err(AppError::from)?
+                    {
+                        receipt
+                    } else {
+                        let current = store
+                            .export_portable_daily_tasks(saga.created_at)
+                            .map_err(AppError::from)?;
+                        if current.canonical_digest == owner.before_digest && !prepared.replayed {
+                            return fail_or_compensate_governed_import(
+                                state,
+                                &journal,
+                                &saga,
+                                false,
+                                &previous_model,
+                                previous_messages.as_ref(),
+                                previous_vectors.as_ref(),
+                                &imported_model_physical_hash,
+                                error.to_string(),
+                            )
+                            .await;
+                        }
+                        return mark_governed_import_owner_unknown(
+                            state,
+                            &journal,
+                            &saga,
+                            &owner.owner,
+                            "StateStore commit result is unknown and no exact owner receipt exists",
+                        )
+                        .await;
+                    }
+                }
+            };
+            if receipt.request_digest != request_digest
+                || receipt.payload_digest != owner.target_digest
+                || receipt.before_canonical_digest != owner.before_digest
+                || receipt.committed_at != saga.created_at
+            {
+                return mark_governed_import_owner_unknown(
+                    state,
+                    &journal,
+                    &saga,
+                    &owner.owner,
+                    "StateStore restore receipt binding mismatch",
+                )
+                .await;
+            }
+            let current = store
+                .export_portable_daily_tasks(saga.created_at)
+                .map_err(AppError::from)?;
+            if current.canonical_digest != receipt.after_canonical_digest {
+                return mark_governed_import_owner_unknown(
+                    state,
+                    &journal,
+                    &saga,
+                    &owner.owner,
+                    "StateStore current digest does not match committed restore receipt",
+                )
+                .await;
+            }
+            let owner_status = state_restore_owner_applied_status(&receipt);
+            state_restore_receipt = Some(receipt);
+            vec![GovernedDataImportOwnerUpdate {
+                owner: owner.owner.clone(),
+                status: owner_status,
+            }]
+        } else {
+            Vec::new()
+        };
+        #[cfg(test)]
+        if fault == GovernedImportFault::AfterStateCommitBeforeJournal {
+            return Err(AppError::internal(
+                "injected crash after StateStore commit before journal transition",
+            ));
+        }
+        saga = transition_governed_import(
+            &journal,
+            state,
+            &request.operation_id,
+            GovernedDataImportStage::StateCommitted,
+            &update,
+            None,
+        )?;
+    }
+
+    if let (Some(state_store), None) = (state_store.as_ref(), state_restore_receipt.as_ref()) {
+        state_restore_receipt = state_store
+            .portable_daily_task_restore_receipt(&request.operation_id, prepared.replayed)
+            .map_err(AppError::from)?;
+    }
+    let mut projection_evidence = None;
+    if matches!(
+        saga.stage,
+        GovernedDataImportStage::StateCommitted | GovernedDataImportStage::ProjectionDegraded
+    ) {
+        if let Some(receipt) = state_restore_receipt.as_ref() {
+            let projection = if let Some(binding) = recovery_binding {
+                crate::state_projection::reconcile_state_store_lifemodel_projection_for_import_recovery_event(
+                    state,
+                    &receipt.outbox_event_id,
+                    binding,
+                )
+                .await
+            } else {
+                crate::state_projection::reconcile_state_store_lifemodel_projection_for_event(
+                    state,
+                    &receipt.outbox_event_id,
+                )
+                .await
+            };
+            match projection {
+                Ok(report)
+                    if report.status
+                        == openlife_core::state_store::StateProjectionStatus::Applied
+                        && report.required_event.as_ref().is_some_and(|proof| {
+                            proof.event_id == receipt.outbox_event_id
+                                && proof.delivery_state == ProjectionDeliveryState::Applied
+                        }) =>
+                {
+                    projection_evidence = Some(metadata_digest(&format!(
+                        "state_projection_applied:{}:{}:{}",
+                        receipt.receipt_id, receipt.outbox_event_id, report.delivery_count
+                    )));
+                }
+                Err(error) if error.is_deferred() => {
+                    // The exact StateStore delivery remains pending. Preserve
+                    // that fact and require an exact retry; terminalization
+                    // contention is not a durable projection failure.
+                    mark_governed_import_recovery_required(state);
+                    return Err(AppError::db_with_hint(
+                        format!(
+                            "canonical owners committed but StateStore projection finalization was deferred; operation={} stage={}; {error}",
+                            saga.operation_id,
+                            saga.stage.as_str()
+                        ),
+                        "data_import_recovery_required",
+                    ));
+                }
+                other => {
+                    let reason = metadata_digest(&format!(
+                        "state_projection_recovery_required:{}",
+                        match other {
+                            Ok(report) => format!("{:?}", report.status),
+                            Err(error) => error.to_string(),
+                        }
+                    ));
+                    if saga.stage == GovernedDataImportStage::StateCommitted {
+                        saga = transition_governed_import(
+                            &journal,
+                            state,
+                            &request.operation_id,
+                            GovernedDataImportStage::ProjectionDegraded,
+                            &[],
+                            Some(&reason),
+                        )?;
+                    }
+                    mark_governed_import_recovery_required(state);
+                    return Err(AppError::db_with_hint(
+                        format!(
+                            "canonical owners committed but projection recovery is required; operation={} stage={}",
+                            saga.operation_id,
+                            saga.stage.as_str()
+                        ),
+                        "data_import_recovery_required",
+                    ));
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    if fault == GovernedImportFault::BeforeTerminalVerificationWithMemoryDrift {
+        tests::inject_governed_import_memory_drift(
+            state,
+            "governed-import-terminal-drift",
+            "LATE_TERMINAL_MEMORY_WRITE_MUST_REMAIN_CANONICAL",
+        )
+        .await;
+    }
+    let completion_fence = state
+        .persistence_coordinator
+        .acquire_governed_data_import_completion_fence(&journal, &saga)
+        .await
+        .map_err(|error| {
+            mark_governed_import_recovery_required(state);
+            AppError::db_with_hint(
+                format!(
+                    "governed data-import completion could not establish an exclusive owner observation point: {error}"
+                ),
+                "data_import_recovery_required",
+            )
+        })?;
+    if let Err(drift) =
+        verify_governed_import_terminal_facts(state, &saga, state_restore_receipt.as_ref()).await
+    {
+        // Block every new admission before releasing the completion fence.
+        // The unknown/abandonment path obtains the same barrier exclusively;
+        // attempting that recursively here would deadlock under Tokio writer
+        // preference.
+        mark_governed_import_recovery_required(state);
+        drop(completion_fence);
+        return mark_governed_import_owner_unknown(
+            state,
+            &journal,
+            &saga,
+            &drift.owner,
+            &drift.reason,
+        )
+        .await;
+    }
+    let terminal_model_physical_hash = current_lifemodel_file_hash(state).await.map_err(|error| {
+        mark_governed_import_recovery_required(state);
+        AppError::db_with_hint(
+            format!(
+                "governed data-import terminal LifeModel physical hash could not be observed: {error}"
+            ),
+            "data_import_recovery_required",
+        )
+    })?;
+    saga = transition_governed_import(
+        &journal,
+        state,
+        &request.operation_id,
+        GovernedDataImportStage::Completed,
+        &[],
+        projection_evidence.as_deref(),
+    )?;
+    debug_assert_eq!(saga.stage, GovernedDataImportStage::Completed);
+    drop(completion_fence);
+
+    let durable_lifemodel_write = {
+        let owner = governed_import_owner(&saga, "life_model")?;
+        owner.before_digest != owner.target_digest
+    };
+    governed_import_result(
+        state,
+        request,
+        &import_payload_hash,
+        &previous_model_physical_hash,
+        &imported_model_physical_hash,
+        messages.as_deref(),
+        vectors.as_deref(),
+        message_report.as_ref(),
+        vector_report.as_ref(),
+        state_store,
+        prepared.replayed,
+        pre_import_snapshot_version,
+        recovery_admission.is_some(),
+        durable_lifemodel_write,
+        Some(terminal_model_physical_hash),
     )
     .await
+}
+
+async fn current_lifemodel_file_hash(state: &Arc<AppState>) -> Result<String, AppError> {
+    let current = state
+        .life_model_manager
+        .lock()
+        .await
+        .load()
+        .map_err(AppError::from)?;
+    life_model_write_gateway::hash_life_model(&current).map_err(AppError::from)
+}
+
+async fn abandon_governed_import_after_exact_observation(
+    state: &Arc<AppState>,
+    journal: &GovernedDataImportJournal,
+    saga: &GovernedDataImportReceipt,
+    reason: &str,
+) -> Result<serde_json::Value, AppError> {
+    let _resolution_fence = state
+        .persistence_coordinator
+        .acquire_governed_data_import_resolution_fence(journal, saga)
+        .await
+        .map_err(|error| {
+            mark_governed_import_recovery_required(state);
+            AppError::db_with_hint(
+                format!(
+                    "governed data-import remains unresolved because the exclusive resolution fence could not be acquired: {reason}; {error}"
+                ),
+                "data_import_recovery_required",
+            )
+        })?;
+    let observations = match observe_governed_import_owner_resolutions(state, saga).await {
+        Ok(observations) => observations,
+        Err(error) => {
+            return Err(AppError::db_with_hint(
+                format!(
+                    "governed data-import remains unresolved because current owner facts could not be observed exactly: {reason}; {error}"
+                ),
+                "data_import_recovery_required",
+            ));
+        }
+    };
+    let reason_digest = metadata_digest(&format!(
+        "automatic preserve-current terminalization after exact observation: {reason}"
+    ));
+    match journal.abandon_preserving_current(&saga.operation_id, &observations, &reason_digest) {
+        Ok(terminal) => Err(AppError::db_with_hint(
+            format!(
+                "governed data-import did not complete or roll back; exact current owner facts were preserved and operation {} was terminalized as {} with {} metadata-only evidence records; restart required",
+                terminal.operation_id,
+                terminal.stage.as_str(),
+                terminal.resolution_evidence.len()
+            ),
+            "data_import_abandoned_restart_required",
+        )),
+        Err(error) => Err(AppError::db_with_hint(
+            format!(
+                "governed data-import remains unresolved because preserve-current terminalization failed after exact observation: {reason}; {error}"
+            ),
+            "data_import_recovery_required",
+        )),
+    }
+}
+
+async fn mark_governed_import_owner_unknown(
+    state: &Arc<AppState>,
+    journal: &GovernedDataImportJournal,
+    saga: &GovernedDataImportReceipt,
+    owner: &str,
+    reason: &str,
+) -> Result<serde_json::Value, AppError> {
+    let reason_digest = metadata_digest(reason);
+    let transition = journal.transition(
+        &saga.operation_id,
+        GovernedDataImportStage::CompensationUnknown,
+        &[GovernedDataImportOwnerUpdate {
+            owner: owner.to_string(),
+            status: GovernedDataImportOwnerStatus::Unknown,
+        }],
+        Some(&reason_digest),
+    );
+    match transition {
+        Ok(unknown) => {
+            abandon_governed_import_after_exact_observation(state, journal, &unknown, reason).await
+        }
+        Err(error) => {
+            mark_governed_import_recovery_required(state);
+            Err(AppError::db_with_hint(
+                format!(
+                    "governed data-import owner state is unknown and journal transition failed: {reason}; {error}"
+                ),
+                "data_import_recovery_required",
+            ))
+        }
+    }
+}
+
+// One saga-compensation boundary must receive every already-committed owner and
+// receipt explicitly; a partial options bag would make rollback omissions easy.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
+async fn fail_or_compensate_governed_import(
+    state: &Arc<AppState>,
+    journal: &GovernedDataImportJournal,
+    saga: &GovernedDataImportReceipt,
+    replayed: bool,
+    previous_model: &LifeModel,
+    previous_messages: Option<&openlife_core::memory::CanonicalMessageArchiveSnapshot>,
+    previous_vectors: Option<&openlife_core::vectors::PortableVectorArchiveSnapshot>,
+    imported_model_physical_hash: &str,
+    import_error: String,
+) -> Result<serde_json::Value, AppError> {
+    if replayed {
+        mark_governed_import_recovery_required(state);
+        return Err(AppError::db_with_hint(
+            format!("governed data-import recovery did not converge: {import_error}"),
+            "data_import_recovery_required",
+        ));
+    }
+
+    let mut failures = Vec::new();
+    if let (Ok(owner), Some(previous)) = (governed_import_owner(saga, "vectors"), previous_vectors)
     {
-        Ok(report) => report,
-        Err(import_error) => {
-            let rollback_error = apply_import_payload(
-                state.clone(),
-                previous_model,
-                previous_messages,
-                previous_vectors,
+        if owner.status == GovernedDataImportOwnerStatus::Applied {
+            let current = state
+                .vector_store
+                .lock()
+                .await
+                .export_portable_archive()
+                .map_err(AppError::from)?;
+            if current.digest != owner.target_digest {
+                failures.push("vector_compensation_refused_after_late_write".into());
+            } else if let Err(error) = replace_import_owner_memory(
+                state,
+                None,
+                Some(&previous.chunks),
+                memory_gateway::ImportedMemoryExpectedDigests {
+                    messages: None,
+                    vectors: Some(owner.target_digest.clone()),
+                },
                 None,
             )
             .await
-            .err();
-            if let Some(rollback_error) = rollback_error {
-                return Err(AppError::internal(format!(
-                "导入失败，且自动回滚失败。请不要继续操作，先备份数据目录。导入错误: {}; 回滚错误: {}",
-                import_error, rollback_error
-            )));
+            {
+                failures.push(format!("vector_compensation_failed:{error}"));
             }
-            return Err(AppError::internal(format!(
-                "导入失败，已自动回滚到导入前状态: {}",
-                import_error
-            )));
+        }
+    }
+    if let (Ok(owner), Some(previous)) =
+        (governed_import_owner(saga, "messages"), previous_messages)
+    {
+        if owner.status == GovernedDataImportOwnerStatus::Applied {
+            let current = state
+                .memory_store
+                .lock()
+                .await
+                .export_canonical_message_archive()
+                .map_err(AppError::from)?;
+            if current.digest != owner.target_digest {
+                failures.push("message_compensation_refused_after_late_write".into());
+            } else if let Err(error) = replace_import_owner_memory(
+                state,
+                Some(&previous.messages),
+                None,
+                memory_gateway::ImportedMemoryExpectedDigests {
+                    messages: Some(owner.target_digest.clone()),
+                    vectors: None,
+                },
+                None,
+            )
+            .await
+            {
+                failures.push(format!("message_compensation_failed:{error}"));
+            }
+        }
+    }
+    if let Ok(owner) = governed_import_owner(saga, "life_model") {
+        if owner.status == GovernedDataImportOwnerStatus::Applied {
+            let current_owner = current_lifemodel_owner_digest(state).await?;
+            let current_physical = current_lifemodel_file_hash(state).await?;
+            if current_owner != owner.target_digest
+                || current_physical != imported_model_physical_hash
+            {
+                failures.push("lifemodel_compensation_refused_after_late_write".into());
+            } else if let Err(error) = life_model_write_gateway::restore_life_model_with_gateway(
+                state,
+                previous_model,
+                LifeModelMaterializerCallerContext::new(
+                    "data_import_exact_compensation",
+                    LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+                    LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
+                ),
+                Some(&current_physical),
+            )
+            .await
+            {
+                failures.push(format!("lifemodel_compensation_failed:{error}"));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        let updates = saga
+            .owners
+            .iter()
+            .filter_map(|owner| match owner.status {
+                GovernedDataImportOwnerStatus::Applied => Some(GovernedDataImportOwnerUpdate {
+                    owner: owner.owner.clone(),
+                    status: GovernedDataImportOwnerStatus::Compensated,
+                }),
+                GovernedDataImportOwnerStatus::Pending => Some(GovernedDataImportOwnerUpdate {
+                    owner: owner.owner.clone(),
+                    status: GovernedDataImportOwnerStatus::Skipped,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        transition_governed_import(
+            journal,
+            state,
+            &saga.operation_id,
+            GovernedDataImportStage::Compensated,
+            &updates,
+            Some(&metadata_digest("owner CAS compensation verified")),
+        )?;
+        return Err(AppError::internal(format!(
+            "导入失败；所有已应用 canonical owner 已恢复到导入前状态，并通过 digest/CAS 复核: {import_error}"
+        )));
+    }
+
+    let updates = saga
+        .owners
+        .iter()
+        .filter(|owner| {
+            matches!(
+                owner.status,
+                GovernedDataImportOwnerStatus::Applied
+                    | GovernedDataImportOwnerStatus::Pending
+                    | GovernedDataImportOwnerStatus::Skipped
+            )
+        })
+        .map(|owner| GovernedDataImportOwnerUpdate {
+            owner: owner.owner.clone(),
+            status: GovernedDataImportOwnerStatus::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let reason = metadata_digest(&failures.join(";"));
+    let unknown = journal.transition(
+        &saga.operation_id,
+        GovernedDataImportStage::CompensationUnknown,
+        &updates,
+        Some(&reason),
+    );
+    match unknown {
+        Ok(unknown) => {
+            abandon_governed_import_after_exact_observation(
+                state,
+                journal,
+                &unknown,
+                &format!(
+                    "import failed and compensation was refused; import={import_error}; compensation={}",
+                    failures.join(";")
+                ),
+            )
+            .await
+        }
+        Err(error) => {
+            mark_governed_import_recovery_required(state);
+            Err(AppError::db_with_hint(
+                format!(
+                    "导入失败且补偿被晚到写或 owner 错误拒绝；未覆盖任何晚到事实，且 unknown journal transition 失败。import={import_error}; compensation={}; journal={error}",
+                    failures.join(";")
+                ),
+                "data_import_recovery_required",
+            ))
+        }
+    }
+}
+
+struct GovernedImportTerminalDrift {
+    owner: String,
+    reason: String,
+}
+
+impl GovernedImportTerminalDrift {
+    fn new(owner: &str, reason: impl Into<String>) -> Self {
+        Self {
+            owner: owner.to_string(),
+            reason: reason.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+async fn wait_at_governed_import_terminal_observation_barrier(operation_id: &str) {
+    let barrier = GOVERNED_IMPORT_TERMINAL_OBSERVATION_BARRIERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(operation_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.observed_first_owner.send(());
+        let _ = barrier.release.await;
+    }
+}
+
+#[cfg(test)]
+fn install_governed_import_terminal_observation_barrier(
+    operation_id: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let replaced = GOVERNED_IMPORT_TERMINAL_OBSERVATION_BARRIERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            operation_id.to_string(),
+            GovernedImportTerminalObservationBarrier {
+                observed_first_owner: observed_tx,
+                release: release_rx,
+            },
+        );
+    assert!(
+        replaced.is_none(),
+        "governed import terminal observation barrier already installed"
+    );
+    (observed_rx, release_tx)
+}
+
+async fn verify_governed_import_terminal_facts(
+    state: &Arc<AppState>,
+    saga: &GovernedDataImportReceipt,
+    state_receipt: Option<&openlife_core::state_store::PortableDailyTaskRestoreReceipt>,
+) -> Result<(), GovernedImportTerminalDrift> {
+    let life_model = governed_import_owner(saga, "life_model").map_err(|_| {
+        GovernedImportTerminalDrift::new(
+            "LifeModelFileStore",
+            "LifeModel journal owner missing before import terminalization",
+        )
+    })?;
+    let current_lifemodel = current_lifemodel_owner_digest(state).await.map_err(|_| {
+        GovernedImportTerminalDrift::new(
+            &life_model.owner,
+            "LifeModel owner could not be observed before import terminalization",
+        )
+    })?;
+    if current_lifemodel != life_model.target_digest {
+        return Err(GovernedImportTerminalDrift::new(
+            &life_model.owner,
+            "LifeModel owner changed before import terminalization",
+        ));
+    }
+    #[cfg(test)]
+    wait_at_governed_import_terminal_observation_barrier(&saga.operation_id).await;
+    if let Ok(owner) = governed_import_owner(saga, "messages") {
+        let digest = state
+            .memory_store
+            .lock()
+            .await
+            .export_canonical_message_archive()
+            .map_err(|_| {
+                GovernedImportTerminalDrift::new(
+                    &owner.owner,
+                    "Memory owner could not be observed before import terminalization",
+                )
+            })?
+            .digest;
+        if digest != owner.target_digest {
+            return Err(GovernedImportTerminalDrift::new(
+                &owner.owner,
+                "Memory owner changed before import terminalization",
+            ));
+        }
+    }
+    if let Ok(owner) = governed_import_owner(saga, "vectors") {
+        let digest = state
+            .vector_store
+            .lock()
+            .await
+            .export_portable_archive()
+            .map_err(|_| {
+                GovernedImportTerminalDrift::new(
+                    &owner.owner,
+                    "Vector owner could not be observed before import terminalization",
+                )
+            })?
+            .digest;
+        if digest != owner.target_digest {
+            return Err(GovernedImportTerminalDrift::new(
+                &owner.owner,
+                "Vector owner changed before import terminalization",
+            ));
+        }
+    }
+    if let Ok(owner) = governed_import_owner(saga, "state_store") {
+        let receipt = state_receipt.ok_or_else(|| {
+            GovernedImportTerminalDrift::new(
+                &owner.owner,
+                "StateStore owner receipt missing before import terminalization",
+            )
+        })?;
+        if receipt.request_digest != saga.request_digest
+            || receipt.payload_digest != owner.target_digest
+            || receipt.before_canonical_digest != owner.before_digest
+            || receipt.committed_at != saga.created_at
+        {
+            return Err(GovernedImportTerminalDrift::new(
+                &owner.owner,
+                "StateStore owner receipt drift before import terminalization",
+            ));
+        }
+        let current = state
+            .state_store
+            .as_ref()
+            .ok_or_else(|| {
+                GovernedImportTerminalDrift::new(
+                    &owner.owner,
+                    "StateStore unavailable before import terminalization",
+                )
+            })?
+            .export_portable_daily_tasks(saga.created_at)
+            .map_err(|_| {
+                GovernedImportTerminalDrift::new(
+                    &owner.owner,
+                    "StateStore owner could not be observed before import terminalization",
+                )
+            })?;
+        if current.canonical_digest != receipt.after_canonical_digest {
+            return Err(GovernedImportTerminalDrift::new(
+                &owner.owner,
+                "StateStore owner changed before import terminalization",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
+async fn governed_import_result(
+    state: &Arc<AppState>,
+    request: &GovernedDataImportRequest,
+    import_payload_hash: &str,
+    previous_model_hash: &str,
+    requested_model_hash: &str,
+    messages: Option<&[openlife_core::memory::ExportedMessage]>,
+    vectors: Option<&[openlife_core::vectors::ExportedVectorChunk]>,
+    message_report: Option<&memory_gateway::ImportedMemoryReplaceReport>,
+    vector_report: Option<&memory_gateway::ImportedMemoryReplaceReport>,
+    state_store: Option<&Arc<openlife_core::state_store::StateStore>>,
+    replayed: bool,
+    pre_import_snapshot_version: Option<String>,
+    recovery_completed: bool,
+    durable_lifemodel_write: bool,
+    terminal_model_physical_hash: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    let supplied_message_count =
+        messages.map_or(0, <[openlife_core::memory::ExportedMessage]>::len);
+    let imported_message_count = message_report
+        .map(|report| report.applied_message_count)
+        .unwrap_or(supplied_message_count);
+    // A completed replay is historical truth. Re-running VectorStore
+    // admission against later tombstones or policy state could turn a durable
+    // success into a false failure, so execution-only counts remain unknown
+    // unless this invocation actually performed/validated the vector lane.
+    let vector_preflight = if !replayed {
+        if let Some(vectors) = vectors {
+            Some(
+                state
+                    .vector_store
+                    .lock()
+                    .await
+                    .validate_portable_replacement(vectors)
+                    .map_err(AppError::from)?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let vector_stats = vector_report
+        .map(|report| report.vectors)
+        .or(vector_preflight);
+    let supplied_vector_count =
+        vectors.map_or(0, <[openlife_core::vectors::ExportedVectorChunk]>::len);
+    let imported_vector_count = if vectors.is_none() {
+        Some(0)
+    } else {
+        vector_stats.map(|stats| stats.applied)
+    };
+    let skipped_vector_count = if vectors.is_none() {
+        Some(0)
+    } else {
+        vector_stats.map(|stats| stats.skipped())
+    };
+    let skipped_canonical_vector_count = if vectors.is_none() {
+        Some(0)
+    } else {
+        vector_stats.map(|stats| stats.skipped_canonical_projection)
+    };
+    let skipped_legacy_chat_vector_count = if vectors.is_none() {
+        Some(0)
+    } else {
+        vector_stats.map(|stats| stats.skipped_legacy_chat_projection)
+    };
+    let state_receipt = match state_store {
+        Some(store) => store
+            .portable_daily_task_restore_receipt(&request.operation_id, replayed)
+            .map_err(AppError::from)?,
+        None => None,
+    };
+    let state_store_projection_status = match (state_store, state_receipt.as_ref()) {
+        (Some(store), Some(receipt)) => store
+            .projection_delivery_state_for_event(&receipt.outbox_event_id)
+            .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?
+            .as_str(),
+        (Some(_), None) => {
+            return Err(AppError::db_with_hint(
+                "completed governed import is missing its exact StateStore restore receipt",
+                "canonical_state_unknown",
+            ));
+        }
+        (None, None) => "not_requested",
+        (None, Some(_)) => {
+            return Err(AppError::internal(
+                "StateStore restore receipt exists without a targeted StateStore owner",
+            ));
         }
     };
-    let imported_message_count = memory_report.applied_message_count;
-    let supplied_message_count = memory_report.supplied_message_count;
-    let imported_vector_count = memory_report.vectors.applied;
-    let supplied_vector_count = memory_report.vectors.supplied;
-    let skipped_vector_count = memory_report.vectors.skipped();
-    let import_audit = serde_json::json!({
+    let status = if recovery_completed {
+        "recovery_completed_restart_required"
+    } else if replayed {
+        "replayed"
+    } else {
+        "completed"
+    };
+    let pre_import_lifemodel_snapshot_created = pre_import_snapshot_version.is_some() || replayed;
+    let physical_hashes_observed_for_this_execution = !replayed;
+    let previous_model_hash_value =
+        physical_hashes_observed_for_this_execution.then(|| previous_model_hash.to_string());
+    let requested_model_hash_value =
+        physical_hashes_observed_for_this_execution.then(|| requested_model_hash.to_string());
+    let final_model_hash_status = if terminal_model_physical_hash.is_some() {
+        if replayed {
+            "observed_at_recovery_terminalization"
+        } else {
+            "observed_at_terminalization"
+        }
+    } else {
+        "not_persisted_for_completed_replay"
+    };
+    let audit = serde_json::json!({
         "source_kind": "data_import",
         "operation_purpose": request.purpose,
-        "vector_import_semantics": "portable_only_canonical_and_chat_projections_skipped",
         "import_targets": request.import_targets,
         "import_payload_hash": import_payload_hash,
-        "previous_model_hash": previous_model_hash,
-        "imported_model_hash": imported_model_hash,
-        "messages_targeted": memory_report.messages_targeted,
-        "vectors_targeted": memory_report.vectors_targeted,
+        "previous_model_hash": previous_model_hash_value,
+        "requested_model_hash": requested_model_hash_value,
+        "physical_hash_status": if physical_hashes_observed_for_this_execution { "observed" } else { "not_reconstructed_on_replay" },
+        "final_model_hash": terminal_model_physical_hash.clone(),
+        "final_model_hash_status": final_model_hash_status,
+        "messages_targeted": messages.is_some(),
+        "vectors_targeted": vectors.is_some(),
         "supplied_message_count": supplied_message_count,
         "imported_message_count": imported_message_count,
         "supplied_vector_count": supplied_vector_count,
         "imported_vector_count": imported_vector_count,
         "skipped_vector_count": skipped_vector_count,
-        "skipped_canonical_vector_count": memory_report.vectors.skipped_canonical_projection,
-        "skipped_legacy_chat_vector_count": memory_report.vectors.skipped_legacy_chat_projection,
+        "state_store_targeted": state_store.is_some(),
+        "state_store_restored_count": state_receipt.as_ref().map_or(0, |receipt| receipt.restored_count),
+        "state_store_skipped_expired_count": state_receipt.as_ref().map_or(0, |receipt| receipt.skipped_expired_count),
+        "state_store_projection_status": state_store_projection_status,
         "pre_change_snapshot_version": pre_import_snapshot_version,
         "metadata_safe": true,
         "contains_raw_content": false,
     });
     Ok(serde_json::json!({
         "success": true,
+        "status": status,
+        "restart_required": recovery_completed,
         "legacy": false,
         "governed_operation": true,
         "operation_kind": "data_import",
         "operation_purpose": request.purpose,
-        "warning": "data import ran as an explicit governed restore/import operation.",
+        "warning": if recovery_completed {
+            "data import recovery is terminal; restart OpenLife before ordinary effects resume."
+        } else {
+            "data import ran as an explicit governed restore/import operation."
+        },
         "vector_import_semantics": "portable_only_canonical_and_chat_projections_skipped",
         "metadata_safe": true,
         "contains_raw_content": false,
         "durable_lifemodel_write": durable_lifemodel_write,
-        "messages_targeted": memory_report.messages_targeted,
-        "vectors_targeted": memory_report.vectors_targeted,
+        "messages_targeted": messages.is_some(),
+        "vectors_targeted": vectors.is_some(),
         "supplied_message_count": supplied_message_count,
         "imported_message_count": imported_message_count,
         "supplied_vector_count": supplied_vector_count,
         "imported_vector_count": imported_vector_count,
         "skipped_vector_count": skipped_vector_count,
-        "skipped_canonical_vector_count": memory_report.vectors.skipped_canonical_projection,
-        "skipped_legacy_chat_vector_count": memory_report.vectors.skipped_legacy_chat_projection,
+        "skipped_canonical_vector_count": skipped_canonical_vector_count,
+        "skipped_legacy_chat_vector_count": skipped_legacy_chat_vector_count,
         "import_payload_hash": import_payload_hash,
-        "previous_model_hash": previous_model_hash,
-        "imported_model_hash": imported_model_hash,
-        "pre_import_snapshot_created": pre_import_snapshot_version.is_some(),
+        "previous_model_hash": previous_model_hash_value,
+        "requested_model_hash": requested_model_hash_value,
+        "imported_model_hash": requested_model_hash_value,
+        "physical_hash_status": if physical_hashes_observed_for_this_execution { "observed" } else { "not_reconstructed_on_replay" },
+        "final_model_hash": terminal_model_physical_hash,
+        "final_model_hash_status": final_model_hash_status,
+        "state_store_targeted": state_store.is_some(),
+        "state_store_replayed": state_receipt.as_ref().is_some_and(|receipt| receipt.replayed),
+        "state_store_restored_count": state_receipt.as_ref().map_or(0, |receipt| receipt.restored_count),
+        "state_store_skipped_expired_count": state_receipt.as_ref().map_or(0, |receipt| receipt.skipped_expired_count),
+        "state_store_projection_status": state_store_projection_status,
+        "pre_import_snapshot_created": pre_import_lifemodel_snapshot_created,
+        "pre_import_snapshot_scope": "life_model_only",
+        "other_owner_recovery": "owner_cas_and_forward_recovery_no_full_rollback_archive",
         "pre_import_snapshot_version": pre_import_snapshot_version,
-        "audit": import_audit,
+        "audit": audit,
     }))
-}
-
-async fn apply_import_payload(
-    state: Arc<AppState>,
-    life_model: LifeModel,
-    messages: Option<Vec<openlife_core::memory::ExportedMessage>>,
-    vectors: Option<Vec<openlife_core::vectors::ExportedVectorChunk>>,
-    expected_lifemodel_hash: Option<String>,
-) -> Result<memory_gateway::ImportedMemoryReplaceReport, AppError> {
-    life_model_write_gateway::persist_life_model_with_gateway_expected(
-        &state,
-        life_model,
-        false,
-        LifeModelMaterializerCallerContext::new(
-            "data_import_governed_operation",
-            LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-            LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-        ),
-        expected_lifemodel_hash.as_deref(),
-    )
-    .await?;
-    memory_gateway::replace_imported_memory_with_state(
-        &state,
-        messages.as_deref(),
-        vectors.as_deref(),
-    )
-    .await
 }
 
 #[derive(serde::Serialize)]
@@ -1386,7 +3808,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
                 grant,
                 effective_network_policy_decision_id,
                 permission_id,
-            } => (grant, effective_network_policy_decision_id, permission_id),
+            } => (*grant, effective_network_policy_decision_id, permission_id),
             ExplicitProviderProbeAuthorization::ConsentRequired { proposal_id } => {
                 return Ok(LlmConnectionTestResult {
                     ok: false,
@@ -1595,7 +4017,10 @@ pub async fn export_mcp_audit_logs(
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AuditExport, AppError> {
-    let export = export_mcp_audit_logs_with_state(days, state.inner()).await?;
+    let export = {
+        let store = state.mcp_audit_store.lock().await;
+        store.export_logs(days).map_err(AppError::from)?
+    };
     let export_value = serde_json::to_value(&export)?;
     require_danger_action_confirmation(
         DangerActionConfirmationRequest {
@@ -1604,7 +4029,6 @@ pub async fn export_mcp_audit_logs(
             requested_target: None,
             affected_count: None,
             reference: None,
-            preflight_scope_arguments: None,
             arguments: &serde_json::json!({
                 "days": days,
                 "export_digest": hash_json_value(&export_value)?,
@@ -1612,19 +4036,13 @@ pub async fn export_mcp_audit_logs(
             arguments_summary: &format!(
                 "导出最近 {days} 天的 MCP 审计快照；原始日志不会复制进 confirmation grant。"
             ),
+            governed_data_import_recovery: None,
         },
         &window,
         state.inner(),
     )
     .await?;
     Ok(export)
-}
-
-async fn export_mcp_audit_logs_with_state(
-    days: i64,
-    state: &Arc<AppState>,
-) -> Result<AuditExport, AppError> {
-    state.mcp_audit_read_gateway.export_logs(state, days).await
 }
 
 #[tauri::command]
@@ -1634,156 +4052,28 @@ pub async fn cleanup_mcp_audit_logs(
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, AppError> {
-    let app_state = state.inner();
-    let window = &window;
-    let confirmation_evidence = confirmation_evidence.as_ref();
-    orchestrate_mcp_audit_cleanup(
-        retention_days,
-        |days| {
-            McpAuditRetentionDays::try_from(days)
-                .map_err(|_| invalid_mcp_audit_retention_error())
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let confirmation_arguments = serde_json::json!({ "retention_days": retention_days });
+    require_danger_action_confirmation(
+        DangerActionConfirmationRequest {
+            action_type: "mcp_audit_cleanup",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: None,
+            reference: confirmation_evidence.as_ref(),
+            arguments: &confirmation_arguments,
+            arguments_summary: &format!("删除超过 {retention_days} 天保留期的 MCP 审计记录。"),
+            governed_data_import_recovery: None,
         },
-        || require_mcp_audit_cleanup_effects_allowed(app_state),
-        |retention| async move {
-            let store = app_state.mcp_audit_store.lock().await;
-            store
-                .count_cleanup_candidates(&retention)
-                .map_err(map_mcp_audit_cleanup_error)
-        },
-        |retention, candidate_count| async move {
-            let retention_days = retention.get();
-            let preflight_scope_arguments = mcp_audit_cleanup_preflight_scope_arguments(
-                retention_days,
-                candidate_count,
-            );
-            let confirmation_arguments = serde_json::json!({
-                "retention_days": retention_days,
-                "predicate_version": MCP_AUDIT_CLEANUP_PREDICATE_VERSION,
-                "candidate_count": candidate_count,
-                "cutoff_utc": retention.cutoff_rfc3339(),
-            });
-            require_danger_action_confirmation(
-                DangerActionConfirmationRequest {
-                    action_type: "mcp_audit_cleanup",
-                    target_ids_for_new_challenge: &[],
-                    requested_target: None,
-                    affected_count: Some(candidate_count),
-                    reference: confirmation_evidence,
-                    preflight_scope_arguments: Some(&preflight_scope_arguments),
-                    arguments: &confirmation_arguments,
-                    arguments_summary: &format!(
-                        "删除创建时间早于 {} 的 MCP 审计记录；保留期 {retention_days} 天，后端候选数量 {candidate_count}。",
-                        retention.cutoff_rfc3339()
-                    ),
-                },
-                window,
-                app_state,
-            )
-            .await
-        },
-        |retention, candidate_count| async move {
-            let store = app_state.mcp_audit_store.lock().await;
-            // Confirmation can await while persistence degrades. Re-check only
-            // after owning the store guard, then let the domain transaction
-            // atomically compare the confirmed count and delete predicate.
-            require_mcp_audit_cleanup_effects_allowed(app_state)?;
-            store
-                .cleanup(retention, candidate_count)
-                .map_err(map_mcp_audit_cleanup_error)
-        },
+        &window,
+        state.inner(),
     )
-    .await
-}
-
-/// Stable product orchestration seam for governed audit cleanup.
-///
-/// The command above is the production caller. Keeping validation, the global
-/// effects gate, Rust-owned confirmation, and the mutation as explicit ports
-/// lets the frozen D063 suite exercise every fail-closed transition without
-/// pretending a concrete `WebviewWindow` command is a MockRuntime command.
-async fn orchestrate_mcp_audit_cleanup<
-    Retention,
-    Validate,
-    Effects,
-    Prepare,
-    PrepareFuture,
-    Prepared,
-    Confirm,
-    ConfirmFuture,
-    Mutate,
-    MutateFuture,
->(
-    retention_days: i64,
-    validate: Validate,
-    require_effects_allowed: Effects,
-    prepare: Prepare,
-    require_native_confirmation: Confirm,
-    mutate: Mutate,
-) -> Result<usize, AppError>
-where
-    Retention: Clone,
-    Prepared: Clone,
-    Validate: FnOnce(i64) -> Result<Retention, AppError>,
-    Effects: Fn() -> Result<(), AppError>,
-    Prepare: FnOnce(Retention) -> PrepareFuture,
-    PrepareFuture: std::future::Future<Output = Result<Prepared, AppError>>,
-    Confirm: FnOnce(Retention, Prepared) -> ConfirmFuture,
-    ConfirmFuture: std::future::Future<Output = Result<(), AppError>>,
-    Mutate: FnOnce(Retention, Prepared) -> MutateFuture,
-    MutateFuture: std::future::Future<Output = Result<usize, AppError>>,
-{
-    let retention = validate(retention_days)?;
-    require_effects_allowed()?;
-    let prepared = prepare(retention.clone()).await?;
-    require_native_confirmation(retention.clone(), prepared.clone()).await?;
-    require_effects_allowed()?;
-    mutate(retention, prepared).await
-}
-
-/// Test-only access to the exact production-called orchestration seam. This
-/// forwarding surface is not compiled into release builds, so sibling modules
-/// cannot inject alternate effects, confirmation, or mutation authorities.
-#[cfg(test)]
-pub(crate) async fn run_d063_cleanup_orchestration_harness<
-    Retention,
-    Validate,
-    Effects,
-    Prepare,
-    PrepareFuture,
-    Prepared,
-    Confirm,
-    ConfirmFuture,
-    Mutate,
-    MutateFuture,
->(
-    retention_days: i64,
-    validate: Validate,
-    require_effects_allowed: Effects,
-    prepare: Prepare,
-    require_native_confirmation: Confirm,
-    mutate: Mutate,
-) -> Result<usize, AppError>
-where
-    Retention: Clone,
-    Prepared: Clone,
-    Validate: FnOnce(i64) -> Result<Retention, AppError>,
-    Effects: Fn() -> Result<(), AppError>,
-    Prepare: FnOnce(Retention) -> PrepareFuture,
-    PrepareFuture: std::future::Future<Output = Result<Prepared, AppError>>,
-    Confirm: FnOnce(Retention, Prepared) -> ConfirmFuture,
-    ConfirmFuture: std::future::Future<Output = Result<(), AppError>>,
-    Mutate: FnOnce(Retention, Prepared) -> MutateFuture,
-    MutateFuture: std::future::Future<Output = Result<usize, AppError>>,
-{
-    orchestrate_mcp_audit_cleanup(
-        retention_days,
-        validate,
-        require_effects_allowed,
-        prepare,
-        require_native_confirmation,
-        mutate,
-    )
-    .await
+    .await?;
+    let store = state.mcp_audit_store.lock().await;
+    store.cleanup(retention_days).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -1803,9 +4093,9 @@ pub async fn rotate_mcp_audit_key(
             requested_target: None,
             affected_count: None,
             reference: confirmation_evidence.as_ref(),
-            preflight_scope_arguments: None,
             arguments: &serde_json::json!({ "operation": "rotate_mcp_audit_key_epoch" }),
             arguments_summary: "轮换 MCP 审计加密 epoch，并保留历史 epoch 供旧记录解密。",
+            governed_data_import_recovery: None,
         },
         &window,
         state.inner(),
@@ -1867,6 +4157,8 @@ mod tests {
         ProviderNetworkAuthorization,
     };
     use openlife_core::llm::{provider_endpoint_is_official, ChatMessage};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
     const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
@@ -1875,50 +4167,146 @@ mod tests {
     const W84_IMPORT_CURRENT_VECTOR_SECRET: &str = "W84_IMPORT_CURRENT_VECTOR_SECRET";
     const W84_IMPORT_PAYLOAD_VECTOR_SECRET: &str = "W84_IMPORT_PAYLOAD_VECTOR_SECRET";
 
-    #[test]
-    fn d063_invalid_cleanup_retention_is_a_stable_config_error() {
-        for invalid in [i64::MIN, -1, 0, MCP_AUDIT_RETENTION_MAX_DAYS + 1, i64::MAX] {
-            let error = validate_mcp_audit_retention_days(invalid).unwrap_err();
-            let AppError::Config { message, hint } = error else {
-                panic!("invalid cleanup retention must not be reported as an internal error");
-            };
-            assert_eq!(message, "invalid_mcp_audit_retention_days");
-            assert_eq!(
-                hint.as_deref(),
-                Some("retention_days_must_be_1_through_3650")
-            );
+    fn install_release_like_persistence_coordinator(state: &mut Arc<AppState>) {
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        Arc::get_mut(state)
+            .expect("test state must be uniquely owned before work starts")
+            .persistence_coordinator = coordinator;
+    }
+
+    fn release_like_test_app_state() -> Arc<AppState> {
+        let mut state = crate::test_utils::test_app_state();
+        install_release_like_persistence_coordinator(&mut state);
+        state
+    }
+
+    pub(super) async fn inject_governed_import_memory_drift(
+        state: &Arc<AppState>,
+        session_id: &str,
+        content: &str,
+    ) {
+        state
+            .memory_store
+            .lock()
+            .await
+            .save_message(
+                session_id,
+                &ChatMessage {
+                    role: "user".into(),
+                    content: content.into(),
+                },
+            )
+            .expect("inject governed-import Memory owner drift");
+    }
+
+    #[derive(Default)]
+    struct RecoverySecretStore {
+        values: Mutex<HashMap<String, String>>,
+        writes: Mutex<usize>,
+    }
+
+    impl SecretStore for RecoverySecretStore {
+        fn get(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.values.lock().unwrap().get(secret_ref).cloned())
+        }
+
+        fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
+            *self.writes.lock().unwrap() += 1;
+            self.values
+                .lock()
+                .unwrap()
+                .insert(secret_ref.into(), value.into());
+            Ok(())
+        }
+
+        fn delete(&self, secret_ref: &str) -> anyhow::Result<()> {
+            self.values.lock().unwrap().remove(secret_ref);
+            Ok(())
         }
     }
 
     #[test]
-    fn d063_cleanup_preflight_digest_binds_retention_predicate_and_server_count() {
-        let scoped_view = |retention_days, candidate_count| {
-            let arguments =
-                mcp_audit_cleanup_preflight_scope_arguments(retention_days, candidate_count);
-            danger_action_preflight_for_action_scoped(
-                "mcp_audit_cleanup",
-                false,
-                DangerActionPreflightScope {
-                    target_ids: vec![],
-                    affected_count: Some(candidate_count),
-                    preflight_scope_arguments: Some(arguments),
-                },
-            )
-            .unwrap()
-        };
-        let expected = scoped_view(90, 2);
-        let changed_retention = scoped_view(30, 2);
-        let changed_count = scoped_view(90, 3);
+    fn credential_recovery_creates_only_missing_keys_for_empty_canonical_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
 
-        assert_eq!(expected.affected_item_count, 2);
-        assert_ne!(
-            expected.confirmation_scope_digest,
-            changed_retention.confirmation_scope_digest
+        let report = recover_required_credential_access_with_store(directory.path(), &store);
+
+        assert!(report.all_required_credentials_ready);
+        assert!(report.restart_required);
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .map(|item| item.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["created", "created", "created", "created"]
         );
-        assert_ne!(
-            expected.confirmation_scope_digest,
-            changed_count.confirmation_scope_digest
-        );
+        assert_eq!(*store.writes.lock().unwrap(), 4);
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("keychain://"));
+        for value in store.values.lock().unwrap().values() {
+            assert!(!serialized.contains(value));
+        }
+    }
+
+    #[test]
+    fn credential_recovery_never_rotates_missing_keys_for_existing_canonical_data() {
+        let directory = tempfile::tempdir().unwrap();
+        for file_name in [
+            "agent_runs.db",
+            "main_chat_agent_events.db",
+            "main_chat_action_queue.db",
+            "tasks.db",
+        ] {
+            std::fs::write(directory.path().join(file_name), b"canonical-data-sentinel").unwrap();
+        }
+        let store = RecoverySecretStore::default();
+
+        let report = recover_required_credential_access_with_store(directory.path(), &store);
+
+        assert!(!report.all_required_credentials_ready);
+        assert!(!report.restart_required);
+        assert!(report
+            .items
+            .iter()
+            .all(|item| item.status == "missing_existing_data"));
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert!(store.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn credential_recovery_never_replaces_invalid_existing_key_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+        for secret_ref in [
+            AGENT_RUN_RECEIPT_KEY_REF,
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            ACTION_QUEUE_AUTHORITY_KEY_REF,
+            TASK_STORE_AUTHORITY_KEY_REF,
+        ] {
+            store.set(secret_ref, "not-base64").unwrap();
+        }
+        *store.writes.lock().unwrap() = 0;
+
+        let report = recover_required_credential_access_with_store(directory.path(), &store);
+
+        assert!(!report.all_required_credentials_ready);
+        assert!(!report.restart_required);
+        assert!(report.items.iter().all(|item| item.status == "invalid"));
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert!(store
+            .values
+            .lock()
+            .unwrap()
+            .values()
+            .all(|value| value == "not-base64"));
     }
 
     #[test]
@@ -2095,7 +4483,16 @@ mod tests {
             default_decision: "allow".into(),
             ..Default::default()
         };
-        let validation_config = config.clone();
+        // Summaries are bound to the effective credential generation and the
+        // backend-owned network policy used by the probe, not to the stale
+        // pre-resolution Settings payload.
+        let current_runtime = state.provider_runtime_snapshot().await;
+        let mut validation_config = config.clone();
+        validation_config.llm.credential_version =
+            resolved_provider_credential_version(&validation_config, &current_runtime.config);
+        validation_config.llm.openai_key =
+            resolve_submitted_provider_api_key(&validation_config, &current_runtime.config);
+        validation_config.system.network_policy = current_runtime.config.system.network_policy;
         let dir = tempfile::tempdir().unwrap();
         let validation_path = dir.path().join("provider-validation.json");
 
@@ -2295,9 +4692,11 @@ mod tests {
     async fn concurrent_provider_replacement_never_exposes_a_mixed_status_generation() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let configured = |suffix: &str, credential_version: u64| {
-            let mut config = AppConfig::default();
-            config.local_model = format!("local-{suffix}");
-            config.prefer_local_model = false;
+            let mut config = AppConfig {
+                local_model: format!("local-{suffix}"),
+                prefer_local_model: false,
+                ..Default::default()
+            };
             config.llm.provider = "openai".into();
             config.llm.openai_base = format!("https://api.example.test/{suffix}");
             config.llm.openai_key = format!("sk-{suffix}");
@@ -2373,7 +4772,7 @@ mod tests {
         assert_eq!(view.risk_tier, "high");
         assert_eq!(
             view.data_categories,
-            vec!["life_model", "messages", "vectors"]
+            vec!["life_model", "state_store", "messages", "vectors"]
         );
         assert!(!view.writes_durable_state);
         assert!(view.privacy_sensitive);
@@ -2400,12 +4799,16 @@ mod tests {
         assert!(view.writes_durable_state);
         assert!(view.privacy_sensitive);
         assert_eq!(view.external_transmission, "not_sent_externally");
-        assert_eq!(view.backup_status, "will_create_on_execute");
+        assert_eq!(
+            view.backup_status,
+            "lifemodel_snapshot_only_other_owners_forward_recovery"
+        );
         assert!(view.final_action_enabled);
         assert!(view
             .source_refs
             .iter()
-            .any(|source| source == "governed_request:create_pre_change_snapshot_on_execute"));
+            .any(|source| source
+                == "governed_request:create_lifemodel_pre_change_snapshot_on_execute"));
 
         let serialized = serde_json::to_string(&view).unwrap();
         for forbidden in [
@@ -2473,7 +4876,6 @@ mod tests {
             DangerActionPreflightScope {
                 target_ids: vec!["run-private-1".into(), "run-private-2".into()],
                 affected_count: Some(2),
-                preflight_scope_arguments: None,
             },
         )
         .unwrap();
@@ -2499,7 +4901,6 @@ mod tests {
             DangerActionPreflightScope {
                 target_ids: vec![],
                 affected_count: Some(12),
-                preflight_scope_arguments: None,
             },
         )
         .unwrap();
@@ -2522,7 +4923,6 @@ mod tests {
             DangerActionPreflightScope {
                 target_ids: vec!["run-confirm-1".to_string()],
                 affected_count: Some(1),
-                preflight_scope_arguments: None,
             },
         )
         .unwrap();
@@ -2563,6 +4963,183 @@ mod tests {
             assert!(view.final_action_enabled);
             assert!(view.blocking_reasons.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn governed_import_recovery_preflight_uses_typed_same_process_health_not_warning_text() {
+        let mut state = crate::test_utils::test_app_state();
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        coordinator.degrade_globally(GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON);
+        Arc::get_mut(&mut state)
+            .expect("isolated test state must be uniquely owned")
+            .persistence_coordinator = coordinator;
+        assert!(
+            state.startup_warnings.is_empty(),
+            "same-process drift does not create a bootstrap warning"
+        );
+
+        let journal = required_governed_data_import_journal(&state).unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        journal
+            .prepare(GovernedDataImportPrepare {
+                operation_id: operation_id.clone(),
+                payload_digest: metadata_digest("same-process recovery payload"),
+                request_digest: metadata_digest("same-process recovery request"),
+                owners: vec![GovernedDataImportOwnerPlan {
+                    owner: "LifeModelFileStore".into(),
+                    import_target: "life_model".into(),
+                    before_digest: metadata_digest("same-process owner before"),
+                    target_digest: metadata_digest("same-process owner target"),
+                    item_count: 1,
+                }],
+            })
+            .unwrap();
+
+        let recovery = governed_import_recovery_preflight_receipt(&state)
+            .await
+            .unwrap()
+            .expect("typed coordinator reason and durable receipt must enable recovery preflight");
+        assert_eq!(recovery.operation_id, operation_id);
+        assert_eq!(
+            state.persistence_coordinator.snapshot().global_reason_codes,
+            vec![GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON.to_string()]
+        );
+    }
+
+    #[test]
+    fn governed_import_product_paths_reuse_the_app_state_journal_owner() {
+        let state = crate::test_utils::test_app_state();
+        let journal_path = state
+            .life_model_manager
+            .try_lock()
+            .expect("isolated LifeModel manager must be uncontended")
+            .mutation_journal_path();
+        let schema_version = || {
+            let connection = rusqlite::Connection::open_with_flags(
+                &journal_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            connection
+                .pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let schema_before_reads = schema_version();
+        let bootstrap_owned = state
+            .governed_data_import_journal
+            .as_ref()
+            .expect("isolated state must install one governed import journal");
+        let first = required_governed_data_import_journal(&state).unwrap();
+        let second = required_governed_data_import_journal(&state).unwrap();
+        first.latest_receipt().unwrap();
+        second.latest_receipt().unwrap();
+
+        assert!(Arc::ptr_eq(bootstrap_owned, &first));
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            schema_version(),
+            schema_before_reads,
+            "repeated status reads through the shared journal must not run migration or DDL"
+        );
+    }
+
+    #[test]
+    fn governed_import_product_paths_fail_closed_when_bootstrap_journal_is_unavailable() {
+        let mut state = crate::test_utils::test_app_state();
+        Arc::get_mut(&mut state)
+            .expect("isolated test state must be uniquely owned")
+            .governed_data_import_journal = None;
+
+        let error = match required_governed_data_import_journal(&state) {
+            Ok(_) => panic!("missing bootstrap journal must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AppError::Database { hint: Some(ref hint), .. }
+                if hint == "data_import_journal_unavailable"
+        ));
+    }
+
+    #[test]
+    fn governed_import_abandonment_result_separates_runtime_restart_from_original_effect_truth() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            GovernedDataImportJournal::new(directory.path().join("abandonment-result.db")).unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let target_digest = metadata_digest("observed imported target");
+        let prepared = journal
+            .prepare(GovernedDataImportPrepare {
+                operation_id: operation_id.clone(),
+                payload_digest: metadata_digest("abandonment result payload"),
+                request_digest: metadata_digest("abandonment result request"),
+                owners: vec![GovernedDataImportOwnerPlan {
+                    owner: "LifeModelFileStore".into(),
+                    import_target: "life_model".into(),
+                    before_digest: metadata_digest("owner before"),
+                    target_digest: target_digest.clone(),
+                    item_count: 1,
+                }],
+            })
+            .unwrap()
+            .receipt;
+        let terminal = journal
+            .abandon_preserving_current(
+                &operation_id,
+                &[GovernedDataImportOwnerObservation {
+                    owner: "LifeModelFileStore".into(),
+                    observed_digest: target_digest.clone(),
+                    observed_at: chrono::Utc::now(),
+                    state_restore_request_digest: None,
+                    state_restore_payload_digest: None,
+                    state_restore_before_canonical_digest: None,
+                    state_restore_after_canonical_digest: None,
+                    state_restore_outbox_event_id: None,
+                    state_projection_delivery_state: None,
+                }],
+                &metadata_digest("explicit preserve current"),
+            )
+            .unwrap();
+        assert_eq!(prepared.operation_id, terminal.operation_id);
+
+        let same_process = governed_import_abandonment_result(&terminal, true);
+        assert_eq!(
+            same_process["status"],
+            "abandoned_preserving_current_restart_required"
+        );
+        assert_eq!(same_process["restart_required"], true);
+        assert_eq!(same_process["success"], true);
+        assert_eq!(same_process["recovery_terminalized"], true);
+        assert_eq!(same_process["original_import_completed"], false);
+        assert_eq!(same_process["rollback_completed"], false);
+        assert_eq!(same_process["abandonment_mutated_canonical_owners"], false);
+        assert_eq!(same_process["owner_resolution_counts"]["target"], 1);
+        assert!(same_process.get("canonical_effect_committed").is_none());
+
+        let clean_restart_replay = governed_import_abandonment_result(&terminal, false);
+        assert_eq!(
+            clean_restart_replay["status"],
+            "abandoned_preserving_current"
+        );
+        assert_eq!(clean_restart_replay["restart_required"], false);
+
+        let durable_status =
+            governed_data_import_status_view(Some(&terminal), false, "2026-07-17T00:00:00Z".into());
+        assert_eq!(durable_status.status, "abandoned_preserving_current");
+        assert!(durable_status.terminal);
+        assert!(durable_status.preserved_current);
+        assert!(!durable_status.restart_required);
+        assert_eq!(durable_status.owner_resolution_counts.target, 1);
+        let serialized = serde_json::to_string(&durable_status).unwrap();
+        assert!(!serialized.contains(&target_digest));
+        assert!(!serialized.contains("observedDigest"));
+        assert!(!serialized.contains("payloadDigest"));
     }
 
     #[test]
@@ -2618,12 +5195,19 @@ mod tests {
     }
 
     async fn seed_current_data(state: &Arc<AppState>) {
-        {
+        let current_model = {
             let manager = state.life_model_manager.lock().await;
             let mut model = manager.load().unwrap();
             model.identity.name = W84_IMPORT_CURRENT_NAME_SECRET.into();
             manager.save(&model).unwrap();
-        }
+            model
+        };
+        crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+            state.state_store.as_ref().expect("test StateStore"),
+            &current_model,
+            chrono::Utc::now(),
+        )
+        .expect("test StateStore daily-task owner receipt");
         {
             let store = state.memory_store.lock().await;
             store
@@ -2723,6 +5307,30 @@ mod tests {
             .name
     }
 
+    fn create_test_daily_task(state: &Arc<AppState>, title: &str) {
+        let now = chrono::Utc::now();
+        state
+            .state_store
+            .as_ref()
+            .expect("test StateStore")
+            .create_daily_task(openlife_core::state_store::CreateDailyTaskCommand {
+                operation_id: Uuid::new_v4().hyphenated().to_string(),
+                request_digest: None,
+                source_message_ref: format!("settings-test:{}", Uuid::new_v4()),
+                title: title.into(),
+                due_at: Some(now + chrono::Duration::hours(6)),
+                created_at: now,
+                expires_at: now + chrono::Duration::days(2),
+                risk: openlife_core::state_store::StateRisk::Low,
+                sensitivity: openlife_core::state_store::StateSensitivity::Internal,
+                source_kind:
+                    openlife_core::state_store::StateSourceKind::CurrentAuthenticatedUserMessage,
+                confidence: 1.0,
+                privacy_class: openlife_core::state_store::StatePrivacyClass::Private,
+            })
+            .expect("create canonical test daily task");
+    }
+
     #[tokio::test]
     async fn w93_import_all_data_without_governed_request_fails_closed() {
         let state = crate::test_utils::test_app_state();
@@ -2752,7 +5360,7 @@ mod tests {
 
     #[tokio::test]
     async fn w93_import_all_data_governed_request_allows_metadata_safe_import() {
-        let state = crate::test_utils::test_app_state();
+        let state = release_like_test_app_state();
         seed_current_data(&state).await;
 
         let result = import_all_data_with_state_for_governed_import(
@@ -2822,8 +5430,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn governed_import_missing_memory_targets_preserves_existing_memory() {
+    async fn governed_import_with_daily_tasks_fails_closed_without_replacing_other_stores() {
         let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+        let before_model_hash = current_lifemodel_file_hash(&state).await.unwrap();
+        let mut payload = import_payload();
+        payload["life_model"]["goals"]["daily"] = serde_json::json!([
+            {
+                "name": "must not become YAML truth",
+                "done": false,
+                "time_block": null
+            }
+        ]);
+
+        let error = import_all_data_with_state_for_governed_import(
+            payload,
+            &state,
+            GovernedDataImportRequest::manual_restore_all_targets(),
+        )
+        .await
+        .expect_err("legacy daily tasks without TTL must be quarantined before any write");
+
+        assert!(error.message().contains("v1 backup contains daily tasks"));
+        assert!(error.message().contains("quarantined"));
+        assert_eq!(
+            current_lifemodel_file_hash(&state).await.unwrap(),
+            before_model_hash,
+            "preflight rejection must not bump metadata or rewrite canonical truth"
+        );
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_missing_memory_targets_preserves_existing_memory() {
+        let state = release_like_test_app_state();
         seed_current_data(&state).await;
         let mut payload = import_payload();
         payload.as_object_mut().unwrap().remove("messages");
@@ -2833,6 +5484,7 @@ mod tests {
             payload,
             &state,
             GovernedDataImportRequest {
+                operation_id: Uuid::new_v4().hyphenated().to_string(),
                 purpose: "manual_restore".into(),
                 explicit_user_intent: true,
                 create_pre_change_snapshot: true,
@@ -2858,7 +5510,7 @@ mod tests {
 
     #[tokio::test]
     async fn governed_import_skips_derived_vectors_and_reports_only_applied_rows() {
-        let state = crate::test_utils::test_app_state();
+        let state = release_like_test_app_state();
         seed_current_data(&state).await;
         let profile = openlife_core::embedding::EmbeddingProfile::new(
             openlife_core::embedding::EmbeddingRouteKind::DeterministicHash,
@@ -2944,6 +5596,7 @@ mod tests {
     async fn governed_import_vector_tombstone_failure_restores_all_preimport_truth() {
         let state = crate::test_utils::test_app_state();
         seed_current_data(&state).await;
+        let before_model_hash = current_lifemodel_file_hash(&state).await.unwrap();
         state
             .vector_store
             .lock()
@@ -2963,7 +5616,16 @@ mod tests {
         )
         .await
         .expect_err("a projected conversation tombstone must reject archive resurrection");
-        assert!(error.message().contains("已自动回滚"));
+        assert!(
+            error.message().contains("已恢复到导入前状态"),
+            "unexpected import failure: {}",
+            error.message()
+        );
+        assert_eq!(
+            current_lifemodel_file_hash(&state).await.unwrap(),
+            before_model_hash,
+            "compensation must restore the exact pre-import physical model hash"
+        );
         assert_eq!(
             current_model_name(&state).await,
             W84_IMPORT_CURRENT_NAME_SECRET
@@ -2987,6 +5649,7 @@ mod tests {
             import_payload(),
             &state,
             Some(GovernedDataImportRequest {
+                operation_id: Uuid::new_v4().hyphenated().to_string(),
                 purpose: "normal_product".into(),
                 explicit_user_intent: true,
                 create_pre_change_snapshot: true,
@@ -3004,6 +5667,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn governed_import_contract_rejects_invalid_operation_id_and_duplicate_targets() {
+        let invalid_operation = GovernedDataImportRequest {
+            operation_id: "not-a-uuid".into(),
+            purpose: "manual_restore".into(),
+            explicit_user_intent: true,
+            create_pre_change_snapshot: true,
+            import_targets: vec!["life_model".into()],
+        };
+        assert!(!invalid_operation.is_valid());
+
+        let duplicate_target = GovernedDataImportRequest {
+            operation_id: Uuid::new_v4().hyphenated().to_string(),
+            purpose: "manual_restore".into(),
+            explicit_user_intent: true,
+            create_pre_change_snapshot: true,
+            import_targets: vec!["life_model".into(), "life_model".into()],
+        };
+        assert!(!duplicate_target.is_valid());
+    }
+
+    #[test]
+    fn governed_import_payload_version_and_state_store_contract_fail_closed() {
+        let mut v2_missing_state_store = import_payload();
+        v2_missing_state_store["version"] = serde_json::json!("2.0");
+        let missing_error = validate_import_payload_shape(&v2_missing_state_store)
+            .expect_err("v2 must not silently omit canonical StateStore data");
+        assert!(missing_error.message().contains("state_store"));
+
+        let mut v1_with_state_store = import_payload();
+        v1_with_state_store["state_store"] = serde_json::json!({
+            "schema": "openlife.state-store-daily-tasks-portable.v1",
+            "exportedAt": "2026-06-03T00:00:00Z",
+            "dailyTasks": []
+        });
+        let mixed_error = validate_import_payload_shape(&v1_with_state_store)
+            .expect_err("v1 must not smuggle a v2 owner payload");
+        assert!(matches!(mixed_error, AppError::PermissionDenied { .. }));
+        assert!(mixed_error.message().contains("v1"));
+    }
+
+    #[test]
+    fn governed_import_payload_resource_limits_fail_before_owner_parsing() {
+        let mut too_many_messages = import_payload();
+        too_many_messages["messages"] = serde_json::Value::Array(vec![
+            serde_json::Value::Null;
+            MAX_GOVERNED_IMPORT_MESSAGES
+                + 1
+        ]);
+        let message_error = validate_import_payload_shape(&too_many_messages).unwrap_err();
+        assert!(message_error.message().contains("message import limit"));
+
+        let mut oversized_text = import_payload();
+        oversized_text["life_model"]["identity"]["name"] =
+            serde_json::Value::String("x".repeat(MAX_GOVERNED_IMPORT_STRING_BYTES + 1));
+        let text_error = validate_import_payload_shape(&oversized_text).unwrap_err();
+        assert!(text_error.message().contains("oversized text field"));
+
+        let mut too_many_tasks = import_payload();
+        too_many_tasks["version"] = serde_json::json!("2.0");
+        too_many_tasks["state_store"] = serde_json::json!({
+            "dailyTasks": vec![serde_json::Value::Null; MAX_GOVERNED_IMPORT_STATE_TASKS + 1]
+        });
+        let task_error = validate_import_payload_shape(&too_many_tasks).unwrap_err();
+        assert!(task_error.message().contains("daily-task import limit"));
+
+        let mut nested = serde_json::Value::Null;
+        for _ in 0..=MAX_GOVERNED_IMPORT_JSON_DEPTH {
+            nested = serde_json::json!({"nested": nested});
+        }
+        let mut excessive_depth = import_payload();
+        excessive_depth["life_model"] = nested;
+        let depth_error = validate_import_payload_shape(&excessive_depth).unwrap_err();
+        assert!(depth_error.message().contains("JSON nesting limit"));
+    }
+
     #[tokio::test]
     async fn w93_import_all_data_payload_targets_must_match_governed_request() {
         let state = crate::test_utils::test_app_state();
@@ -3013,6 +5752,7 @@ mod tests {
             import_payload(),
             &state,
             GovernedDataImportRequest {
+                operation_id: Uuid::new_v4().hyphenated().to_string(),
                 purpose: "manual_restore".into(),
                 explicit_user_intent: true,
                 create_pre_change_snapshot: true,
@@ -3091,5 +5831,579 @@ mod tests {
         assert!(exported
             .to_string()
             .contains(W84_IMPORT_CURRENT_VECTOR_SECRET));
+        assert_eq!(exported["version"], "2.0");
+        assert_eq!(
+            exported["state_store"]["schema"],
+            "openlife.state-store-daily-tasks-portable.v1"
+        );
+        assert_eq!(
+            exported["life_model"]["goals"]["daily"],
+            serde_json::json!([]),
+            "StateStore-owned daily tasks must not be copied into LifeModel backup truth"
+        );
+        assert_eq!(
+            exported["life_model"]["state"]["alerts"],
+            serde_json::json!([]),
+            "derived alerts must not be copied into LifeModel backup truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn openlife_v2_export_import_round_trips_canonical_daily_tasks_without_title_leak() {
+        let source = crate::test_utils::test_app_state();
+        seed_current_data(&source).await;
+        create_test_daily_task(&source, "PORTABLE_DAILY_TASK_SECRET");
+        let exported = export_all_data_with_state(&source).await.unwrap();
+
+        let target = release_like_test_app_state();
+        seed_current_data(&target).await;
+        create_test_daily_task(&target, "REPLACED_TARGET_TASK_SECRET");
+        let result = import_all_data_with_state_for_governed_import(
+            exported,
+            &target,
+            GovernedDataImportRequest::manual_restore_all_targets(),
+        )
+        .await
+        .unwrap();
+
+        let tasks = target
+            .state_store
+            .as_ref()
+            .unwrap()
+            .get_product_daily_tasks()
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "PORTABLE_DAILY_TASK_SECRET");
+        assert_eq!(
+            tasks[0].source_kind,
+            openlife_core::state_store::StateSourceKind::GovernedDataRestore
+        );
+        assert_eq!(result["state_store_targeted"], true);
+        assert_eq!(result["state_store_restored_count"], 1);
+        assert_eq!(result["state_store_projection_status"], "applied");
+        let response = result.to_string();
+        assert!(!response.contains("PORTABLE_DAILY_TASK_SECRET"));
+        assert!(!response.contains("REPLACED_TARGET_TASK_SECRET"));
+    }
+
+    #[tokio::test]
+    async fn governed_import_state_owner_marks_semantic_noop_restore_as_skipped() {
+        let state = release_like_test_app_state();
+        seed_current_data(&state).await;
+        let archive = state
+            .state_store
+            .as_ref()
+            .unwrap()
+            .export_portable_daily_tasks(chrono::Utc::now())
+            .unwrap();
+        assert!(archive.daily_tasks.is_empty());
+        let mut payload = import_payload();
+        payload["version"] = serde_json::json!("2.0");
+        payload["state_store"] = serde_json::to_value(archive).unwrap();
+        let request = GovernedDataImportRequest::manual_restore_all_targets();
+
+        import_all_data_governed_operation(payload, &state, &request)
+            .await
+            .unwrap();
+
+        let journal = required_governed_data_import_journal(&state).unwrap();
+        let terminal = journal.receipt(&request.operation_id).unwrap().unwrap();
+        assert_eq!(terminal.stage, GovernedDataImportStage::Completed);
+        assert_eq!(
+            governed_import_owner(&terminal, "state_store")
+                .unwrap()
+                .status,
+            GovernedDataImportOwnerStatus::Skipped
+        );
+        let restore = state
+            .state_store
+            .as_ref()
+            .unwrap()
+            .portable_daily_task_restore_receipt(&request.operation_id, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restore.before_canonical_digest, restore.after_canonical_digest,
+            "StateStore owner status must use canonical before/after domains"
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_replay_result_preserves_exact_degraded_projection_truth() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+        let store = state.state_store.as_ref().unwrap();
+        let restored_at = chrono::Utc::now();
+        let archive = store.export_portable_daily_tasks(restored_at).unwrap();
+        let request = GovernedDataImportRequest {
+            operation_id: Uuid::new_v4().hyphenated().to_string(),
+            purpose: "manual_restore".into(),
+            explicit_user_intent: true,
+            create_pre_change_snapshot: true,
+            import_targets: vec!["state_store".into()],
+        };
+        let request_digest = hash_serializable_value(&request).unwrap();
+        let receipt = store
+            .restore_portable_daily_tasks(
+                openlife_core::state_store::RestorePortableDailyTasksCommand {
+                    operation_id: request.operation_id.clone(),
+                    request_digest,
+                    expected_before_digest: archive.canonical_digest.clone(),
+                    archive,
+                    restored_at,
+                },
+            )
+            .unwrap();
+        store
+            .mark_projection_degraded(&receipt.outbox_event_id, "injected_projection_failure")
+            .unwrap();
+
+        let result = governed_import_result(
+            &state,
+            &request,
+            &metadata_digest("replay payload"),
+            &metadata_digest("previous model"),
+            &metadata_digest("requested model"),
+            None,
+            None,
+            None,
+            None,
+            Some(store),
+            true,
+            None,
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["state_store_projection_status"], "degraded");
+        assert_eq!(result["audit"]["state_store_projection_status"], "degraded");
+        assert_ne!(result["state_store_projection_status"], "applied");
+    }
+
+    #[tokio::test]
+    async fn governed_import_replays_every_owner_commit_before_journal_crash_boundary() {
+        let archive_source = crate::test_utils::test_app_state();
+        seed_current_data(&archive_source).await;
+        create_test_daily_task(&archive_source, "PORTABLE_CRASH_RECOVERY_TASK_SECRET");
+        let state_archive = archive_source
+            .state_store
+            .as_ref()
+            .unwrap()
+            .export_portable_daily_tasks(chrono::Utc::now())
+            .unwrap();
+        let mut payload = import_payload();
+        payload["version"] = serde_json::json!("2.0");
+        payload["state_store"] = serde_json::to_value(state_archive).unwrap();
+
+        for (fault, expected_stage) in [
+            (
+                GovernedImportFault::AfterLifeModelCommitBeforeJournal,
+                GovernedDataImportStage::Prepared,
+            ),
+            (
+                GovernedImportFault::AfterMemoryCommitBeforeJournal,
+                GovernedDataImportStage::LifeModelApplied,
+            ),
+            (
+                GovernedImportFault::AfterVectorCommitBeforeJournal,
+                GovernedDataImportStage::MemoryApplied,
+            ),
+            (
+                GovernedImportFault::AfterStateCommitBeforeJournal,
+                GovernedDataImportStage::VectorApplied,
+            ),
+        ] {
+            let state = release_like_test_app_state();
+            seed_current_data(&state).await;
+            create_test_daily_task(&state, "REPLACED_CRASH_RECOVERY_TASK_SECRET");
+            let request = GovernedDataImportRequest::manual_restore_all_targets();
+
+            let crash = import_all_data_governed_operation_with_fault(
+                payload.clone(),
+                &state,
+                &request,
+                fault,
+            )
+            .await
+            .expect_err("fault injection must stop after owner commit and before journal advance");
+            assert!(crash.message().contains("injected crash"));
+
+            let journal = required_governed_data_import_journal(&state).unwrap();
+            let interrupted = journal
+                .receipt(&request.operation_id)
+                .unwrap()
+                .expect("interrupted import must leave a durable nonterminal receipt");
+            assert_eq!(interrupted.stage, expected_stage);
+            assert_eq!(
+                journal
+                    .recovery_requirement()
+                    .unwrap()
+                    .expect("interrupted import must be discoverable for recovery")
+                    .operation_id,
+                request.operation_id
+            );
+
+            let recovered = import_all_data_governed_operation(payload.clone(), &state, &request)
+                .await
+                .expect("exact replay must converge without a duplicate owner write");
+            assert_eq!(recovered["success"], true);
+            assert_eq!(recovered["status"], "replayed");
+            assert_eq!(recovered["restart_required"], false);
+
+            let terminal = journal
+                .receipt(&request.operation_id)
+                .unwrap()
+                .expect("recovered import receipt");
+            assert_eq!(terminal.stage, GovernedDataImportStage::Completed);
+            assert!(terminal.terminal_at.is_some());
+            assert!(journal.recovery_requirement().unwrap().is_none());
+
+            let state_receipt = state
+                .state_store
+                .as_ref()
+                .unwrap()
+                .portable_daily_task_restore_receipt(&request.operation_id, true)
+                .unwrap()
+                .expect("StateStore must retain the exact durable restore receipt");
+            assert_eq!(state_receipt.committed_at, terminal.created_at);
+            assert_eq!(state_receipt.operation_id, request.operation_id);
+
+            assert_eq!(
+                current_model_name(&state).await,
+                W84_IMPORT_PAYLOAD_NAME_SECRET
+            );
+            assert_eq!(
+                exported_message_contents(&state).await,
+                vec![W84_IMPORT_PAYLOAD_MESSAGE_SECRET.to_string()]
+            );
+            assert_eq!(
+                exported_vector_contents(&state).await,
+                vec![W84_IMPORT_PAYLOAD_VECTOR_SECRET.to_string()]
+            );
+            let tasks = state
+                .state_store
+                .as_ref()
+                .unwrap()
+                .get_product_daily_tasks()
+                .unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].title, "PORTABLE_CRASH_RECOVERY_TASK_SECRET");
+
+            let response = recovered.to_string();
+            assert!(!response.contains("PORTABLE_CRASH_RECOVERY_TASK_SECRET"));
+            assert!(!response.contains("REPLACED_CRASH_RECOVERY_TASK_SECRET"));
+        }
+    }
+
+    #[tokio::test]
+    async fn governed_import_snapshot_is_durable_before_journal_prepare() {
+        let state = release_like_test_app_state();
+        seed_current_data(&state).await;
+        let request = GovernedDataImportRequest::manual_restore_all_targets();
+        let payload = import_payload();
+
+        let crash = import_all_data_governed_operation_with_fault(
+            payload.clone(),
+            &state,
+            &request,
+            GovernedImportFault::AfterSnapshotBeforeJournalPrepare,
+        )
+        .await
+        .expect_err("fault injection must stop after snapshot and before saga prepare");
+        assert!(crash.message().contains("injected crash"));
+
+        let journal = required_governed_data_import_journal(&state).unwrap();
+        assert!(journal.receipt(&request.operation_id).unwrap().is_none());
+        let snapshots_before_retry = state
+            .version_manager
+            .lock()
+            .await
+            .list_versions()
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| snapshot.tag == "auto:pre-import")
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots_before_retry.len(), 1);
+        assert!(snapshots_before_retry[0]
+            .yaml_content
+            .contains(W84_IMPORT_CURRENT_NAME_SECRET));
+        assert!(!snapshots_before_retry[0]
+            .yaml_content
+            .contains(W84_IMPORT_PAYLOAD_NAME_SECRET));
+
+        let completed = import_all_data_governed_operation(payload, &state, &request)
+            .await
+            .expect("retry must reuse the exact pre-change snapshot before preparing the saga");
+        assert_eq!(completed["status"], "completed");
+        let snapshots_after_retry = state
+            .version_manager
+            .lock()
+            .await
+            .list_versions()
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| snapshot.tag == "auto:pre-import")
+            .count();
+        assert_eq!(snapshots_after_retry, 1);
+        assert_eq!(
+            journal
+                .receipt(&request.operation_id)
+                .unwrap()
+                .unwrap()
+                .stage,
+            GovernedDataImportStage::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_pending_owner_late_drift_is_preserved_and_terminalized() {
+        let mut state = crate::test_utils::test_app_state();
+        install_release_like_persistence_coordinator(&mut state);
+        seed_current_data(&state).await;
+        let request = GovernedDataImportRequest::manual_restore_all_targets();
+
+        let error = import_all_data_governed_operation_with_fault(
+            import_payload(),
+            &state,
+            &request,
+            GovernedImportFault::AfterMemoryCommitWithLateDrift,
+        )
+        .await
+        .expect_err("late owner drift must fail closed");
+        assert!(matches!(
+            &error,
+            AppError::Database { hint: Some(hint), .. }
+                if hint == "data_import_abandoned_restart_required"
+        ));
+
+        let journal = required_governed_data_import_journal(&state).unwrap();
+        let receipt = journal.receipt(&request.operation_id).unwrap().unwrap();
+        assert_eq!(
+            receipt.stage,
+            GovernedDataImportStage::AbandonedPreservingCurrent
+        );
+        assert_eq!(
+            governed_import_owner(&receipt, "messages").unwrap().status,
+            GovernedDataImportOwnerStatus::Unknown
+        );
+        assert_eq!(receipt.resolution_evidence.len(), receipt.owners.len());
+        assert!(journal.recovery_requirement().unwrap().is_none());
+        let messages = exported_message_contents(&state).await;
+        assert!(messages
+            .iter()
+            .any(|message| message == W84_IMPORT_PAYLOAD_MESSAGE_SECRET));
+        assert!(messages
+            .iter()
+            .any(|message| message == "LATE_MEMORY_WRITE_MUST_NOT_BE_COMPENSATED_AWAY"));
+        assert!(!error.message().contains("已恢复到导入前状态"));
+        assert!(error.message().contains("did not complete or roll back"));
+        assert!(
+            !state
+                .persistence_coordinator
+                .snapshot()
+                .canonical_writes_allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_terminal_drift_is_preserved_and_terminalized() {
+        let mut state = crate::test_utils::test_app_state();
+        install_release_like_persistence_coordinator(&mut state);
+        seed_current_data(&state).await;
+        let request = GovernedDataImportRequest::manual_restore_all_targets();
+
+        let error = import_all_data_governed_operation_with_fault(
+            import_payload(),
+            &state,
+            &request,
+            GovernedImportFault::BeforeTerminalVerificationWithMemoryDrift,
+        )
+        .await
+        .expect_err("terminal fact drift must fail closed");
+        assert!(matches!(
+            &error,
+            AppError::Database { hint: Some(hint), .. }
+                if hint == "data_import_abandoned_restart_required"
+        ));
+
+        let journal = required_governed_data_import_journal(&state).unwrap();
+        let receipt = journal.receipt(&request.operation_id).unwrap().unwrap();
+        assert_eq!(
+            receipt.stage,
+            GovernedDataImportStage::AbandonedPreservingCurrent
+        );
+        assert_eq!(
+            governed_import_owner(&receipt, "messages").unwrap().status,
+            GovernedDataImportOwnerStatus::Unknown
+        );
+        assert_eq!(receipt.resolution_evidence.len(), receipt.owners.len());
+        assert!(journal.recovery_requirement().unwrap().is_none());
+        assert!(exported_message_contents(&state)
+            .await
+            .iter()
+            .any(|message| message == "LATE_TERMINAL_MEMORY_WRITE_MUST_REMAIN_CANONICAL"));
+        assert!(!error.message().contains("已恢复到导入前状态"));
+        assert!(error.message().contains("did not complete or roll back"));
+        assert!(
+            !state
+                .persistence_coordinator
+                .snapshot()
+                .canonical_writes_allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_completion_fence_linearizes_owner_checks_and_terminal_journal() {
+        let mut state = crate::test_utils::test_app_state();
+        install_release_like_persistence_coordinator(&mut state);
+        seed_current_data(&state).await;
+        let request = GovernedDataImportRequest::manual_restore_all_targets();
+        let old_admission = state
+            .persistence_coordinator
+            .admit_normal_or_governed_data_import_writes(
+                &[GovernedDataImportRecoveryOwner::MemoryStore],
+                None,
+                "",
+                "",
+                "",
+            )
+            .unwrap();
+        let (observed_first_owner, release_terminal_verification) =
+            install_governed_import_terminal_observation_barrier(&request.operation_id);
+
+        let import_state = Arc::clone(&state);
+        let import_request = request.clone();
+        let import = tokio::spawn(async move {
+            import_all_data_governed_operation(import_payload(), &import_state, &import_request)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), observed_first_owner)
+            .await
+            .expect("import reaches terminal owner observation")
+            .expect("terminal observation barrier remains installed");
+
+        let stale_coordinator = Arc::clone(&state.persistence_coordinator);
+        let (stale_queued_tx, stale_queued_rx) = tokio::sync::oneshot::channel();
+        let stale_writer = tokio::spawn(async move {
+            let mut permit =
+                Box::pin(stale_coordinator.acquire_canonical_commit_permit(&old_admission));
+            // Poll the read-lock first so the writer is deterministically
+            // queued behind the live completion fence before verification is
+            // allowed to continue.
+            tokio::select! {
+                biased;
+                result = &mut permit => {
+                    return result.map(drop);
+                }
+                _ = async { let _ = stale_queued_tx.send(()); } => {}
+            }
+            permit.await.map(drop)
+        });
+        stale_queued_rx.await.unwrap();
+        assert!(
+            !stale_writer.is_finished(),
+            "an owner admission minted before terminal observation must not bypass the fence"
+        );
+
+        release_terminal_verification.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), import)
+            .await
+            .expect("terminal verification and durable Completed transition finish")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["status"], "completed");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stale_writer)
+                .await
+                .expect("stale writer is released after terminal journal commit")
+                .unwrap()
+                .is_err(),
+            "the completion fence must invalidate admissions minted before owner observation"
+        );
+
+        let journal = required_governed_data_import_journal(&state).unwrap();
+        assert_eq!(
+            journal
+                .receipt(&request.operation_id)
+                .unwrap()
+                .unwrap()
+                .stage,
+            GovernedDataImportStage::Completed
+        );
+        assert_eq!(
+            state.persistence_coordinator.snapshot().mode,
+            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite,
+            "successful completion must not masquerade as recovery degradation"
+        );
+
+        memory_gateway::save_conversation_message_idempotent_with_state(
+            "after-governed-import-completion",
+            &ChatMessage {
+                role: "user".into(),
+                content: "POST_COMPLETION_WRITE_IS_ORDERED_AFTER_TERMINAL_FACT".into(),
+            },
+            &Uuid::new_v4().hyphenated().to_string(),
+            &state,
+        )
+        .await
+        .expect("fresh product writes remain available after the completion fence");
+    }
+
+    #[tokio::test]
+    async fn completed_import_replay_does_not_relabel_later_lifemodel_hash_as_terminal_fact() {
+        let mut state = crate::test_utils::test_app_state();
+        install_release_like_persistence_coordinator(&mut state);
+        seed_current_data(&state).await;
+        let request = GovernedDataImportRequest::manual_restore_all_targets();
+        let payload = import_payload();
+
+        let completed = import_all_data_governed_operation(payload.clone(), &state, &request)
+            .await
+            .unwrap();
+        assert_eq!(completed["status"], "completed");
+        assert!(completed["final_model_hash"].is_string());
+        assert_eq!(
+            completed["final_model_hash_status"],
+            "observed_at_terminalization"
+        );
+
+        let (mut later_model, expected_hash) = {
+            let manager = state.life_model_manager.lock().await;
+            let model = manager.load().unwrap();
+            let hash = life_model_write_gateway::hash_life_model(&model).unwrap();
+            (model, hash)
+        };
+        later_model.identity.name = "LATER_LEGITIMATE_LIFEMODEL_WRITE".into();
+        life_model_write_gateway::restore_life_model_with_gateway(
+            &state,
+            &later_model,
+            LifeModelMaterializerCallerContext::new(
+                "completed_import_replay_counterfactual",
+                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
+            ),
+            Some(&expected_hash),
+        )
+        .await
+        .unwrap();
+
+        let replayed = import_all_data_governed_operation(payload, &state, &request)
+            .await
+            .unwrap();
+        assert_eq!(replayed["status"], "replayed");
+        assert!(replayed["final_model_hash"].is_null());
+        assert!(replayed["audit"]["final_model_hash"].is_null());
+        assert_eq!(
+            replayed["final_model_hash_status"],
+            "not_persisted_for_completed_replay"
+        );
+        assert_eq!(
+            replayed["audit"]["final_model_hash_status"],
+            "not_persisted_for_completed_replay"
+        );
     }
 }

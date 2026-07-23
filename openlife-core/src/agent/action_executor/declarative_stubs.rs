@@ -8,7 +8,10 @@ use super::AgentActionRequest;
 
 impl super::ActionExecutor {
     /// For manifest-only provider-gated tools, create a Proposal instead of blocking.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn create_declarative_stub_proposal(
         &self,
         request: &AgentActionRequest,

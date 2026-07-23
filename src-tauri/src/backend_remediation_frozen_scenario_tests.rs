@@ -666,22 +666,36 @@ async fn run_exact_prompt_through_send(
     assert_eq!(execution.executor, FrozenExecutor::MainChatSendMechanics);
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_frozen_command_seed(&state, execution).await;
-    let result = crate::main_chat_send::send_message_with_state(
+    let result = send_exact_prompt_through_state(
+        scenario_id,
+        &state,
         format!(
             "frozen-{}-{}",
             scenario_id.to_ascii_lowercase(),
             uuid::Uuid::new_v4()
         ),
+    )
+    .await;
+    (state, result)
+}
+
+async fn send_exact_prompt_through_state(
+    scenario_id: &str,
+    state: &Arc<crate::AppState>,
+    task_session_id: String,
+) -> crate::SendMessageResult {
+    let result = crate::main_chat_send::send_message_with_state(
+        task_session_id,
         vec![ChatMessage {
             role: "user".into(),
             content: frozen_prompt(scenario_id),
         }],
         None,
-        &state,
+        state,
     )
     .await
     .unwrap_or_else(|error| panic!("{scenario_id} real send entry failed: {error}"));
-    (state, result)
+    result
 }
 
 #[test]
@@ -953,20 +967,52 @@ async fn explicit_memory_exact_prompts_commit_once_with_typed_policy_and_undo_re
             "{scenario_id}: {evidence:#}"
         );
         assert_eq!(pending_proposal_count(&state).await, 0, "{scenario_id}");
-        assert_eq!(result.tool_calls.len(), 1, "{scenario_id}: {evidence:#}");
-        let call = &result.tool_calls[0];
-        assert_eq!(call.name, "memory.explicit_write", "{scenario_id}");
-        assert!(call.success, "{scenario_id}: {evidence:#}");
-        assert_eq!(call.arguments["undoAvailable"], true, "{scenario_id}");
+        assert!(
+            result.tool_calls.is_empty(),
+            "a domain Memory commit must not mint fake ToolGateway credit: {evidence:#}"
+        );
+        let receipt = &result
+            .reasoning_trace
+            .generation_result
+            .as_ref()
+            .expect("explicit Memory generation evidence")["memoryGovernance"]
+            ["explicitMemoryReceipts"][0];
+        assert_eq!(receipt["undoAvailable"], true, "{scenario_id}");
         assert_eq!(
-            call.arguments["sourceMessageId"], ingress.policy_decision.authorized_user_message_id,
+            receipt["sourceMessageId"], ingress.policy_decision.authorized_user_message_id,
             "{scenario_id} receipt authority must equal PolicyDecision authority"
         );
         assert_eq!(
-            call.arguments["authorizedCandidateId"],
+            receipt["authorizedCandidateId"],
             ingress.policy_decision.authorized_memory_candidate_ids[0],
             "{scenario_id} receipt candidate must equal the exact typed grant"
         );
+        assert_eq!(
+            terminal.final_delivery.durable_changes.len(),
+            1,
+            "explicit Memory durable change projection missing: {evidence:#}"
+        );
+        let terminal_change = &terminal.final_delivery.durable_changes[0];
+        assert!(matches!(
+            terminal_change.change_type.as_str(),
+            "memory.materialized" | "memory.accepted"
+        ));
+        assert_eq!(
+            terminal_change.target,
+            receipt["memoryId"].as_str().expect("receipt memory id")
+        );
+        assert!(terminal_change.rollback_available);
+        let product_change = &result
+            .agent_state
+            .as_ref()
+            .expect("explicit Memory AgentState")
+            .final_delivery
+            .as_ref()
+            .expect("explicit Memory FinalDelivery")
+            .durable_changes[0];
+        assert_eq!(product_change.target, terminal_change.target);
+        assert_eq!(product_change.change_type, terminal_change.change_type);
+        assert!(product_change.rollback_available);
         assert!(result.reply.contains("写入可撤销 Memory"), "{scenario_id}");
     }
 }
@@ -990,9 +1036,144 @@ async fn explicit_memory_commit_failure_cannot_return_a_successful_confirmation_
     .await
     .expect_err("missing canonical Memory store must fail the turn");
 
-    assert!(
-        error.contains("explicit Memory write failed"),
-        "unexpected fail-closed error: {error}"
+    assert!(error.contains("lifecycle_store_unavailable"));
+    assert!(!error.contains("写入可撤销 Memory"));
+}
+
+#[tokio::test]
+async fn inferred_memory_exact_prompt_has_one_non_blocking_review_batch_under_repetition() {
+    let scenario_id = "MEM-04";
+    let execution = execution_for(scenario_id);
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_frozen_command_seed(&state, execution).await;
+    let canonical_memory_before = state
+        .memory_lifecycle_store
+        .as_ref()
+        .expect("MEM-04 canonical Memory store")
+        .lock()
+        .await
+        .list_records(None, None, 200, 0)
+        .expect("list canonical Memory before MEM-04")
+        .len();
+
+    let mut canonical_proposal_id = None;
+    for repetition in 0..10 {
+        let result = send_exact_prompt_through_state(
+            scenario_id,
+            &state,
+            format!("frozen-mem-04-repetition-{repetition}"),
+        )
+        .await;
+        let evidence = serde_json::to_value(&result)
+            .expect("serialize inferred Memory frozen scenario evidence");
+        let ingress = result
+            .agent_ingress
+            .as_ref()
+            .expect("MEM-04 typed PolicyDecision");
+        let terminal = result
+            .turn_terminal
+            .as_ref()
+            .expect("MEM-04 canonical terminal");
+        let generation = result
+            .reasoning_trace
+            .generation_result
+            .as_ref()
+            .expect("MEM-04 generation evidence");
+        let proposal_ids = generation["memoryGovernance"]["memoryProposalIds"]
+            .as_array()
+            .unwrap_or_else(|| panic!("MEM-04 inferred Memory proposal ids: {evidence:#}"));
+
+        assert_eq!(
+            ingress.selected_strategy.as_str(),
+            "direct_answer",
+            "MEM-04 must preserve the answer path: {evidence:#}"
+        );
+        assert_eq!(
+            generation["memoryGovernanceDisposition"], "deferred_review_overlay",
+            "MEM-04 review must remain non-blocking: {evidence:#}"
+        );
+        assert!(
+            !result.reply.trim().is_empty(),
+            "MEM-04 must preserve a useful candidate answer"
+        );
+        assert_eq!(
+            result.status, "completed_with_pending_items",
+            "the answer is complete while deferred review remains truthfully pending: {evidence:#}"
+        );
+        assert!(result.blockers.is_empty(), "MEM-04: {evidence:#}");
+        assert_eq!(proposal_ids.len(), 1, "MEM-04: {evidence:#}");
+        let proposal_id = proposal_ids[0]
+            .as_str()
+            .expect("MEM-04 proposal id")
+            .to_string();
+        match canonical_proposal_id.as_ref() {
+            Some(existing) => assert_eq!(
+                &proposal_id, existing,
+                "canonical fact-key dedup must reuse one pending Proposal"
+            ),
+            None => canonical_proposal_id = Some(proposal_id),
+        }
+        assert!(
+            !terminal.direct_writes_executed,
+            "MEM-04 cannot commit canonical Memory before review"
+        );
+        assert!(
+            terminal.final_delivery.durable_changes.is_empty(),
+            "a Proposal is not a completed durable Memory change"
+        );
+
+        let session = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("MEM-04 task store")
+            .lock()
+            .await
+            .load_session(
+                ingress
+                    .agent_task_session_id
+                    .as_deref()
+                    .expect("MEM-04 task session id"),
+            )
+            .expect("load MEM-04 task")
+            .expect("MEM-04 task exists");
+        assert_eq!(
+            session.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+        );
+        assert!(session.pending_blockers.is_empty());
+    }
+
+    assert_eq!(
+        pending_proposal_count(&state).await,
+        1,
+        "ten repetitions of one inferred fact must produce one pending Proposal"
+    );
+    let review_center =
+        crate::read_models::review_center::get_review_center_view_model_with_state(&state)
+            .await
+            .expect("load MEM-04 ReviewCenter projection");
+    let model = review_center.data.expect("MEM-04 ReviewCenter data");
+    assert_eq!(model.items.len(), 1);
+    assert_eq!(model.batches.len(), 1);
+    let batch = &model.batches[0];
+    assert_eq!(
+        batch.domain,
+        openlife_core::agent::ReviewBatchDomain::Memory
+    );
+    assert_eq!(batch.item_ids, vec![canonical_proposal_id.unwrap()]);
+    assert_eq!(batch.action_required_count, 1);
+    assert_eq!(
+        state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("MEM-04 canonical Memory store")
+            .lock()
+            .await
+            .list_records(None, None, 200, 0)
+            .expect("list canonical Memory after MEM-04")
+            .len(),
+        canonical_memory_before,
+        "deferred review must not mutate canonical Memory"
     );
 }
 
@@ -1157,7 +1338,7 @@ fn run_02_store_claim_is_only_a_lower_bound_for_the_frozen_product_scenario() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn run_02_product_accept_path_has_one_success_and_one_observed_file_effect() {
+async fn run_02_product_accept_path_has_one_dispatch_and_one_observed_file_effect() {
     assert_eq!(
         execution_for("RUN-02").mechanical_coverage,
         FrozenMechanicalCoverage::ProductDispatcherWithoutCountingAdapter,
@@ -1205,18 +1386,31 @@ async fn run_02_product_accept_path_has_one_success_and_one_observed_file_effect
             })
         })
         .collect::<Vec<_>>();
-    let mut successes = 0usize;
+    let mut accepted_responses = 0usize;
+    let mut dispatches = 0usize;
     let mut errors = Vec::new();
     for contender in contenders {
         match contender.await.expect("RUN-02 product contender joins") {
-            Ok(_) => successes += 1,
+            Ok(response) => {
+                accepted_responses += 1;
+                let operation = response
+                    .pointer("/patch_result/operation")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("RUN-02 accepted response operation");
+                match operation {
+                    "artifact_materialized" => dispatches += 1,
+                    "confirmed_effect_projection_reconciled" => {}
+                    other => panic!("unexpected RUN-02 accepted operation: {other}"),
+                }
+            }
             Err(error) => errors.push(error),
         }
     }
     assert_eq!(
-        successes, 1,
-        "only one product acceptor may own dispatch; errors={errors:#?}"
+        dispatches, 1,
+        "only one product acceptor may own dispatch; accepted_responses={accepted_responses}, errors={errors:#?}"
     );
+    assert!(accepted_responses >= 1);
     assert_eq!(
         std::fs::read_to_string(&effect_path).expect("RUN-02 observed file effect"),
         "one frozen product dispatch"
@@ -1327,12 +1521,29 @@ async fn run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect() {
             None,
         )
         .expect("RUN-03 AllowOnce grant");
+    let agent_run_store = Arc::new(
+        openlife_core::agent::AgentRunStore::new_in_memory()
+            .expect("RUN-03 canonical AgentRun store"),
+    );
+    let run_ids = (0..100)
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    for run_id in &run_ids {
+        let mut run =
+            openlife_core::agent::AgentRun::new_tool_execution_run("frozen.run03.counting-effect");
+        run.id = run_id.clone();
+        agent_run_store
+            .create_run(&run)
+            .expect("RUN-03 canonical AgentRun owner");
+    }
     let effect_count = Arc::new(AtomicUsize::new(0));
     let dispatch_observer = Arc::new(FrozenCountingDispatchObserver::default());
     let barrier = Arc::new(tokio::sync::Barrier::new(100));
     let contenders = (0..100)
         .map(|index| {
             let permission_store = Arc::clone(&permission_store);
+            let agent_run_store = Arc::clone(&agent_run_store);
+            let run_id = run_ids[index].clone();
             let effect_count = Arc::clone(&effect_count);
             let dispatch_observer = Arc::clone(&dispatch_observer);
             let barrier = Arc::clone(&barrier);
@@ -1360,6 +1571,7 @@ async fn run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect() {
                     &privacy_engine,
                     &safe_paths,
                 )
+                .with_agent_run_store(agent_run_store.as_ref())
                 .with_tool_dispatch_observer(dispatch_observer.as_ref());
                 barrier.wait().await;
                 ToolGateway::from_executor_config(ActionExecutorConfig::default())
@@ -1368,7 +1580,7 @@ async fn run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect() {
                             action_type: "builtin_tool".into(),
                             target: "frozen.run03.counting-effect".into(),
                             input: serde_json::json!({}),
-                            source_run_id: Some(format!("frozen-run03-{index}")),
+                            source_run_id: Some(run_id),
                             step_index: 0,
                         },
                         &context,
@@ -1442,29 +1654,80 @@ async fn run_04_exact_prompt_uses_real_send_and_stream_with_independent_uuidv4_i
     let send = send.expect("RUN-04 send joins").expect("RUN-04 send");
     let stream = stream.expect("RUN-04 stream joins").expect("RUN-04 stream");
     let send_ingress = send.agent_ingress.expect("RUN-04 send ingress");
-    let ids = [
-        send_ingress.request_id,
-        send_ingress
-            .agent_task_session_id
-            .expect("RUN-04 send task id"),
-        send.run_id.expect("RUN-04 send run id"),
-        stream["agent_ingress"]["requestId"]
-            .as_str()
-            .expect("RUN-04 stream request id")
-            .to_string(),
-        stream["agent_ingress"]["agentTaskSessionId"]
-            .as_str()
-            .expect("RUN-04 stream task id")
-            .to_string(),
-        stream["run_id"]
-            .as_str()
-            .expect("RUN-04 stream run id")
-            .to_string(),
-    ];
-    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
-    for id in ids {
-        let parsed = uuid::Uuid::parse_str(&id).expect("RUN-04 UUID");
+    let send_operation_id = send_ingress.request_id;
+    let send_task_id = send_ingress
+        .agent_task_session_id
+        .expect("RUN-04 send task id");
+    let send_run_id = send.run_id.expect("RUN-04 send run id");
+    let stream_operation_id = stream["agent_ingress"]["requestId"]
+        .as_str()
+        .expect("RUN-04 stream request id")
+        .to_string();
+    let stream_task_id = stream["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("RUN-04 stream task id")
+        .to_string();
+    let stream_run_id = stream["run_id"]
+        .as_str()
+        .expect("RUN-04 stream run id")
+        .to_string();
+
+    assert_eq!(send_operation_id, send_task_id);
+    assert_eq!(send_operation_id, send_run_id);
+    assert_eq!(stream_operation_id, stream_task_id);
+    assert_eq!(stream_operation_id, stream_run_id);
+    assert_ne!(send_operation_id, stream_operation_id);
+    for id in [&send_operation_id, &stream_operation_id] {
+        let parsed = uuid::Uuid::parse_str(id).expect("RUN-04 UUID");
         assert_eq!(parsed.get_version_num(), 4, "RUN-04 id is not UUIDv4: {id}");
+    }
+
+    let session_store = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("RUN-04 task session store")
+        .lock()
+        .await;
+    let task_ids = session_store
+        .list_sessions(None, 10, 0)
+        .expect("RUN-04 task sessions")
+        .into_iter()
+        .filter(|session| session.chat_session_id == "frozen-run04-shared-chat-session")
+        .map(|session| session.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        task_ids,
+        BTreeSet::from([send_operation_id.clone(), stream_operation_id.clone()])
+    );
+    let send_transcript = session_store
+        .list_transcript_entries(&send_operation_id)
+        .expect("RUN-04 send transcript");
+    let stream_transcript = session_store
+        .list_transcript_entries(&stream_operation_id)
+        .expect("RUN-04 stream transcript");
+    assert!(!send_transcript.is_empty());
+    assert!(!stream_transcript.is_empty());
+    assert!(send_transcript
+        .iter()
+        .all(|entry| entry.session_id == send_operation_id));
+    assert!(stream_transcript
+        .iter()
+        .all(|entry| entry.session_id == stream_operation_id));
+    let send_transcript_ids = send_transcript
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(stream_transcript
+        .iter()
+        .all(|entry| !send_transcript_ids.contains(entry.id.as_str())));
+    drop(session_store);
+
+    for request in captured
+        .lock()
+        .expect("RUN-04 captured provider requests")
+        .iter()
+    {
+        assert!(request.contains("x-openlife-request-id:"));
     }
     assert_eq!(
         captured

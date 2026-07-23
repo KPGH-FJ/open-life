@@ -26,8 +26,8 @@ pub struct ChatMessage {
 }
 
 const MAX_PREPARED_MESSAGES: usize = 128;
-const MAX_PREPARED_CONTEXT_BLOCKS: usize = 32;
-const MAX_PREPARED_CONTENT_CHARS: usize = 262_144;
+pub const MAX_PREPARED_CONTEXT_BLOCKS: usize = 32;
+pub const MAX_PREPARED_CONTENT_CHARS: usize = 262_144;
 
 /// A minimal, auditable description of the context selected before a provider call.
 ///
@@ -267,6 +267,7 @@ pub enum ProviderLocalOnlyReason {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPayloadPurpose {
     MainChatDirectAnswer,
+    MainChatArtifactDraft,
     MainChatReactRanking,
     AgentLoopStep,
     AgentRuntimeGeneration,
@@ -279,6 +280,7 @@ impl ProviderPayloadPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MainChatDirectAnswer => "main_chat_direct_answer",
+            Self::MainChatArtifactDraft => "main_chat_artifact_draft",
             Self::MainChatReactRanking => "main_chat_react_ranking",
             Self::AgentLoopStep => "agent_loop_step",
             Self::AgentRuntimeGeneration => "agent_runtime_generation",
@@ -771,6 +773,11 @@ impl ProviderPolicyAuthorization {
         }
     }
 
+    // Every provider envelope field is independently bound into the authenticated digest.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub(crate) fn bind_prepared_envelope(
         mut self,
         messages: &[ChatMessage],
@@ -800,6 +807,11 @@ impl ProviderPolicyAuthorization {
         Ok(self)
     }
 
+    // Validation recomputes the exact envelope from all independently bound fields.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn validate_for_request(
         &self,
         messages: &[ChatMessage],
@@ -898,6 +910,11 @@ fn append_scope_part(target: &mut Vec<u8>, value: &[u8]) {
     target.extend_from_slice(value);
 }
 
+// The digest commits every prepared-provider field without an unauthenticated wrapper.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_prepared_envelope_digest(
     messages: &[ChatMessage],
     context_blocks: &[BoundedContextBlock],
@@ -1614,7 +1631,10 @@ fn response_body_digest(body: &str) -> String {
     response_bytes_digest(body.as_bytes())
 }
 
-fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkClient> {
+fn provider_network_client(
+    provider: &str,
+    url: &str,
+) -> Result<crate::network_client::NetworkClient> {
     let parsed = reqwest::Url::parse(url).context("provider endpoint is not a valid URL")?;
     let host = parsed
         .host_str()
@@ -1623,6 +1643,7 @@ fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkCl
         || host
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
+    let official_endpoint = provider_endpoint_allows_system_fake_ip_proxy(provider, &parsed);
 
     Ok(crate::network_client::NetworkClient::new(
         crate::network_client::NetworkClientPolicy {
@@ -1631,6 +1652,11 @@ fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkCl
             // providers and the repository's capture-adapter evidence.
             require_https: !explicitly_loopback,
             allow_loopback: explicitly_loopback,
+            fake_ip_proxy_domain_allowlist: if official_endpoint {
+                vec![host.to_string()]
+            } else {
+                Vec::new()
+            },
             max_redirects: 0,
             max_body_bytes: PROVIDER_MAX_RESPONSE_BYTES,
             connect_timeout: Duration::from_secs(STREAM_CONNECT_TIMEOUT_SECS),
@@ -1638,6 +1664,16 @@ fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkCl
             ..Default::default()
         },
     ))
+}
+
+fn provider_endpoint_allows_system_fake_ip_proxy(provider: &str, endpoint: &reqwest::Url) -> bool {
+    endpoint.scheme() == "https"
+        && reqwest::Url::parse(&chat_completions_url(
+            provider,
+            default_base_for_provider(provider),
+        ))
+        .ok()
+        .is_some_and(|expected| expected == *endpoint)
 }
 
 fn provider_http_error(label: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
@@ -1737,7 +1773,12 @@ where
     let url = endpoint.to_string();
 
     let mut on_started = Some(on_started);
-    let res = provider_network_client(&url)?
+    // `Attempting` is the local adapter-start edge: URL/policy/DNS and request
+    // construction have succeeded and the non-idempotent HTTP send is about to
+    // begin. It does not claim that the remote provider accepted the request;
+    // cancellation before a terminal observation must therefore remain
+    // `remote_unknown`.
+    let res = provider_network_client(provider, &url)?
         .post_json_text_with_decision_and_start_observer(
             &url,
             network_policy,
@@ -1745,13 +1786,12 @@ where
             headers,
             &body,
             move |phase| {
-                let result = if phase
-                    == crate::network_client::NetworkDispatchAttemptPhase::ResponseHeadersObserved
-                {
-                    on_started.take().map_or(Ok(()), |observer| observer())
-                } else {
-                    Ok(())
-                };
+                let result =
+                    if phase == crate::network_client::NetworkDispatchAttemptPhase::Attempting {
+                        on_started.take().map_or(Ok(()), |observer| observer())
+                    } else {
+                        Ok(())
+                    };
                 std::future::ready(result)
             },
         )
@@ -1861,7 +1901,10 @@ where
     let url = endpoint.to_string();
 
     let mut on_started = Some(on_started);
-    let res = provider_network_client(&url)?
+    // Keep streaming and buffered provider truth on the same local adapter
+    // edge. Waiting for response headers would lose an in-flight request when
+    // cancellation drops the HTTP future after the body may have left.
+    let res = provider_network_client(provider, &url)?
         .post_json_stream_with_decision_and_start_observer(
             &url,
             network_policy,
@@ -1869,13 +1912,12 @@ where
             headers,
             &body,
             move |phase| {
-                let result = if phase
-                    == crate::network_client::NetworkDispatchAttemptPhase::ResponseHeadersObserved
-                {
-                    on_started.take().map_or(Ok(()), |observer| observer())
-                } else {
-                    Ok(())
-                };
+                let result =
+                    if phase == crate::network_client::NetworkDispatchAttemptPhase::Attempting {
+                        on_started.take().map_or(Ok(()), |observer| observer())
+                    } else {
+                        Ok(())
+                    };
                 std::future::ready(result)
             },
         )
@@ -2013,7 +2055,8 @@ mod tests {
     use super::{
         chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
         extract_chat_content, extract_stream_content, has_reasoning_content,
-        provider_credential_identity, provider_label, resolve_provider_chat_model,
+        provider_credential_identity, provider_endpoint_allows_system_fake_ip_proxy,
+        provider_label, resolve_provider_chat_model,
     };
     use futures::StreamExt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2153,6 +2196,32 @@ mod tests {
     }
 
     #[test]
+    fn system_fake_ip_proxy_is_limited_to_official_https_provider_endpoints() {
+        let official_deepseek = reqwest::Url::parse(&chat_completions_url(
+            "deepseek",
+            default_base_for_provider("deepseek"),
+        ))
+        .unwrap();
+        assert!(provider_endpoint_allows_system_fake_ip_proxy(
+            "deepseek",
+            &official_deepseek
+        ));
+
+        let custom = reqwest::Url::parse("https://provider.example/v1/chat/completions").unwrap();
+        assert!(!provider_endpoint_allows_system_fake_ip_proxy(
+            "custom", &custom
+        ));
+        assert!(!provider_endpoint_allows_system_fake_ip_proxy(
+            "deepseek", &custom
+        ));
+
+        let plaintext = reqwest::Url::parse("http://api.deepseek.com/chat/completions").unwrap();
+        assert!(!provider_endpoint_allows_system_fake_ip_proxy(
+            "deepseek", &plaintext
+        ));
+    }
+
+    #[test]
     fn provider_specific_env_fallbacks_are_used_when_config_key_is_empty() {
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek-test");
@@ -2256,9 +2325,9 @@ mod tests {
             test_chat_with_openrouter_raw(vec![], None, "openai", &base, "sk-test", "gpt-test")
                 .await
                 .unwrap_err();
-        let message = error.to_string();
+        let message = format!("{error:#}");
 
-        assert!(message.contains("HTTP 500"));
+        assert!(message.contains("HTTP 500"), "{message}");
         assert!(message.contains("body_digest=sha256:"));
         assert!(!message.contains("TOP_SECRET_PROVIDER_ERROR_BODY"));
         server.await.unwrap();
@@ -2497,8 +2566,8 @@ mod tests {
             .await
             .expect("structured provider error must terminate the stream")
             .expect_err("structured provider error cannot become completed output");
-        let message = error.to_string();
-        assert!(message.contains("provider_stream_error"));
+        let message = format!("{error:#}");
+        assert!(message.contains("provider_stream_error"), "{message}");
         assert!(message.contains("body_digest=sha256:"));
         assert!(!message.contains("remote secret detail"));
         assert_eq!(

@@ -12,6 +12,7 @@ use openlife_core::agent::main_chat_runtime_contract::{
     ProviderRouteEvidence, StrategyEvidence, TaskSessionEvidence,
 };
 use openlife_core::agent::{PlanExecuteSession, PlanExecuteSessionStatus, PlanStepStatus};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(crate) async fn assemble_main_chat_agent_state_for_turn(
@@ -90,7 +91,10 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
     let run = if let (Some(run_store_arc), Some(run_id)) = (state.agent_run_store.as_ref(), run_id)
     {
         let run_store = run_store_arc.lock().await;
-        match run_store.get_run(run_id) {
+        match crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            run_store.get_run(run_id).map_err(|error| error.to_string()),
+        ) {
             Ok(run) => run,
             Err(err) => {
                 assembly_diagnostics.push(gap(
@@ -152,7 +156,11 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
                 let proposals = proposals
                     .into_iter()
                     .filter(|proposal| {
-                        proposal.source_detail.as_deref() == Some(task_session_id)
+                        proposal_store
+                            .terminal_owner_origin_binding(&proposal.id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|origin| origin.task_session_id() == task_session_id)
                             || run_id
                                 .map(|run_id| proposal.run_id.as_deref() == Some(run_id))
                                 .unwrap_or(false)
@@ -209,6 +217,59 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
                         Some(proposal.id.clone()),
                     )),
                 }
+            }
+            let explicit_memory_ids = transcript
+                .iter()
+                .filter(|entry| {
+                    entry.kind == ExecutionTranscriptEntryKind::FinalResult
+                        && entry
+                            .metadata
+                            .get("acceptedDurableTruthWritten")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && entry
+                            .metadata
+                            .get("directMemoryWrite")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                })
+                .filter_map(|entry| {
+                    entry
+                        .metadata
+                        .get("receiptId")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>();
+            for memory_id in explicit_memory_ids {
+                match memory_lifecycle_store.get_record(&memory_id) {
+                Ok(Some(record))
+                    if record.source_task_session_id.as_deref() == Some(task_session_id)
+                        && record.source_run_id.as_deref() == run_id =>
+                {
+                    if !records
+                        .iter()
+                        .any(|existing| existing.memory_id == record.memory_id)
+                    {
+                        records.push(record);
+                    }
+                }
+                Ok(Some(_)) => assembly_diagnostics.push(gap(
+                    "agent_state_explicit_memory_owner_mismatch",
+                    "Explicit Memory receipt did not belong to the requested canonical task/run.",
+                    Some(memory_id),
+                )),
+                Ok(None) => assembly_diagnostics.push(gap(
+                    "agent_state_explicit_memory_owner_missing",
+                    "Explicit Memory receipt referenced a missing canonical owner.",
+                    Some(memory_id),
+                )),
+                Err(err) => assembly_diagnostics.push(gap(
+                    "agent_state_explicit_memory_owner_load_failed",
+                    &format!("Explicit Memory canonical owner could not be loaded: {err}"),
+                    Some(memory_id),
+                )),
+            }
             }
             records
         } else {

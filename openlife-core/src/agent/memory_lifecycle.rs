@@ -391,6 +391,14 @@ impl CanonicalMemoryFactDescriptor {
             sensitivity,
         )
     }
+
+    /// Stable semantic identity shared by proposal de-duplication and the
+    /// canonical Memory owner. Source, confidence, evidence and run metadata
+    /// are intentionally excluded by the lifecycle identity contract.
+    pub fn fact_key(&self) -> Result<String> {
+        canonical_memory_fact_identity(self.scope, self.category, &self.canonical_body)
+            .map(|(_, fact_key)| fact_key)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -555,6 +563,7 @@ pub struct MemoryRollbackReport {
     pub projection_error_digest: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct MemoryLifecycleStore {
     conn: Arc<Mutex<Connection>>,
 }
@@ -1813,6 +1822,32 @@ impl MemoryLifecycleStore {
             .map_err(Into::into)
     }
 
+    pub fn get_active_record_for_fact(
+        &self,
+        fact: &CanonicalMemoryFactDescriptor,
+    ) -> Result<Option<MemoryLifecycleRecord>> {
+        let fact_key = fact.fact_key()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.query_row(
+            record_select_sql!(
+                "WHERE fact_key = ?1
+                   AND runtime_context_excluded_at IS NULL
+                   AND status IN (
+                        'accepted', 'pending_materialization', 'materialized',
+                        'materialization_failed'
+                   )
+                 LIMIT 1"
+            ),
+            [fact_key],
+            row_to_record,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn count_archived_memory_retrieval_states(&self) -> Result<usize> {
         let conn = self
             .conn
@@ -2093,6 +2128,32 @@ fn lifecycle_retrieval_state_from_row(
 }
 
 impl MemoryLifecycleAcceptanceInput {
+    pub fn from_memory_proposal_with_terminal_origin(
+        proposal: &AgentProposal,
+        content: String,
+        task_session_id: &str,
+        run_id: &str,
+        canonical_user_message_ref: &str,
+        canonical_user_message_digest: &str,
+    ) -> Result<Self> {
+        let mut input = Self::from_memory_proposal(proposal, content)?;
+        if task_session_id.trim().is_empty()
+            || run_id.trim().is_empty()
+            || canonical_user_message_ref.trim().is_empty()
+            || canonical_user_message_digest.trim().is_empty()
+        {
+            anyhow::bail!("terminal owner Memory origin is incomplete");
+        }
+        input.source_task_session_id = Some(task_session_id.to_string());
+        input.source_run_id = Some(run_id.to_string());
+        input.evidence_ids = vec![
+            proposal.id.clone(),
+            canonical_user_message_ref.to_string(),
+            canonical_user_message_digest.to_string(),
+        ];
+        Ok(input)
+    }
+
     pub fn from_memory_proposal(proposal: &AgentProposal, content: String) -> Result<Self> {
         let reviewed_content = proposal
             .after
@@ -2130,7 +2191,10 @@ impl MemoryLifecycleAcceptanceInput {
         )?;
         Ok(Self {
             proposal_id: proposal.id.clone(),
-            source_task_session_id: proposal.source_detail.clone(),
+            // Untyped Proposal fields are never terminal-owner authority.
+            // Origin-bound Review acceptance must use
+            // `from_memory_proposal_with_terminal_origin`.
+            source_task_session_id: None,
             source_run_id: proposal.run_id.clone(),
             fact,
             created_by: created_by_from_source(proposal.source).into(),
@@ -2431,6 +2495,12 @@ fn proposal_link_tx(
     .map_err(Into::into)
 }
 
+// The canonical proposal-memory relation is one transactional row whose
+// identity and audit fields remain explicit.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn link_proposal_to_memory_tx(
     tx: &rusqlite::Transaction<'_>,
     proposal_id: &str,
@@ -3850,6 +3920,29 @@ mod tests {
     }
 
     #[test]
+    fn public_fact_identity_finds_the_existing_active_canonical_owner() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let accepted = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-active-fact-lookup",
+                "I prefer quiet focus time.",
+            ))
+            .unwrap();
+        let equivalent = fact_descriptor(
+            "  I   prefer quiet focus time.  ",
+            MemoryLifecycleRiskLevel::Medium,
+            MemoryLifecycleSensitivity::Sensitive,
+        );
+
+        assert_eq!(equivalent.fact_key().unwrap(), accepted.canonical_fact_key);
+        let existing = store
+            .get_active_record_for_fact(&equivalent)
+            .unwrap()
+            .expect("active canonical owner");
+        assert_eq!(existing.memory_id, accepted.record.memory_id);
+    }
+
+    #[test]
     fn fact_identity_nfkc_unifies_unicode_equivalents_without_rewriting_canonical_body() {
         let original_body = "Ｃａｆｅ\u{301} １２３";
         let (normalized_original, original_key) = canonical_memory_fact_identity(
@@ -4069,6 +4162,108 @@ mod tests {
         assert!(content_error
             .to_string()
             .contains("differs from reviewed content"));
+    }
+
+    #[test]
+    fn proposal_admission_ignores_untyped_session_fields_and_uses_terminal_origin() {
+        let proposal = |after: serde_json::Value, source_detail: Option<&str>| {
+            let mut proposal = AgentProposal::new(
+                ProposalType::MemoryWrite,
+                "memory.records",
+                after,
+                "Task session ownership must remain exact.",
+                0.9,
+                RiskLevel::Medium,
+                ProposalSource::Manual,
+            );
+            proposal.source_detail = source_detail.map(str::to_string);
+            proposal
+        };
+        let valid_after = json!({
+            "content": "Task-bound reviewed fact",
+            "scope": "global",
+            "category": "fact",
+            "candidateKind": "semantic_user_fact",
+            "riskLevel": "medium",
+            "sensitivity": "internal",
+            "originatingTaskSessionId": "task-session-1"
+        });
+        let valid = proposal(
+            valid_after.clone(),
+            Some("main_chat_agent_task_session:task-session-1;candidate:candidate-1"),
+        );
+        let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &valid,
+            "Task-bound reviewed fact".into(),
+        )
+        .unwrap();
+        assert_eq!(input.source_task_session_id, None);
+
+        let terminal_bound =
+            MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
+                &valid,
+                "Task-bound reviewed fact".into(),
+                "task-session-1",
+                "run-1",
+                "conversation-message:1",
+                "sha256:canonical-user-message",
+            )
+            .unwrap();
+        assert_eq!(
+            terminal_bound.source_task_session_id.as_deref(),
+            Some("task-session-1")
+        );
+        assert_eq!(terminal_bound.source_run_id.as_deref(), Some("run-1"));
+
+        let drift = proposal(
+            valid_after.clone(),
+            Some("main_chat_agent_task_session:task-session-2;candidate:candidate-1"),
+        );
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &drift,
+                "Task-bound reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "source_detail cannot authorize terminal ownership"
+        );
+
+        let mut alias_drift = valid_after;
+        alias_drift["session_id"] = json!("task-session-2");
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &proposal(alias_drift, None),
+                "Task-bound reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "proposal JSON aliases cannot authorize terminal ownership"
+        );
+
+        let unbound = proposal(
+            json!({
+                "content": "Global reviewed fact",
+                "scope": "global",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal"
+            }),
+            Some("maturation:preference.communication"),
+        );
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &unbound,
+                "Global reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "non-session source metadata must not become a MemoryStore session owner"
+        );
     }
 
     #[test]

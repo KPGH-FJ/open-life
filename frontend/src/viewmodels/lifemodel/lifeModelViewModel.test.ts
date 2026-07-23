@@ -25,8 +25,11 @@ describe("lifeModelViewModel backend ownership", () => {
     expect(contractSource).not.toContain("export type BuildLifeModelViewModelInput");
   });
 
-  it("keeps LifeModelPage off raw LifeModel reconstruction commands", () => {
-    const source = readFileSync(join(process.cwd(), "src/pages/LifeModelPage.tsx"), "utf8");
+  it("keeps the production durable-truth owner off raw LifeModel reconstruction commands", () => {
+    const source = readFileSync(
+      join(process.cwd(), "src/ui/journeys/durableTruth/durableTruthDataSource.ts"),
+      "utf8"
+    );
     const forbiddenCalls = [
       ["get", "Life", "Model", "("].join(""),
       ["get", "Life", "Model", "Current", "View", "("].join(""),
@@ -39,7 +42,9 @@ describe("lifeModelViewModel backend ownership", () => {
 
     expect(source).toContain("getLifeModelViewModel");
     for (const forbidden of forbiddenCalls) {
-      expect(source, `LifeModelPage should not call ${forbidden}`).not.toContain(forbidden);
+      expect(source, `durable truth data source should not call ${forbidden}`).not.toContain(
+        forbidden
+      );
     }
   });
 

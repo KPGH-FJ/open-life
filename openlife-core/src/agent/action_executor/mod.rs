@@ -33,6 +33,10 @@ pub struct ActionExecutorConfig {
     /// Default is `true`. Set to `false` for replay paths to avoid
     /// consuming one-time permissions.
     pub consume_allow_once: bool,
+    /// Immutable per-execution projection of the canonical product config.
+    /// Keeping it on ToolGateway prevents process-global search state from
+    /// drifting away from the AppState generation that authorized the turn.
+    pub search_provider: helpers::SearchProviderConfig,
 }
 
 impl Default for ActionExecutorConfig {
@@ -42,6 +46,7 @@ impl Default for ActionExecutorConfig {
             allow_cloud: true,
             timeout_seconds: 120,
             consume_allow_once: true,
+            search_provider: helpers::SearchProviderConfig::default(),
         }
     }
 }
@@ -106,7 +111,16 @@ impl ActionExecutionResult {
             anyhow::bail!("bound_content_receipt_issuer_unavailable");
         };
         let receipt =
-            issuer.issue_bound_content_receipt(admission, &self.action, &self.observation)?;
+            match issuer.issue_bound_content_receipt(admission, &self.action, &self.observation) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    // Notify while the original AgentRunStore error is still
+                    // intact. ToolGateway may later turn this into a typed failed
+                    // result, which must not hide durable-owner degradation.
+                    ctx.observe_durable_store_failure("AgentRunStore", &error);
+                    return Err(error);
+                }
+            };
         self.action
             .react_trace
             .as_mut()
@@ -445,6 +459,23 @@ pub trait DurableToolExecutionOwner: Send + Sync {
     fn terminal(&self, result: &ActionExecutionResult) -> Result<()>;
 }
 
+/// Receives a metadata-only fact after the mandatory minimized audit insert
+/// fails. Product runtimes use this to degrade their existing persistence
+/// coordinator; the observer owns no tool payload and cannot rewrite the
+/// execution receipt's transport or effect truth.
+pub trait ToolAuditPersistenceObserver: Send + Sync {
+    fn audit_persistence_failed(&self, receipt: &ToolExecutionReceipt);
+}
+
+/// Metadata-only bridge from synchronous canonical-store failures inside Core
+/// execution back to the product's existing persistence-health authority.
+/// Implementations receive only the store kind and raw store error; tool
+/// arguments, observed bodies, and model/user payloads must never be copied
+/// into this callback.
+pub trait DurableStoreFailureObserver: Send + Sync {
+    fn durable_store_failed(&self, store_kind: &'static str, raw_error: &str);
+}
+
 /// Project the immutable `tool.started` transition exactly once for a receipt.
 ///
 /// A concrete idempotent adapter may perform more than one wire attempt. An
@@ -463,6 +494,48 @@ pub(crate) async fn observe_first_tool_started_transition(
         observer.after_dispatch(&receipt).await?;
     }
     Ok(())
+}
+
+/// Opaque, one-use proof that the execution-owner dispatch fence succeeded for
+/// this receipt. Concrete adapters must consume this value at their dispatch
+/// edge; a prepared receipt alone cannot be promoted into dispatch truth.
+#[must_use = "dispatch admission must be consumed by exactly one concrete adapter edge"]
+pub(crate) struct ToolDispatchAdmission<'a> {
+    receipt_tracker: ToolExecutionReceiptTracker,
+    started_observer: Option<&'a dyn ToolStartedTransitionObserver>,
+}
+
+impl<'a> ToolDispatchAdmission<'a> {
+    fn new(
+        receipt_tracker: ToolExecutionReceiptTracker,
+        started_observer: Option<&'a dyn ToolStartedTransitionObserver>,
+    ) -> Self {
+        Self {
+            receipt_tracker,
+            started_observer,
+        }
+    }
+
+    pub(crate) async fn observe_local(self) -> Result<()> {
+        self.receipt_tracker.mark_local_dispatched();
+        observe_first_tool_started_transition(&self.receipt_tracker, self.started_observer).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn observe_simulated(self) -> Result<()> {
+        self.receipt_tracker.mark_simulated_dispatched();
+        observe_first_tool_started_transition(&self.receipt_tracker, self.started_observer).await?;
+        Ok(())
+    }
+
+    pub(crate) fn into_remote_parts(
+        self,
+    ) -> (
+        ToolExecutionReceiptTracker,
+        Option<&'a dyn ToolStartedTransitionObserver>,
+    ) {
+        (self.receipt_tracker, self.started_observer)
+    }
 }
 
 /// Dependencies required for action execution.
@@ -487,6 +560,8 @@ pub struct ActionExecutionContext<'a> {
     pub hs_runtime_packet: Option<&'a crate::agent::RuntimeHSPacket>,
     pub tool_dispatch_observer: Option<&'a dyn ToolDispatchObserver>,
     pub tool_started_transition_observer: Option<&'a dyn ToolStartedTransitionObserver>,
+    pub tool_audit_persistence_observer: Option<&'a dyn ToolAuditPersistenceObserver>,
+    pub durable_store_failure_observer: Option<&'a dyn DurableStoreFailureObserver>,
     pub a2a_outbound_authorization: Option<&'a A2AOutboundAuthorization>,
     /// Execution-owner authority that linearizes canonical mutations against
     /// cancellation. Proposal writes fail closed when this authority is absent.
@@ -557,6 +632,8 @@ impl<'a> ActionExecutionContext<'a> {
             hs_runtime_packet: None,
             tool_dispatch_observer: None,
             tool_started_transition_observer: None,
+            tool_audit_persistence_observer: None,
+            durable_store_failure_observer: None,
             a2a_outbound_authorization: None,
             canonical_write_admission: None,
             action_bound_tool_permission: None,
@@ -667,6 +744,32 @@ impl<'a> ActionExecutionContext<'a> {
         self
     }
 
+    pub fn with_tool_audit_persistence_observer(
+        mut self,
+        observer: &'a dyn ToolAuditPersistenceObserver,
+    ) -> Self {
+        self.tool_audit_persistence_observer = Some(observer);
+        self
+    }
+
+    pub fn with_durable_store_failure_observer(
+        mut self,
+        observer: &'a dyn DurableStoreFailureObserver,
+    ) -> Self {
+        self.durable_store_failure_observer = Some(observer);
+        self
+    }
+
+    pub(crate) fn observe_durable_store_failure(
+        &self,
+        store_kind: &'static str,
+        raw_error: &impl std::fmt::Display,
+    ) {
+        if let Some(observer) = self.durable_store_failure_observer {
+            observer.durable_store_failed(store_kind, &raw_error.to_string());
+        }
+    }
+
     pub fn with_a2a_outbound_authorization(
         mut self,
         authorization: &'a A2AOutboundAuthorization,
@@ -699,44 +802,46 @@ impl<'a> ActionExecutionContext<'a> {
     }
 
     /// Run the fallible policy/claim fence immediately before a concrete
-    /// adapter crosses its local or remote dispatch boundary. Receipt mutation
-    /// remains adapter-owned and happens only when that boundary is actually
-    /// crossed.
+    /// adapter crosses its local or remote dispatch boundary. The opaque
+    /// admission is the only value an adapter may consume to record that edge.
     pub(crate) async fn authorize_tool_dispatch(
         &self,
         manifest: &crate::tool_manifest::ToolManifest,
         request: &AgentActionRequest,
         args: &Value,
         receipt_tracker: &ToolExecutionReceiptTracker,
-    ) -> Result<()> {
-        let Some(observer) = self.tool_dispatch_observer else {
-            return Ok(());
-        };
+    ) -> Result<ToolDispatchAdmission<'a>> {
         let (input_length_bytes, input_hash) =
             crate::agent::metadata_safe::metadata_safe_value_digest(args);
         let receipt = receipt_tracker.snapshot();
         let registry_binding = self.registry.dispatch_binding(manifest)?;
-        observer
-            .before_registry_dispatch(
-                &ToolDispatchAttempt {
-                    receipt_id: receipt.receipt_id,
-                    manifest_id: manifest.id.clone(),
-                    tool_name: manifest.name.clone(),
-                    manifest_contract_digest: manifest.execution_contract_digest(),
-                    input_hash,
-                    input_length_bytes: input_length_bytes as u64,
-                    source_run_id: request.source_run_id.clone(),
-                    request_digest: receipt.request_digest,
-                    action_effect: receipt.action_effect,
-                    idempotency_contract: receipt.idempotency_contract,
-                    process_risk: tool_dispatch_process_risk_for_manifest(manifest),
-                    effect_may_survive_local_process: effect_may_survive_local_process(
-                        receipt.action_effect,
-                    ),
-                },
-                &registry_binding,
-            )
-            .await
+        if let Some(observer) = self.tool_dispatch_observer {
+            observer
+                .before_registry_dispatch(
+                    &ToolDispatchAttempt {
+                        receipt_id: receipt.receipt_id,
+                        manifest_id: manifest.id.clone(),
+                        tool_name: manifest.name.clone(),
+                        manifest_contract_digest: manifest.execution_contract_digest(),
+                        input_hash,
+                        input_length_bytes: input_length_bytes as u64,
+                        source_run_id: request.source_run_id.clone(),
+                        request_digest: receipt.request_digest,
+                        action_effect: receipt.action_effect,
+                        idempotency_contract: receipt.idempotency_contract,
+                        process_risk: tool_dispatch_process_risk_for_manifest(manifest),
+                        effect_may_survive_local_process: effect_may_survive_local_process(
+                            receipt.action_effect,
+                        ),
+                    },
+                    &registry_binding,
+                )
+                .await?;
+        }
+        Ok(ToolDispatchAdmission::new(
+            receipt_tracker.clone(),
+            self.tool_started_transition_observer,
+        ))
     }
 
     /// Run the same fallible execution-owner fence for a gateway-owned
@@ -747,10 +852,7 @@ impl<'a> ActionExecutionContext<'a> {
         &self,
         request: &AgentActionRequest,
         receipt_tracker: &ToolExecutionReceiptTracker,
-    ) -> Result<()> {
-        let Some(observer) = self.tool_dispatch_observer else {
-            return Ok(());
-        };
+    ) -> Result<ToolDispatchAdmission<'a>> {
         let receipt = receipt_tracker.snapshot();
         let manifest_id = receipt
             .manifest_id
@@ -765,35 +867,30 @@ impl<'a> ActionExecutionContext<'a> {
                 "actionEffect": receipt.action_effect.as_str(),
                 "idempotencyContract": receipt.idempotency_contract,
             }));
-        observer
-            .before_dispatch(&ToolDispatchAttempt {
-                receipt_id: receipt.receipt_id,
-                manifest_id,
-                tool_name: request.action_type.clone(),
-                manifest_contract_digest,
-                input_hash,
-                input_length_bytes: input_length_bytes as u64,
-                source_run_id: request.source_run_id.clone(),
-                request_digest: receipt.request_digest,
-                action_effect: receipt.action_effect,
-                idempotency_contract: receipt.idempotency_contract,
-                process_risk: ToolDispatchProcessRisk::ProcessBound,
-                effect_may_survive_local_process: effect_may_survive_local_process(
-                    receipt.action_effect,
-                ),
-            })
-            .await
-    }
-
-    pub(crate) async fn observe_tool_started(
-        &self,
-        receipt_tracker: &ToolExecutionReceiptTracker,
-    ) -> Result<()> {
-        observe_first_tool_started_transition(
-            receipt_tracker,
+        if let Some(observer) = self.tool_dispatch_observer {
+            observer
+                .before_dispatch(&ToolDispatchAttempt {
+                    receipt_id: receipt.receipt_id,
+                    manifest_id,
+                    tool_name: request.action_type.clone(),
+                    manifest_contract_digest,
+                    input_hash,
+                    input_length_bytes: input_length_bytes as u64,
+                    source_run_id: request.source_run_id.clone(),
+                    request_digest: receipt.request_digest,
+                    action_effect: receipt.action_effect,
+                    idempotency_contract: receipt.idempotency_contract,
+                    process_risk: ToolDispatchProcessRisk::ProcessBound,
+                    effect_may_survive_local_process: effect_may_survive_local_process(
+                        receipt.action_effect,
+                    ),
+                })
+                .await?;
+        }
+        Ok(ToolDispatchAdmission::new(
+            receipt_tracker.clone(),
             self.tool_started_transition_observer,
-        )
-        .await
+        ))
     }
 }
 
@@ -829,9 +926,9 @@ impl ActionExecutor {
             // adapter is entered. A prepared attempt is not dispatch truth;
             // the receipt changes only at the concrete local adapter edge.
             ctx.authorize_internal_tool_dispatch(&request, &receipt_tracker)
+                .await?
+                .observe_local()
                 .await?;
-            receipt_tracker.mark_local_dispatched();
-            ctx.observe_tool_started(&receipt_tracker).await?;
         }
         let mut result = match request.action_type.as_str() {
             "mcp_tool" | "builtin_tool" | "plugin_tool" => {
@@ -937,14 +1034,14 @@ impl ActionExecutor {
         } {
             Ok(hits) => hits,
             Err(error) => {
-                return Ok(failed_memory_search_result(
+                return failed_memory_search_result(
                     self,
                     request,
                     contract,
                     "memory_store_query_failed",
                     &error.to_string(),
                     fallback_receipt,
-                )?);
+                );
             }
         };
         let hits = if is_session_search {
@@ -955,14 +1052,14 @@ impl ActionExecutor {
             match ctx.filter_retrievable_memory_hits(raw_hits) {
                 Ok(hits) => hits,
                 Err(error) => {
-                    return Ok(failed_memory_search_result(
+                    return failed_memory_search_result(
                         self,
                         request,
                         contract,
                         error.reason_code(),
                         &error.to_string(),
                         fallback_receipt,
-                    )?);
+                    );
                 }
             }
         };

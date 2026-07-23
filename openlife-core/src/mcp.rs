@@ -761,6 +761,35 @@ fn memory_archive_owner_parameters() -> Value {
     })
 }
 
+fn memory_write_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
+            "scope": {
+                "type": "string",
+                "enum": ["global", "workspace", "conversation", "project"]
+            },
+            "category": {
+                "type": "string",
+                "enum": ["fact", "workflow", "preference", "boundary"]
+            },
+            "candidateKind": {
+                "type": "string",
+                "enum": [
+                    "episodic_life_event",
+                    "semantic_user_fact",
+                    "procedural_rule",
+                    "preference",
+                    "identity_or_role"
+                ]
+            }
+        },
+        "required": ["content"]
+    })
+}
+
 impl McpRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
@@ -776,6 +805,41 @@ impl McpRegistry {
         };
         reg.register_default_builtins();
         reg
+    }
+
+    /// Build the registry used by the default product release.
+    ///
+    /// Core governed capabilities remain available, including Web, bounded
+    /// file reads, tasks, and Memory proposals. Test utilities and generic
+    /// extension dispatch stay out of the release product path.
+    pub fn new_release_product() -> Self {
+        let mut registry = Self::new();
+        registry.remove_builtin_by_name("builtin_echo");
+        registry.remove_builtin_by_name("mcp.call_tool");
+        registry
+    }
+
+    fn remove_builtin_by_name(&mut self, name: &str) {
+        let removed = self
+            .builtin_manifests
+            .iter()
+            .filter(|manifest| manifest.name == name)
+            .cloned()
+            .collect::<Vec<_>>();
+        for manifest in &removed {
+            if let Some(gate) = self
+                .execution_instance_gates
+                .remove(&registry_execution_instance_key(manifest))
+            {
+                gate.retire();
+            }
+            self.builtins.remove(&manifest.name);
+        }
+        self.builtin_manifests
+            .retain(|manifest| manifest.name != name);
+        if !removed.is_empty() {
+            self.registry_generation = self.registry_generation.saturating_add(1);
+        }
     }
 
     pub(crate) fn register_default_builtins(&mut self) {
@@ -910,13 +974,14 @@ impl McpRegistry {
             ToolIdempotencyContract::NonIdempotent,
         );
 
-        self.register_core_os_tool(
+        self.register_core_os_tool_with_parameters(
             "memory.propose_write",
             "提议写入记忆（生成 Proposal，不直接写入）",
             "medium",
             vec!["write".into(), "memory".into()],
             "write",
             ToolIdempotencyContract::NonIdempotent,
+            memory_write_parameters(),
         );
 
         self.register_core_os_tool_with_parameters(
@@ -1094,6 +1159,11 @@ impl McpRegistry {
         );
     }
 
+    // The typed built-in manifest registers each risk and capability field explicitly.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn register_core_os_tool_with_parameters(
         &mut self,
         id: &str,
@@ -1974,6 +2044,33 @@ mod tests {
     }
 
     #[test]
+    fn memory_write_manifest_exposes_the_reviewed_candidate_contract() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "memory.propose_write")
+            .expect("memory write manifest");
+
+        assert_eq!(manifest.parameters["type"], serde_json::json!("object"));
+        assert_eq!(
+            manifest.parameters["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            manifest.parameters["required"],
+            serde_json::json!(["content"])
+        );
+        assert_eq!(
+            manifest.parameters["properties"]["content"]["maxLength"],
+            serde_json::json!(65536)
+        );
+        assert!(manifest.parameters["properties"]["candidateKind"]["enum"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == "identity_or_role")));
+    }
+
+    #[test]
     fn memory_archive_manifest_requires_typed_canonical_owners() {
         let registry = McpRegistry::new();
         let manifest = registry
@@ -2099,6 +2196,23 @@ mod tests {
             violations.is_empty(),
             "legacy product terms leaked in MCP manifest copy: {violations:?}"
         );
+    }
+
+    #[test]
+    fn release_product_registry_keeps_core_capabilities_without_extension_dispatch() {
+        let registry = McpRegistry::new_release_product();
+        let names = registry
+            .list_manifests()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(names.contains("web.search"));
+        assert!(names.contains("file.read"));
+        assert!(names.contains("memory.propose_write"));
+        assert!(!names.contains("builtin_echo"));
+        assert!(!names.contains("mcp.call_tool"));
+        assert!(!names.contains("a2a.call_agent"));
     }
 
     #[test]

@@ -5,14 +5,15 @@ use crate::a2a_sidecar;
 use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigestKey};
 use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::{
-    hydrate_config_secrets, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, hydrate_or_create_mcp_audit_keys, KeyringSecretStore,
-    SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
+    hydrate_config_secrets, hydrate_existing_mcp_audit_keys,
+    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key, SecretStore,
+    StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
     MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::AppState;
 use crate::storage::{
     load_mcp_audit_keyring_from_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
+    McpAuditKeyringLoad,
 };
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
@@ -44,6 +45,8 @@ pub struct BootstrapResult {
 
 const STARTUP_PROPOSAL_RECONCILIATION_BATCH: i64 = 200;
 const STARTUP_PROPOSAL_RECONCILIATION_SYNC_PASSES: usize = 5;
+const STARTUP_TERMINAL_OWNER_RECONCILIATION_BATCH: usize = 64;
+const STARTUP_TERMINAL_OWNER_RECONCILIATION_PASSES: usize = 8;
 const STARTUP_CANONICAL_OUTBOX_BATCH: usize = 500;
 const STARTUP_CANONICAL_OUTBOX_PASSES: usize = 20;
 const STARTUP_MAIN_CHAT_TASK_SCAN_BATCH: usize = 200;
@@ -292,13 +295,26 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 .as_ref()
                 .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
             let store = store_arc.lock().await;
-            store
-                .get_run_for_task_id(&task.id)
-                .map_err(|error| format!("load exact startup AgentRun failed: {error}"))?
-                .ok_or_else(|| format!("startup_main_chat_agent_run_missing:{}", task.id))?
+            crate::terminal_owner_write_gateway::register_agent_run_store_result(
+                state,
+                store
+                    .get_run_for_task_id(&task.id)
+                    .map_err(|error| error.to_string()),
+            )
+            .map_err(|error| format!("load exact startup AgentRun failed: {error}"))?
+            .ok_or_else(|| format!("startup_main_chat_agent_run_missing:{}", task.id))?
         };
         if run.task_id != task.id {
             return Err("startup_main_chat_agent_run_task_identity_mismatch".into());
+        }
+        if crate::main_chat_turn_runtime::reconcile_orphaned_openlife_replay_epoch_after_restart(
+            state, &task.id, &run.id,
+        )
+        .await?
+        {
+            verify_startup_terminal_projection(state, &run.id, &task.id).await?;
+            reconciled = reconciled.saturating_add(1);
+            continue;
         }
         let lifecycle = {
             let store_arc = state
@@ -348,7 +364,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
             {
                 let failure_kind = startup_failure_kind_from_terminal(&event)?;
                 crate::main_chat_runtime_support::
-                    finalize_main_chat_task_failure_after_durable_receipt(
+                    finalize_main_chat_task_failure_after_durable_receipt_at_startup_reconciliation(
                         state,
                         failure_kind,
                         "Recovered a terminal Main Chat receipt left unprojected by the previous process.",
@@ -359,7 +375,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 true
             }
             Some(event) if event.event_type == "cancel_requested" => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -371,7 +387,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 true
             }
             Some(event) if event.event_type == "turn.interrupted" => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -389,7 +405,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 ));
             }
             None if pre_dispatch_failure_marker => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -405,17 +421,13 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                     && task.status
                     == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission =>
             {
-                let store_arc = state
-                    .agent_run_store
-                    .as_ref()
-                    .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
-                let store = store_arc.lock().await;
-                let mut waiting = run.clone();
-                waiting.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
-                waiting.finished_at = None;
-                store
-                    .update_run(&waiting)
-                    .map_err(|error| format!("project startup waiting run failed: {error}"))?;
+                crate::terminal_owner_write_gateway::project_agent_run_from_startup_task_owner(
+                    state,
+                    &run.id,
+                    &run.task_id,
+                )
+                .await
+                .map_err(|error| format!("project startup waiting run failed: {error}"))?;
                 false
             }
             None
@@ -433,7 +445,7 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 ));
             }
             None if run.status == openlife_core::agent::AgentRunStatus::Running => {
-                crate::main_chat_runtime_support::finalize_main_chat_task_failure(
+                crate::main_chat_runtime_support::finalize_main_chat_task_failure_at_startup_reconciliation(
                     state,
                     Some(&run.id),
                     Some(&run.task_id),
@@ -534,6 +546,7 @@ fn startup_lifecycle_projection_matches(
             ),
             Some("blocked") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Blocked),
             Some("failed") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed),
+            Some("interrupted") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed),
             Some("cancelled") => (AgentRunStatus::Cancelled, AgentTaskSessionStatus::Cancelled),
             _ => return Err("startup_final_delivery_status_invalid".into()),
         },
@@ -564,8 +577,9 @@ async fn startup_pre_dispatch_failure_marker_exists(
         || marker.run_id != run_id
         || marker.failure_kind
             != openlife_core::agent::main_chat_agent_v1::PRE_DISPATCH_PERSISTENCE_FAILURE_KIND
+        || error_digest_hex.is_none()
         || error_digest_hex
-            .is_none_or(|hex| hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .is_some_and(|hex| hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         return Err("startup_pre_dispatch_persistence_marker_identity_invalid".into());
     }
@@ -583,10 +597,12 @@ async fn verify_startup_terminal_projection(
             .as_ref()
             .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
         let store = store_arc.lock().await;
-        store
-            .get_run(run_id)
-            .map_err(|error| format!("reload startup recovered run failed: {error}"))?
-            .ok_or_else(|| format!("startup_recovered_run_missing:{run_id}"))?
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store.get_run(run_id).map_err(|error| error.to_string()),
+        )
+        .map_err(|error| format!("reload startup recovered run failed: {error}"))?
+        .ok_or_else(|| format!("startup_recovered_run_missing:{run_id}"))?
     };
     if run.task_id != task_session_id {
         return Err("startup_recovered_run_task_identity_mismatch".into());
@@ -649,34 +665,20 @@ async fn project_startup_final_delivery_receipt(
         .get("status")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "startup_final_delivery_status_missing".to_string())?;
-    {
-        let store_arc = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        let mut projected = run.clone();
-        match status {
-            "completed" => {
-                projected.status = openlife_core::agent::AgentRunStatus::Completed;
-                projected.finished_at = Some(event.created_at);
-            }
-            "completed_with_pending_items" => {
-                projected.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
-                projected.finished_at = None;
-            }
-            "blocked" | "failed" => projected.fail(openlife_core::agent::AgentRunError {
-                message: "Recovered terminal status from a durable final-delivery receipt.".into(),
-                phase: "startup_projection_recovery".into(),
-                recoverable: status == "blocked",
-            }),
-            "cancelled" => projected.cancel(),
-            _ => return Err("startup_final_delivery_status_invalid".into()),
-        }
-        store
-            .update_run(&projected)
-            .map_err(|error| format!("project startup final AgentRun failed: {error}"))?;
+    if !matches!(
+        status,
+        "completed"
+            | "completed_with_pending_items"
+            | "blocked"
+            | "failed"
+            | "interrupted"
+            | "cancelled"
+    ) {
+        return Err("startup_final_delivery_status_invalid".into());
     }
+    crate::terminal_owner_write_gateway::project_agent_run_from_startup_durable_event(state, event)
+        .await
+        .map_err(|error| format!("project startup final AgentRun failed: {error}"))?;
     let store_arc = state
         .main_chat_agent_session_store
         .as_ref()
@@ -691,7 +693,7 @@ async fn project_startup_final_delivery_receipt(
             &task.id,
             "Recovered blocked state from durable final-delivery receipt.",
         ),
-        "failed" => store.fail_session(
+        "failed" | "interrupted" => store.fail_session(
             &task.id,
             "Recovered failed state from durable final-delivery receipt.",
         ),
@@ -714,8 +716,10 @@ pub(crate) async fn reconcile_startup_canonical_outboxes(
     let mut lifemodel_drained = false;
     for _ in 0..STARTUP_CANONICAL_OUTBOX_PASSES {
         let report =
-            crate::life_model_write_gateway::reconcile_lifemodel_file_mutations_with_state(state)
-                .await?;
+            crate::life_model_write_gateway::reconcile_startup_lifemodel_file_mutations_with_state(
+                state,
+            )
+            .await?;
         if report.degraded > 0 {
             return Err(format!(
                 "LifeModel file projection reconciliation degraded: {} delivery attempts",
@@ -749,6 +753,37 @@ pub(crate) async fn reconcile_startup_canonical_outboxes(
     Err("canonical projection reconciliation backlog exceeded startup bound".into())
 }
 
+/// Finish terminal-owner successors from durable ReviewWorkflow claims before
+/// the generic Proposal/AgentRun projection pass. This may complete a local
+/// Memory effect that was already claimed before a crash, but it never retries
+/// an external effect whose remote outcome is unknown.
+pub(crate) async fn reconcile_startup_terminal_owner_successors(
+    state: &Arc<AppState>,
+) -> Result<usize, String> {
+    if !state
+        .persistence_coordinator
+        .startup_reconciliation_mutations_safe()
+    {
+        return Err("startup_terminal_owner_reconciliation_mutations_unavailable".into());
+    }
+    let gateway =
+        crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::from_state(state).await?;
+    let mut reconciled = 0usize;
+    for _ in 0..STARTUP_TERMINAL_OWNER_RECONCILIATION_PASSES {
+        let report = gateway
+            .reconcile_pending_terminal_owner_successors(
+                STARTUP_TERMINAL_OWNER_RECONCILIATION_BATCH,
+            )
+            .await
+            .map_err(|error| format!("startup terminal-owner reconciliation failed: {error}"))?;
+        reconciled = reconciled.saturating_add(report.successors_confirmed);
+        if report.proposals_projected < STARTUP_TERMINAL_OWNER_RECONCILIATION_BATCH {
+            return Ok(reconciled);
+        }
+    }
+    Err("startup_terminal_owner_reconciliation_bound_exceeded".into())
+}
+
 /// Reconcile a bounded amount of already-confirmed Proposal truth before the
 /// product window becomes interactive. `true` means a durable indexed backlog
 /// remains and must be drained by the async continuation; it never means the
@@ -757,12 +792,15 @@ pub(crate) async fn reconcile_startup_proposal_projections(
     state: &Arc<AppState>,
 ) -> Result<bool, String> {
     for _ in 0..STARTUP_PROPOSAL_RECONCILIATION_SYNC_PASSES {
-        let report = crate::commands::proposal::reconcile_durable_proposal_projections_with_state(
-            state,
-            STARTUP_PROPOSAL_RECONCILIATION_BATCH,
-        )
-        .await?;
-        let backlog = report.projection_backlog_may_remain || report.agent_run_backlog_may_remain;
+        let report =
+            crate::commands::proposal::reconcile_startup_durable_proposal_projections_with_state(
+                state,
+                STARTUP_PROPOSAL_RECONCILIATION_BATCH,
+            )
+            .await?;
+        let backlog = report.artifact_backlog_may_remain
+            || report.projection_backlog_may_remain
+            || report.agent_run_backlog_may_remain;
         if !backlog {
             return Ok(false);
         }
@@ -780,7 +818,8 @@ pub(crate) async fn drain_startup_proposal_projection_backlog(state: Arc<AppStat
         .await
         {
             Ok(report)
-                if !report.projection_backlog_may_remain
+                if !report.artifact_backlog_may_remain
+                    && !report.projection_backlog_may_remain
                     && !report.agent_run_backlog_may_remain =>
             {
                 return;
@@ -1582,7 +1621,7 @@ fn stage_legacy_scheduled_task_review_proposals(
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
-    bootstrap_with_secret_store(data_dir, &KeyringSecretStore)
+    bootstrap_with_secret_store(data_dir, &StartupKeyringSecretStore::default())
 }
 
 #[cfg(test)]
@@ -1649,13 +1688,6 @@ fn bootstrap_with_secret_store(
     // Apply system configuration
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
 
-    // Initialize web search provider configuration
-    openlife_core::agent::action_executor::helpers::set_search_config(
-        &config.system.search_provider,
-        &config.system.search_provider_key,
-        &config.system.searxng_url,
-    );
-
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
     match life_model_manager.load() {
         Ok(_) => persistence.register_read_write("LifeModelFileStore"),
@@ -1675,6 +1707,52 @@ fn bootstrap_with_secret_store(
             &error.to_string(),
         ),
     }
+    let governed_data_import_journal =
+        match openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            life_model_manager.mutation_journal_path(),
+        ) {
+            Ok(journal) => {
+                let journal = Arc::new(journal);
+                match journal.recovery_requirement() {
+                    Ok(Some(receipt)) => {
+                        persistence.register_read_write("GovernedDataImportJournal");
+                        persistence.degrade_globally(
+                        openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
+                    );
+                        startup_warnings.borrow_mut().push(format!(
+                        "governed data import recovery required before effects may resume: operation={} stage={}",
+                        receipt.operation_id,
+                        receipt.stage.as_str(),
+                    ));
+                    }
+                    Ok(None) => persistence.register_read_write("GovernedDataImportJournal"),
+                    Err(error) => {
+                        persistence.register_unavailable(
+                            "GovernedDataImportJournal",
+                            "data_import_journal_read_failed",
+                            &error.to_string(),
+                        );
+                        persistence.degrade_globally("data_import_journal_unavailable");
+                        startup_warnings.borrow_mut().push(format!(
+                        "governed data-import journal could not be inspected; effects remain fail-closed: {error}"
+                    ));
+                    }
+                }
+                Some(journal)
+            }
+            Err(error) => {
+                persistence.register_unavailable(
+                    "GovernedDataImportJournal",
+                    "data_import_journal_open_failed",
+                    &error.to_string(),
+                );
+                persistence.degrade_globally("data_import_journal_unavailable");
+                startup_warnings.borrow_mut().push(format!(
+                "governed data-import journal could not be opened; effects remain fail-closed: {error}"
+            ));
+                None
+            }
+        };
 
     let db_path = data_dir.join("memory.db");
     let memory_store = init_store(
@@ -2214,13 +2292,92 @@ fn bootstrap_with_secret_store(
     let privacy_engine = PrivacyEngine::with_policy(privacy_policy);
     let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
     let audit_keyring_path = data_dir.join("mcp_audit_keys.json");
-    let audit_key_hydration = hydrate_or_create_mcp_audit_keys(
-        load_mcp_audit_keyring_from_path(&audit_keyring_path),
-        secret_store,
-    );
+    let mcp_audit_db_path = data_dir.join("mcp_audit.db");
+    let audit_key_hydration = (|| -> anyhow::Result<_> {
+        let configs = match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
+            McpAuditKeyringLoad::Absent => {
+                let inspection = McpAuditStore::inspect_existing_database(&mcp_audit_db_path)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "missing MCP audit keyring beside an untrusted audit database: {error}"
+                        )
+                    })?;
+                if !inspection.is_empty_or_absent() {
+                    anyhow::bail!(
+                        "MCP audit keyring is missing while the canonical audit database contains {} rows",
+                        inspection.row_count
+                    );
+                }
+                Vec::new()
+            }
+            McpAuditKeyringLoad::Present(configs) => configs,
+            McpAuditKeyringLoad::PresentInvalid { error } => {
+                anyhow::bail!("MCP audit keyring is present but invalid: {error}");
+            }
+            McpAuditKeyringLoad::Unreadable { error } => {
+                anyhow::bail!("MCP audit keyring is unreadable: {error}");
+            }
+        };
+        let mut hydration = hydrate_existing_mcp_audit_keys(configs, secret_store)?;
+        let payload_integrity_error = match McpAuditStore::preflight_existing_database_key_materials(
+            &mcp_audit_db_path,
+            &hydration.materials,
+        ) {
+            Ok(_) => None,
+            Err(error)
+                if openlife_core::mcp_audit::is_payload_integrity_failure(&error)
+                    && hydration.configs.last().is_some_and(|config| {
+                        config.mode == openlife_core::mcp_audit::KeyMode::Keychain
+                    }) =>
+            {
+                Some(error.to_string())
+            }
+            Err(error) => return Err(error),
+        };
+        if payload_integrity_error.is_none() {
+            hydration.ensure_write_epoch(secret_store)?;
+            if hydration.config_changed {
+                if let Err(save_error) =
+                    save_mcp_audit_keyring_to_path(&audit_keyring_path, &hydration.configs)
+                {
+                    match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
+                        McpAuditKeyringLoad::Present(observed) if observed == hydration.configs => {
+                            anyhow::bail!(
+                                "persist MCP audit key references reported failure after the intended reference file became observable; write-key activation is withheld for this startup: {save_error}"
+                            );
+                        }
+                        McpAuditKeyringLoad::Absent | McpAuditKeyringLoad::Present(_) => {
+                            let rollback_error =
+                                hydration.rollback_staged_secret(secret_store).err();
+                            return Err(match rollback_error {
+                                Some(rollback_error) => anyhow::anyhow!(
+                                    "persist MCP audit key references failed: {save_error}; staged secret rollback also failed: {rollback_error}"
+                                ),
+                                None => anyhow::anyhow!(
+                                    "persist MCP audit key references failed: {save_error}"
+                                ),
+                            });
+                        }
+                        McpAuditKeyringLoad::PresentInvalid { error }
+                        | McpAuditKeyringLoad::Unreadable { error } => {
+                            anyhow::bail!(
+                                "persist MCP audit key references failed and the final reference state is unknown; the staged secret is retained to avoid orphaning observable ciphertext authority: {save_error}; observe_error={error}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok((hydration, payload_integrity_error))
+    })();
     let audit_key_hydration = match audit_key_hydration {
-        Ok(hydration) => {
+        Ok((hydration, payload_integrity_error)) => {
             persistence.register_read_write("McpAuditKeyReferenceStore");
+            if let Some(error) = payload_integrity_error {
+                startup_warnings.borrow_mut().push(format!(
+                    "MCP audit key references remain canonical, but audit payload integrity is invalid; the audit store is unavailable and all effects are disabled: {error}"
+                ));
+            }
             Some(hydration)
         }
         Err(error) => {
@@ -2235,25 +2392,6 @@ fn bootstrap_with_secret_store(
             None
         }
     };
-    if audit_key_hydration
-        .as_ref()
-        .is_some_and(|hydration| hydration.config_changed)
-    {
-        if let Err(error) = save_mcp_audit_keyring_to_path(
-            &audit_keyring_path,
-            &audit_key_hydration.as_ref().expect("checked Some").configs,
-        ) {
-            persistence.register_unavailable(
-                "McpAuditKeyReferenceStore",
-                "mcp_audit_key_reference_persistence_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "MCP audit key reference persistence failed; effects disabled: {error}"
-            ));
-        }
-    }
-    let mcp_audit_db_path = data_dir.join("mcp_audit.db");
     let audit_materials = audit_key_hydration
         .map(|hydration| hydration.materials)
         .unwrap_or_default();
@@ -2302,7 +2440,7 @@ fn bootstrap_with_secret_store(
         registry
     };
     #[cfg(not(feature = "dev-extensions"))]
-    let mcp_registry = McpRegistry::new();
+    let mcp_registry = McpRegistry::new_release_product();
     let tool_permission_store = init_store(
         || {
             openlife_core::tool_permissions::ToolPermissionStore::new(
@@ -2527,8 +2665,116 @@ fn bootstrap_with_secret_store(
         }
     };
 
+    let resource_runtime = {
+        let store_path = data_dir.join("resources.db");
+        let runtime = openlife_core::resource::ResourceStore::new(&store_path).and_then(|store| {
+            let parser =
+                openlife_core::resource_gateway::ResourceParserProcess::for_current_executable()?;
+            Ok(crate::resource_commands::ResourceRuntime::new(
+                openlife_core::resource_gateway::ResourceGateway::new(store, parser),
+            ))
+        });
+        match runtime {
+            Ok(runtime) => {
+                persistence.register_read_write("ResourceStore");
+                Some(Arc::new(runtime))
+            }
+            Err(error) => {
+                persistence.register_unavailable(
+                    "ResourceStore",
+                    "resource_runtime_initialization_failed",
+                    &error.to_string(),
+                );
+                startup_warnings
+                    .borrow_mut()
+                    .push(format!("resources.db 初始化失败: {error}"));
+                None
+            }
+        }
+    };
+
+    let state_store = {
+        let store_path = data_dir.join("state.db");
+        match openlife_core::state_store::StateStore::new(&store_path) {
+            Ok(store) => {
+                persistence.register_read_write("StateStore");
+                if persistence.bootstrap_mutations_safe() {
+                    let daily_task_cutover_result = life_model_manager
+                        .load()
+                        .map_err(|error| {
+                            format!(
+                                "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
+                            )
+                        })
+                        .and_then(|model| {
+                            crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+                                &store,
+                                &model,
+                                chrono::Utc::now(),
+                            )
+                        });
+                    if let Err(error) = daily_task_cutover_result {
+                        // Shipped product reads require the import receipt and
+                        // fail closed. Never merge a partial StateStore view
+                        // with the legacy YAML source after a blocked cutover.
+                        startup_warnings.borrow_mut().push(format!(
+                            "legacy daily-task StateStore cutover remains blocked: {error}"
+                        ));
+                    }
+                    let history_cutover_result = memory_store
+                        .list_legacy_state_history_migration_source()
+                        .map_err(|error| {
+                            format!(
+                                "MemoryStore state history could not be loaded for StateStore cutover: {error}"
+                            )
+                        })
+                        .and_then(|snapshot| {
+                            crate::state_projection::reconcile_legacy_memory_state_history_shadow(
+                                &store,
+                                &snapshot,
+                                chrono::Utc::now(),
+                            )?;
+                            store
+                                .import_legacy_state_history_shadow(chrono::Utc::now())
+                                .map_err(|error| {
+                                    format!(
+                                        "legacy state-history canonical import failed: {error}"
+                                    )
+                                })
+                        });
+                    if let Err(error) = history_cutover_result {
+                        // Product reads fail closed on the absent import
+                        // receipt. MemoryStore remains migration evidence, not
+                        // a hidden product fallback.
+                        startup_warnings.borrow_mut().push(format!(
+                            "legacy state-history StateStore cutover remains blocked: {error}"
+                        ));
+                    }
+                } else {
+                    startup_warnings.borrow_mut().push(
+                        "legacy daily-task and state-history StateStore shadow reconciliation skipped because canonical bootstrap mutations are unsafe"
+                            .into(),
+                    );
+                }
+                Some(Arc::new(store))
+            }
+            Err(error) => {
+                persistence.register_unavailable(
+                    "StateStore",
+                    "state_store_initialization_failed",
+                    &error.to_string(),
+                );
+                startup_warnings.borrow_mut().push(format!(
+                    "state.db 初始化失败；transient-state 写入已禁用且不会降级到临时存储：{error}"
+                ));
+                None
+            }
+        }
+    };
+
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
+        governed_data_import_journal,
         config: Arc::new(Mutex::new(config)),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
@@ -2546,9 +2792,6 @@ fn bootstrap_with_secret_store(
         ))),
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
-        mcp_audit_read_gateway: Arc::new(
-            crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
-        ),
         agent_run_store: agent_run_store.map(|store| Arc::new(Mutex::new(store))),
         evidence_store: Arc::new(Mutex::new(evidence_store)),
         life_event_store: life_event_store.map(|store| Arc::new(Mutex::new(store))),
@@ -2579,6 +2822,8 @@ fn bootstrap_with_secret_store(
             crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
         )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        resource_runtime,
+        state_store,
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
@@ -2856,6 +3101,69 @@ mod tests {
         values: std::sync::Mutex<std::collections::HashMap<String, String>>,
     }
 
+    impl TestSecretStore {
+        fn mcp_secret_snapshot(&self) -> Vec<(String, String)> {
+            let mut values = self
+                .values
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(secret_ref, _)| {
+                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+                })
+                .map(|(secret_ref, value)| (secret_ref.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            values.sort_by(|left, right| left.0.cmp(&right.0));
+            values
+        }
+
+        fn mcp_secret_refs(&self) -> Vec<String> {
+            let mut refs = self
+                .values
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|secret_ref| {
+                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            refs.sort();
+            refs
+        }
+
+        fn preload_mcp_key(&self, epoch: u64, key: [u8; 32]) {
+            use base64::Engine as _;
+
+            self.set(
+                &format!("{}{}", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX, epoch),
+                &base64::engine::general_purpose::STANDARD.encode(key),
+            )
+            .unwrap();
+        }
+    }
+
+    fn d068_database_family_bytes(
+        path: &std::path::Path,
+    ) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+        [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+            std::path::PathBuf::from(format!("{}-shm", path.display())),
+            std::path::PathBuf::from(format!("{}-journal", path.display())),
+        ]
+        .into_iter()
+        .map(|candidate| {
+            let bytes = match std::fs::read(&candidate) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("read {}: {error}", candidate.display()),
+            };
+            (candidate, bytes)
+        })
+        .collect()
+    }
+
     impl SecretStore for TestSecretStore {
         fn get(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
             Ok(self.values.lock().unwrap().get(secret_ref).cloned())
@@ -2875,1205 +3183,540 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct D057SecretStoreState {
-        values: std::collections::HashMap<String, String>,
-        set_refs: Vec<String>,
-        deleted_refs: Vec<String>,
+    fn seed_governed_import_journal(
+        data_dir: &Path,
+    ) -> (
+        openlife_core::persistence_outbox::GovernedDataImportJournal,
+        String,
+        String,
+    ) {
+        let manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
+        let journal = openlife_core::persistence_outbox::GovernedDataImportJournal::new(
+            manager.mutation_journal_path(),
+        )
+        .unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let owner = "LifeModelFileStore".to_string();
+        journal
+            .prepare(
+                openlife_core::persistence_outbox::GovernedDataImportPrepare {
+                    operation_id: operation_id.clone(),
+                    payload_digest: openlife_core::persistence_outbox::metadata_digest(
+                        "bootstrap data import payload",
+                    ),
+                    request_digest: openlife_core::persistence_outbox::metadata_digest(
+                        "bootstrap governed request",
+                    ),
+                    owners: vec![
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
+                            owner: owner.clone(),
+                            import_target: "life_model".into(),
+                            before_digest: openlife_core::persistence_outbox::metadata_digest(
+                                "bootstrap before",
+                            ),
+                            target_digest: openlife_core::persistence_outbox::metadata_digest(
+                                "bootstrap target",
+                            ),
+                            item_count: 1,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        (journal, operation_id, owner)
     }
 
-    #[derive(Default)]
-    struct D057RecordingSecretStore {
-        state: std::sync::Mutex<D057SecretStoreState>,
+    #[test]
+    fn startup_fails_closed_when_governed_data_import_requires_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_journal, operation_id, _owner) = seed_governed_import_journal(directory.path());
+
+        let result = bootstrap_with_secret_store_for_test(
+            directory.path().to_path_buf(),
+            &TestSecretStore::default(),
+        );
+        let health = result.state.persistence_coordinator.snapshot();
+        assert!(result.state.governed_data_import_journal.is_some());
+        assert!(health.global_reason_codes.iter().any(|reason| {
+            reason
+                == openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON
+        }));
+        assert!(!health.canonical_writes_allowed);
+        assert!(!health.provider_dispatch_allowed);
+        assert!(!health.tool_dispatch_allowed);
+        assert!(result.state.startup_warnings.iter().any(|warning| {
+            warning.contains(&operation_id) && warning.contains("stage=prepared")
+        }));
     }
 
-    impl D057RecordingSecretStore {
-        fn preload_key(&self, secret_ref: &str, key: [u8; 32]) {
-            use base64::Engine as _;
+    #[test]
+    fn startup_accepts_terminal_governed_data_import_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let (journal, operation_id, owner) = seed_governed_import_journal(directory.path());
+        journal
+            .transition(
+                &operation_id,
+                openlife_core::persistence_outbox::GovernedDataImportStage::Compensated,
+                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
+                    owner,
+                    status:
+                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Compensated,
+                }],
+                Some(&openlife_core::persistence_outbox::metadata_digest(
+                    "no owner effect was committed",
+                )),
+            )
+            .unwrap();
+        drop(journal);
 
-            self.state.lock().unwrap().values.insert(
-                secret_ref.to_string(),
-                base64::engine::general_purpose::STANDARD.encode(key),
-            );
-        }
-
-        fn mcp_set_refs(&self) -> Vec<String> {
-            self.state
-                .lock()
-                .unwrap()
-                .set_refs
-                .iter()
-                .filter(|secret_ref| {
-                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
-                })
-                .cloned()
-                .collect()
-        }
-
-        fn mcp_deleted_refs(&self) -> Vec<String> {
-            self.state
-                .lock()
-                .unwrap()
-                .deleted_refs
-                .iter()
-                .filter(|secret_ref| {
-                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
-                })
-                .cloned()
-                .collect()
-        }
-
-        fn live_mcp_refs(&self) -> Vec<String> {
-            let mut refs = self
-                .state
-                .lock()
-                .unwrap()
-                .values
-                .keys()
-                .filter(|secret_ref| {
-                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            refs.sort();
-            refs
-        }
+        let result = bootstrap_with_secret_store_for_test(
+            directory.path().to_path_buf(),
+            &TestSecretStore::default(),
+        );
+        let health = result.state.persistence_coordinator.snapshot();
+        assert!(result.state.governed_data_import_journal.is_some());
+        assert!(!health.global_reason_codes.iter().any(|reason| {
+            reason
+                == openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON
+        }));
+        assert!(!result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("governed data import recovery required")));
     }
 
-    impl SecretStore for D057RecordingSecretStore {
-        fn get(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
-            Ok(self.state.lock().unwrap().values.get(secret_ref).cloned())
-        }
+    #[test]
+    fn governed_import_journal_open_failure_has_no_runtime_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = LifeModelManager::new(directory.path().join("life-model").join("current"));
+        std::fs::create_dir_all(manager.mutation_journal_path()).unwrap();
 
-        fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
-            let mut state = self.state.lock().unwrap();
-            state.set_refs.push(secret_ref.to_string());
-            state
-                .values
-                .insert(secret_ref.to_string(), value.to_string());
-            Ok(())
-        }
+        let result = bootstrap_with_secret_store_for_test(
+            directory.path().to_path_buf(),
+            &TestSecretStore::default(),
+        );
+        let health = result.state.persistence_coordinator.snapshot();
 
-        fn delete(&self, secret_ref: &str) -> anyhow::Result<()> {
-            let mut state = self.state.lock().unwrap();
-            state.deleted_refs.push(secret_ref.to_string());
-            state.values.remove(secret_ref);
-            Ok(())
-        }
+        assert!(result.state.governed_data_import_journal.is_none());
+        assert!(health
+            .global_reason_codes
+            .iter()
+            .any(|reason| reason == "data_import_journal_unavailable"));
+        assert!(!health.canonical_writes_allowed);
+        assert!(!health.provider_dispatch_allowed);
+        assert!(!health.tool_dispatch_allowed);
     }
 
-    fn d057_keychain_config(
-        epoch: u64,
-        secret_ref: impl Into<String>,
-    ) -> openlife_core::mcp_audit::AuditKeyConfig {
+    fn d057_key_config(epoch: u64) -> openlife_core::mcp_audit::AuditKeyConfig {
         openlife_core::mcp_audit::AuditKeyConfig {
             mode: openlife_core::mcp_audit::KeyMode::Keychain,
             salt_b64: None,
             env_var: None,
-            key_ref: Some(secret_ref.into()),
+            key_ref: Some(format!(
+                "{}{}",
+                crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX,
+                epoch
+            )),
             epoch,
-            created_at: format!("2026-07-13T00:00:{:02}Z", epoch % 60),
+            created_at: "2026-07-16T00:00:00Z".into(),
         }
     }
 
-    fn d057_key_ref(epoch: u64) -> String {
-        format!("{}{}", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX, epoch)
-    }
-
-    fn d057_write_keyring(
-        path: &std::path::Path,
-        configs: &[openlife_core::mcp_audit::AuditKeyConfig],
-    ) -> Vec<u8> {
-        let bytes = serde_json::to_vec_pretty(configs).expect("serialize D057 keyring fixture");
-        std::fs::write(path, &bytes).expect("write D057 keyring fixture");
-        bytes
-    }
-
-    fn d057_material(
-        config: openlife_core::mcp_audit::AuditKeyConfig,
+    fn d057_seed_nonempty_audit_store(
+        data_dir: &std::path::Path,
+        secrets: &TestSecretStore,
+        epoch: u64,
         key: [u8; 32],
-    ) -> openlife_core::mcp_audit::AuditKeyMaterial {
-        openlife_core::mcp_audit::AuditKeyMaterial { config, key }
-    }
-
-    fn d057_seed_audit_db(
-        db_path: &std::path::Path,
-        material: openlife_core::mcp_audit::AuditKeyMaterial,
-        tool_name: &str,
     ) {
-        let store = McpAuditStore::with_key_materials(db_path, vec![material])
-            .expect("create real file-backed D057 audit fixture");
-        store
-            .insert_log(
-                tool_name,
-                &serde_json::json!({"fixture": tool_name}),
-                "fixture-result",
-                true,
-                false,
-            )
-            .expect("seed real encrypted D057 audit row");
-    }
-
-    fn d057_store_mode(
-        result: &BootstrapResult,
-        store_name: &str,
-    ) -> crate::persistence_coordinator::PersistenceStoreMode {
-        result
-            .state
-            .persistence_coordinator
-            .snapshot()
-            .stores
-            .into_iter()
-            .find(|health| health.store == store_name)
-            .unwrap_or_else(|| panic!("missing persistence health for {store_name}"))
-            .mode
-    }
-
-    fn d057_audit_reads_fail_closed(result: &BootstrapResult) -> bool {
-        result
-            .state
-            .mcp_audit_store
-            .try_lock()
-            .expect("D057 audit store is not concurrently held")
-            .list_logs(10)
-            .is_err()
-    }
-
-    fn d057_all_logs_json(store: &McpAuditStore) -> Result<String, String> {
-        store
-            .list_logs(i64::MAX as usize)
-            .map_err(|error| error.to_string())
-            .and_then(|logs| serde_json::to_string(&logs).map_err(|error| error.to_string()))
-    }
-
-    fn d057_audit_artifact_snapshot(data_dir: &std::path::Path) -> Vec<(String, Option<Vec<u8>>)> {
-        let database_path = data_dir.join("mcp_audit.db");
-        ["", "-wal", "-shm", "-journal"]
-            .into_iter()
-            .map(|suffix| {
-                let mut artifact_path = database_path.as_os_str().to_os_string();
-                artifact_path.push(suffix);
-                let artifact_path = std::path::PathBuf::from(artifact_path);
-                let bytes = match std::fs::read(&artifact_path) {
-                    Ok(bytes) => Some(bytes),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => panic!(
-                        "snapshot D057 audit artifact {} failed: {error}",
-                        artifact_path.display()
-                    ),
-                };
-                (format!("mcp_audit.db{suffix}"), bytes)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn d057_malformed_keyring_never_creates_secret_or_overwrites_bytes() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let malformed_bytes = b"{ definitely-not-a-keyring\n".to_vec();
-        std::fs::write(&keyring_path, &malformed_bytes).unwrap();
-        let secrets = D057RecordingSecretStore::default();
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == malformed_bytes,
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "malformed authority must be preserved for recovery and cannot mint or activate a replacement key"
-        );
-    }
-
-    #[test]
-    fn d057_present_empty_json_keyring_is_invalid_not_first_boot() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let original_bytes = b"[]\n".to_vec();
-        std::fs::write(&keyring_path, &original_bytes).unwrap();
-        let secrets = D057RecordingSecretStore::default();
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_bytes,
-            !directory.path().join("mcp_audit.db").exists(),
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "an explicitly present empty keyring is invalid authority, not an absent first-boot marker"
-        );
-    }
-
-    #[test]
-    fn d057_key_epoch_and_reference_epoch_mismatch_is_rejected() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let mismatched_ref = d057_key_ref(62);
-        let mismatched_config = d057_keychain_config(61, mismatched_ref.clone());
-        let original_bytes = d057_write_keyring(&keyring_path, &[mismatched_config]);
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&mismatched_ref, [0x61; 32]);
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_bytes,
-            !directory.path().join("mcp_audit.db").exists(),
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "a key reference naming a different epoch is not valid keyring authority"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn d057_unreadable_keyring_never_creates_secret_or_overwrites_bytes() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let directory = tempfile::tempdir().unwrap();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let secret_ref = d057_key_ref(7);
-        let config = d057_keychain_config(7, secret_ref.clone());
-        let original_bytes = d057_write_keyring(&keyring_path, &[config]);
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&secret_ref, [0x07; 32]);
-        let mut unreadable = std::fs::metadata(&keyring_path).unwrap().permissions();
-        unreadable.set_mode(0o000);
-        std::fs::set_permissions(&keyring_path, unreadable).unwrap();
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let mut readable = std::fs::metadata(&keyring_path).unwrap().permissions();
-        readable.set_mode(0o600);
-        std::fs::set_permissions(&keyring_path, readable).unwrap();
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_bytes,
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "an unreadable authority file must remain untouched and cannot be treated as first boot"
-        );
-    }
-
-    #[test]
-    fn d057_missing_keyring_with_nonempty_audit_db_fails_closed() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        #[derive(Debug)]
-        struct Observation {
-            secret_sets_zero: bool,
-            secret_deletes_zero: bool,
-            keyring_remains_absent: bool,
-            reference_mode: PersistenceStoreMode,
-            audit_mode: PersistenceStoreMode,
-            audit_state_oracle_satisfied: bool,
-            write_attempt_failed: bool,
-            artifacts_unchanged_after_bootstrap: bool,
-            artifacts_unchanged_after_write_attempt: bool,
-            canonical_writes_blocked: bool,
-            provider_dispatch_blocked: bool,
-            tool_dispatch_blocked: bool,
-            historical_logs_exact: bool,
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let db_path = directory.path().join("mcp_audit.db");
-        let historical_ref = d057_key_ref(10);
-        let historical_config = d057_keychain_config(10, historical_ref.clone());
-        let historical_material = d057_material(historical_config, [0x10; 32]);
-        d057_seed_audit_db(
-            &db_path,
-            historical_material.clone(),
-            "historical_nonempty_fixture",
-        );
-        let expected_logs = {
-            let owner =
-                McpAuditStore::with_key_materials(&db_path, vec![historical_material.clone()])
-                    .expect("historical authority opens the control database");
-            d057_all_logs_json(&owner).expect("serialize the complete historical control logs")
-        };
-        let artifacts_before_bootstrap = d057_audit_artifact_snapshot(directory.path());
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&historical_ref, [0x10; 32]);
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let artifacts_after_bootstrap = d057_audit_artifact_snapshot(directory.path());
-        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
-        let audit_mode = d057_store_mode(&result, "McpAuditStore");
-        let (logs_before_write, write_attempt_failed, logs_after_write) = {
-            let audit = result
-                .state
-                .mcp_audit_store
-                .try_lock()
-                .expect("missing-keyring audit store lock");
-            let logs_before_write = d057_all_logs_json(&audit);
-            let write_attempt_failed = audit
-                .insert_log(
-                    "must_not_write_without_keyring",
-                    &serde_json::json!({"forbidden": true}),
-                    "must-not-commit",
-                    true,
-                    false,
-                )
-                .is_err();
-            let logs_after_write = d057_all_logs_json(&audit);
-            (logs_before_write, write_attempt_failed, logs_after_write)
-        };
-        let artifacts_after_write_attempt = d057_audit_artifact_snapshot(directory.path());
-        result.state.persistence_coordinator.seal();
-        let persistence = result.state.persistence_coordinator.snapshot();
-        let audit_state_oracle_satisfied = match audit_mode {
-            PersistenceStoreMode::Unavailable => {
-                logs_before_write.is_err() && logs_after_write.is_err()
-            }
-            PersistenceStoreMode::ReadOnlyCanonical => {
-                logs_before_write.as_ref() == Ok(&expected_logs)
-                    && logs_after_write.as_ref() == Ok(&expected_logs)
-            }
-            _ => false,
-        };
-        drop(result);
-        let historical_logs_exact = {
-            let owner = McpAuditStore::with_key_materials(&db_path, vec![historical_material])
-                .expect("correct historical authority still opens after rejected bootstrap");
-            d057_all_logs_json(&owner)
-                .map(|actual| actual == expected_logs)
-                .unwrap_or(false)
-        };
-        let observation = Observation {
-            secret_sets_zero: secrets.mcp_set_refs().is_empty(),
-            secret_deletes_zero: secrets.mcp_deleted_refs().is_empty(),
-            keyring_remains_absent: !directory.path().join("mcp_audit_keys.json").exists(),
-            reference_mode,
-            audit_mode,
-            audit_state_oracle_satisfied,
-            write_attempt_failed,
-            artifacts_unchanged_after_bootstrap: artifacts_before_bootstrap
-                == artifacts_after_bootstrap,
-            artifacts_unchanged_after_write_attempt: artifacts_before_bootstrap
-                == artifacts_after_write_attempt,
-            canonical_writes_blocked: !persistence.canonical_writes_allowed,
-            provider_dispatch_blocked: !persistence.provider_dispatch_allowed,
-            tool_dispatch_blocked: !persistence.tool_dispatch_allowed,
-            historical_logs_exact,
-        };
-
-        assert!(
-            observation.secret_sets_zero
-                && observation.secret_deletes_zero
-                && observation.keyring_remains_absent
-                && observation.reference_mode == PersistenceStoreMode::Unavailable
-                && matches!(
-                    observation.audit_mode,
-                    PersistenceStoreMode::Unavailable | PersistenceStoreMode::ReadOnlyCanonical
-                )
-                && observation.audit_state_oracle_satisfied
-                && observation.write_attempt_failed
-                && observation.artifacts_unchanged_after_bootstrap
-                && observation.artifacts_unchanged_after_write_attempt
-                && observation.canonical_writes_blocked
-                && observation.provider_dispatch_blocked
-                && observation.tool_dispatch_blocked
-                && observation.historical_logs_exact,
-            "an absent keyring with nonempty audit history must be fully unavailable or strictly read-only without creating authority or mutating any durable artifact: {observation:#?}"
-        );
-    }
-
-    #[test]
-    fn d057_missing_keyring_with_existing_valid_empty_audit_db_is_true_first_boot() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let db_path = directory.path().join("mcp_audit.db");
-        let fixture_ref = d057_key_ref(11);
-        let fixture_config = d057_keychain_config(11, fixture_ref);
-        let empty_store = McpAuditStore::with_key_materials(
-            &db_path,
-            vec![d057_material(fixture_config, [0x11; 32])],
+        let config = d057_key_config(epoch);
+        secrets.preload_mcp_key(epoch, key);
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &data_dir.join("mcp_audit_keys.json"),
+            std::slice::from_ref(&config),
         )
-        .expect("create a real, schema-valid empty audit database");
-        assert!(empty_store.list_logs(1).unwrap().is_empty());
-        drop(empty_store);
-        let secrets = D057RecordingSecretStore::default();
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let keyring_bytes = std::fs::read(directory.path().join("mcp_audit_keys.json"))
-            .expect("true first boot persists the new key reference");
-        let keyring: Vec<openlife_core::mcp_audit::AuditKeyConfig> =
-            serde_json::from_slice(&keyring_bytes).expect("new keyring is valid JSON authority");
-        let logs = result
-            .state
-            .mcp_audit_store
-            .try_lock()
-            .expect("valid empty audit store lock")
-            .list_logs(10)
-            .expect("valid empty audit store remains available");
-
-        assert_eq!(secrets.mcp_set_refs().len(), 1);
-        assert_eq!(keyring.len(), 1);
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::ReadWriteCanonical
-        );
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditStore"),
-            PersistenceStoreMode::ReadWriteCanonical
-        );
-        assert!(logs.is_empty());
-    }
-
-    #[test]
-    fn d057_missing_keyring_with_untrusted_audit_db_fails_closed_without_mutation() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let mut observations = Vec::new();
-        let mut case_names = vec!["corrupt", "non_audit_sqlite"];
-        #[cfg(unix)]
-        case_names.push("unreadable");
-        for case_name in case_names {
-            let directory = tempfile::tempdir().unwrap();
-            let db_path = directory.path().join("mcp_audit.db");
-            match case_name {
-                "corrupt" => std::fs::write(&db_path, b"not-a-sqlite-database").unwrap(),
-                "non_audit_sqlite" => {
-                    let connection = rusqlite::Connection::open(&db_path).unwrap();
-                    connection
-                        .execute("CREATE TABLE unrelated_fact (id INTEGER PRIMARY KEY)", [])
-                        .unwrap();
-                }
-                "unreadable" => {
-                    #[cfg(unix)]
-                    {
-                        let fixture_ref = d057_key_ref(12);
-                        let fixture_config = d057_keychain_config(12, fixture_ref);
-                        let empty_store = McpAuditStore::with_key_materials(
-                            &db_path,
-                            vec![d057_material(fixture_config, [0x12; 32])],
-                        )
-                        .unwrap();
-                        drop(empty_store);
-                        let mut permissions = std::fs::metadata(&db_path).unwrap().permissions();
-                        permissions.set_mode(0o000);
-                        std::fs::set_permissions(&db_path, permissions).unwrap();
-                    }
-                    #[cfg(not(unix))]
-                    unreachable!("unreadable case is only registered on Unix");
-                }
-                _ => unreachable!(),
-            }
-            #[cfg(unix)]
-            let original_bytes = if case_name == "unreadable" {
-                let mut readable = std::fs::metadata(&db_path).unwrap().permissions();
-                readable.set_mode(0o600);
-                std::fs::set_permissions(&db_path, readable).unwrap();
-                let bytes = std::fs::read(&db_path).unwrap();
-                let mut unreadable = std::fs::metadata(&db_path).unwrap().permissions();
-                unreadable.set_mode(0o000);
-                std::fs::set_permissions(&db_path, unreadable).unwrap();
-                bytes
-            } else {
-                std::fs::read(&db_path).unwrap()
-            };
-            #[cfg(not(unix))]
-            let original_bytes = std::fs::read(&db_path).unwrap();
-            let secrets = D057RecordingSecretStore::default();
-
-            let result =
-                bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-            #[cfg(unix)]
-            if case_name == "unreadable" {
-                let mut readable = std::fs::metadata(&db_path).unwrap().permissions();
-                readable.set_mode(0o600);
-                std::fs::set_permissions(&db_path, readable).unwrap();
-            }
-            observations.push((
-                case_name,
-                secrets.mcp_set_refs(),
-                !directory.path().join("mcp_audit_keys.json").exists(),
-                std::fs::read(&db_path).unwrap() == original_bytes,
-                d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-                d057_store_mode(&result, "McpAuditStore"),
-                d057_audit_reads_fail_closed(&result),
-            ));
-        }
-
-        let mut expected = vec![
-            (
-                "corrupt",
-                Vec::<String>::new(),
-                true,
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            (
-                "non_audit_sqlite",
-                Vec::<String>::new(),
-                true,
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-        ];
-        #[cfg(unix)]
-        expected.push((
-            "unreadable",
-            Vec::<String>::new(),
-            true,
-            true,
-            PersistenceStoreMode::Unavailable,
-            PersistenceStoreMode::Unavailable,
-            true,
-        ));
-        assert_eq!(
-            observations,
-            expected,
-            "missing keyring cannot be treated as first boot unless an existing audit DB is proven schema-valid and empty"
-        );
-    }
-
-    #[test]
-    fn d057_duplicate_key_epochs_are_rejected_without_rewrite() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let first_ref = format!("{}20-a", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX);
-        let second_ref = format!("{}20-b", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX);
-        let configs = vec![
-            d057_keychain_config(20, first_ref.clone()),
-            d057_keychain_config(20, second_ref.clone()),
-        ];
-        let original_bytes = d057_write_keyring(&keyring_path, &configs);
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&first_ref, [0x20; 32]);
-        secrets.preload_key(&second_ref, [0x21; 32]);
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_bytes,
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "duplicate epochs are ambiguous authority and must not be silently deduplicated"
-        );
-    }
-
-    #[test]
-    fn d057_nonmonotonic_key_epochs_are_rejected_without_rewrite() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let newer_ref = d057_key_ref(31);
-        let older_ref = d057_key_ref(30);
-        let configs = vec![
-            d057_keychain_config(31, newer_ref.clone()),
-            d057_keychain_config(30, older_ref.clone()),
-        ];
-        let original_bytes = d057_write_keyring(&keyring_path, &configs);
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&newer_ref, [0x31; 32]);
-        secrets.preload_key(&older_ref, [0x30; 32]);
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_bytes,
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "keyring order is part of the epoch history and must not be silently normalized"
-        );
-    }
-
-    #[test]
-    fn d057_existing_db_epoch_not_covered_by_keyring_is_unavailable() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        #[derive(Debug)]
-        struct Observation {
-            secret_sets_zero: bool,
-            secret_deletes_zero: bool,
-            keyring_unchanged: bool,
-            reference_mode: PersistenceStoreMode,
-            audit_mode: PersistenceStoreMode,
-            reads_fail_closed_before_write: bool,
-            write_attempt_failed: bool,
-            reads_fail_closed_after_write: bool,
-            artifacts_unchanged_after_bootstrap: bool,
-            artifacts_unchanged_after_write_attempt: bool,
-            canonical_writes_blocked: bool,
-            provider_dispatch_blocked: bool,
-            tool_dispatch_blocked: bool,
-            historical_logs_exact: bool,
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let db_path = directory.path().join("mcp_audit.db");
-        let historical_ref = d057_key_ref(40);
-        let historical_config = d057_keychain_config(40, historical_ref.clone());
-        let historical_material = d057_material(historical_config.clone(), [0x40; 32]);
-        d057_seed_audit_db(
-            &db_path,
-            historical_material.clone(),
-            "uncovered_epoch_fixture",
-        );
-        let expected_logs = {
-            let owner =
-                McpAuditStore::with_key_materials(&db_path, vec![historical_material.clone()])
-                    .expect("covered historical authority opens the control database");
-            d057_all_logs_json(&owner).expect("serialize the complete uncovered-epoch control")
-        };
-        let artifacts_before_bootstrap = d057_audit_artifact_snapshot(directory.path());
-        let current_ref = d057_key_ref(41);
-        let current_config = d057_keychain_config(41, current_ref.clone());
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let original_keyring = d057_write_keyring(&keyring_path, &[current_config]);
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&current_ref, [0x41; 32]);
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let artifacts_after_bootstrap = d057_audit_artifact_snapshot(directory.path());
-        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
-        let audit_mode = d057_store_mode(&result, "McpAuditStore");
-        let (reads_fail_closed_before_write, write_attempt_failed, reads_fail_closed_after_write) = {
-            let audit = result
-                .state
-                .mcp_audit_store
-                .try_lock()
-                .expect("uncovered-epoch audit store lock");
-            let reads_fail_closed_before_write = d057_all_logs_json(&audit).is_err();
-            let write_attempt_failed = audit
-                .insert_log(
-                    "must_not_write_with_uncovered_epoch",
-                    &serde_json::json!({"forbidden": true}),
-                    "must-not-commit",
-                    true,
-                    false,
-                )
-                .is_err();
-            let reads_fail_closed_after_write = d057_all_logs_json(&audit).is_err();
-            (
-                reads_fail_closed_before_write,
-                write_attempt_failed,
-                reads_fail_closed_after_write,
-            )
-        };
-        let artifacts_after_write_attempt = d057_audit_artifact_snapshot(directory.path());
-        result.state.persistence_coordinator.seal();
-        let persistence = result.state.persistence_coordinator.snapshot();
-        drop(result);
-        let historical_logs_exact = {
-            let owner = McpAuditStore::with_key_materials(&db_path, vec![historical_material])
-                .expect("original authority still opens the unchanged database");
-            d057_all_logs_json(&owner)
-                .map(|actual| actual == expected_logs)
-                .unwrap_or(false)
-        };
-        let observation = Observation {
-            secret_sets_zero: secrets.mcp_set_refs().is_empty(),
-            secret_deletes_zero: secrets.mcp_deleted_refs().is_empty(),
-            keyring_unchanged: std::fs::read(&keyring_path).unwrap() == original_keyring,
-            reference_mode,
-            audit_mode,
-            reads_fail_closed_before_write,
-            write_attempt_failed,
-            reads_fail_closed_after_write,
-            artifacts_unchanged_after_bootstrap: artifacts_before_bootstrap
-                == artifacts_after_bootstrap,
-            artifacts_unchanged_after_write_attempt: artifacts_before_bootstrap
-                == artifacts_after_write_attempt,
-            canonical_writes_blocked: !persistence.canonical_writes_allowed,
-            provider_dispatch_blocked: !persistence.provider_dispatch_allowed,
-            tool_dispatch_blocked: !persistence.tool_dispatch_allowed,
-            historical_logs_exact,
-        };
-
-        assert!(
-            observation.secret_sets_zero
-                && observation.secret_deletes_zero
-                && observation.keyring_unchanged
-                && observation.reference_mode == PersistenceStoreMode::Unavailable
-                && observation.audit_mode == PersistenceStoreMode::Unavailable
-                && observation.reads_fail_closed_before_write
-                && observation.write_attempt_failed
-                && observation.reads_fail_closed_after_write
-                && observation.artifacts_unchanged_after_bootstrap
-                && observation.artifacts_unchanged_after_write_attempt
-                && observation.canonical_writes_blocked
-                && observation.provider_dispatch_blocked
-                && observation.tool_dispatch_blocked
-                && observation.historical_logs_exact,
-            "an incomplete keyring must not expose reads, writes, or mutate main/sidecar artifacts; exact historical log JSON must remain recoverable with the complete authority: {observation:#?}"
-        );
-    }
-
-    #[test]
-    fn d057_wrong_keychain_material_cannot_reencrypt_or_damage_historical_rows() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let db_path = directory.path().join("mcp_audit.db");
-        let control_db_path = directory.path().join("mcp_audit_control.db");
-        let secret_ref = d057_key_ref(50);
-        let config = d057_keychain_config(50, secret_ref.clone());
-        let correct_material = d057_material(config.clone(), [0x50; 32]);
-        d057_seed_audit_db(
-            &db_path,
-            correct_material.clone(),
-            "wrong_key_historical_fixture",
-        );
-        {
-            let connection = rusqlite::Connection::open(&db_path).unwrap();
-            assert_eq!(
-                connection
-                    .execute("UPDATE mcp_log SET payload_minimized_version = 0", [])
-                    .unwrap(),
-                1,
-                "fixture must exercise the legacy migration branch"
-            );
-        }
-        let original_db_bytes = std::fs::read(&db_path).unwrap();
-        std::fs::write(&control_db_path, &original_db_bytes).unwrap();
-        let expected_logs = {
-            let control =
-                McpAuditStore::with_key_materials(&control_db_path, vec![correct_material.clone()])
-                    .expect("the correct historical key performs the legitimate migration");
-            serde_json::to_string(&control.list_logs(10).unwrap()).unwrap()
-        };
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let original_keyring = d057_write_keyring(&keyring_path, &[config]);
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&secret_ref, [0x5F; 32]);
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
-        let audit_mode = d057_store_mode(&result, "McpAuditStore");
-        let audit_reads_fail_closed = d057_audit_reads_fail_closed(&result);
-        let db_bytes_unchanged = std::fs::read(&db_path).unwrap() == original_db_bytes;
-        drop(result);
-        let original_authority =
-            McpAuditStore::with_key_materials(&db_path, vec![correct_material])
-                .expect("the correct historical key can still inspect the database");
-        let actual_logs =
-            serde_json::to_string(&original_authority.list_logs(10).unwrap()).unwrap();
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_keyring,
-            db_bytes_unchanged,
-            reference_mode,
-            audit_mode,
-            audit_reads_fail_closed,
-            actual_logs == expected_logs,
-        );
-
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-                true,
-            ),
-            "a structurally valid but incorrect credential must fail closed before migration writes and preserve old-key readability"
-        );
-    }
-
-    #[test]
-    fn d057_true_first_boot_creates_one_key_and_restart_reuses_it() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let secrets = D057RecordingSecretStore::default();
-        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let first_keyring = std::fs::read(directory.path().join("mcp_audit_keys.json")).unwrap();
-        {
-            let audit = first
-                .state
-                .mcp_audit_store
-                .try_lock()
-                .expect("first-boot audit store lock");
-            audit
-                .insert_log(
-                    "first_boot_fixture",
-                    &serde_json::json!({"first": true}),
-                    "created-once",
-                    true,
-                    false,
-                )
-                .expect("true first boot activates the persisted key");
-        }
-        assert_eq!(
-            d057_store_mode(&first, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::ReadWriteCanonical
-        );
-        assert_eq!(secrets.mcp_set_refs().len(), 1);
-        drop(first);
-
-        let restarted =
-            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        assert_eq!(secrets.mcp_set_refs().len(), 1);
-        assert_eq!(
-            std::fs::read(directory.path().join("mcp_audit_keys.json")).unwrap(),
-            first_keyring
-        );
-        let logs = restarted
-            .state
-            .mcp_audit_store
-            .try_lock()
-            .expect("restart audit store lock")
-            .list_logs(10)
-            .expect("persisted first-boot key remains readable after restart");
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].tool_name, "first_boot_fixture");
-    }
-
-    #[test]
-    fn d057_legal_legacy_and_keychain_restart_remains_readable() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
-        let directory = tempfile::tempdir().unwrap();
-        let db_path = directory.path().join("mcp_audit.db");
-        let legacy_store = McpAuditStore::new(&db_path);
-        legacy_store
+        .unwrap();
+        let store = McpAuditStore::with_key_materials(
+            data_dir.join("mcp_audit.db"),
+            vec![openlife_core::mcp_audit::AuditKeyMaterial { config, key }],
+        )
+        .unwrap();
+        store
             .insert_log(
-                "legacy_epoch_fixture",
-                &serde_json::json!({"legacy": true}),
-                "legacy-row",
+                "d057.seed",
+                &serde_json::json!({"payload": "minimized"}),
+                "seeded",
                 true,
                 false,
             )
             .unwrap();
-        let legacy_config = legacy_store.key_config().clone();
-        drop(legacy_store);
-
-        let current_ref = d057_key_ref(legacy_config.epoch + 1);
-        let current_config = d057_keychain_config(legacy_config.epoch + 1, current_ref.clone());
-        d057_write_keyring(
-            &directory.path().join("mcp_audit_keys.json"),
-            &[legacy_config, current_config],
-        );
-        let secrets = D057RecordingSecretStore::default();
-        secrets.preload_key(&current_ref, [0x51; 32]);
-
-        let first_restart =
-            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        assert_eq!(
-            d057_store_mode(&first_restart, "McpAuditStore"),
-            PersistenceStoreMode::ReadWriteCanonical
-        );
-        {
-            let audit = first_restart
-                .state
-                .mcp_audit_store
-                .try_lock()
-                .expect("legacy transition audit lock");
-            let logs = audit.list_logs(10).expect("legacy row remains readable");
-            assert_eq!(logs.len(), 1);
-            assert_eq!(logs[0].tool_name, "legacy_epoch_fixture");
-            audit
-                .insert_log(
-                    "keychain_epoch_fixture",
-                    &serde_json::json!({"keychain": true}),
-                    "keychain-row",
-                    true,
-                    false,
-                )
-                .expect("new rows use the persisted keychain epoch");
-        }
-        drop(first_restart);
-
-        let second_restart =
-            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let logs = second_restart
-            .state
-            .mcp_audit_store
-            .try_lock()
-            .expect("second legacy transition audit lock")
-            .list_logs(10)
-            .expect("both legal epochs remain readable after restart");
-        let mut tool_names = logs
-            .iter()
-            .map(|log| log.tool_name.as_str())
-            .collect::<Vec<_>>();
-        tool_names.sort();
-        assert_eq!(
-            tool_names,
-            vec!["keychain_epoch_fixture", "legacy_epoch_fixture"]
-        );
-        assert!(secrets.mcp_set_refs().is_empty());
     }
 
-    #[test]
-    fn d057_reference_save_failure_rolls_back_secret_and_never_activates_it() {
-        use crate::persistence_coordinator::PersistenceStoreMode;
-
+    #[tokio::test]
+    async fn d057_malformed_keyring_never_creates_secret_or_overwrites_authority() {
         let directory = tempfile::tempdir().unwrap();
         let keyring_path = directory.path().join("mcp_audit_keys.json");
-        std::fs::create_dir(&keyring_path).unwrap();
-        let secrets = D057RecordingSecretStore::default();
+        let malformed = b"{ malformed audit key authority\n";
+        std::fs::write(&keyring_path, malformed).unwrap();
+        let secrets = TestSecretStore::default();
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let set_refs = secrets.mcp_set_refs();
-        let deleted_refs = secrets.mcp_deleted_refs();
-        let observed = (
-            set_refs.len(),
-            deleted_refs == set_refs,
-            secrets.live_mcp_refs().is_empty(),
-            keyring_path.is_dir(),
-            !directory.path().join("mcp_audit.db").exists(),
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
+
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), malformed);
+        assert!(secrets.mcp_secret_refs().is_empty());
+        assert!(!directory.path().join("mcp_audit.db").exists());
+        assert!(result
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        assert!(result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| { warning.contains("MCP audit keyring is present but invalid") }));
+    }
+
+    #[tokio::test]
+    async fn d057_missing_keyring_beside_nonempty_database_fails_without_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        d057_seed_nonempty_audit_store(directory.path(), &secrets, 17, [0x71; 32]);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        std::fs::remove_file(&keyring_path).unwrap();
+        let db_path = directory.path().join("mcp_audit.db");
+        let before_db = std::fs::read(&db_path).unwrap();
+        let before_refs = secrets.mcp_secret_refs();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert!(!keyring_path.exists());
+        assert_eq!(std::fs::read(&db_path).unwrap(), before_db);
+        assert_eq!(secrets.mcp_secret_refs(), before_refs);
+        assert!(result
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        assert!(result.state.startup_warnings.iter().any(|warning| {
+            warning.contains("keyring is missing") && warning.contains("contains 1 rows")
+        }));
+    }
+
+    #[tokio::test]
+    async fn d068_version_flip_keeps_key_authority_canonical_and_audit_unavailable() {
+        const PRIVATE_ARGUMENT: &str = "D068-BOOTSTRAP-RAW-HEALTH-ARGUMENT";
+        const PRIVATE_RESULT: &str = "D068-BOOTSTRAP-RAW-FINANCE-RESULT";
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let epoch = 68;
+        let key = [0x68; 32];
+        let config = d057_key_config(epoch);
+        secrets.preload_mcp_key(epoch, key);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &keyring_path,
+            std::slice::from_ref(&config),
+        )
+        .unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let store = McpAuditStore::with_key_materials(
+            &database_path,
+            vec![openlife_core::mcp_audit::AuditKeyMaterial { config, key }],
+        )
+        .unwrap();
+        let row_id = store
+            .d068_insert_legacy_payload_fixture_for_test(
+                "d068-bootstrap-version-flip",
+                &serde_json::json!({"health": PRIVATE_ARGUMENT}),
+                PRIVATE_RESULT,
+            )
+            .unwrap();
+        store
+            .d068_flip_payload_version_to_current_for_test(row_id)
+            .unwrap();
+        drop(store);
+        let keyring_before = std::fs::read(&keyring_path).unwrap();
+        let secrets_before = secrets.mcp_secret_snapshot();
+        let database_before = d068_database_family_bytes(&database_path);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let persistence = result.state.persistence_coordinator.snapshot();
+        let mode = |store: &str| {
+            persistence
+                .stores
+                .iter()
+                .find(|health| health.store == store)
+                .map(|health| health.mode)
+        };
+        let audit_error = result
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(10)
+            .unwrap_err();
 
         assert_eq!(
-            observed,
-            (
-                1,
-                true,
-                true,
-                true,
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "a key is not authoritative until its reference is durably saved; persistence failure must roll it back before audit-store construction"
+            mode("McpAuditKeyReferenceStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::ReadWriteCanonical)
         );
+        assert_eq!(
+            mode("McpAuditStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+        );
+        assert!(!persistence.provider_dispatch_allowed);
+        assert!(!persistence.tool_dispatch_allowed);
+        assert!(audit_error.to_string().contains("unavailable"));
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert_eq!(secrets.mcp_secret_snapshot(), secrets_before);
+        assert_eq!(d068_database_family_bytes(&database_path), database_before);
+        let warnings = result.state.startup_warnings.join("\n");
+        assert!(warnings.contains("audit payload integrity is invalid"));
+        assert!(!warnings.contains(PRIVATE_ARGUMENT));
+        assert!(!warnings.contains(PRIVATE_RESULT));
     }
 
-    #[derive(Debug)]
-    struct D057PreManifestEpochScanMetrics {
-        row_count: usize,
-        schema_version: i64,
-        epochs: Vec<i64>,
-        index_names: Vec<String>,
-        query_plan: Vec<String>,
-        fullscan_steps: i32,
-        vm_steps: i32,
-    }
-
-    fn d057_observe_pre_manifest_epoch_scan(row_count: usize) -> D057PreManifestEpochScanMetrics {
-        use rusqlite::StatementStatus;
-
-        let directory = tempfile::tempdir().expect("D057 pre-manifest temp directory");
+    #[tokio::test]
+    async fn d057_wrong_audit_key_remains_unavailable_after_payload_attribution_split() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let epoch = 69;
+        let correct_key = [0x69; 32];
+        let wrong_key = [0x96; 32];
+        let config = d057_key_config(epoch);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &keyring_path,
+            std::slice::from_ref(&config),
+        )
+        .unwrap();
         let database_path = directory.path().join("mcp_audit.db");
-        let mut connection = rusqlite::Connection::open(&database_path)
-            .expect("open D057 pre-manifest SQLite fixture");
-        connection
-            .execute_batch(
-                "CREATE TABLE mcp_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tool_name TEXT NOT NULL,
-                    arguments_encrypted TEXT NOT NULL,
-                    result_encrypted TEXT NOT NULL,
-                    success INTEGER NOT NULL,
-                    pii_found INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    key_epoch INTEGER NOT NULL DEFAULT 0,
-                    payload_minimized_version INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE openlife_schema_versions (
-                    component TEXT PRIMARY KEY,
-                    version INTEGER NOT NULL,
-                    applied_at TEXT NOT NULL
-                );
-                INSERT INTO openlife_schema_versions (component, version, applied_at)
-                VALUES ('mcp_audit_store', 3, '2026-07-13T00:00:00Z');",
+        let store = McpAuditStore::with_key_materials(
+            &database_path,
+            vec![openlife_core::mcp_audit::AuditKeyMaterial {
+                config,
+                key: correct_key,
+            }],
+        )
+        .unwrap();
+        store
+            .insert_log(
+                "d057-wrong-key",
+                &serde_json::json!({"bounded": true}),
+                "bounded",
+                true,
+                false,
             )
-            .expect("create source-exact pre-manifest current-v3 audit schema");
-        let transaction = connection
-            .transaction()
-            .expect("begin D057 pre-manifest fixture transaction");
-        {
-            let mut insert = transaction
-                .prepare(
-                    "INSERT INTO mcp_log (
-                        tool_name, arguments_encrypted, result_encrypted, success,
-                        pii_found, created_at, key_epoch, payload_minimized_version
-                     ) VALUES ('d057_pre_manifest', 'fixture', 'fixture', 1, 0,
-                        '2026-07-13T00:00:00Z', ?1, 1)",
-                )
-                .expect("prepare D057 pre-manifest rows");
-            for ordinal in 0..row_count {
-                let epoch = if ordinal % 2 == 0 { 80_i64 } else { 81_i64 };
-                insert
-                    .execute([epoch])
-                    .expect("insert D057 pre-manifest row");
-            }
-        }
-        transaction
-            .commit()
-            .expect("commit D057 pre-manifest fixture");
+            .unwrap();
+        drop(store);
+        secrets.preload_mcp_key(epoch, wrong_key);
+        let keyring_before = std::fs::read(&keyring_path).unwrap();
+        let secrets_before = secrets.mcp_secret_snapshot();
+        let database_before = d068_database_family_bytes(&database_path);
 
-        let schema_version = connection
-            .query_row(
-                "SELECT version FROM openlife_schema_versions
-                 WHERE component = 'mcp_audit_store'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("read D057 pre-manifest schema version");
-
-        let index_names = {
-            let mut statement = connection
-                .prepare("PRAGMA index_list('mcp_log')")
-                .expect("inspect D057 pre-manifest indexes");
-            statement
-                .query_map([], |row| row.get::<_, String>(1))
-                .expect("query D057 pre-manifest indexes")
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .expect("collect D057 pre-manifest indexes")
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let persistence = result.state.persistence_coordinator.snapshot();
+        let mode = |store: &str| {
+            persistence
+                .stores
+                .iter()
+                .find(|health| health.store == store)
+                .map(|health| health.mode)
         };
-        let query_plan = {
-            let mut statement = connection
-                .prepare(
-                    "EXPLAIN QUERY PLAN
-                     SELECT DISTINCT key_epoch FROM mcp_log ORDER BY key_epoch",
-                )
-                .expect("prepare D057 pre-manifest query plan");
-            statement
-                .query_map([], |row| row.get::<_, String>(3))
-                .expect("query D057 pre-manifest plan")
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .expect("collect D057 pre-manifest plan")
-        };
-        let mut statement = connection
-            .prepare("SELECT DISTINCT key_epoch FROM mcp_log ORDER BY key_epoch")
-            .expect("prepare exact D057 epoch discovery");
-        let epochs = statement
-            .query_map([], |row| row.get::<_, i64>(0))
-            .expect("query exact D057 epoch set")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("collect exact D057 epoch set");
-        let fullscan_steps = statement.get_status(StatementStatus::FullscanStep);
-        let vm_steps = statement.get_status(StatementStatus::VmStep);
 
-        D057PreManifestEpochScanMetrics {
-            row_count,
-            schema_version,
-            epochs,
-            index_names,
-            query_plan,
-            fullscan_steps,
-            vm_steps,
-        }
+        assert_eq!(
+            mode("McpAuditKeyReferenceStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+        );
+        assert_eq!(
+            mode("McpAuditStore"),
+            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+        );
+        assert!(!persistence.provider_dispatch_allowed);
+        assert!(!persistence.tool_dispatch_allowed);
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert_eq!(secrets.mcp_secret_snapshot(), secrets_before);
+        assert_eq!(d068_database_family_bytes(&database_path), database_before);
+        assert!(result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("key material is unavailable")));
     }
 
-    #[test]
-    fn d057_pre_manifest_epoch_discovery_has_linear_work_without_authenticated_metadata() {
-        let small = d057_observe_pre_manifest_epoch_scan(32);
-        let large = d057_observe_pre_manifest_epoch_scan(2_048);
+    #[tokio::test]
+    async fn d057_true_first_boot_creates_one_reference_and_restart_reuses_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
 
-        assert!(
-            small.schema_version == 3
-                && large.schema_version == 3
-                && small.epochs == vec![80, 81]
-                && large.epochs == vec![80, 81]
-                && small.index_names.is_empty()
-                && large.index_names.is_empty()
-                && small
-                    .query_plan
-                    .iter()
-                    .any(|step| step.contains("SCAN mcp_log"))
-                && large
-                    .query_plan
-                    .iter()
-                    .any(|step| step.contains("SCAN mcp_log"))
-                && small.fullscan_steps >= small.row_count as i32 - 1
-                && large.fullscan_steps >= large.row_count as i32 - 1
-                && large.fullscan_steps > small.fullscan_steps + 1_900
-                && large.vm_steps > small.vm_steps,
-            "D057 waiver proof: exact epoch discovery over pre-manifest current-v3 has row-linear work; this one-time scan cannot be replaced by epoch sampling: small={small:#?}, large={large:#?}"
+        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        assert!(first
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap()
+            .is_empty());
+        let first_refs = secrets.mcp_secret_refs();
+        assert_eq!(first_refs.len(), 1);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let first_keyring = std::fs::read(&keyring_path).unwrap();
+        let McpAuditKeyringLoad::Present(first_configs) =
+            crate::storage::load_mcp_audit_keyring_from_path(&keyring_path)
+        else {
+            panic!("first boot must persist one valid key authority");
+        };
+        assert_eq!(first_configs.len(), 1);
+        first
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .insert_log(
+                "d057.restart",
+                &serde_json::json!({"payload": "minimized"}),
+                "restart-readable",
+                true,
+                false,
+            )
+            .unwrap();
+        drop(first);
+
+        let restarted =
+            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(secrets.mcp_secret_refs(), first_refs);
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), first_keyring);
+        let logs = restarted
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_name, "d057.restart");
+    }
+
+    #[tokio::test]
+    async fn d057_existing_empty_database_is_still_a_proven_first_boot() {
+        let directory = tempfile::tempdir().unwrap();
+        let bootstrap_key = d057_key_config(29);
+        let bootstrap_material = openlife_core::mcp_audit::AuditKeyMaterial {
+            config: bootstrap_key,
+            key: [0x29; 32],
+        };
+        let empty_store = McpAuditStore::with_key_materials(
+            directory.path().join("mcp_audit.db"),
+            vec![bootstrap_material],
+        )
+        .unwrap();
+        drop(empty_store);
+        let before_db = std::fs::read(directory.path().join("mcp_audit.db")).unwrap();
+        let secrets = TestSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(secrets.mcp_secret_refs().len(), 1);
+        assert!(directory.path().join("mcp_audit_keys.json").exists());
+        assert!(result
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap()
+            .is_empty());
+        assert_ne!(
+            std::fs::read(directory.path().join("mcp_audit.db")).unwrap(),
+            Vec::<u8>::new()
         );
+        assert!(!before_db.is_empty());
+    }
+
+    #[tokio::test]
+    async fn d057_reference_save_failure_rolls_back_staged_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::fail_next_mcp_audit_keyring_save_for_test(keyring_path.clone());
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert!(secrets.mcp_secret_refs().is_empty());
+        assert!(!keyring_path.exists());
+        assert!(!directory.path().join("mcp_audit.db").exists());
+        assert!(result
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        assert!(result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| { warning.contains("persist MCP audit key references failed") }));
+    }
+
+    #[tokio::test]
+    async fn d057_post_rename_save_error_withholds_activation_without_orphaning_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::fail_next_mcp_audit_keyring_save_after_write_for_test(keyring_path.clone());
+
+        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        let first_refs = secrets.mcp_secret_refs();
+        assert_eq!(first_refs.len(), 1);
+        let McpAuditKeyringLoad::Present(configs) =
+            crate::storage::load_mcp_audit_keyring_from_path(&keyring_path)
+        else {
+            panic!("post-rename error must preserve the observable key reference");
+        };
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].key_ref.as_ref(), Some(&first_refs[0]));
+        assert!(!directory.path().join("mcp_audit.db").exists());
+        assert!(first
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        assert!(first.state.startup_warnings.iter().any(|warning| {
+            warning.contains("write-key activation is withheld for this startup")
+        }));
+        drop(first);
+
+        let restarted =
+            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(secrets.mcp_secret_refs(), first_refs);
+        assert!(restarted
+            .state
+            .mcp_audit_store
+            .lock()
+            .await
+            .list_logs(1)
+            .unwrap()
+            .is_empty());
     }
 
     async fn seed_failed_main_chat_owner_fixture(
@@ -4231,6 +3874,230 @@ mod tests {
         assert_eq!(projection.readiness.database_status, "degraded");
     }
 
+    #[tokio::test]
+    async fn startup_releases_external_claim_when_artifact_intent_was_never_prepared() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let result =
+            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+        let target_path = temp_dir.path().join("never-written.txt");
+        let proposal = openlife_core::agent::AgentProposal::new(
+            openlife_core::agent::ProposalType::ExternalWriteAction,
+            "filesystem.startup-orphan",
+            serde_json::json!({
+                "path": target_path,
+                "content": "must not be written by startup recovery",
+            }),
+            "Crash after claim and before ArtifactMaterializer prepared intent.",
+            1.0,
+            openlife_core::agent::RiskLevel::High,
+            openlife_core::agent::ProposalSource::ChatConversation,
+        );
+        let proposal_id = proposal.id.clone();
+        let claim_id = {
+            let store = result
+                .state
+                .proposal_store
+                .as_ref()
+                .expect("proposal store")
+                .lock()
+                .await;
+            store.create_proposal(&proposal).expect("create proposal");
+            store
+                .claim_dispatch(&proposal_id)
+                .expect("claim proposal")
+                .expect("one startup fixture claim")
+        };
+
+        assert!(!reconcile_startup_proposal_projections(&result.state)
+            .await
+            .expect("startup reconciliation proves the effect was not attempted"));
+        let store = result
+            .state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await;
+        assert_eq!(
+            store
+                .dispatch_state(&proposal_id)
+                .expect("read recovered dispatch state")
+                .as_deref(),
+            Some("failed_before_effect")
+        );
+        assert_eq!(
+            store
+                .dispatch_error_code(&proposal_id)
+                .expect("read recovery reason")
+                .as_deref(),
+            Some("startup_artifact_claim_without_prepared_intent")
+        );
+        assert!(store
+            .artifact_effect(&proposal_id)
+            .expect("read artifact intent")
+            .is_none());
+        assert_eq!(
+            store
+                .dispatch_claim_id(&proposal_id)
+                .expect("read preserved first claim")
+                .as_deref(),
+            Some(claim_id.as_str())
+        );
+        assert!(store
+            .claim_dispatch(&proposal_id)
+            .expect("a proven before-effect failure is retryable")
+            .is_some());
+        assert!(!target_path.exists());
+    }
+
+    #[test]
+    fn bootstrap_imports_verified_legacy_yaml_daily_tasks_into_statestore_owner() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let manager = LifeModelManager::new(temp_dir.path().join("life-model").join("current"));
+        let mut model = openlife_core::life_model::LifeModel::default_model();
+        model
+            .goals
+            .daily
+            .push(openlife_core::life_model::DailyGoal {
+                name: "保留的旧 YAML 任务".into(),
+                done: false,
+                time_block: Some(openlife_core::life_model::TimeBlock {
+                    start: "09:00".into(),
+                    end: "10:00".into(),
+                }),
+                due_at: None,
+                operation_id: None,
+                operation_digest: None,
+            });
+        manager.save(&model).unwrap();
+
+        let result =
+            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+        let store = result.state.state_store.as_ref().expect("StateStore");
+        let receipt = store
+            .legacy_daily_task_shadow_receipt(false)
+            .unwrap()
+            .expect("legacy shadow receipt");
+        let import_receipt = store
+            .legacy_daily_task_import_receipt(false)
+            .unwrap()
+            .expect("legacy import receipt");
+
+        assert_eq!(receipt.item_count, 1);
+        assert!(receipt.deterministic);
+        assert!(receipt.parity);
+        assert!(receipt.rollback_rehearsed);
+        assert_eq!(receipt.candidate_digest, receipt.repeated_read_digest);
+        assert_eq!(receipt.candidate_digest, receipt.restored_digest);
+        assert_eq!(import_receipt.item_count, 1);
+        assert_eq!(
+            import_receipt.candidate_digest,
+            import_receipt.canonical_digest
+        );
+        assert_eq!(store.list_legacy_daily_task_shadow().unwrap().len(), 1);
+        let tasks = store.get_product_daily_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "保留的旧 YAML 任务");
+        assert_eq!(tasks[0].time_block_start.as_deref(), Some("09:00"));
+        assert_eq!(tasks[0].time_block_end.as_deref(), Some("10:00"));
+        assert_eq!(
+            tasks[0].source_kind,
+            openlife_core::state_store::StateSourceKind::LegacyLifeModelMigration
+        );
+        let persisted = result
+            .state
+            .life_model_manager
+            .blocking_lock()
+            .load()
+            .unwrap();
+        assert_eq!(persisted.goals.daily.len(), 1);
+        assert_eq!(persisted.goals.daily[0].name, "保留的旧 YAML 任务");
+        let encoded_receipt = serde_json::to_string(&receipt).unwrap();
+        let encoded_import_receipt = serde_json::to_string(&import_receipt).unwrap();
+        assert!(!encoded_receipt.contains("保留的旧 YAML 任务"));
+        assert!(!encoded_import_receipt.contains("保留的旧 YAML 任务"));
+    }
+
+    #[test]
+    fn bootstrap_imports_verified_legacy_state_history_and_preserves_migration_source() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let operation_digest =
+            openlife_core::persistence_outbox::metadata_digest("bootstrap legacy state history");
+        let memory_path = temp_dir.path().join("memory.db");
+        {
+            let memory = openlife_core::memory::MemoryStore::new(&memory_path).unwrap();
+            drop(memory);
+            let conn = rusqlite::Connection::open(&memory_path).unwrap();
+            conn.execute(
+                "INSERT INTO state_history (
+                    dimension_name, value, unit, recorded_at, note,
+                    operation_id, operation_digest
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    "专注度",
+                    8.0,
+                    "分",
+                    chrono::Utc::now().to_rfc3339(),
+                    "路演前",
+                    operation_id,
+                    operation_digest,
+                ],
+            )
+            .unwrap();
+        }
+
+        let result =
+            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+        let store = result.state.state_store.as_ref().expect("StateStore");
+        let receipt = store
+            .legacy_state_history_shadow_receipt(false)
+            .unwrap()
+            .expect("legacy state-history shadow receipt");
+        let import_receipt = store
+            .legacy_state_history_import_receipt(false)
+            .unwrap()
+            .expect("legacy state-history import receipt");
+        let shadow = store.list_legacy_state_history_shadow().unwrap();
+
+        assert_eq!(receipt.item_count, 1);
+        assert!(receipt.deterministic);
+        assert!(receipt.parity);
+        assert!(receipt.rollback_rehearsed);
+        assert_eq!(receipt.candidate_digest, receipt.repeated_read_digest);
+        assert_eq!(receipt.candidate_digest, receipt.restored_digest);
+        assert_eq!(shadow.len(), 1);
+        assert_eq!(shadow[0].dimension_name, "专注度");
+        assert_eq!(shadow[0].value, 8.0);
+        assert_eq!(shadow[0].unit, "分");
+        assert_eq!(shadow[0].note.as_deref(), Some("路演前"));
+        assert_eq!(
+            shadow[0].legacy_operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+        assert_eq!(import_receipt.item_count, 1);
+        assert_eq!(
+            import_receipt.candidate_digest,
+            import_receipt.canonical_digest
+        );
+        let canonical_history = store.get_product_state_history("专注度", 10).unwrap();
+        assert_eq!(canonical_history.len(), 1);
+        assert_eq!(canonical_history[0].value, 8.0);
+        assert_eq!(canonical_history[0].note.as_deref(), Some("路演前"));
+        let legacy_history = result
+            .state
+            .memory_store
+            .blocking_lock()
+            .get_state_history("专注度", 10)
+            .unwrap();
+        assert_eq!(legacy_history.len(), 1);
+        assert_eq!(legacy_history[0].note.as_deref(), Some("路演前"));
+        let encoded_receipt = serde_json::to_string(&(receipt, import_receipt)).unwrap();
+        for body in ["专注度", "分", "路演前"] {
+            assert!(!encoded_receipt.contains(body));
+        }
+    }
+
     #[test]
     fn bootstrap_injects_stable_agent_run_key_and_rejects_key_mismatch() {
         use base64::Engine as _;
@@ -4386,10 +4253,392 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_never_completes_open_provider_consent_epoch_from_empty_action_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let preparation = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        {
+            let manager = preparation.state.life_model_manager.lock().await;
+            let heuristic_store = preparation.state.heuristic_store.lock().await;
+            let registry = openlife_core::agent::HSAssetAuthorityRegistry::new(
+                manager.hs_asset_authority_registry_path(),
+            )
+            .expect("restart test HS authority registry");
+            let revision = registry
+                .authority(openlife_core::agent::HSAssetCategory::CollaborationGuidance)
+                .expect("restart test HS authority")
+                .revision;
+            let scenario = registry
+                .record_product_scenario(
+                    openlife_core::agent::HSAssetCategory::CollaborationGuidance,
+                    revision,
+                    "test-fixture:provider-consent-restart",
+                    openlife_core::agent::HSAssetOwner::AcceptedHsStore,
+                    &[openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.into()],
+                    openlife_core::agent::digest_string("provider-consent-restart-runtime-audit"),
+                )
+                .expect("restart test product receipt shape");
+            let model = manager.load().expect("restart test LifeModel");
+            let report = openlife_core::agent::complete_collaboration_guidance_cutover(
+                &registry,
+                &model,
+                &heuristic_store,
+                &scenario,
+            )
+            .expect("restart test HS cutover fixture");
+            manager
+                .save_hs_compatibility_view(&report.projection.yaml)
+                .expect("restart test HS compatibility view");
+        }
+        drop(preparation);
+
+        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        assert!(first.state.startup_warnings.is_empty());
+        first.state.persistence_coordinator.seal();
+
+        let mut config = first.state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = "http://127.0.0.1:9/v1".into();
+        config.llm.openai_key = "sk-provider-restart-test".into();
+        config.llm.chat_model = "gpt-provider-restart-test".into();
+        config.prefer_local_model = false;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        first.state.replace_provider_runtime_config(config).await;
+
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let initial = crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(&first.state)
+            .run_buffered(crate::main_chat_turn_runtime::OpenLifeTurnInput {
+                operation_id: operation_id.clone(),
+                session_id: "provider-consent-restart-chat".into(),
+                messages: vec![openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: "Draft a concise roadshow opening.".into(),
+                }],
+                selected_skill_id: None,
+                stream_mode: crate::main_chat_turn_runtime::MainChatTurnStreamMode::Buffered,
+            })
+            .await
+            .expect("initial provider turn stages consent");
+        let proposal_id = initial.terminal.proposals[0]
+            .strip_prefix("proposal:")
+            .unwrap_or(&initial.terminal.proposals[0])
+            .to_string();
+        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &first.state)
+            .await
+            .expect("accept exact provider consent");
+
+        let waiting_session = first
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load waiting task")
+            .expect("waiting task exists");
+        let replay_admission = crate::terminal_owner_write_gateway::issue_terminal_owner_provider_consent_replay_admission(
+            &first.state,
+            &waiting_session,
+            &proposal_id,
+        )
+        .await
+        .expect("issue exact provider replay admission");
+        let replay_epoch = first
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
+            .expect("open provider replay epoch");
+        let replay_run_id = replay_epoch.run_id().to_string();
+        assert_eq!(replay_epoch.generation(), 2);
+        let replay_start = first
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .latest_terminal_owner_replay_start(&operation_id, &replay_run_id)
+            .expect("load replay start")
+            .expect("replay start exists");
+        assert_eq!(
+            replay_start.payload["replayCause"],
+            "accepted_provider_network_consent"
+        );
+        crate::terminal_owner_write_gateway::write_task_session(
+            &first.state,
+            &operation_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::ResumeAfterResolvedBlocker(
+                format!("proposal:{proposal_id}"),
+            ),
+        )
+        .await
+        .expect("simulate continuation task activation");
+        crate::terminal_owner_write_gateway::begin_main_chat_agent_run_replay(
+            &first.state,
+            &replay_run_id,
+            &operation_id,
+        )
+        .await
+        .expect("simulate continuation run activation");
+        assert!(first
+            .state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(&operation_id)
+            .expect("list actions")
+            .is_empty());
+        drop(first);
+
+        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        assert!(
+            crate::main_chat_turn_runtime::reconcile_orphaned_openlife_replay_epoch_after_restart(
+                &restarted.state,
+                &operation_id,
+                &replay_run_id,
+            )
+            .await
+            .expect("reconcile orphaned provider continuation")
+        );
+        restarted.state.persistence_coordinator.seal();
+
+        let recovered_task = restarted
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load recovered task")
+            .expect("recovered task exists");
+        assert_eq!(
+            recovered_task.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        );
+        let final_event = restarted
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .terminal_owner_final_event(&operation_id)
+            .expect("load final")
+            .expect("final exists");
+        assert_eq!(final_event.payload["status"], "failed");
+        assert_eq!(final_event.payload["toolInvoked"], false);
+        assert_eq!(final_event.payload["modelInvoked"], false);
+        assert_eq!(
+            final_event.payload["providerInvocationStatus"],
+            "not_attempted"
+        );
+        assert_eq!(final_event.payload["requiresProvider"], true);
+        assert_eq!(final_event.payload["requiresToolLoop"], false);
+        let events = restarted
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list recovered events");
+        let restart_failure = events
+            .iter()
+            .find(|event| event.source == "bootstrap.orphan_open_replay_epoch")
+            .expect("startup failure receipt exists");
+        assert_eq!(
+            restart_failure.payload["providerAttemptState"],
+            "not_attempted"
+        );
+        assert_eq!(
+            restart_failure.payload["remoteProviderState"],
+            "not_attempted"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_projects_interrupted_final_delivery_to_failed_run_and_task_at_event_time() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, MainChatAgentStrategy,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let chat_session_id = format!("restart-interrupted-final:{operation_id}");
+        let user_goal = "Recover an interrupted final delivery without inventing cancellation.";
+        first
+            .state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session(&chat_session_id, "Interrupted restart fixture")
+            .unwrap();
+        let task = first
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_session_with_id(
+                operation_id.clone(),
+                AgentTaskSessionDraft {
+                    chat_session_id: chat_session_id.clone(),
+                    user_goal: user_goal.into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                },
+            )
+            .unwrap();
+        let canonical_message = first
+            .state
+            .memory_store
+            .lock()
+            .await
+            .save_message_idempotent_with_proof(
+                &chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: user_goal.into(),
+                },
+                &operation_id,
+            )
+            .unwrap();
+        let admission = {
+            let store = first
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .bind_session_canonical_user_message(
+                    &task.id,
+                    &canonical_message.receipt().canonical_ref,
+                    user_goal,
+                )
+                .unwrap();
+            store
+                .issue_terminal_owner_epoch_admission(&task.id, &operation_id, canonical_message)
+                .unwrap()
+        };
+        let mut run = openlife_core::agent::AgentRun::new_chat_run(&chat_session_id, user_goal);
+        run.id = operation_id.clone();
+        run.task_id = task.id.clone();
+        first
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        let head = first
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&task.id)
+            .unwrap()
+            .unwrap();
+        let interrupted_event = {
+            let event_store = first
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            let epoch = event_store
+                .open_terminal_owner_epoch_from_admission(admission)
+                .unwrap();
+            event_store
+                .begin_terminal_owner_seal(&task.id, &run.id, epoch.generation())
+                .unwrap();
+            event_store
+                .append_terminal_final_and_seal(
+                    crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                        task_session_id: task.id.clone(),
+                        run_id: run.id.clone(),
+                        epoch_generation: epoch.generation(),
+                        delivery_id: format!("interrupted-final:{}", run.id),
+                        expected_task_owner_revision: head.revision(),
+                        expected_task_owner_digest: head.digest().to_string(),
+                        status: "interrupted".into(),
+                    },
+                )
+                .unwrap()
+        };
+        drop(first);
+
+        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        assert_eq!(
+            reconcile_startup_orphaned_main_chat_runs(&restarted.state)
+                .await
+                .expect("restart projects exact interrupted final delivery"),
+            1
+        );
+        let recovered_run = restarted
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered_run.status,
+            openlife_core::agent::AgentRunStatus::Failed
+        );
+        assert_eq!(
+            recovered_run.finished_at,
+            Some(interrupted_event.created_at)
+        );
+        let recovered_task = restarted
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_session(&task.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered_task.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn restart_repairs_both_directions_of_partial_terminal_projection() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
         let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        // Seed the durable terminal through the same release-like admission
+        // used by normal product effects. The restart below is the only phase
+        // that may use startup reconciliation while the coordinator is still
+        // Initializing.
+        first.state.persistence_coordinator.seal();
         let (run_terminal_task_running, run_terminal_id) =
             seed_failed_main_chat_owner_fixture(&first.state, "restart-run-terminal").await;
         let (run_running_task_terminal, task_terminal_run_id) =

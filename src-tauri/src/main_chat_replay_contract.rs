@@ -149,6 +149,12 @@ impl DurableMainChatReplayExecutionEnvelope {
         Ok(())
     }
 
+    // Replay matching deliberately compares every canonical execution field;
+    // collapsing these into a caller-built key would weaken the anti-replay check.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub(crate) fn matches_current_execution(
         &self,
         task_session_id: &str,

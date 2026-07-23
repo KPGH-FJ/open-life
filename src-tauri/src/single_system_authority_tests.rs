@@ -197,11 +197,49 @@ fn source_files(roots: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
+const RETIRED_FRONTEND_OWNERS: &[&str] = &[
+    "frontend/src/components/ProductShell.tsx",
+    "frontend/src/components/product/ProductPrimitives.tsx",
+    "frontend/src/productShellContract.ts",
+    "frontend/src/pages/TodayPage.tsx",
+    "frontend/src/pages/CompanionPage.tsx",
+    "frontend/src/pages/ChatPage.tsx",
+    "frontend/src/pages/RunsPage.tsx",
+    "frontend/src/pages/MailboxPage.tsx",
+    "frontend/src/pages/LifeModelPage.tsx",
+    "frontend/src/pages/MemorySearch.tsx",
+    "frontend/src/pages/SettingsPage.tsx",
+    "frontend/src/pages/BuilderPage.tsx",
+    "frontend/src/pages/AgentRunDetail.tsx",
+    "frontend/src/utils/runtimeDisclosure.ts",
+    "frontend/src/utils/runDisplaySummary.ts",
+    "frontend/src/utils/capabilityStatus.ts",
+];
+
+fn assert_retired_frontend_owners_absent() {
+    for former_directory in ["frontend/src/pages", "frontend/src/components"] {
+        assert!(
+            !repo_root().join(former_directory).exists(),
+            "Phase 4E retired frontend owner directory must stay absent: {former_directory}"
+        );
+    }
+    for former_path in RETIRED_FRONTEND_OWNERS {
+        assert!(
+            !repo_root().join(former_path).exists(),
+            "Phase 4E retired frontend owner must stay absent: {former_path}"
+        );
+    }
+}
+
 fn strip_cfg_test_module(source: &str) -> &str {
-    source
-        .split("\n#[cfg(test)]\nmod tests")
-        .next()
-        .unwrap_or(source)
+    [
+        "\n#[cfg(test)]\nmod tests",
+        "\n#[cfg(test)]\nmod bound_content_receipt_tests",
+    ]
+    .into_iter()
+    .filter_map(|marker| source.find(marker))
+    .min()
+    .map_or(source, |index| &source[..index])
 }
 
 fn count_occurrences(source: &str, needle: &str) -> usize {
@@ -520,11 +558,19 @@ fn single_system_phase1_inventory_has_required_categories_and_contract_fields() 
     ]);
 
     for category in required_categories {
-        let entries = inventory_entries(&inventory, category);
         assert!(
-            !entries.is_empty(),
-            "inventory category {category} must not be empty"
+            inventory
+                .get(category)
+                .is_some_and(serde_json::Value::is_array),
+            "inventory category {category} must exist as an array"
         );
+        let entries = inventory_entries(&inventory, category);
+        if category != "direct_proposal_write_surfaces" {
+            assert!(
+                !entries.is_empty(),
+                "inventory category {category} must not be empty"
+            );
+        }
         for entry in entries {
             let id = entry_str(entry, "id");
             let disposition = entry_str(entry, "disposition");
@@ -739,7 +785,8 @@ fn single_system_r0_readmodel_authority_map_keeps_frontend_adapters_transitional
         );
     }
 
-    for missing_backend_owner in ["src-tauri/src/read_models/workspace.rs"] {
+    {
+        let missing_backend_owner = "src-tauri/src/read_models/workspace.rs";
         assert!(
             !repo_root().join(missing_backend_owner).exists(),
             "R0 source map must be updated before treating {missing_backend_owner} as an existing backend read-model owner"
@@ -880,29 +927,57 @@ fn single_system_r2_review_center_readmodel_owns_review_actions() {
         "R2 frontend bridge must mirror the ReviewCenterViewModel command shape"
     );
 
-    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    let data_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let controller =
+        read_repo_file("frontend/src/ui/journeys/governedAction/useGovernedActionJourney.ts");
+    let review_view =
+        read_repo_file("frontend/src/ui/journeys/governedAction/ReviewGovernedView.tsx");
     for required in [
-        "getReviewCenterViewModel",
-        "allowedActions.find",
-        "actionBlockedReason(selectedReviewItem, \"approve\")",
-        "materializationStatus",
-        "ReviewCenterViewModel 尚未提供该确认项的后端操作状态",
+        "getReviewCenterViewModel()",
+        "dispatchReviewAction(action: ReviewAction)",
+        "acceptProposal(action.targetReviewItemId)",
+        "rejectProposal(action.targetReviewItemId)",
+        "postponeProposal(action.targetReviewItemId)",
     ] {
         assert!(
-            mailbox.contains(required),
-            "R2 Mailbox must consume backend ReviewItem action/materialization authority: {required}"
+            data_source.contains(required),
+            "R2 production review data source must preserve backend review authority: {required}"
+        );
+    }
+    for required in [
+        "selectedItem?.allowedActions.filter",
+        "item.materializationStatus",
+        "action.completionProofAfterDispatch",
+        "data-action-expected-materialization-status",
+    ] {
+        assert!(
+            review_view.contains(required),
+            "R2 production Review view must render backend action/materialization truth: {required}"
+        );
+    }
+    for required in [
+        "await dataSource.dispatchReviewAction(action)",
+        "const refreshed = await loadSnapshot(false)",
+        "review_refresh_target_missing",
+        "应用结果仍需独立刷新证明",
+    ] {
+        assert!(
+            controller.contains(required),
+            "R2 review dispatch must refresh and verify instead of claiming completion: {required}"
         );
     }
     for forbidden in [
-        "function canAccept(",
-        "function isPathInSafePaths(",
-        "function acceptBlockedReason(",
-        "function appliedNotice(",
+        "listProposals(",
         "setProposals(prev =>",
+        "function canAccept(",
+        "function appliedNotice(",
     ] {
         assert!(
-            !mailbox.contains(forbidden),
-            "R2 Mailbox must not keep local review action/materialization authority pattern: {forbidden}"
+            !data_source.contains(forbidden)
+                && !controller.contains(forbidden)
+                && !review_view.contains(forbidden),
+            "R2 production review path must not restore local review authority: {forbidden}"
         );
     }
 }
@@ -977,13 +1052,32 @@ fn single_system_r3_lifemodel_viewmodel_is_backend_owned() {
         "R3 frontend adapter must delegate to backend LifeModelViewModel, not rebuild raw truth"
     );
 
-    let page = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    let data_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
+    let presentation =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthPresentation.ts");
+    let view = read_repo_file("frontend/src/ui/journeys/durableTruth/DurableTruthView.tsx");
     assert!(
-        page.contains("getLifeModelViewModel")
-            && page.contains("viewModel?.pendingUpdateCounts.pendingReview")
-            && page.contains("viewModel?.memoryLinkage")
-            && page.contains("viewModel?.candidateChanges"),
-        "R3 LifeModel page must consume backend LifeModelViewModel fields"
+        data_source.contains("getLifeModelViewModel()")
+            && data_source.contains("getMemoryViewModel()")
+            && data_source.contains("getReviewCenterViewModel()"),
+        "R3 production durable-truth data source must consume backend ViewModels"
+    );
+    for required in [
+        "lifeModel?.pendingUpdateCounts.pendingReview",
+        "lifeModel?.candidateChanges.length",
+        "approved_not_applied",
+        "change.materializationStatus === \"applied\"",
+    ] {
+        assert!(
+            presentation.contains(required),
+            "R3 durable-truth presentation must keep backend materialization distinctions: {required}"
+        );
+    }
+    assert!(
+        view.contains("selectedItem?.allowedActions.find(action => action.kind === \"apply\")")
+            && view.contains("data-action-target-ref={applyAction.targetReviewItemId}"),
+        "R3 LifeModel application action must come from the ReviewItem action contract"
     );
     for forbidden in [
         "getLifeModel(",
@@ -998,8 +1092,10 @@ fn single_system_r3_lifemodel_viewmodel_is_backend_owned() {
         "buildLifeModelTrustViews",
     ] {
         assert!(
-            !page.contains(forbidden),
-            "R3 LifeModel page must not reconstruct backend truth locally via {forbidden}"
+            !data_source.contains(forbidden)
+                && !presentation.contains(forbidden)
+                && !view.contains(forbidden),
+            "R3 production durable-truth path must not reconstruct backend truth locally via {forbidden}"
         );
     }
 }
@@ -1016,6 +1112,12 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "pub enum TaskTerminalDeliveryStatus",
         "pub fn build_tasks_view_model",
         "pub fn build_workspace_view_model",
+        "pub struct WorkspaceViewModelBuildInput",
+        "pub struct WorkspaceActivityItem",
+        "pub active_task: Option<TaskViewModelItem>",
+        "pub pending_review_items: Vec<ReviewItem>",
+        "pub activity: Vec<WorkspaceActivityItem>",
+        "activity_redaction_state: \"metadata_only\"",
         "CompletedWithPendingReview",
         "CompletedNeedsEvidence",
         "TaskControlEffect::TaskResumeRequest",
@@ -1058,7 +1160,7 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "get_provider_privacy_boundary_summary_with_state",
         "state.agent_run_store",
         "build_tasks_view_model",
-        "WorkspaceViewModel consumes R5 ProviderPrivacyBoundarySummary",
+        "Workspace activity is metadata-only",
     ] {
         assert!(
             read_model.contains(required),
@@ -1092,20 +1194,54 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "R4 frontend bridge must mirror backend task/workspace read-model command shapes"
     );
 
-    let runs = read_repo_file("frontend/src/pages/RunsPage.tsx");
+    let data_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let contract = read_repo_file("frontend/src/ui/journeys/governedAction/taskControlContract.ts");
+    let controller =
+        read_repo_file("frontend/src/ui/journeys/governedAction/useGovernedActionJourney.ts");
+    let tasks_view = read_repo_file("frontend/src/ui/journeys/readOnly/TasksReadOnlyView.tsx");
     for required in [
-        "getTasksViewModel",
-        "TaskViewModelItem",
-        "TaskControl",
-        "item.lifecycleStatus",
-        "item.terminalDeliveryStatus",
-        "enabledActionControls(item)",
-        "control.effect",
-        "taskControl.targetActionId",
+        "getTasksViewModel()",
+        "dispatchTaskControl(control: TaskControl)",
+        "retryMainChatAgentAction(control.targetTaskId, control.targetActionId)",
+        "refreshMainChatAgentTaskContext(control.targetTaskId)",
     ] {
         assert!(
-            runs.contains(required),
-            "R4 Runs page must consume backend TasksViewModel authority: {required}"
+            data_source.contains(required),
+            "R4 production task data source must use typed backend task contracts: {required}"
+        );
+    }
+    for required in [
+        "control.targetTaskId !== expectedTaskId",
+        "control.completionProofAfterDispatch",
+        "refreshed_tasks_missing_target",
+        "task_refresh_target_mismatch",
+    ] {
+        assert!(
+            contract.contains(required),
+            "R4 task-control reducer must preserve exact identity and fail-closed verification: {required}"
+        );
+    }
+    for required in [
+        "await dataSource.dispatchTaskControl(control)",
+        "const refreshed = await loadSnapshot(false)",
+        "当前不会显示状态已经改变",
+        "页面不会把恢复请求解释成完成",
+    ] {
+        assert!(
+            controller.contains(required),
+            "R4 task dispatch must refresh backend state before product conclusions: {required}"
+        );
+    }
+    for required in [
+        "selectedTask?.allowedControls.filter(isExecutableTaskControl)",
+        "data-action-target-ref={control.targetTaskId}",
+        "data-action-target-action-id={control.targetActionId ?? \"\"}",
+        "data-action-completion-proof-after-dispatch",
+    ] {
+        assert!(
+            tasks_view.contains(required),
+            "R4 Tasks view must render backend TaskControl fields: {required}"
         );
     }
     for forbidden in [
@@ -1114,42 +1250,15 @@ fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
         "taskSummaryByRunId",
         "allowedControlsForSummary",
         "lifecycleForRun",
-    ] {
-        assert!(
-            !runs.contains(forbidden),
-            "R4 Runs page must not locally merge raw task lifecycle/control authority via {forbidden}"
-        );
-    }
-
-    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
-    for required in [
-        "getTasksViewModel",
-        "currentTaskViewItem",
-        "enabledTaskViewControl",
-        "taskViewItem?.lifecycleStatus",
-        "taskViewItem?.terminalDeliveryStatus",
-        "Backend task read model did not enable resume",
-        "canResumeCurrentMainChatTask",
-        "canRetryCurrentMainChatTask",
-        "canCancelCurrentMainChatTask",
-    ] {
-        assert!(
-            chat.contains(required),
-            "R4 Chat page must consume backend TasksViewModel authority: {required}"
-        );
-    }
-    for forbidden in [
-        "taskState?.canResume ? [\"resume\"]",
-        "taskState?.canRetry ? [\"retry\"]",
-        "canCancel ? [\"cancel\"]",
         "taskStatus === \"completed\" ||",
         "runStatus === \"completed\" ||",
-        "disabled={!taskState?.canResume",
-        "disabled={!currentAgentTaskState.canResume",
     ] {
         assert!(
-            !chat.contains(forbidden),
-            "R4 Chat page must not grant task control/completion authority from raw fragments: {forbidden}"
+            !data_source.contains(forbidden)
+                && !contract.contains(forbidden)
+                && !controller.contains(forbidden)
+                && !tasks_view.contains(forbidden),
+            "R4 production task path must not restore raw task lifecycle authority: {forbidden}"
         );
     }
 }
@@ -1211,7 +1320,7 @@ fn single_system_r5_memory_and_provider_privacy_readmodels_own_product_boundarie
     for required in [
         "pub async fn get_provider_privacy_boundary_summary",
         "get_provider_privacy_boundary_summary_with_state",
-        "summarize_provider_validation",
+        "summarize_loaded_provider_validation",
         "cloud_api_configured",
         "build_provider_privacy_boundary_summary",
         "external transmission remain fail-closed",
@@ -1270,230 +1379,134 @@ fn single_system_r5_memory_and_provider_privacy_readmodels_own_product_boundarie
         );
     }
 
-    let memory_page = read_repo_file("frontend/src/pages/MemorySearch.tsx");
+    let durable_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
     assert!(
-        memory_page.contains("getMemoryViewModel")
-            && memory_page.contains("memoryViewModel?.summary")
-            && memory_page.contains("lifecycleSummary")
-            && !memory_page.contains("getMemoryTierStats("),
-        "R5 MemorySearch must consume MemoryViewModel and must not derive product counts from raw tier stats"
+        durable_source.contains("getMemoryViewModel()")
+            && durable_source.contains("getLifeModelViewModel()")
+            && !durable_source.contains("getMemoryTierStats("),
+        "R5 production durable-truth source must consume MemoryViewModel instead of raw storage telemetry"
     );
 
-    for (path, required) in [
-        (
-            "frontend/src/pages/settings/tabs/ProviderTab.tsx",
-            "providerPrivacyBoundary",
-        ),
-        (
-            "frontend/src/pages/settings/tabs/OverviewTab.tsx",
-            "providerPrivacyBoundary",
-        ),
-        (
-            "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
-            "memoryViewModel",
-        ),
-        (
-            "frontend/src/pages/TodayV2PreviewPage.tsx",
-            "getProviderPrivacyBoundarySummary",
-        ),
-        (
-            "frontend/src/viewmodels/today/todayViewModelAdapter.ts",
-            "providerPrivacyBoundary",
-        ),
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
+    let readonly_source =
+        read_repo_file("frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts");
+    let today_adapter = read_repo_file("frontend/src/viewmodels/today/todayViewModelAdapter.ts");
+    for (label, source) in [
+        ("settings", settings_source.as_str()),
+        ("read-only spine", readonly_source.as_str()),
+        ("Today adapter", today_adapter.as_str()),
     ] {
-        let source = read_repo_file(path);
         assert!(
-            source.contains(required),
-            "R5 frontend convergence target {path} must consume {required}"
+            source.contains("ProviderPrivacyBoundarySummary")
+                || source.contains("providerPrivacyBoundary"),
+            "R5 {label} must consume the backend provider/privacy boundary contract"
         );
         assert!(
             !source.contains("buildProviderReadinessView"),
-            "R5 frontend convergence target {path} must not locally rebuild provider/privacy boundary"
+            "R5 {label} must not locally rebuild provider/privacy truth"
         );
     }
+    assert!(
+        settings_source.contains("getProviderPrivacyBoundarySummary()")
+            && readonly_source.contains("getProviderPrivacyBoundarySummary()"),
+        "R5 production Settings and read-only spine must read provider/privacy truth from the backend command"
+    );
 }
 
 #[test]
 fn single_system_r6_frontend_convergence_guards_repaired_authority() {
-    let frontend_guard =
-        read_repo_file("frontend/src/pages/TodayPage.readModelConvergence.test.ts");
-    for required in [
-        "frontend read-model convergence guards",
-        "getReviewCenterViewModel",
-        "getTasksViewModel",
-        "getLifeModelViewModel",
-        "getMemoryViewModel",
-        "getProviderPrivacyBoundarySummary",
-        "reviewRequiredCountFromProjection",
-        "keeps frontend helpers display-only",
-    ] {
-        assert!(
-            frontend_guard.contains(required),
-            "R6 frontend static guard must cover {required}"
-        );
-    }
+    assert_retired_frontend_owners_absent();
 
-    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    let app = read_repo_file("frontend/src/App.tsx");
     for required in [
-        "getReviewCenterViewModel",
-        "allowedActions.find",
-        "item.materializationStatus",
-        "ReviewCenterViewModel 尚未提供该确认项的后端操作状态",
+        "ReadOnlySpineJourney",
+        "tauriReadOnlySpineDataSource",
+        "tauriGovernedActionDataSource",
+        "tauriDurableTruthDataSource",
+        "tauriSettingsPrivacyDataSource",
+        "tauriWorkspaceConversationDataSource",
+        "tauriLifeModelBuilderDataSource",
     ] {
         assert!(
-            mailbox.contains(required),
-            "R6 Mailbox must keep review action/materialization authority in ReviewCenterViewModel: {required}"
+            app.contains(required),
+            "R6 production App must compose the converged owner {required}"
         );
     }
     for forbidden in [
-        "function canAccept(",
-        "function isPathInSafePaths(",
-        "function appliedNotice(",
-        "setProposals(prev =>",
+        "ProductShell",
+        "productShellContract",
+        "LEGACY_PRODUCT_REDIRECTS",
+        "src/dev/phase4",
     ] {
         assert!(
-            !mailbox.contains(forbidden),
-            "R6 Mailbox must not restore local review/materialization inference: {forbidden}"
+            !app.contains(forbidden),
+            "R6 production App must not restore old or dev-only authority: {forbidden}"
         );
     }
 
-    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
+    let route_contract = read_repo_file("frontend/src/ui/productRouteContract.ts");
     for required in [
-        "getTasksViewModel",
-        "currentTaskViewItem",
-        "enabledTaskViewControl",
-        "taskViewItem?.lifecycleStatus",
-        "taskViewItem?.terminalDeliveryStatus",
+        "today: \"/today\"",
+        "workspace: \"/workspace\"",
+        "tasks: \"/tasks\"",
+        "review: \"/review\"",
+        "\"life-model\": \"/life-model\"",
+        "SETTINGS_ROUTE_PATH = \"/settings\"",
+        "RETIRED_PRODUCT_PATHS",
     ] {
         assert!(
-            chat.contains(required),
-            "R6 Chat must keep task lifecycle/control authority in TasksViewModel: {required}"
+            route_contract.contains(required),
+            "R6 production route contract must include {required}"
         );
     }
-    for forbidden in [
-        "taskState?.canResume ? [\"resume\"]",
-        "taskState?.canRetry ? [\"retry\"]",
-        "canCancel ? [\"cancel\"]",
-        "taskStatus === \"completed\" ||",
-        "runStatus === \"completed\" ||",
-    ] {
+    for forbidden in ["Navigate", "Redirect", "LEGACY_PRODUCT_REDIRECTS"] {
         assert!(
-            !chat.contains(forbidden),
-            "R6 Chat must not restore raw task control/completion authority: {forbidden}"
+            !route_contract.contains(forbidden),
+            "R6 route contract must not authorize compatibility routing: {forbidden}"
         );
     }
 
-    let runs = read_repo_file("frontend/src/pages/RunsPage.tsx");
-    for required in [
-        "getTasksViewModel",
-        "TaskViewModelItem",
-        "item.lifecycleStatus",
-        "enabledActionControls(item)",
-        "control.effect",
-    ] {
-        assert!(
-            runs.contains(required),
-            "R6 Runs must keep lifecycle/control authority in TasksViewModel: {required}"
-        );
-    }
-    for forbidden in [
-        "listMainChatAgentTasks",
-        "getMainChatAgentTaskDetail",
-        "taskSummaryByRunId",
-        "allowedControlsForSummary",
-        "lifecycleForRun",
-    ] {
-        assert!(
-            !runs.contains(forbidden),
-            "R6 Runs must not restore raw task summary lifecycle reconstruction: {forbidden}"
-        );
-    }
-
-    let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    let review_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let task_contract =
+        read_repo_file("frontend/src/ui/journeys/governedAction/taskControlContract.ts");
+    let durable_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
+    let today_source =
+        read_repo_file("frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts");
     assert!(
-        lifemodel.contains("getLifeModelViewModel")
-            && lifemodel.contains("viewModel?.pendingUpdateCounts.pendingReview")
-            && lifemodel.contains("viewModel?.memoryLinkage")
-            && lifemodel.contains("viewModel?.candidateChanges"),
-        "R6 LifeModel page must keep backend LifeModelViewModel as product truth source"
+        review_source.contains("getReviewCenterViewModel()")
+            && review_source.contains("getTasksViewModel()")
+            && review_source.contains("getWorkspaceViewModel()")
+            && task_contract.contains("control.completionProofAfterDispatch")
+            && durable_source.contains("getLifeModelViewModel()")
+            && durable_source.contains("getMemoryViewModel()")
+            && settings_source.contains("getProviderPrivacyBoundarySummary()")
+            && today_source.contains("getLifeStateProjection()")
+            && today_source.contains("getDailyGoals()")
+            && today_source.contains("getProviderPrivacyBoundarySummary()"),
+        "R6 converged production data sources must retain their backend authority boundaries"
     );
     for forbidden in [
+        "getSystemDiagnostics(",
+        "listProposals(",
+        "listAgentRuns(",
+        "listMainChatAgentTasks(",
         "getLifeModel(",
-        "getLifeModelCurrentView(",
-        "getSystemDiagnostics(",
-        "countMemoryChunks(",
-        "getMemoryTierStats(",
-        "listProposals(",
-        "buildLifeModelViewModelEnvelope",
-    ] {
-        assert!(
-            !lifemodel.contains(forbidden),
-            "R6 LifeModel page must not restore raw truth reconstruction: {forbidden}"
-        );
-    }
-
-    let memory_page = read_repo_file("frontend/src/pages/MemorySearch.tsx");
-    assert!(
-        memory_page.contains("getMemoryViewModel")
-            && memory_page.contains("memoryViewModel?.summary")
-            && memory_page.contains("lifecycleSummary")
-            && memory_page.contains("向量层级只是存储遥测")
-            && !memory_page.contains("getMemoryTierStats("),
-        "R6 MemorySearch must keep MemoryViewModel as product memory summary source"
-    );
-
-    let settings = read_repo_file("frontend/src/pages/SettingsPage.tsx");
-    assert!(
-        settings.contains("getMemoryViewModel")
-            && settings.contains("getProviderPrivacyBoundarySummary")
-            && settings.contains("providerPrivacyBoundary"),
-        "R6 Settings must consume backend MemoryViewModel and ProviderPrivacyBoundarySummary"
-    );
-    for path in [
-        "frontend/src/pages/settings/tabs/ProviderTab.tsx",
-        "frontend/src/pages/settings/tabs/OverviewTab.tsx",
-    ] {
-        let source = read_repo_file(path);
-        assert!(
-            source.contains("providerPrivacyBoundary") && !source.contains("buildProviderReadinessView"),
-            "R6 Settings tab {path} must use provider/privacy summary and not rebuild provider readiness locally"
-        );
-    }
-
-    let today = read_repo_file("frontend/src/pages/TodayPage.tsx");
-    assert!(
-        today.contains("getLifeStateProjection")
-            && today.contains("getDailyGoals")
-            && today.contains("reviewRequiredCountFromProjection"),
-        "R6 Today page must stay projection-backed until a backend TodayViewModel exists"
-    );
-    for forbidden in [
-        "listProposals(",
-        "getSystemDiagnostics(",
         "getMemoryTierStats(",
         "buildProviderReadinessView",
-        "getProviderPrivacyBoundarySummary",
     ] {
         assert!(
-            !today.contains(forbidden),
-            "R6 Today limited page must not invent missing backend owners via {forbidden}"
-        );
-    }
-
-    let runtime_disclosure = read_repo_file("frontend/src/utils/runtimeDisclosure.ts");
-    for forbidden in [
-        "safeInvoke",
-        "getSystemDiagnostics",
-        "getProviderPrivacyBoundarySummary",
-        "listMainChatAgentTasks",
-        "resumeMainChatAgentTask",
-        "ReviewCenterViewModel",
-        "TasksViewModel",
-        "MemoryViewModel",
-    ] {
-        assert!(
-            !runtime_disclosure.contains(forbidden),
-            "R6 runtimeDisclosure must remain display-only and not call/own {forbidden}"
+            !review_source.contains(forbidden)
+                && !task_contract.contains(forbidden)
+                && !durable_source.contains(forbidden)
+                && !settings_source.contains(forbidden)
+                && !today_source.contains(forbidden),
+            "R6 production data sources must not reconstruct covered truth from {forbidden}"
         );
     }
 
@@ -1528,7 +1541,11 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
         "getLifeModelCompletion(",
     ];
     let mut actual = BTreeSet::new();
-    for file in source_files(&["frontend/src/pages", "frontend/src/utils"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.ts")
             || rel.ends_with(".test.tsx")
@@ -1551,6 +1568,15 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
     let mut expected = BTreeSet::new();
     let mut classified = BTreeMap::new();
     for entry in entries {
+        let disposition = entry_str(entry, "disposition");
+        validate_inventory_path_contract(
+            "frontend_multi_source_state_surfaces",
+            entry,
+            disposition,
+        );
+        if disposition == "deleted" {
+            continue;
+        }
         let path = entry_str(entry, "path").to_string();
         let classification = entry_str(entry, "r0_surface_classification").to_string();
         assert!(
@@ -1568,30 +1594,35 @@ fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
         "R0 frontend raw reconstruction scan must match classified inventory entries"
     );
 
-    for required_helper in [
-        "frontend/src/utils/runtimeDisclosure.ts",
-        "frontend/src/utils/runDisplaySummary.ts",
-        "frontend/src/utils/capabilityStatus.ts",
+    for required_owner in [
         "frontend/src/utils/lifeStateProjection.ts",
+        "frontend/src/App.tsx",
+        "frontend/src/ui/productRouteContract.ts",
+        "frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts",
+        "frontend/src/ui/journeys/governedAction/governedActionDataSource.ts",
+        "frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts",
+        "frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts",
+        "frontend/src/ui/journeys/durableTruth/lifeModelBuilderDataSource.ts",
+        "frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts",
     ] {
         assert!(
-            classified.contains_key(required_helper),
-            "R0 source map must classify frontend helper {required_helper}"
+            classified.contains_key(required_owner),
+            "R0 source map must classify production frontend owner {required_owner}"
         );
     }
 
     for (path, expected_class) in [
         (
-            "frontend/src/pages/TodayV2PreviewPage.tsx",
-            "frontend_preview_only",
+            "frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts",
+            "production_today_strict_adapter_data_source",
         ),
         (
-            "frontend/src/pages/chat/useChatContext.ts",
-            "product_hook_raw_read_convergence_target",
+            "frontend/src/ui/journeys/governedAction/governedActionDataSource.ts",
+            "production_governed_action_data_source",
         ),
         (
-            "frontend/src/pages/MemorySearch.tsx",
-            "technical_memory_surface_memory_view_model_consumer",
+            "frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts",
+            "production_durable_truth_data_source",
         ),
         ("frontend/src/tauri.ts", "frontend_product_bridge"),
     ] {
@@ -1791,6 +1822,286 @@ fn single_system_handler_legacy_development_commands_match_inventory_or_allowlis
 }
 
 #[test]
+fn governed_data_import_recovery_has_one_journal_owner_and_bounded_product_commands() {
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    let handler = lib
+        .split("tauri::generate_handler![")
+        .nth(1)
+        .and_then(|rest| rest.split("])").next())
+        .expect("Tauri generate_handler body");
+    let settings_source = read_repo_file("src-tauri/src/commands/settings.rs");
+    let settings = strip_cfg_test_module(&settings_source);
+    let bootstrap_source = read_repo_file("src-tauri/src/bootstrap.rs");
+    let bootstrap = strip_cfg_test_module(&bootstrap_source);
+    let app_state = read_repo_file("src-tauri/src/state.rs");
+    let journal_source = read_repo_file("openlife-core/src/persistence_outbox.rs");
+    let journal = strip_cfg_test_module(&journal_source);
+    let state_projection = read_repo_file("src-tauri/src/state_projection.rs");
+    let frontend = read_repo_file("frontend/src/tauri.ts");
+
+    for command in [
+        "abandon_governed_data_import_recovery",
+        "get_governed_data_import_status",
+    ] {
+        assert_eq!(
+            settings
+                .matches(&format!("pub async fn {command}("))
+                .count(),
+            1,
+            "governed import recovery command {command} must have one backend owner"
+        );
+        assert_eq!(
+            handler
+                .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+                .filter(|token| *token == command)
+                .count(),
+            1,
+            "governed import recovery command {command} must be shipped exactly once"
+        );
+        assert!(
+            frontend.contains(&format!("\"{command}\"")),
+            "frontend contract adapter must expose {command}"
+        );
+    }
+    assert_eq!(
+        journal
+            .matches("pub fn abandon_preserving_current(")
+            .count(),
+        1,
+        "GovernedDataImportJournal must remain the sole abandonment evidence owner"
+    );
+    assert_eq!(
+        journal.matches("pub fn latest_receipt(").count(),
+        1,
+        "durable recovery status must reuse the existing journal rather than a second ledger"
+    );
+    assert_eq!(
+        settings.matches("GovernedDataImportJournal::new(").count(),
+        0,
+        "product Settings paths must reuse the bootstrap-owned journal; Journal::new performs schema migration and is not a read-only status operation"
+    );
+    assert_eq!(
+        bootstrap.matches("GovernedDataImportJournal::new(").count(),
+        1,
+        "release bootstrap must open and migrate the governed import journal exactly once"
+    );
+    assert!(app_state.contains("pub(crate) governed_data_import_journal:"));
+    assert!(
+        app_state
+            .contains("Option<Arc<openlife_core::persistence_outbox::GovernedDataImportJournal>>"),
+        "AppState must retain the reusable bootstrap-owned governed import journal"
+    );
+    let status_command = source_between(
+        settings,
+        "pub async fn get_governed_data_import_status(",
+        "pub async fn abandon_governed_data_import_recovery(",
+    );
+    assert!(status_command.contains("required_governed_data_import_journal(state.inner())"));
+    for forbidden in [
+        "GovernedDataImportJournal::new(",
+        "migrate_",
+        "CREATE TABLE",
+        "CREATE INDEX",
+        "pragma_update",
+    ] {
+        assert!(
+            !status_command.contains(forbidden),
+            "read-only governed import status must not execute journal schema work: {forbidden}"
+        );
+    }
+    let journal_accessor = source_between(
+        settings,
+        "fn required_governed_data_import_journal(",
+        "async fn governed_import_recovery_preflight_receipt(",
+    );
+    assert!(journal_accessor.contains(".governed_data_import_journal"));
+    assert!(journal_accessor.contains(".cloned()"));
+    assert!(!journal_accessor.contains("mutation_journal_path"));
+    assert!(!journal_accessor.contains("GovernedDataImportJournal::new("));
+    assert!(state_projection
+        .contains("reconcile_state_store_lifemodel_projection_for_import_recovery_event"));
+    assert!(!state_projection
+        .contains("fn reconcile_state_store_lifemodel_projection_for_import_recovery("));
+    let status_adapter = source_between(
+        &frontend,
+        "export async function getGovernedDataImportStatus",
+        "export async function abandonGovernedDataImportRecovery",
+    );
+    assert!(status_adapter.contains("get_governed_data_import_status"));
+    for forbidden in [
+        "payload",
+        "requestDigest",
+        "observedDigest",
+        "beforeDigest",
+        "targetDigest",
+    ] {
+        assert!(
+            !status_adapter.contains(forbidden),
+            "bounded recovery status adapter must not accept {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn governed_import_resolution_barrier_covers_all_four_canonical_owners() {
+    let coordinator = read_repo_file("src-tauri/src/persistence_coordinator.rs");
+    for required in [
+        "canonical_write_barrier: tokio::sync::RwLock<()>",
+        "admit_normal_or_governed_data_import_writes",
+        "admit_startup_reconciliation_writes",
+        "acquire_canonical_commit_permit",
+        "acquire_governed_data_import_resolution_fence",
+        "acquire_governed_data_import_completion_fence",
+        "invalidate_canonical_write_admissions",
+    ] {
+        assert!(
+            coordinator.contains(required),
+            "PersistenceCoordinator must own canonical recovery barrier marker {required}"
+        );
+    }
+
+    let lifemodel = read_repo_file("src-tauri/src/life_model_write_gateway.rs");
+    let lifemodel_commit = source_between(
+        &lifemodel,
+        "async fn write_prepared_life_model_compare_and_swap",
+        "async fn write_life_model_without_prepare",
+    );
+    assert!(lifemodel_commit.contains("CanonicalCommitPermit"));
+    assert!(lifemodel_commit.contains("manager.save("));
+    assert!(lifemodel_commit.contains("observe_canonical_digest"));
+
+    let memory = read_repo_file("src-tauri/src/memory_gateway.rs");
+    let memory_admission = source_between(
+        &memory,
+        "fn admit_memory_vector_writes",
+        "async fn exchange_memory_vector_commit_admission",
+    );
+    assert!(memory_admission.contains("admit_normal_or_governed_data_import_writes"));
+    let memory_exchange = source_between(
+        &memory,
+        "async fn exchange_memory_vector_commit_admission",
+        "async fn acquire_memory_vector_commit_permit",
+    );
+    assert!(memory_exchange.contains("acquire_canonical_commit_permit"));
+    let memory_barrier_composition = source_between(
+        &memory,
+        "async fn acquire_memory_vector_commit_permit",
+        "async fn commit_vector_store_mutation",
+    );
+    assert!(memory_barrier_composition.contains("admit_memory_vector_writes"));
+    assert!(memory_barrier_composition.contains("exchange_memory_vector_commit_admission"));
+    for (start, end) in [
+        (
+            "pub(crate) async fn save_conversation_message_idempotent_with_state",
+            "pub(crate) async fn save_turn_user_message_idempotent_with_state",
+        ),
+        (
+            "pub(crate) async fn save_turn_user_message_idempotent_with_state",
+            "pub(crate) async fn create_chat_session_with_state",
+        ),
+        (
+            "pub(crate) async fn delete_chat_session_with_state",
+            "pub(crate) async fn reconcile_canonical_outboxes_with_state",
+        ),
+        (
+            "pub(crate) async fn run_memory_tier_maintenance_with_state",
+            "pub(crate) async fn archive_low_access_memories_with_state",
+        ),
+        (
+            "async fn replace_imported_memory_with_state_inner",
+            "pub(crate) async fn materialize_memory_proposal_with_state",
+        ),
+    ] {
+        assert!(
+            source_between(&memory, start, end).contains("acquire_memory_vector_commit_permit"),
+            "Memory/Vector canonical write path {start} must acquire the shared commit permit"
+        );
+    }
+    let rebuild = source_between(
+        &memory,
+        "pub(crate) async fn rebuild_memory_index_with_state",
+        "async fn cancellable_rebuild_embedding",
+    );
+    assert!(rebuild.contains("commit_vector_store_mutation"));
+
+    let kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    let state_helper = source_between(
+        &kernel,
+        "async fn acquire_state_store_commit_permit",
+        "fn resolve_transient_state_execution_context",
+    );
+    assert!(state_helper.contains("GovernedDataImportRecoveryOwner::StateStore"));
+    assert!(state_helper.contains("acquire_canonical_commit_permit"));
+    for start in [
+        "async fn build_kernel_transient_state_command_surface_result",
+        "async fn build_kernel_resource_daily_task_batch_result",
+    ] {
+        let body = kernel
+            .split(start)
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing StateGateway owner {start}"));
+        assert!(body.contains("acquire_state_store_commit_permit"));
+    }
+
+    let settings = read_repo_file("src-tauri/src/commands/settings.rs");
+    let state_restore = source_between(
+        &settings,
+        "if saga.stage == GovernedDataImportStage::VectorApplied",
+        "if saga.stage == GovernedDataImportStage::StateCommitted",
+    );
+    assert!(state_restore.contains("GovernedDataImportRecoveryOwner::StateStore"));
+    assert!(state_restore.contains("acquire_canonical_commit_permit"));
+    let explicit_abandonment = source_between(
+        &settings,
+        "pub async fn abandon_governed_data_import_recovery",
+        "async fn import_all_data_with_state",
+    );
+    assert!(explicit_abandonment.contains("acquire_governed_data_import_resolution_fence"));
+    let automatic_abandonment = source_between(
+        &settings,
+        "async fn abandon_governed_import_after_exact_observation",
+        "async fn mark_governed_import_owner_unknown",
+    );
+    assert!(automatic_abandonment.contains("acquire_governed_data_import_resolution_fence"));
+
+    let state_projection = read_repo_file("src-tauri/src/state_projection.rs");
+    let state_projection_finalize = source_between(
+        &state_projection,
+        "async fn acquire_state_projection_finalize_permit",
+        "pub(crate) async fn reconcile_state_store_lifemodel_projection",
+    );
+    assert!(state_projection_finalize.contains("GovernedDataImportRecoveryOwner::StateStore"));
+    assert!(state_projection_finalize.contains("acquire_canonical_commit_permit"));
+    let state_projection_terminal = source_between(
+        &state_projection,
+        "\n    match projection_result {\n",
+        "fn required_projection_proof",
+    );
+    assert!(state_projection_terminal.contains("acquire_state_projection_finalize_permit"));
+    assert!(state_projection_terminal.contains("mark_projection_applied"));
+    assert!(state_projection_terminal.contains("mark_projection_degraded"));
+
+    let successful_completion = source_between(
+        &settings,
+        "let completion_fence = state",
+        "let durable_lifemodel_write =",
+    );
+    assert!(successful_completion.contains("acquire_governed_data_import_completion_fence"));
+    assert!(successful_completion.contains("verify_governed_import_terminal_facts"));
+    assert!(successful_completion.contains("GovernedDataImportStage::Completed"));
+    assert!(successful_completion.contains("drop(completion_fence)"));
+
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    let dev_workers = source_between(
+        &lib,
+        "fn start_dev_extension_background_workers",
+        "fn runtime_dev_url",
+    );
+    assert!(dev_workers.contains("run_memory_tier_maintenance_with_state"));
+    assert!(!dev_workers.contains(".run_tier_maintenance("));
+}
+
+#[test]
 fn single_system_direct_proposal_write_callsites_match_inventory() {
     let expected = expected_count_map("direct_proposal_write_surfaces");
     let mut actual = BTreeMap::new();
@@ -1809,6 +2120,374 @@ fn single_system_direct_proposal_write_callsites_match_inventory() {
         actual, expected,
         "direct proposal write callsites must be registered in Phase 1 inventory"
     );
+}
+
+#[test]
+fn single_system_phase4a_review_permission_contract_is_backend_owned_and_fail_closed() {
+    let review_item = read_repo_file("openlife-core/src/agent/review_item.rs");
+    for required in [
+        "pub decision_context: ReviewDecisionContext",
+        "build_review_decision_context(proposal, &evidence_refs)",
+        "Exact permission scope is incomplete",
+        "materialization_status_for",
+        "ReviewItemMaterializationStatus::Unknown",
+    ] {
+        assert!(
+            review_item.contains(required),
+            "Phase 4A ReviewItem owner must include {required}"
+        );
+    }
+
+    let decision_context = read_repo_file("openlife-core/src/agent/review_decision_context.rs");
+    for required in [
+        "pub struct ReviewDecisionContext",
+        "pub struct PermissionDecisionContext",
+        "PermissionScopeKind::ActionBound",
+        "PermissionScopeKind::NetworkPolicy",
+        "PermissionDecisionContextStatus::Incomplete",
+        "ExternalTransmissionStatus::Unknown",
+        "transmissionBoundary",
+        "[REDACTED]",
+    ] {
+        assert!(
+            decision_context.contains(required),
+            "Phase 4A readable decision projection must include {required}"
+        );
+    }
+
+    let action_contract = read_repo_file("openlife-core/src/agent/product_read_model.rs");
+    for required in [
+        "pub completion_proof_after_dispatch: bool",
+        "ReviewActionClaimsCompletionProof",
+        "DisabledReviewActionMissingReason",
+        "ReviewActionConfirmationRequired",
+    ] {
+        assert!(
+            action_contract.contains(required),
+            "Phase 4A ReviewAction contract must include {required}"
+        );
+    }
+
+    let bridge = read_repo_file("frontend/src/tauri.ts");
+    for required in [
+        "export type ReviewDecisionContext =",
+        "export type PermissionDecisionContext =",
+        "completionProofAfterDispatch: boolean",
+        "decisionContext: ReviewDecisionContext",
+        "activeTask?: TaskViewModelItem",
+        "pendingReviewItems: ReviewItem[]",
+        "activity: WorkspaceActivityItem[]",
+    ] {
+        assert!(
+            bridge.contains(required),
+            "Phase 4A TypeScript bridge must mirror {required}"
+        );
+    }
+}
+
+#[test]
+fn single_system_phase4a_test_fixtures_and_contract_harnesses_are_absent_from_product_imports() {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        for forbidden in [
+            "phase4a-contract-golden",
+            "src/test/fixtures",
+            "test/phase4aContractGolden",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4A test contract must not enter product source {rel}: {forbidden}"
+            );
+        }
+    }
+
+    let app = read_repo_file("frontend/src/App.tsx");
+    assert!(!app.contains("phase4a-contract-golden"));
+    assert!(!app.contains("src/test/fixtures"));
+    assert!(!app.contains("test/phase4aContractGolden"));
+}
+
+#[test]
+fn single_system_phase4b_foundation_harness_is_dev_only_and_preview_route_stays_absent() {
+    let app = read_repo_file("frontend/src/App.tsx");
+    let workbench = read_repo_file("frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx");
+    for source in [&app, &workbench] {
+        for forbidden in [
+            "TodayV2PreviewPage",
+            "/today-v2-preview",
+            "src/dev/phase4b",
+            "OPENLIFE_PHASE4B_DEV_HARNESS",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4B dev-only surface must stay absent from product shell authority: {forbidden}"
+            );
+        }
+    }
+
+    assert!(
+        !repo_root()
+            .join("frontend/src/pages/TodayV2PreviewPage.tsx")
+            .exists(),
+        "retired production preview page must stay absent"
+    );
+
+    let production_vite = read_repo_file("frontend/vite.config.ts");
+    let harness_vite = read_repo_file("frontend/vite.phase4b.config.ts");
+    let tauri_overlay = read_repo_file("src-tauri/tauri.phase4b.conf.json");
+    let package = read_repo_file("frontend/package.json");
+    let release_guard = read_repo_file("frontend/scripts/verify-production-absence.mjs");
+
+    assert!(
+        production_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)")
+            && harness_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(true)"),
+        "Phase 4B harness must be compile-time false for production and true only in its Vite entry"
+    );
+    for required in [
+        "http://127.0.0.1:4184/dev/phase4b/",
+        "corepack pnpm dev:phase4b --host 127.0.0.1 --port 4184",
+        "\"cwd\": \"../frontend\"",
+        "Phase 4B is development-only; release and package builds are forbidden.",
+        "\"active\": false",
+    ] {
+        assert!(
+            tauri_overlay.contains(required),
+            "Phase 4B Tauri dev overlay must contain {required}"
+        );
+    }
+    assert!(
+        !tauri_overlay.contains("dev:phase4b -- --host"),
+        "Phase 4B beforeDevCommand must pass Vite host options instead of hiding them after a separator"
+    );
+    assert!(
+        package.contains("vite build && node scripts/verify-production-absence.mjs"),
+        "normal production build must execute the Phase 4B release absence guard"
+    );
+    for required in [
+        "OPENLIFE_PHASE4B_DEV_HARNESS",
+        "TodayV2PreviewPage",
+        "/today-v2-preview",
+        "dev/phase4b/index.html",
+    ] {
+        assert!(
+            release_guard.contains(required),
+            "release bundle guard must scan for {required}"
+        );
+    }
+
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert!(
+            !source.contains("src/dev/phase4b") && !source.contains("OPENLIFE_PHASE4B_DEV_HARNESS"),
+            "product source must not import Phase 4B harness: {rel}"
+        );
+    }
+}
+
+#[test]
+fn single_system_phase4c_desktop_shell_is_production_authority_and_harness_stays_dev_only() {
+    let app = read_repo_file("frontend/src/App.tsx");
+    let workbench = read_repo_file("frontend/src/ui/shell/OpenLifeWorkbenchShell.tsx");
+    let journey = read_repo_file("frontend/src/ui/journeys/readOnly/ReadOnlySpineJourney.tsx");
+    assert!(
+        app.contains("ReadOnlySpineJourney") && journey.contains("OpenLifeWorkbenchShell"),
+        "Phase 4C desktop Workbench shell must be part of the production composition"
+    );
+    assert_retired_frontend_owners_absent();
+    for source in [&app, &workbench, &journey] {
+        for forbidden in ["src/dev/phase4c", "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS"] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4C dev harness marker must stay absent from production authority: {forbidden}"
+            );
+        }
+    }
+
+    let production_vite = read_repo_file("frontend/vite.config.ts");
+    let phase4b_vite = read_repo_file("frontend/vite.phase4b.config.ts");
+    let harness_vite = read_repo_file("frontend/vite.phase4c.config.ts");
+    let tauri_overlay = read_repo_file("src-tauri/tauri.phase4c.conf.json");
+    let package = read_repo_file("frontend/package.json");
+    let release_guard = read_repo_file("frontend/scripts/verify-production-absence.mjs");
+
+    assert!(
+        production_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false)")
+            && phase4b_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false)")
+            && harness_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(true)"),
+        "Phase 4C harness must be compile-time false outside its dedicated Vite entry"
+    );
+    assert!(
+        harness_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)"),
+        "Phase 4C must not reactivate the Phase 4B harness"
+    );
+    for required in [
+        "http://127.0.0.1:4185/dev/phase4c/",
+        "corepack pnpm dev:phase4c --host 127.0.0.1 --port 4185",
+        "\"cwd\": \"../frontend\"",
+        "Phase 4C is development-only; release and package builds are forbidden.",
+        "\"minWidth\": 1024",
+        "\"active\": false",
+    ] {
+        assert!(
+            tauri_overlay.contains(required),
+            "Phase 4C Tauri dev overlay must contain {required}"
+        );
+    }
+    assert!(
+        package.contains("\"dev:phase4c\": \"vite --config vite.phase4c.config.ts\"")
+            && package.contains("\"build:phase4c\"")
+            && package.contains("\"qa:phase4c\""),
+        "Phase 4C scripts must remain explicit dev/review commands"
+    );
+    for required in [
+        "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
+        "dev/phase4c/index.html",
+    ] {
+        assert!(
+            release_guard.contains(required),
+            "release bundle guard must scan for Phase 4C marker {required}"
+        );
+    }
+
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert!(
+            !source.contains("src/dev/phase4c")
+                && !source.contains("OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS"),
+            "product source must not import the Phase 4C dev harness: {rel}"
+        );
+    }
+}
+
+#[test]
+fn single_system_phase4d_journeys_are_production_authority_and_harness_stays_dev_only() {
+    let app = read_repo_file("frontend/src/App.tsx");
+    for required in [
+        "ReadOnlySpineJourney",
+        "tauriGovernedActionDataSource",
+        "tauriDurableTruthDataSource",
+        "tauriSettingsPrivacyDataSource",
+    ] {
+        assert!(
+            app.contains(required),
+            "Phase 4D production journey composition must include {required}"
+        );
+    }
+    for source in [&app] {
+        for forbidden in [
+            "src/dev/phase4d",
+            "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
+            "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
+            "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
+            "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
+            "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Phase 4D dev harness marker must stay absent from product authority: {forbidden}"
+            );
+        }
+    }
+
+    let production_vite = read_repo_file("frontend/vite.config.ts");
+    let phase4b_vite = read_repo_file("frontend/vite.phase4b.config.ts");
+    let phase4c_vite = read_repo_file("frontend/vite.phase4c.config.ts");
+    let harness_vite = read_repo_file("frontend/vite.phase4d.config.ts");
+    let tauri_overlay = read_repo_file("src-tauri/tauri.phase4d.conf.json");
+    let package = read_repo_file("frontend/package.json");
+    let release_guard = read_repo_file("frontend/scripts/verify-production-absence.mjs");
+
+    assert!(
+        production_vite.contains("__OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(false)")
+            && phase4b_vite.contains("__OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(false)")
+            && phase4c_vite.contains("__OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(false)")
+            && harness_vite.contains("__OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(true)"),
+        "Phase 4D harness must be compile-time false outside its dedicated Vite entry"
+    );
+    assert!(
+        harness_vite.contains("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)")
+            && harness_vite.contains("__OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false)"),
+        "Phase 4D must not reactivate earlier harnesses"
+    );
+    for required in [
+        "http://127.0.0.1:4186/dev/phase4d/",
+        "corepack pnpm dev:phase4d --host 127.0.0.1 --port 4186",
+        "\"cwd\": \"../frontend\"",
+        "Phase 4D is development-only; release and package builds are forbidden.",
+        "\"minWidth\": 1024",
+        "\"active\": false",
+    ] {
+        assert!(
+            tauri_overlay.contains(required),
+            "Phase 4D Tauri dev overlay must contain {required}"
+        );
+    }
+    assert!(
+        package.contains("\"dev:phase4d\": \"vite --config vite.phase4d.config.ts\"")
+            && package.contains("\"build:phase4d\"")
+            && package.contains("\"qa:phase4d\"")
+            && package.contains("\"qa:phase4d:durable\"")
+            && package.contains("\"qa:phase4d:settings\""),
+        "Phase 4D scripts must remain explicit dev/review commands"
+    );
+    for required in [
+        "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
+        "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
+        "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
+        "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
+        "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
+        "dev/phase4d/index.html",
+    ] {
+        assert!(
+            release_guard.contains(required),
+            "release bundle guard must scan for Phase 4D marker {required}"
+        );
+    }
+
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts") || rel.ends_with(".test.tsx") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        assert!(
+            !source.contains("src/dev/phase4d")
+                && !source.contains("OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS")
+                && !source.contains("OPENLIFE_PHASE4D_REAL_TAURI_PROBE"),
+            "product source must not import the Phase 4D dev harness: {rel}"
+        );
+    }
 }
 
 #[test]
@@ -1941,16 +2620,93 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
     for owner_marker in [
         "pub(crate) fn submit_review_proposal",
         "canonical_write_admission",
-        "CanonicalWriteAdmissionRequest::new",
-        "permit.finish_committed()",
-        "permit.finish_noop()",
-        "permit.finish_failed()",
+        "submit_with_admission(request, admission)",
     ] {
         assert!(
             action_executor_owner.contains(owner_marker),
             "ActionExecutor ReviewWorkflow gateway lost ownership marker {owner_marker}"
         );
     }
+    let review_workflow_owner = read_repo_file("openlife-core/src/agent/review_workflow.rs");
+    for owner_marker in [
+        "pub fn submit_with_admission(",
+        "CanonicalWriteAdmissionRequest::new",
+        "permit.finish_committed()",
+        "permit.finish_noop()",
+        "permit.finish_failed()",
+    ] {
+        assert!(
+            review_workflow_owner.contains(owner_marker),
+            "ReviewWorkflow lost canonical admission owner marker {owner_marker}"
+        );
+    }
+
+    let provider_network_consent = read_repo_file("src-tauri/src/provider_network_consent.rs");
+    assert!(
+        provider_network_consent.contains("submit_main_chat_terminal_review_relation("),
+        "Main Chat provider consent must use the typed terminal-owner Review seam"
+    );
+    assert!(
+        provider_network_consent.contains("ProposalTerminalRelationKind::ActionResumePrerequisite"),
+        "provider consent must declare its action-resume lifecycle explicitly"
+    );
+    let task_controls_source = read_repo_file("src-tauri/src/main_chat_task_controls.rs");
+    let task_controls = strip_cfg_test_module(&task_controls_source);
+    assert!(
+        task_controls.contains(".run_provider_network_consent_continuation("),
+        "accepted provider consent must resume through the one OpenLifeTurnRuntime owner"
+    );
+    for forbidden_command_owned_provider_path in [
+        ".generate_direct_answer(",
+        "CommandSurfaceDirectAnswerModelClient",
+        "SchedulerMainChatModelClient",
+    ] {
+        assert!(
+            !task_controls.contains(forbidden_command_owned_provider_path),
+            "task controls must not own a parallel provider continuation path: {forbidden_command_owned_provider_path}"
+        );
+    }
+    let turn_runtime = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
+    for runtime_owner_marker in [
+        "pub(crate) async fn run_provider_network_consent_continuation(",
+        "OpenLifeTurnExecutionMode::ProviderConsentContinuation",
+        "issue_terminal_owner_provider_consent_replay_admission(",
+        "terminalized_provider_continuation_preparation_error(",
+    ] {
+        assert!(
+            turn_runtime.contains(runtime_owner_marker),
+            "OpenLifeTurnRuntime lost provider continuation owner marker {runtime_owner_marker}"
+        );
+    }
+    let permissions = read_repo_file("openlife-core/src/tool_permissions.rs");
+    for exact_grant_marker in [
+        "pub fn consume_reviewed_network_once_for_proposal(",
+        "pub fn reviewed_network_once_available_for_proposal(",
+    ] {
+        assert!(
+            permissions.contains(exact_grant_marker),
+            "provider continuation must bind AllowOnce to the exact accepted Proposal: {exact_grant_marker}"
+        );
+    }
+    let event_store = read_repo_file("src-tauri/src/main_chat_event_stream.rs");
+    assert!(
+        event_store.contains("PayloadFieldSchema::optional(\"replayCause\"")
+            && event_store.contains("latest_provider_event_after_replay_start("),
+        "startup recovery must retain replay type and query only provider facts after that replay start"
+    );
+    assert!(
+        !turn_runtime.contains("bind_staged_proposal_to_terminal_owner_origin("),
+        "TurnRuntime finalization must validate canonical typed Review relations, never late-bind them"
+    );
+    assert!(
+        !review_workflow_owner.contains("bind_staged_proposal_to_terminal_owner_origin("),
+        "ReviewWorkflow must not retain a late-bind escape hatch for Main Chat proposals"
+    );
+    let main_chat_kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    assert!(
+        !main_chat_kernel.contains("AgentRunProposalStagingKind::MainChatReview"),
+        "ordinary Main Chat must project typed Review relations at creation instead of staging AgentRun ids later"
+    );
 
     let retired_stage4_memory_knowledge = "src-tauri/src/main_chat_stage4_memory_knowledge.rs";
     assert!(
@@ -2039,7 +2795,9 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         ".insert(&session_id",
         ".insert_batch(",
         ".replace_all_messages(",
+        ".replace_all_messages_guarded(",
         ".replace_all_chunks(",
+        ".replace_portable_chunks_guarded(",
         ".archive_lifecycle_memory_records(",
         ".rollback_memory_asset(",
         ".rebuild_materialized_view(",
@@ -2059,13 +2817,11 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
 
     let memory_gateway = read_repo_file("src-tauri/src/memory_gateway.rs");
     for marker in [
-        ".save_message(",
-        ".save_memory_record(",
-        ".record_state_entry(",
-        ".insert(&session_id",
-        ".replace_all_messages(",
-        ".replace_all_chunks(",
-        ".archive_lifecycle_memory_records(",
+        ".save_message_idempotent(",
+        ".save_message_idempotent_with_proof(",
+        ".save_knowledge_note_idempotent_with_outbox(",
+        ".replace_all_messages_guarded(",
+        ".replace_portable_chunks_guarded(",
         ".rollback_memory_asset(",
         ".rebuild_materialized_view(",
     ] {
@@ -2099,8 +2855,8 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
     }
     let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
     assert!(
-        bootstrap.contains("reconcile_lifemodel_file_mutations_with_state"),
-        "Phase5 startup must reconcile the canonical LifeModel file journal before product use"
+        bootstrap.contains("reconcile_startup_lifemodel_file_mutations_with_state"),
+        "Phase5 startup must use the bootstrap-only admission to reconcile the canonical LifeModel file journal before product use"
     );
     for (path, start, end) in [
         (
@@ -2115,8 +2871,8 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         ),
         (
             "src-tauri/src/commands/settings.rs",
-            "async fn import_all_data_governed_operation",
-            "async fn apply_import_payload",
+            "async fn import_all_data_governed_operation_with_fault",
+            "let before_digest =",
         ),
     ] {
         let source = read_repo_file(path);
@@ -2132,7 +2888,7 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
     }
     assert!(
         !strip_cfg_test_module(&read_repo_file("src-tauri/src/lib.rs")).contains("manager.save("),
-        "Phase5 persist_life_model compatibility wrapper must not save directly"
+        "Phase5 lib.rs command wiring must not own LifeModel persistence"
     );
 
     let proposal_raw_source = read_repo_file("src-tauri/src/commands/proposal.rs");
@@ -2224,6 +2980,183 @@ fn single_system_phase6_product_tool_execution_uses_tool_gateway() {
 }
 
 #[test]
+fn single_system_phase6_workspace_file_execution_has_one_tool_gateway_owner() {
+    let resolver = read_repo_file("src-tauri/src/workspace_file_resolver.rs");
+    let target_resolution = source_between(
+        &resolver,
+        "pub(crate) fn resolve_main_chat_workspace_file_target",
+        "pub(crate) fn resolve_workspace_root",
+    );
+    for forbidden in [
+        "canonicalize()",
+        ".metadata()",
+        "std::fs::read",
+        "File::open",
+    ] {
+        assert!(
+            !target_resolution.contains(forbidden),
+            "workspace candidate resolution must remain lexical before ToolGateway: {forbidden}"
+        );
+    }
+
+    let kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    let pre_gateway_blocker = source_between(
+        &kernel,
+        "fn blocked_kernel_read_tool_execution",
+        "fn merge_kernel_read_selection_metadata",
+    );
+    assert!(
+        !pre_gateway_blocker.contains("ToolExecutionReceipt::failed_before_dispatch"),
+        "a lexical Kernel blocker must not manufacture a ToolGateway execution receipt"
+    );
+    assert!(pre_gateway_blocker.contains("execution_receipt: None"));
+
+    let filesystem_adapter =
+        read_repo_file("openlife-core/src/agent/action_executor/execution_tools.rs");
+    assert!(
+        filesystem_adapter.contains("tokio::fs::metadata")
+            && filesystem_adapter.contains("tokio::fs::read_to_string"),
+        "ToolGateway filesystem adapter must own operating-system file observations"
+    );
+    let executor_context = read_repo_file("openlife-core/src/agent/action_executor/mod.rs");
+    assert!(executor_context.contains("struct ToolDispatchAdmission"));
+    assert!(executor_context.contains("Result<ToolDispatchAdmission<'a>>"));
+    for adapter_path in [
+        "openlife-core/src/agent/action_executor/core_os_tools.rs",
+        "openlife-core/src/agent/action_executor/execution_tools.rs",
+        "openlife-core/src/agent/action_executor/tool_executor.rs",
+    ] {
+        let adapter = read_repo_file(adapter_path);
+        for forbidden in ["mark_local_dispatched", "mark_simulated_dispatched"] {
+            assert!(
+                !adapter.contains(forbidden),
+                "concrete adapter {adapter_path} must consume ToolDispatchAdmission instead of mutating dispatch truth via {forbidden}"
+            );
+        }
+    }
+    let remote_helpers = read_repo_file("openlife-core/src/agent/action_executor/helpers.rs");
+    for helper in ["fetch_url_async", "search_web_async", "call_a2a_agent"] {
+        let marker = format!("async fn {helper}");
+        let signature = remote_helpers
+            .split(&marker)
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing remote adapter {helper}"))
+            .chars()
+            .take(500)
+            .collect::<String>();
+        assert!(
+            signature.contains("ToolDispatchAdmission"),
+            "remote adapter {helper} must require a sealed dispatch admission"
+        );
+    }
+
+    let runtime = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
+    let final_persistence = source_between(
+        &runtime,
+        "async fn persist_openlife_turn_final_delivery_receipt",
+        "fn canonical_final_owner_digest",
+    );
+    assert!(final_persistence.contains("toolOwnerBindingsVersion"));
+    assert!(final_persistence.contains("toolOwnerBindings"));
+    for legacy_parallel_field in [
+        "toolReceiptRefs",
+        "toolTerminalEventRefs",
+        "toolTerminalEventDigests",
+    ] {
+        assert!(
+            !final_persistence.contains(legacy_parallel_field),
+            "new finals must not persist the positional v1 tool owner field {legacy_parallel_field}"
+        );
+    }
+    let identity_recovery = source_between(
+        &runtime,
+        "async fn recover_canonical_tool_facts",
+        "async fn recover_openlife_turn_from_durable_final",
+    );
+    assert!(identity_recovery.contains("binding.action_queue_id"));
+    assert!(identity_recovery.contains("binding.receipt_id"));
+    assert!(identity_recovery.contains("binding.terminal_event_id"));
+}
+
+#[test]
+fn single_system_phase6_resource_artifact_and_tool_gateways_are_distinct() {
+    let resource_commands_source = read_repo_file("src-tauri/src/resource_commands.rs");
+    let resource_commands = strip_cfg_test_module(&resource_commands_source);
+    assert!(
+        resource_commands.contains("gateway.detach_resource_from_message("),
+        "resource detach must enter ResourceGateway instead of mutating ResourceStore from IPC"
+    );
+    assert!(
+        !resource_commands.contains("store.detach_resource_from_message("),
+        "resource detach must not retain a command-owned canonical write path"
+    );
+
+    let resource_gateway_source = read_repo_file("openlife-core/src/resource_gateway.rs");
+    let resource_gateway = strip_cfg_test_module(&resource_gateway_source);
+    for lifecycle_owner in [
+        "commit_import_batch_guarded(",
+        "pub fn detach_resource_from_message(",
+    ] {
+        assert!(
+            resource_gateway.contains(lifecycle_owner),
+            "ResourceGateway must own canonical resource lifecycle operation {lifecycle_owner}"
+        );
+    }
+    assert!(
+        !resource_gateway.contains("agent::ToolGateway")
+            && !resource_gateway.contains("ToolGateway::from_executor_config"),
+        "ResourceGateway must not become a second Agent tool executor"
+    );
+
+    let proposal_source = read_repo_file("src-tauri/src/commands/proposal.rs");
+    let proposal = strip_cfg_test_module(&proposal_source);
+    let artifact_apply = source_between(
+        proposal,
+        "async fn apply_external_write_artifact",
+        "pub(crate) fn memory_session_id",
+    );
+    for required in [
+        "claim_id: &str",
+        "prepare_artifact_materialization(",
+        "stage_artifact_bytes(",
+        "commit_staged_artifact(",
+        "finish_artifact_confirmed(",
+    ] {
+        assert!(
+            artifact_apply.contains(required),
+            "accepted artifact materialization must retain review-claim-bound owner {required}"
+        );
+    }
+    let accept_flow = source_between(
+        proposal,
+        "pub(crate) async fn accept_proposal_with_state",
+        "async fn terminal_owner_relation_kind",
+    );
+    assert!(
+        accept_flow.contains(".claim_dispatch(&proposal_id)")
+            && accept_flow.contains(".claimed_acceptance_snapshot(&proposal_id, &dispatch_claim_id)"),
+        "artifact bytes must not materialize before ReviewWorkflow proves the claimed accepted decision"
+    );
+    assert!(
+        accept_flow.contains("apply_external_write_artifact(state, &proposal, &dispatch_claim_id)"),
+        "artifact materialization must consume the exact accepted dispatch claim"
+    );
+
+    let tool_gateway_source = read_repo_file("openlife-core/src/agent/tool_gateway.rs");
+    let tool_gateway = strip_cfg_test_module(&tool_gateway_source);
+    for foreign_owner in [
+        "ResourceGateway",
+        "stage_artifact_bytes",
+        "commit_staged_artifact",
+    ] {
+        assert!(
+            !tool_gateway.contains(foreign_owner),
+            "ToolGateway must not absorb Resource/Artifact canonical ownership: {foreign_owner}"
+        );
+    }
+}
+
+#[test]
 fn single_system_phase6_final_delivery_is_canonical_and_non_overclaiming() {
     let runtime_source = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
     let source = strip_cfg_test_module(&runtime_source);
@@ -2279,149 +3212,169 @@ fn single_system_phase6_frontend_product_status_reads_life_state_projection() {
         );
     }
 
-    let product_status_files = [
-        "frontend/src/pages/TodayPage.tsx",
-        "frontend/src/pages/MailboxPage.tsx",
-        "frontend/src/pages/ChatPage.tsx",
-        "frontend/src/pages/CompanionPage.tsx",
-        "frontend/src/pages/LifeModelPage.tsx",
-        "frontend/src/pages/SettingsPage.tsx",
-        "frontend/src/pages/settings/tabs/OverviewTab.tsx",
-        "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
-        "frontend/src/pages/settings/tabs/ToolsPermissionsTab.tsx",
-        "frontend/src/pages/settings/tabs/AdvancedTab.tsx",
-    ];
-    let forbidden_raw_status_markers = [
-        "pending_proposal_count",
-        "high_risk_pending_proposal_count",
-        "pending_builder_review_sessions",
-        "unfinished_builder_sessions",
-        "isSafeMode(",
-        "getSafeModeReason(",
-        "diagnosticsUsageReady",
-        "diagnosticsUsageReadinessIssues",
-    ];
+    assert_retired_frontend_owners_absent();
 
-    for path in product_status_files {
-        let source = read_repo_file(path);
-        if path == "frontend/src/pages/CompanionPage.tsx" {
-            assert!(
-                source.contains("<ChatPage companionMode"),
-                "CompanionPage must inherit ChatPage projection-backed status"
-            );
-        } else {
-            assert!(
-                source.contains("LifeStateProjection") || source.contains("getLifeStateProjection"),
-                "Phase6 product status file {path} must use LifeStateProjection"
-            );
-        }
-        if matches!(
-            path,
-            "frontend/src/pages/TodayPage.tsx"
-                | "frontend/src/pages/MailboxPage.tsx"
-                | "frontend/src/pages/ChatPage.tsx"
-        ) {
-            assert!(
-                source.contains("reviewRequiredCountFromProjection"),
-                "Phase6 product pending state in {path} must use the LifeStateProjection helper"
-            );
-        }
-        if path == "frontend/src/pages/LifeModelPage.tsx" {
-            assert!(
-                source.contains("viewModel?.pendingUpdateCounts.pendingReview"),
-                "R3 LifeModel product pending state must use the backend LifeModelViewModel"
-            );
-        }
-        for marker in forbidden_raw_status_markers {
-            assert!(
-                !source.contains(marker),
-                "Phase6 product status file {path} must not derive covered state from raw marker {marker}"
-            );
-        }
-    }
-
-    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
-    let chat_pending_alert = source_between(
-        &chat,
-        "{/* Pending Proposals Alert */}",
-        "{/* Chat mode selector */}",
-    );
+    let today_source =
+        read_repo_file("frontend/src/ui/journeys/readOnly/readOnlySpineDataSource.ts");
+    let today_adapter = read_repo_file("frontend/src/viewmodels/today/todayViewModelAdapter.ts");
     assert!(
-        chat.contains("const projectionPendingReviewCount = reviewRequiredCountFromProjection("),
-        "Chat product pending state must be named and sourced from LifeStateProjection"
-    );
-    assert!(
-        chat_pending_alert.contains("projectionPendingReviewCount"),
-        "Chat pending banner must render from projection-backed count"
-    );
-    for forbidden in [
-        "?? pendingProposals.length",
-        "|| pendingProposals.length",
-        "pendingProposals.length > 0",
-    ] {
-        assert!(
-            !chat.contains(forbidden),
-            "Chat must not use raw pendingProposals length as product pending authority: {forbidden}"
-        );
-    }
-
-    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
-    assert!(
-        mailbox.contains("const mailboxReviewRequiredCount = reviewRequiredCountFromProjection("),
-        "Mailbox top-level pending state must be named and sourced from LifeStateProjection"
-    );
-    assert!(
-        !mailbox.contains("folderCounts.pending"),
-        "Mailbox global pending badge must not use folderCounts.pending; folderCounts are list-filter details only"
+        today_source.contains("getLifeStateProjection()")
+            && today_source.contains("getDailyGoals()")
+            && today_source.contains("getProviderPrivacyBoundarySummary()")
+            && today_adapter.contains("input.projection.pending.totalReviewRequiredCount"),
+        "Phase6 Today production path must remain a strict adapter over backend projection and boundary inputs"
     );
 
-    let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
-    let builder_review_counter = source_between(
-        &lifemodel,
-        "function BuildSection",
-        "function CommunicationStyleCurrentView",
-    );
+    let governed_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let durable_source =
+        read_repo_file("frontend/src/ui/journeys/durableTruth/durableTruthDataSource.ts");
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
     assert!(
-        lifemodel.contains("const pendingCount = viewModel?.pendingUpdateCounts.pendingReview"),
-        "LifeModel product pending count must come from LifeModelViewModel"
+        governed_source.contains("getWorkspaceViewModel()")
+            && governed_source.contains("getReviewCenterViewModel()")
+            && governed_source.contains("getTasksViewModel()")
+            && durable_source.contains("getLifeModelViewModel()")
+            && durable_source.contains("getMemoryViewModel()")
+            && settings_source.contains("getProviderPrivacyBoundarySummary()"),
+        "Phase6 covered product status must come from backend projection/ViewModel owners"
     );
-    assert!(
-        builder_review_counter.contains("viewModel?.pendingUpdateCounts.pendingReview"),
-        "LifeModel builder review state must come from LifeModelViewModel"
-    );
-    for forbidden in ["pendingProposals", "Math.max", "proposalCount"] {
-        assert!(
-            !builder_review_counter.contains(forbidden),
-            "LifeModel builder review state must not fallback to raw proposal data: {forbidden}"
-        );
-    }
 
-    let today = read_repo_file("frontend/src/pages/TodayPage.tsx");
-    assert!(
-        today.contains(
-            "const pendingCount = reviewRequiredCountFromProjection(state.projection, \"today\")"
-        ),
-        "Today pending state must come from LifeStateProjection helper"
-    );
-    for (path, source) in [
-        ("ChatPage", chat.as_str()),
-        ("MailboxPage", mailbox.as_str()),
-        ("LifeModelPage", lifemodel.as_str()),
-        ("TodayPage", today.as_str()),
+    for (label, source) in [
+        ("Today source", today_source.as_str()),
+        ("Today adapter", today_adapter.as_str()),
+        ("governed source", governed_source.as_str()),
+        ("durable source", durable_source.as_str()),
+        ("settings source", settings_source.as_str()),
     ] {
         for forbidden in [
-            "?? pendingProposals.length",
-            "|| pendingProposals.length",
-            "?? folderCounts.pending",
-            "|| folderCounts.pending",
+            "pending_proposal_count",
+            "high_risk_pending_proposal_count",
+            "pending_builder_review_sessions",
+            "unfinished_builder_sessions",
+            "isSafeMode(",
+            "getSafeModeReason(",
+            "diagnosticsUsageReady",
+            "diagnosticsUsageReadinessIssues",
             "pending.totalReviewRequiredCount ?? 0",
         ] {
             assert!(
                 !source.contains(forbidden),
-                "{path} must not turn projection-missing pending state into a raw or fake definite count: {forbidden}"
+                "Phase6 {label} must not rebuild covered product state from {forbidden}"
             );
         }
     }
+}
+
+#[test]
+fn single_system_statestore_is_the_only_shipped_state_history_read_owner() {
+    let raw_source = read_repo_file("src-tauri/src/commands/state.rs");
+    let source = strip_cfg_test_module(&raw_source);
+    assert!(
+        source.contains(".get_product_state_history("),
+        "shipped state history and alerts must consume the receipt-gated StateStore product read"
+    );
+    for forbidden in [
+        "state.memory_store",
+        ".memory_store.lock()",
+        ".get_state_history(&dimension_name",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "shipped state history must not retain a MemoryStore fallback: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn single_system_statestore_is_the_only_shipped_daily_task_read_owner() {
+    let raw_source = read_repo_file("src-tauri/src/commands/state.rs");
+    let source = strip_cfg_test_module(&raw_source);
+    assert!(
+        source.contains(".get_product_daily_tasks("),
+        "shipped daily-task reads must consume the receipt-gated StateStore product read"
+    );
+    assert!(
+        source.contains("validate_legacy_yaml_daily_task_cutover_source"),
+        "shipped daily-task reads must fail closed on post-cutover legacy YAML drift"
+    );
+    for forbidden in [
+        ".list_daily_tasks(false)",
+        ".goals.daily.into_iter()",
+        ".filter(|goal| !crate::state_projection::is_state_store_projected_daily_goal(goal))",
+        "goals.extend(",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "shipped daily-task read must not retain YAML/StateStore merge or raw fallback: {forbidden}"
+        );
+    }
+
+    let bootstrap_raw = read_repo_file("src-tauri/src/bootstrap.rs");
+    let bootstrap = strip_cfg_test_module(&bootstrap_raw);
+    assert!(
+        bootstrap.contains("reconcile_and_import_legacy_yaml_daily_tasks"),
+        "startup must stage and atomically import the verified legacy daily-task source"
+    );
+    let projection_raw = read_repo_file("src-tauri/src/state_projection.rs");
+    let projection = strip_cfg_test_module(&projection_raw);
+    assert!(
+        projection.contains(".get_product_daily_tasks()"),
+        "LifeModel compatibility projection must consume receipt-gated canonical daily tasks"
+    );
+    assert!(
+        !projection.contains(".retain(|goal| !is_state_store_projected_daily_goal(goal))"),
+        "compatibility projection must not preserve a second unmarked YAML daily-task owner"
+    );
+}
+
+#[test]
+fn single_system_statestore_owned_lifemodel_fields_have_no_shipped_second_writer() {
+    let builder_raw = read_repo_file("openlife-core/src/builder/engine.rs");
+    let builder = strip_cfg_test_module(&builder_raw);
+    assert!(
+        builder.contains("life_model_field_authority(&signal.affected_path)"),
+        "Builder must consult the shared LifeModel field-authority contract before applying candidates"
+    );
+    for forbidden in [
+        "[\"goals\", \"daily\"] =>",
+        "[\"state\", \"alerts\"] =>",
+        "goals.daily (merged)",
+        "state.alerts (merged)",
+    ] {
+        assert!(
+            !builder.contains(forbidden),
+            "Builder must not retain a second StateStore/derived LifeModel writer: {forbidden}"
+        );
+    }
+    assert!(
+        builder.contains("\"sig_blocker\"")
+            && builder.contains("\"state.open_questions\""),
+        "Builder must preserve explicit blocker capability through a reviewed canonical LifeModel field"
+    );
+
+    let core_gateway = read_repo_file("openlife-core/src/life_model_write_gateway.rs");
+    assert!(
+        core_gateway.contains("pub fn life_model_field_authority"),
+        "the field-authority classification must have one reusable Core owner"
+    );
+    let tauri_gateway_raw = read_repo_file("src-tauri/src/life_model_write_gateway.rs");
+    let tauri_gateway = strip_cfg_test_module(&tauri_gateway_raw);
+    assert!(
+        count_occurrences(tauri_gateway, "validate_lifemodel_field_authority(") >= 4,
+        "manual/import, accepted Proposal, batch Proposal, and restore writes must enforce field ownership"
+    );
+    assert!(
+        tauri_gateway.contains("STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID"),
+        "the compatibility exception must be bound to the exact StateStore projector identity"
+    );
+    let projection_raw = read_repo_file("src-tauri/src/state_projection.rs");
+    let projection = strip_cfg_test_module(&projection_raw);
+    assert!(
+        projection.contains("STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID"),
+        "the one legitimate compatibility writer must consume the shared projector identity"
+    );
 }
 
 #[test]
@@ -2434,7 +3387,9 @@ fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
         ".record_state_entry(",
         ".insert(&session_id",
         "replace_all_messages(",
+        "replace_all_messages_guarded(",
         "replace_all_chunks(",
+        "replace_portable_chunks_guarded(",
         "archive_lifecycle_memory_records(",
         "rollback_memory_asset(",
         "restore_archived_chunks(",
@@ -2559,9 +3514,13 @@ fn single_system_phase7_forbids_old_modules_in_product_module_graph() {
 }
 
 #[test]
-fn single_system_phase7_frontend_product_pages_do_not_import_dev_bridge_or_legacy_status() {
+fn single_system_phase7_frontend_product_sources_do_not_import_dev_bridge_or_legacy_status() {
     let mut violations = Vec::new();
-    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+    for file in source_files(&[
+        "frontend/src/ui",
+        "frontend/src/viewmodels",
+        "frontend/src/utils",
+    ]) {
         let rel = to_repo_path(&file);
         if rel.ends_with(".test.tsx") || rel.ends_with(".test.ts") {
             continue;
@@ -2575,8 +3534,16 @@ fn single_system_phase7_frontend_product_pages_do_not_import_dev_bridge_or_legac
     }
     assert!(
         violations.is_empty(),
-        "Phase7 contract requires product frontend pages/components to avoid dev bridge imports and legacy fallback status fields: {violations:?}"
+        "Phase7 contract requires production frontend sources to avoid dev bridge imports and legacy fallback status fields: {violations:?}"
     );
+
+    let app = read_repo_file("frontend/src/App.tsx");
+    for marker in ["tauriDev", "legacyFallbackUsed", "legacy_fallback_used"] {
+        assert!(
+            !app.contains(marker),
+            "Phase7 production App must not import dev bridge or legacy status: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -2710,11 +3677,16 @@ fn single_system_posthoc_proposal_engine_and_product_consumers_stay_absent() {
         command_surface.contains("ordinary_chat_finalization_never_creates_post_hoc_proposals"),
         "ordinary provider or assistant output must retain a behavioral counterexample against post-hoc Proposal creation"
     );
-    let review_memory = read_repo_file("frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx");
+    let review_source =
+        read_repo_file("frontend/src/ui/journeys/governedAction/governedActionDataSource.ts");
+    let settings_source =
+        read_repo_file("frontend/src/ui/journeys/settingsPrivacy/settingsPrivacyDataSource.ts");
     assert!(
-        review_memory.contains("后端 PolicyRouter 路由")
-            && review_memory.contains("按后端回执显示"),
-        "Mailbox & Memory must describe backend-owned governance after inert controls are removed"
+        review_source.contains("getReviewCenterViewModel()")
+            && settings_source.contains("getReviewCenterViewModel()")
+            && !review_source.contains("ProposalEngine")
+            && !settings_source.contains("ProposalEngine"),
+        "production review/settings consumers must use ReviewCenterViewModel after ProposalEngine removal"
     );
 
     let manifest = read_repo_file("plans/openlife_single_system_deletion_manifest.md");
@@ -2755,7 +3727,8 @@ fn single_system_d011_conversation_and_retrieval_parallel_routes_stay_absent() {
         );
     }
     assert!(runtime.contains("save_turn_user_message_idempotent_with_state("));
-    assert!(generation.contains("main_chat_assistant_message:{}:{}"));
+    assert!(generation.contains("main_chat_assistant_message_operation_id("));
+    assert!(generation.contains("main_chat_assistant_message:{task_session_id}:{run_id}"));
     assert!(gateway.contains("save_conversation_message_idempotent_with_state("));
 
     assert!(memory_store.contains("reject_memory_lifecycle_retrieval_insert"));
@@ -2810,7 +3783,8 @@ fn single_system_d049_keyword_conversation_update_routes_stay_absent() {
         "D049 inventory must enumerate semantic markers that could rename the retired route"
     );
 
-    for former_path in ["src-tauri/src/main_chat_conversation_updates.rs"] {
+    {
+        let former_path = "src-tauri/src/main_chat_conversation_updates.rs";
         assert!(
             !repo_root().join(former_path).exists(),
             "D049 callerless conversation-inference module must stay absent: {former_path}"
@@ -2854,7 +3828,7 @@ fn single_system_d049_keyword_conversation_update_routes_stay_absent() {
     let auto_checkin_body = source_between(
         &command_surface,
         "async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_truth()",
-        "async fn main_chat_direct_answer_guard_blocks_false_memory_or_life_event_claims()",
+        "async fn inferred_memory_review_preserves_direct_answer_and_truthful_proposal_reason()",
     );
     assert!(
         auto_checkin_body.contains("implicit_life_event_ids.is_empty()")

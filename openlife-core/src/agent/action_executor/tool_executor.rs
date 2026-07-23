@@ -7,7 +7,7 @@ use serde_json::Value;
 use super::helpers::{
     canonical_tool_source, configured_web_search_endpoint, ensure_external_write_content_size,
     external_write_content_preview, filesystem_access_error, hs_requires_external_write_proposal,
-    is_direct_external_write_tool, is_path_in_safe_paths_async, is_proposal_generation_tool,
+    is_direct_external_write_tool, is_path_lexically_in_safe_paths, is_proposal_generation_tool,
     minimized_external_write_arguments, normalize_tool_name, should_mark_needs_confirmation,
     ToolCallInternalResult,
 };
@@ -297,7 +297,35 @@ impl super::ActionExecutor {
                     .map(str::to_string)
                     .ok_or_else(|| anyhow::anyhow!("Missing 'url' argument for web.fetch"))?
             } else {
-                configured_web_search_endpoint()
+                match configured_web_search_endpoint(&self.config.search_provider) {
+                    Ok(endpoint) => endpoint,
+                    Err(reason) => {
+                        let forced_decision = ToolPermissionDecision {
+                            allowed: false,
+                            requires_confirmation: false,
+                            decision: "blocked".into(),
+                            reason: reason.into(),
+                            policy_id: None,
+                        };
+                        let (action, observation) = self.build_blocked_action_observation(
+                            tool_name,
+                            &args,
+                            &inspection,
+                            &forced_decision,
+                            manifest.as_ref(),
+                            &request,
+                        );
+                        return Ok(ActionExecutionResult {
+                            action,
+                            observation,
+                            status: ActionExecutionStatus::Blocked,
+                            stop_reason: Some(reason.into()),
+                            governance_report: None,
+                            execution_receipt: receipt_tracker.snapshot(),
+                            observed_body_admission: None,
+                        });
+                    }
+                }
             };
             if let Some(policy) = ctx.network_policy {
                 let network_decision = resolve_network_policy_decision(
@@ -713,7 +741,7 @@ impl super::ActionExecutor {
                     .get("path")
                     .and_then(|v: &Value| v.as_str())
                     .unwrap_or("");
-                if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
+                if !is_path_lexically_in_safe_paths(path, ctx.safe_paths) {
                     let (action, observation) = self.build_blocked_action_observation(
                         tool_name,
                         &args,
@@ -838,14 +866,15 @@ impl super::ActionExecutor {
                 });
             result
         } else {
-            ctx.authorize_tool_dispatch(manifest_ref, &request, &args, &receipt_tracker)
+            let admission = ctx
+                .authorize_tool_dispatch(manifest_ref, &request, &args, &receipt_tracker)
                 .await?;
             self.call_tool_internal(
                 manifest_ref,
                 args.clone(),
                 ctx,
                 inspection.pii_found,
-                receipt_tracker.clone(),
+                admission,
             )
             .await
         };
@@ -894,16 +923,29 @@ impl super::ActionExecutor {
                     .into_iter()
                     .find(|m| m.name == target_name || m.id == target_name);
                 if let Some(target_manifest) = target_manifest {
+                    let target_source = canonical_tool_source(&target_manifest);
+                    observation.source = target_source.clone();
                     action.tool_scope = Some(ToolActionScope {
                         tool_name: target_manifest.name.clone(),
                         tool_id: target_manifest.id.clone(),
-                        source: canonical_tool_source(&target_manifest),
+                        source: target_source.clone(),
                         risk_level: target_manifest.risk_level.clone(),
                         capabilities: target_manifest.capabilities.clone(),
                         action_type: target_manifest.action_type.clone(),
                         requires_confirmation: false,
                         allowed: result.success,
                     });
+                    for trace in action
+                        .react_trace
+                        .iter_mut()
+                        .chain(observation.react_trace.iter_mut())
+                    {
+                        trace.tool_name = target_manifest.name.clone();
+                        trace.tool_id = target_manifest.id.clone();
+                        trace.tool_source = target_source.clone();
+                        trace.risk_level = target_manifest.risk_level.clone();
+                        trace.action_category = target_manifest.action_type.clone();
+                    }
                     target_permission_manifest = Some(target_manifest);
                 } else {
                     action.status = "blocked".to_string();
@@ -1011,12 +1053,14 @@ impl super::ActionExecutor {
         } else {
             ActionExecutionStatus::Failed
         };
+        let stop_reason = (!result.success && tool_name == "file.read")
+            .then(|| "filesystem_read_failed".to_string());
 
         Ok(ActionExecutionResult {
             action,
             observation,
             status,
-            stop_reason: None,
+            stop_reason,
             governance_report: None,
             execution_receipt: receipt_tracker.snapshot(),
             observed_body_admission,
@@ -1029,48 +1073,52 @@ impl super::ActionExecutor {
         args: Value,
         ctx: &ActionExecutionContext<'_>,
         pii_found: bool,
-        receipt_tracker: ToolExecutionReceiptTracker,
+        admission: super::ToolDispatchAdmission<'_>,
     ) -> ToolCallInternalResult {
-        match ctx
+        let (receipt_tracker, started_observer) = admission.into_remote_parts();
+        receipt_tracker.mark_audit_persistence_pending();
+        let result = match ctx
             .registry
             .execute_manifest_async_with_receipt_tracker(
                 manifest,
                 args.clone(),
-                receipt_tracker,
-                ctx.tool_started_transition_observer,
+                receipt_tracker.clone(),
+                started_observer,
             )
             .await
         {
-            Ok(r) => {
-                if let Err(e) =
-                    ctx.audit_store
-                        .insert_log(&manifest.name, &args, &r, true, pii_found)
-                {
-                    eprintln!("[warn] audit log write failed: {}", e);
-                }
-                ToolCallInternalResult {
-                    success: true,
-                    output: Some(r),
-                    error: None,
-                }
-            }
-            Err(e) => {
-                if let Err(log_err) = ctx.audit_store.insert_log(
-                    &manifest.name,
-                    &args,
-                    &e.to_string(),
-                    false,
-                    pii_found,
-                ) {
-                    eprintln!("[warn] audit log write failed: {}", log_err);
-                }
-                ToolCallInternalResult {
-                    success: false,
-                    output: None,
-                    error: Some(e.to_string()),
+            Ok(output) => ToolCallInternalResult {
+                success: true,
+                output: Some(output),
+                error: None,
+            },
+            Err(error) => ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(error.to_string()),
+            },
+        };
+        let audit_body = result
+            .output
+            .as_deref()
+            .or(result.error.as_deref())
+            .unwrap_or_default();
+        match ctx.audit_store.insert_log(
+            &manifest.name,
+            &args,
+            audit_body,
+            result.success,
+            pii_found,
+        ) {
+            Ok(_) => receipt_tracker.mark_audit_persistence_committed(),
+            Err(_) => {
+                receipt_tracker.mark_audit_persistence_failed();
+                if let Some(observer) = ctx.tool_audit_persistence_observer {
+                    observer.audit_persistence_failed(&receipt_tracker.snapshot());
                 }
             }
         }
+        result
     }
 
     pub fn build_blocked_action_observation(
@@ -1502,7 +1550,10 @@ impl super::ActionExecutor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn build_react_trace_envelope(
         &self,
         action_id: &str,
@@ -2172,7 +2223,7 @@ mod bound_content_receipt_tests {
 
     #[test]
     fn bound_content_receipt_admission_has_one_private_mint_surface() {
-        let executor_source = include_str!("tool_executor.rs");
+        let executor_source = include_str!("tool_executor.rs").replace("\r\n", "\n");
         let production_source = executor_source
             .split("#[cfg(test)]\nmod bound_content_receipt_tests")
             .next()

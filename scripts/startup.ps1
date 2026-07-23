@@ -446,7 +446,7 @@ function Start-Dev {
             exit 1
         }
         Write-Info "构建显式启用的开发 A2A sidecar..."
-        cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server --features dev-extensions
+        cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
     }
 
     # 检查使用哪种方式启动 Tauri
@@ -498,7 +498,7 @@ function Start-A2A {
 
     Push-Location $TauriDir
     try {
-        cargo run --bin openlife-a2a-server --features dev-extensions
+        cargo run -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
     }
     finally {
         Pop-Location

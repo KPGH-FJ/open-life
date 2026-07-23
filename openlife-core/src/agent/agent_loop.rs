@@ -974,14 +974,20 @@ impl AgentLoop {
             network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
             guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
-        self.run_loop_core(
+        // Keep the product AgentLoop seam stack-bounded. `run_loop_core`
+        // contains the full iterative provider/tool state machine; inlining
+        // that future into every upstream Main Chat poll chain can exhaust a
+        // normal Tokio test/runtime thread before this async body is entered.
+        // Boxing the single subordinate future preserves one runtime owner and
+        // changes neither execution nor cancellation semantics.
+        Box::pin(self.run_loop_core(
             &actx,
             action_ctx,
             canonical_run,
             None,
             &self.config,
             provider_progress,
-        )
+        ))
         .await
     }
 
@@ -1021,6 +1027,8 @@ impl AgentLoop {
             hs_runtime_packet,
             tool_dispatch_observer: action_ctx.tool_dispatch_observer,
             tool_started_transition_observer: action_ctx.tool_started_transition_observer,
+            tool_audit_persistence_observer: action_ctx.tool_audit_persistence_observer,
+            durable_store_failure_observer: action_ctx.durable_store_failure_observer,
             a2a_outbound_authorization: action_ctx.a2a_outbound_authorization,
             canonical_write_admission: action_ctx.canonical_write_admission,
             action_bound_tool_permission: action_ctx.action_bound_tool_permission,
@@ -1072,7 +1080,10 @@ impl AgentLoop {
 
     /// Streaming variant of run(). Same logic but forwards token chunks
     /// through the callback as they arrive from the model.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn run_streaming(
         &self,
         task: &AgentTask,
@@ -1454,20 +1465,20 @@ impl AgentLoop {
                 PreparedProviderStreamEvent::Terminal(
                     PreparedProviderStreamTerminal::Completed(receipt),
                 ) => {
-                    provider_progress(ProviderInvocationProgress::Completed(receipt))?;
+                    provider_progress(ProviderInvocationProgress::Completed(*receipt))?;
                     return Ok(reply);
                 }
                 PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::Failed {
                     receipt,
                     error,
                 }) => {
-                    provider_progress(ProviderInvocationProgress::Failed(receipt))?;
+                    provider_progress(ProviderInvocationProgress::Failed(*receipt))?;
                     return Err(anyhow::anyhow!("stream generation failed: {error}"));
                 }
                 PreparedProviderStreamEvent::Terminal(
                     PreparedProviderStreamTerminal::RemoteUnknown { receipt, error },
                 ) => {
-                    provider_progress(ProviderInvocationProgress::RemoteUnknown(receipt))?;
+                    provider_progress(ProviderInvocationProgress::RemoteUnknown(*receipt))?;
                     return Err(anyhow::anyhow!("stream generation failed: {error}"));
                 }
             }
@@ -1760,7 +1771,10 @@ impl AgentLoop {
 
     /// Execute a batch of tool actions, collecting observations and status updates.
     /// Returns (all_succeeded, executed_count, budget_exceeded, observations).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn execute_tool_batch(
         &self,
         tool_actions: &[AgentActionRequest],
@@ -1947,7 +1961,10 @@ impl AgentLoop {
 
     /// Handle step completion after tool batch execution:
     /// budget exceeded / partial failure / no observations / continue.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn handle_step_completion(
         &self,
         budget_exceeded: bool,
@@ -2076,6 +2093,11 @@ impl AgentLoop {
         }
     }
 
+    // Assemble independently audited terminal facts without a second mutable accumulator.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn build_result(
         &self,
         mut run: AgentRun,
@@ -2157,6 +2179,47 @@ fn preview_text(text: &str, max_len: usize) -> String {
     } else {
         format!("{}...", text.chars().take(max_len).collect::<String>())
     }
+}
+
+/// Search memory store for relevant context and format as a string.
+fn search_memory_for_context(
+    action_ctx: &ActionExecutionContext<'_>,
+    query: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    if query.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let memory_store = action_ctx
+        .memory_store
+        .ok_or_else(|| anyhow::anyhow!("MemoryStore unavailable for AgentLoop context"))?;
+    let hits = action_ctx.filter_retrievable_memory_hits(memory_store.search_text_memories(
+        Some(session_id),
+        query,
+        5,
+    )?)?;
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = String::from("以下是与当前话题相关的历史记忆：\n\n");
+    for (idx, hit) in hits.iter().enumerate() {
+        context.push_str(&format!(
+            "[记忆 {}] {} (相关度: {:.2})\n{}\n\n",
+            idx + 1,
+            hit.chunk.source,
+            hit.relevance_score,
+            hit.chunk.content
+        ));
+    }
+
+    Ok(Some(context))
+}
+
+/// Extract JSON object from text.
+fn try_extract_json(text: &str) -> Option<&str> {
+    crate::json_utils::extract_first_json_object(text)
 }
 
 #[cfg(test)]
@@ -2339,8 +2402,10 @@ mod tests {
 
         let agent = make_test_agent_loop();
         let life_model = LifeModel::default();
-        let mut network_policy = crate::config::NetworkPolicy::default();
-        network_policy.default_decision = "allow".into();
+        let network_policy = crate::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
         let context = AgentLoopContext {
             task: &task,
             provider_subject_text: user_text,
@@ -2413,6 +2478,8 @@ mod tests {
                 hs_runtime_packet: None,
                 tool_dispatch_observer: None,
                 tool_started_transition_observer: None,
+                tool_audit_persistence_observer: None,
+                durable_store_failure_observer: None,
                 a2a_outbound_authorization: None,
                 canonical_write_admission: Some(
                     &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
@@ -2536,7 +2603,7 @@ mod tests {
         let callback = Arc::new(RecordingStreamingCallback::default());
         let stream: PreparedProviderStream = Box::pin(futures::stream::iter(vec![
             PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::Failed {
-                receipt: observed_provider_receipt(ProviderInvocationStatus::Failed),
+                receipt: Box::new(observed_provider_receipt(ProviderInvocationStatus::Failed)),
                 error: "provider_reasoning_without_final_content".into(),
             }),
         ]));
@@ -2573,7 +2640,9 @@ mod tests {
         let stream: PreparedProviderStream = Box::pin(futures::stream::iter(vec![
             PreparedProviderStreamEvent::Token("partial".to_string()),
             PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::RemoteUnknown {
-                receipt: observed_provider_receipt(ProviderInvocationStatus::RemoteUnknown),
+                receipt: Box::new(observed_provider_receipt(
+                    ProviderInvocationStatus::RemoteUnknown,
+                )),
                 error: "provider transport reset".into(),
             }),
         ]));
@@ -2615,7 +2684,7 @@ mod tests {
             PreparedProviderStreamEvent::Token("hello ".to_string()),
             PreparedProviderStreamEvent::Token("world".to_string()),
             PreparedProviderStreamEvent::Terminal(PreparedProviderStreamTerminal::Completed(
-                expected_receipt.clone(),
+                Box::new(expected_receipt.clone()),
             )),
         ]));
         let mut progress = Vec::new();
@@ -2683,6 +2752,44 @@ mod tests {
         assert!(
             progress.is_empty(),
             "scripted reply performs no provider I/O"
+        );
+    }
+
+    #[test]
+    fn existing_canonical_run_future_remains_stack_bounded() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let task = AgentTask {
+            kind: AgentTaskKind::Conversation,
+            session_id: "bounded-agent-loop-session".into(),
+            user_text: "hello".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            layer: crate::layer::Layer::L2,
+        };
+        let life_model = LifeModel::default();
+        let canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
+        let mut observer = |_: ProviderInvocationProgress| Ok(());
+        let future = agent.run_existing_with_provider_observer(
+            AgentLoopRunRequest::new(
+                &task,
+                &life_model,
+                "",
+                None,
+                PrivacyEngine::new(),
+                &action_ctx,
+            ),
+            canonical_run,
+            &mut observer,
+        );
+        let future_size = std::mem::size_of_val(&future);
+
+        assert!(
+            future_size <= 8 * 1024,
+            "canonical AgentLoop seam regressed to an oversized inline future: {future_size} bytes"
         );
     }
 
@@ -3129,45 +3236,4 @@ mod tests {
         let preview = preview_text(&text, 200);
         assert!(preview.ends_with("😀..."));
     }
-}
-
-/// Search memory store for relevant context and format as a string.
-fn search_memory_for_context(
-    action_ctx: &ActionExecutionContext<'_>,
-    query: &str,
-    session_id: &str,
-) -> Result<Option<String>> {
-    if query.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let memory_store = action_ctx
-        .memory_store
-        .ok_or_else(|| anyhow::anyhow!("MemoryStore unavailable for AgentLoop context"))?;
-    let hits = action_ctx.filter_retrievable_memory_hits(memory_store.search_text_memories(
-        Some(session_id),
-        query,
-        5,
-    )?)?;
-    if hits.is_empty() {
-        return Ok(None);
-    }
-
-    let mut context = String::from("以下是与当前话题相关的历史记忆：\n\n");
-    for (idx, hit) in hits.iter().enumerate() {
-        context.push_str(&format!(
-            "[记忆 {}] {} (相关度: {:.2})\n{}\n\n",
-            idx + 1,
-            hit.chunk.source,
-            hit.relevance_score,
-            hit.chunk.content
-        ));
-    }
-
-    Ok(Some(context))
-}
-
-/// Extract JSON object from text.
-fn try_extract_json(text: &str) -> Option<&str> {
-    crate::json_utils::extract_first_json_object(text)
 }

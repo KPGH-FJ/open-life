@@ -26,15 +26,21 @@ pub mod plugins;
 pub mod privacy;
 pub mod proactive;
 pub mod reflex_engine;
+pub mod resource;
+pub mod resource_gateway;
+pub mod resource_parser;
+pub mod resource_selection;
 pub mod scheduler;
 pub mod skills;
 pub mod sqlite_migration;
+pub mod state_store;
 pub mod tasks;
 pub mod tool_execution_receipt;
 pub mod tool_manifest;
 pub mod tool_permissions;
 pub mod vectors;
 pub mod versioning;
+pub mod web_search;
 
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

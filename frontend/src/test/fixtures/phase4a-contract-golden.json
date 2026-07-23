@@ -1,0 +1,188 @@
+{
+  "schemaVersion": "openlife.phase4a-contract.v1",
+  "reviewItem": {
+    "id": "review-permission-1",
+    "type": "tool_permission",
+    "source": {
+      "kind": "proposal",
+      "proposalId": "review-permission-1",
+      "proposalSource": "chat_conversation",
+      "runId": "run-1"
+    },
+    "status": "pending",
+    "materializationStatus": "not_started",
+    "decisionContext": {
+      "reviewItemId": "review-permission-1",
+      "title": "Allow one action",
+      "summary": "Review the exact permission scope before allowing one matching action.",
+      "after": {
+        "kind": "redacted",
+        "summary": "Exact permission scope is projected in the permission decision context.",
+        "sensitivity": "redacted",
+        "truncated": false
+      },
+      "reasonSummary": "Read one selected local note.",
+      "sourceSummary": "Current conversation",
+      "impactSummary": "Approval creates only a scoped permission decision. Execution and its result require refreshed backend evidence.",
+      "affectedObjectLabels": ["Permission: tool permission builtin file read"],
+      "expiresAt": "2026-07-22T00:00:00Z",
+      "permission": {
+        "status": "ready",
+        "scopeKind": "action_bound",
+        "policy": "allow_once",
+        "toolLabel": "file read",
+        "toolName": "file.read",
+        "capabilityLabels": ["read"],
+        "requestedTargetLabel": "notes/today.md",
+        "resolvedTargetLabel": "file.read",
+        "purposeSummary": "Read one selected local note.",
+        "scopeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requestDigestKind": "input",
+        "requestDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "requestLengthBytes": 42,
+        "blockedRunId": "run-1",
+        "blockedStepIndex": 2,
+        "transmissionBoundary": {
+          "externalTransmission": "not_sent",
+          "summary": "The canonical built-in tool scope has no external-network capability. This describes the requested tool action only.",
+          "targetLabel": "file.read",
+          "evidenceRefs": [
+            {
+              "id": "proposal:review-permission-1",
+              "label": "Proposal record",
+              "source": "review",
+              "sensitivity": "local_private"
+            }
+          ]
+        },
+        "expiresAt": "2026-07-22T00:00:00Z",
+        "revocationSummary": "No valid one-time permission is created until approval. A granted permission is consumed only by one exact matching action or expires.",
+        "missingFields": [],
+        "evidenceRefs": [
+          {
+            "id": "proposal:review-permission-1",
+            "label": "Proposal record",
+            "source": "review",
+            "sensitivity": "local_private"
+          }
+        ]
+      },
+      "evidenceRefs": [
+        {
+          "id": "proposal:review-permission-1",
+          "label": "Proposal record",
+          "source": "review",
+          "sensitivity": "local_private"
+        }
+      ]
+    },
+    "allowedActions": [
+      {
+        "id": "review-permission-1:approve",
+        "label": "Approve",
+        "kind": "approve",
+        "effect": "decision_only",
+        "enabled": true,
+        "requiresConfirmation": true,
+        "targetReviewItemId": "review-permission-1",
+        "expectedMaterializationStatusAfterDispatch": "unknown",
+        "completionProofAfterDispatch": false
+      },
+      {
+        "id": "review-permission-1:reject",
+        "label": "Reject",
+        "kind": "reject",
+        "effect": "decision_only",
+        "enabled": true,
+        "requiresConfirmation": false,
+        "targetReviewItemId": "review-permission-1",
+        "completionProofAfterDispatch": false
+      },
+      {
+        "id": "review-permission-1:later",
+        "label": "Later",
+        "kind": "later",
+        "effect": "decision_only",
+        "enabled": true,
+        "requiresConfirmation": false,
+        "targetReviewItemId": "review-permission-1",
+        "completionProofAfterDispatch": false
+      },
+      {
+        "id": "review-permission-1:edit",
+        "label": "Edit",
+        "kind": "edit",
+        "effect": "decision_only",
+        "enabled": true,
+        "requiresConfirmation": false,
+        "targetReviewItemId": "review-permission-1",
+        "completionProofAfterDispatch": false
+      },
+      {
+        "id": "review-permission-1:view_evidence",
+        "label": "View evidence",
+        "kind": "view_evidence",
+        "effect": "evidence_only",
+        "enabled": true,
+        "requiresConfirmation": false,
+        "targetReviewItemId": "review-permission-1",
+        "completionProofAfterDispatch": false
+      }
+    ],
+    "risk": "medium",
+    "expiresAt": "2026-07-22T00:00:00Z",
+    "evidenceRefs": [
+      {
+        "id": "proposal:review-permission-1",
+        "label": "Proposal record",
+        "source": "review",
+        "sensitivity": "local_private"
+      }
+    ],
+    "targetRefs": [
+      {
+        "id": "review-permission-1",
+        "kind": "proposal",
+        "label": "Proposal"
+      },
+      {
+        "id": "tool_permission.builtin.file.read",
+        "kind": "tool_permission",
+        "label": "Tool permission"
+      }
+    ],
+    "taskResumeRelation": {
+      "taskSessionId": "task-1",
+      "resumeRequiresMaterialization": false,
+      "canRequestResume": false,
+      "resumeActionId": "review-permission-1:resume",
+      "blockedReason": "Approve before requesting task resume."
+    }
+  },
+  "workspaceActivity": {
+    "id": "event-1",
+    "kind": "permission_request",
+    "label": "Permission required",
+    "summary": "permission_request_recorded",
+    "status": "waiting_decision",
+    "evidenceRefs": [
+      {
+        "id": "event-1",
+        "label": "Task activity evidence",
+        "source": "task",
+        "sensitivity": "local_private"
+      }
+    ],
+    "occurredAt": "2026-07-19T00:00:00Z"
+  },
+  "providerBoundary": {
+    "routeType": "unknown",
+    "externalTransmission": "unknown",
+    "providerLabel": "provider unknown",
+    "modelLabel": "model unknown",
+    "privacyLabel": "privacy boundary unknown",
+    "risk": "unknown",
+    "localOnlyRequired": false,
+    "evidenceRefs": []
+  }
+}

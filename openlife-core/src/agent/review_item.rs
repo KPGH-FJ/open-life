@@ -2,6 +2,7 @@ use crate::agent::product_read_model::{
     BackendEntityKind, BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
     ProductRiskLevel, ReviewAction, ReviewActionKind, ReviewItemMaterializationStatus,
 };
+use crate::agent::review_decision_context::{build_review_decision_context, ReviewDecisionContext};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -126,6 +127,7 @@ pub struct ReviewItem {
     pub source: ReviewItemSource,
     pub status: ReviewItemDecisionStatus,
     pub materialization_status: ReviewItemMaterializationStatus,
+    pub decision_context: ReviewDecisionContext,
     pub allowed_actions: Vec<ReviewAction>,
     pub risk: ProductRiskLevel,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +138,46 @@ pub struct ReviewItem {
     pub target_refs: Vec<BackendEntityRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_resume_relation: Option<ReviewItemTaskResumeRelation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewBatchDomain {
+    Memory,
+    LifeModel,
+    ToolPermission,
+    ExternalAction,
+    Other,
+}
+
+impl ReviewBatchDomain {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::LifeModel => "life_model",
+            Self::ToolPermission => "tool_permission",
+            Self::ExternalAction => "external_action",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// A presentation-only grouping of independently authoritative ReviewItems.
+///
+/// A batch has no approve/reject action and cannot authorize effects. Each
+/// child Proposal retains its own decision, dispatch claim and materialization
+/// receipt; this projection only prevents one Main Chat session from appearing
+/// as an unstructured wall of cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewBatch {
+    pub id: String,
+    pub domain: ReviewBatchDomain,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub item_ids: Vec<String>,
+    pub action_required_count: usize,
+    pub highest_risk: ProductRiskLevel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -155,6 +197,8 @@ pub struct ReviewCenterSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewCenterViewModel {
+    #[serde(default)]
+    pub batches: Vec<ReviewBatch>,
     pub items: Vec<ReviewItem>,
     pub summary: ReviewCenterSummary,
 }
@@ -166,6 +210,7 @@ pub struct ReviewCenterBuildInput {
     pub safe_mode_reason: Option<String>,
     pub safe_paths: Vec<String>,
     pub materialization_overrides: BTreeMap<String, ReviewItemMaterializationStatus>,
+    pub terminal_owner_task_session_ids: BTreeMap<String, String>,
 }
 
 pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCenterViewModel {
@@ -192,7 +237,90 @@ pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCe
         items.push(item);
     }
 
-    ReviewCenterViewModel { items, summary }
+    let batches = build_review_batches(&input.proposals, &items, &input);
+    ReviewCenterViewModel {
+        batches,
+        items,
+        summary,
+    }
+}
+
+fn build_review_batches(
+    proposals: &[AgentProposal],
+    items: &[ReviewItem],
+    input: &ReviewCenterBuildInput,
+) -> Vec<ReviewBatch> {
+    let mut groups: BTreeMap<(ReviewBatchDomain, String), ReviewBatch> = BTreeMap::new();
+    for (proposal, item) in proposals.iter().zip(items) {
+        let domain = review_batch_domain(proposal.proposal_type);
+        let session_id = review_batch_session_id(proposal, input);
+        let grouping_owner = session_id
+            .clone()
+            .unwrap_or_else(|| format!("proposal:{}", proposal.id));
+        let (_, owner_digest) = crate::agent::metadata_safe::metadata_safe_text_digest(&format!(
+            "{}:{}",
+            domain.as_str(),
+            grouping_owner
+        ));
+        let key = (domain, grouping_owner);
+        let batch = groups.entry(key).or_insert_with(|| ReviewBatch {
+            id: format!("review_batch:{}:{owner_digest}", domain.as_str()),
+            domain,
+            session_id,
+            item_ids: Vec::new(),
+            action_required_count: 0,
+            highest_risk: item.risk,
+        });
+        batch.item_ids.push(item.id.clone());
+        if item.allowed_actions.iter().any(is_enabled_decision_action) {
+            batch.action_required_count += 1;
+        }
+        if product_risk_rank(item.risk) > product_risk_rank(batch.highest_risk) {
+            batch.highest_risk = item.risk;
+        }
+    }
+    groups.into_values().collect()
+}
+
+fn review_batch_domain(proposal_type: ProposalType) -> ReviewBatchDomain {
+    match proposal_type {
+        ProposalType::MemoryWrite | ProposalType::MemoryArchive => ReviewBatchDomain::Memory,
+        ProposalType::GoalUpdate
+        | ProposalType::StateUpdate
+        | ProposalType::PreferenceUpdate
+        | ProposalType::CapabilityUpdate
+        | ProposalType::ModelPolicyChange
+        | ProposalType::LifeModelUpdate => ReviewBatchDomain::LifeModel,
+        ProposalType::ToolPermission | ProposalType::PluginPermission => {
+            ReviewBatchDomain::ToolPermission
+        }
+        ProposalType::ScheduledTask
+        | ProposalType::ExternalWriteAction
+        | ProposalType::DataExport
+        | ProposalType::ScheduleCheckin => ReviewBatchDomain::ExternalAction,
+        ProposalType::Unsupported => ReviewBatchDomain::Other,
+    }
+}
+
+fn review_batch_session_id(
+    proposal: &AgentProposal,
+    input: &ReviewCenterBuildInput,
+) -> Option<String> {
+    input
+        .terminal_owner_task_session_ids
+        .get(&proposal.id)
+        .cloned()
+}
+
+fn product_risk_rank(risk: ProductRiskLevel) -> u8 {
+    match risk {
+        ProductRiskLevel::None => 0,
+        ProductRiskLevel::Low => 1,
+        ProductRiskLevel::Medium => 2,
+        ProductRiskLevel::High => 3,
+        ProductRiskLevel::Critical => 4,
+        ProductRiskLevel::Unknown => 5,
+    }
 }
 
 pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> ReviewItem {
@@ -200,13 +328,16 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
     let status = ReviewItemDecisionStatus::from(proposal.status);
     let materialization_status = materialization_status_for(proposal, input);
     let evidence_refs = evidence_refs_for(proposal);
+    let decision_context = build_review_decision_context(proposal, &evidence_refs);
     let target_refs = target_refs_for(proposal);
-    let task_resume_relation = task_resume_relation_for(proposal, status, materialization_status);
+    let task_resume_relation =
+        task_resume_relation_for(proposal, status, materialization_status, input);
     let allowed_actions = allowed_actions_for(
         proposal,
         &item_id,
         status,
         materialization_status,
+        &decision_context,
         task_resume_relation.as_ref(),
         input,
     );
@@ -223,6 +354,7 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
         },
         status,
         materialization_status,
+        decision_context,
         allowed_actions,
         risk: risk_for(proposal.risk_level),
         expires_at: proposal.expires_at,
@@ -237,11 +369,12 @@ fn allowed_actions_for(
     item_id: &str,
     status: ReviewItemDecisionStatus,
     materialization_status: ReviewItemMaterializationStatus,
+    decision_context: &ReviewDecisionContext,
     task_resume_relation: Option<&ReviewItemTaskResumeRelation>,
     input: &ReviewCenterBuildInput,
 ) -> Vec<ReviewAction> {
     let mut actions = Vec::new();
-    let approve_blocker = approve_blocker(proposal, input);
+    let approve_blocker = approve_blocker(proposal, decision_context, input);
     actions.push(
         action(item_id, "approve", "Approve", ReviewActionKind::Approve)
             .with_expected_materialization_status(ReviewItemMaterializationStatus::Unknown)
@@ -388,7 +521,11 @@ fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
         && proposal.affected_path == crate::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
 }
 
-fn approve_blocker(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> Option<String> {
+fn approve_blocker(
+    proposal: &AgentProposal,
+    decision_context: &ReviewDecisionContext,
+    input: &ReviewCenterBuildInput,
+) -> Option<String> {
     if input.safe_mode_active {
         return Some(
             input
@@ -403,6 +540,17 @@ fn approve_blocker(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> 
     }
     if is_unsupported_type(proposal.proposal_type) {
         return Some("This review item type has no backend apply pathway yet.".into());
+    }
+    if proposal.proposal_type == ProposalType::ToolPermission
+        && !decision_context
+            .permission
+            .as_ref()
+            .is_some_and(|permission| permission.is_ready())
+    {
+        return Some(
+            "Exact permission scope is incomplete; approval stays disabled until the backend can explain the action, target, duration, and transmission boundary."
+                .into(),
+        );
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
         && !is_path_in_safe_paths(external_write_path(proposal), &input.safe_paths)
@@ -543,14 +691,11 @@ fn task_resume_relation_for(
     proposal: &AgentProposal,
     status: ReviewItemDecisionStatus,
     materialization_status: ReviewItemMaterializationStatus,
+    input: &ReviewCenterBuildInput,
 ) -> Option<ReviewItemTaskResumeRelation> {
-    if !matches!(proposal.source, ProposalSource::ChatConversation) {
-        return None;
-    }
-    let task_session_id = proposal
-        .source_detail
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())?
+    let task_session_id = input
+        .terminal_owner_task_session_ids
+        .get(&proposal.id)?
         .clone();
     let resume_requires_materialization = resume_requires_materialization(proposal.proposal_type);
     let materialization_allows_resume = !resume_requires_materialization
@@ -641,7 +786,18 @@ fn increment(map: &mut BTreeMap<String, usize>, key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{ProviderPrivacyBoundarySummary, WorkspaceActivityItem};
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Phase4AContractGolden {
+        schema_version: String,
+        review_item: ReviewItem,
+        workspace_activity: WorkspaceActivityItem,
+        provider_boundary: ProviderPrivacyBoundarySummary,
+    }
 
     fn proposal(proposal_type: ProposalType) -> AgentProposal {
         AgentProposal::new(
@@ -655,11 +811,36 @@ mod tests {
         )
     }
 
-    fn find_action<'a>(item: &'a ReviewItem, kind: ReviewActionKind) -> &'a ReviewAction {
+    fn find_action(item: &ReviewItem, kind: ReviewActionKind) -> &ReviewAction {
         item.allowed_actions
             .iter()
             .find(|action| action.kind == kind)
             .expect("action exists")
+    }
+
+    #[test]
+    fn phase4a_contract_golden_round_trips_and_preserves_action_invariants() {
+        let raw = include_str!("../../../frontend/src/test/fixtures/phase4a-contract-golden.json");
+        let parsed: serde_json::Value = serde_json::from_str(raw).expect("parse golden JSON");
+        let golden: Phase4AContractGolden =
+            serde_json::from_value(parsed.clone()).expect("deserialize Rust contract");
+
+        assert_eq!(golden.schema_version, "openlife.phase4a-contract.v1");
+        assert!(golden
+            .review_item
+            .allowed_actions
+            .iter()
+            .all(|action| action.validate().is_ok()));
+        assert!(golden
+            .review_item
+            .decision_context
+            .permission
+            .as_ref()
+            .is_some_and(|permission| permission.is_ready()));
+        assert_eq!(
+            serde_json::to_value(golden).expect("serialize Rust contract"),
+            parsed
+        );
     }
 
     #[test]
@@ -687,6 +868,30 @@ mod tests {
         assert!(!edit.enabled);
         assert!(reject.enabled);
         assert_eq!(model.summary.blocked_action_count, 2);
+    }
+
+    #[test]
+    fn review_item_incomplete_tool_permission_disables_approve_but_keeps_reject_available() {
+        let proposal = proposal(ProposalType::ToolPermission);
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+        let item = &model.items[0];
+        let approve = find_action(item, ReviewActionKind::Approve);
+
+        assert!(!approve.enabled);
+        assert!(approve
+            .disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Exact permission scope is incomplete")));
+        assert!(find_action(item, ReviewActionKind::Reject).enabled);
+        assert!(!item
+            .decision_context
+            .permission
+            .as_ref()
+            .expect("permission context")
+            .is_ready());
     }
 
     #[test]
@@ -771,9 +976,14 @@ mod tests {
         proposal.source = ProposalSource::ChatConversation;
         proposal.source_detail = Some("task-session-1".into());
         proposal.status = ProposalStatus::Accepted;
+        let proposal_id = proposal.id.clone();
 
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![proposal],
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id,
+                "task-session-1".into(),
+            )]),
             ..Default::default()
         });
 
@@ -811,6 +1021,7 @@ mod tests {
         proposal.source = ProposalSource::ChatConversation;
         proposal.source_detail = Some("task-session-1".into());
         proposal.status = ProposalStatus::Accepted;
+        let proposal_id = proposal.id.clone();
         let mut overrides = BTreeMap::new();
         overrides.insert(
             proposal.id.clone(),
@@ -820,6 +1031,10 @@ mod tests {
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![proposal],
             materialization_overrides: overrides,
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id,
+                "task-session-1".into(),
+            )]),
             ..Default::default()
         });
 
@@ -847,9 +1062,14 @@ mod tests {
         proposal.source = ProposalSource::ChatConversation;
         proposal.source_detail = Some("task-session-1".into());
         proposal.status = ProposalStatus::Accepted;
+        let proposal_id = proposal.id.clone();
 
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![proposal],
+            terminal_owner_task_session_ids: BTreeMap::from([(
+                proposal_id,
+                "task-session-1".into(),
+            )]),
             ..Default::default()
         });
 
@@ -866,6 +1086,91 @@ mod tests {
         assert_eq!(
             item.materialization_status,
             ReviewItemMaterializationStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn review_batches_group_same_session_by_domain_without_batch_authorization() {
+        let mut memory_one = proposal(ProposalType::MemoryWrite);
+        memory_one.source = ProposalSource::MemoryGovernance;
+        memory_one.source_detail =
+            Some("main_chat_agent_task_session:task-1;candidate:first".into());
+        memory_one.risk_level = RiskLevel::Medium;
+        let mut memory_two = proposal(ProposalType::MemoryWrite);
+        memory_two.source = ProposalSource::MemoryGovernance;
+        memory_two.source_detail =
+            Some("main_chat_agent_task_session:task-1;candidate:second".into());
+        memory_two.risk_level = RiskLevel::High;
+        let mut life_model = proposal(ProposalType::LifeModelUpdate);
+        life_model.source = ProposalSource::MemoryGovernance;
+        life_model.after = json!({ "originatingTaskSessionId": "task-1" });
+
+        let memory_ids = vec![memory_one.id.clone(), memory_two.id.clone()];
+        let terminal_owner_task_session_ids = [
+            memory_one.id.clone(),
+            memory_two.id.clone(),
+            life_model.id.clone(),
+        ]
+        .into_iter()
+        .map(|proposal_id| (proposal_id, "task-1".into()))
+        .collect();
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![memory_one, memory_two, life_model],
+            terminal_owner_task_session_ids,
+            ..Default::default()
+        });
+
+        assert_eq!(model.items.len(), 3);
+        assert_eq!(model.batches.len(), 2);
+        let memory_batch = model
+            .batches
+            .iter()
+            .find(|batch| batch.domain == ReviewBatchDomain::Memory)
+            .expect("Memory batch");
+        assert_eq!(memory_batch.session_id.as_deref(), Some("task-1"));
+        assert_eq!(memory_batch.item_ids, memory_ids);
+        assert_eq!(memory_batch.action_required_count, 2);
+        assert_eq!(memory_batch.highest_risk, ProductRiskLevel::High);
+        assert!(memory_batch.id.starts_with("review_batch:memory:sha256:"));
+        assert!(model.items[..2].iter().all(|item| {
+            item.task_resume_relation
+                .as_ref()
+                .is_some_and(|relation| relation.task_session_id == "task-1")
+        }));
+        assert!(
+            serde_json::to_value(memory_batch)
+                .unwrap()
+                .get("allowedActions")
+                .is_none(),
+            "ReviewBatch must not become a second authorization surface"
+        );
+    }
+
+    #[test]
+    fn forged_source_detail_and_payload_cannot_create_task_relation_or_batch_owner() {
+        let mut proposal = proposal(ProposalType::MemoryWrite);
+        proposal.source = ProposalSource::ChatConversation;
+        proposal.source_detail = Some("forged-task".into());
+        proposal.after = json!({
+            "sourceTaskSessionId": "forged-task",
+            "taskSessionId": "forged-task",
+            "session_id": "forged-task"
+        });
+        proposal.status = ProposalStatus::Accepted;
+
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+
+        assert!(
+            model.items[0].task_resume_relation.is_none(),
+            "descriptive Proposal fields cannot mint a task resume authority"
+        );
+        assert_eq!(model.batches.len(), 1);
+        assert!(
+            model.batches[0].session_id.is_none(),
+            "descriptive Proposal fields cannot mint a ReviewBatch task owner"
         );
     }
 }

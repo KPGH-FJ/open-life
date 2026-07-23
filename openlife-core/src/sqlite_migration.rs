@@ -22,9 +22,15 @@ struct DatabaseFileIdentity {
     inode: u64,
     #[cfg(unix)]
     hard_link_count: u64,
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(windows)]
+    hard_link_count: u32,
+    #[cfg(not(any(unix, windows)))]
     created: Option<std::time::SystemTime>,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     length: u64,
 }
 
@@ -37,13 +43,20 @@ impl DatabaseFileIdentity {
                 self.device, self.inode, self.hard_link_count
             )
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            format!(
+                "windows:{}:{}:{}",
+                self.volume_serial_number, self.file_index, self.hard_link_count
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             format!("portable:{:?}:{}", self.created, self.length)
         }
     }
 
-    fn from_metadata(metadata: &std::fs::Metadata, path: &Path, component: &str) -> Result<Self> {
+    fn validate_metadata(metadata: &std::fs::Metadata, path: &Path, component: &str) -> Result<()> {
         if !metadata.is_file() {
             anyhow::bail!(
                 "{component} canonical SQLite database slot is not a regular file: {}",
@@ -60,13 +73,23 @@ impl DatabaseFileIdentity {
                     path.display()
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn from_metadata(metadata: &std::fs::Metadata, path: &Path, component: &str) -> Result<Self> {
+        Self::validate_metadata(metadata, path, component)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
             Ok(Self {
                 device: metadata.dev(),
                 inode: metadata.ino(),
-                hard_link_count,
+                hard_link_count: metadata.nlink(),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Self {
                 created: metadata.created().ok(),
@@ -76,13 +99,27 @@ impl DatabaseFileIdentity {
     }
 
     fn from_path(path: &Path, component: &str) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let file = File::open(path).with_context(|| {
+                format!(
+                    "open {component} canonical SQLite identity at {}",
+                    path.display()
+                )
+            })?;
+            return Self::from_file(&file, path, component);
+        }
+        #[cfg(not(windows))]
         let metadata = std::fs::metadata(path).with_context(|| {
             format!(
                 "read {component} canonical SQLite database identity at {}",
                 path.display()
             )
         })?;
-        Self::from_metadata(&metadata, path, component)
+        #[cfg(not(windows))]
+        {
+            Self::from_metadata(&metadata, path, component)
+        }
     }
 
     fn from_path_no_follow(path: &Path, component: &str) -> Result<Self> {
@@ -95,7 +132,20 @@ impl DatabaseFileIdentity {
         if metadata.file_type().is_symlink() {
             anyhow::bail!("{component}_symlink_rejected:{}", path.display());
         }
-        Self::from_metadata(&metadata, path, component)
+        #[cfg(windows)]
+        {
+            let file = File::open(path).with_context(|| {
+                format!(
+                    "open {component} no-follow SQLite identity at {}",
+                    path.display()
+                )
+            })?;
+            Self::from_file(&file, path, component)
+        }
+        #[cfg(not(windows))]
+        {
+            Self::from_metadata(&metadata, path, component)
+        }
     }
 
     fn from_file(file: &File, path: &Path, component: &str) -> Result<Self> {
@@ -105,7 +155,52 @@ impl DatabaseFileIdentity {
                 path.display()
             )
         })?;
-        Self::from_metadata(&metadata, path, component)
+        Self::validate_metadata(&metadata, path, component)?;
+        #[cfg(windows)]
+        {
+            use std::mem::MaybeUninit;
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            };
+
+            let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+            // SAFETY: the handle remains owned and open for this call, and the
+            // OS initializes the full output structure when it returns success.
+            let succeeded = unsafe {
+                GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+            };
+            if succeeded == 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "read {component} stable Windows file identity at {}",
+                        path.display()
+                    )
+                });
+            }
+            // SAFETY: a successful GetFileInformationByHandle call initialized
+            // the output structure above.
+            let information = unsafe { information.assume_init() };
+            if information.nNumberOfLinks != 1 {
+                anyhow::bail!(
+                    "{component}_database_link_count_invalid:{}:{}",
+                    information.nNumberOfLinks,
+                    path.display()
+                );
+            }
+            let file_index = (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow);
+            Ok(Self {
+                volume_serial_number: information.dwVolumeSerialNumber,
+                file_index,
+                hard_link_count: information.nNumberOfLinks,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Self::from_metadata(&metadata, path, component)
+        }
     }
 }
 
@@ -285,7 +380,7 @@ impl SqliteSlotOwnerLease {
                         canonical_slot.display()
                     );
                 }
-                DatabaseFileIdentity::from_metadata(&metadata, canonical_slot, component)?;
+                DatabaseFileIdentity::validate_metadata(&metadata, canonical_slot, component)?;
                 true
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -891,6 +986,24 @@ mod tests {
         assert!(conn
             .execute("CREATE TABLE canonical_facts (id INTEGER)", [])
             .is_err());
+    }
+
+    #[test]
+    fn owner_lock_envelope_write_preserves_lease_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let slot = directory.path().join("canonical.sqlite");
+        let canonical_slot = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("canonical.sqlite");
+        let lease = SqliteSlotOwnerLease::acquire(&canonical_slot, "lease_envelope_test").unwrap();
+
+        let envelope = b"authenticated-owner-envelope";
+        lease.write_owner_lock_envelope(envelope, 1024).unwrap();
+        lease.validate_database_identity().unwrap();
+        assert_eq!(lease.read_owner_lock_envelope(1024).unwrap(), envelope);
+        assert!(slot.exists());
     }
 
     #[test]

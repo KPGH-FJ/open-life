@@ -1,15 +1,13 @@
 #[cfg(all(feature = "dev-extensions", not(debug_assertions)))]
 compile_error!("dev-extensions are forbidden in non-debug OpenLife builds");
 
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
-use crate::life_model_materializer_guard::LifeModelMaterializerCallerContext;
-
 pub mod a2a_server;
 pub mod a2a_sidecar;
+pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 pub mod commands;
 pub(crate) mod danger_action_confirmation;
@@ -60,7 +58,6 @@ pub(crate) mod main_chat_task_controls;
 pub(crate) mod main_chat_turn_pipeline;
 #[allow(dead_code)]
 pub mod main_chat_turn_runtime;
-pub(crate) mod mcp_audit_read_gateway;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
@@ -68,11 +65,14 @@ pub(crate) mod product_agent_dto;
 pub(crate) mod provider_network_consent;
 pub(crate) mod provider_validation;
 pub(crate) mod read_models;
+pub(crate) mod resource_commands;
 pub mod runtime_build_info;
 pub mod scheduler_runner;
 pub(crate) mod secret_store;
 pub mod state;
+pub(crate) mod state_projection;
 pub mod storage;
+pub(crate) mod terminal_owner_write_gateway;
 pub(crate) mod tool_gateway_resources;
 pub(crate) mod workspace_file_resolver;
 
@@ -81,9 +81,6 @@ mod main_chat_acceptance_test_support;
 
 #[cfg(test)]
 mod main_chat_live_provider_tests;
-
-#[cfg(test)]
-mod mcp_audit_read_contract_test_support;
 
 #[cfg(test)]
 mod main_chat_command_surface_tests;
@@ -121,13 +118,10 @@ mod backend_remediation_phase1_tests;
 mod backend_remediation_phase2_tests;
 
 #[cfg(test)]
-mod backend_remediation_d064_tests;
+mod d055_terminal_owner_graph_tests;
 
 #[cfg(test)]
-mod backend_remediation_d063_tests;
-
-#[cfg(test)]
-mod backend_remediation_d068_tests;
+mod d055_terminal_owner_graph_compile_red;
 
 #[cfg(test)]
 mod backend_remediation_frozen_scenario_tests;
@@ -177,10 +171,9 @@ use commands::diagnostics::{
     check_ollama_status, get_policy_router_status, get_runtime_build_info, get_scheduler_config,
     get_system_diagnostics, set_scheduler_config,
 };
-use commands::execution::{
-    check_tool_permission, disable_plugin, enable_plugin, list_plugins, list_tool_permissions,
-    reload_plugins, revoke_tool_permission,
-};
+use commands::execution::{check_tool_permission, list_tool_permissions, revoke_tool_permission};
+#[cfg(feature = "dev-extensions")]
+use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
 use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
@@ -190,12 +183,12 @@ pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{get_life_model, get_life_model_current_view, save_life_model};
-use commands::mcp::{
-    list_mcp_audit_logs, list_mcp_servers, list_mcp_templates, list_mcp_tools, list_tool_manifests,
-    recommend_mcp_manifests,
-};
+use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
-use commands::mcp::{register_mcp_server, unregister_mcp_server};
+use commands::mcp::{
+    clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
+    list_mcp_tools, recommend_mcp_manifests, register_mcp_server, unregister_mcp_server,
+};
 use commands::memory::{
     archive_low_access_memories, cancel_memory_index_rebuild, count_memory_chunks,
     create_knowledge_note, get_hot_cache, get_memory_index_rebuild_progress, get_memory_tier_stats,
@@ -211,14 +204,14 @@ use commands::proposal::{
 };
 use commands::router::get_model_router_status;
 use commands::settings::{
-    cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config,
-    get_danger_action_preflight, get_last_model_error, get_privacy_policy, import_all_data,
-    rotate_mcp_audit_key, save_config, set_privacy_policy, test_llm_connection,
+    abandon_governed_data_import_recovery, export_all_data, get_config,
+    get_danger_action_preflight, get_governed_data_import_status, get_last_model_error,
+    get_privacy_policy, import_all_data, recover_required_credential_access, save_config,
+    set_privacy_policy, test_llm_connection,
 };
-use commands::state::{
-    add_daily_goal, delete_daily_goal, get_daily_goals, get_state_alerts, get_state_history,
-    record_state, toggle_daily_goal, update_daily_goal,
-};
+#[cfg(feature = "dev-extensions")]
+use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
+use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
@@ -438,20 +431,6 @@ pub struct SystemDiagnostics {
     pub runtime_route_evidence: main_chat_runtime_facts::RuntimeRouteEvidence,
 }
 
-pub(crate) async fn persist_life_model(
-    state: &Arc<AppState>,
-    life_model: LifeModel,
-    create_daily_snapshot: bool,
-    caller_context: LifeModelMaterializerCallerContext,
-) -> Result<LifeModel, String> {
-    life_model_write_gateway::persist_life_model_with_gateway(
-        state,
-        life_model,
-        create_daily_snapshot,
-        caller_context,
-    )
-    .await
-}
 #[tauri::command]
 async fn send_message(
     operation_id: String,
@@ -538,6 +517,54 @@ async fn start_stream_message<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+async fn pick_and_import_resources<R: tauri::Runtime>(
+    import_operation_id: String,
+    turn_operation_id: String,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<resource_commands::ResourceImportSelectionResult, String> {
+    resource_commands::pick_and_import_resources(
+        import_operation_id,
+        turn_operation_id,
+        app_handle,
+        state.inner(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_resource_import(
+    operation_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    resource_commands::cancel_resource_import(&operation_id, state.inner())
+}
+
+#[tauri::command]
+fn get_resource_import_status(
+    operation_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<resource_commands::ResourceImportStatus, String> {
+    resource_commands::get_resource_import_status(&operation_id, state.inner())
+}
+
+#[tauri::command]
+async fn detach_resource_from_turn(
+    operation_id: String,
+    turn_operation_id: String,
+    resource_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<openlife_core::resource::ResourceDetachReceipt, String> {
+    resource_commands::detach_resource_from_turn(
+        operation_id,
+        turn_operation_id,
+        resource_id,
+        state.inner(),
+    )
+    .await
+}
+
+#[tauri::command]
 #[cfg(feature = "dev-extensions")]
 async fn execute_tool_call(
     name: String,
@@ -568,7 +595,10 @@ async fn execute_tool_call(
         &resources.shared.privacy_engine,
         &safe_paths,
     );
-    let ctx = ctx.with_agent_run_store(&resources.agent_run_store);
+    let ctx = ctx
+        .with_tool_audit_persistence_observer(resources.shared.persistence_coordinator.as_ref())
+        .with_durable_store_failure_observer(resources.shared.persistence_coordinator.as_ref())
+        .with_agent_run_store(&resources.agent_run_store);
 
     let request = openlife_core::agent::AgentActionRequest {
         action_type: "mcp_tool".to_string(),
@@ -645,6 +675,7 @@ async fn execute_tool_call(
 
     Ok(tool_result)
 }
+#[cfg(feature = "dev-extensions")]
 #[tauri::command]
 async fn inspect_mcp_call(
     name: String,
@@ -653,6 +684,56 @@ async fn inspect_mcp_call(
 ) -> Result<openlife_core::mcp::McpArgumentInspection, String> {
     let reg = state.mcp_registry.lock().await;
     Ok(reg.inspect_call_arguments(&name, &arguments))
+}
+
+#[cfg(feature = "dev-extensions")]
+fn start_dev_extension_background_workers(app_state: Arc<AppState>) {
+    if app_state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .is_ok()
+    {
+        let maintenance_state = Arc::clone(&app_state);
+        tauri::async_runtime::spawn(async move {
+            match memory_gateway::run_memory_tier_maintenance_with_state(&maintenance_state).await {
+                Ok((upgraded, downgraded)) => {
+                    log::info!(
+                        "[tier] development maintenance done: upgraded={} downgraded={}",
+                        upgraded,
+                        downgraded
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[tier] development maintenance skipped or failed: {}",
+                        error
+                    );
+                }
+            }
+            let interval = std::time::Duration::from_secs(600);
+            loop {
+                tokio::time::sleep(interval).await;
+                match memory_gateway::run_memory_tier_maintenance_with_state(&maintenance_state)
+                    .await
+                {
+                    Ok((upgraded, downgraded)) => {
+                        log::info!(
+                            "[tier] periodic development maintenance done: upgraded={} downgraded={}",
+                            upgraded,
+                            downgraded
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[tier] periodic development maintenance skipped or failed: {}",
+                            error
+                        );
+                    }
+                }
+            }
+        });
+    }
+    scheduler_runner::start_scheduler_runner(app_state);
 }
 
 #[cfg(debug_assertions)]
@@ -757,6 +838,19 @@ pub fn run() {
                         .degrade_globally("startup_canonical_outbox_reconciliation_failed");
                 }
             }
+            if app_state_for_setup
+                .persistence_coordinator
+                .startup_reconciliation_mutations_safe()
+            {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    bootstrap::reconcile_startup_terminal_owner_successors(&app_state_for_setup),
+                ) {
+                    log::error!("[setup] terminal-owner reconciliation degraded: {error}");
+                    app_state_for_setup
+                        .persistence_coordinator
+                        .degrade_globally("startup_terminal_owner_reconciliation_failed");
+                }
+            }
             let proposal_backlog = if app_state_for_setup
                 .persistence_coordinator
                 .startup_reconciliation_mutations_safe()
@@ -766,14 +860,10 @@ pub fn run() {
                 ) {
                     Ok(backlog) => backlog,
                     Err(error) => {
-                        log::error!(
-                            "[setup] Proposal projection reconciliation degraded: {error}"
-                        );
+                        log::error!("[setup] Proposal projection reconciliation degraded: {error}");
                         app_state_for_setup
                             .persistence_coordinator
-                            .degrade_globally(
-                                "startup_proposal_projection_reconciliation_failed",
-                            );
+                            .degrade_globally("startup_proposal_projection_reconciliation_failed");
                         false
                     }
                 }
@@ -784,6 +874,23 @@ pub fn run() {
             // startup reconciliation above has either succeeded or degraded
             // the coordinator. Seal is the one-way enable point.
             app_state_for_setup.persistence_coordinator.seal();
+            if app_state_for_setup
+                .persistence_coordinator
+                .require_effects_allowed()
+                .is_ok()
+            {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    state_projection::reconcile_state_store_lifemodel_projection(
+                        &app_state_for_setup,
+                    ),
+                ) {
+                    // StateStore remains the canonical product read owner. A
+                    // failed YAML compatibility projection is explicitly
+                    // degraded and retryable; it must not trigger a temp-store
+                    // fallback or misreport the canonical effect as failed.
+                    log::warn!("[setup] StateStore compatibility projection degraded: {error}");
+                }
+            }
             if app_state_for_setup
                 .persistence_coordinator
                 .require_effects_allowed()
@@ -829,41 +936,8 @@ pub fn run() {
                     }
                 }
             }
-            if app_state_for_setup
-                .persistence_coordinator
-                .require_effects_allowed()
-                .is_ok()
-            {
-                let vs = app_state_for_setup.vector_store.clone();
-                tauri::async_runtime::spawn(async move {
-                {
-                    let store = vs.lock().await;
-                    match store.run_tier_maintenance() {
-                        Ok((upgraded, downgraded)) => {
-                            log::info!("[tier] initial maintenance done: upgraded={} downgraded={} - lib.rs:2255", upgraded, downgraded);
-                        }
-                        Err(e) => {
-                            log::warn!("[tier] initial maintenance failed: {} - lib.rs:2258", e);
-                        }
-                    }
-                }
-                let interval = std::time::Duration::from_secs(600);
-                loop {
-                    tokio::time::sleep(interval).await;
-                    let store = vs.lock().await;
-                    match store.run_tier_maintenance() {
-                        Ok((upgraded, downgraded)) => {
-                            log::info!("[tier] periodic maintenance done: upgraded={} downgraded={} - lib.rs:2268", upgraded, downgraded);
-                        }
-                        Err(e) => {
-                            log::warn!("[tier] periodic maintenance failed: {} - lib.rs:2271", e);
-                        }
-                    }
-                }
-                });
-            }
-            // Start scheduled task runner
-            scheduler_runner::start_scheduler_runner(app_state_for_setup.clone());
+            #[cfg(feature = "dev-extensions")]
+            start_dev_extension_background_workers(app_state_for_setup.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -879,6 +953,7 @@ pub fn run() {
             save_life_model,
             get_config,
             save_config,
+            recover_required_credential_access,
             get_agent_run,
             list_agent_runs,
             list_provider_transmission_history,
@@ -915,6 +990,10 @@ pub fn run() {
             rebuild_memory_materialized_view,
             send_message,
             start_stream_message,
+            pick_and_import_resources,
+            cancel_resource_import,
+            get_resource_import_status,
+            detach_resource_from_turn,
             list_main_chat_agent_events,
             get_main_chat_agent_state_snapshot,
             list_main_chat_agent_tasks,
@@ -928,17 +1007,25 @@ pub fn run() {
             save_chat_message,
             #[cfg(feature = "dev-extensions")]
             execute_tool_call,
+            #[cfg(feature = "dev-extensions")]
             inspect_mcp_call,
             #[cfg(feature = "dev-extensions")]
             register_mcp_server,
             #[cfg(feature = "dev-extensions")]
             unregister_mcp_server,
+            #[cfg(feature = "dev-extensions")]
             list_mcp_servers,
+            #[cfg(feature = "dev-extensions")]
             list_mcp_tools,
+            #[cfg(feature = "dev-extensions")]
             list_mcp_templates,
+            #[cfg(feature = "dev-extensions")]
             recommend_mcp_manifests,
             list_tool_manifests,
+            #[cfg(feature = "dev-extensions")]
             list_mcp_audit_logs,
+            #[cfg(feature = "dev-extensions")]
+            clear_mcp_audit_logs,
             get_system_diagnostics,
             get_runtime_build_info,
             check_ollama_status,
@@ -988,20 +1075,17 @@ pub fn run() {
             export_all_data,
             get_danger_action_preflight,
             import_all_data,
+            abandon_governed_data_import_recovery,
+            get_governed_data_import_status,
             test_llm_connection,
             get_last_model_error,
             list_chat_sessions,
             create_chat_session,
             rename_chat_session,
             delete_chat_session,
-            record_state,
             get_state_history,
             get_state_alerts,
             get_daily_goals,
-            add_daily_goal,
-            update_daily_goal,
-            delete_daily_goal,
-            toggle_daily_goal,
             run_micro_evolution,
             generate_calibration_report,
             generate_micro_evolution_changes,
@@ -1017,8 +1101,11 @@ pub fn run() {
             rebuild_memory_index,
             get_memory_index_rebuild_progress,
             cancel_memory_index_rebuild,
+            #[cfg(feature = "dev-extensions")]
             export_mcp_audit_logs,
+            #[cfg(feature = "dev-extensions")]
             cleanup_mcp_audit_logs,
+            #[cfg(feature = "dev-extensions")]
             rotate_mcp_audit_key,
             get_privacy_policy,
             set_privacy_policy,
@@ -1029,9 +1116,13 @@ pub fn run() {
             list_tool_permissions,
             revoke_tool_permission,
             check_tool_permission,
+            #[cfg(feature = "dev-extensions")]
             list_plugins,
+            #[cfg(feature = "dev-extensions")]
             reload_plugins,
+            #[cfg(feature = "dev-extensions")]
             enable_plugin,
+            #[cfg(feature = "dev-extensions")]
             disable_plugin,
         ])
         .build(tauri::generate_context!())

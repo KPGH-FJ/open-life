@@ -1,4 +1,9 @@
 use crate::{
+    artifact_materializer::{
+        commit_staged_artifact, confirmed_artifact_receipt, inspect_artifact_filesystem,
+        prepare_artifact_materialization, stage_artifact_bytes, ArtifactFilesystemFailure,
+        ArtifactFilesystemObservation, ArtifactMaterializationReceipt,
+    },
     danger_action_confirmation::{
         require_native_danger_action_confirmation, NativeDangerActionRequest,
     },
@@ -7,17 +12,19 @@ use crate::{
     AppState,
 };
 use openlife_core::agent::{
-    AgentProposal, MaturationProposalOutcome, MemoryLifecycleRecord, MemoryLifecycleScope,
-    MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType,
-    RiskLevel,
+    AgentProposal, ArtifactEffectState, MaturationProposalOutcome, MemoryLifecycleRecord,
+    MemoryLifecycleScope, MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource,
+    ProposalStatus, ProposalType, RiskLevel,
 };
 use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::Write;
 use std::sync::Arc;
 use tauri::State;
+
+#[cfg(test)]
+use crate::artifact_materializer::PreparedArtifactMaterialization;
 
 /// Maximum content size for ExternalWriteAction (100 KB)
 const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
@@ -28,6 +35,31 @@ fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
         .persistence_coordinator
         .require_effects_allowed()
         .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Copy)]
+enum ProposalReconciliationAdmission {
+    ProductEffects,
+    StartupInternal,
+}
+
+fn require_proposal_reconciliation_admission(
+    state: &Arc<AppState>,
+    admission: ProposalReconciliationAdmission,
+) -> Result<(), String> {
+    match admission {
+        ProposalReconciliationAdmission::ProductEffects => require_persistence_write(state),
+        ProposalReconciliationAdmission::StartupInternal
+            if state
+                .persistence_coordinator
+                .startup_reconciliation_mutations_safe() =>
+        {
+            Ok(())
+        }
+        ProposalReconciliationAdmission::StartupInternal => {
+            Err("startup_proposal_reconciliation_mutations_unavailable".into())
+        }
+    }
 }
 
 fn runtime_proposal_store_error(state: &Arc<AppState>, error: impl ToString) -> String {
@@ -62,6 +94,10 @@ pub struct AcceptProposalResponse {
     /// already-confirmed effect to the product as fully applied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_persistence: Option<MemoryPersistenceResponse>,
+    /// Present only for a confirmed filesystem materialization. Proposal
+    /// creation and permission wait responses never manufacture this receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_materialization: Option<ArtifactMaterializationReceipt>,
     #[serde(alias = "blocked_action")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_action: Option<Value>,
@@ -194,7 +230,9 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
             | "lifemodel_gateway_stale_conflict"
             | "lifemodel_patch_conflict"
             | "lifemodel_gateway_blocked"
+            | "lifemodel_field_authority_blocked"
             | "lifemodel_patch_batch_validation_failed"
+            | "lifemodel_patch_batch_field_authority_blocked"
             | "lifemodel_gateway_batch_stale_conflict"
             | "lifemodel_patch_batch_conflict"
             | "lifemodel_gateway_batch_blocked"
@@ -212,18 +250,16 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
     )
 }
 
-#[derive(Debug, Clone, Copy)]
-enum LinkedAgentRunReviewOutcome {
-    Materialized,
-    Rejected,
-    WaitingReview,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProposalReconciliationReport {
+    pub artifact_effects_reconciled: usize,
     pub proposal_projections_repaired: usize,
     pub agent_runs_reconciled: usize,
+    pub agent_run_candidates_examined: usize,
+    pub agent_run_cursor_advanced: bool,
+    pub agent_run_cursor_wrapped: bool,
+    pub artifact_backlog_may_remain: bool,
     pub projection_backlog_may_remain: bool,
     pub agent_run_backlog_may_remain: bool,
 }
@@ -231,124 +267,54 @@ pub(crate) struct ProposalReconciliationReport {
 async fn reconcile_agent_runs_for_proposal(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
-    outcome: LinkedAgentRunReviewOutcome,
+) -> Result<usize, String> {
+    reconcile_agent_runs_for_proposal_with_admission(
+        state,
+        &proposal.id,
+        ProposalReconciliationAdmission::ProductEffects,
+    )
+    .await
+}
+
+async fn reconcile_agent_runs_for_proposal_with_admission(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    admission: ProposalReconciliationAdmission,
 ) -> Result<usize, String> {
     let Some(store) = state.agent_run_store.as_ref() else {
         return Err("AgentRun store is unavailable for Proposal reconciliation.".into());
     };
-    let linked_runs = store
-        .lock()
-        .await
-        .list_runs_linked_to_proposal(&proposal.id)
-        .map_err(|error| error.to_string())?;
+    let store = store.lock().await.clone();
+    let linked_runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .list_runs_linked_to_proposal(proposal_id)
+            .map_err(|error| error.to_string()),
+    )?;
     if linked_runs.is_empty() {
         return Ok(0);
     }
 
-    let mut linked_outcomes = std::collections::HashMap::new();
-    {
-        let proposal_store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        for linked_proposal_id in linked_runs
-            .iter()
-            .flat_map(|run| run.generated_proposals.iter())
-        {
-            if linked_outcomes.contains_key(linked_proposal_id) {
-                continue;
-            }
-            let linked_outcome = if linked_proposal_id == &proposal.id {
-                outcome
-            } else {
-                match proposal_store
-                    .get_proposal(linked_proposal_id)
-                    .map_err(|error| error.to_string())?
-                {
-                    Some(linked) => match linked.status {
-                        ProposalStatus::Accepted
-                            if proposal_store
-                                .dispatch_state(linked_proposal_id)
-                                .map_err(|error| error.to_string())?
-                                .as_deref()
-                                == Some("confirmed") =>
-                        {
-                            LinkedAgentRunReviewOutcome::Materialized
-                        }
-                        ProposalStatus::Rejected | ProposalStatus::Expired => {
-                            LinkedAgentRunReviewOutcome::Rejected
-                        }
-                        _ => LinkedAgentRunReviewOutcome::WaitingReview,
-                    },
-                    None => LinkedAgentRunReviewOutcome::WaitingReview,
-                }
-            };
-            linked_outcomes.insert(linked_proposal_id.clone(), linked_outcome);
-        }
-    }
-
-    let store = store.lock().await;
     let mut reconciled = 0_usize;
     for linked_run in linked_runs {
-        let Some(mut run) = store
-            .get_run(&linked_run.id)
-            .map_err(|error| error.to_string())?
-        else {
-            continue;
-        };
-        if run.status != openlife_core::agent::AgentRunStatus::WaitingPermission {
-            continue;
-        }
-        if run.deleted_at.is_some() {
-            continue;
-        }
-        let run_outcomes = run
-            .generated_proposals
-            .iter()
-            .map(|proposal_id| {
-                linked_outcomes
-                    .get(proposal_id)
-                    .copied()
-                    .unwrap_or(LinkedAgentRunReviewOutcome::WaitingReview)
-            })
-            .collect::<Vec<_>>();
-        let run_outcome = if run_outcomes
-            .iter()
-            .any(|item| matches!(item, LinkedAgentRunReviewOutcome::WaitingReview))
-        {
-            LinkedAgentRunReviewOutcome::WaitingReview
-        } else if run_outcomes
-            .iter()
-            .any(|item| matches!(item, LinkedAgentRunReviewOutcome::Rejected))
-        {
-            LinkedAgentRunReviewOutcome::Rejected
-        } else {
-            LinkedAgentRunReviewOutcome::Materialized
-        };
-        match run_outcome {
-            LinkedAgentRunReviewOutcome::Materialized => {
-                run.status = openlife_core::agent::AgentRunStatus::Completed;
-                run.finished_at = Some(chrono::Utc::now());
-                run.output_preview =
-                    Some("All linked Proposal effects materialized through ReviewWorkflow.".into());
-                run.error = None;
+        match admission {
+            ProposalReconciliationAdmission::ProductEffects => {
+                crate::terminal_owner_write_gateway::update_agent_run_after_review_reconciliation(
+                    state,
+                    proposal_id,
+                    &linked_run.id,
+                )
+                .await?;
             }
-            LinkedAgentRunReviewOutcome::Rejected => {
-                run.cancel();
-                run.output_preview = Some(
-                    "Linked Proposal review completed without materializing every effect.".into(),
-                );
-            }
-            LinkedAgentRunReviewOutcome::WaitingReview => {
-                run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
-                run.finished_at = None;
-                run.output_preview =
-                    Some("One or more linked Proposals remain in Review Center.".into());
+            ProposalReconciliationAdmission::StartupInternal => {
+                crate::terminal_owner_write_gateway::update_agent_run_after_startup_review_reconciliation(
+                    state,
+                    proposal_id,
+                    &linked_run.id,
+                )
+                .await?;
             }
         }
-        store.update_run(&run).map_err(|error| error.to_string())?;
         reconciled += 1;
     }
     Ok(reconciled)
@@ -391,12 +357,293 @@ async fn project_confirmed_effect_projection_only(
     }
 }
 
+async fn reconcile_artifact_effects_with_state(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<(usize, bool), String> {
+    let bounded_limit = limit.clamp(1, 200);
+    let records = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .list_artifact_effects_for_reconciliation(bounded_limit)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+    };
+    let backlog_may_remain = records.len() == bounded_limit as usize;
+    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let mut reconciled = 0usize;
+    for record in records {
+        let proposal = {
+            let store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(proposal_store_missing)?
+                .lock()
+                .await;
+            store
+                .get_proposal(&record.proposal_id)
+                .map_err(|error| runtime_proposal_store_error(state, error))?
+        };
+        let Some(proposal) = proposal else {
+            return Err("artifact reconciliation proposal disappeared".into());
+        };
+        if proposal.proposal_type != ProposalType::ExternalWriteAction {
+            persist_artifact_unknown(
+                state,
+                &record.proposal_id,
+                &record.dispatch_claim_id,
+                "artifact_proposal_type_mismatch",
+            )
+            .await?;
+            reconciled += 1;
+            continue;
+        }
+        let Some(path) = proposal.after.get("path").and_then(Value::as_str) else {
+            persist_artifact_unknown(
+                state,
+                &record.proposal_id,
+                &record.dispatch_claim_id,
+                "artifact_recovery_path_missing",
+            )
+            .await?;
+            reconciled += 1;
+            continue;
+        };
+        let content = proposal
+            .after
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let prepared = match prepare_artifact_materialization(
+            &record.proposal_id,
+            &record.dispatch_claim_id,
+            path,
+            content,
+            &safe_paths,
+        ) {
+            Ok(prepared) => prepared,
+            Err(_) => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_preflight_failed",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
+        };
+        if prepared.target_reference_digest != record.target_reference_digest
+            || prepared.content_digest != record.content_digest
+            || prepared.byte_size != record.byte_size
+            || prepared.media_type != record.media_type
+        {
+            persist_artifact_unknown(
+                state,
+                &record.proposal_id,
+                &record.dispatch_claim_id,
+                "artifact_recovery_binding_mismatch",
+            )
+            .await?;
+            reconciled += 1;
+            continue;
+        }
+        let inspection_prepared = prepared.clone();
+        let observation =
+            tokio::task::spawn_blocking(move || inspect_artifact_filesystem(&inspection_prepared))
+                .await
+                .map_err(|_| "artifact_recovery_inspection_worker_failed".to_string())?;
+        match observation {
+            ArtifactFilesystemObservation::Confirmed {
+                observed_content_digest,
+            } => {
+                let store = state
+                    .proposal_store
+                    .as_ref()
+                    .ok_or_else(proposal_store_missing)?
+                    .lock()
+                    .await;
+                if !store
+                    .finish_artifact_confirmed(
+                        &record.proposal_id,
+                        &record.dispatch_claim_id,
+                        &observed_content_digest,
+                    )
+                    .map_err(|error| runtime_proposal_store_error(state, error))?
+                {
+                    return Err("artifact recovery confirmation CAS lost".into());
+                }
+                reconciled += 1;
+            }
+            ArtifactFilesystemObservation::Staged => {
+                let commit_prepared = prepared.clone();
+                let commit_safe_paths = safe_paths.clone();
+                match tokio::task::spawn_blocking(move || {
+                    commit_staged_artifact(&commit_prepared, &commit_safe_paths)
+                })
+                .await
+                {
+                    Ok(Ok(observed_content_digest)) => {
+                        let store = state
+                            .proposal_store
+                            .as_ref()
+                            .ok_or_else(proposal_store_missing)?
+                            .lock()
+                            .await;
+                        if !store
+                            .finish_artifact_confirmed(
+                                &record.proposal_id,
+                                &record.dispatch_claim_id,
+                                &observed_content_digest,
+                            )
+                            .map_err(|error| runtime_proposal_store_error(state, error))?
+                        {
+                            return Err("artifact staged recovery confirmation CAS lost".into());
+                        }
+                    }
+                    Ok(Err(failure)) => {
+                        persist_artifact_unknown(
+                            state,
+                            &record.proposal_id,
+                            &record.dispatch_claim_id,
+                            failure.code(),
+                        )
+                        .await?;
+                    }
+                    Err(_) => {
+                        persist_artifact_unknown(
+                            state,
+                            &record.proposal_id,
+                            &record.dispatch_claim_id,
+                            "artifact_recovery_commit_worker_unknown",
+                        )
+                        .await?;
+                    }
+                }
+                reconciled += 1;
+            }
+            ArtifactFilesystemObservation::NoStagedOrFinalBytes
+                if record.state == ArtifactEffectState::Prepared =>
+            {
+                persist_artifact_failed_before_effect(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_proved_no_effect",
+                )
+                .await?;
+                reconciled += 1;
+            }
+            ArtifactFilesystemObservation::NoStagedOrFinalBytes => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_bytes_missing_after_stage",
+                )
+                .await?;
+            }
+            ArtifactFilesystemObservation::Unknown { reason_code } => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    &reason_code,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok((reconciled, backlog_may_remain))
+}
+
+async fn release_startup_artifact_claims_proven_before_effect(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<(usize, bool), String> {
+    let bounded_limit = limit.clamp(1, 200);
+    let claims = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .list_claimed_external_writes_without_artifact_intent(bounded_limit as usize)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+    };
+    let backlog_may_remain = claims.len() == bounded_limit as usize;
+    let mut released = 0usize;
+    for (proposal_id, claim_id) in claims {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        if store
+            .mark_dispatch_failed_before_effect(
+                &proposal_id,
+                &claim_id,
+                "startup_artifact_claim_without_prepared_intent",
+            )
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+        {
+            released += 1;
+        }
+    }
+    Ok((released, backlog_may_remain))
+}
+
 pub(crate) async fn reconcile_durable_proposal_projections_with_state(
     state: &Arc<AppState>,
     limit: i64,
 ) -> Result<ProposalReconciliationReport, String> {
-    require_persistence_write(state)?;
+    reconcile_durable_proposal_projections_inner(
+        state,
+        limit,
+        ProposalReconciliationAdmission::ProductEffects,
+    )
+    .await
+}
+
+pub(crate) async fn reconcile_startup_durable_proposal_projections_with_state(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<ProposalReconciliationReport, String> {
+    reconcile_durable_proposal_projections_inner(
+        state,
+        limit,
+        ProposalReconciliationAdmission::StartupInternal,
+    )
+    .await
+}
+
+async fn reconcile_durable_proposal_projections_inner(
+    state: &Arc<AppState>,
+    limit: i64,
+    admission: ProposalReconciliationAdmission,
+) -> Result<ProposalReconciliationReport, String> {
+    require_proposal_reconciliation_admission(state, admission)?;
     let bounded_limit = limit.clamp(1, 200);
+    let (orphaned_claims_released, orphaned_claim_backlog_may_remain) =
+        if matches!(admission, ProposalReconciliationAdmission::StartupInternal) {
+            release_startup_artifact_claims_proven_before_effect(state, bounded_limit).await?
+        } else {
+            (0, false)
+        };
+    let (reconciled_artifact_effects, artifact_effect_backlog_may_remain) =
+        reconcile_artifact_effects_with_state(state, bounded_limit).await?;
+    let artifact_effects_reconciled =
+        orphaned_claims_released.saturating_add(reconciled_artifact_effects);
+    let artifact_backlog_may_remain =
+        orphaned_claim_backlog_may_remain || artifact_effect_backlog_may_remain;
     let confirmed_projection_pending = {
         let store = state
             .proposal_store
@@ -410,36 +657,41 @@ pub(crate) async fn reconcile_durable_proposal_projections_with_state(
     };
 
     let mut report = ProposalReconciliationReport {
+        artifact_effects_reconciled,
+        artifact_backlog_may_remain,
         projection_backlog_may_remain: confirmed_projection_pending.len() == bounded_limit as usize,
         ..ProposalReconciliationReport::default()
     };
     for (proposal, claim_id) in confirmed_projection_pending {
         let accepted =
             project_confirmed_effect_projection_only(state, &proposal, &claim_id).await?;
-        report.agent_runs_reconciled += reconcile_agent_runs_for_proposal(
-            state,
-            &accepted,
-            LinkedAgentRunReviewOutcome::Materialized,
-        )
-        .await?;
+        sync_main_chat_task_blockers_after_review_proposal_accept(state, &accepted).await;
+        report.agent_runs_reconciled +=
+            reconcile_agent_runs_for_proposal_with_admission(state, &accepted.id, admission)
+                .await?;
         report.proposal_projections_repaired += 1;
     }
 
     // A process may stop after the Proposal projection commits but before every linked
-    // AgentRun projection is updated. Reconcile only the bounded indexed waiting queue;
-    // never scan all historical runs and never invoke the proposal effect applicator.
-    let waiting_proposal_ids = {
+    // AgentRun projection is updated. Reconcile only the bounded indexed wait/unknown
+    // queue; never scan all historical runs or invoke the effect applicator.
+    let reconciliation_page = {
         let Some(store) = state.agent_run_store.as_ref() else {
             return Err("AgentRun store is unavailable for Proposal reconciliation.".into());
         };
-        store
-            .lock()
-            .await
-            .list_waiting_permission_linked_proposal_ids(bounded_limit)
-            .map_err(|error| error.to_string())?
+        let store = store.lock().await.clone();
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .take_review_reconciliation_page(bounded_limit)
+                .map_err(|error| error.to_string()),
+        )?
     };
-    report.agent_run_backlog_may_remain = waiting_proposal_ids.len() == bounded_limit as usize;
-    for proposal_id in waiting_proposal_ids {
+    report.agent_run_backlog_may_remain = reconciliation_page.backlog_may_remain;
+    report.agent_run_candidates_examined = reconciliation_page.proposal_ids.len();
+    report.agent_run_cursor_advanced = reconciliation_page.cursor_advanced;
+    report.agent_run_cursor_wrapped = reconciliation_page.wrapped;
+    for proposal_id in reconciliation_page.proposal_ids {
         let (proposal, dispatch_state) = {
             let store = state
                 .proposal_store
@@ -455,32 +707,84 @@ pub(crate) async fn reconcile_durable_proposal_projections_with_state(
                 .map_err(|error| error.to_string())?;
             (proposal, dispatch_state)
         };
-        let Some(proposal) = proposal else {
-            continue;
-        };
-        let outcome = match proposal.status {
-            ProposalStatus::Accepted if dispatch_state.as_deref() == Some("confirmed") => {
-                Some(LinkedAgentRunReviewOutcome::Materialized)
+        if let Some(proposal) = proposal.as_ref() {
+            if proposal.status == ProposalStatus::Accepted
+                && dispatch_state.as_deref() == Some("confirmed")
+            {
+                sync_main_chat_task_blockers_after_review_proposal_accept(state, proposal).await;
             }
-            ProposalStatus::Rejected | ProposalStatus::Expired => {
-                Some(LinkedAgentRunReviewOutcome::Rejected)
-            }
-            _ => None,
-        };
-        if let Some(outcome) = outcome {
-            report.agent_runs_reconciled +=
-                reconcile_agent_runs_for_proposal(state, &proposal, outcome).await?;
         }
+        // Every durable dispatch state is projected by the canonical gateway.
+        // Missing Proposal rows and unknown/new states remain unknown; they are
+        // never silently treated as unclaimed or confirmed.
+        report.agent_runs_reconciled +=
+            reconcile_agent_runs_for_proposal_with_admission(state, &proposal_id, admission)
+                .await?;
     }
     Ok(report)
+}
+
+async fn confirmed_artifact_receipt_from_store(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Option<ArtifactMaterializationReceipt>, String> {
+    if proposal.proposal_type != ProposalType::ExternalWriteAction {
+        return Ok(None);
+    }
+    let record = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .artifact_effect(&proposal.id)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+    };
+    let Some(record) = record.filter(|record| record.state == ArtifactEffectState::Confirmed)
+    else {
+        return Ok(None);
+    };
+    let path = proposal
+        .after
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "confirmed artifact Proposal lost after.path".to_string())?;
+    let content = proposal
+        .after
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let prepared = prepare_artifact_materialization(
+        &proposal.id,
+        &record.dispatch_claim_id,
+        path,
+        content,
+        &safe_paths,
+    )?;
+    if prepared.target_reference_digest != record.target_reference_digest
+        || prepared.content_digest != record.content_digest
+        || prepared.byte_size != record.byte_size
+        || prepared.media_type != record.media_type
+    {
+        return Err("confirmed artifact receipt binding mismatch".into());
+    }
+    let observed = record
+        .observed_content_digest
+        .filter(|digest| digest == &record.content_digest)
+        .ok_or_else(|| "confirmed artifact observed digest missing".to_string())?;
+    Ok(Some(confirmed_artifact_receipt(&prepared, observed)))
 }
 
 fn confirmed_effect_reconciliation_response(
     proposal: &AgentProposal,
     projection_confirmed: bool,
     warnings: Vec<String>,
+    artifact_materialization: Option<ArtifactMaterializationReceipt>,
 ) -> Value {
-    serde_json::json!({
+    let mut response = serde_json::json!({
         "success": true,
         "patch_result": patch_result_for_proposal(
             proposal,
@@ -499,7 +803,12 @@ fn confirmed_effect_reconciliation_response(
             "reconciliation_required"
         },
         "warnings": warnings,
-    })
+    });
+    if let Some(receipt) = artifact_materialization {
+        response["artifactMaterialization"] =
+            serde_json::to_value(receipt).unwrap_or(serde_json::Value::Null);
+    }
+    response
 }
 
 fn patch_result_for_proposal(
@@ -947,153 +1256,223 @@ fn ensure_lifemodel_proposal_patch_source_readiness(
     }
 }
 
-/// Check if any component of the path is a symlink.
-/// This includes the final target and any parent directory.
-/// Returns true if any symlink is found.
-fn path_contains_symlink(path: &std::path::Path) -> bool {
-    // Check each existing component in the path
-    for component in path.ancestors() {
-        if let Ok(meta) = component.symlink_metadata() {
-            if meta.file_type().is_symlink() {
-                return true;
-            }
-        }
-    }
-    false
+enum ArtifactApplyOutcome {
+    Confirmed {
+        patch_result: openlife_core::life_model::patch::PatchApplyResult,
+        receipt: Box<ArtifactMaterializationReceipt>,
+    },
+    FailedBeforeEffect(String),
+    Unknown(String),
 }
 
-fn canonical_safe_paths(safe_paths: &[String]) -> Vec<std::path::PathBuf> {
-    safe_paths
-        .iter()
-        .filter_map(|safe| {
-            let path = std::path::Path::new(safe);
-            if path_contains_symlink(path) {
-                return None;
-            }
-            path.canonicalize().ok()
-        })
-        .collect()
-}
-
-fn canonical_parent_in_safe_paths(
-    target: &std::path::Path,
-    safe_paths: &[std::path::PathBuf],
-) -> Result<std::path::PathBuf, String> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("Path '{}' has no parent directory.", target.display()))?;
-    if path_contains_symlink(parent) {
-        return Err(format!(
-            "Path '{}' contains a symbolic link. Symbolic links are not allowed in safe paths.",
-            parent.display()
-        ));
-    }
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize parent directory: {}", e))?;
-    if !safe_paths
-        .iter()
-        .any(|safe| canonical_parent.starts_with(safe))
+async fn persist_artifact_failed_before_effect(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    claim_id: &str,
+    error_code: &str,
+) -> Result<(), String> {
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    if store
+        .artifact_effect(proposal_id)
+        .map_err(|error| runtime_proposal_store_error(state, error))?
+        .is_some()
     {
-        return Err(format!(
-            "Path '{}' is not in safe paths list",
-            target.display()
-        ));
+        if !store
+            .finish_artifact_failed_before_effect(proposal_id, claim_id, error_code)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+        {
+            return Err("artifact_failed_before_effect_receipt_cas_lost".into());
+        }
+    } else if !store
+        .mark_dispatch_failed_before_effect(proposal_id, claim_id, error_code)
+        .map_err(|error| runtime_proposal_store_error(state, error))?
+    {
+        return Err("artifact_preflight_failure_receipt_cas_lost".into());
     }
-    Ok(canonical_parent)
+    Ok(())
 }
 
-/// Write content to a file atomically within a safe directory.
-/// 1. Verifies no symlinks exist in the path or its parents.
-/// 2. Writes to a temp file in the same directory.
-/// 3. Renames the temp file to the target (atomic on Unix).
-fn safe_write_utf8(path: &str, content: &str, safe_paths: &[String]) -> Result<(), String> {
-    let target = std::path::Path::new(path);
-    let valid_safe_paths = canonical_safe_paths(safe_paths);
-    if valid_safe_paths.is_empty() {
-        return Err("No valid safe paths configured for filesystem access".to_string());
+async fn persist_artifact_unknown(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    claim_id: &str,
+    error_code: &str,
+) -> Result<(), String> {
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    if !store
+        .finish_artifact_unknown(proposal_id, claim_id, error_code)
+        .map_err(|error| runtime_proposal_store_error(state, error))?
+    {
+        return Err("artifact_unknown_receipt_cas_lost".into());
     }
+    Ok(())
+}
 
-    // 1. Strict symlink check: reject any symlink in the path
-    if path_contains_symlink(target) {
-        return Err(format!(
-            "Path '{}' contains a symbolic link. Symbolic links are not allowed in safe paths.",
-            path
-        ));
-    }
-
-    let canonical_parent = canonical_parent_in_safe_paths(target, &valid_safe_paths)?;
-    let file_name = target
-        .file_name()
-        .ok_or_else(|| format!("Path '{}' has no filename.", path))?;
-    let canonical_target_path = canonical_parent.join(file_name);
-
-    // 2. Create temp file in the same directory (same filesystem for atomic rename)
-    let temp_path = canonical_parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-
-    // Write to a newly-created temp file and flush it before rename.
-    let mut temp_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .map_err(|e| format!("Failed to create temporary file: {}", e))?;
-    temp_file
-        .write_all(content.as_bytes())
-        .map_err(|e| format!("Failed to write temporary file: {}", e))?;
-    temp_file
-        .sync_all()
-        .map_err(|e| format!("Failed to sync temporary file: {}", e))?;
-    drop(temp_file);
-
-    // Re-check immediately before rename: parent may have changed, and target may
-    // have become a symlink after the initial validation.
-    let pre_rename_parent = match canonical_parent_in_safe_paths(target, &valid_safe_paths) {
-        Ok(parent) => parent,
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(e);
+async fn apply_external_write_artifact(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    claim_id: &str,
+) -> ArtifactApplyOutcome {
+    let path = match proposal.after.get("path").and_then(Value::as_str) {
+        Some(path) => path,
+        None => {
+            let code = "artifact_path_missing";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
         }
     };
-    if pre_rename_parent != canonical_parent || path_contains_symlink(target) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!(
-            "Path '{}' changed during safe write validation.",
-            path
-        ));
+    let content = proposal
+        .after
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if content.len() > EXTERNAL_WRITE_MAX_SIZE {
+        let code = "artifact_content_too_large";
+        let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+        return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+    }
+    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let prepared = match prepare_artifact_materialization(
+        &proposal.id,
+        claim_id,
+        path,
+        content,
+        &safe_paths,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let code = "artifact_preflight_failed";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+        }
+    };
+    if let Some(expected_hash) = proposal
+        .after
+        .get("content_hash")
+        .and_then(Value::as_str)
+        .filter(|hash| !hash.is_empty())
+    {
+        let expected_hash = if expected_hash.starts_with("sha256:") {
+            expected_hash.to_string()
+        } else {
+            format!("sha256:{expected_hash}")
+        };
+        if expected_hash != prepared.content_digest {
+            let code = "artifact_content_digest_mismatch";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+        }
+    }
+    let prepared_record = {
+        let store = match state.proposal_store.as_ref() {
+            Some(store) => store.lock().await,
+            None => return ArtifactApplyOutcome::FailedBeforeEffect(proposal_store_missing()),
+        };
+        store.prepare_artifact_effect(
+            &proposal.id,
+            claim_id,
+            &prepared.target_reference_digest,
+            &prepared.content_digest,
+            prepared.byte_size,
+            &prepared.media_type,
+        )
+    };
+    if let Err(error) = prepared_record {
+        let detail = runtime_proposal_store_error(state, error);
+        let _ = persist_artifact_failed_before_effect(
+            state,
+            &proposal.id,
+            claim_id,
+            "artifact_prepare_receipt_failed",
+        )
+        .await;
+        return ArtifactApplyOutcome::FailedBeforeEffect(detail);
     }
 
-    // 3. Atomic rename (Unix: atomic; Windows: best-effort)
-    match std::fs::rename(&temp_path, &canonical_target_path) {
-        Ok(_) => {
-            if let Err(error) =
-                std::fs::File::open(&canonical_parent).and_then(|directory| directory.sync_all())
-            {
-                return Err(format!(
-                    "File was renamed but parent directory durability could not be confirmed: {}",
-                    error
-                ));
-            }
-            let canonical_target = canonical_target_path
-                .canonicalize()
-                .map_err(|e| format!("Failed to canonicalize written file: {}", e))?;
-            if valid_safe_paths
-                .iter()
-                .any(|safe| canonical_target.starts_with(safe))
-                && !path_contains_symlink(&canonical_target_path)
-            {
-                Ok(())
-            } else {
-                Err(format!(
-                    "Path '{}' left safe paths during write.",
-                    target.display()
-                ))
-            }
+    let stage_prepared = prepared.clone();
+    let stage_content = content.to_string();
+    let stage_result =
+        tokio::task::spawn_blocking(move || stage_artifact_bytes(&stage_prepared, &stage_content))
+            .await;
+    match stage_result {
+        Ok(Ok(())) => {}
+        Ok(Err(ArtifactFilesystemFailure::FailedBeforeEffect(code))) => {
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, &code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code);
         }
-        Err(e) => {
-            // Clean up temp file on failure
-            let _ = std::fs::remove_file(&temp_path);
-            Err(format!("Failed to rename temporary file to target: {}", e))
+        Ok(Err(ArtifactFilesystemFailure::Unknown(code))) => {
+            let _ = persist_artifact_unknown(state, &proposal.id, claim_id, &code).await;
+            return ArtifactApplyOutcome::Unknown(code);
         }
+        Err(_) => {
+            let code = "artifact_stage_worker_outcome_unknown";
+            let _ = persist_artifact_unknown(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::Unknown(code.into());
+        }
+    }
+    let staged = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .expect("ProposalStore checked before artifact staging")
+            .lock()
+            .await;
+        store.mark_artifact_staged(&proposal.id, claim_id)
+    };
+    if !matches!(staged, Ok(true)) {
+        let code = "artifact_staged_receipt_unconfirmed";
+        let _ = persist_artifact_unknown(state, &proposal.id, claim_id, code).await;
+        return ArtifactApplyOutcome::Unknown(code.into());
+    }
+
+    let commit_prepared = prepared.clone();
+    let commit_safe_paths = safe_paths.clone();
+    let commit_result = tokio::task::spawn_blocking(move || {
+        commit_staged_artifact(&commit_prepared, &commit_safe_paths)
+    })
+    .await;
+    let observed_digest = match commit_result {
+        Ok(Ok(digest)) => digest,
+        Ok(Err(failure)) => {
+            let code = failure.code().to_string();
+            let _ = persist_artifact_unknown(state, &proposal.id, claim_id, &code).await;
+            return ArtifactApplyOutcome::Unknown(code);
+        }
+        Err(_) => {
+            let code = "artifact_commit_worker_outcome_unknown";
+            let _ = persist_artifact_unknown(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::Unknown(code.into());
+        }
+    };
+    let confirmed = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .expect("ProposalStore checked before artifact confirmation")
+            .lock()
+            .await;
+        store.finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
+    };
+    if !matches!(confirmed, Ok(true)) {
+        return ArtifactApplyOutcome::Unknown("artifact_confirmed_receipt_unavailable".into());
+    }
+    ArtifactApplyOutcome::Confirmed {
+        patch_result: patch_result_for_proposal(proposal, true, "artifact_materialized", None),
+        receipt: Box::new(confirmed_artifact_receipt(&prepared, observed_digest)),
     }
 }
 
@@ -1425,7 +1804,7 @@ pub(crate) fn validate_proposal_payload(
                 let value = aliases
                     .iter()
                     .find_map(|alias| tool_permission_scope_field(after, alias));
-                if value.is_none_or(|value| value.trim().is_empty()) {
+                if value.is_none() || value.is_some_and(|value| value.trim().is_empty()) {
                     return Err(format!(
                         "ToolPermission Proposal 缺少精确 after.{field}（非空字符串）。"
                     ));
@@ -1542,6 +1921,18 @@ pub(crate) fn validate_proposal_payload(
             Ok(())
         }
     }
+}
+
+fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), String> {
+    validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    if proposal.proposal_type == ProposalType::MemoryWrite {
+        let content = memory_content(&proposal.after)?;
+        openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            proposal, content,
+        )
+        .map_err(|error| format!("MemoryWrite Proposal 审阅契约无效：{error}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1765,6 +2156,19 @@ async fn apply_proposal_to_state(
                 >(after)
                 .map_err(|_| "invalid_lifemodel_patch_batch_payload".to_string())?;
                 batch.validate()?;
+                if let Some(operation) = batch.operations.iter().find(|operation| {
+                    openlife_core::life_model_write_gateway::life_model_field_authority(
+                        &operation.path,
+                    ) != openlife_core::life_model_write_gateway::LifeModelFieldAuthority::CanonicalLifeModel
+                }) {
+                    return Ok(openlife_core::life_model::patch::PatchApplyResult {
+                        patch_id: format!("batch:{}", proposal.id),
+                        success: false,
+                        path: operation.path.clone(),
+                        operation: "lifemodel_patch_batch_field_authority_blocked".into(),
+                        error: Some("builder_batch_contains_non_lifemodel_owned_field".into()),
+                    });
+                }
                 let builder_risk = match proposal.risk_level {
                     openlife_core::agent::RiskLevel::Low => openlife_core::builder::RiskLevel::Low,
                     openlife_core::agent::RiskLevel::Medium => {
@@ -1990,102 +2394,7 @@ async fn apply_proposal_to_state(
             ))
         }
         ProposalType::ExternalWriteAction => {
-            let path = after
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "ExternalWriteAction Proposal 缺少 after.path。".to_string())?;
-            let content = after.get("content").and_then(Value::as_str).unwrap_or("");
-
-            // Load safe_paths from config
-            let safe_paths = {
-                let cfg = state.config.lock().await;
-                cfg.system.safe_paths.clone()
-            };
-
-            // Re-validate path is within safe_paths using strict canonical parent strategy.
-            // This is a defense-in-depth check: the path was already validated at proposal
-            // creation time, but the filesystem state may have changed.
-            if !openlife_core::agent::action_executor::is_path_in_safe_paths(path, &safe_paths) {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some(
-                        openlife_core::agent::action_executor::filesystem_access_error(
-                            path,
-                            &safe_paths,
-                        ),
-                    ),
-                ));
-            }
-
-            // Validate content is valid UTF-8 (defense-in-depth: JSON strings are UTF-8,
-            // but we enforce it explicitly for audit clarity)
-            if std::str::from_utf8(content.as_bytes()).is_err() {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some("Content is not valid UTF-8.".to_string()),
-                ));
-            }
-
-            // Check content size limit
-            let max_size = EXTERNAL_WRITE_MAX_SIZE;
-            if content.len() > max_size {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some(format!(
-                        "Content size ({} bytes) exceeds maximum allowed ({} bytes)",
-                        content.len(),
-                        max_size
-                    )),
-                ));
-            }
-
-            // Validate content hash if present
-            if let Some(expected_hash) = after.get("content_hash").and_then(Value::as_str) {
-                if !expected_hash.is_empty() {
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let actual_hash = format!("{:x}", hasher.finalize());
-                    if actual_hash != expected_hash {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "external_write",
-                            Some(format!(
-                                "Content hash mismatch: expected {}, got {}",
-                                expected_hash, actual_hash
-                            )),
-                        ));
-                    }
-                }
-            }
-
-            // Governance policy: do NOT auto-create parent directories.
-            // is_path_in_safe_paths already requires the parent to exist.
-            // If the parent was removed between proposal creation and acceptance,
-            // std::fs::write will fail with a clear error and the Proposal stays pending.
-
-            // Execute file write with symlink defense and atomic temp+rename
-            match safe_write_utf8(path, content, &safe_paths) {
-                Ok(_) => Ok(patch_result_for_proposal(
-                    proposal,
-                    true,
-                    "external_write",
-                    None,
-                )),
-                Err(e) => Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some(e),
-                )),
-            }
+            Err("ExternalWriteAction must execute through ArtifactMaterializer.".into())
         }
         ProposalType::ScheduledTask => {
             let Some(review_acceptance) = review_acceptance else {
@@ -2471,23 +2780,22 @@ async fn accept_proposal_with_state_and_confirmation(
         )
     };
     if let Some(claim_id) = confirmed_projection_claim {
+        let artifact_receipt = confirmed_artifact_receipt_from_store(state, &proposal).await?;
         return match project_confirmed_effect_projection_only(state, &proposal, &claim_id).await {
             Ok(accepted) => {
                 let mut warnings = vec![
                     "Recovered the durable confirmed effect projection without redispatching the effect."
                         .to_string(),
                 ];
-                if let Err(error) = reconcile_agent_runs_for_proposal(
-                    state,
-                    &accepted,
-                    LinkedAgentRunReviewOutcome::Materialized,
-                )
-                .await
-                {
+                sync_main_chat_task_blockers_after_review_proposal_accept(state, &accepted).await;
+                if let Err(error) = reconcile_agent_runs_for_proposal(state, &accepted).await {
                     warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
                 }
                 Ok(confirmed_effect_reconciliation_response(
-                    &accepted, true, warnings,
+                    &accepted,
+                    true,
+                    warnings,
+                    artifact_receipt.clone(),
                 ))
             }
             Err(error) => Ok(confirmed_effect_reconciliation_response(
@@ -2497,30 +2805,30 @@ async fn accept_proposal_with_state_and_confirmation(
                     "Effect 已确认，Proposal 投影仍等待 reconciliation；未重放副作用: {}",
                     error
                 )],
+                artifact_receipt,
             )),
         };
     }
     if proposal.status == ProposalStatus::Accepted && dispatch_state.as_deref() == Some("confirmed")
     {
+        let artifact_receipt = confirmed_artifact_receipt_from_store(state, &proposal).await?;
         let mut warnings = vec![
             "Proposal effect was already confirmed; the idempotent retry did not redispatch it."
                 .to_string(),
         ];
-        if let Err(error) = reconcile_agent_runs_for_proposal(
-            state,
-            &proposal,
-            LinkedAgentRunReviewOutcome::Materialized,
-        )
-        .await
-        {
+        sync_main_chat_task_blockers_after_review_proposal_accept(state, &proposal).await;
+        if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
             warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
         }
         return Ok(confirmed_effect_reconciliation_response(
-            &proposal, true, warnings,
+            &proposal,
+            true,
+            warnings,
+            artifact_receipt,
         ));
     }
     ensure_pending_or_postponed(&proposal)?;
-    validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    validate_proposal_for_acceptance(&proposal)?;
     if is_builder_lifemodel_patch_batch(&proposal) {
         let batch =
             serde_json::from_value::<openlife_core::life_model::patch::LifeModelPatchBatchV1>(
@@ -2541,6 +2849,77 @@ async fn accept_proposal_with_state_and_confirmation(
             proposal.proposal_type
         ));
     }
+    let terminal_owner_origin = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .terminal_owner_origin_binding(&proposal_id)
+            .map_err(|error| error.to_string())?
+    };
+    let mut terminal_owner_fence = None;
+    if let Some(origin) = terminal_owner_origin.as_ref() {
+        let epoch_state = {
+            let event_store = state
+                .main_chat_agent_event_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                .lock()
+                .await;
+            let epoch = event_store
+                .terminal_owner_epoch(origin.task_session_id())
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "terminal_owner_epoch_missing".to_string())?;
+            if epoch.run_id() != origin.run_id() {
+                return Err("terminal_owner_epoch_run_mismatch".to_string());
+            }
+            epoch.state()
+        };
+        if matches!(
+            epoch_state,
+            crate::main_chat_event_stream::TerminalOwnerSealState::Open
+                | crate::main_chat_event_stream::TerminalOwnerSealState::Sealing
+        ) {
+            let reason_code = match epoch_state {
+                crate::main_chat_event_stream::TerminalOwnerSealState::Open => "origin_turn_open",
+                crate::main_chat_event_stream::TerminalOwnerSealState::Sealing => {
+                    "origin_turn_sealing"
+                }
+                crate::main_chat_event_stream::TerminalOwnerSealState::Sealed => unreachable!(),
+            };
+            return Ok(serde_json::json!({
+                "success": false,
+                "status": "deferred",
+                "reasonCode": reason_code,
+                "proposalId": proposal_id,
+                "dispatchState": "unclaimed",
+                "durableWriteExecuted": false,
+            }));
+        }
+        terminal_owner_fence = Some(
+            crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(
+                origin.task_session_id(),
+            )
+            .await,
+        );
+        let sealed_epoch = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await
+            .terminal_owner_epoch(origin.task_session_id())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "terminal_owner_epoch_missing".to_string())?;
+        if sealed_epoch.run_id() != origin.run_id()
+            || sealed_epoch.state() != crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+        {
+            return Err("terminal_owner_epoch_changed_before_review_claim".to_string());
+        }
+    }
     let dispatch_claim_id = {
         let store = state
             .proposal_store
@@ -2555,6 +2934,7 @@ async fn accept_proposal_with_state_and_confirmation(
                 "该 Proposal 已由另一个请求领取执行；请先检查执行结果，禁止重复副作用。".to_string()
             })?
     };
+    let terminal_owner_fence_guard = terminal_owner_fence;
     if let Some(expected_digest) = expected_native_confirmation_digest {
         // The native grant is bound to the exact Proposal snapshot. Reload only
         // after winning the dispatch claim: edits that raced before the claim are
@@ -2576,7 +2956,7 @@ async fn accept_proposal_with_state_and_confirmation(
             );
         }
         proposal = claimed_proposal;
-        validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+        validate_proposal_for_acceptance(&proposal)?;
     }
     let review_acceptance_result = {
         let store = state
@@ -2605,29 +2985,93 @@ async fn accept_proposal_with_state_and_confirmation(
             ));
         }
     };
-    let result = match apply_proposal_to_state(
-        state,
-        &proposal,
-        proposal.after.clone(),
-        Some(&review_acceptance),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            if let Some(store) = state.proposal_store.as_ref() {
-                let store = store.lock().await;
-                let _ = store.mark_dispatch_unknown(
-                    &proposal_id,
-                    &dispatch_claim_id,
-                    "proposal_apply_effect_unknown",
-                );
-            }
-            return Err(format!(
-                "Proposal 执行状态无法确认，已禁止自动重试并等待 reconciliation：{}",
-                error
-            ));
+    if terminal_owner_origin.is_some() && proposal.proposal_type == ProposalType::MemoryWrite {
+        let gateway = terminal_owner_write_gateway_from_state(state).await?;
+        let relation_kind = terminal_owner_relation_kind(state, &proposal_id).await?;
+        let transition = if matches!(
+            relation_kind,
+            Some(openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor)
+                | Some(
+                    openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+                )
+        ) {
+            gateway
+                .apply_claimed_review_without_task_transition(review_acceptance)
+                .await
+                .map_err(|error| error.to_string())?;
+            None
+        } else {
+            Some(
+                gateway
+                    .apply_claimed_review_acceptance(review_acceptance)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
+        };
+        let mut response = serde_json::json!({
+            "success": true,
+            "effect_status": "confirmed",
+            "proposal_projection_status": "confirmed",
+            "proposalId": proposal.id,
+        });
+        if let Some(transition) = transition {
+            response["terminalOwnerTransition"] = serde_json::json!({
+                "beforeOwnerRevision": transition.before_owner_revision,
+                "afterOwnerRevision": transition.after_owner_revision,
+                "beforeOwnerDigest": transition.before_owner_digest,
+                "afterOwnerDigest": transition.after_owner_digest,
+                "localTransitionReceiptRef": transition.local_transition_receipt_ref,
+                "localTransitionReceiptDigest": transition.local_transition_receipt_digest,
+                "successorEventId": transition.successor_event_id,
+            });
         }
+        return Ok(response);
+    }
+    let (result, artifact_materialization) = if proposal.proposal_type
+        == ProposalType::ExternalWriteAction
+    {
+        match apply_external_write_artifact(state, &proposal, &dispatch_claim_id).await {
+            ArtifactApplyOutcome::Confirmed {
+                patch_result,
+                receipt,
+            } => (patch_result, Some(*receipt)),
+            ArtifactApplyOutcome::FailedBeforeEffect(error) => {
+                return Err(format!(
+                    "Artifact materialization failed before effect: {error}"
+                ));
+            }
+            ArtifactApplyOutcome::Unknown(error) => {
+                return Err(format!(
+                        "Artifact materialization state is unknown; automatic redispatch is forbidden: {error}"
+                    ));
+            }
+        }
+    } else {
+        let result = match apply_proposal_to_state(
+            state,
+            &proposal,
+            proposal.after.clone(),
+            Some(&review_acceptance),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(store) = state.proposal_store.as_ref() {
+                    let store = store.lock().await;
+                    let _ = store.mark_dispatch_unknown(
+                        &proposal_id,
+                        &dispatch_claim_id,
+                        "proposal_apply_effect_unknown",
+                    );
+                }
+                return Err(format!(
+                    "Proposal 执行状态无法确认，已禁止自动重试并等待 reconciliation：{}",
+                    error
+                ));
+            }
+        };
+        (result, None)
     };
     if !result.success {
         if let Some(store) = state.proposal_store.as_ref() {
@@ -2657,7 +3101,9 @@ async fn accept_proposal_with_state_and_confirmation(
         };
     }
     let mut warnings = Vec::new();
-    let effect_receipt_persisted = {
+    let effect_receipt_persisted = if artifact_materialization.is_some() {
+        true
+    } else {
         let store = state
             .proposal_store
             .as_ref()
@@ -2684,48 +3130,110 @@ async fn accept_proposal_with_state_and_confirmation(
     };
     proposal.accept();
     canonicalize_proposal_affected_path(&mut proposal);
+    let mut terminal_owner_transition_response = None;
+    let mut main_chat_task_sync = Vec::new();
     let proposal_projected = if effect_receipt_persisted {
-        match project_confirmed_effect_projection_only(state, &proposal, &dispatch_claim_id).await {
-            Ok(projected) => {
-                proposal = projected;
-                true
+        if let Some(origin) = terminal_owner_origin.as_ref() {
+            let relation_kind = terminal_owner_relation_kind(state, &proposal_id).await?;
+            let gateway = terminal_owner_write_gateway_from_state(state).await?;
+            if matches!(
+                relation_kind,
+                Some(openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor)
+                    | Some(
+                        openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+                    )
+            ) {
+                match gateway
+                    .apply_claimed_review_without_task_transition(review_acceptance)
+                    .await
+                {
+                    Ok(_) => {
+                        proposal = get_proposal_with_state(state, &proposal_id).await?;
+                        true
+                    }
+                    Err(error) => {
+                        warnings.push(format!(
+                            "Effect 已确认，但 typed terminal-owner Proposal 投影失败并等待 reconciliation: {}",
+                            error
+                        ));
+                        false
+                    }
+                }
+            } else {
+                match gateway
+                    .apply_claimed_review_acceptance(review_acceptance)
+                    .await
+                {
+                    Ok(transition) => {
+                        terminal_owner_transition_response = Some(serde_json::json!({
+                            "beforeOwnerRevision": transition.before_owner_revision,
+                            "afterOwnerRevision": transition.after_owner_revision,
+                            "beforeOwnerDigest": transition.before_owner_digest,
+                            "afterOwnerDigest": transition.after_owner_digest,
+                            "localTransitionReceiptRef": transition.local_transition_receipt_ref,
+                            "localTransitionReceiptDigest": transition.local_transition_receipt_digest,
+                            "successorEventId": transition.successor_event_id,
+                        }));
+                        proposal = get_proposal_with_state(state, &proposal_id).await?;
+                        if let Some(task_store) = state.main_chat_agent_session_store.as_ref() {
+                            if let Ok(Some(session)) = task_store
+                                .lock()
+                                .await
+                                .load_session(origin.task_session_id())
+                            {
+                                main_chat_task_sync.push(serde_json::json!({
+                                "taskSessionId": origin.task_session_id(),
+                                "proposalBlockerCleared": true,
+                                "remainingBlockerCount": session.pending_blockers.len(),
+                                "taskCompletedAfterProposalAccept": session.status
+                                    == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed,
+                            }));
+                            }
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        warnings.push(format!(
+                            "Effect 已确认，但 terminal-owner successor 投影失败并等待 reconciliation: {}",
+                            error
+                        ));
+                        false
+                    }
+                }
             }
-            Err(error) => {
-                warnings.push(format!(
-                    "Effect 已确认，但 Proposal status 投影失败并等待 reconciliation: {}",
-                    error
-                ));
-                false
+        } else {
+            match project_confirmed_effect_projection_only(state, &proposal, &dispatch_claim_id)
+                .await
+            {
+                Ok(projected) => {
+                    proposal = projected;
+                    true
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "Effect 已确认，但 Proposal status 投影失败并等待 reconciliation: {}",
+                        error
+                    ));
+                    false
+                }
             }
         }
     } else {
         false
     };
     let dispatch_projection_confirmed = proposal_projected;
-    if let Err(error) = reconcile_agent_runs_for_proposal(
-        state,
-        &proposal,
-        if effect_receipt_persisted {
-            LinkedAgentRunReviewOutcome::Materialized
-        } else {
-            LinkedAgentRunReviewOutcome::WaitingReview
-        },
-    )
-    .await
-    {
-        warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
-    }
-    let main_chat_task_sync = if proposal_projected {
+    if proposal_projected {
         record_maturation_proposal_outcome_evidence_with_state(
             state,
             &proposal,
             MaturationProposalOutcome::Accepted,
         )
         .await;
-        sync_main_chat_task_blockers_after_review_proposal_accept(state, &proposal).await
-    } else {
-        Vec::new()
-    };
+    }
+    drop(terminal_owner_fence_guard);
+    if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
+        warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
+    }
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
         if err.starts_with("__blocked_action__:") {
@@ -2748,8 +3256,15 @@ async fn accept_proposal_with_state_and_confirmation(
         },
         "warnings": warnings,
     });
+    if let Some(receipt) = artifact_materialization {
+        response["artifactMaterialization"] =
+            serde_json::to_value(receipt).unwrap_or(serde_json::Value::Null);
+    }
     if !main_chat_task_sync.is_empty() {
         response["mainChatTaskSync"] = serde_json::Value::Array(main_chat_task_sync);
+    }
+    if let Some(transition) = terminal_owner_transition_response {
+        response["terminalOwnerTransition"] = transition;
     }
     if proposal.proposal_type == ProposalType::MemoryWrite {
         let decision = memory_gateway::memory_gateway_decision_for_proposal(
@@ -2812,46 +3327,30 @@ fn proposal_type_resolves_main_chat_review_blocker(proposal_type: ProposalType) 
             | ProposalType::StateUpdate
             | ProposalType::PreferenceUpdate
             | ProposalType::CapabilityUpdate
+            | ProposalType::ExternalWriteAction
     )
 }
 
-fn collect_main_chat_task_session_ids_from_proposal(proposal: &AgentProposal) -> Vec<String> {
-    let mut ids = Vec::new();
-    if let Some(task_session_id) = proposal
-        .after
-        .get("originatingTaskSessionId")
-        .or_else(|| proposal.after.get("originating_task_session_id"))
-        .and_then(Value::as_str)
-    {
-        push_main_chat_task_session_id(&mut ids, task_session_id);
-    }
-    if let Some(source_detail) = proposal.source_detail.as_deref() {
-        for segment in source_detail.split(';') {
-            if let Some(task_session_id) =
-                segment.trim().strip_prefix("main_chat_agent_task_session:")
-            {
-                push_main_chat_task_session_id(&mut ids, task_session_id);
-            } else {
-                push_main_chat_task_session_id(&mut ids, segment.trim());
-            }
-        }
-    }
-    ids.sort();
-    ids.dedup();
-    ids
+async fn terminal_owner_write_gateway_from_state(
+    state: &Arc<AppState>,
+) -> Result<crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway, String> {
+    crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::from_state(state).await
 }
 
-fn push_main_chat_task_session_id(ids: &mut Vec<String>, value: &str) {
-    let trimmed = value.trim();
-    let historical_id = trimmed.starts_with("mainchat_task_")
-        && !trimmed
-            .chars()
-            .any(|ch| ch.is_control() || ch.is_whitespace());
-    let current_uuid =
-        uuid::Uuid::parse_str(trimmed).is_ok_and(|parsed| parsed.get_version_num() == 4);
-    if historical_id || current_uuid {
-        ids.push(trimmed.to_string());
-    }
+async fn terminal_owner_relation_kind(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+) -> Result<Option<openlife_core::agent::ProposalTerminalRelationKind>, String> {
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    store
+        .terminal_relation_projection_proof(proposal_id)
+        .map(|proof| proof.map(|proof| proof.relation_kind()))
+        .map_err(|error| error.to_string())
 }
 
 async fn sync_main_chat_task_blockers_after_review_proposal_accept(
@@ -2861,135 +3360,99 @@ async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     if !proposal_type_resolves_main_chat_review_blocker(proposal.proposal_type) {
         return Vec::new();
     }
-    let task_session_ids = collect_main_chat_task_session_ids_from_proposal(proposal);
-    if task_session_ids.is_empty() {
+    let (origin, relation_kind) = match state.proposal_store.as_ref() {
+        Some(store) => {
+            let store = store.lock().await;
+            (
+                store
+                    .terminal_owner_origin_binding(&proposal.id)
+                    .ok()
+                    .flatten(),
+                store
+                    .terminal_relation_projection_proof(&proposal.id)
+                    .ok()
+                    .flatten()
+                    .map(|proof| proof.relation_kind()),
+            )
+        }
+        None => (None, None),
+    };
+    if relation_kind.is_some()
+        && relation_kind
+            != Some(openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite)
+    {
         return Vec::new();
     }
-    let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
+    let Some(origin) = origin else {
         return Vec::new();
     };
-    let proposal_blocker = format!("proposal:{}", proposal.id);
-    let mut sync_reports = Vec::new();
-
-    for task_session_id in task_session_ids {
-        let Some((before_status, remaining_blockers)) = ({
-            let store = store_arc.lock().await;
-            let Ok(Some(session)) = store.load_session(&task_session_id) else {
-                continue;
-            };
-            let before_status = session.status;
-            let before_blockers = session.pending_blockers.clone();
-            let mut remaining_blockers = before_blockers.clone();
-            remaining_blockers.retain(|blocker| blocker != &proposal_blocker);
-            if remaining_blockers.len() == before_blockers.len() {
-                continue;
-            }
-            if let Err(err) =
-                store.set_pending_blockers(&task_session_id, remaining_blockers.clone())
-            {
-                log::warn!(
-                    "[proposal] failed to clear Main Chat proposal blocker for {}: {}",
-                    task_session_id,
-                    err
-                );
-                continue;
-            }
-            Some((before_status, remaining_blockers))
-        }) else {
-            continue;
+    let _fence = crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(
+        origin.task_session_id(),
+    )
+    .await;
+    let materialized_acceptance = {
+        let Some(proposal_store) = state.proposal_store.as_ref() else {
+            return Vec::new();
         };
-
-        let has_pending_permission_action =
-            main_chat_task_has_pending_permission_action(state, &task_session_id).await;
-        let completed = if remaining_blockers.is_empty()
-            && !has_pending_permission_action
-            && before_status
-                == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        let proposal_store = proposal_store.lock().await;
+        match openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+            .materialized_acceptance_snapshot(&proposal.id)
         {
-            let store = store_arc.lock().await;
-            match store.resume_session(&task_session_id) {
-                Ok(_) => match store.complete_session(
-                    &task_session_id,
-                    "Accepted Review proposal resolved the Main Chat task blocker.",
-                ) {
-                    Ok(_) => true,
-                    Err(err) => {
-                        log::warn!(
-                            "[proposal] failed to complete unblocked Main Chat task {}: {}",
-                            task_session_id,
-                            err
-                        );
-                        false
-                    }
-                },
-                Err(err) => {
-                    log::warn!(
-                        "[proposal] failed to resume unblocked Main Chat task {}: {}",
-                        task_session_id,
-                        err
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        {
-            let store = store_arc.lock().await;
-            if let Err(err) = store.append_transcript_entry(
-                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryDraft {
-                    session_id: task_session_id.clone(),
-                    kind: openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
-                    summary: "Accepted Review proposal resolved a Main Chat proposal blocker."
-                        .into(),
-                    metadata: serde_json::json!({
-                        "proposalId": proposal.id,
-                        "proposalType": proposal.proposal_type,
-                        "proposalBlockerCleared": true,
-                        "remainingBlockerCount": remaining_blockers.len(),
-                        "taskCompletedAfterProposalAccept": completed,
-                        "directWritesExecuted": false,
-                    }),
-                },
-            ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
                 log::warn!(
-                    "[proposal] failed to append Main Chat proposal accept sync transcript for {}: {}",
-                    task_session_id,
-                    err
+                    "[proposal] terminal owner materialized acceptance unavailable for {}: {}",
+                    proposal.id,
+                    error
                 );
+                return Vec::new();
             }
         }
-
-        let sync_report = serde_json::json!({
-            "taskSessionId": task_session_id,
-            "proposalBlockerCleared": true,
-            "remainingBlockerCount": remaining_blockers.len(),
-            "taskCompletedAfterProposalAccept": completed,
-        });
-        sync_reports.push(sync_report);
-    }
-
-    sync_reports
-}
-
-async fn main_chat_task_has_pending_permission_action(
-    state: &Arc<AppState>,
-    task_session_id: &str,
-) -> bool {
-    let Some(queue_arc) = state.main_chat_action_queue_store.as_ref() else {
-        return false;
     };
-    let queue = queue_arc.lock().await;
-    queue
-        .list_for_session(task_session_id)
-        .map(|actions| {
-            actions.iter().any(|action| {
-                action.status
-                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-            })
-        })
-        .unwrap_or(false)
+    let gateway = match terminal_owner_write_gateway_from_state(state).await {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            log::warn!(
+                "[proposal] terminal owner gateway unavailable for {}: {}",
+                proposal.id,
+                error
+            );
+            return Vec::new();
+        }
+    };
+    if let Err(error) = gateway
+        .apply_materialized_review_successor(materialized_acceptance)
+        .await
+    {
+        log::warn!(
+            "[proposal] terminal owner successor reconciliation failed for {}: {}",
+            proposal.id,
+            error
+        );
+        return Vec::new();
+    }
+    let Some(store) = state.main_chat_agent_session_store.as_ref() else {
+        return Vec::new();
+    };
+    let session = match store.lock().await.load_session(origin.task_session_id()) {
+        Ok(Some(session)) => session,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            log::warn!(
+                "[proposal] terminal owner task projection unavailable for {}: {}",
+                proposal.id,
+                error
+            );
+            return Vec::new();
+        }
+    };
+    vec![serde_json::json!({
+        "taskSessionId": origin.task_session_id(),
+        "proposalBlockerCleared": true,
+        "remainingBlockerCount": session.pending_blockers.len(),
+        "taskCompletedAfterProposalAccept": session.status
+            == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed,
+    })]
 }
 
 pub(crate) async fn reject_proposal_with_state(
@@ -3003,10 +3466,7 @@ pub(crate) async fn reject_proposal_with_state(
     let expected_status = proposal.status;
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
-    if let Err(error) =
-        reconcile_agent_runs_for_proposal(state, &proposal, LinkedAgentRunReviewOutcome::Rejected)
-            .await
-    {
+    if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         log::warn!(
             "[proposal] AgentRun rejection reconciliation pending for {}: {}",
             proposal.id,
@@ -3078,13 +3538,7 @@ pub(crate) async fn edit_proposal_with_state(
     let expected_status = proposal.status;
     proposal.edit(new_after);
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
-    if let Err(error) = reconcile_agent_runs_for_proposal(
-        state,
-        &proposal,
-        LinkedAgentRunReviewOutcome::WaitingReview,
-    )
-    .await
-    {
+    if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         log::warn!(
             "[proposal] AgentRun edit reconciliation pending for {}: {}",
             proposal.id,
@@ -3115,13 +3569,7 @@ pub(crate) async fn postpone_proposal_with_state(
     let expected_status = proposal.status;
     proposal.postpone();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
-    if let Err(error) = reconcile_agent_runs_for_proposal(
-        state,
-        &proposal,
-        LinkedAgentRunReviewOutcome::WaitingReview,
-    )
-    .await
-    {
+    if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         log::warn!(
             "[proposal] AgentRun postpone reconciliation pending for {}: {}",
             proposal.id,
@@ -3445,7 +3893,7 @@ pub async fn accept_proposal(
         && proposal_may_dispatch_effect(state.inner(), &proposal).await?
     {
         ensure_pending_or_postponed(&proposal)?;
-        validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+        validate_proposal_for_acceptance(&proposal)?;
         let snapshot_digest = proposal_native_confirmation_digest(&proposal);
         let affected_path_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
             &serde_json::json!({ "affected_path": proposal.affected_path }),
@@ -3458,7 +3906,6 @@ pub async fn accept_proposal(
                 target_ids_for_new_challenge: std::slice::from_ref(&proposal_id),
                 requested_target: Some(proposal_id.as_str()),
                 affected_count: 1,
-                preflight_scope_arguments: None,
                 arguments: &serde_json::json!({
                     "proposal_snapshot_digest": snapshot_digest.clone(),
                     "proposal_type": proposal.proposal_type,
@@ -3563,8 +4010,8 @@ mod tests {
         agent::{
             AgentProposal, AgentRun, AgentRunStatus, AgentRunStore, EvidenceDraft,
             EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
-            EvidenceSourceType, EvidenceType, ProposalSource, ProposalStore, ProposalType,
-            RiskLevel,
+            EvidenceSourceType, EvidenceType, MemoryCandidateKind, ProposalSource, ProposalStore,
+            ProposalType, RiskLevel,
         },
         builder::BuilderSessionStore,
         config::AppConfig,
@@ -3580,6 +4027,27 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
+    fn reviewed_memory_after(
+        session_id: &str,
+        content: &str,
+        candidate_kind: MemoryCandidateKind,
+        risk_level: &str,
+        sensitivity: &str,
+    ) -> Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "content": content,
+            "scope": "global",
+            "category": openlife_core::agent::memory_lifecycle_category_for_candidate_kind(
+                candidate_kind
+            ),
+            "candidateKind": candidate_kind,
+            "riskLevel": risk_level,
+            "sensitivity": sensitivity,
+            "source": "review_center",
+        })
+    }
+
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = AppConfig::default();
         let hot_cache: SharedHotCache =
@@ -3588,6 +4056,7 @@ mod tests {
             persistence_coordinator: Arc::new(
                 crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
             ),
+            governed_data_import_journal: None,
             config: Arc::new(Mutex::new(config.clone())),
             life_model_manager: Arc::new(Mutex::new(LifeModelManager::new(
                 temp_dir.path().join("life-model").join("current"),
@@ -3622,9 +4091,6 @@ mod tests {
             mcp_audit_store: Arc::new(Mutex::new(McpAuditStore::new(
                 temp_dir.path().join("mcp_audit.db"),
             ))),
-            mcp_audit_read_gateway: Arc::new(
-                crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
-            ),
             agent_run_store: Some(Arc::new(Mutex::new(
                 AgentRunStore::new_in_memory().unwrap(),
             ))),
@@ -3681,6 +4147,8 @@ mod tests {
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            resource_runtime: None,
+            state_store: None,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -3995,6 +4463,17 @@ mod tests {
                 "applied": 0,
                 "reasonCode": "projection_delivery_failed",
                 "errorDigest": "sha256:deadbeef"
+            },
+            "artifactMaterialization": {
+                "artifactId": "artifact:proposal-1",
+                "proposalId": "proposal-1",
+                "targetReference": "/safe/roadshow-summary.md",
+                "targetReferenceDigest": "sha256:target",
+                "contentDigest": "sha256:content",
+                "observedContentDigest": "sha256:content",
+                "byteSize": 42,
+                "mediaType": "text/markdown; charset=utf-8",
+                "status": "confirmed"
             }
         }))
         .unwrap();
@@ -4014,6 +4493,14 @@ mod tests {
         assert_eq!(
             serialized["memoryPersistence"]["reasonCode"],
             "projection_delivery_failed"
+        );
+        assert_eq!(
+            serialized["artifactMaterialization"]["targetReference"],
+            "/safe/roadshow-summary.md"
+        );
+        assert_eq!(
+            serialized["artifactMaterialization"]["contentDigest"],
+            serialized["artifactMaterialization"]["observedContentDigest"]
         );
     }
 
@@ -4035,6 +4522,51 @@ mod tests {
         }))
         .expect_err("typed IPC must fail closed instead of deleting a new fact");
         assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_rejects_nonconfirmed_artifact_receipt() {
+        let error = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "patchResult": {
+                "patchId": "patch-artifact-unknown",
+                "success": true,
+                "path": "filesystem.safe/artifact.md",
+                "operation": "artifact_materialization",
+                "error": null
+            },
+            "effectStatus": "confirmed",
+            "proposalProjectionStatus": "confirmed",
+            "warnings": [],
+            "artifactMaterialization": {
+                "artifactId": "artifact:proposal-unknown",
+                "proposalId": "proposal-unknown",
+                "targetReference": "/safe/artifact.md",
+                "targetReferenceDigest": "sha256:target",
+                "contentDigest": "sha256:content",
+                "observedContentDigest": "sha256:content",
+                "byteSize": 42,
+                "mediaType": "text/markdown; charset=utf-8",
+                "status": "unknown"
+            }
+        }))
+        .expect_err("ArtifactMaterializationReceipt can represent confirmed truth only");
+        assert!(error.contains("unknown variant"), "{error}");
+    }
+
+    #[test]
+    fn external_write_action_old_direct_file_route_stays_absent() {
+        let source = include_str!("proposal.rs");
+        let retired_writer = ["safe_", "write_", "utf8"].concat();
+        assert!(!source.contains(&retired_writer));
+        let generic_apply = extract_rust_function_body(source, "async fn apply_proposal_to_state(");
+        assert!(generic_apply
+            .contains("ExternalWriteAction must execute through ArtifactMaterializer."));
+        let review_acceptance = extract_rust_function_body(
+            source,
+            "async fn accept_proposal_with_state_and_confirmation(",
+        );
+        assert!(review_acceptance.contains("apply_external_write_artifact(state, &proposal"));
     }
 
     #[test]
@@ -4833,11 +5365,13 @@ mod tests {
         let food = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "lane-food",
-                "content": "午餐吃了沙拉，下午精力不错",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "lane-food",
+                "午餐吃了沙拉，下午精力不错",
+                MemoryCandidateKind::EpisodicLifeEvent,
+                "low",
+                "internal",
+            ),
             "User accepted diet event memory.",
             0.8,
             RiskLevel::Low,
@@ -4863,11 +5397,13 @@ mod tests {
         let preference = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "lane-preference",
-                "content": "User prefers concise status updates.",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "lane-preference",
+                "User prefers concise status updates.",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "User accepted preference memory.",
             0.8,
             RiskLevel::Low,
@@ -4897,11 +5433,13 @@ mod tests {
         let future_rule = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.rules.planning",
-            serde_json::json!({
-                "session_id": "lane-rule",
-                "content": "以后做计划时，先安排最难的任务。",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "lane-rule",
+                "以后做计划时，先安排最难的任务。",
+                MemoryCandidateKind::ProceduralRule,
+                "medium",
+                "internal",
+            ),
             "User accepted future planning rule.",
             0.8,
             RiskLevel::Medium,
@@ -5083,11 +5621,13 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "proposal-session",
-                "content": "用户偏好早上做深度工作",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "proposal-session",
+                "用户偏好早上做深度工作",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "用户确认写入长期记忆",
             0.8,
             RiskLevel::Low,
@@ -5129,17 +5669,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_memory_write_proposal_returns_lifecycle_materialization_evidence() {
+    async fn malformed_memory_review_contract_fails_before_dispatch_claim() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
             serde_json::json!({
-                "session_id": "proposal-lifecycle-session",
-                "content": "用户偏好 execution-first agents",
-                "source": "review_center"
+                "content": "This payload was never reviewed with typed governance metadata."
             }),
+            "Malformed fixture must fail before dispatch.",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("reviewed risk level is missing"),
+            "the original reviewed-contract boundary must remain observable: {error}"
+        );
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal_id).unwrap().as_deref(),
+            Some("unclaimed")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal_id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_memory_write_proposal_returns_lifecycle_materialization_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            reviewed_memory_after(
+                "proposal-lifecycle-session",
+                "用户偏好 execution-first agents",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "用户确认写入长期记忆",
             0.8,
             RiskLevel::Low,
@@ -5187,11 +5772,13 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "proposal-rollback-session",
-                "content": "User prefers execution-first agents.",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "proposal-rollback-session",
+                "User prefers execution-first agents.",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "User confirmed a long-term memory.",
             0.8,
             RiskLevel::Low,
@@ -5263,11 +5850,13 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "proposal-sensitive-session",
-                "content": "身份证 11010519491231002X，邮箱 proposal-sensitive@example.com，最近健康诊断和负债压力",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "proposal-sensitive-session",
+                "身份证 11010519491231002X，邮箱 proposal-sensitive@example.com，最近健康诊断和负债压力",
+                MemoryCandidateKind::SemanticUserFact,
+                "low",
+                "sensitive",
+            ),
             "用户确认写入长期记忆",
             0.8,
             RiskLevel::Low,
@@ -5672,9 +6261,18 @@ mod tests {
             .create_proposal(&proposal)
             .unwrap();
 
-        accept_proposal_with_state(id.clone(), &state)
+        let response = accept_proposal_with_state(id.clone(), &state)
             .await
             .unwrap();
+        assert_eq!(response["effect_status"], "confirmed");
+        assert_eq!(
+            response["artifactMaterialization"]["contentDigest"],
+            response["artifactMaterialization"]["observedContentDigest"]
+        );
+        assert_eq!(
+            response["artifactMaterialization"]["targetReference"],
+            file_path.to_string_lossy().as_ref()
+        );
 
         let stored = state
             .proposal_store
@@ -5763,6 +6361,239 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
     }
 
+    async fn stage_artifact_crash_fixture(
+        state: &Arc<AppState>,
+        proposal: &AgentProposal,
+        content: &str,
+        safe_paths: &[String],
+    ) -> (String, PreparedArtifactMaterialization) {
+        let claim_id = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal.id)
+            .unwrap()
+            .unwrap();
+        let path = proposal.after["path"].as_str().unwrap();
+        let prepared =
+            prepare_artifact_materialization(&proposal.id, &claim_id, path, content, safe_paths)
+                .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .prepare_artifact_effect(
+                &proposal.id,
+                &claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            )
+            .unwrap();
+        (claim_id, prepared)
+    }
+
+    #[tokio::test]
+    async fn artifact_restart_recovers_staged_bytes_without_blind_redispatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("artifact-stage-restart.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let safe_root = temp_dir.path().join("safe-stage");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        state.config.lock().await.system.safe_paths = safe_paths.clone();
+        let target = safe_root.join("roadshow-summary.md");
+        let content = "# Roadshow\n\nRestart-safe artifact.";
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", target.display()),
+            serde_json::json!({"path": target, "content": content}),
+            "Restart recovery fixture",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let (claim_id, prepared) =
+            stage_artifact_crash_fixture(&state, &proposal, content, &safe_paths).await;
+        stage_artifact_bytes(&prepared, content).unwrap();
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .mark_artifact_staged(&proposal.id, &claim_id)
+            .unwrap());
+        assert!(!prepared.target_path.exists());
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let report = reconcile_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.artifact_effects_reconciled, 1);
+        assert_eq!(report.proposal_projections_repaired, 1);
+        assert_eq!(
+            std::fs::read_to_string(&prepared.target_path).unwrap(),
+            content
+        );
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.artifact_effect(&proposal.id).unwrap().unwrap().state,
+            ArtifactEffectState::Confirmed
+        );
+        assert_eq!(
+            store.dispatch_state(&proposal.id).unwrap().as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal.id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_restart_observes_rename_before_receipt_without_rewriting() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("artifact-rename-restart.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let safe_root = temp_dir.path().join("safe-rename");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        state.config.lock().await.system.safe_paths = safe_paths.clone();
+        let target = safe_root.join("risks.csv");
+        let content = "risk,severity\nrestart,high\n";
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", target.display()),
+            serde_json::json!({"path": target, "content": content}),
+            "Rename crash fixture",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let (claim_id, prepared) =
+            stage_artifact_crash_fixture(&state, &proposal, content, &safe_paths).await;
+        stage_artifact_bytes(&prepared, content).unwrap();
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .mark_artifact_staged(&proposal.id, &claim_id)
+            .unwrap());
+        let observed = commit_staged_artifact(&prepared, &safe_paths).unwrap();
+        assert_eq!(observed, prepared.content_digest);
+        assert!(!prepared.stage_path.exists());
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let report = reconcile_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.artifact_effects_reconciled, 1);
+        assert_eq!(report.proposal_projections_repaired, 1);
+        assert_eq!(
+            std::fs::read_to_string(&prepared.target_path).unwrap(),
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_restart_proves_prepared_without_bytes_is_retryable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("artifact-prepared-restart.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let safe_root = temp_dir.path().join("safe-prepared");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        state.config.lock().await.system.safe_paths = safe_paths.clone();
+        let target = safe_root.join("retry.md");
+        let content = "# Retry after proven no effect";
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", target.display()),
+            serde_json::json!({"path": target, "content": content}),
+            "Prepared crash fixture",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let (_claim_id, prepared) =
+            stage_artifact_crash_fixture(&state, &proposal, content, &safe_paths).await;
+        assert!(!prepared.stage_path.exists());
+        assert!(!prepared.target_path.exists());
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let report = reconcile_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.artifact_effects_reconciled, 1);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal.id)
+                .unwrap()
+                .as_deref(),
+            Some("failed_before_effect")
+        );
+        let response = accept_proposal_with_state(proposal.id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(response["artifactMaterialization"]["status"], "confirmed");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), content);
+    }
+
     #[tokio::test]
     async fn accept_external_write_action_blocks_outside_safe_paths() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -5802,7 +6633,7 @@ mod tests {
         let err = accept_proposal_with_state(id.clone(), &state)
             .await
             .unwrap_err();
-        assert!(err.contains("not in safe paths"));
+        assert!(err.contains("safe paths"), "{err}");
         assert!(!file_path.exists());
     }
 
@@ -5849,60 +6680,6 @@ mod tests {
         assert!(records[0].linked_proposal_ids.contains(&proposal_id));
         let serialized = serde_json::to_string(&records[0]).unwrap();
         assert!(!serialized.contains("raw reminder rejection text"));
-    }
-
-    #[test]
-    fn safe_write_utf8_creates_and_overwrites_inside_safe_path() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let safe_path = temp_dir.path().join("safe");
-        std::fs::create_dir_all(&safe_path).unwrap();
-        let safe_path = safe_path.canonicalize().unwrap();
-        let safe_paths = vec![safe_path.to_string_lossy().to_string()];
-        let file_path = safe_path.join("write.txt");
-
-        safe_write_utf8(&file_path.to_string_lossy(), "first", &safe_paths).unwrap();
-        safe_write_utf8(&file_path.to_string_lossy(), "second", &safe_paths).unwrap();
-
-        assert_eq!(std::fs::read_to_string(file_path).unwrap(), "second");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn safe_write_utf8_rejects_target_symlink() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let safe_path = temp_dir.path().join("safe");
-        let outside_path = temp_dir.path().join("outside");
-        std::fs::create_dir_all(&safe_path).unwrap();
-        std::fs::create_dir_all(&outside_path).unwrap();
-        let target = safe_path.join("link.txt");
-        let outside_file = outside_path.join("outside.txt");
-        std::fs::write(&outside_file, "outside").unwrap();
-        std::os::unix::fs::symlink(&outside_file, &target).unwrap();
-        let safe_path = safe_path.canonicalize().unwrap();
-        let safe_paths = vec![safe_path.to_string_lossy().to_string()];
-
-        let err = safe_write_utf8(&target.to_string_lossy(), "new", &safe_paths).unwrap_err();
-        assert!(err.contains("symbolic link"));
-        assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "outside");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn safe_write_utf8_rejects_parent_symlink() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let safe_path = temp_dir.path().join("safe");
-        let outside_path = temp_dir.path().join("outside");
-        std::fs::create_dir_all(&safe_path).unwrap();
-        std::fs::create_dir_all(&outside_path).unwrap();
-        let link_dir = safe_path.join("linked-dir");
-        std::os::unix::fs::symlink(&outside_path, &link_dir).unwrap();
-        let target = link_dir.join("write.txt");
-        let safe_path = safe_path.canonicalize().unwrap();
-        let safe_paths = vec![safe_path.to_string_lossy().to_string()];
-
-        let err = safe_write_utf8(&target.to_string_lossy(), "new", &safe_paths).unwrap_err();
-        assert!(err.contains("symbolic link") || err.contains("safe paths"));
-        assert!(!outside_path.join("write.txt").exists());
     }
 
     #[tokio::test]
@@ -6318,6 +7095,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_builder_batch_for_statestore_field_fails_before_effect_not_unknown() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let batch = openlife_core::life_model::patch::LifeModelPatchBatchV1::new(vec![
+            openlife_core::life_model::patch::LifeModelPatchBatchOperationV1 {
+                candidate_id: "legacy-daily-candidate".into(),
+                path: "goals.daily".into(),
+                candidate: serde_json::json!([{"name": "legacy pending task", "done": false}]),
+            },
+        ])
+        .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH,
+            serde_json::to_value(batch).unwrap(),
+            "persisted before the StateStore ownership cutover",
+            0.9,
+            RiskLevel::Low,
+            ProposalSource::BuilderReview,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .expect_err("the retired Builder write must fail before any effect");
+
+        assert!(error.contains("Patch 应用前校验失败"));
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            assert_eq!(
+                store.dispatch_state(&proposal_id).unwrap().as_deref(),
+                Some("failed_before_effect")
+            );
+            assert_ne!(
+                store.dispatch_state(&proposal_id).unwrap().as_deref(),
+                Some("unknown")
+            );
+        }
+        assert!(state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .unwrap()
+            .goals
+            .daily
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn confirmed_effect_with_failed_proposal_projection_reports_reconciliation_not_failure() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut state = test_app_state(&temp_dir);
@@ -6396,19 +7231,19 @@ mod tests {
                 .status,
             ProposalStatus::Pending
         );
-        assert_eq!(
-            state
-                .agent_run_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .get_run(&run_id)
-                .unwrap()
-                .unwrap()
-                .status,
-            AgentRunStatus::Completed
-        );
+        let projection_pending_run = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection_pending_run.status, AgentRunStatus::Failed);
+        assert!(projection_pending_run.error.as_ref().is_some_and(|error| {
+            error.phase == "review_projection_pending" && error.recoverable
+        }));
         assert_eq!(
             state
                 .scheduled_task_store
@@ -6460,6 +7295,113 @@ mod tests {
                 .len(),
             1,
             "projection reconciliation must not replay the already-confirmed effect"
+        );
+        let reconciled_run = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled_run.status, AgentRunStatus::Completed);
+        assert!(reconciled_run.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_does_not_treat_legacy_task_strings_as_terminal_authority() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let task_session_id = uuid::Uuid::new_v4().to_string();
+        let mut proposal = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "goals.short_term",
+            serde_json::json!({
+                "originatingTaskSessionId": task_session_id,
+                "description": "confirmed effect awaiting read-model recovery"
+            }),
+            "Counterfactual crash after effect and Proposal projection.",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        proposal.source_detail = Some(task_session_id.clone());
+        let proposal_id = proposal.id.clone();
+        {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .create_session_with_id(
+                    task_session_id.clone(),
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: "artifact-reconciliation-chat".into(),
+                        user_goal: "wait for one governed effect".into(),
+                        selected_strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::FileWriteProposal,
+                        current_plan_summary: None,
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .unwrap();
+            store
+                .set_pending_blockers(&task_session_id, vec![format!("proposal:{proposal_id}")])
+                .unwrap();
+            store.mark_waiting_permission(&task_session_id).unwrap();
+        }
+        let run_id =
+            create_waiting_conversation_run(&state, &proposal_id, "artifact-recovery-chat").await;
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+            let claim_id = store.claim_dispatch(&proposal_id).unwrap().unwrap();
+            assert!(store
+                .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
+                .unwrap());
+            proposal.accept();
+            assert!(store
+                .project_confirmed_effect(&proposal, &claim_id)
+                .unwrap());
+        }
+
+        let report = reconcile_durable_proposal_projections_with_state(&state, 20)
+            .await
+            .expect("reconcile accepted effect read models");
+        assert_eq!(report.agent_run_candidates_examined, 0);
+        assert_eq!(report.agent_runs_reconciled, 0);
+        let task = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_session(&task_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        );
+        assert_eq!(
+            task.pending_blockers,
+            vec![format!("proposal:{proposal_id}")],
+            "source_detail and after payload strings cannot authorize a post-final TaskSession write"
+        );
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::WaitingPermission
         );
     }
 
@@ -6764,6 +7706,445 @@ mod tests {
                 .unwrap()
                 .status,
             AgentRunStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_proposal_linked_after_review_cannot_be_projected_back_to_waiting() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = scheduled_builder_proposal("accepted before AgentRun projection");
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let run = AgentRun::new_builder_run("builder-accept-before-link");
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+
+        accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        // This mirrors the old Builder/Calibration producer shape: it retained
+        // a pre-review row, then wrote that full stale row after Proposal review.
+        crate::terminal_owner_write_gateway::project_agent_run_from_proposal_staging(
+            &state,
+            &run_id,
+            std::slice::from_ref(&proposal_id),
+            crate::terminal_owner_write_gateway::AgentRunProposalStagingReceipt {
+                kind: crate::terminal_owner_write_gateway::AgentRunProposalStagingKind::Builder,
+                requested_count: 1,
+                failed_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let canonical = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            canonical.status,
+            AgentRunStatus::Completed,
+            "link finalization must derive the already-confirmed Proposal instead of trusting a stale WaitingPermission row"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_confirmed_and_rejected_review_is_failed_partial_effect_not_cancelled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let confirmed = scheduled_builder_proposal("confirmed partial effect");
+        let rejected = scheduled_builder_proposal("rejected partial effect");
+        let confirmed_id = confirmed.id.clone();
+        let rejected_id = rejected.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&confirmed).unwrap();
+            store.create_proposal(&rejected).unwrap();
+        }
+        let mut run = AgentRun::new_builder_run("builder-partial-effect");
+        run.status = AgentRunStatus::WaitingPermission;
+        run.add_generated_proposal(&confirmed_id);
+        run.add_generated_proposal(&rejected_id);
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+
+        accept_proposal_with_state(confirmed_id, &state)
+            .await
+            .unwrap();
+        reject_proposal_with_state(rejected_id, &state)
+            .await
+            .unwrap();
+
+        let canonical = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.status, AgentRunStatus::Failed);
+        assert_eq!(
+            canonical.error.as_ref().map(|error| error.phase.as_str()),
+            Some("review_partial_effect")
+        );
+        let count_receipt = canonical.status_updates.last().unwrap();
+        assert_eq!(
+            count_receipt.phase,
+            openlife_core::agent::AgentLoopPhase::Failed
+        );
+        assert_eq!(count_receipt.step_index, 1, "confirmed effect count");
+        assert_eq!(
+            count_receipt.tool_call_index,
+            Some(1),
+            "declined effect count"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_dispatch_truth_remains_remote_unknown_without_promoting_legacy_link() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = scheduled_builder_proposal("unknown dispatch result");
+        let proposal_id = proposal.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+            let claim_id = store.claim_dispatch(&proposal_id).unwrap().unwrap();
+            assert!(store
+                .mark_dispatch_unknown(&proposal_id, &claim_id, "test_transport_unknown")
+                .unwrap());
+        }
+        let run_id =
+            create_waiting_builder_run(&state, &proposal_id, "builder-unknown-dispatch").await;
+
+        reconcile_agent_runs_for_proposal(&state, &proposal)
+            .await
+            .unwrap();
+
+        let (first_finished_at, first_revision, first_status_updates) = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            let run = store.get_run(&run_id).unwrap().unwrap();
+            (
+                run.finished_at,
+                store.canonical_revision(&run_id).unwrap(),
+                run.status_updates,
+            )
+        };
+
+        reconcile_agent_runs_for_proposal(&state, &proposal)
+            .await
+            .unwrap();
+
+        let canonical = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.status, AgentRunStatus::RemoteUnknown);
+        assert_eq!(
+            canonical.finished_at, first_finished_at,
+            "re-observing the same unknown receipt must not manufacture a new terminal time"
+        );
+        assert_eq!(
+            serde_json::to_value(&canonical.status_updates).unwrap(),
+            serde_json::to_value(&first_status_updates).unwrap(),
+            "re-observing the same unknown receipt must be a semantic no-op"
+        );
+        let count_receipt = canonical.status_updates.last().unwrap();
+        assert_eq!(
+            count_receipt.phase,
+            openlife_core::agent::AgentLoopPhase::Failed
+        );
+        assert_eq!(count_receipt.step_index, 1, "unknown effect count");
+        assert_eq!(
+            canonical
+                .status_updates
+                .iter()
+                .filter(|update| {
+                    update.phase == openlife_core::agent::AgentLoopPhase::Failed
+                        && update.step_index == 1
+                        && update.tool_call_index == Some(0)
+                })
+                .count(),
+            1,
+            "unchanged unknown truth must be idempotent, not manufacture progress or duplicate receipts"
+        );
+        drop(canonical);
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .canonical_revision(&run_id)
+                .unwrap(),
+            first_revision,
+            "a semantic no-op must not bump the canonical AgentRun revision"
+        );
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_review_reconcilable_linked_proposal_ids(20)
+                .unwrap(),
+            Vec::<String>::new(),
+            "an untyped legacy Proposal link must not be promoted into the typed durable reconciliation queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_receipts_project_exact_agent_run_truth() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        for (label, transition, expected_status, expected_phase) in [
+            (
+                "failed-before-effect",
+                "failed_before_effect",
+                AgentRunStatus::Failed,
+                Some("review_failed_before_effect"),
+            ),
+            (
+                "confirmed-projection-pending",
+                "confirmed_projection_pending",
+                AgentRunStatus::Failed,
+                Some("review_projection_pending"),
+            ),
+            (
+                "claimed-dispatch",
+                "claimed",
+                AgentRunStatus::RemoteUnknown,
+                Some("review_effect_unknown"),
+            ),
+        ] {
+            let proposal = scheduled_builder_proposal(label);
+            let proposal_id = proposal.id.clone();
+            {
+                let store = state.proposal_store.as_ref().unwrap().lock().await;
+                store.create_proposal(&proposal).unwrap();
+                let claim_id = store.claim_dispatch(&proposal_id).unwrap().unwrap();
+                let changed = match transition {
+                    "failed_before_effect" => store
+                        .mark_dispatch_failed_before_effect(
+                            &proposal_id,
+                            &claim_id,
+                            "test_before_effect",
+                        )
+                        .unwrap(),
+                    "confirmed_projection_pending" => store
+                        .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
+                        .unwrap(),
+                    "claimed" => true,
+                    _ => unreachable!(),
+                };
+                assert!(changed);
+            }
+            let run_id = create_waiting_builder_run(&state, &proposal_id, label).await;
+            reconcile_agent_runs_for_proposal(&state, &proposal)
+                .await
+                .unwrap();
+            let canonical = state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                canonical.status, expected_status,
+                "{transition} must preserve its exact execution truth"
+            );
+            assert_eq!(
+                canonical.error.as_ref().map(|error| error.phase.as_str()),
+                expected_phase,
+                "{transition} must expose a typed recoverable blocker"
+            );
+        }
+
+        let unclaimed = scheduled_builder_proposal("unclaimed review");
+        let unclaimed_id = unclaimed.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&unclaimed)
+            .unwrap();
+        let run_id = create_waiting_builder_run(&state, &unclaimed_id, "unclaimed-review").await;
+        reconcile_agent_runs_for_proposal(&state, &unclaimed)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::WaitingPermission,
+            "only an unclaimed review is truthfully waiting for permission"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_receipt_idempotency_includes_typed_message() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = scheduled_builder_proposal("typed unknown receipt");
+        let proposal_id = proposal.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+            let claim_id = store.claim_dispatch(&proposal_id).unwrap().unwrap();
+            assert!(store
+                .mark_dispatch_unknown(&proposal_id, &claim_id, "typed_unknown")
+                .unwrap());
+        }
+        let mut run = AgentRun::new_builder_run("typed-unknown-receipt");
+        run.status = AgentRunStatus::WaitingPermission;
+        run.add_generated_proposal(&proposal_id);
+        run.status_updates
+            .push(openlife_core::agent::AgentLoopStatusUpdate {
+                phase: openlife_core::agent::AgentLoopPhase::Failed,
+                message: "different_receipt_type_with_same_counts".into(),
+                step_index: 1,
+                tool_call_index: Some(0),
+                timestamp: chrono::Utc::now(),
+            });
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        let (previous_receipt_count, previous_receipt_message) = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            let canonical = store.get_run(&run_id).unwrap().unwrap();
+            (
+                canonical.status_updates.len(),
+                canonical.status_updates.last().unwrap().message.clone(),
+            )
+        };
+
+        reconcile_agent_runs_for_proposal(&state, &proposal)
+            .await
+            .unwrap();
+
+        let canonical = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.status_updates.len(), previous_receipt_count + 1);
+        let receipt = canonical.status_updates.last().unwrap();
+        assert_ne!(receipt.message, previous_receipt_message);
+        assert_eq!(receipt.step_index, 1);
+        assert_eq!(receipt.tool_call_index, Some(0));
+    }
+
+    #[tokio::test]
+    async fn partial_staging_failure_with_all_reviews_declined_is_failed_not_cancelled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = scheduled_builder_proposal("declined after partial staging");
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let mut run = AgentRun::new_builder_run("partial-staging-all-declined");
+        run.status = AgentRunStatus::WaitingPermission;
+        run.add_generated_proposal(&proposal_id);
+        run.error = Some(openlife_core::agent::AgentRunError {
+            message: "proposal_staging_partial_or_failed".into(),
+            phase: "review_staging_partial".into(),
+            recoverable: true,
+        });
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+
+        reject_proposal_with_state(proposal_id, &state)
+            .await
+            .unwrap();
+
+        let canonical = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.status, AgentRunStatus::Failed);
+        assert_ne!(canonical.status, AgentRunStatus::Cancelled);
+        assert_eq!(
+            canonical.error.as_ref().map(|error| error.phase.as_str()),
+            Some("review_staging_partial")
         );
     }
 

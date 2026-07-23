@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use openlife_core::agent::main_chat_agent_v1::{
-    AgentIngressDecision, MainChatAgentStrategy, PolicyRouteKind,
+    AgentIngressDecision, AgentTaskSessionStatus, MainChatAgentStrategy, PolicyRouteKind,
 };
 use openlife_core::llm::{ChatMessage, ProviderInvocationReceipt};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,289 @@ struct MainChatPreRegistrationBarrier {
     reached: Arc<tokio::sync::Barrier>,
     release: Arc<tokio::sync::Barrier>,
     kernel_first_poll_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+mod provider_consent_continuation_tests {
+    use super::{
+        fail_main_chat_once_after_provider_replay_epoch_open_for_test, MainChatTurnStreamMode,
+        OpenLifeTurnInput, OpenLifeTurnRuntime, ProviderInvocationState,
+    };
+    use openlife_core::agent::main_chat_agent_v1::{AgentTaskSessionStatus, MainChatAgentStrategy};
+    use openlife_core::llm::ChatMessage;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn accepted_provider_consent_resumes_same_turn_once_through_product_task_command() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider continuation fixture");
+        let address = listener.local_addr().expect("provider fixture address");
+        let mut config = state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = format!("http://{address}/v1");
+        config.llm.openai_key = "sk-provider-continuation-test".into();
+        config.llm.chat_model = "gpt-provider-continuation-test".into();
+        config.prefer_local_model = false;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        state.replace_provider_runtime_config(config).await;
+
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let session_id = "provider-consent-continuation-chat";
+        let user_text = "Write a concise launch announcement for OpenLife.";
+        let initial = OpenLifeTurnRuntime::new(&state)
+            .run_buffered(OpenLifeTurnInput {
+                operation_id: operation_id.clone(),
+                session_id: session_id.into(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: user_text.into(),
+                }],
+                selected_skill_id: None,
+                stream_mode: MainChatTurnStreamMode::Buffered,
+            })
+            .await
+            .expect("initial turn must stage consent instead of dispatching");
+        assert_eq!(
+            initial.terminal.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert_eq!(initial.terminal.proposals.len(), 1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(75), listener.accept())
+                .await
+                .is_err(),
+            "the Ask generation must not cross the HTTP edge"
+        );
+        let proposal_id = initial.terminal.proposals[0]
+            .strip_prefix("proposal:")
+            .unwrap_or(&initial.terminal.proposals[0])
+            .to_string();
+        let before_resume = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load waiting product task")
+            .expect("waiting product task");
+        assert_eq!(
+            before_resume.status,
+            AgentTaskSessionStatus::WaitingPermission
+        );
+        assert_eq!(
+            before_resume.selected_strategy,
+            MainChatAgentStrategy::DirectAnswer
+        );
+
+        let accepted =
+            crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+                .await
+                .expect("accept exact provider consent");
+        assert_eq!(
+            accepted
+                .get("proposal_projection_status")
+                .and_then(serde_json::Value::as_str),
+            Some("confirmed")
+        );
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                    .await
+                    .expect("provider continuation must dispatch")
+                    .expect("accept provider request");
+            server_count.fetch_add(1, Ordering::SeqCst);
+            let mut input = [0_u8; 16384];
+            let _ = socket
+                .read(&mut input)
+                .await
+                .expect("read provider request");
+            let body = serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "OpenLife is ready for its next chapter."
+                    }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write provider response");
+        });
+
+        let (first_resume, second_resume) = tokio::join!(
+            crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+                &operation_id,
+                &state,
+            ),
+            crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+                &operation_id,
+                &state,
+            ),
+        );
+        let mut resume_results = vec![first_resume, second_resume];
+        assert_eq!(
+            resume_results
+                .iter()
+                .filter(|result| result.is_ok())
+                .count(),
+            1,
+            "concurrent double resume must elect exactly one TurnRuntime owner"
+        );
+        let completed = resume_results
+            .drain(..)
+            .find_map(Result::ok)
+            .expect("one product resume must continue the same provider turn");
+        server.await.expect("provider fixture task");
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            completed.session.as_ref().map(|session| session.status),
+            Some(AgentTaskSessionStatus::Completed)
+        );
+        let epoch = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .terminal_owner_epoch(&operation_id)
+            .expect("load terminal epoch")
+            .expect("terminal epoch");
+        assert_eq!(epoch.generation(), 2);
+        assert_eq!(
+            epoch.state(),
+            crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+        );
+        let reused = crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+            &operation_id,
+            &state,
+        )
+        .await;
+        assert!(reused.is_err(), "a completed AllowOnce cannot be replayed");
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert!(state
+            .tool_permission_store
+            .lock()
+            .await
+            .consume_reviewed_network_once_for_proposal(
+                &proposal_id,
+                "wrong-scope",
+                "provider",
+                "high",
+                "network",
+            )
+            .expect("query consumed exact grant")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_continuation_preparation_failure_seals_failed_generation() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut config = state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = "http://127.0.0.1:9/v1".into();
+        config.llm.openai_key = "sk-provider-preparation-failure-test".into();
+        config.llm.chat_model = "gpt-provider-preparation-failure-test".into();
+        config.prefer_local_model = false;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        state.replace_provider_runtime_config(config).await;
+
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let initial = OpenLifeTurnRuntime::new(&state)
+            .run_buffered(OpenLifeTurnInput {
+                operation_id: operation_id.clone(),
+                session_id: "provider-consent-preparation-failure-chat".into(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "Draft a concise product summary.".into(),
+                }],
+                selected_skill_id: None,
+                stream_mode: MainChatTurnStreamMode::Buffered,
+            })
+            .await
+            .expect("initial provider turn stages consent");
+        let proposal_id = initial.terminal.proposals[0]
+            .strip_prefix("proposal:")
+            .unwrap_or(&initial.terminal.proposals[0])
+            .to_string();
+        crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+            .await
+            .expect("accept provider consent");
+        fail_main_chat_once_after_provider_replay_epoch_open_for_test(&operation_id);
+
+        let error = crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+            &operation_id,
+            &state,
+        )
+        .await
+        .expect_err("injected continuation preparation failure must be returned");
+        assert_eq!(
+            error,
+            "provider_consent_continuation_execution_failed:injected_provider_continuation_failure_after_replay_epoch_open"
+        );
+        let task = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load failed task")
+            .expect("failed task exists");
+        assert_eq!(task.status, AgentTaskSessionStatus::Failed);
+        let run = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await
+            .get_run_for_task_id(&operation_id)
+            .expect("load failed run")
+            .expect("failed run exists");
+        assert_eq!(run.status, openlife_core::agent::AgentRunStatus::Failed);
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await;
+        let epoch = event_store
+            .terminal_owner_epoch(&operation_id)
+            .expect("load terminal epoch")
+            .expect("terminal epoch exists");
+        assert_eq!(epoch.generation(), 2);
+        assert_eq!(
+            epoch.state(),
+            crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+        );
+        let final_event = event_store
+            .terminal_owner_final_event(&operation_id)
+            .expect("load failed final")
+            .expect("failed final exists");
+        assert_eq!(final_event.payload["status"], "failed");
+        assert_eq!(
+            final_event.payload["providerInvocationStatus"],
+            "not_attempted"
+        );
+        assert_eq!(final_event.payload["modelInvoked"], false);
+        assert_eq!(final_event.payload["toolInvoked"], false);
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +396,79 @@ async fn pause_main_chat_before_cancellation_registration_for_test(chat_session_
 async fn pause_main_chat_before_cancellation_registration_for_test(_chat_session_id: &str) {}
 
 #[cfg(test)]
+#[derive(Clone)]
+struct MainChatTerminalSealingBarrier {
+    reached: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+fn main_chat_terminal_sealing_barrier_slot(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, MainChatTerminalSealingBarrier>> {
+    static SLOT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, MainChatTerminalSealingBarrier>>,
+    > = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct MainChatTerminalSealingBarrierGuard {
+    operation_id: String,
+}
+
+#[cfg(test)]
+impl Drop for MainChatTerminalSealingBarrierGuard {
+    fn drop(&mut self) {
+        main_chat_terminal_sealing_barrier_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.operation_id);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_main_chat_terminal_sealing_barrier_for_test(
+    operation_id: &str,
+) -> (
+    MainChatTerminalSealingBarrierGuard,
+    Arc<tokio::sync::Barrier>,
+    Arc<tokio::sync::Barrier>,
+) {
+    let reached = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Barrier::new(2));
+    main_chat_terminal_sealing_barrier_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            operation_id.to_string(),
+            MainChatTerminalSealingBarrier {
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&release),
+            },
+        );
+    (
+        MainChatTerminalSealingBarrierGuard {
+            operation_id: operation_id.to_string(),
+        },
+        reached,
+        release,
+    )
+}
+
+#[cfg(test)]
+async fn pause_main_chat_at_terminal_sealing_for_test(operation_id: &str) {
+    let barrier = main_chat_terminal_sealing_barrier_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(operation_id)
+        .cloned();
+    if let Some(barrier) = barrier {
+        barrier.reached.wait().await;
+        barrier.release.wait().await;
+    }
+}
+
+#[cfg(test)]
 fn main_chat_fail_after_message_commit_operations_for_test(
 ) -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static OPERATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -138,6 +494,35 @@ fn should_fail_main_chat_after_message_commit_for_test(operation_id: &str) -> bo
 
 #[cfg(not(test))]
 fn should_fail_main_chat_after_message_commit_for_test(_operation_id: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn main_chat_fail_after_provider_replay_epoch_open_operations_for_test(
+) -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static OPERATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    OPERATIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn fail_main_chat_once_after_provider_replay_epoch_open_for_test(operation_id: &str) {
+    main_chat_fail_after_provider_replay_epoch_open_operations_for_test()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(operation_id.to_string());
+}
+
+#[cfg(test)]
+fn should_fail_main_chat_after_provider_replay_epoch_open_for_test(operation_id: &str) -> bool {
+    main_chat_fail_after_provider_replay_epoch_open_operations_for_test()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(operation_id)
+}
+
+#[cfg(not(test))]
+fn should_fail_main_chat_after_provider_replay_epoch_open_for_test(_operation_id: &str) -> bool {
     false
 }
 
@@ -426,7 +811,27 @@ pub(crate) struct OpenLifeTurnInput {
     pub(crate) stream_mode: MainChatTurnStreamMode,
 }
 
+#[derive(Debug, Clone)]
+enum OpenLifeTurnExecutionMode {
+    Initial,
+    ProviderConsentContinuation { proposal_id: String },
+}
+
+impl OpenLifeTurnExecutionMode {
+    fn required_network_consent_proposal_id(&self) -> Option<&str> {
+        match self {
+            Self::Initial => None,
+            Self::ProviderConsentContinuation { proposal_id } => Some(proposal_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The shared prefix is part of the explicit admission-failure vocabulary.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
+)]
 enum OpenLifeTurnAdmissionError {
     InvalidOperationId,
     InvalidSessionId,
@@ -810,17 +1215,22 @@ async fn create_early_canonical_agent_run(
     run.task_id = task_session_id.to_string();
     run.input_ref = Some(message_commit.receipt().canonical_ref.clone());
     let run_id = run.id.clone();
-    // Clone both sync stores behind short, non-overlapping Tokio guards. The
-    // fenced operation below owns the only cross-store lock order:
-    // MemoryStore connection -> AgentRunStore connection, with no await.
-    let memory_store = { state.memory_store.lock().await.clone() };
+    // Clone the synchronous run owner behind a short Tokio guard for the
+    // reconciliation read. Canonical creation itself goes through the sole
+    // Tauri AgentRun create gateway below.
     let store = { store_arc.lock().await.clone() };
-    let existing_by_run = store
-        .get_run_including_deleted(operation_id)
-        .map_err(|error| format!("load operation-bound AgentRun failed: {error}"))?;
-    let existing_by_task = store
-        .get_run_for_task_id(task_session_id)
-        .map_err(|error| format!("load task-bound AgentRun failed: {error}"))?;
+    let existing_by_run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run_including_deleted(operation_id)
+            .map_err(|error| format!("load operation-bound AgentRun failed: {error}")),
+    )?;
+    let existing_by_task = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run_for_task_id(task_session_id)
+            .map_err(|error| format!("load task-bound AgentRun failed: {error}")),
+    )?;
     if existing_by_run.is_some() || existing_by_task.is_some() {
         let existing = existing_by_run
             .as_ref()
@@ -845,9 +1255,13 @@ async fn create_early_canonical_agent_run(
     // own the purpose-isolated Store key. This boundary performs the stronger
     // check: the non-serde Memory proof must bind the canonical owner/ref and
     // raw content digest, then AgentRunStore issues the keyed receipt.
-    memory_store
-        .create_agent_run_from_active_conversation_message(&store, &run, message_commit.proof())
-        .map_err(|err| format!("create early canonical AgentRun failed: {err}"))?;
+    crate::terminal_owner_write_gateway::create_conversation_bound_agent_run(
+        state,
+        &run,
+        message_commit,
+    )
+    .await
+    .map_err(|err| format!("create early canonical AgentRun failed: {err}"))?;
     Ok(run_id)
 }
 
@@ -856,20 +1270,14 @@ async fn fail_task_session_after_agent_run_create_failure(
     task_session_id: &str,
     create_error: &str,
 ) -> Result<(), String> {
-    let store_arc = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| {
-            format!(
-                "canonical AgentRun creation failed and task cleanup store is unavailable: {create_error}"
-            )
-        })?;
-    let store = store_arc.lock().await;
-    store
-        .fail_session(
-            task_session_id,
-            "Canonical AgentRun persistence failed before execution started.",
-        )
+    crate::terminal_owner_write_gateway::write_task_session(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::Fail(
+            "Canonical AgentRun persistence failed before execution started.".into(),
+        ),
+    )
+    .await
         .map_err(|cleanup_error| {
             format!(
                 "canonical AgentRun creation failed ({create_error}); task cleanup failed: {cleanup_error}"
@@ -890,6 +1298,43 @@ impl<S> crate::main_chat_kernel::MainChatEventSink for CancellationAwareMainChat
 where
     S: crate::main_chat_kernel::MainChatEventSink + ?Sized,
 {
+    fn emit_provider_started(
+        &mut self,
+        request_id: String,
+        provider: String,
+        model: String,
+        started_at: chrono::DateTime<chrono::Utc>,
+        policy_evidence: openlife_core::llm::ProviderPolicyReceiptEvidence,
+    ) -> Result<(), String> {
+        match self.registry.admit_provider_start(
+            &self.task_session_id,
+            &request_id,
+            &provider,
+            &model,
+            started_at,
+            &policy_evidence,
+        ) {
+            Ok(disposition) if disposition.should_emit() => self.inner.emit_provider_started(
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence,
+            ),
+            Ok(_) => Ok(()),
+            Err(crate::main_chat_cancellation::MainChatProviderAttemptError::CancelRequested) => {
+                Err(
+                    crate::main_chat_cancellation::MainChatProviderAttemptError::CancelRequested
+                        .to_string(),
+                )
+            }
+            Err(error) => {
+                self.provider_attempt_error.get_or_insert(error);
+                Err(error.to_string())
+            }
+        }
+    }
+
     fn emit(&mut self, event: crate::main_chat_kernel::MainChatKernelEvent) {
         let attempt_result = match &event {
             crate::main_chat_kernel::MainChatKernelEvent::ProviderStarted {
@@ -963,9 +1408,76 @@ impl<'a> OpenLifeTurnRuntime<'a> {
     ) -> Result<OpenLifeTurnOutput, String> {
         debug_assert_eq!(input.stream_mode, MainChatTurnStreamMode::Buffered);
         let mut event_sink = BufferedMainChatEventSink::default();
-        let execution = self
-            .run_with_event_sink(input, &mut event_sink, MainChatTurnStreamMode::Buffered)
-            .await?;
+        let execution = Box::pin(self.run_with_event_sink(
+            input,
+            &mut event_sink,
+            MainChatTurnStreamMode::Buffered,
+        ))
+        .await?;
+        Ok(OpenLifeTurnOutput {
+            route_decision: execution.route_decision,
+            terminal: execution.terminal,
+            delivery: MainChatTurnDelivery::Buffered {
+                result: Box::new(execution.result),
+            },
+        })
+    }
+
+    pub(crate) async fn run_provider_network_consent_continuation(
+        &self,
+        task_session_id: &str,
+        proposal_id: &str,
+    ) -> Result<OpenLifeTurnOutput, String> {
+        let session = load_openlife_replay_session(self.state, task_session_id).await?;
+        if session.status
+            != openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        {
+            return Err("provider_consent_continuation_task_not_waiting_permission".into());
+        }
+        let messages = crate::memory_gateway::load_turn_context_through_operation_with_state(
+            task_session_id,
+            64,
+            self.state,
+        )
+        .await?;
+        let canonical_user_message = self
+            .state
+            .memory_store
+            .lock()
+            .await
+            .load_active_conversation_message_by_operation(task_session_id)
+            .map_err(|error| format!("provider_consent_continuation_owner_load_failed:{error}"))?
+            .ok_or_else(|| "provider_consent_continuation_user_message_missing".to_string())?;
+        let current_user_message = messages
+            .last()
+            .filter(|message| message.role == "user")
+            .ok_or_else(|| "provider_consent_continuation_user_message_missing".to_string())?;
+        if canonical_user_message.receipt.session_id != session.chat_session_id
+            || canonical_user_message.receipt.operation_id != session.id
+            || canonical_user_message.message.role != current_user_message.role
+            || canonical_user_message.message.content != current_user_message.content
+            || current_user_message.content != session.user_goal
+        {
+            return Err("provider_consent_continuation_user_message_drift".into());
+        }
+        let input = OpenLifeTurnInput {
+            operation_id: session.id.clone(),
+            session_id: session.chat_session_id.clone(),
+            messages,
+            selected_skill_id: None,
+            stream_mode: MainChatTurnStreamMode::Buffered,
+        };
+        let mut event_sink = BufferedMainChatEventSink::default();
+        let execution = Box::pin(self.run_with_event_sink_mode(
+            input,
+            &mut event_sink,
+            MainChatTurnStreamMode::Buffered,
+            OpenLifeTurnExecutionMode::ProviderConsentContinuation {
+                proposal_id: proposal_id.to_string(),
+            },
+        ))
+        .await
+        .map_err(|error| format!("provider_consent_continuation_execution_failed:{error}"))?;
         Ok(OpenLifeTurnOutput {
             route_decision: execution.route_decision,
             terminal: execution.terminal,
@@ -983,9 +1495,12 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         debug_assert_eq!(input.stream_mode, MainChatTurnStreamMode::Streaming);
         let (execution, provider_token_count) = {
             let mut event_sink = StreamingMainChatEventSink::new(emit_stream_event);
-            let execution = self
-                .run_with_event_sink(input, &mut event_sink, MainChatTurnStreamMode::Streaming)
-                .await?;
+            let execution = Box::pin(self.run_with_event_sink(
+                input,
+                &mut event_sink,
+                MainChatTurnStreamMode::Streaming,
+            ))
+            .await?;
             (execution, event_sink.provider_token_count())
         };
         let durable_event_count = execution.durable_events.len();
@@ -1043,7 +1558,12 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             return Err("main_chat_replay_action_task_identity_mismatch".into());
         }
         let prepared = prepare_openlife_replay(self.state, &session, &action).await?;
-        let canonical_run_id = prepared.canonical_run_id.clone();
+        let PreparedOpenLifeReplay {
+            action_plan,
+            retry_proof,
+            canonical_run_id,
+            envelope,
+        } = prepared;
         let cancellation_registry = {
             self.state
                 .main_chat_runtime_state
@@ -1059,39 +1579,137 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                     "OpenLifeTurnRuntime refused a second replay owner for {task_session_id}: {error}"
                 )
             })?;
+        let replay_cause = match kind {
+            OpenLifeReplayKind::Retry => {
+                crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry
+            }
+            OpenLifeReplayKind::ResumeAfterPermission => {
+                crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission
+            }
+        };
+        let replay_admission =
+            crate::terminal_owner_write_gateway::issue_terminal_owner_replay_epoch_admission(
+                self.state,
+                &session,
+                &action,
+                &envelope,
+                replay_cause,
+                action_bound_permission.as_ref(),
+                retry_proof,
+            )
+            .await?;
+        let replay_epoch = self
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await
+            .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
+            .map_err(|error| format!("open terminal owner replay epoch failed: {error}"))?;
         if registration.token.is_cancelled() {
-            finalize_openlife_replay_cancellation(
+            let cancellation_result = finalize_openlife_replay_cancellation(
                 self.state,
                 &task_session_id,
                 &canonical_run_id,
                 &registration,
             )
-            .await?;
-            return Err("main_chat_replay_locally_aborted:before_claim".into());
+            .await;
+            let result: Result<OpenLifeReplayOutput, String> = match cancellation_result {
+                Ok(()) => Err("main_chat_replay_locally_aborted:before_claim".into()),
+                Err(error) => Err(error),
+            };
+            let seal_result = persist_openlife_replay_final_receipt(
+                self.state,
+                &session,
+                &canonical_run_id,
+                replay_epoch.generation(),
+                registration.execution_id(),
+                OpenLifeReplayReceiptKind::Tool,
+                result.as_ref().err().map(String::as_str),
+            )
+            .await;
+            drop(registration);
+            return match (result, seal_result) {
+                (result, Ok(_)) => result,
+                (Ok(_), Err(seal_error)) => Err(format!(
+                    "terminal_owner_replay_finalization_failed:{seal_error}"
+                )),
+                (Err(error), Err(seal_error)) => Err(format!(
+                    "{error}; terminal_owner_replay_finalization_failed:{seal_error}"
+                )),
+            };
         }
-
-        let replay_claim = claim_openlife_replay(
+        let replay_claim = match claim_openlife_replay(
             self.state,
             &action,
             registration.execution_id(),
-            prepared.retry_proof,
+            replay_admission.into_retry_proof()?,
         )
-        .await?;
+        .await
+        {
+            Ok(claim) => claim,
+            Err(error) => {
+                let seal_result = persist_openlife_replay_final_receipt(
+                    self.state,
+                    &session,
+                    &canonical_run_id,
+                    replay_epoch.generation(),
+                    registration.execution_id(),
+                    OpenLifeReplayReceiptKind::Tool,
+                    Some(&error),
+                )
+                .await;
+                drop(registration);
+                if let Err(seal_error) = seal_result {
+                    return Err(format!(
+                        "{error}; terminal_owner_replay_finalization_failed:{seal_error}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
         if registration.token.is_cancelled() {
-            finalize_openlife_replay_cancellation(
+            let cancellation_result = finalize_openlife_replay_cancellation(
                 self.state,
                 &task_session_id,
                 &canonical_run_id,
                 &registration,
             )
-            .await?;
-            return Err("main_chat_replay_locally_aborted:after_claim".into());
+            .await;
+            let result: Result<OpenLifeReplayOutput, String> = match cancellation_result {
+                Ok(()) => Err("main_chat_replay_locally_aborted:after_claim".into()),
+                Err(error) => Err(error),
+            };
+            let seal_result = persist_openlife_replay_final_receipt(
+                self.state,
+                &session,
+                &canonical_run_id,
+                replay_epoch.generation(),
+                registration.execution_id(),
+                OpenLifeReplayReceiptKind::Tool,
+                result.as_ref().err().map(String::as_str),
+            )
+            .await;
+            drop(registration);
+            if let Err(seal_error) = seal_result {
+                return Err(format!(
+                    "{}; terminal_owner_replay_finalization_failed:{seal_error}",
+                    result
+                        .as_ref()
+                        .err()
+                        .map(String::as_str)
+                        .unwrap_or("main_chat_replay_locally_aborted")
+                ));
+            }
+            return result;
         }
 
         let claimed_action = load_openlife_replay_action(self.state, &action_id).await?;
         let replay_action = if kind == OpenLifeReplayKind::Retry {
             transition_claimed_openlife_replay(
                 self.state,
+                &task_session_id,
                 &action_id,
                 &replay_claim.claim_id,
                 claimed_action.status,
@@ -1144,7 +1762,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 &session,
                 &replay_action,
                 &replay_claim,
-                prepared.action_plan,
+                action_plan,
                 &canonical_run_id,
                 &registration,
                 action_bound_permission.as_ref(),
@@ -1159,40 +1777,67 @@ impl<'a> OpenLifeTurnRuntime<'a> {
 
         let result = match outcome {
             RuntimeReplayOutcome::Cancelled => {
-                finalize_openlife_replay_cancellation(
+                match finalize_openlife_replay_cancellation(
                     self.state,
                     &task_session_id,
                     &canonical_run_id,
                     &registration,
                 )
-                .await?;
-                Err(MAIN_CHAT_REPLAY_ABORT_DURING_TOOL_EXECUTION.into())
+                .await
+                {
+                    Ok(()) => Err(MAIN_CHAT_REPLAY_ABORT_DURING_TOOL_EXECUTION.into()),
+                    Err(error) => Err(error),
+                }
             }
             RuntimeReplayOutcome::Completed(result) => {
                 if registration.token.is_cancelled() {
-                    finalize_openlife_replay_cancellation(
+                    match finalize_openlife_replay_cancellation(
                         self.state,
                         &task_session_id,
                         &canonical_run_id,
                         &registration,
                     )
-                    .await?;
-                    Err("main_chat_replay_locally_aborted:after_execution".into())
+                    .await
+                    {
+                        Ok(()) => Err("main_chat_replay_locally_aborted:after_execution".into()),
+                        Err(error) => Err(error),
+                    }
                 } else {
-                    settle_openlife_replay_owner_exit(
+                    match settle_openlife_replay_owner_exit(
                         self.state,
                         &task_session_id,
                         &canonical_run_id,
                         &registration,
                         result.as_ref().err().map(String::as_str),
                     )
-                    .await?;
-                    result
+                    .await
+                    {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    }
                 }
             }
         };
+        let seal_result = persist_openlife_replay_final_receipt(
+            self.state,
+            &session,
+            &canonical_run_id,
+            replay_epoch.generation(),
+            registration.execution_id(),
+            OpenLifeReplayReceiptKind::Tool,
+            result.as_ref().err().map(String::as_str),
+        )
+        .await;
         drop(registration);
-        result
+        match (result, seal_result) {
+            (result, Ok(_)) => result,
+            (Ok(_), Err(seal_error)) => Err(format!(
+                "terminal_owner_replay_finalization_failed:{seal_error}"
+            )),
+            (Err(error), Err(seal_error)) => Err(format!(
+                "{error}; terminal_owner_replay_finalization_failed:{seal_error}"
+            )),
+        }
     }
 
     /// Consume a cancel-before-registration tombstone as a short-lived
@@ -1230,6 +1875,25 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         input: OpenLifeTurnInput,
         event_sink: &mut S,
         stream_mode: MainChatTurnStreamMode,
+    ) -> Result<OpenLifeKernelExecution, String>
+    where
+        S: crate::main_chat_kernel::MainChatEventSink + ?Sized,
+    {
+        self.run_with_event_sink_mode(
+            input,
+            event_sink,
+            stream_mode,
+            OpenLifeTurnExecutionMode::Initial,
+        )
+        .await
+    }
+
+    async fn run_with_event_sink_mode<S>(
+        &self,
+        input: OpenLifeTurnInput,
+        event_sink: &mut S,
+        stream_mode: MainChatTurnStreamMode,
+        execution_mode: OpenLifeTurnExecutionMode,
     ) -> Result<OpenLifeKernelExecution, String>
     where
         S: crate::main_chat_kernel::MainChatEventSink + ?Sized,
@@ -1283,32 +1947,85 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         if should_fail_main_chat_after_message_commit_for_test(&operation_id) {
             return Err("injected_turn_failure_after_canonical_message_before_policy".into());
         }
-        if let Some(recovered) = recover_openlife_turn_from_durable_final(
-            self.state,
-            &operation_id,
-            &session_id,
-            &canonical_user_message,
-        )
-        .await?
-        {
-            return Ok(recovered);
+        if matches!(execution_mode, OpenLifeTurnExecutionMode::Initial) {
+            if let Some(recovered) = recover_openlife_turn_from_durable_final(
+                self.state,
+                &operation_id,
+                &session_id,
+                &canonical_user_message,
+            )
+            .await?
+            {
+                return Ok(recovered);
+            }
         }
         // One turn owns exactly one immutable provider runtime generation.
         // Capture it before any task/run creation or test barrier can yield;
         // every route, adapter and projection below receives this value rather
         // than consulting mutable AppState again.
-        let provider_runtime = self.state.provider_runtime_snapshot().await;
+        let mut provider_runtime = self.state.provider_runtime_snapshot().await;
         if !provider_runtime.coherent {
             return Err("provider_runtime_generation_incoherent".into());
         }
-        let mut main_chat_agent_turn = start_main_chat_agent_turn(
-            &operation_id,
-            &canonical_user_message,
-            &messages,
-            openlife_core::agent::AgentTaskKind::Conversation,
-            self.state,
-        )
-        .await?;
+        // One turn owns one provider lifecycle proof scope. Every provider
+        // route beneath this runtime, including candidate ranking and
+        // AgentLoop generation, must share this fresh collector so
+        // cancellation can durably prove the exact completed/in-flight prefix
+        // without consulting another turn's adapter facts.
+        provider_runtime.scheduler = provider_runtime
+            .scheduler
+            .clone()
+            .with_provider_receipt_collector(
+                openlife_core::scheduler::ProviderReceiptCollector::default(),
+            );
+        let continuation_session = match &execution_mode {
+            OpenLifeTurnExecutionMode::Initial => None,
+            OpenLifeTurnExecutionMode::ProviderConsentContinuation { .. } => {
+                Some(load_openlife_replay_session(self.state, &operation_id).await?)
+            }
+        };
+        let mut main_chat_agent_turn = if let Some(existing) = continuation_session.as_ref() {
+            let user_text = messages
+                .last()
+                .filter(|message| message.role == "user")
+                .map(|message| message.content.as_str())
+                .unwrap_or_default();
+            let mut decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+                .decide_with_canonical_user_message(
+                    &operation_id,
+                    &canonical_user_message,
+                    user_text,
+                    &messages,
+                    openlife_core::agent::AgentTaskKind::Conversation,
+                )
+                .map_err(|error| {
+                    format!("canonical Main Chat continuation policy admission failed: {error}")
+                })?;
+            if existing.id != operation_id
+                || existing.chat_session_id != session_id
+                || existing.user_goal != user_text
+                || existing.selected_strategy != decision.selected_strategy
+                || existing.status != AgentTaskSessionStatus::WaitingPermission
+                || decision.request_id != operation_id
+                || decision.agent_task_session_id.as_deref() != Some(operation_id.as_str())
+            {
+                return Err("provider_consent_continuation_owner_or_policy_drift".into());
+            }
+            decision.agent_task_session_id = Some(existing.id.clone());
+            crate::main_chat_runtime_support::MainChatAgentTurn {
+                decision,
+                transcript_entries: Vec::new(),
+            }
+        } else {
+            start_main_chat_agent_turn(
+                &operation_id,
+                &canonical_user_message,
+                &messages,
+                openlife_core::agent::AgentTaskKind::Conversation,
+                self.state,
+            )
+            .await?
+        };
         let task_session_id = main_chat_agent_turn
             .decision
             .agent_task_session_id
@@ -1319,7 +2036,6 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         {
             return Err("turn_operation_policy_task_identity_mismatch".into());
         }
-        pause_main_chat_before_cancellation_registration_for_test(&session_id).await;
         let cancellation_registry = {
             self.state
                 .main_chat_runtime_state
@@ -1328,42 +2044,248 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 .cancellation_registry
                 .clone()
         };
+        // Continuations claim the one runtime owner before opening the replay
+        // epoch. A losing concurrent resume therefore cannot mutate Task/Run
+        // state or consume the accepted AllowOnce.
+        let continuation_registration = if continuation_session.is_some() {
+            Some(
+                cancellation_registry
+                    .try_register(&task_session_id)
+                    .map_err(|error| {
+                        format!(
+                            "OpenLifeTurnRuntime refused a second provider continuation owner for {task_session_id}: {error}"
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let (terminal_epoch, terminal_review_origin) = if let Some(session) =
+            continuation_session.as_ref()
+        {
+            let proposal_id = execution_mode
+                .required_network_consent_proposal_id()
+                .ok_or_else(|| "provider_consent_continuation_proposal_missing".to_string())?;
+            let original_admission = {
+                let store = self
+                    .state
+                    .main_chat_agent_session_store
+                    .as_ref()
+                    .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+                    .lock()
+                    .await;
+                store
+                    .issue_terminal_owner_epoch_admission(
+                        &task_session_id,
+                        &operation_id,
+                        canonical_user_message.clone(),
+                    )
+                    .map_err(|error| {
+                        format!("issue terminal owner epoch admission failed: {error}")
+                    })?
+            };
+            let replay_admission = crate::terminal_owner_write_gateway::issue_terminal_owner_provider_consent_replay_admission(
+                self.state,
+                session,
+                proposal_id,
+            )
+            .await?;
+            let terminal_epoch = self
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                .lock()
+                .await;
+            let terminal_epoch = terminal_epoch
+                .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
+                .map_err(|error| format!("open provider consent replay epoch failed: {error}"))?;
+            let review_origin = match original_admission
+                .into_opened_epoch_review_origin(
+                    terminal_epoch.epoch_id().to_string(),
+                    terminal_epoch.generation(),
+                )
+                .map_err(|error| {
+                    format!("issue provider continuation Review origin failed: {error}")
+                }) {
+                Ok(review_origin) => review_origin,
+                Err(error) => {
+                    return Err(terminalized_provider_continuation_preparation_error(
+                        self.state,
+                        &task_session_id,
+                        terminal_epoch.run_id(),
+                        terminal_epoch.generation(),
+                        error,
+                    )
+                    .await);
+                }
+            };
+            (terminal_epoch, review_origin)
+        } else {
+            let admission = {
+                let store = self
+                    .state
+                    .main_chat_agent_session_store
+                    .as_ref()
+                    .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+                    .lock()
+                    .await;
+                store
+                    .issue_terminal_owner_epoch_admission(
+                        &task_session_id,
+                        &operation_id,
+                        canonical_user_message.clone(),
+                    )
+                    .map_err(|error| {
+                        format!("issue terminal owner epoch admission failed: {error}")
+                    })?
+            };
+            let terminal_epoch = self
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                .lock()
+                .await
+                .open_terminal_owner_epoch_from_admission(admission)
+                .map_err(|error| format!("open terminal owner epoch failed: {error}"))?;
+            let review_origin = terminal_epoch
+                .review_origin_proof()
+                .cloned()
+                .ok_or_else(|| {
+                    "terminal owner review origin unavailable before kernel execution".to_string()
+                })?;
+            (terminal_epoch, review_origin)
+        };
+        if terminal_epoch.replayed()
+            && should_fail_main_chat_after_provider_replay_epoch_open_for_test(&operation_id)
+        {
+            return Err(terminalized_provider_continuation_preparation_error(
+                self.state,
+                &task_session_id,
+                terminal_epoch.run_id(),
+                terminal_epoch.generation(),
+                "injected_provider_continuation_failure_after_replay_epoch_open".into(),
+            )
+            .await);
+        }
+        if continuation_registration.is_none() {
+            pause_main_chat_before_cancellation_registration_for_test(&session_id).await;
+        }
         // Acquire the single execution/cancellation owner before creating the
         // canonical AgentRun. This closes the task-created/run-not-yet-created
         // window: a shipped cancel command can now either leave a tombstone for
         // this registration or cancel this exact active epoch.
-        let registration = cancellation_registry
-            .try_register(&task_session_id)
-            .map_err(|error| {
-                format!(
-                    "OpenLifeTurnRuntime refused a second execution owner for {task_session_id}: {error}"
-                )
-            })?;
+        let registration = match continuation_registration {
+            Some(registration) => registration,
+            None => cancellation_registry
+                .try_register(&task_session_id)
+                .map_err(|error| {
+                    format!(
+                        "OpenLifeTurnRuntime refused a second execution owner for {task_session_id}: {error}"
+                    )
+                })?,
+        };
         let execution_epoch = registration.execution_epoch();
-        let canonical_run_id = match create_early_canonical_agent_run(
-            self.state,
-            &operation_id,
-            &session_id,
-            &task_session_id,
-            user_msg,
-            &canonical_user_message,
-        )
-        .await
+        if let Err(error) =
+            execution_epoch.bind_terminal_owner_generation(terminal_epoch.generation())
         {
-            Ok(run_id) => run_id,
-            Err(error) => {
-                fail_task_session_after_agent_run_create_failure(
+            if terminal_epoch.replayed() {
+                return Err(terminalized_provider_continuation_preparation_error(
                     self.state,
                     &task_session_id,
-                    &error,
+                    terminal_epoch.run_id(),
+                    terminal_epoch.generation(),
+                    error,
                 )
-                .await?;
-                return Err(error);
+                .await);
+            }
+            return Err(error);
+        }
+        let canonical_run_id = if terminal_epoch.replayed() {
+            let run_id = terminal_epoch.run_id().to_string();
+            let resolved_blocker = match execution_mode
+                .required_network_consent_proposal_id()
+                .map(|proposal_id| format!("proposal:{proposal_id}"))
+                .ok_or_else(|| "provider_consent_continuation_proposal_missing".to_string())
+            {
+                Ok(resolved_blocker) => resolved_blocker,
+                Err(error) => {
+                    return Err(terminalized_provider_continuation_preparation_error(
+                        self.state,
+                        &task_session_id,
+                        &run_id,
+                        terminal_epoch.generation(),
+                        error,
+                    )
+                    .await);
+                }
+            };
+            if let Err(error) = crate::terminal_owner_write_gateway::write_task_session(
+                self.state,
+                &task_session_id,
+                crate::terminal_owner_write_gateway::TaskSessionWrite::ResumeAfterResolvedBlocker(
+                    resolved_blocker,
+                ),
+            )
+            .await
+            .map_err(|error| format!("resume provider continuation task failed: {error}"))
+            {
+                return Err(terminalized_provider_continuation_preparation_error(
+                    self.state,
+                    &task_session_id,
+                    &run_id,
+                    terminal_epoch.generation(),
+                    error,
+                )
+                .await);
+            }
+            if let Err(error) =
+                crate::terminal_owner_write_gateway::begin_main_chat_agent_run_replay(
+                    self.state,
+                    &run_id,
+                    &task_session_id,
+                )
+                .await
+                .map_err(|error| format!("resume provider continuation AgentRun failed: {error}"))
+            {
+                return Err(terminalized_provider_continuation_preparation_error(
+                    self.state,
+                    &task_session_id,
+                    &run_id,
+                    terminal_epoch.generation(),
+                    error,
+                )
+                .await);
+            }
+            run_id
+        } else {
+            match create_early_canonical_agent_run(
+                self.state,
+                &operation_id,
+                &session_id,
+                &task_session_id,
+                user_msg,
+                &canonical_user_message,
+            )
+            .await
+            {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    fail_task_session_after_agent_run_create_failure(
+                        self.state,
+                        &task_session_id,
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                }
             }
         };
         let provider_durability_scope =
             MainChatProviderDurabilityScope::issue(&task_session_id, &canonical_run_id)?;
-        if let Err(error) = crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+        if !terminal_epoch.replayed() {
+            if let Err(error) = crate::terminal_owner_write_gateway::append_runtime_event(
             self.state,
             &task_session_id,
             &canonical_run_id,
@@ -1380,29 +2302,48 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 "rawUserTextStored": false,
             }),
         )
-        .await
-        {
-            mark_main_chat_pre_dispatch_event_store_failure(
-                self.state,
-                &canonical_run_id,
-                &task_session_id,
-                &error,
-            )
-            .await?;
-            return Err(format!(
-                "persist turn_started before dispatch failed: {error}"
-            ));
+            .await
+            {
+                mark_main_chat_pre_dispatch_event_store_failure(
+                    self.state,
+                    &canonical_run_id,
+                    &task_session_id,
+                    &error,
+                )
+                .await?;
+                return Err(format!(
+                    "persist turn_started before dispatch failed: {error}"
+                ));
+            }
         }
         event_sink.bind_execution_identity(&task_session_id, &canonical_run_id);
         event_sink.emit_stream_start(&session_id, &task_session_id, &canonical_run_id);
-        record_main_chat_agent_turn_ingress(
-            self.state,
-            &mut main_chat_agent_turn,
-            &session_id,
-            &user_msg.content,
-            &canonical_run_id,
-        )
-        .await?;
+        if terminal_epoch.replayed() {
+            main_chat_agent_turn.transcript_entries.extend(
+                append_main_chat_agent_transcript(
+                    self.state,
+                    Some(&task_session_id),
+                    openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
+                    "OpenLifeTurnRuntime resumed provider execution after accepted network consent.",
+                    serde_json::json!({
+                        "proposalId": execution_mode.required_network_consent_proposal_id(),
+                        "replayKind": "provider_network_consent",
+                        "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
+                        "directWritesExecuted": false,
+                    }),
+                )
+                .await,
+            );
+        } else {
+            record_main_chat_agent_turn_ingress(
+                self.state,
+                &mut main_chat_agent_turn,
+                &session_id,
+                &user_msg.content,
+                &canonical_run_id,
+            )
+            .await?;
+        }
 
         let route_decision = decide_main_chat_turn_route(
             &main_chat_agent_turn.decision,
@@ -1441,6 +2382,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                         main_chat_agent_turn: &main_chat_agent_turn,
                         canonical_run_id: &canonical_run_id,
                         execution_epoch: &execution_epoch,
+                        terminal_owner_review_origin: &terminal_review_origin,
+                        required_network_consent_proposal_id: execution_mode
+                            .required_network_consent_proposal_id(),
                         event_sink_label: stream_mode.as_str(),
                     },
                     &mut cancellation_sink,
@@ -1723,7 +2667,10 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                         &execution_epoch,
                         &provider_durability_scope,
                         &provider_runtime.scheduler,
-                        MainChatKernelFailureObservation::ProviderAttemptStateInvalid { error },
+                        MainChatKernelFailureObservation::ProviderAttemptStateInvalid {
+                            error,
+                            kernel_events: event_sink.events(),
+                        },
                         observed_at,
                     )
                     .await?;
@@ -1765,9 +2712,20 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                     )
                 }
             };
-        let already_projected_tool_receipt_ids = durable_events
+        let already_projected_tool_terminal_receipt_ids = durable_events
             .iter()
-            .filter(|event| event.object_type == "tool_execution_receipt")
+            .filter(|event| {
+                event.object_type == "tool_execution_receipt"
+                    && matches!(
+                        event.event_type.as_str(),
+                        "tool.completed"
+                            | "tool.failed"
+                            | "tool.effect_unknown"
+                            | "tool.local_aborted"
+                            | "tool.remote_unknown"
+                            | "tool.not_dispatched"
+                    )
+            })
             .map(|event| event.object_id.clone())
             .collect::<std::collections::HashSet<_>>();
         let regular_tool_receipts = result
@@ -1784,7 +2742,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                     != openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
                     || receipt.proves_not_dispatched()
             })
-            .filter(|receipt| !already_projected_tool_receipt_ids.contains(&receipt.receipt_id))
+            .filter(|receipt| {
+                !already_projected_tool_terminal_receipt_ids.contains(&receipt.receipt_id)
+            })
             .collect::<Vec<_>>();
         if !regular_tool_receipts.is_empty() {
             let appended_tool_events =
@@ -1820,8 +2780,70 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             &canonical_run_id,
             &task_session_id,
             Some(kernel_event_count),
+            &durable_events,
             durable_event_count,
+            terminal_epoch.generation(),
         )?;
+        if !terminal.proposals.is_empty() {
+            let proposal_store = self
+                .state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| "proposal_store_unavailable".to_string())?
+                .lock()
+                .await;
+            for proposal_ref in &terminal.proposals {
+                let proposal_id = proposal_ref
+                    .strip_prefix("proposal:")
+                    .unwrap_or(proposal_ref);
+                let existing_origin = proposal_store
+                    .terminal_owner_origin_binding(proposal_id)
+                    .map_err(|error| format!("load terminal owner review origin failed: {error}"))?
+                    .ok_or_else(|| {
+                        "ordinary Main Chat emitted an untyped terminal review item".to_string()
+                    })?;
+                let proposal = proposal_store
+                    .get_proposal(proposal_id)
+                    .map_err(|error| format!("load terminal review item failed: {error}"))?
+                    .ok_or_else(|| {
+                        "ordinary Main Chat terminal review item is missing".to_string()
+                    })?;
+                let relation = proposal_store
+                    .terminal_relation_projection_proof(proposal_id)
+                    .map_err(|error| {
+                        format!("load terminal owner review relation failed: {error}")
+                    })?
+                    .ok_or_else(|| {
+                        "ordinary Main Chat terminal review relation is missing".to_string()
+                    })?;
+                if existing_origin.task_session_id() == task_session_id {
+                    if existing_origin.run_id() != canonical_run_id
+                        || relation.task_session_id() != task_session_id
+                        || relation.run_id() != canonical_run_id
+                    {
+                        return Err("terminal owner review relation current-origin mismatch".into());
+                    }
+                    continue;
+                }
+                let relation_matches_foreign_origin = relation.task_session_id()
+                    == existing_origin.task_session_id()
+                    && relation.run_id() == existing_origin.run_id();
+                let foreign_non_blocking = terminal.status == "completed_with_pending_items"
+                    && relation_matches_foreign_origin
+                    && (relation.relation_kind()
+                        == openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
+                        || (proposal.proposal_type
+                            == openlife_core::agent::ProposalType::MemoryWrite
+                            && relation.relation_kind()
+                                == openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite));
+                if !foreign_non_blocking {
+                    return Err(
+                        "terminal owner review relation from another task cannot block the current task"
+                            .into(),
+                    );
+                }
+            }
+        }
         let final_event = persist_openlife_turn_final_delivery_receipt(
             self.state,
             &session_id,
@@ -1830,6 +2852,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             &terminal,
             &task_session_id,
             &canonical_run_id,
+            terminal_epoch.generation(),
             kernel_event_count,
             durable_event_count,
         )
@@ -1859,6 +2882,7 @@ struct PreparedOpenLifeReplay {
     action_plan: crate::main_chat_react_tool_selection::MainChatReactActionPlan,
     retry_proof: openlife_core::agent::tool_gateway::ToolAutomaticRetryProof,
     canonical_run_id: String,
+    envelope: DurableMainChatReplayExecutionEnvelope,
 }
 
 pub(crate) fn canonical_openlife_replay_envelope(
@@ -1913,10 +2937,13 @@ async fn canonical_openlife_replay_run_id(
         .as_ref()
         .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
     let store = store_arc.lock().await;
-    let run = store
-        .get_run_for_task_id(task_session_id)
-        .map_err(|error| format!("load canonical AgentRun before replay failed: {error}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing_for_task:{task_session_id}"))?;
+    let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+        state,
+        store
+            .get_run_for_task_id(task_session_id)
+            .map_err(|error| format!("load canonical AgentRun before replay failed: {error}")),
+    )?
+    .ok_or_else(|| format!("canonical_agent_run_missing_for_task:{task_session_id}"))?;
     if run.task_id != task_session_id {
         return Err("canonical_replay_run_task_identity_mismatch".into());
     }
@@ -2001,7 +3028,31 @@ async fn prepare_openlife_replay(
         action_plan,
         retry_proof,
         canonical_run_id,
+        envelope,
     })
+}
+
+#[cfg(test)]
+pub(crate) async fn issue_terminal_owner_retry_epoch_admission_for_test(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+) -> Result<crate::terminal_owner_write_gateway::TerminalOwnerReplayEpochAdmission, String> {
+    let PreparedOpenLifeReplay {
+        retry_proof,
+        envelope,
+        ..
+    } = prepare_openlife_replay(state, session, action).await?;
+    crate::terminal_owner_write_gateway::issue_terminal_owner_replay_epoch_admission(
+        state,
+        session,
+        action,
+        &envelope,
+        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry,
+        None,
+        retry_proof,
+    )
+    .await
 }
 
 /// Validate whether the current read model may advertise replay without
@@ -2023,24 +3074,27 @@ async fn claim_openlife_replay(
     owner_execution_id: &str,
     retry_proof: openlife_core::agent::tool_gateway::ToolAutomaticRetryProof,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::ActionReplayClaim, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .claim_replay_with_automatic_retry_proof(
-            &action.id,
-            action.status,
-            action.revision,
-            owner_execution_id,
-            retry_proof,
-        )
-        .map_err(|error| format!("claim canonical Main Chat replay failed: {error}"))
+    crate::terminal_owner_write_gateway::claim_action_replay(
+        state,
+        &action.session_id,
+        &action.id,
+        action.status,
+        action.revision,
+        owner_execution_id,
+        retry_proof,
+    )
+    .await
+    .map_err(|error| format!("claim canonical Main Chat replay failed: {error}"))
 }
 
+// The replay transition CAS binds every expected queue and owner field.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn transition_claimed_openlife_replay(
     state: &Arc<AppState>,
+    task_session_id: &str,
     action_id: &str,
     claim_id: &str,
     expected_status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
@@ -2048,21 +3102,18 @@ async fn transition_claimed_openlife_replay(
     status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
     metadata: Option<serde_json::Value>,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .transition_claimed_replay(
-            action_id,
-            claim_id,
-            expected_status,
-            expected_revision,
-            status,
-            metadata,
-        )
-        .map_err(|error| format!("transition canonical Main Chat replay failed: {error}"))
+    crate::terminal_owner_write_gateway::transition_claimed_action_replay(
+        state,
+        task_session_id,
+        action_id,
+        claim_id,
+        expected_status,
+        expected_revision,
+        status,
+        metadata,
+    )
+    .await
+    .map_err(|error| format!("transition canonical Main Chat replay failed: {error}"))
 }
 
 async fn fail_and_release_openlife_replay_before_dispatch(
@@ -2072,21 +3123,18 @@ async fn fail_and_release_openlife_replay_before_dispatch(
     safe_error: &str,
     metadata: serde_json::Value,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .fail_and_release_replay_claim_before_dispatch(
-            &action.id,
-            claim_id,
-            action.status,
-            action.revision,
-            safe_error,
-            Some(metadata),
-        )
-        .map_err(|error| format!("fail pre-dispatch canonical replay failed: {error}"))
+    crate::terminal_owner_write_gateway::fail_and_release_action_replay_before_dispatch(
+        state,
+        &action.session_id,
+        &action.id,
+        claim_id,
+        action.status,
+        action.revision,
+        safe_error,
+        Some(metadata),
+    )
+    .await
+    .map_err(|error| format!("fail pre-dispatch canonical replay failed: {error}"))
 }
 
 async fn fail_claimed_openlife_replay(
@@ -2096,21 +3144,18 @@ async fn fail_claimed_openlife_replay(
     safe_error: &str,
     metadata: serde_json::Value,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .fail_claimed_replay(
-            &action.id,
-            claim_id,
-            action.status,
-            action.revision,
-            safe_error,
-            Some(metadata),
-        )
-        .map_err(|error| format!("fail claimed canonical replay failed: {error}"))
+    crate::terminal_owner_write_gateway::fail_claimed_action_replay(
+        state,
+        &action.session_id,
+        &action.id,
+        claim_id,
+        action.status,
+        action.revision,
+        safe_error,
+        Some(metadata),
+    )
+    .await
+    .map_err(|error| format!("fail claimed canonical replay failed: {error}"))
 }
 
 async fn release_pending_openlife_replay_claim(
@@ -2118,18 +3163,15 @@ async fn release_pending_openlife_replay_claim(
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
     claim_id: &str,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .release_pending_permission_replay_claim_without_dispatch(
-            &action.id,
-            claim_id,
-            action.revision,
-        )
-        .map_err(|error| format!("release pending canonical replay claim failed: {error}"))
+    crate::terminal_owner_write_gateway::release_pending_action_replay_claim(
+        state,
+        &action.session_id,
+        &action.id,
+        claim_id,
+        action.revision,
+    )
+    .await
+    .map_err(|error| format!("release pending canonical replay claim failed: {error}"))
 }
 
 async fn begin_canonical_openlife_replay_run(
@@ -2137,86 +3179,29 @@ async fn begin_canonical_openlife_replay_run(
     task_session_id: &str,
     run_id: &str,
 ) -> Result<(), String> {
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let mut run = store
-        .get_run(run_id)
-        .map_err(|error| format!("load canonical AgentRun before replay start failed: {error}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
-    if run.task_id != task_session_id {
-        return Err("canonical_replay_run_task_identity_mismatch".into());
-    }
-    if !matches!(
-        run.status,
-        openlife_core::agent::AgentRunStatus::Failed
-            | openlife_core::agent::AgentRunStatus::WaitingPermission
-    ) {
-        return Err(format!("canonical_replay_run_not_resumable:{}", run.status));
-    }
-    run.status = openlife_core::agent::AgentRunStatus::Running;
-    run.finished_at = None;
-    run.error = None;
-    run.status_updates
-        .push(openlife_core::agent::AgentLoopStatusUpdate {
-            phase: openlife_core::agent::AgentLoopPhase::ExecutingTool,
-            message: "Governed replay execution started under OpenLifeTurnRuntime.".into(),
-            step_index: run.step_count,
-            tool_call_index: Some(run.tool_call_count),
-            timestamp: chrono::Utc::now(),
-        });
-    store
-        .update_run(&run)
-        .map_err(|error| format!("start canonical AgentRun replay failed: {error}"))
+    crate::terminal_owner_write_gateway::begin_main_chat_agent_run_replay(
+        state,
+        run_id,
+        task_session_id,
+    )
+    .await
+    .map_err(|error| format!("start canonical AgentRun replay failed: {error}"))
 }
 
 async fn set_canonical_openlife_replay_run_status(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
-    status: openlife_core::agent::AgentRunStatus,
-    phase: openlife_core::agent::AgentLoopPhase,
-    message: &str,
+    projection: crate::terminal_owner_write_gateway::AgentRunReplayProjection,
 ) -> Result<(), String> {
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let mut run = store
-        .get_run(run_id)
-        .map_err(|error| format!("load canonical AgentRun after replay failed: {error}"))?
-        .ok_or_else(|| format!("canonical_agent_run_missing:{run_id}"))?;
-    if run.task_id != task_session_id {
-        return Err("canonical_replay_run_task_identity_mismatch".into());
-    }
-    if run.status != openlife_core::agent::AgentRunStatus::Running {
-        return Err(format!(
-            "canonical_replay_run_terminal_transition_conflict:{}",
-            run.status
-        ));
-    }
-    run.status = status;
-    run.finished_at = matches!(
-        status,
-        openlife_core::agent::AgentRunStatus::Completed
-            | openlife_core::agent::AgentRunStatus::Failed
-            | openlife_core::agent::AgentRunStatus::Cancelled
+    crate::terminal_owner_write_gateway::project_main_chat_agent_run_replay(
+        state,
+        run_id,
+        task_session_id,
+        projection,
     )
-    .then(chrono::Utc::now);
-    run.status_updates
-        .push(openlife_core::agent::AgentLoopStatusUpdate {
-            phase,
-            message: message.to_string(),
-            step_index: run.step_count,
-            tool_call_index: Some(run.tool_call_count),
-            timestamp: chrono::Utc::now(),
-        });
-    store
-        .update_run(&run)
-        .map_err(|error| format!("update canonical AgentRun replay status failed: {error}"))
+    .await
+    .map_err(|error| format!("update canonical AgentRun replay status failed: {error}"))
 }
 
 struct MainChatReplayLifecycleObserver {
@@ -2343,7 +3328,7 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatReplayLifecycleObser
         // makes the exact claim unknown before any release pass. Once this
         // fence commits, the lease reaper can no longer classify the claim as
         // safe even though the physical adapter edge has not yet been observed.
-        {
+        let action_revision = {
             let queue_arc = self
                 .state
                 .main_chat_action_queue_store
@@ -2364,13 +3349,18 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatReplayLifecycleObser
             {
                 anyhow::bail!("replay_dispatch_preflight_claim_not_owned");
             }
-            queue.fence_replay_dispatch_commit(
-                &self.action_id,
-                &self.claim_id,
-                self.claim_owner_generation,
-                action.revision,
-            )?;
-        }
+            action.revision
+        };
+        crate::terminal_owner_write_gateway::fence_action_replay_dispatch(
+            &self.state,
+            &self.task_session_id,
+            &self.action_id,
+            &self.claim_id,
+            self.claim_owner_generation,
+            action_revision,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
 
         // Recheck after both durable commits. A replacement before this point
         // fails here. A replacement after this check still retires the shared
@@ -2402,7 +3392,7 @@ impl openlife_core::agent::ToolStartedTransitionObserver for MainChatReplayLifec
         // the attempt instead of releasing it as not attempted.
         self.edge_crossed
             .store(true, std::sync::atomic::Ordering::Release);
-        {
+        let action_revision = {
             let queue_arc = self
                 .state
                 .main_chat_action_queue_store
@@ -2417,12 +3407,17 @@ impl openlife_core::agent::ToolStartedTransitionObserver for MainChatReplayLifec
             {
                 anyhow::bail!("replay_dispatch_requires_executing");
             }
-            queue.record_replay_dispatch_started(
-                &self.action_id,
-                &self.claim_id,
-                action.revision,
-            )?;
-        }
+            action.revision
+        };
+        crate::terminal_owner_write_gateway::record_action_replay_dispatch_started(
+            &self.state,
+            &self.task_session_id,
+            &self.action_id,
+            &self.claim_id,
+            action_revision,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         openlife_core::agent::ToolStartedTransitionObserver::after_dispatch(
             &self.durable_lifecycle,
             receipt,
@@ -2502,10 +3497,13 @@ async fn settle_openlife_replay_owner_exit(
             .as_ref()
             .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
         let store = store_arc.lock().await;
-        let run = store
-            .get_run(canonical_run_id)
-            .map_err(|error| format!("load replay owner AgentRun failed: {error}"))?
-            .ok_or_else(|| format!("canonical_agent_run_missing:{canonical_run_id}"))?;
+        let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store
+                .get_run(canonical_run_id)
+                .map_err(|error| format!("load replay owner AgentRun failed: {error}")),
+        )?
+        .ok_or_else(|| format!("canonical_agent_run_missing:{canonical_run_id}"))?;
         if run.task_id != task_session_id {
             return Err("canonical_replay_run_task_identity_mismatch".into());
         }
@@ -2557,6 +3555,751 @@ async fn settle_openlife_replay_owner_exit(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupProviderReplayObservation {
+    NotAttempted,
+    RemoteUnknown,
+    CompletedWithoutDelivery,
+    Failed,
+}
+
+impl StartupProviderReplayObservation {
+    fn from_event(event: Option<&MainChatAgentDurableEvent>) -> Result<Self, String> {
+        match event.map(|event| event.event_type.as_str()) {
+            None => Ok(Self::NotAttempted),
+            Some("provider.started" | "provider.remote_unknown") => Ok(Self::RemoteUnknown),
+            Some("provider.completed") => Ok(Self::CompletedWithoutDelivery),
+            Some("provider.failed") => Ok(Self::Failed),
+            Some(_) => Err("startup_provider_replay_observation_invalid".into()),
+        }
+    }
+
+    fn provider_invocation_status(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::RemoteUnknown => "remote_unknown",
+            Self::CompletedWithoutDelivery => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn provider_attempt_state(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::RemoteUnknown => "started_without_terminal",
+            Self::CompletedWithoutDelivery => "completed_without_final_delivery",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn remote_provider_state(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::RemoteUnknown => "unknown",
+            Self::CompletedWithoutDelivery => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn model_invoked(self) -> bool {
+        self != Self::NotAttempted
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenLifeReplayReceiptKind {
+    Tool,
+    ProviderConsent(StartupProviderReplayObservation),
+    Unknown,
+}
+
+impl OpenLifeReplayReceiptKind {
+    fn tool_invoked(self) -> bool {
+        self == Self::Tool
+    }
+
+    fn model_invoked(self) -> bool {
+        matches!(self, Self::ProviderConsent(observation) if observation.model_invoked())
+    }
+
+    fn provider_invocation_status(self) -> &'static str {
+        match self {
+            Self::ProviderConsent(observation) => observation.provider_invocation_status(),
+            Self::Tool | Self::Unknown => "not_attempted",
+        }
+    }
+
+    fn route_path(self) -> &'static str {
+        match self {
+            Self::Tool => "openlife_turn_runtime_replay",
+            Self::ProviderConsent(_) => "openlife_turn_runtime_provider_consent_continuation",
+            Self::Unknown => "openlife_turn_runtime_unknown_replay_recovery",
+        }
+    }
+
+    fn strategy_label(
+        self,
+        session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    ) -> &str {
+        match self {
+            Self::ProviderConsent(_) => "direct_answer",
+            Self::Tool | Self::Unknown => session.selected_strategy.as_str(),
+        }
+    }
+
+    fn route_reason_code(self) -> &'static str {
+        match self {
+            Self::Tool => "governed_replay_successor",
+            Self::ProviderConsent(_) => "provider_consent_continuation",
+            Self::Unknown => "unknown_replay_failed_closed",
+        }
+    }
+
+    fn requires_provider(self) -> bool {
+        matches!(self, Self::ProviderConsent(_))
+    }
+
+    fn requires_tool_loop(self) -> bool {
+        self == Self::Tool
+    }
+}
+
+async fn persist_openlife_replay_final_receipt(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    canonical_run_id: &str,
+    replay_epoch_generation: u64,
+    replay_execution_id: &str,
+    replay_kind: OpenLifeReplayReceiptKind,
+    execution_error: Option<&str>,
+) -> Result<MainChatAgentDurableEvent, String> {
+    let task_session_id = session.id.as_str();
+    let _terminal_owner_fence =
+        crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(task_session_id)
+            .await;
+    let staged_delivery_id = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .begin_terminal_owner_seal(task_session_id, canonical_run_id, replay_epoch_generation)
+            .map_err(|error| format!("begin replay terminal owner seal failed: {error}"))?;
+        event_store
+            .terminal_owner_staged_final_delivery_id(task_session_id)
+            .map_err(|error| format!("load staged replay terminal final failed: {error}"))?
+    };
+
+    let actions = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?
+            .lock()
+            .await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("list replay final actions failed: {error}"))?
+    };
+    let (task_owner, task_owner_receipt, task_owner_head, transcripts) = {
+        let tasks = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let task_owner = tasks
+            .load_session(task_session_id)
+            .map_err(|error| format!("load replay final task failed: {error}"))?
+            .ok_or_else(|| "replay_final_task_owner_missing".to_string())?;
+        let receipt = tasks
+            .canonical_owner_receipt(task_session_id)
+            .map_err(|error| format!("receipt replay final task failed: {error}"))?
+            .ok_or_else(|| "replay_final_task_owner_missing".to_string())?;
+        let head = tasks
+            .canonical_owner_head(task_session_id)
+            .map_err(|error| format!("load replay final task head failed: {error}"))?
+            .ok_or_else(|| "replay_final_task_owner_missing".to_string())?;
+        if head.digest() != receipt.digest() {
+            return Err("replay_final_task_owner_head_receipt_mismatch".into());
+        }
+        let transcripts = tasks
+            .list_transcript_entries(task_session_id)
+            .map_err(|error| format!("list replay final transcripts failed: {error}"))?;
+        (task_owner, receipt, head, transcripts)
+    };
+    let (run_owner, run_owner_revision) = {
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.get_run(canonical_run_id)
+                .map_err(|error| format!("load replay final AgentRun failed: {error}")),
+        )?
+        .ok_or_else(|| "replay_final_agent_run_missing".to_string())?;
+        let revision = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.canonical_revision(canonical_run_id)
+                .map_err(|error| format!("load replay final AgentRun revision failed: {error}")),
+        )?;
+        (run, revision)
+    };
+    if task_owner.id != task_session_id
+        || task_owner.chat_session_id != session.chat_session_id
+        || run_owner.id != canonical_run_id
+        || run_owner.task_id != task_session_id
+        || run_owner.session_id.as_deref() != Some(session.chat_session_id.as_str())
+    {
+        return Err("replay_final_canonical_owner_graph_mismatch".into());
+    }
+
+    let action_queue_refs = actions
+        .iter()
+        .map(|action| action.id.clone())
+        .collect::<Vec<_>>();
+    let action_queue_owner_digests = actions
+        .iter()
+        .map(|action| canonical_final_owner_digest("action_queue", action))
+        .collect::<Result<Vec<_>, _>>()?;
+    let transcript_refs = transcripts
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    let transcript_owner_digests = transcripts
+        .iter()
+        .map(|entry| canonical_final_owner_digest("task_transcript", entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let completed_action_refs = actions
+        .iter()
+        .filter(|action| {
+            action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+        })
+        .map(|action| action.id.clone())
+        .collect::<Vec<_>>();
+    let blocker_refs = task_owner.pending_blockers.clone();
+    let final_status = if task_owner.status
+        == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    {
+        "completed_with_pending_items"
+    } else {
+        task_owner.status.as_str()
+    };
+    let existing_staged_final = staged_delivery_id.is_some();
+    let delivery_id = staged_delivery_id.unwrap_or_else(|| {
+        format!("replay-delivery:{task_session_id}:{replay_epoch_generation}:{replay_execution_id}")
+    });
+    let final_payload = serde_json::json!({
+        "deliveryId": delivery_id,
+        "taskSessionId": task_session_id,
+        "runId": canonical_run_id,
+        "status": final_status,
+        "reasonCode": if execution_error.is_some() {
+            "replay_terminal_error"
+        } else {
+            "replay_terminal_committed"
+        },
+        "completedActionCount": completed_action_refs.len(),
+        "blockerCount": blocker_refs.len(),
+        "pendingUserActionCount": blocker_refs.len(),
+        "transcriptCount": transcripts.len(),
+        "directWritesExecuted": false,
+        "bodyStored": false,
+        "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
+        "taskOwnerStatus": task_owner.status.as_str(),
+        "taskOwnerDigestVersion": task_owner_receipt.version(),
+        "taskOwnerRevision": task_owner_head.revision(),
+        "taskOwnerDigest": task_owner_receipt.digest(),
+        "runOwnerStatus": run_owner.status.to_string(),
+        "runOwnerRevision": run_owner_revision,
+        "runOwnerDigest": canonical_final_owner_digest("agent_run", &run_owner)?,
+        "providerInvocationStatus": replay_kind.provider_invocation_status(),
+        "modelInvoked": replay_kind.model_invoked(),
+        "toolInvoked": replay_kind.tool_invoked(),
+        "routePath": replay_kind.route_path(),
+        "strategyLabel": replay_kind.strategy_label(session),
+        "routeReasonCode": replay_kind.route_reason_code(),
+        "blockerRefs": blocker_refs,
+        "actionQueueRefs": action_queue_refs,
+        "actionQueueOwnerDigests": action_queue_owner_digests,
+        "transcriptRefs": transcript_refs,
+        "transcriptOwnerDigests": transcript_owner_digests,
+        "completedActionRefs": completed_action_refs,
+        "requiresProvider": replay_kind.requires_provider(),
+        "requiresToolLoop": replay_kind.requires_tool_loop(),
+        "replayEpochGeneration": replay_epoch_generation,
+        "replayExecutionRef": replay_execution_id,
+        "errorBodyStored": false,
+    });
+    let event_store = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+        .lock()
+        .await;
+    if !existing_staged_final {
+        event_store
+            .stage_terminal_final_payload(
+                task_session_id,
+                canonical_run_id,
+                replay_epoch_generation,
+                &delivery_id,
+                &final_payload,
+            )
+            .map_err(|error| format!("stage replay terminal final payload failed: {error}"))?;
+    }
+    event_store
+        .append_terminal_final_and_seal(
+            crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                task_session_id: task_session_id.to_string(),
+                run_id: canonical_run_id.to_string(),
+                epoch_generation: replay_epoch_generation,
+                delivery_id,
+                expected_task_owner_revision: task_owner_head.revision(),
+                expected_task_owner_digest: task_owner_head.digest().to_string(),
+                status: final_status.to_string(),
+            },
+        )
+        .map_err(|error| format!("append replay terminal final failed: {error}"))
+}
+
+async fn terminalized_provider_continuation_preparation_error(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    canonical_run_id: &str,
+    replay_epoch_generation: u64,
+    preparation_error: String,
+) -> String {
+    let terminalization = async {
+        finalize_main_chat_task_failure(
+            state,
+            Some(canonical_run_id),
+            Some(task_session_id),
+            MainChatTaskFailureKind::UnknownError,
+            "Provider continuation failed before provider dispatch established a runnable canonical owner.",
+            "openlife_turn_runtime.provider_continuation_preparation",
+        )
+        .await?;
+        let failed_session = load_openlife_replay_session(state, task_session_id).await?;
+        persist_openlife_replay_final_receipt(
+            state,
+            &failed_session,
+            canonical_run_id,
+            replay_epoch_generation,
+            &format!("provider-continuation-preparation:{replay_epoch_generation}"),
+            OpenLifeReplayReceiptKind::ProviderConsent(
+                StartupProviderReplayObservation::NotAttempted,
+            ),
+            Some(&preparation_error),
+        )
+        .await?;
+        Ok::<(), String>(())
+    }
+    .await;
+    match terminalization {
+        Ok(()) => preparation_error,
+        Err(terminalization_error) => format!(
+            "{preparation_error}; provider_continuation_preparation_terminalization_failed:{terminalization_error}"
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReplayProjection {
+    Completed,
+    WaitingPermission,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReplayKind {
+    Tool,
+    ProviderConsent,
+    Unknown,
+}
+
+impl StartupReplayKind {
+    fn from_start(event: Option<&MainChatAgentDurableEvent>) -> Self {
+        let Some(event) = event else {
+            return Self::Unknown;
+        };
+        match event
+            .payload
+            .get("replayCause")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("automatic_retry" | "accepted_tool_permission") => Self::Tool,
+            Some("accepted_provider_network_consent") => Self::ProviderConsent,
+            Some(_) => Self::Unknown,
+            None => match event
+                .payload
+                .get("selectedStrategy")
+                .and_then(serde_json::Value::as_str)
+            {
+                // Compatibility for replay-start rows written before
+                // `replayCause` became a retained typed field.
+                Some("react_tool_execution") => Self::Tool,
+                Some("direct_answer") => Self::ProviderConsent,
+                _ => Self::Unknown,
+            },
+        }
+    }
+}
+
+async fn persist_startup_replay_failure_receipt(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    canonical_run_id: &str,
+    replay_epoch_generation: u64,
+    replay_kind: StartupReplayKind,
+    provider_observation: StartupProviderReplayObservation,
+) -> Result<MainChatAgentDurableEvent, String> {
+    let mut payload = serde_json::json!({
+        "status": "failed",
+        "kind": "unknown_error",
+        "reasonCode": match replay_kind {
+            StartupReplayKind::ProviderConsent => "provider_continuation_process_restart",
+            StartupReplayKind::Tool => "tool_replay_process_restart",
+            StartupReplayKind::Unknown => "unknown_replay_process_restart",
+        },
+        "replayEpochGeneration": replay_epoch_generation,
+        "effectObserved": false,
+        "durableCommitAllowedAfterFailure": false,
+    });
+    if replay_kind == StartupReplayKind::ProviderConsent {
+        let object = payload
+            .as_object_mut()
+            .ok_or_else(|| "startup_replay_failure_payload_invalid".to_string())?;
+        object.insert(
+            "providerAttemptState".into(),
+            serde_json::json!(provider_observation.provider_attempt_state()),
+        );
+        object.insert(
+            "remoteProviderState".into(),
+            serde_json::json!(provider_observation.remote_provider_state()),
+        );
+    }
+    crate::terminal_owner_write_gateway::append_runtime_event(
+        state,
+        task_session_id,
+        canonical_run_id,
+        "failed",
+        "turn",
+        format!("startup-replay-terminal:{task_session_id}:{replay_epoch_generation}"),
+        "bootstrap.orphan_open_replay_epoch",
+        payload,
+    )
+    .await
+}
+
+pub(crate) async fn reconcile_orphaned_openlife_replay_epoch_after_restart(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    canonical_run_id: &str,
+) -> Result<bool, String> {
+    use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
+
+    let epoch = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .terminal_owner_epoch(task_session_id)
+            .map_err(|error| format!("load startup replay terminal epoch failed: {error}"))?
+    };
+    let Some(epoch) = epoch else {
+        return Ok(false);
+    };
+    if epoch.generation() <= 1
+        || epoch.state() == crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+    {
+        return Ok(false);
+    }
+    if epoch.run_id() != canonical_run_id {
+        return Err("startup_replay_terminal_epoch_run_mismatch".into());
+    }
+
+    let (replay_kind, staged_final_status, provider_observation) = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let replay_start = event_store
+            .latest_terminal_owner_replay_start(task_session_id, canonical_run_id)
+            .map_err(|error| format!("load startup replay cause failed: {error}"))?;
+        let replay_kind = StartupReplayKind::from_start(replay_start.as_ref());
+        let staged_final_status = event_store
+            .terminal_owner_staged_final_status(task_session_id)
+            .map_err(|error| format!("load startup staged replay final failed: {error}"))?;
+        let provider_event = if replay_kind == StartupReplayKind::ProviderConsent {
+            if let Some(replay_start) = replay_start.as_ref() {
+                event_store
+                    .latest_provider_event_after_replay_start(
+                        task_session_id,
+                        canonical_run_id,
+                        replay_start.sequence,
+                    )
+                    .map_err(|error| {
+                        format!("load startup provider continuation fact failed: {error}")
+                    })?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let provider_observation =
+            StartupProviderReplayObservation::from_event(provider_event.as_ref())?;
+        (replay_kind, staged_final_status, provider_observation)
+    };
+
+    let session = load_openlife_replay_session(state, task_session_id).await?;
+    let actions = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?
+            .lock()
+            .await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("load startup replay actions failed: {error}"))?
+    };
+    if actions
+        .iter()
+        .any(|action| action.session_id != task_session_id)
+    {
+        return Err("startup_replay_action_task_identity_mismatch".into());
+    }
+    let unresolved = actions
+        .iter()
+        .filter(|action| action.status != ExecutionQueueStatus::Completed)
+        .collect::<Vec<_>>();
+    let run = {
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+            .lock()
+            .await;
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.get_run(canonical_run_id)
+                .map_err(|error| format!("load startup replay AgentRun failed: {error}")),
+        )?
+        .ok_or_else(|| format!("canonical_agent_run_missing:{canonical_run_id}"))?
+    };
+    if run.task_id != task_session_id {
+        return Err("startup_replay_run_task_identity_mismatch".into());
+    }
+    let owners_cancelled = run.status == openlife_core::agent::AgentRunStatus::Cancelled
+        && session.status == AgentTaskSessionStatus::Cancelled;
+    let owners_completed = run.status == openlife_core::agent::AgentRunStatus::Completed
+        && session.status == AgentTaskSessionStatus::Completed;
+    let projection = if let Some(status) = staged_final_status.as_deref() {
+        let projection = match status {
+            "completed" => StartupReplayProjection::Completed,
+            "completed_with_pending_items" | "waiting_permission" => {
+                StartupReplayProjection::WaitingPermission
+            }
+            "cancelled" => StartupReplayProjection::Cancelled,
+            "blocked" | "failed" | "interrupted" => StartupReplayProjection::Failed,
+            _ => return Err("startup_replay_staged_final_status_invalid".into()),
+        };
+        if replay_kind == StartupReplayKind::ProviderConsent
+            && projection == StartupReplayProjection::Completed
+            && provider_observation != StartupProviderReplayObservation::CompletedWithoutDelivery
+        {
+            return Err("startup_provider_replay_completed_without_provider_terminal".into());
+        }
+        projection
+    } else {
+        match replay_kind {
+            StartupReplayKind::Tool => {
+                if owners_cancelled {
+                    StartupReplayProjection::Cancelled
+                } else if actions.is_empty() {
+                    StartupReplayProjection::Failed
+                } else if unresolved.is_empty() {
+                    StartupReplayProjection::Completed
+                } else if unresolved
+                    .iter()
+                    .any(|action| action.status == ExecutionQueueStatus::PendingPermission)
+                {
+                    StartupReplayProjection::WaitingPermission
+                } else {
+                    StartupReplayProjection::Failed
+                }
+            }
+            StartupReplayKind::ProviderConsent => {
+                if owners_cancelled {
+                    StartupReplayProjection::Cancelled
+                } else if owners_completed
+                    && provider_observation
+                        == StartupProviderReplayObservation::CompletedWithoutDelivery
+                {
+                    StartupReplayProjection::Completed
+                } else {
+                    // An OPEN provider continuation without a staged final is
+                    // never completed merely because its ActionQueue is empty.
+                    StartupReplayProjection::Failed
+                }
+            }
+            StartupReplayKind::Unknown => StartupReplayProjection::Failed,
+        }
+    };
+    let coherent = match projection {
+        StartupReplayProjection::Completed => {
+            run.status == openlife_core::agent::AgentRunStatus::Completed
+                && session.status == AgentTaskSessionStatus::Completed
+        }
+        StartupReplayProjection::WaitingPermission => {
+            run.status == openlife_core::agent::AgentRunStatus::WaitingPermission
+                && session.status == AgentTaskSessionStatus::WaitingPermission
+        }
+        StartupReplayProjection::Failed => {
+            run.status == openlife_core::agent::AgentRunStatus::Failed
+                && matches!(
+                    session.status,
+                    AgentTaskSessionStatus::Failed | AgentTaskSessionStatus::Blocked
+                )
+        }
+        StartupReplayProjection::Cancelled => {
+            run.status == openlife_core::agent::AgentRunStatus::Cancelled
+                && session.status == AgentTaskSessionStatus::Cancelled
+        }
+    };
+    let active = run.status == openlife_core::agent::AgentRunStatus::Running
+        || session.status == AgentTaskSessionStatus::Running;
+    let mut failure_receipt_persisted = false;
+
+    if epoch.state() == crate::main_chat_event_stream::TerminalOwnerSealState::Open {
+        if !coherent {
+            if !active {
+                return Err(format!(
+                    "startup_replay_terminal_projection_conflict:run={}:task={}",
+                    run.status,
+                    session.status.as_str()
+                ));
+            }
+            match projection {
+                StartupReplayProjection::Completed => {
+                    crate::terminal_owner_write_gateway::write_task_session(
+                        state,
+                        task_session_id,
+                        crate::terminal_owner_write_gateway::TaskSessionWrite::Complete(
+                            "Recovered completed replay projections after process restart.".into(),
+                        ),
+                    )
+                    .await?;
+                }
+                StartupReplayProjection::WaitingPermission => {
+                    let mut blockers = unresolved
+                        .iter()
+                        .map(|action| format!("action:{}:{}", action.id, action.status.as_str()))
+                        .collect::<Vec<_>>();
+                    blockers.sort();
+                    blockers.dedup();
+                    crate::terminal_owner_write_gateway::write_task_session(
+                        state,
+                        task_session_id,
+                        crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                            blockers,
+                            transition: crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
+                        },
+                    )
+                    .await?;
+                    crate::terminal_owner_write_gateway::project_agent_run_from_startup_task_owner(
+                        state,
+                        canonical_run_id,
+                        task_session_id,
+                    )
+                    .await?;
+                }
+                StartupReplayProjection::Failed => {
+                    let failure_event = persist_startup_replay_failure_receipt(
+                        state,
+                        task_session_id,
+                        canonical_run_id,
+                        epoch.generation(),
+                        replay_kind,
+                        provider_observation,
+                    )
+                    .await?;
+                    crate::main_chat_runtime_support::finalize_main_chat_task_failure_after_durable_receipt_at_startup_reconciliation(
+                        state,
+                        MainChatTaskFailureKind::UnknownError,
+                        "The previous OpenLife process ended before the replay generation produced a durable final.",
+                        "bootstrap.orphan_open_replay_epoch",
+                        failure_event,
+                    )
+                    .await?;
+                    failure_receipt_persisted = true;
+                }
+                StartupReplayProjection::Cancelled => {
+                    return Err("startup_replay_cancelled_projection_not_durable".into());
+                }
+            }
+        }
+        if projection == StartupReplayProjection::Failed && !failure_receipt_persisted {
+            persist_startup_replay_failure_receipt(
+                state,
+                task_session_id,
+                canonical_run_id,
+                epoch.generation(),
+                replay_kind,
+                provider_observation,
+            )
+            .await?;
+        }
+    } else if !coherent {
+        return Err(format!(
+            "startup_replay_sealing_projection_conflict:run={}:task={}",
+            run.status,
+            session.status.as_str()
+        ));
+    }
+
+    let execution_error = (projection == StartupReplayProjection::Failed)
+        .then_some("startup_orphan_open_replay_epoch");
+    let final_event = persist_openlife_replay_final_receipt(
+        state,
+        &session,
+        canonical_run_id,
+        epoch.generation(),
+        &format!("startup-replay-recovery:{}", epoch.generation()),
+        match replay_kind {
+            StartupReplayKind::Tool => OpenLifeReplayReceiptKind::Tool,
+            StartupReplayKind::ProviderConsent => {
+                OpenLifeReplayReceiptKind::ProviderConsent(provider_observation)
+            }
+            StartupReplayKind::Unknown => OpenLifeReplayReceiptKind::Unknown,
+        },
+        execution_error,
+    )
+    .await?;
+    if projection != StartupReplayProjection::WaitingPermission {
+        crate::terminal_owner_write_gateway::project_agent_run_from_startup_durable_event(
+            state,
+            &final_event,
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
 struct OpenLifeReplayAggregateProjection {
     task_completed: bool,
     remaining_action_count: usize,
@@ -2597,11 +4340,15 @@ async fn project_openlife_replay_success_aggregate(
         .main_chat_agent_session_store
         .as_ref()
         .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-    let store = store_arc.lock().await;
-    let session = store
-        .load_session(task_session_id)
-        .map_err(|error| format!("reload task for aggregate replay projection failed: {error}"))?
-        .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?;
+    let session = {
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|error| {
+                format!("reload task for aggregate replay projection failed: {error}")
+            })?
+            .ok_or_else(|| format!("canonical_task_session_missing:{task_session_id}"))?
+    };
     let mut blockers = if task_completed {
         Vec::new()
     } else {
@@ -2613,77 +4360,44 @@ async fn project_openlife_replay_success_aggregate(
     blockers.sort();
     blockers.dedup();
 
-    let commit_permit = execution_epoch
-        .begin_canonical_commit("task_session", task_session_id)
-        .map_err(|rejection| {
-            format!("aggregate replay projection rejected after cancellation: {rejection:?}")
-        })?;
-    let task_projection = (|| -> Result<(), String> {
-        store
-            .set_pending_blockers(task_session_id, blockers.clone())
-            .map_err(|error| format!("set aggregate replay blockers failed: {error}"))?;
-        if task_completed {
-            store
-                .complete_session(task_session_id, "All governed replay actions completed.")
-                .map_err(|error| format!("complete aggregate replay task failed: {error}"))?;
-        } else if has_pending_permission {
-            store
-                .mark_waiting_permission(task_session_id)
-                .map_err(|error| {
-                    format!("mark aggregate replay permission wait failed: {error}")
-                })?;
-        } else if has_failed {
-            store
-                .fail_session(
-                    task_session_id,
-                    "A governed replay action completed, but another action remains failed.",
-                )
-                .map_err(|error| format!("mark aggregate replay task failed: {error}"))?;
-        } else {
-            store
-                .block_session(
-                    task_session_id,
-                    "A governed replay action completed, but required actions remain unresolved.",
-                )
-                .map_err(|error| format!("block aggregate replay task failed: {error}"))?;
-        }
-        Ok(())
-    })();
-    match task_projection {
-        Ok(()) => commit_permit.finish_committed(),
-        Err(error) => {
-            commit_permit.finish_failed();
-            return Err(error);
-        }
-    }
-    drop(store);
-
-    let (run_status, run_phase, run_message) = if task_completed {
-        (
-            openlife_core::agent::AgentRunStatus::Completed,
-            openlife_core::agent::AgentLoopPhase::Completed,
-            "All governed replay actions completed.",
+    let transition = if task_completed {
+        crate::terminal_owner_write_gateway::TaskSessionTransition::Complete(
+            "All governed replay actions completed.".into(),
         )
     } else if has_pending_permission {
-        (
-            openlife_core::agent::AgentRunStatus::WaitingPermission,
-            openlife_core::agent::AgentLoopPhase::WaitingPermission,
-            "A replay action completed; another action is waiting for permission.",
+        crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission
+    } else if has_failed {
+        crate::terminal_owner_write_gateway::TaskSessionTransition::Fail(
+            "A governed replay action completed, but another action remains failed.".into(),
         )
     } else {
-        (
-            openlife_core::agent::AgentRunStatus::Failed,
-            openlife_core::agent::AgentLoopPhase::Failed,
-            "A replay action completed; another required action remains unresolved.",
+        crate::terminal_owner_write_gateway::TaskSessionTransition::Block(
+            "A governed replay action completed, but required actions remain unresolved.".into(),
         )
+    };
+    crate::terminal_owner_write_gateway::write_task_session_with_commit_admission(
+        state,
+        task_session_id,
+        crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+            blockers: blockers.clone(),
+            transition,
+        },
+        execution_epoch,
+    )
+    .await
+    .map_err(|error| format!("aggregate replay projection failed: {error}"))?;
+    let run_projection = if task_completed {
+        crate::terminal_owner_write_gateway::AgentRunReplayProjection::CompletedAllActions
+    } else if has_pending_permission {
+        crate::terminal_owner_write_gateway::AgentRunReplayProjection::WaitingForAnotherAction
+    } else {
+        crate::terminal_owner_write_gateway::AgentRunReplayProjection::FailedUnresolvedAction
     };
     set_canonical_openlife_replay_run_status(
         state,
         task_session_id,
         canonical_run_id,
-        run_status,
-        run_phase,
-        run_message,
+        run_projection,
     )
     .await?;
 
@@ -2715,6 +4429,12 @@ fn replay_receipt_crossed_adapter_edge(
             != openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
 }
 
+// Runtime replay keeps the canonical session/action, permission scope,
+// cancellation epoch, and stream callback explicit at the sole execution edge.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn execute_openlife_replay(
     state: &Arc<AppState>,
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
@@ -2737,6 +4457,7 @@ async fn execute_openlife_replay(
 
     let executing = transition_claimed_openlife_replay(
         state,
+        task_session_id,
         action_id,
         &replay_claim.claim_id,
         action.status,
@@ -2754,25 +4475,23 @@ async fn execute_openlife_replay(
     )
     .await?;
 
-    let task_preparation = async {
-        let store_arc = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-        let store = store_arc.lock().await;
-        if matches!(
-            session.status,
-            AgentTaskSessionStatus::WaitingPermission
-                | AgentTaskSessionStatus::Blocked
-                | AgentTaskSessionStatus::Failed
-        ) {
-            store
-                .resume_session(task_session_id)
-                .map_err(|error| format!("resume task before replay failed: {error}"))?;
-        }
-        Ok::<(), String>(())
-    }
-    .await;
+    let task_preparation = if matches!(
+        session.status,
+        AgentTaskSessionStatus::WaitingPermission
+            | AgentTaskSessionStatus::Blocked
+            | AgentTaskSessionStatus::Failed
+    ) {
+        crate::terminal_owner_write_gateway::write_task_session(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::Resume,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("resume task before replay failed: {error}"))
+    } else {
+        Ok(())
+    };
     if let Err(error) = task_preparation {
         fail_and_release_openlife_replay_before_dispatch(
             state,
@@ -2983,33 +4702,17 @@ async fn execute_openlife_replay(
                     serde_json::json!(ActionReplayEffectCertainty::Confirmed),
                 );
             }
-            {
-                let queue_arc = state
-                    .main_chat_action_queue_store
-                    .as_ref()
-                    .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
-                let queue = queue_arc.lock().await;
-                let commit_permit = execution_epoch
-                    .begin_canonical_commit("action_queue", action_id)
-                    .map_err(|rejection| {
-                        format!("complete replay rejected after cancellation: {rejection:?}")
-                    })?;
-                let completion = queue
-                    .complete_claimed_replay(
-                        action_id,
-                        &replay_claim.claim_id,
-                        current.revision,
-                        Some(retry_metadata.clone()),
-                    )
-                    .map_err(|error| format!("complete replay effect failed: {error}"));
-                match completion {
-                    Ok(_) => commit_permit.finish_committed(),
-                    Err(error) => {
-                        commit_permit.finish_failed();
-                        return Err(error);
-                    }
-                }
-            }
+            crate::terminal_owner_write_gateway::complete_claimed_action_replay_with_commit_admission(
+                state,
+                task_session_id,
+                action_id,
+                &replay_claim.claim_id,
+                current.revision,
+                Some(retry_metadata.clone()),
+                &execution_epoch,
+            )
+            .await
+            .map_err(|error| format!("complete replay effect failed: {error}"))?;
             let aggregate = project_openlife_replay_success_aggregate(
                 state,
                 task_session_id,
@@ -3059,6 +4762,7 @@ async fn execute_openlife_replay(
             }
             let pending = transition_claimed_openlife_replay(
                 state,
+                task_session_id,
                 action_id,
                 &replay_claim.claim_id,
                 current.status,
@@ -3072,26 +4776,21 @@ async fn execute_openlife_replay(
                 .blocker_reason
                 .clone()
                 .unwrap_or_else(|| "tool_permission_required".into());
-            {
-                let store_arc = state
-                    .main_chat_agent_session_store
-                    .as_ref()
-                    .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
-                let store = store_arc.lock().await;
-                store
-                    .set_pending_blockers(task_session_id, vec![blocker.clone()])
-                    .map_err(|error| format!("set replay permission blocker failed: {error}"))?;
-                store
-                    .mark_waiting_permission(task_session_id)
-                    .map_err(|error| format!("mark replay permission pending failed: {error}"))?;
-            }
+            crate::terminal_owner_write_gateway::write_task_session(
+                state,
+                task_session_id,
+                crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
+                    blockers: vec![blocker.clone()],
+                    transition: crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
+                },
+            )
+            .await
+            .map_err(|error| format!("project replay permission task state failed: {error}"))?;
             set_canonical_openlife_replay_run_status(
                 state,
                 task_session_id,
                 canonical_run_id,
-                openlife_core::agent::AgentRunStatus::WaitingPermission,
-                openlife_core::agent::AgentLoopPhase::WaitingPermission,
-                "Governed replay is waiting for permission.",
+                crate::terminal_owner_write_gateway::AgentRunReplayProjection::WaitingForPermission,
             )
             .await?;
             append_main_chat_agent_transcript(
@@ -3214,6 +4913,7 @@ enum MainChatKernelFailureObservation<'a> {
     },
     ProviderAttemptStateInvalid {
         error: crate::main_chat_cancellation::MainChatProviderAttemptError,
+        kernel_events: &'a [crate::main_chat_kernel::MainChatKernelEvent],
     },
 }
 
@@ -3250,7 +4950,7 @@ impl MainChatKernelFailureObservation<'_> {
     fn degradation_detail(&self) -> String {
         match self {
             Self::Kernel { error_detail, .. } => (*error_detail).to_string(),
-            Self::ProviderAttemptStateInvalid { error } => error.to_string(),
+            Self::ProviderAttemptStateInvalid { error, .. } => error.to_string(),
         }
     }
 }
@@ -3264,6 +4964,12 @@ struct MainChatKernelFailureTerminalization {
 /// called, so it can close every retained ToolGateway receipt, commit all
 /// provider/tool facts plus the turn terminal atomically, and only then project
 /// AgentRun/task state.
+// Failure terminalization commits one fact set from the exact task, run,
+// provider attempts, tool receipts, and observed timestamp.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn terminalize_main_chat_kernel_failure(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -3297,6 +5003,26 @@ async fn terminalize_main_chat_kernel_failure(
     let terminal_observed_at = failure_observed_at;
     let mut inputs = Vec::new();
     let mut durability_proofs = Vec::new();
+    let mut failure_terminal_staged = false;
+    let failure_terminal_input = || {
+        MainChatAgentRuntimeEventInput::new(
+            "failed",
+            "turn",
+            &failure_terminal_id,
+            // A provider-attempt invariant breach is still a pre-commit
+            // runtime failure. The provider remote-unknown persistence
+            // contract intentionally accepts only this narrow receipt owner.
+            "openlife_turn_runtime.kernel_error_pre_commit",
+            serde_json::json!({
+                "status": "failed",
+                "kind": "unknown_error",
+                "errorDigest": reason_digest,
+                "observedAt": terminal_observed_at,
+                "durableCommitAllowedAfterFailure": false,
+            }),
+        )
+        .with_occurred_at(terminal_observed_at)
+    };
 
     match &observation {
         MainChatKernelFailureObservation::Kernel { kernel_events, .. } => {
@@ -3322,6 +5048,14 @@ async fn terminalize_main_chat_kernel_failure(
                         Ok(proofs) => {
                             durability_proofs = proofs;
                             inputs.extend(observed_provider_adapter_event_inputs(&lifecycle)?);
+                            if project_failure && !lifecycle.unresolved_starts.is_empty() {
+                                // The runtime-owned remote-unknown fact is
+                                // authorized by this durable failure receipt,
+                                // so the receipt must precede it in the same
+                                // atomic event batch.
+                                inputs.push(failure_terminal_input());
+                                failure_terminal_staged = true;
+                            }
                             for start in &lifecycle.unresolved_starts {
                                 inputs.push(
                                     MainChatAgentRuntimeEventInput::new(
@@ -3401,7 +5135,67 @@ async fn terminalize_main_chat_kernel_failure(
                 }
             }
         }
-        MainChatKernelFailureObservation::ProviderAttemptStateInvalid { error } => {
+        MainChatKernelFailureObservation::ProviderAttemptStateInvalid {
+            error,
+            kernel_events,
+        } => {
+            if let Ok(lifecycle) = observed_provider_lifecycle_from_kernel_events(kernel_events) {
+                let proof_result = provider_scheduler
+                    .provider_durability_proofs_for_receipts(&lifecycle.terminal_receipts)
+                    .and_then(|mut proofs| {
+                        for start in &lifecycle.unresolved_starts {
+                            proofs.push(provider_scheduler.provider_durability_proof_for_start(
+                                &start.request_id,
+                                &start.provider,
+                                &start.model,
+                                start.started_at,
+                                &start.policy_evidence,
+                            )?);
+                        }
+                        Ok(proofs)
+                    });
+                if let Ok(proofs) = proof_result {
+                    durability_proofs = proofs;
+                    inputs.extend(observed_provider_adapter_event_inputs(&lifecycle)?);
+                    if project_failure && !lifecycle.unresolved_starts.is_empty() {
+                        inputs.push(failure_terminal_input());
+                        failure_terminal_staged = true;
+                    }
+                    for start in &lifecycle.unresolved_starts {
+                        inputs.push(
+                            MainChatAgentRuntimeEventInput::new(
+                                "provider.remote_unknown",
+                                "provider_request",
+                                &start.request_id,
+                                "openlife_turn_runtime",
+                                provider_start_payload_with_policy(
+                                    serde_json::json!({
+                                        "requestId": start.request_id,
+                                        "provider": start.provider,
+                                        "model": start.model,
+                                        "status": "remote_unknown",
+                                        "startedAt": start.started_at,
+                                        "observedAt": terminal_observed_at,
+                                        "localKernelFutureDropped": true,
+                                        "adapterTerminalObserved": false,
+                                        "kernelFailureReceiptId": failure_terminal_id,
+                                        // The per-request fact uses the existing
+                                        // runtime-kernel-failure contract. The
+                                        // separate aggregate
+                                        // `provider.receipt_state_failed`
+                                        // event below preserves that the
+                                        // provider-attempt registry itself was
+                                        // invalid.
+                                        "reasonCode": "kernel_failed_before_provider_terminal_observed",
+                                    }),
+                                    start,
+                                )?,
+                            )
+                            .with_occurred_at(terminal_observed_at),
+                        );
+                    }
+                }
+            }
             inputs.push(
                 MainChatAgentRuntimeEventInput::new(
                     "provider.receipt_state_failed",
@@ -3436,26 +5230,8 @@ async fn terminalize_main_chat_kernel_failure(
             "openlife_turn_runtime.tool_failure_terminalizer",
         )?,
     );
-    if project_failure {
-        // The turn terminal is deliberately the last input. Provider/tool facts
-        // and any remote-unknown state therefore exist durably before a caller
-        // can observe the failed run projection.
-        inputs.push(
-            MainChatAgentRuntimeEventInput::new(
-                "failed",
-                "turn",
-                &failure_terminal_id,
-                observation.pre_commit_source_ref(),
-                serde_json::json!({
-                    "status": "failed",
-                    "kind": "unknown_error",
-                    "errorDigest": reason_digest,
-                    "observedAt": terminal_observed_at,
-                    "durableCommitAllowedAfterFailure": false,
-                }),
-            )
-            .with_occurred_at(terminal_observed_at),
-        );
+    if project_failure && !failure_terminal_staged {
+        inputs.push(failure_terminal_input());
     }
 
     let durable_events =
@@ -3818,11 +5594,14 @@ async fn persist_main_chat_cancellation_events(
         .map_err(|error| error.to_string())?
         .into_iter()
         .enumerate()
-        .map(|(index, input)| OrderedRuntimeEvent {
-            occurred_at: cancel_observed_at,
-            kind_order: 0,
-            stable_id: format!("provider-receipt-{index:04}"),
-            input,
+        .map(|(index, input)| {
+            let occurred_at = input.occurred_at().unwrap_or(cancel_observed_at);
+            OrderedRuntimeEvent {
+                occurred_at,
+                kind_order: 0,
+                stable_id: format!("provider-receipt-{index:04}"),
+                input,
+            }
         })
         .collect::<Vec<_>>();
     if let Some(error_digest) = provider_proof_failure_digest {
@@ -4005,8 +5784,8 @@ async fn persist_main_chat_cancellation_events(
     ordered_events.sort_by(|left, right| {
         left.kind_order
             .cmp(&right.kind_order)
-            .then_with(|| left.stable_id.cmp(&right.stable_id))
             .then_with(|| left.occurred_at.cmp(&right.occurred_at))
+            .then_with(|| left.stable_id.cmp(&right.stable_id))
     });
     let events = ordered_events
         .into_iter()
@@ -4077,6 +5856,10 @@ pub(crate) fn decide_main_chat_turn_route_from_disposition(
                 MainChatExecutionPath::ReadOnlyTool,
                 "openlife_runtime_read_only_tool",
             ),
+            PolicyRouteKind::TransientStateCommand => (
+                MainChatExecutionPath::WriteOutcome,
+                "openlife_runtime_transient_state_command",
+            ),
             PolicyRouteKind::PlanDraft => (
                 MainChatExecutionPath::PlanExecute,
                 "openlife_runtime_plan_execute",
@@ -4118,6 +5901,12 @@ pub(crate) fn decide_main_chat_turn_route_from_disposition(
     }
 }
 
+// FinalDelivery is a denormalized receipt whose complete canonical identity and
+// count fields are intentionally explicit at the persistence boundary.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 async fn persist_openlife_turn_final_delivery_receipt(
     state: &Arc<AppState>,
     session_id: &str,
@@ -4126,9 +5915,29 @@ async fn persist_openlife_turn_final_delivery_receipt(
     terminal: &OpenLifeTurnTerminal,
     task_session_id: &str,
     run_id: &str,
+    terminal_epoch_generation: u64,
     kernel_event_count: usize,
     durable_event_count: usize,
 ) -> Result<MainChatAgentDurableEvent, String> {
+    let _terminal_owner_fence =
+        crate::terminal_owner_write_gateway::acquire_terminal_owner_task_fence(task_session_id)
+            .await;
+    // The D055 linearization boundary begins before any mutable owner head is
+    // read. The durable epoch is already SEALING before the test barrier or
+    // any canonical owner snapshot is observed.
+    {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .begin_terminal_owner_seal(task_session_id, run_id, terminal_epoch_generation)
+            .map_err(|error| format!("begin terminal owner seal failed: {error}"))?;
+    }
+    #[cfg(test)]
+    pause_main_chat_at_terminal_sealing_for_test(task_session_id).await;
     let assistant_message = ChatMessage {
         role: "assistant".into(),
         content: result.reply.clone(),
@@ -4139,13 +5948,15 @@ async fn persist_openlife_turn_final_delivery_receipt(
             &assistant_message,
             task_session_id,
             run_id,
+            terminal_epoch_generation,
             state,
         )
         .await?;
     let expected_operation =
-        crate::main_chat_generation_support::main_chat_assistant_message_operation_id(
+        crate::main_chat_generation_support::main_chat_assistant_message_operation_id_for_generation(
             task_session_id,
             run_id,
+            terminal_epoch_generation,
         );
     if assistant_receipt.session_id != session_id
         || assistant_receipt.role != "assistant"
@@ -4165,7 +5976,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .list_for_session(task_session_id)
             .map_err(|error| format!("list canonical final actions failed: {error}"))?
     };
-    let (task_owner, task_owner_receipt, transcript_owners) = {
+    let (task_owner, task_owner_receipt, task_owner_head, transcript_owners) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -4180,10 +5991,17 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .canonical_owner_receipt(task_session_id)
             .map_err(|error| format!("receipt canonical final task failed: {error}"))?
             .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
+        let task_head = sessions
+            .canonical_owner_head(task_session_id)
+            .map_err(|error| format!("load canonical final task head failed: {error}"))?
+            .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
+        if task_head.digest() != task_receipt.digest() {
+            return Err("turn_final_task_owner_head_receipt_mismatch".into());
+        }
         let transcript = sessions
             .list_transcript_entries(task_session_id)
             .map_err(|error| format!("list canonical final transcript failed: {error}"))?;
-        (task, task_receipt, transcript)
+        (task, task_receipt, task_head, transcript)
     };
     let (run_owner, run_owner_revision) = {
         let runs = state
@@ -4192,13 +6010,17 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .ok_or_else(|| "agent_run_store_unavailable".to_string())?
             .lock()
             .await;
-        let run = runs
-            .get_run(run_id)
-            .map_err(|error| format!("load canonical final run failed: {error}"))?
-            .ok_or_else(|| "turn_final_run_owner_missing".to_string())?;
-        let revision = runs
-            .canonical_revision(run_id)
-            .map_err(|error| format!("load canonical final run revision failed: {error}"))?;
+        let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.get_run(run_id)
+                .map_err(|error| format!("load canonical final run failed: {error}")),
+        )?
+        .ok_or_else(|| "turn_final_run_owner_missing".to_string())?;
+        let revision = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.canonical_revision(run_id)
+                .map_err(|error| format!("load canonical final run revision failed: {error}")),
+        )?;
         (run, revision)
     };
     if task_owner.id != task_session_id
@@ -4236,24 +6058,43 @@ async fn persist_openlife_turn_final_delivery_receipt(
                 .ok_or_else(|| "turn_final_tool_receipt_owner_missing".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let (tool_terminal_event_refs, tool_terminal_event_digests) = {
+    let tool_owner_bindings = {
         let event_store = state
             .main_chat_agent_event_store
             .as_ref()
             .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
             .lock()
             .await;
-        let mut refs = Vec::with_capacity(tool_receipt_refs.len());
-        let mut digests = Vec::with_capacity(tool_receipt_refs.len());
+        let mut bindings = Vec::with_capacity(tool_receipt_refs.len());
         for receipt_id in &tool_receipt_refs {
+            let matching_actions = action_queue_owners
+                .iter()
+                .filter(|action| {
+                    action
+                        .observation_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+                        .and_then(|receipt| receipt.get("receiptId"))
+                        .and_then(Value::as_str)
+                        == Some(receipt_id.as_str())
+                })
+                .collect::<Vec<_>>();
+            if matching_actions.len() != 1 {
+                return Err("turn_final_tool_receipt_action_binding_ambiguous".into());
+            }
             let event = event_store
                 .get_unique_tool_terminal_event(task_session_id, run_id, receipt_id)
                 .map_err(|error| format!("load final exact tool terminal failed: {error}"))?
                 .ok_or_else(|| "turn_final_tool_terminal_owner_missing".to_string())?;
-            refs.push(event.event_id);
-            digests.push(event.payload_digest);
+            bindings.push(CanonicalToolOwnerBindingV2 {
+                action_queue_id: matching_actions[0].id.clone(),
+                receipt_id: receipt_id.clone(),
+                terminal_event_id: event.event_id,
+                terminal_event_digest: event.payload_digest,
+            });
         }
-        (refs, digests)
+        validate_identity_tool_owner_bindings(&bindings)?;
+        bindings
     };
     let completed_action_refs = terminal
         .final_delivery
@@ -4321,6 +6162,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "assistantMessageRef": assistant_receipt.canonical_ref,
             "assistantMessageDigest": assistant_receipt.content_digest,
             "assistantMessageOperationId": assistant_receipt.operation_id,
+            "terminalEpochGeneration": terminal_epoch_generation,
             "bodyStored": false,
             "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
             "providerInvocationStatus": terminal.provider_invocation_status.as_str(),
@@ -4332,7 +6174,6 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "blockerRefs": terminal.blockers,
             "proposalRefs": terminal.proposals,
             "actionQueueRefs": action_queue_refs,
-            "toolReceiptRefs": tool_receipt_refs,
             "transcriptRefs": transcript_refs,
             "completedActionRefs": completed_action_refs,
             "observationRefs": observation_refs,
@@ -4361,6 +6202,10 @@ async fn persist_openlife_turn_final_delivery_receipt(
             serde_json::json!(task_owner_receipt.digest()),
         ),
         (
+            "taskOwnerRevision",
+            serde_json::json!(task_owner_head.revision()),
+        ),
+        (
             "runOwnerStatus",
             serde_json::json!(run_owner.status.to_string()),
         ),
@@ -4370,14 +6215,8 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "actionQueueOwnerDigests",
             serde_json::json!(action_queue_owner_digests),
         ),
-        (
-            "toolTerminalEventRefs",
-            serde_json::json!(tool_terminal_event_refs),
-        ),
-        (
-            "toolTerminalEventDigests",
-            serde_json::json!(tool_terminal_event_digests),
-        ),
+        ("toolOwnerBindingsVersion", serde_json::json!(2)),
+        ("toolOwnerBindings", serde_json::json!(tool_owner_bindings)),
         (
             "transcriptOwnerDigests",
             serde_json::json!(transcript_owner_digests),
@@ -4390,17 +6229,34 @@ async fn persist_openlife_turn_final_delivery_receipt(
         payload_object.insert(field.into(), value);
     }
 
-    crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
-        state,
-        task_session_id,
-        run_id,
-        "final_delivery.created",
-        "final_delivery",
-        terminal.final_delivery.delivery_id.clone(),
-        "openlife_turn_runtime.final_delivery_owner",
-        final_receipt_payload,
-    )
-    .await
+    let event_store = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+        .lock()
+        .await;
+    event_store
+        .stage_terminal_final_payload(
+            task_session_id,
+            run_id,
+            terminal_epoch_generation,
+            &terminal.final_delivery.delivery_id,
+            &final_receipt_payload,
+        )
+        .map_err(|error| format!("stage terminal final payload failed: {error}"))?;
+    event_store
+        .append_terminal_final_and_seal(
+            crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                task_session_id: task_session_id.to_string(),
+                run_id: run_id.to_string(),
+                epoch_generation: terminal_epoch_generation,
+                delivery_id: terminal.final_delivery.delivery_id.clone(),
+                expected_task_owner_revision: task_owner_head.revision(),
+                expected_task_owner_digest: task_owner_head.digest().to_string(),
+                status: terminal.status.clone(),
+            },
+        )
+        .map_err(|error| format!("append terminal final and seal failed: {error}"))
 }
 
 fn canonical_final_owner_digest(
@@ -4439,10 +6295,10 @@ fn final_event_count(event: &MainChatAgentDurableEvent, field: &str) -> Result<u
         .ok_or_else(|| format!("turn_operation_final_receipt_missing:{field}"))
 }
 
-fn final_payload_task_owner_digest<'a>(
-    payload: &'a Value,
+fn final_payload_task_owner_digest(
+    payload: &Value,
     supported_version: u64,
-) -> Result<&'a str, String> {
+) -> Result<&str, String> {
     let Some(version_value) = payload.get("taskOwnerDigestVersion") else {
         return Err("turn_operation_final_receipt_missing:taskOwnerDigestVersion".to_string());
     };
@@ -4508,14 +6364,114 @@ struct RecoveredCanonicalToolFacts {
     observations_used: Vec<CanonicalObservationSummary>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CanonicalToolOwnerBindingV2 {
+    action_queue_id: String,
+    receipt_id: String,
+    terminal_event_id: String,
+    terminal_event_digest: String,
+}
+
+enum CanonicalToolOwnerBindingSource {
+    IdentityV2(Vec<CanonicalToolOwnerBindingV2>),
+    LegacyV1 {
+        receipt_refs: Vec<String>,
+        terminal_event_refs: Vec<String>,
+        terminal_event_digests: Vec<String>,
+    },
+}
+
+impl CanonicalToolOwnerBindingSource {
+    fn len(&self) -> usize {
+        match self {
+            Self::IdentityV2(bindings) => bindings.len(),
+            Self::LegacyV1 { receipt_refs, .. } => receipt_refs.len(),
+        }
+    }
+}
+
+fn validate_identity_tool_owner_bindings(
+    bindings: &[CanonicalToolOwnerBindingV2],
+) -> Result<(), String> {
+    let mut action_ids = std::collections::BTreeSet::new();
+    let mut receipt_ids = std::collections::BTreeSet::new();
+    let mut terminal_event_ids = std::collections::BTreeSet::new();
+    for binding in bindings {
+        if binding.action_queue_id.trim().is_empty()
+            || binding.receipt_id.trim().is_empty()
+            || binding.terminal_event_id.trim().is_empty()
+            || binding.terminal_event_digest.trim().is_empty()
+        {
+            return Err(
+                "turn_operation_final_reconciliation_required:tool_owner_binding_empty".into(),
+            );
+        }
+        if !action_ids.insert(binding.action_queue_id.as_str())
+            || !receipt_ids.insert(binding.receipt_id.as_str())
+            || !terminal_event_ids.insert(binding.terminal_event_id.as_str())
+        {
+            return Err(
+                "turn_operation_final_reconciliation_required:tool_owner_binding_duplicate".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn final_event_tool_owner_bindings(
+    final_event: &MainChatAgentDurableEvent,
+) -> Result<CanonicalToolOwnerBindingSource, String> {
+    match (
+        final_event.payload.get("toolOwnerBindingsVersion"),
+        final_event.payload.get("toolOwnerBindings"),
+    ) {
+        (Some(version), Some(bindings)) => {
+            if version.as_u64() != Some(2) {
+                return Err(
+                    "turn_operation_final_reconciliation_required:tool_owner_binding_version_invalid"
+                        .into(),
+                );
+            }
+            let bindings =
+                serde_json::from_value::<Vec<CanonicalToolOwnerBindingV2>>(bindings.clone())
+                    .map_err(|_| {
+                        "turn_operation_final_reconciliation_required:tool_owner_binding_invalid"
+                            .to_string()
+                    })?;
+            validate_identity_tool_owner_bindings(&bindings)?;
+            Ok(CanonicalToolOwnerBindingSource::IdentityV2(bindings))
+        }
+        (None, None) => {
+            let receipt_refs = final_event_string_array(final_event, "toolReceiptRefs")?;
+            let terminal_event_refs =
+                final_event_string_array(final_event, "toolTerminalEventRefs")?;
+            let terminal_event_digests =
+                final_event_string_array(final_event, "toolTerminalEventDigests")?;
+            if receipt_refs.len() != terminal_event_refs.len()
+                || receipt_refs.len() != terminal_event_digests.len()
+            {
+                return Err(
+                    "turn_operation_final_reconciliation_required:legacy_tool_owner_reference_count_mismatch"
+                        .into(),
+                );
+            }
+            Ok(CanonicalToolOwnerBindingSource::LegacyV1 {
+                receipt_refs,
+                terminal_event_refs,
+                terminal_event_digests,
+            })
+        }
+        _ => Err("turn_operation_final_reconciliation_required:tool_owner_binding_partial".into()),
+    }
+}
+
 async fn recover_canonical_tool_facts(
     state: &Arc<AppState>,
     operation_id: &str,
     action_queue_refs: &[String],
     action_queue_owner_digests: &[String],
-    tool_receipt_refs: &[String],
-    tool_terminal_event_refs: &[String],
-    tool_terminal_event_digests: &[String],
+    tool_owner_binding_source: &CanonicalToolOwnerBindingSource,
     completed_action_refs: &[String],
     observation_refs: &[String],
 ) -> Result<RecoveredCanonicalToolFacts, String> {
@@ -4545,22 +6501,113 @@ async fn recover_canonical_tool_facts(
             "turn_operation_final_reconciliation_required:action_owner_digest_drift".into(),
         );
     }
-    if actions.len() != tool_receipt_refs.len() {
-        return Err(
-            "turn_operation_final_reconciliation_required:tool_receipt_owner_count_mismatch".into(),
-        );
-    }
-
-    let mut tool_calls = Vec::with_capacity(actions.len());
-    let mut completed_actions = Vec::new();
-    let mut observations_used = Vec::new();
-    for (index, (action, expected_receipt_ref)) in actions.iter().zip(tool_receipt_refs).enumerate()
-    {
+    for action in &actions {
         if action.session_id != operation_id {
             return Err(
                 "turn_operation_final_reconciliation_required:action_session_mismatch".into(),
             );
         }
+        if matches!(
+            action.status,
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Planned
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Executing
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Observed
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Retrying
+        ) {
+            return Err(
+                "turn_operation_final_reconciliation_required:nonterminal_action_owner".into(),
+            );
+        }
+    }
+    let observed_tool_owner_pairs = actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+                .map(|receipt| (action.id.clone(), receipt))
+        })
+        .map(|(action_id, value)| {
+            serde_json::from_value::<openlife_core::tool_execution_receipt::ToolExecutionReceipt>(
+                value.clone(),
+            )
+            .map(|receipt| (action_id, receipt.receipt_id))
+            .map_err(|_| {
+                "turn_operation_final_reconciliation_required:tool_receipt_owner_invalid"
+                    .to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tool_owner_bindings = match tool_owner_binding_source {
+        CanonicalToolOwnerBindingSource::IdentityV2(bindings) => bindings.clone(),
+        CanonicalToolOwnerBindingSource::LegacyV1 {
+            receipt_refs,
+            terminal_event_refs,
+            terminal_event_digests,
+        } => {
+            let mut bindings = Vec::with_capacity(receipt_refs.len());
+            for ((receipt_id, terminal_event_id), terminal_event_digest) in receipt_refs
+                .iter()
+                .zip(terminal_event_refs)
+                .zip(terminal_event_digests)
+            {
+                let matching_actions = observed_tool_owner_pairs
+                    .iter()
+                    .filter(|(_, observed_receipt_id)| observed_receipt_id == receipt_id)
+                    .collect::<Vec<_>>();
+                if matching_actions.len() != 1 {
+                    return Err(
+                        "turn_operation_final_reconciliation_required:legacy_tool_receipt_action_binding_ambiguous"
+                            .into(),
+                    );
+                }
+                bindings.push(CanonicalToolOwnerBindingV2 {
+                    action_queue_id: matching_actions[0].0.clone(),
+                    receipt_id: receipt_id.clone(),
+                    terminal_event_id: terminal_event_id.clone(),
+                    terminal_event_digest: terminal_event_digest.clone(),
+                });
+            }
+            validate_identity_tool_owner_bindings(&bindings)?;
+            bindings
+        }
+    };
+    if tool_owner_bindings.iter().any(|binding| {
+        !actions
+            .iter()
+            .any(|action| action.id == binding.action_queue_id)
+    }) {
+        return Err(
+            "turn_operation_final_reconciliation_required:tool_owner_binding_action_unknown".into(),
+        );
+    }
+    let observed_tool_owner_pairs = observed_tool_owner_pairs
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let bound_tool_owner_pairs = tool_owner_bindings
+        .iter()
+        .map(|binding| (binding.action_queue_id.clone(), binding.receipt_id.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    if observed_tool_owner_pairs != bound_tool_owner_pairs
+        || bound_tool_owner_pairs.len() != tool_owner_bindings.len()
+    {
+        return Err(
+            "turn_operation_final_reconciliation_required:tool_receipt_owner_refs_mismatch".into(),
+        );
+    }
+
+    let mut tool_calls = Vec::with_capacity(tool_owner_bindings.len());
+    let mut completed_actions = Vec::new();
+    let mut observations_used = Vec::new();
+    for binding in &tool_owner_bindings {
+        let action = actions
+            .iter()
+            .find(|action| action.id == binding.action_queue_id)
+            .ok_or_else(|| {
+                "turn_operation_final_reconciliation_required:tool_owner_binding_action_unknown"
+                    .to_string()
+            })?;
         let metadata = action.observation_metadata.as_ref().ok_or_else(|| {
             "turn_operation_final_reconciliation_required:observation_owner_missing".to_string()
         })?;
@@ -4580,7 +6627,7 @@ async fn recover_canonical_tool_facts(
                         .to_string()
                 })
             })?;
-        if receipt.receipt_id != *expected_receipt_ref
+        if receipt.receipt_id != binding.receipt_id
             || receipt.source_run_id.as_deref() != Some(operation_id)
             || receipt.mechanically_valid_terminal().is_err()
         {
@@ -4601,8 +6648,8 @@ async fn recover_canonical_tool_facts(
                     .to_string()
             })?;
         if terminal_event.run_id != operation_id
-            || terminal_event.event_id != tool_terminal_event_refs[index]
-            || terminal_event.payload_digest != tool_terminal_event_digests[index]
+            || terminal_event.event_id != binding.terminal_event_id
+            || terminal_event.payload_digest != binding.terminal_event_digest
             || terminal_event.payload["receiptId"] != receipt.receipt_id
             || terminal_event.payload["sourceRunId"] != operation_id
             || terminal_event.payload["manifestId"]
@@ -4617,6 +6664,8 @@ async fn recover_canonical_tool_facts(
             || terminal_event.payload["transportStatus"] != receipt.transport_status.as_str()
             || terminal_event.payload["effectStatus"] != receipt.effect_status.as_str()
             || terminal_event.payload["executionOutcome"] != receipt.execution_outcome.as_str()
+            || terminal_event.payload["auditPersistenceStatus"]
+                != receipt.audit_persistence_status.as_str()
             || terminal_event.payload["startedAt"] != serde_json::json!(receipt.started_at)
             || terminal_event.payload["dispatchedAt"] != serde_json::json!(receipt.dispatched_at)
             || terminal_event.payload["responseObservedAt"]
@@ -4740,7 +6789,6 @@ async fn recover_openlife_turn_from_durable_final(
     session_id: &str,
     canonical_user_message: &openlife_core::memory::CanonicalConversationMessageCommit,
 ) -> Result<Option<OpenLifeKernelExecution>, String> {
-    let delivery_id = format!("delivery:{operation_id}:{operation_id}");
     let final_event = {
         let event_store = state
             .main_chat_agent_event_store
@@ -4749,14 +6797,22 @@ async fn recover_openlife_turn_from_durable_final(
             .lock()
             .await;
         event_store
-            .get_immutable_event(operation_id, "final_delivery.created", &delivery_id)
+            .terminal_owner_final_event(operation_id)
             .map_err(|error| format!("load durable final receipt failed: {error}"))?
     };
     let Some(final_event) = final_event else {
         return Ok(None);
     };
+    let terminal_epoch_generation = final_event
+        .payload
+        .get("terminalEpochGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    let delivery_id =
+        main_chat_final_delivery_id(operation_id, operation_id, terminal_epoch_generation);
 
-    if final_event.task_session_id != operation_id
+    if final_event.event_type != "final_delivery.created"
+        || final_event.task_session_id != operation_id
         || final_event.run_id != operation_id
         || final_event.object_id != delivery_id
         || final_event.source != "openlife_turn_runtime.final_delivery_owner"
@@ -4768,30 +6824,69 @@ async fn recover_openlife_turn_from_durable_final(
     {
         return Err("turn_operation_final_receipt_identity_mismatch".into());
     }
-    let recovered_event_window_after = final_event.sequence.saturating_sub(250);
-    let durable_events = state
-        .main_chat_agent_event_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
-        .lock()
-        .await
-        .list(operation_id, recovered_event_window_after, 250)
-        .map_err(|error| format!("list recovered durable turn facts failed: {error}"))?;
-    if durable_events.last().map(|event| event.event_id.as_str())
-        != Some(final_event.event_id.as_str())
-    {
+    let (durable_events, terminal_successor) = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let post_final_events = event_store
+            .list(operation_id, final_event.sequence, 2)
+            .map_err(|error| format!("list post-final durable facts failed: {error}"))?;
+        let terminal_successor = match post_final_events.as_slice() {
+            [] => None,
+            [successor]
+                if successor.event_type == "terminal_owner.successor_confirmed"
+                    && successor.sequence == final_event.sequence.saturating_add(1) =>
+            {
+                Some(successor.clone())
+            }
+            _ => {
+                return Err(
+                    "turn_operation_final_reconciliation_required:bounded_event_window_missing_final"
+                        .into(),
+                );
+            }
+        };
+        // Keep enough pre-final context for the normal recovery checks while
+        // reserving one slot for the only legal post-final successor.
+        let recovered_event_window_after = final_event.sequence.saturating_sub(248);
+        let durable_events = event_store
+            .list(operation_id, recovered_event_window_after, 250)
+            .map_err(|error| format!("list recovered durable turn facts failed: {error}"))?;
+        let expected_last_event_id = terminal_successor
+            .as_ref()
+            .map(|event| event.event_id.as_str())
+            .unwrap_or(final_event.event_id.as_str());
+        if durable_events.last().map(|event| event.event_id.as_str())
+            != Some(expected_last_event_id)
+            || !durable_events
+                .iter()
+                .any(|event| event.event_id == final_event.event_id)
+        {
+            return Err(
+                "turn_operation_final_reconciliation_required:bounded_event_window_missing_final"
+                    .into(),
+            );
+        }
+        (durable_events, terminal_successor)
+    };
+    if terminal_successor.as_ref().is_some_and(|successor| {
+        successor.task_session_id != operation_id
+            || successor.run_id != operation_id
+            || successor.object_type != "terminal_owner_successor"
+            || successor.source != "terminal_owner_write_gateway.review_successor"
+    }) {
         return Err(
-            "turn_operation_final_reconciliation_required:bounded_event_window_missing_final"
-                .into(),
+            "turn_operation_final_reconciliation_required:terminal_successor_identity_mismatch"
+                .to_string(),
         );
     }
     let action_queue_refs = final_event_string_array(&final_event, "actionQueueRefs")?;
     let action_queue_owner_digests =
         final_event_string_array(&final_event, "actionQueueOwnerDigests")?;
-    let tool_receipt_refs = final_event_string_array(&final_event, "toolReceiptRefs")?;
-    let tool_terminal_event_refs = final_event_string_array(&final_event, "toolTerminalEventRefs")?;
-    let tool_terminal_event_digests =
-        final_event_string_array(&final_event, "toolTerminalEventDigests")?;
+    let tool_owner_bindings = final_event_tool_owner_bindings(&final_event)?;
     let transcript_refs = final_event_string_array(&final_event, "transcriptRefs")?;
     let transcript_owner_digests =
         final_event_string_array(&final_event, "transcriptOwnerDigests")?;
@@ -4807,7 +6902,7 @@ async fn recover_openlife_turn_from_durable_final(
     let durable_change_rollback_states =
         final_event_string_array(&final_event, "durableChangeRollbackStates")?;
 
-    let (task, task_owner_receipt) = {
+    let (task, task_owner_receipt, recorded_task_owner_digest) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -4826,7 +6921,73 @@ async fn recover_openlife_turn_from_durable_final(
             .ok_or_else(|| {
                 "turn_operation_final_reconciliation_required:task_missing".to_string()
             })?;
-        (task, receipt)
+        let recorded_task_owner_digest =
+            final_payload_task_owner_digest(&final_event.payload, receipt.version())?.to_string();
+        if let Some(successor) = terminal_successor.as_ref() {
+            let cause_ref = final_event_string(successor, "causeRef")?;
+            let before_revision = final_event_count(successor, "beforeOwnerRevision")? as u64;
+            let after_revision = final_event_count(successor, "afterOwnerRevision")? as u64;
+            let before_digest = final_event_string(successor, "beforeOwnerDigest")?;
+            let after_digest = final_event_string(successor, "afterOwnerDigest")?;
+            let transition_receipt_ref =
+                final_event_string(successor, "localTransitionReceiptRef")?;
+            let transition_receipt_digest =
+                final_event_string(successor, "localTransitionReceiptDigest")?;
+            let final_owner_revision = final_event_count(&final_event, "taskOwnerRevision")? as u64;
+            if final_event_string(successor, "causeKind")? != "proposal_review_acceptance"
+                || final_event_string(successor, "finalEventId")? != final_event.event_id
+                || final_event_string(successor, "ownerKind")? != "agent_task_session"
+                || final_event_string(successor, "ownerId")? != operation_id
+                || before_revision != final_owner_revision
+                || before_digest != recorded_task_owner_digest
+                || after_revision != before_revision.saturating_add(1)
+            {
+                return Err(
+                    "turn_operation_final_reconciliation_required:terminal_successor_binding_mismatch"
+                        .to_string(),
+                );
+            }
+            let verified_transition = sessions
+                .verified_terminal_owner_transition_receipt(transition_receipt_ref)
+                .map_err(|error| {
+                    format!(
+                        "turn_operation_final_reconciliation_required:terminal_successor_receipt_invalid:{error}"
+                    )
+                })?
+                .ok_or_else(|| {
+                    "turn_operation_final_reconciliation_required:terminal_successor_receipt_missing"
+                        .to_string()
+                })?;
+            let owner_head = sessions
+                .canonical_owner_head(operation_id)
+                .map_err(|error| {
+                    format!(
+                        "turn_operation_final_reconciliation_required:terminal_successor_owner_head_invalid:{error}"
+                    )
+                })?
+                .ok_or_else(|| {
+                    "turn_operation_final_reconciliation_required:task_missing".to_string()
+                })?;
+            if verified_transition.receipt_digest() != transition_receipt_digest
+                || verified_transition.proposal_id() != cause_ref
+                || verified_transition.owner_kind() != "agent_task_session"
+                || verified_transition.owner_id() != operation_id
+                || verified_transition.before_revision() != before_revision
+                || verified_transition.after_revision() != after_revision
+                || verified_transition.before_digest() != before_digest
+                || verified_transition.after_digest() != after_digest
+                || owner_head.revision() != after_revision
+                || owner_head.digest() != after_digest
+                || receipt.digest() != after_digest
+                || task.status != AgentTaskSessionStatus::Completed
+            {
+                return Err(
+                    "turn_operation_final_reconciliation_required:terminal_successor_receipt_mismatch"
+                        .to_string(),
+                );
+            }
+        }
+        (task, receipt, recorded_task_owner_digest)
     };
     let (run, run_owner_revision) = {
         let runs = state
@@ -4835,15 +6996,17 @@ async fn recover_openlife_turn_from_durable_final(
             .ok_or_else(|| "agent_run_store_unavailable".to_string())?
             .lock()
             .await;
-        let run = runs
-            .get_run(operation_id)
-            .map_err(|error| format!("load operation-bound run for recovery failed: {error}"))?
-            .ok_or_else(|| {
-                "turn_operation_final_reconciliation_required:run_missing".to_string()
-            })?;
-        let revision = runs
-            .canonical_revision(operation_id)
-            .map_err(|error| format!("load operation-bound run revision failed: {error}"))?;
+        let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.get_run(operation_id)
+                .map_err(|error| format!("load operation-bound run for recovery failed: {error}")),
+        )?
+        .ok_or_else(|| "turn_operation_final_reconciliation_required:run_missing".to_string())?;
+        let revision = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            runs.canonical_revision(operation_id)
+                .map_err(|error| format!("load operation-bound run revision failed: {error}")),
+        )?;
         (run, revision)
     };
     if task.id != operation_id
@@ -4855,15 +7018,37 @@ async fn recover_openlife_turn_from_durable_final(
     {
         return Err("turn_operation_final_reconciliation_required:owner_graph_mismatch".into());
     }
-    let recorded_task_owner_digest =
-        final_payload_task_owner_digest(&final_event.payload, task_owner_receipt.version())?;
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run)?;
-    if final_event_string(&final_event, "taskOwnerStatus")? != task.status.as_str()
-        || recorded_task_owner_digest != task_owner_receipt.digest()
-        || final_event_string(&final_event, "runOwnerStatus")? != run.status.to_string()
-        || final_event_count(&final_event, "runOwnerRevision")? as u64 != run_owner_revision
-        || final_event_string(&final_event, "runOwnerDigest")? != run_owner_digest
+    let task_owner_matches_terminal_fact = if terminal_successor.is_some() {
+        true
+    } else {
+        final_event_string(&final_event, "taskOwnerStatus")? == task.status.as_str()
+            && recorded_task_owner_digest == task_owner_receipt.digest()
+    };
+    let recorded_run_owner_status = final_event_string(&final_event, "runOwnerStatus")?;
+    let recorded_run_owner_revision = final_event_count(&final_event, "runOwnerRevision")? as u64;
+    let recorded_run_owner_digest = final_event_string(&final_event, "runOwnerDigest")?;
+    let run_owner_matches_terminal_fact = if recorded_run_owner_status == run.status.to_string()
+        && recorded_run_owner_revision == run_owner_revision
+        && recorded_run_owner_digest == run_owner_digest
     {
+        true
+    } else if let Some(successor) = terminal_successor.as_ref() {
+        verified_effect_blocking_agent_run_successor(
+            state,
+            operation_id,
+            &run,
+            run_owner_revision,
+            recorded_run_owner_status,
+            recorded_run_owner_revision,
+            recorded_run_owner_digest,
+            successor,
+        )
+        .await?
+    } else {
+        false
+    };
+    if !task_owner_matches_terminal_fact || !run_owner_matches_terminal_fact {
         return Err(
             "turn_operation_final_reconciliation_required:canonical_owner_digest_drift".into(),
         );
@@ -4901,10 +7086,11 @@ async fn recover_openlife_turn_from_durable_final(
         entries
     };
 
-    let assistant_operation =
-        crate::main_chat_generation_support::main_chat_assistant_message_operation_id(
+    let assistant_operation = crate::main_chat_generation_support::
+        main_chat_assistant_message_operation_id_for_generation(
             operation_id,
             operation_id,
+            terminal_epoch_generation,
         );
     if final_event_string(&final_event, "assistantMessageOperationId")? != assistant_operation {
         return Err(
@@ -4972,10 +7158,8 @@ async fn recover_openlife_turn_from_durable_final(
         || completed_action_count != completed_action_refs.len()
         || observation_count != observation_refs.len()
         || pending_user_action_count != pending_user_action_refs.len()
-        || tool_call_count != tool_receipt_refs.len()
-        || tool_call_count != action_queue_owner_digests.len()
-        || tool_call_count != tool_terminal_event_refs.len()
-        || tool_call_count != tool_terminal_event_digests.len()
+        || tool_call_count != tool_owner_bindings.len()
+        || action_queue_refs.len() != action_queue_owner_digests.len()
         || transcript_count != transcript_refs.len()
         || transcript_count != transcript_owner_digests.len()
         || transcript_count != execution_transcript.len()
@@ -4992,9 +7176,7 @@ async fn recover_openlife_turn_from_durable_final(
         operation_id,
         &action_queue_refs,
         &action_queue_owner_digests,
-        &tool_receipt_refs,
-        &tool_terminal_event_refs,
-        &tool_terminal_event_digests,
+        &tool_owner_bindings,
         &completed_action_refs,
         &observation_refs,
     )
@@ -5141,13 +7323,104 @@ async fn recover_openlife_turn_from_durable_final(
     }))
 }
 
+/// A sealed final is immutable, but accepting its exact effect-blocking Review
+/// prerequisite may legally advance the linked AgentRun once. Reconstruct the
+/// pre-successor row from the current canonical owner and require it to match
+/// the final's full digest; the typed Proposal relation and confirmed dispatch
+/// then authorize only the WaitingPermission -> Completed lifecycle delta.
+// Successor verification compares the complete proposal, run, task, owner, and
+// durable-event tuple without trusting a preassembled boolean.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
+async fn verified_effect_blocking_agent_run_successor(
+    state: &Arc<AppState>,
+    operation_id: &str,
+    run: &openlife_core::agent::AgentRun,
+    run_owner_revision: u64,
+    recorded_run_owner_status: &str,
+    recorded_run_owner_revision: u64,
+    recorded_run_owner_digest: &str,
+    successor: &MainChatAgentDurableEvent,
+) -> Result<bool, String> {
+    let cause_ref = final_event_string(successor, "causeRef")?;
+    if recorded_run_owner_status
+        != openlife_core::agent::AgentRunStatus::WaitingPermission.to_string()
+        || run.status != openlife_core::agent::AgentRunStatus::Completed
+        || run.finished_at.is_none()
+        || run.error.is_some()
+        || run_owner_revision != recorded_run_owner_revision.saturating_add(1)
+        || run.generated_proposals.as_slice() != [cause_ref]
+    {
+        return Ok(false);
+    }
+
+    let mut reconstructed_final_owner = run.clone();
+    reconstructed_final_owner.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+    reconstructed_final_owner.finished_at = None;
+    reconstructed_final_owner.error = None;
+    if canonical_final_owner_digest("agent_run", &reconstructed_final_owner)?
+        != recorded_run_owner_digest
+    {
+        return Ok(false);
+    }
+
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?
+        .lock()
+        .await;
+    let proposal = proposal_store
+        .get_proposal(cause_ref)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "turn_operation_final_reconciliation_required:terminal_successor_proposal_missing"
+                .to_string()
+        })?;
+    let dispatch_state = proposal_store
+        .dispatch_state(cause_ref)
+        .map_err(|error| error.to_string())?;
+    let projection = proposal_store
+        .terminal_relation_projection_proof(cause_ref)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "turn_operation_final_reconciliation_required:terminal_successor_relation_missing"
+                .to_string()
+        })?;
+    Ok(
+        proposal.status == openlife_core::agent::ProposalStatus::Accepted
+            && dispatch_state.as_deref() == Some("confirmed")
+            && projection.proposal_id() == cause_ref
+            && projection.task_session_id() == operation_id
+            && projection.run_id() == operation_id
+            && projection.relation_kind()
+                == openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+            && projection.target_owner_revision() <= recorded_run_owner_revision
+            && matches!(
+                projection.target_status_at_issue(),
+                openlife_core::agent::AgentRunStatus::Running
+                    | openlife_core::agent::AgentRunStatus::WaitingPermission
+            ),
+    )
+}
+
+// The finalizer receives all canonical terminal facts explicitly and remains
+// the only place that maps them into product delivery state.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) fn finalize_openlife_turn_result(
     route_decision: &MainChatTurnRouteDecision,
     result: &mut SendMessageResult,
     canonical_run_id: &str,
     canonical_task_session_id: &str,
     kernel_event_count: Option<usize>,
+    durable_events: &[MainChatAgentDurableEvent],
     durable_event_count: usize,
+    terminal_owner_generation: u64,
 ) -> Result<OpenLifeTurnTerminal, String> {
     let generation = result.reasoning_trace.generation_result.as_ref();
     let mut blockers = result.blockers.clone();
@@ -5165,7 +7438,8 @@ pub(crate) fn finalize_openlife_turn_result(
     // ToolGateway receipts. Generation metadata and the mere presence of a
     // pending/blocked tool-call projection are not execution proof.
     let provider_invocation_status = result.provider_invocation_status;
-    let model_invoked = provider_invocation_status.observed_adapter_start();
+    let model_invoked = provider_invocation_status.observed_adapter_start()
+        || durable_provider_invocation_observed(durable_events, canonical_run_id);
     let tool_invoked = result.tool_calls.iter().any(|call| {
         call.execution_receipt.as_ref().is_some_and(|receipt| {
             !matches!(
@@ -5173,7 +7447,7 @@ pub(crate) fn finalize_openlife_turn_result(
                 openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
             )
         })
-    });
+    }) || durable_tool_invocation_observed(durable_events, canonical_run_id);
     let pending_permission = result.tool_calls.iter().any(|call| {
         call.requires_confirmation
             || matches!(call.status, crate::ToolCallStatus::NeedsConfirmation)
@@ -5224,6 +7498,7 @@ pub(crate) fn finalize_openlife_turn_result(
         canonical_task_session_id,
         kernel_event_count,
         durable_event_count,
+        terminal_owner_generation,
     );
     let terminal = OpenLifeTurnTerminal {
         runtime_owner: OPENLIFE_TURN_RUNTIME_OWNER.into(),
@@ -5244,6 +7519,45 @@ pub(crate) fn finalize_openlife_turn_result(
     };
     result.turn_terminal = Some(terminal.clone());
     Ok(terminal)
+}
+
+/// Cancellation can drop the kernel future after ToolGateway has already
+/// completed and durably recorded a receipt. In that path `tool_calls` is
+/// intentionally empty because no live product projection survived the drop.
+/// The minimal durable receipt remains the canonical invocation fact and must
+/// keep the final delivery/IPC truth aligned with the execution boundary.
+fn durable_tool_invocation_observed(
+    events: &[MainChatAgentDurableEvent],
+    canonical_run_id: &str,
+) -> bool {
+    events.iter().any(|event| {
+        event.run_id == canonical_run_id
+            && event.object_type == "tool_execution_receipt"
+            && matches!(
+                event.payload.get("transportStatus").and_then(Value::as_str),
+                Some("dispatched" | "response_observed" | "local_aborted" | "remote_unknown")
+            )
+    })
+}
+
+/// Provider state may fail closed after the adapter edge was already crossed.
+/// In that case the typed status remains `invalid`, while an exact durable
+/// provider-request lifecycle fact still proves that model invocation happened.
+fn durable_provider_invocation_observed(
+    events: &[MainChatAgentDurableEvent],
+    canonical_run_id: &str,
+) -> bool {
+    events.iter().any(|event| {
+        event.run_id == canonical_run_id
+            && event.object_type == "provider_request"
+            && matches!(
+                event.event_type.as_str(),
+                "provider.started"
+                    | "provider.completed"
+                    | "provider.failed"
+                    | "provider.remote_unknown"
+            )
+    })
 }
 
 fn emit_stream_send_message_result(
@@ -5365,7 +7679,10 @@ fn proposal_ids_from_result(result: &SendMessageResult, generation: Option<&Valu
     proposals
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn canonical_final_delivery_from_result(
     route_decision: &MainChatTurnRouteDecision,
     result: &SendMessageResult,
@@ -5376,6 +7693,7 @@ fn canonical_final_delivery_from_result(
     canonical_task_session_id: &str,
     kernel_event_count: Option<usize>,
     durable_event_count: usize,
+    terminal_owner_generation: u64,
 ) -> CanonicalFinalDeliveryView {
     let run_id = canonical_run_id.to_string();
     let task_id = canonical_task_session_id.to_string();
@@ -5385,11 +7703,10 @@ fn canonical_final_delivery_from_result(
     let blocker_summaries = canonical_blockers(blockers, result);
     let pending_user_actions =
         canonical_pending_user_actions(proposals, result, &blocker_summaries);
-    let durable_changes =
-        canonical_durable_changes(result.reasoning_trace.generation_result.as_ref());
+    let durable_changes = canonical_durable_changes(result);
 
     CanonicalFinalDeliveryView {
-        delivery_id: format!("delivery:{run_id}:{task_id}"),
+        delivery_id: main_chat_final_delivery_id(&run_id, &task_id, terminal_owner_generation),
         task_id,
         run_id,
         status: status.into(),
@@ -5414,7 +7731,52 @@ fn canonical_final_delivery_from_result(
     }
 }
 
-fn canonical_durable_changes(generation: Option<&Value>) -> Vec<CanonicalDurableChangeSummary> {
+fn main_chat_final_delivery_id(
+    run_id: &str,
+    task_id: &str,
+    terminal_owner_generation: u64,
+) -> String {
+    if terminal_owner_generation <= 1 {
+        format!("delivery:{run_id}:{task_id}")
+    } else {
+        format!("delivery:{run_id}:{task_id}:generation:{terminal_owner_generation}")
+    }
+}
+
+fn canonical_durable_changes(result: &SendMessageResult) -> Vec<CanonicalDurableChangeSummary> {
+    let mut changes = result
+        .agent_state
+        .as_ref()
+        .and_then(|state| state.final_delivery.as_ref())
+        .map(|delivery| {
+            delivery
+                .durable_changes
+                .iter()
+                .map(|change| CanonicalDurableChangeSummary {
+                    change_type: change.change_type.clone(),
+                    target: change.target.clone(),
+                    provenance: change.provenance_id.clone(),
+                    timestamp: None,
+                    rollback_available: change.rollback_available,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for committed in
+        canonical_durable_changes_from_generation(result.reasoning_trace.generation_result.as_ref())
+    {
+        if !changes.iter().any(|change| {
+            change.change_type == committed.change_type && change.target == committed.target
+        }) {
+            changes.push(committed);
+        }
+    }
+    changes
+}
+
+fn canonical_durable_changes_from_generation(
+    generation: Option<&Value>,
+) -> Vec<CanonicalDurableChangeSummary> {
     let Some(generation) = generation else {
         return Vec::new();
     };
@@ -5673,13 +8035,324 @@ fn bounded_preview(value: &str, max_chars: usize) -> String {
 }
 
 #[cfg(test)]
+mod provider_start_admission_tests {
+    use super::CancellationAwareMainChatEventSink;
+    use crate::main_chat_kernel::{
+        BufferedMainChatEventSink, MainChatEventSink, MainChatModelClient, MainChatModelProgress,
+        MainChatModelRequest, MainChatProviderAuthorization, SchedulerMainChatModelClient,
+    };
+    use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
+    use openlife_core::llm::{ChatMessage, ProviderPayloadPurpose};
+    use openlife_core::privacy::PrivacyEngine;
+    use openlife_core::scheduler::InferenceScheduler;
+    use std::time::Duration;
+
+    async fn cancelled_adapter_fixture(
+        task_id: &str,
+    ) -> (
+        tokio::net::TcpListener,
+        String,
+        crate::main_chat_cancellation::MainChatCancellationRegistry,
+        crate::main_chat_cancellation::RegisteredMainChatCancellation,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider marker server");
+        let endpoint = format!(
+            "http://{}/v1",
+            listener.local_addr().expect("provider marker address")
+        );
+        let registry = crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = registry.register(task_id);
+        registry.request_cancel(task_id);
+        (listener, endpoint, registry, registration)
+    }
+
+    fn provider_client(base: String) -> SchedulerMainChatModelClient {
+        let mut router = ModelRouter::new();
+        router.providers.insert(
+            "openai".into(),
+            ProviderAvailability {
+                provider: "openai".into(),
+                available: true,
+                latency_ms: Some(1),
+                models: vec!["gpt-test".into()],
+                last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: false,
+            },
+        );
+        SchedulerMainChatModelClient::new(
+            InferenceScheduler::new(
+                String::new(),
+                false,
+                "openai".into(),
+                base,
+                "sk-test".into(),
+                "gpt-test".into(),
+                String::new(),
+                false,
+            )
+            .with_model_router(router),
+            PrivacyEngine::new(),
+            openlife_core::config::NetworkPolicy {
+                default_decision: "allow".into(),
+                ..openlife_core::config::NetworkPolicy::default()
+            },
+        )
+    }
+
+    fn provider_request(task_id: &str, stream_provider_tokens: bool) -> MainChatModelRequest {
+        let user_text = "do not dispatch";
+        let mut authorization =
+            MainChatProviderAuthorization::test_fixture_for_user_text(task_id, true, user_text);
+        authorization.task_session_id = Some(task_id.into());
+        MainChatModelRequest {
+            session_id: format!("session-{task_id}"),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: user_text.into(),
+            }],
+            provider_authorization: authorization,
+            system_prompt: "Answer safely.".into(),
+            supplemental_context_blocks: Vec::new(),
+            context_snapshot_ref: format!("context:{task_id}"),
+            selected_context_refs: Vec::new(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+            selected_skill_id: None,
+            payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
+            stream_provider_tokens,
+        }
+    }
+
+    async fn assert_no_http_connection(listener: tokio::net::TcpListener) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "cancel-first adapter admission must prevent a TCP connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_first_blocks_buffered_provider_before_real_http_send() {
+        let task_id = "provider-cancel-first-buffered";
+        let (listener, endpoint, registry, _registration) =
+            cancelled_adapter_fixture(task_id).await;
+        let client = provider_client(endpoint);
+        let mut inner = BufferedMainChatEventSink::default();
+        let mut provider_attempt_error = None;
+        let mut sink = CancellationAwareMainChatEventSink {
+            inner: &mut inner,
+            registry: registry.clone(),
+            task_session_id: task_id.into(),
+            provider_attempt_error: &mut provider_attempt_error,
+        };
+        let error = client
+            .generate_direct_answer(
+                provider_request(task_id, false),
+                &mut |progress| match progress {
+                    MainChatModelProgress::Started {
+                        request_id,
+                        provider,
+                        model,
+                        started_at,
+                        policy_evidence,
+                    } => sink
+                        .emit_provider_started(
+                            request_id,
+                            provider,
+                            model,
+                            started_at,
+                            *policy_evidence,
+                        )
+                        .map_err(anyhow::Error::msg),
+                    _ => Ok(()),
+                },
+            )
+            .await
+            .expect_err("cancel-first buffered adapter must reject before send");
+        drop(sink);
+        assert!(
+            error
+                .message
+                .contains("network_dispatch_attempt_observer_rejected"),
+            "unexpected buffered rejection: {}",
+            error.message
+        );
+        assert!(provider_attempt_error.is_none());
+        assert!(inner.events().is_empty());
+        assert!(registry
+            .snapshot_provider_attempts_for_cancel(task_id, chrono::Utc::now())
+            .expect("cancel-first buffered snapshot")
+            .attempts
+            .is_empty());
+        assert_no_http_connection(listener).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_first_blocks_streaming_provider_before_real_http_send() {
+        let task_id = "provider-cancel-first-streaming";
+        let (listener, endpoint, registry, _registration) =
+            cancelled_adapter_fixture(task_id).await;
+        let client = provider_client(endpoint);
+        let mut inner = BufferedMainChatEventSink::default();
+        let mut provider_attempt_error = None;
+        let mut sink = CancellationAwareMainChatEventSink {
+            inner: &mut inner,
+            registry: registry.clone(),
+            task_session_id: task_id.into(),
+            provider_attempt_error: &mut provider_attempt_error,
+        };
+        let error = client
+            .generate_direct_answer(
+                provider_request(task_id, true),
+                &mut |progress| match progress {
+                    MainChatModelProgress::Started {
+                        request_id,
+                        provider,
+                        model,
+                        started_at,
+                        policy_evidence,
+                    } => sink
+                        .emit_provider_started(
+                            request_id,
+                            provider,
+                            model,
+                            started_at,
+                            *policy_evidence,
+                        )
+                        .map_err(anyhow::Error::msg),
+                    _ => Ok(()),
+                },
+            )
+            .await
+            .expect_err("cancel-first streaming adapter must reject before send");
+        drop(sink);
+        assert!(
+            error
+                .message
+                .contains("network_dispatch_attempt_observer_rejected"),
+            "unexpected streaming rejection: {}",
+            error.message
+        );
+        assert!(provider_attempt_error.is_none());
+        assert!(inner.events().is_empty());
+        assert!(registry
+            .snapshot_provider_attempts_for_cancel(task_id, chrono::Utc::now())
+            .expect("cancel-first streaming snapshot")
+            .attempts
+            .is_empty());
+        assert_no_http_connection(listener).await;
+    }
+}
+
+#[cfg(test)]
 mod turn_admission_tests {
+    use crate::main_chat_event_stream::MainChatAgentDurableEvent;
+
     use super::{
+        durable_provider_invocation_observed, durable_tool_invocation_observed,
         fail_main_chat_once_after_durable_final_for_test,
         fail_main_chat_once_after_message_commit_for_test,
         install_main_chat_pre_registration_barrier_for_test, validate_openlife_turn_admission,
         MainChatTurnStreamMode, OpenLifeTurnAdmissionError, OpenLifeTurnInput,
     };
+
+    fn durable_tool_transport_event(transport_status: &str) -> MainChatAgentDurableEvent {
+        MainChatAgentDurableEvent {
+            event_id: format!("event-{transport_status}"),
+            task_session_id: "task-1".into(),
+            run_id: "run-1".into(),
+            sequence: 1,
+            event_type: "tool.completed".into(),
+            object_type: "tool_execution_receipt".into(),
+            object_id: "receipt-1".into(),
+            created_at: chrono::Utc::now(),
+            source: "test".into(),
+            payload_digest: format!("sha256:{}", "a".repeat(64)),
+            payload: serde_json::json!({ "transportStatus": transport_status }),
+            backfilled: false,
+        }
+    }
+
+    fn durable_provider_event(event_type: &str) -> MainChatAgentDurableEvent {
+        MainChatAgentDurableEvent {
+            event_id: format!("event-{event_type}"),
+            task_session_id: "task-1".into(),
+            run_id: "run-1".into(),
+            sequence: 1,
+            event_type: event_type.into(),
+            object_type: "provider_request".into(),
+            object_id: "request-1".into(),
+            created_at: chrono::Utc::now(),
+            source: "provider_adapter".into(),
+            payload_digest: format!("sha256:{}", "b".repeat(64)),
+            payload: serde_json::json!({ "status": "started" }),
+            backfilled: false,
+        }
+    }
+
+    #[test]
+    fn durable_provider_lifecycle_preserves_invocation_truth_after_state_failure() {
+        for event_type in [
+            "provider.started",
+            "provider.completed",
+            "provider.failed",
+            "provider.remote_unknown",
+        ] {
+            assert!(
+                durable_provider_invocation_observed(
+                    &[durable_provider_event(event_type)],
+                    "run-1"
+                ),
+                "durable provider lifecycle event {event_type} must prove invocation"
+            );
+        }
+
+        let mut state_failure = durable_provider_event("provider.receipt_state_failed");
+        state_failure.object_type = "provider_attempt_state".into();
+        assert!(!durable_provider_invocation_observed(
+            &[state_failure],
+            "run-1"
+        ));
+
+        let mut wrong_owner = durable_provider_event("provider.started");
+        wrong_owner.run_id = "run-2".into();
+        assert!(!durable_provider_invocation_observed(
+            &[wrong_owner],
+            "run-1"
+        ));
+    }
+
+    #[test]
+    fn durable_tool_receipt_keeps_final_invocation_truth_after_kernel_drop() {
+        assert!(!durable_tool_invocation_observed(
+            &[durable_tool_transport_event("not_attempted")],
+            "run-1"
+        ));
+        for status in [
+            "dispatched",
+            "response_observed",
+            "local_aborted",
+            "remote_unknown",
+        ] {
+            assert!(
+                durable_tool_invocation_observed(&[durable_tool_transport_event(status)], "run-1"),
+                "durable ToolGateway transport {status} must count as an invocation"
+            );
+        }
+
+        let mut wrong_owner = durable_tool_transport_event("response_observed");
+        wrong_owner.object_type = "provider_request".into();
+        assert!(!durable_tool_invocation_observed(&[wrong_owner], "run-1"));
+
+        assert!(!durable_tool_invocation_observed(
+            &[durable_tool_transport_event("response_observed")],
+            "run-2"
+        ));
+    }
 
     #[derive(Clone)]
     struct D050FileBackedStorePaths {
@@ -5784,11 +8457,6 @@ mod turn_admission_tests {
             hasher.finalize()
         );
 
-        // Immutable EventStore rows have no product mutation API. This test
-        // fixture updates the event and its immutable-identity registry as one
-        // coherent legal baseline, then relies on the normal reopen validator
-        // to reinstall guards and reject any mismatch before the actual
-        // unknown-enum corruption is introduced.
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS guard_main_chat_event_update_v1;
              DROP TRIGGER IF EXISTS guard_main_chat_event_identity_update_v1;",
@@ -5825,6 +8493,68 @@ mod turn_admission_tests {
         });
     }
 
+    async fn assert_d062_identity_binding_mutation_fails_closed(
+        label: &str,
+        expected_error: &str,
+        mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) {
+        let directory = tempfile::tempdir().expect("create identity binding fixture directory");
+        let paths = D050FileBackedStorePaths::new(directory.path());
+        let state = paths.open_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = format!("d062-{label}");
+        let body = "Please read file `Cargo.toml`.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.clone(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after identity final commits");
+        drop(state);
+
+        rewrite_d054_final_payload_fixture(&paths.event, &operation_id, mutate);
+        let reopened = paths.open_state();
+        let error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id,
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &reopened,
+        )
+        .await
+        .expect_err("invalid identity binding must fail closed");
+        assert!(
+            error.contains(expected_error),
+            "unexpected identity binding error: {error}"
+        );
+        assert_eq!(
+            reopened
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list(&operation_id, 0, 250)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "tool.completed")
+                .count(),
+            1,
+            "failed recovery must not redispatch the tool"
+        );
+    }
+
     fn d050_task_owner_receipt_payload(version: Option<serde_json::Value>) -> serde_json::Value {
         let mut payload = serde_json::json!({
             "taskOwnerDigest": format!("sha256:{}", "a".repeat(64)),
@@ -5836,6 +8566,265 @@ mod turn_admission_tests {
                 .insert("taskOwnerDigestVersion".into(), version);
         }
         payload
+    }
+
+    #[tokio::test]
+    async fn transient_state_commands_use_one_runtime_and_emit_minimal_committed_facts() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let test_offset = chrono::FixedOffset::east_opt(8 * 60 * 60).unwrap();
+        // Derive the date in the same explicit zone encoded in the fixed clock.
+        let local_test_clock = format!(
+            "{}T09:00:00+08:00",
+            chrono::Utc::now()
+                .with_timezone(&test_offset)
+                .format("%Y-%m-%d")
+        );
+        *state.runtime_clock_source.lock().await =
+            crate::main_chat_runtime_facts::MainChatRuntimeClockSource::Fixed(
+                chrono::DateTime::parse_from_rfc3339(&local_test_clock).unwrap(),
+            );
+        let session_id = "roadshow-transient-state-loop";
+
+        let create_operation = uuid::Uuid::new_v4().to_string();
+        let created = crate::main_chat_send::send_message_with_operation_state(
+            create_operation.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("create transient state through TurnRuntime");
+        assert_eq!(created.status, "completed");
+        assert!(!created.model_invoked);
+        assert!(!created.tool_invoked);
+        assert_eq!(
+            created.agent_ingress.as_ref().unwrap().selected_strategy,
+            openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::TransientStateCommand
+        );
+        assert!(created.reply.contains("canonical 状态"));
+
+        let replayed_after_response_loss =
+            crate::main_chat_send::send_message_with_operation_state(
+                create_operation.clone(),
+                session_id.into(),
+                vec![openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。".into(),
+                }],
+                None,
+                &state,
+            )
+            .await
+            .expect("retry lost response through the same TurnRuntime operation");
+        assert_eq!(replayed_after_response_loss.status, "completed");
+        assert_eq!(replayed_after_response_loss.run_id, created.run_id);
+        assert_eq!(
+            state
+                .state_store
+                .as_ref()
+                .unwrap()
+                .list_daily_tasks(false)
+                .unwrap()
+                .len(),
+            1,
+            "same-operation response recovery must not duplicate the canonical task"
+        );
+
+        let list = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal list".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("read transient state through TurnRuntime");
+        assert!(list.reply.contains("完成路演设备检查"));
+        assert!(!list.model_invoked);
+
+        let completed = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal done 完成路演设备检查".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("complete transient state through TurnRuntime");
+        assert!(completed.reply.contains("标记为完成"));
+
+        let undone = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal undo 完成路演设备检查".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("undo transient state through TurnRuntime");
+        assert!(undone.reply.contains("tombstone"));
+
+        let assets = state
+            .state_store
+            .as_ref()
+            .unwrap()
+            .list_daily_tasks(true)
+            .unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(
+            assets[0].status,
+            openlife_core::state_store::DailyTaskStatus::Tombstoned
+        );
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await;
+        let events = event_store.list(&create_operation, 0, 200).unwrap();
+        let effect = events
+            .iter()
+            .find(|event| event.event_type == "effect_committed")
+            .expect("canonical state effect event");
+        let final_delivery = events
+            .iter()
+            .find(|event| event.event_type == "final_delivery.created")
+            .expect("final delivery event");
+        assert!(effect.sequence < final_delivery.sequence);
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("完成路演设备检查"),
+            "TurnEventStore must retain state refs and digests without copying the task body"
+        );
+        assert_eq!(effect.payload["status"], "committed");
+        assert_eq!(
+            effect.payload["projectionStatus"], "pending",
+            "the immutable transaction-time event cannot be rewritten as later projection truth"
+        );
+        drop(event_store);
+        let create_receipt = state
+            .state_store
+            .as_ref()
+            .unwrap()
+            .receipt_for_operation(&create_operation, true)
+            .unwrap()
+            .expect("current canonical create receipt");
+        assert_eq!(
+            create_receipt.projection_status,
+            openlife_core::state_store::StateProjectionStatus::Applied,
+            "current projection truth belongs to the StateStore receipt/read model"
+        );
+        let projected = state.life_model_manager.lock().await.load().unwrap();
+        assert!(projected.goals.daily.is_empty());
+        assert!(crate::commands::state::get_daily_goals_with_state(&state)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn transient_state_command_fails_closed_when_canonical_state_store_is_unavailable() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut state = std::sync::Arc::try_unwrap(state)
+            .unwrap_or_else(|_| panic!("isolated state must have exactly one owner"));
+        state.state_store = None;
+        let state = std::sync::Arc::new(state);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+
+        let error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            "roadshow-state-store-degraded".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal add 不能静默写进临时库".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("missing canonical StateStore must fail closed");
+
+        assert!(error.contains("state_store_unavailable_degraded"));
+        let events = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("durable event store")
+            .lock()
+            .await
+            .list(&operation_id, 0, 200)
+            .expect("list failed turn facts");
+        assert!(events.iter().any(|event| event.event_type == "failed"));
+        assert!(events.iter().all(|event| {
+            !matches!(
+                event.event_type.as_str(),
+                "provider.started" | "tool.started" | "effect_committed"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn concurrent_transient_state_commits_do_not_lose_yaml_projection_updates() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let first = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            "state-projection-race-a".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal add 并发投影任务甲".into(),
+            }],
+            None,
+            &state,
+        );
+        let second = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            "state-projection-race-b".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal add 并发投影任务乙".into(),
+            }],
+            None,
+            &state,
+        );
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap().status, "completed");
+        assert_eq!(second.unwrap().status, "completed");
+        assert_eq!(
+            state
+                .state_store
+                .as_ref()
+                .unwrap()
+                .list_daily_tasks(false)
+                .unwrap()
+                .len(),
+            2
+        );
+        let projected = state.life_model_manager.lock().await.load().unwrap();
+        let names = projected
+            .goals
+            .daily
+            .iter()
+            .filter(|goal| crate::state_projection::is_state_store_projected_daily_goal(goal))
+            .map(|goal| goal.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["并发投影任务乙", "并发投影任务甲"])
+        );
     }
 
     #[test]
@@ -6358,6 +9347,113 @@ mod turn_admission_tests {
     }
 
     #[tokio::test]
+    async fn domain_action_without_tool_receipt_recovers_without_duplicate_memory_commit() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d053-memory-domain-action-recovery";
+        let body = "Remember this: I prefer short summaries.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+
+        let first_error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after the Memory domain action is durable");
+        assert_eq!(
+            first_error,
+            "injected_turn_failure_after_durable_final_before_live_delivery"
+        );
+        let active_before_retry = state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("MemoryLifecycleStore")
+            .lock()
+            .await
+            .list_active_records(None, 200)
+            .expect("active Memory records before retry");
+        assert_eq!(active_before_retry.len(), 1);
+        let actions_before_retry = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("ActionQueueStore")
+            .lock()
+            .await
+            .list_for_session(&operation_id)
+            .expect("Memory domain actions before retry");
+        assert_eq!(actions_before_retry.len(), 1);
+        assert_eq!(
+            actions_before_retry[0].action.action_type,
+            "memory.explicit_write"
+        );
+        assert!(actions_before_retry[0]
+            .observation_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("receiptId").is_some()));
+        assert!(actions_before_retry[0]
+            .observation_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("toolExecutionReceipt").is_none()));
+
+        *state.main_chat_runtime_state.lock().await = crate::state::MainChatRuntimeState::default();
+        let retry = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("recover domain action from the canonical final receipt");
+
+        assert!(retry.tool_calls.is_empty());
+        assert_eq!(
+            retry
+                .turn_terminal
+                .as_ref()
+                .expect("recovered Memory terminal")
+                .final_delivery
+                .tool_call_count,
+            0
+        );
+        assert_eq!(
+            state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("MemoryLifecycleStore")
+                .lock()
+                .await
+                .list_active_records(None, 200)
+                .expect("active Memory records after retry")
+                .len(),
+            1,
+            "recovery must not commit the Memory fact twice"
+        );
+        assert_eq!(
+            state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("ActionQueueStore")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("Memory domain actions after retry")
+                .len(),
+            1,
+            "recovery must not enqueue a second domain action"
+        );
+    }
+
+    #[tokio::test]
     async fn same_id_task_owner_drift_after_final_requires_reconciliation_without_redispatch() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let captured_requests = crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_captured_local_http_provider(
@@ -6499,6 +9595,35 @@ mod turn_admission_tests {
             "injected_turn_failure_after_durable_final_before_live_delivery"
         );
 
+        let final_owner = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_immutable_event(
+                &operation_id,
+                "final_delivery.created",
+                &format!("delivery:{operation_id}:{operation_id}"),
+            )
+            .expect("load identity-keyed final owner")
+            .expect("identity-keyed final owner exists");
+        assert_eq!(final_owner.payload["toolOwnerBindingsVersion"], 2);
+        let bindings = final_owner.payload["toolOwnerBindings"]
+            .as_array()
+            .expect("version two tool owner bindings");
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0]["actionQueueId"].is_string());
+        assert!(bindings[0]["receiptId"].is_string());
+        assert!(bindings[0]["terminalEventId"].is_string());
+        assert!(bindings[0]["terminalEventDigest"].is_string());
+        assert!(final_owner.payload.get("toolReceiptRefs").is_none());
+        assert!(final_owner.payload.get("toolTerminalEventRefs").is_none());
+        assert!(final_owner
+            .payload
+            .get("toolTerminalEventDigests")
+            .is_none());
+
         let before_actions = state
             .main_chat_action_queue_store
             .as_ref()
@@ -6532,7 +9657,7 @@ mod turn_admission_tests {
         .expect("recover the canonical read result without dispatching the tool again");
 
         assert_eq!(retry.tool_calls.len(), 1);
-        assert_eq!(retry.execution_transcript.is_empty(), false);
+        assert!(!retry.execution_transcript.is_empty());
         let terminal = retry.turn_terminal.as_ref().expect("recovered terminal");
         assert_eq!(terminal.final_delivery.completed_actions.len(), 1);
         assert_eq!(terminal.final_delivery.observations_used.len(), 1);
@@ -6572,6 +9697,173 @@ mod turn_admission_tests {
             1,
             "same operation recovery must not dispatch or complete the read twice"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_v1_real_tool_final_remains_recoverable_without_redispatch() {
+        let directory = tempfile::tempdir().expect("create legacy final fixture directory");
+        let paths = D050FileBackedStorePaths::new(directory.path());
+        let state = paths.open_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d062-legacy-tool-owner-recovery";
+        let body = "Please read file `Cargo.toml`.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after the version two final commits");
+        drop(state);
+
+        rewrite_d054_final_payload_fixture(&paths.event, &operation_id, |payload| {
+            let bindings = payload
+                .remove("toolOwnerBindings")
+                .and_then(|value| value.as_array().cloned())
+                .expect("version two binding fixture");
+            payload.remove("toolOwnerBindingsVersion");
+            payload.insert(
+                "toolReceiptRefs".into(),
+                serde_json::json!(bindings
+                    .iter()
+                    .map(|binding| binding["receiptId"].clone())
+                    .collect::<Vec<_>>()),
+            );
+            payload.insert(
+                "toolTerminalEventRefs".into(),
+                serde_json::json!(bindings
+                    .iter()
+                    .map(|binding| binding["terminalEventId"].clone())
+                    .collect::<Vec<_>>()),
+            );
+            payload.insert(
+                "toolTerminalEventDigests".into(),
+                serde_json::json!(bindings
+                    .iter()
+                    .map(|binding| binding["terminalEventDigest"].clone())
+                    .collect::<Vec<_>>()),
+            );
+        });
+
+        let reopened = paths.open_state();
+        let recovered = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &reopened,
+        )
+        .await
+        .expect("legacy version one real tool owner remains recoverable");
+        assert_eq!(recovered.tool_calls.len(), 1);
+        assert_eq!(
+            reopened
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list(&operation_id, 0, 250)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "tool.completed")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_identity_tool_owner_binding_fails_closed_without_redispatch() {
+        let directory = tempfile::tempdir().expect("create duplicate binding fixture directory");
+        let paths = D050FileBackedStorePaths::new(directory.path());
+        let state = paths.open_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d062-duplicate-tool-owner-binding";
+        let body = "Please read file `Cargo.toml`.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after identity final commits");
+        drop(state);
+
+        rewrite_d054_final_payload_fixture(&paths.event, &operation_id, |payload| {
+            let bindings = payload["toolOwnerBindings"]
+                .as_array_mut()
+                .expect("identity binding array");
+            bindings.push(bindings[0].clone());
+        });
+
+        let reopened = paths.open_state();
+        let error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &reopened,
+        )
+        .await
+        .expect_err("duplicate identity binding must fail closed");
+        assert!(error.contains("tool_owner_binding_duplicate"));
+        assert_eq!(
+            reopened
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list(&operation_id, 0, 250)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "tool.completed")
+                .count(),
+            1,
+            "failed recovery must not redispatch the tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_and_conflicting_identity_tool_owner_bindings_fail_closed() {
+        assert_d062_identity_binding_mutation_fails_closed(
+            "unknown-action-binding",
+            "tool_owner_binding_action_unknown",
+            |payload| {
+                payload["toolOwnerBindings"][0]["actionQueueId"] =
+                    serde_json::json!(uuid::Uuid::new_v4().to_string());
+            },
+        )
+        .await;
+        assert_d062_identity_binding_mutation_fails_closed(
+            "conflicting-terminal-binding",
+            "durable_tool_terminal_mismatch",
+            |payload| {
+                payload["toolOwnerBindings"][0]["terminalEventId"] =
+                    serde_json::json!(uuid::Uuid::new_v4().to_string());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -7259,10 +10551,7 @@ mod turn_admission_tests {
             1,
             "unknown transcript kind must never create a replacement final"
         );
-        assert!(
-            recovery.is_err(),
-            "unknown transcript kind must require reconciliation instead of aliasing Error"
-        );
+        assert!(recovery.is_err());
     }
 
     #[tokio::test]
@@ -7317,7 +10606,7 @@ mod turn_admission_tests {
                 .await
                 .list_for_session(&operation_id)
                 .expect("load legal dispatched_unknown owner");
-            assert_eq!(actions.len(), 1, "one canonical read action fixture");
+            assert_eq!(actions.len(), 1);
             super::canonical_final_owner_digest("action_queue", &actions[0])
                 .expect("digest legal dispatched_unknown owner")
         };
@@ -7385,10 +10674,7 @@ mod turn_admission_tests {
             1,
             "unknown action certainty must never create a replacement final"
         );
-        assert!(
-            recovery.is_err(),
-            "unknown action certainty must require reconciliation instead of aliasing dispatched_unknown"
-        );
+        assert!(recovery.is_err());
     }
 
     #[tokio::test]
@@ -7741,6 +11027,13 @@ mod product_receipt_ipc_tests {
         run_id: &str,
     ) -> (ToolCallResult, openlife_core::agent::AgentRunStore) {
         let store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
+        let mut run =
+            openlife_core::agent::AgentRun::new_chat_run("ipc-product-receipt-fixture", "");
+        run.id = run_id.to_string();
+        run.task_id = run_id.to_string();
+        store
+            .create_run(&run)
+            .expect("create IPC fixture AgentRun owner");
         let mut registry = openlife_core::mcp::McpRegistry::new();
         let mut manifest = openlife_core::tool_manifest::ToolManifest::new(
             "ipc_receipt_fixture",
@@ -7903,6 +11196,7 @@ mod product_receipt_ipc_tests {
             keys,
             [
                 "actionEffect",
+                "auditPersistenceStatus",
                 "dispatchAttemptCount",
                 "dispatchKind",
                 "dispatchObserved",
@@ -8019,7 +11313,7 @@ mod product_receipt_ipc_tests {
 #[cfg(test)]
 mod cancellation_projection_tests {
     use super::{
-        canonical_durable_changes, persist_main_chat_cancellation_events,
+        canonical_durable_changes_from_generation, persist_main_chat_cancellation_events,
         terminalize_main_chat_kernel_failure, MainChatCancellationEventBatch,
         MainChatKernelFailureObservation, MainChatProviderDurabilityScope,
     };
@@ -8449,7 +11743,7 @@ mod cancellation_projection_tests {
             ]
         });
 
-        let changes = canonical_durable_changes(Some(&generation));
+        let changes = canonical_durable_changes_from_generation(Some(&generation));
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_type, "memory");
         assert_eq!(changes[0].target, "memory:item-committed");
@@ -8523,10 +11817,22 @@ mod cancellation_projection_tests {
         );
         assert_eq!(pre_dispatch.effect_status, ToolEffectStatus::NotAttempted);
         assert_eq!(pre_dispatch.execution_outcome, ToolExecutionOutcome::Failed);
-        assert!(terminalization
+        let not_dispatched = terminalization
             .durable_events
             .iter()
-            .all(|event| event.object_id != pre_dispatch_id));
+            .filter(|event| event.object_id == pre_dispatch_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            not_dispatched.len(),
+            1,
+            "a pre-dispatch receipt must produce one explicit durable not-dispatched fact"
+        );
+        assert_eq!(not_dispatched[0].event_type, "tool.not_dispatched");
+        assert_eq!(
+            not_dispatched[0].payload["transportStatus"],
+            "not_attempted"
+        );
+        assert_eq!(not_dispatched[0].payload["effectStatus"], "not_attempted");
 
         let no_response = receipt(&no_response_id);
         assert_eq!(
@@ -8639,6 +11945,7 @@ mod cancellation_projection_tests {
             &provider_scheduler,
             MainChatKernelFailureObservation::ProviderAttemptStateInvalid {
                 error: MainChatProviderAttemptError::MissingStart,
+                kernel_events: &[],
             },
             chrono::Utc::now(),
         )

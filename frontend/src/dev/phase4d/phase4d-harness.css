@@ -1,0 +1,133 @@
+html,
+body,
+#root {
+  width: 100%;
+  min-width: var(--ol-shell-min-width);
+  height: 100%;
+  min-height: 720px;
+  margin: 0;
+}
+
+body {
+  overflow: auto;
+  background: var(--ol-canvas);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.phase4d-harness {
+  display: grid;
+  grid-template-rows: 84px minmax(0, 1fr);
+  width: 100%;
+  min-width: var(--ol-shell-min-width);
+  height: 100%;
+  min-height: 720px;
+  overflow: hidden;
+  background: var(--ol-canvas);
+}
+
+.phase4d-qa-toolbar {
+  display: grid;
+  grid-template-areas:
+    "identity source boundaries"
+    "feedback feedback feedback"
+    "warning warning warning";
+  grid-template-columns: auto minmax(260px, 340px) minmax(0, 1fr);
+  grid-template-rows: 32px 18px 18px;
+  min-width: 0;
+  gap: var(--ol-space-4);
+  align-items: center;
+  padding: 0 var(--ol-space-3) var(--ol-space-1);
+  border-bottom: var(--ol-divider-width) solid var(--ol-line-strong);
+  background: var(--ol-surface-subtle);
+  color: var(--ol-ink-secondary);
+}
+
+.phase4d-qa-identity,
+.phase4d-source-select {
+  display: flex;
+  gap: var(--ol-space-2);
+  align-items: center;
+  white-space: nowrap;
+}
+
+.phase4d-qa-identity {
+  grid-area: identity;
+}
+
+.phase4d-source-select {
+  grid-area: source;
+}
+
+.phase4d-qa-identity strong {
+  color: var(--ol-ink);
+  font-size: var(--ol-type-caption);
+}
+
+.phase4d-qa-identity span,
+.phase4d-source-select > span,
+.phase4d-qa-feedback {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.phase4d-qa-warning {
+  grid-area: warning;
+  min-width: 0;
+  margin: 0;
+  color: var(--ol-amber);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  white-space: nowrap;
+}
+
+.phase4d-source-select select {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--ol-space-2);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-1);
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+}
+
+.phase4d-source-select select:focus-visible {
+  outline: var(--ol-focus-width) solid var(--ol-focus);
+  outline-offset: var(--ol-focus-offset);
+}
+
+.phase4d-qa-feedback {
+  grid-area: feedback;
+  min-width: 0;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.phase4d-qa-boundaries {
+  grid-area: boundaries;
+  display: flex;
+  gap: var(--ol-space-2);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.phase4d-shell-stage {
+  min-width: var(--ol-shell-min-width);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.phase4d-shell-stage > .ol-workbench-shell {
+  height: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phase4d-harness * {
+    scroll-behavior: auto;
+  }
+}

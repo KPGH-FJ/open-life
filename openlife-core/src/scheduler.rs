@@ -120,7 +120,10 @@ impl ProviderInvocationTerminalProof {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn validate_runtime_binding(
         &self,
         provider_target: &str,
@@ -148,7 +151,10 @@ impl ProviderInvocationTerminalProof {
     }
 
     #[cfg(feature = "test-utils")]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn validate_synthetic_test_binding(
         &self,
         provider_target: &str,
@@ -179,7 +185,10 @@ impl ProviderInvocationTerminalProof {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn validate_binding(
         &self,
         provider_target: &str,
@@ -1941,13 +1950,13 @@ pub enum PreparedProviderStreamEvent {
 #[derive(Debug)]
 pub enum PreparedProviderStreamTerminal {
     NotAttempted,
-    Completed(ProviderInvocationReceipt),
+    Completed(Box<ProviderInvocationReceipt>),
     Failed {
-        receipt: ProviderInvocationReceipt,
+        receipt: Box<ProviderInvocationReceipt>,
         error: String,
     },
     RemoteUnknown {
-        receipt: ProviderInvocationReceipt,
+        receipt: Box<ProviderInvocationReceipt>,
         error: String,
     },
 }
@@ -1955,13 +1964,13 @@ pub enum PreparedProviderStreamTerminal {
 impl PreparedProviderStreamTerminal {
     fn from_receipt(receipt: ProviderInvocationReceipt, error: Option<String>) -> Self {
         match receipt.status {
-            ProviderInvocationStatus::Completed => Self::Completed(receipt),
+            ProviderInvocationStatus::Completed => Self::Completed(Box::new(receipt)),
             ProviderInvocationStatus::Failed => Self::Failed {
-                receipt,
+                receipt: Box::new(receipt),
                 error: error.unwrap_or_else(|| "provider_confirmed_failure".into()),
             },
             ProviderInvocationStatus::RemoteUnknown => Self::RemoteUnknown {
-                receipt,
+                receipt: Box::new(receipt),
                 error: error.unwrap_or_else(|| "provider_remote_state_unknown".into()),
             },
         }
@@ -2206,7 +2215,10 @@ impl InferenceScheduler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn new(
         local_model: String,
         prefer_local: bool,
@@ -2678,7 +2690,10 @@ impl InferenceScheduler {
     /// filter, then seal the exact resulting payload into the authorization
     /// envelope. Callers cannot mutate the prepared payload afterwards without
     /// invalidating adapter-edge validation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn prepare_chat_request_with_authorized_filter<T, F>(
         &self,
         mut messages: Vec<ChatMessage>,
@@ -3962,6 +3977,12 @@ mod tests {
         );
     }
 
+    // Provider tests mutate process-global endpoint credentials; the lock is
+    // intentionally held through the complete async observation window.
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test(flavor = "current_thread")]
     async fn scheduled_provider_truth_real_adapter_issues_start_and_completed_admissions() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
@@ -4016,6 +4037,10 @@ mod tests {
             .is_empty());
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test(flavor = "current_thread")]
     async fn scheduled_provider_truth_local_abort_requires_real_in_flight_start() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -4071,7 +4096,10 @@ mod tests {
             tokio::spawn(
                 async move { scheduler.execute_scheduled_provider_request(prepared).await },
             );
-        tokio::time::timeout(std::time::Duration::from_secs(1), chat_seen.notified())
+        // Coverage instrumentation can make the full local-provider path
+        // several times slower; keep a bounded wait without using a
+        // production latency threshold as a test-harness deadline.
+        tokio::time::timeout(std::time::Duration::from_secs(10), chat_seen.notified())
             .await
             .expect("scheduled HTTP request crossed the loopback edge");
         let started = store
@@ -4146,7 +4174,7 @@ mod tests {
 
     #[test]
     fn scheduled_scheduler_public_api_has_no_generic_or_streaming_bypass() {
-        let source = include_str!("scheduler.rs");
+        let source = include_str!("scheduler.rs").replace("\r\n", "\n");
         let start = source
             .find("impl ScheduledInferenceScheduler {")
             .expect("scheduled scheduler impl");
@@ -4299,7 +4327,7 @@ mod tests {
         assert!(stream.next().await.is_none());
 
         let receipts = scheduler.provider_receipts_snapshot();
-        assert_eq!(receipts, vec![receipt]);
+        assert_eq!(receipts, vec![*receipt]);
         assert_eq!(receipts[0].request_id, "stream-completed");
         assert_eq!(receipts[0].status, ProviderInvocationStatus::Completed);
         assert!(receipts[0].error_digest.is_none());
@@ -4330,7 +4358,7 @@ mod tests {
             other => panic!("expected confirmed failed terminal receipt, got {other:?}"),
         };
         assert_eq!(receipt.status, ProviderInvocationStatus::Failed);
-        assert_eq!(scheduler.provider_receipts_snapshot(), vec![receipt]);
+        assert_eq!(scheduler.provider_receipts_snapshot(), vec![*receipt]);
     }
 
     #[tokio::test]
@@ -4356,7 +4384,7 @@ mod tests {
             other => panic!("expected post-start remote-unknown terminal, got {other:?}"),
         };
         assert_eq!(receipt.status, ProviderInvocationStatus::RemoteUnknown);
-        assert_eq!(scheduler.provider_receipts_snapshot(), vec![receipt]);
+        assert_eq!(scheduler.provider_receipts_snapshot(), vec![*receipt]);
         assert!(stream.next().await.is_none());
     }
 
@@ -4388,7 +4416,7 @@ mod tests {
         };
 
         let receipts = scheduler.provider_receipts_snapshot();
-        assert_eq!(receipts, vec![receipt]);
+        assert_eq!(receipts, vec![*receipt]);
         assert_eq!(receipts[0].request_id, "stream-failed");
         assert_eq!(receipts[0].status, ProviderInvocationStatus::RemoteUnknown);
         assert!(receipts[0]
@@ -4443,7 +4471,7 @@ mod tests {
             other => panic!("late completion must forward cancel-owned terminal: {other:?}"),
         };
         assert_eq!(receipt.status, ProviderInvocationStatus::RemoteUnknown);
-        assert_eq!(scheduler.provider_receipts_snapshot(), vec![receipt]);
+        assert_eq!(scheduler.provider_receipts_snapshot(), vec![*receipt]);
         assert!(stream.next().await.is_none());
     }
 
@@ -4563,6 +4591,10 @@ mod tests {
         assert_eq!(trace.route_type, "cloud");
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test(flavor = "current_thread")]
     async fn policy_allowed_local_first_uses_the_observed_loopback_provider() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
@@ -5432,7 +5464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hanging_provider_without_response_headers_does_not_invent_started_truth() {
+    async fn hanging_provider_records_local_adapter_start_without_inventing_terminal_truth() {
         use tokio::io::AsyncReadExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5492,26 +5524,33 @@ mod tests {
                 .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), request_observed_rx)
+        let observation_watchdog = std::time::Duration::from_secs(5);
+        tokio::time::timeout(observation_watchdog, request_observed_rx)
             .await
             .expect("server observes the HTTP attempt")
             .expect("request observation channel remains open");
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                progress_rx.recv()
-            )
+        let progress = tokio::time::timeout(observation_watchdog, progress_rx.recv())
             .await
-            .is_err(),
-            "an accepted request without response headers is only an ambiguous attempt, not provider.started"
-        );
+            .expect("local adapter start is observable before response headers")
+            .expect("provider progress channel remains open");
+        assert!(matches!(
+            progress,
+            ProviderInvocationProgress::Started {
+                request_id,
+                provider,
+                model,
+                ..
+            } if request_id == "hanging-provider-request"
+                && provider == "openai"
+                && model == "hanging-model"
+        ));
         assert!(!execution.is_finished());
 
         execution.abort();
         let _ = execution.await;
         assert!(
             progress_rx.try_recv().is_err(),
-            "no terminal receipt is invented"
+            "dropping the local future must not invent a provider terminal receipt"
         );
         release_provider.notify_one();
         let _ = server.await;
@@ -5584,6 +5623,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn local_only_prepared_request_fails_closed_before_cloud_generation_without_local_provider(
     ) {

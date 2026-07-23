@@ -70,7 +70,7 @@ fn guidance_store_with_low_energy_trial() -> HeuristicStore {
 }
 
 fn selected_guidance_packet() -> RuntimeHSPacket {
-    HSSelector::default()
+    HSSelector
         .select(
             &PolicyStore::mvp_builtin(),
             &guidance_store_with_low_energy_trial(),
@@ -256,7 +256,7 @@ async fn w138_explicit_non_default_react_consumes_guidance_through_prompt_config
 
 #[test]
 fn w139_plan_execute_weekly_planning_consumes_guidance_and_stays_proposal_first() {
-    let service = PlanExecuteService::default();
+    let service = PlanExecuteService;
     let packet = selected_guidance_packet();
     let contract = PlanExecuteProductContract::weekly_planning();
     let unguided = service.draft_product_plan(

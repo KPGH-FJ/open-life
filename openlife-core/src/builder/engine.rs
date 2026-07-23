@@ -1662,22 +1662,26 @@ impl BuilderEngine {
             }
         }
 
-        // Step 6: preserve the explicit blocker as an informational alert.
+        // Step 6: preserve the explicit blocker as a reviewed open question.
+        // State alerts are a derived product projection from canonical
+        // StateStore history and are not a Builder-owned LifeModel write path.
         // Free-text keyword matching is not mood classification: negation and
         // context cannot be recovered safely with substring checks.
         if let Some(ans) = answers.get(&6) {
             let blockers = ans.trim().to_string();
             if !blockers.is_empty() {
                 signals.push(create_signal(
-                    "sig_alert", 6, "state", "state.alerts",
-                    serde_json::Value::Array(vec![serde_json::json!({
-                        "message": format!("当前卡点: {}", blockers.chars().take(50).collect::<String>()),
-                        "severity": "info",
-                        "dimension_name": "general"
-                    })]),
+                    "sig_blocker",
+                    6,
+                    "state",
+                    "state.open_questions",
+                    serde_json::Value::Array(vec![serde_json::Value::String(format!(
+                        "当前卡点: {}",
+                        blockers.chars().take(50).collect::<String>()
+                    ))]),
                     0.65,
                     "用户主动报告的阻碍",
-                    RiskLevel::Medium
+                    RiskLevel::Medium,
                 ));
             }
         }
@@ -1749,6 +1753,28 @@ impl BuilderEngine {
                 && signal.user_status != SignalUserStatus::Edited
             {
                 continue;
+            }
+            match crate::life_model_write_gateway::life_model_field_authority(&signal.affected_path)
+            {
+                crate::life_model_write_gateway::LifeModelFieldAuthority::CanonicalLifeModel => {}
+                crate::life_model_write_gateway::LifeModelFieldAuthority::StateStoreCanonical => {
+                    Self::skip_field(
+                        &mut skipped,
+                        signal,
+                        "field is StateStore canonical and cannot be materialized by Builder",
+                        "StateGateway-owned transient state",
+                    );
+                    continue;
+                }
+                crate::life_model_write_gateway::LifeModelFieldAuthority::DerivedProjection => {
+                    Self::skip_field(
+                        &mut skipped,
+                        signal,
+                        "field is a derived projection and cannot be persisted by Builder",
+                        "backend-derived product projection",
+                    );
+                    continue;
+                }
             }
 
             // Simple path-based application
@@ -2419,114 +2445,6 @@ impl BuilderEngine {
                         applied.push(format!("preferences.peak_energy_time = {}", val));
                     } else {
                         Self::skip_field(&mut skipped, signal, "expected string value", "string");
-                    }
-                }
-                ["goals", "daily"] => {
-                    if let Some(arr) = signal.proposed_value.as_array() {
-                        let items: Vec<crate::life_model::DailyGoal> = arr
-                            .iter()
-                            .filter_map(|v| {
-                                Some(crate::life_model::DailyGoal {
-                                    name: Self::parse_nonempty_string(v.get("name")?)?,
-                                    done: v.get("done")?.as_bool()?,
-                                    time_block: match v.get("time_block") {
-                                        Some(value) if value.is_null() => None,
-                                        Some(value) => Some(crate::life_model::TimeBlock {
-                                            start: Self::parse_nonempty_string(
-                                                value.get("start")?,
-                                            )?,
-                                            end: Self::parse_nonempty_string(value.get("end")?)?,
-                                        }),
-                                        None => None,
-                                    },
-                                    operation_id: None,
-                                    operation_digest: None,
-                                })
-                            })
-                            .collect();
-                        if !items.is_empty() && items.len() == arr.len() {
-                            for item in items {
-                                if let Some(existing) =
-                                    model.goals.daily.iter_mut().find(|v| v.name == item.name)
-                                {
-                                    *existing = item;
-                                } else {
-                                    model.goals.daily.push(item);
-                                }
-                            }
-                            applied.push("goals.daily (merged)".to_string());
-                        } else {
-                            Self::skip_field(
-                                &mut skipped,
-                                signal,
-                                "daily goal array parsed to empty",
-                                "array of {name, done, time_block}",
-                            );
-                        }
-                    } else {
-                        Self::skip_field(
-                            &mut skipped,
-                            signal,
-                            "expected array value",
-                            "array of {name, done, time_block}",
-                        );
-                    }
-                }
-                ["state", "alerts"] => {
-                    if let Some(arr) = signal.proposed_value.as_array() {
-                        let items: Vec<crate::life_model::StateAlert> = arr
-                            .iter()
-                            .filter_map(|v| {
-                                Some(crate::life_model::StateAlert {
-                                    dimension_name: v
-                                        .get("dimension_name")
-                                        .or_else(|| v.get("dimension"))?
-                                        .as_str()
-                                        .filter(|value| !value.trim().is_empty())?
-                                        .to_string(),
-                                    level: match v.get("severity")?.as_str()? {
-                                        "critical" => crate::life_model::AlertLevel::Critical,
-                                        "warning" | "medium" => {
-                                            crate::life_model::AlertLevel::Warning
-                                        }
-                                        "info" => crate::life_model::AlertLevel::Info,
-                                        _ => return None,
-                                    },
-                                    message: Self::parse_nonempty_string(v.get("message")?)?,
-                                    triggered_at: match v.get("triggered_at") {
-                                        Some(value) => value.as_str()?.to_string(),
-                                        None => String::new(),
-                                    },
-                                })
-                            })
-                            .collect();
-                        if !items.is_empty() && items.len() == arr.len() {
-                            for item in items {
-                                if let Some(existing) = model.state.alerts.iter_mut().find(|v| {
-                                    v.dimension_name == item.dimension_name
-                                        && v.message == item.message
-                                }) {
-                                    *existing = item;
-                                } else {
-                                    model.state.alerts.push(item);
-                                }
-                            }
-                            applied.push("state.alerts (merged)".to_string());
-                        } else {
-                            Self::skip_field(
-                                &mut skipped,
-                                signal,
-                                "state alert array parsed to empty",
-                                "array of {dimension_name, severity, message}",
-                            );
-                        }
-                    } else {
-                        Self::skip_field(
-                            &mut skipped,
-                            signal,
-                            "expected array value",
-                            "array of {dimension_name, severity, message}",
-                        );
                     }
                 }
                 unsupported => {
@@ -3218,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_signals_goals_daily_and_state_alerts() {
+    fn apply_signals_rejects_state_store_owned_and_derived_paths() {
         let mut model = LifeModel::default_model();
         let signals = vec![
             BuilderSignal {
@@ -3251,12 +3169,17 @@ mod tests {
             },
         ];
         let (applied, skipped) = BuilderEngine::apply_signals_to_model(&mut model, &signals);
-        assert_eq!(model.goals.daily.len(), 1);
-        assert_eq!(model.goals.daily[0].name, "晨跑");
-        assert_eq!(model.state.alerts.len(), 1);
-        assert_eq!(model.state.alerts[0].message, "注意节奏");
-        assert_eq!(applied.len(), 2);
-        assert!(skipped.is_empty());
+        assert!(model.goals.daily.is_empty());
+        assert!(model.state.alerts.is_empty());
+        assert!(applied.is_empty());
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped
+            .iter()
+            .any(|field| field.path == "goals.daily"
+                && field.reason.contains("StateStore canonical")));
+        assert!(skipped.iter().any(
+            |field| field.path == "state.alerts" && field.reason.contains("derived projection")
+        ));
     }
 
     #[test]
@@ -3375,7 +3298,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_signals_alert_medium_maps_to_warning() {
+    fn apply_signals_state_alert_is_rejected_as_derived_projection() {
         let mut model = LifeModel::default_model();
         let signals = vec![BuilderSignal {
             id: "s_alert_medium".into(),
@@ -3392,13 +3315,11 @@ mod tests {
             user_status: SignalUserStatus::Accepted,
         }];
 
-        let (_applied, skipped) = BuilderEngine::apply_signals_to_model(&mut model, &signals);
-        assert!(skipped.is_empty());
-        assert_eq!(model.state.alerts.len(), 1);
-        assert!(matches!(
-            model.state.alerts[0].level,
-            crate::life_model::AlertLevel::Warning
-        ));
+        let (applied, skipped) = BuilderEngine::apply_signals_to_model(&mut model, &signals);
+        assert!(applied.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("derived projection"));
+        assert!(model.state.alerts.is_empty());
     }
 
     #[test]
@@ -3608,18 +3529,12 @@ mod tests {
                 user_status: SignalUserStatus::Accepted,
             },
             BuilderSignal {
-                id: "sig_alert".into(),
+                id: "sig_blocker".into(),
                 source_step: 6,
                 source_question_id: "current_blockers".into(),
                 dimension: BuilderDimension::State,
-                affected_path: "state.alerts".into(),
-                proposed_value: serde_json::json!([
-                    {
-                        "dimension_name": "general",
-                        "message": "当前卡点: 方向不明确、拖延",
-                        "severity": "medium"
-                    }
-                ]),
+                affected_path: "state.open_questions".into(),
+                proposed_value: serde_json::json!(["当前卡点: 方向不明确、拖延"]),
                 confidence: 0.65,
                 reason: "用户主动报告的阻碍".into(),
                 risk_level: RiskLevel::Medium,
@@ -3684,7 +3599,11 @@ mod tests {
             .tone_descriptors
             .iter()
             .any(|item| item == "探究"));
-        assert_eq!(model.state.alerts.len(), 1);
+        assert!(model
+            .state
+            .open_questions
+            .iter()
+            .any(|item| item == "当前卡点: 方向不明确、拖延"));
         assert!(applied.iter().any(|item| item.contains("identity.name")));
         assert!(applied
             .iter()
@@ -4186,7 +4105,12 @@ mod tests {
         let signals =
             BuilderEngine::extract_quick_build_signals(&session, &LifeModel::default_model());
 
-        assert!(signals.iter().any(|signal| signal.id == "sig_alert"));
+        assert!(signals.iter().any(|signal| {
+            signal.id == "sig_blocker"
+                && signal.affected_path == "state.open_questions"
+                && signal.proposed_value
+                    == serde_json::json!(["当前卡点: 我不焦虑，只是缺少明确的技术路线"])
+        }));
         assert!(signals
             .iter()
             .all(|signal| { signal.affected_path != "state.emotional_state.current_mood" }));

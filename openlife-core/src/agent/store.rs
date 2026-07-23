@@ -178,6 +178,15 @@ fn is_exact_metadata_digest(value: &str) -> bool {
     })
 }
 
+fn is_exact_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
 fn canonical_owner_content_digest(value: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, value.as_bytes());
     let hex = digest
@@ -681,6 +690,9 @@ fn minimize_action_for_update(
     // receipt back through the NewInput minimizer. Preserve each unchanged
     // field only from the exact same stored action owner; changed fields still
     // cross the untrusted-input boundary independently.
+    if action.id == stored.id {
+        minimized.id = stored.id.clone();
+    }
     if action.action_type == stored.action_type {
         minimized.action_type = stored.action_type.clone();
     }
@@ -781,6 +793,11 @@ struct PendingBoundContentAttachment {
     receipt_json: String,
 }
 
+// Migration canonicalization keeps each table and attachment accumulator explicit.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn canonicalize_execution_records(
     tx: &Transaction<'_>,
     canonical_store_identity: &str,
@@ -878,7 +895,25 @@ fn canonicalize_execution_records(
                     action.error == stored_action.error
                 }
             } && observation.content == stored_observation.content;
-            if !bound_body_ref_unchanged {
+            let verified_raw_owner_replay = if bound_body_ref_unchanged {
+                false
+            } else {
+                observed_bound_content_body(action, observation, receipt.field())
+                    .ok()
+                    .zip(
+                        crate::agent::types::ContentReceiptBinding::from_action_graph(
+                            run_id,
+                            action,
+                            observation,
+                            receipt.field(),
+                        )
+                        .ok(),
+                    )
+                    .is_some_and(|(body, observed_binding)| {
+                        receipt.verify_observed_body(key, &observed_binding, body)
+                    })
+            };
+            if !bound_body_ref_unchanged && !verified_raw_owner_replay {
                 anyhow::bail!("bound_content_receipt_attached_body_ref_drift");
             }
             match receipt.field() {
@@ -1202,6 +1237,11 @@ fn minimize_error(
                 "safety_check",
                 "generation",
                 "review_staging",
+                "review_staging_partial",
+                "review_partial_effect",
+                "review_effect_unknown",
+                "review_failed_before_effect",
+                "review_projection_pending",
                 "timeout",
                 "cancelled",
                 "interrupted",
@@ -1685,7 +1725,7 @@ fn validate_new_agent_run_identity(run: &AgentRun) -> Result<()> {
     #[cfg(any(test, feature = "test-utils"))]
     {
         let _ = run;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(test, feature = "test-utils")))]
     {
@@ -1705,12 +1745,8 @@ fn is_canonical_conversation_message_ref(value: &str) -> bool {
 }
 
 fn canonical_conversation_message_parts(value: &str) -> Option<(&str, i64)> {
-    let Some(rest) = value.strip_prefix("conversation://") else {
-        return None;
-    };
-    let Some((session_id, message_id)) = rest.split_once("/message/") else {
-        return None;
-    };
+    let rest = value.strip_prefix("conversation://")?;
+    let (session_id, message_id) = rest.split_once("/message/")?;
     let parsed_message_id = message_id.parse::<i64>().ok()?;
     (!session_id.is_empty()
         && parsed_message_id > 0
@@ -2080,6 +2116,275 @@ pub struct AgentRunStore {
     receipt_key: Arc<AgentRunReceiptKey>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRunTerminalRelationTargetIntentAuthority {
+    VerifiedByCanonicalAgentRunStore,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
+fn agent_run_terminal_relation_target_binding_digest(
+    run_id: &str,
+    task_session_id: &str,
+    canonical_user_message_ref: &str,
+    canonical_user_message_digest: &str,
+    canonical_memory_store_identity: &str,
+    agent_run_store_identity: &str,
+    owner_revision: u64,
+    status_at_issue: AgentRunStatus,
+) -> Result<String> {
+    let material = serde_json::json!({
+        "schema": "openlife.agentRunTerminalRelationTarget.v1",
+        "runId": run_id,
+        "taskSessionId": task_session_id,
+        "canonicalUserMessageRef": canonical_user_message_ref,
+        "canonicalUserMessageDigest": canonical_user_message_digest,
+        "canonicalMemoryStoreIdentity": canonical_memory_store_identity,
+        "agentRunStoreIdentity": agent_run_store_identity,
+        "ownerRevision": owner_revision,
+        "statusAtIssue": status_at_issue.to_string(),
+    });
+    Ok(crate::persistence_outbox::metadata_digest(
+        &serde_json::to_string(&material)
+            .context("agent run terminal relation target digest serialization failed")?,
+    ))
+}
+
+/// Opaque, non-serializable proof that the exact live AgentRun owns the
+/// terminal-review target at submission time. It is not projection credit:
+/// an outbox consumer must re-read the live run before applying the relation.
+#[derive(Debug)]
+pub struct AgentRunTerminalRelationTargetIntentAdmission {
+    run_id: String,
+    task_session_id: String,
+    canonical_user_message_ref: String,
+    canonical_user_message_digest: String,
+    canonical_memory_store_identity: String,
+    agent_run_store_identity: String,
+    agent_run_store_identity_digest: String,
+    owner_revision: u64,
+    status_at_issue: AgentRunStatus,
+    binding_digest: String,
+    authority: AgentRunTerminalRelationTargetIntentAuthority,
+}
+
+impl AgentRunTerminalRelationTargetIntentAdmission {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn task_session_id(&self) -> &str {
+        &self.task_session_id
+    }
+
+    pub fn canonical_user_message_ref(&self) -> &str {
+        &self.canonical_user_message_ref
+    }
+
+    pub fn target_binding_digest(&self) -> &str {
+        &self.binding_digest
+    }
+
+    pub fn agent_run_store_identity_digest(&self) -> &str {
+        &self.agent_run_store_identity_digest
+    }
+
+    pub fn owner_revision(&self) -> u64 {
+        self.owner_revision
+    }
+
+    pub fn status_at_issue(&self) -> AgentRunStatus {
+        self.status_at_issue
+    }
+
+    pub(super) fn validate_for(
+        &self,
+        origin: &crate::agent::TerminalOwnerReviewOriginProof,
+        relation_kind: crate::agent::proposal_store::ProposalTerminalRelationKind,
+    ) -> Result<()> {
+        let expected_binding_digest = agent_run_terminal_relation_target_binding_digest(
+            &self.run_id,
+            &self.task_session_id,
+            &self.canonical_user_message_ref,
+            &self.canonical_user_message_digest,
+            &self.canonical_memory_store_identity,
+            &self.agent_run_store_identity,
+            self.owner_revision,
+            self.status_at_issue,
+        )?;
+        if self.authority
+            != AgentRunTerminalRelationTargetIntentAuthority::VerifiedByCanonicalAgentRunStore
+            || self.run_id != origin.run_id()
+            || self.task_session_id != origin.task_session_id()
+            || self.canonical_user_message_ref != origin.canonical_user_message_ref()
+            || self.canonical_user_message_digest != origin.canonical_user_message_digest()
+            || self.canonical_memory_store_identity != origin.canonical_store_identity()
+            || self.agent_run_store_identity.trim().is_empty()
+            || self.agent_run_store_identity_digest
+                != crate::persistence_outbox::metadata_digest(&self.agent_run_store_identity)
+            || self.owner_revision == 0
+            || self.binding_digest != expected_binding_digest
+        {
+            anyhow::bail!("agent_run_terminal_relation_target_authority_invalid");
+        }
+        let status_is_compatible = match relation_kind {
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor => {
+                matches!(
+                    self.status_at_issue,
+                    AgentRunStatus::Running | AgentRunStatus::Completed
+                )
+            }
+            crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+            | crate::agent::proposal_store::ProposalTerminalRelationKind::ActionResumePrerequisite => {
+                matches!(
+                    self.status_at_issue,
+                    AgentRunStatus::Running | AgentRunStatus::WaitingPermission
+                )
+            }
+            crate::agent::proposal_store::ProposalTerminalRelationKind::LegacyUnclassified => {
+                false
+            }
+        };
+        if !status_is_compatible {
+            anyhow::bail!("agent_run_terminal_relation_target_status_incompatible");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn agent_run_terminal_relation_target_fixture(
+    origin: &crate::agent::TerminalOwnerReviewOriginProof,
+) -> AgentRunTerminalRelationTargetIntentAdmission {
+    AgentRunTerminalRelationTargetIntentAdmission {
+        run_id: origin.run_id().to_string(),
+        task_session_id: origin.task_session_id().to_string(),
+        canonical_user_message_ref: origin.canonical_user_message_ref().to_string(),
+        canonical_user_message_digest: origin.canonical_user_message_digest().to_string(),
+        canonical_memory_store_identity: origin.canonical_store_identity().to_string(),
+        agent_run_store_identity: "agent-run-store:test-fixture".into(),
+        agent_run_store_identity_digest: crate::persistence_outbox::metadata_digest(
+            "agent-run-store:test-fixture",
+        ),
+        owner_revision: 1,
+        status_at_issue: AgentRunStatus::Running,
+        binding_digest: agent_run_terminal_relation_target_binding_digest(
+            origin.run_id(),
+            origin.task_session_id(),
+            origin.canonical_user_message_ref(),
+            origin.canonical_user_message_digest(),
+            origin.canonical_store_identity(),
+            "agent-run-store:test-fixture",
+            1,
+            AgentRunStatus::Running,
+        )
+        .expect("test terminal relation target binding digest"),
+        authority: AgentRunTerminalRelationTargetIntentAuthority::VerifiedByCanonicalAgentRunStore,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRunReviewRelationProjectionLane {
+    ForegroundOpen,
+    RecoverySealed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRunReviewRelationProjectionLaneAuthority {
+    VerifiedByTerminalEventOwner,
+}
+
+/// Opaque evidence that the terminal event owner observed the exact epoch in
+/// a lane where relation projection is legal. This is deliberately separate
+/// from the issue-time target intent: projection revalidates the current
+/// AgentRun head instead of treating issue-time status as current truth.
+#[derive(Debug)]
+pub struct AgentRunReviewRelationProjectionLaneAdmission {
+    task_session_id: String,
+    run_id: String,
+    epoch_id: String,
+    epoch_generation: u64,
+    admission_id: String,
+    lane: AgentRunReviewRelationProjectionLane,
+    authority: AgentRunReviewRelationProjectionLaneAuthority,
+}
+
+impl AgentRunReviewRelationProjectionLaneAdmission {
+    pub fn lane(&self) -> AgentRunReviewRelationProjectionLane {
+        self.lane
+    }
+
+    fn validate_for(
+        &self,
+        projection: &crate::agent::proposal_store::ProposalTerminalRelationProjectionProof,
+    ) -> Result<()> {
+        if self.authority
+            != AgentRunReviewRelationProjectionLaneAuthority::VerifiedByTerminalEventOwner
+            || self.task_session_id != projection.task_session_id()
+            || self.run_id != projection.run_id()
+            || self.epoch_id != projection.epoch_id()
+            || self.epoch_generation != projection.epoch_generation()
+            || self.admission_id != projection.admission_id()
+        {
+            anyhow::bail!("agent_run_review_relation_projection_lane_invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Issue a projection-lane capability only from an opaque terminal-owner
+/// origin. The event owner must still revalidate the durable epoch immediately
+/// before calling this function; this capability cannot be deserialized or
+/// caller-shaped from task/run strings.
+pub fn issue_agent_run_review_relation_projection_lane(
+    origin: &crate::agent::TerminalOwnerReviewOriginProof,
+    lane: AgentRunReviewRelationProjectionLane,
+) -> Result<AgentRunReviewRelationProjectionLaneAdmission> {
+    origin.validate()?;
+    Ok(AgentRunReviewRelationProjectionLaneAdmission {
+        task_session_id: origin.task_session_id().to_string(),
+        run_id: origin.run_id().to_string(),
+        epoch_id: origin.epoch_id().to_string(),
+        epoch_generation: origin.epoch_generation(),
+        admission_id: origin.admission_id().to_string(),
+        lane,
+        authority: AgentRunReviewRelationProjectionLaneAuthority::VerifiedByTerminalEventOwner,
+    })
+}
+
+#[cfg(test)]
+fn agent_run_review_relation_projection_lane_fixture(
+    origin: &crate::agent::TerminalOwnerReviewOriginProof,
+    lane: AgentRunReviewRelationProjectionLane,
+) -> AgentRunReviewRelationProjectionLaneAdmission {
+    AgentRunReviewRelationProjectionLaneAdmission {
+        task_session_id: origin.task_session_id().to_string(),
+        run_id: origin.run_id().to_string(),
+        epoch_id: origin.epoch_id().to_string(),
+        epoch_generation: origin.epoch_generation(),
+        admission_id: origin.admission_id().to_string(),
+        lane,
+        authority: AgentRunReviewRelationProjectionLaneAuthority::VerifiedByTerminalEventOwner,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRunReviewRelationProjectionOutcome {
+    Applied,
+    AlreadyApplied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunReviewReconciliationPage {
+    pub proposal_ids: Vec<String>,
+    pub cursor: Option<String>,
+    pub cursor_advanced: bool,
+    pub wrapped: bool,
+    pub backlog_may_remain: bool,
+}
+
 struct RawAgentRunToolExecutionRecord {
     run_id: String,
     receipt_id: String,
@@ -2288,6 +2593,11 @@ impl CanonicalAgentRunLifeEventExecutionProof {
         )
     }
 
+    // The sealed proof authenticates each canonical identity component independently.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn new(
         task_id: String,
         run_id: String,
@@ -2372,10 +2682,293 @@ impl std::fmt::Debug for CanonicalAgentRunLifeEventExecutionProof {
 }
 
 impl AgentRunStore {
+    /// Compares a persisted, minimized status-update message with one exact
+    /// semantic receipt type without exposing the store-scoped receipt key.
+    pub fn status_update_message_matches(&self, stored: &str, expected: &str) -> bool {
+        stored == expected
+            || stored
+                == metadata_safe_text_receipt(
+                    "status_message",
+                    expected,
+                    ReceiptOrigin::NewInput(self.receipt_key.as_ref()),
+                )
+    }
+
+    /// Compares a persisted, minimized AgentRun error message with its exact
+    /// semantic reason while keeping the HMAC key inside the canonical store.
+    pub fn run_error_message_matches(&self, stored: &str, expected: &str) -> bool {
+        stored == expected
+            || stored
+                == metadata_safe_text_receipt(
+                    "run_error",
+                    expected,
+                    ReceiptOrigin::NewInput(self.receipt_key.as_ref()),
+                )
+    }
+
+    /// Normalizes one candidate action through the same receipt boundary used
+    /// by `update_run`, then compares it with the exact canonical owner. This
+    /// lets typed merge gateways distinguish idempotent replay from a
+    /// same-identity/different-body conflict without exposing receipt keys.
+    pub fn action_delta_matches_canonical(
+        &self,
+        candidate: &crate::agent::types::AgentAction,
+        canonical: &crate::agent::types::AgentAction,
+    ) -> Result<bool> {
+        if candidate.id != canonical.id
+            && self.canonical_action_identity(&candidate.id) != canonical.id
+        {
+            return Ok(false);
+        }
+        Ok(records_are_equal(
+            &minimize_action_for_update(candidate, Some(canonical), self.receipt_key.as_ref())?,
+            canonical,
+        ))
+    }
+
+    /// Compares two not-yet-persisted action deltas after applying the exact
+    /// same minimization boundary. This is used only to collapse an exact
+    /// duplicate inside one typed batch; a same-identity body difference must
+    /// remain a conflict before either candidate reaches canonical storage.
+    pub fn action_deltas_match(
+        &self,
+        left: &crate::agent::types::AgentAction,
+        right: &crate::agent::types::AgentAction,
+    ) -> bool {
+        records_are_equal(
+            &minimize_action(left, ReceiptOrigin::NewInput(self.receipt_key.as_ref())),
+            &minimize_action(right, ReceiptOrigin::NewInput(self.receipt_key.as_ref())),
+        )
+    }
+
+    /// Observation counterpart to `action_delta_matches_canonical`.
+    pub fn observation_delta_matches_canonical(
+        &self,
+        candidate: &crate::agent::types::AgentObservation,
+        canonical: &crate::agent::types::AgentObservation,
+    ) -> bool {
+        (candidate.id == canonical.id
+            || self.canonical_observation_identity(&candidate.id) == canonical.id)
+            && records_are_equal(
+                &minimize_observation_for_update(
+                    candidate,
+                    Some(canonical),
+                    self.receipt_key.as_ref(),
+                ),
+                canonical,
+            )
+    }
+
+    /// Compares a typed gateway candidate that was cloned from `canonical`
+    /// and then mutated in memory with the exact row that currently owns the
+    /// run. Every mutable field crosses the same field-provenance minimization
+    /// boundary as `update_run`; transient bodies are compared through their
+    /// keyed digests. This is intentionally not a generic caller-input trust
+    /// seam: action/observation identities are accepted as already canonical
+    /// only when they equal the owner loaded from this store.
+    pub fn typed_projection_matches_canonical(
+        &self,
+        candidate: &AgentRun,
+        canonical: &AgentRun,
+    ) -> Result<bool> {
+        if candidate.id != canonical.id
+            || candidate.task_id != canonical.task_id
+            || candidate.session_id != canonical.session_id
+            || candidate.status != canonical.status
+            || candidate.kind != canonical.kind
+            || candidate.deleted_at != canonical.deleted_at
+            || candidate.delete_reason != canonical.delete_reason
+            || candidate.finished_at != canonical.finished_at
+            || candidate.step_count != canonical.step_count
+            || candidate.tool_call_count != canonical.tool_call_count
+            || candidate.legacy_payload_unverified != canonical.legacy_payload_unverified
+        {
+            return Ok(false);
+        }
+
+        let key = self.receipt_key.as_ref();
+        let (input_ref, input_digest) = normalized_run_input(candidate, key, true)?;
+        if input_ref != canonical.input_ref || input_digest != canonical.input_digest {
+            return Ok(false);
+        }
+        if normalized_reasoning_trace_digest(candidate, key, true)?
+            != canonical.reasoning_trace_digest
+        {
+            return Ok(false);
+        }
+
+        let context_summary = candidate
+            .context_summary
+            .as_ref()
+            .map(|summary| {
+                minimize_composite_for_update(
+                    summary,
+                    canonical.context_summary.as_ref(),
+                    |value| minimize_context_summary(value, ReceiptOrigin::NewInput(key)),
+                )
+            })
+            .transpose()?;
+        if !records_are_equal(&context_summary, &canonical.context_summary) {
+            return Ok(false);
+        }
+
+        let model_route = candidate
+            .model_route
+            .as_ref()
+            .map(|route| {
+                minimize_composite_for_update(route, canonical.model_route.as_ref(), |value| {
+                    minimize_model_route(value, ReceiptOrigin::NewInput(key))
+                })
+            })
+            .transpose()?;
+        if !records_are_equal(&model_route, &canonical.model_route) {
+            return Ok(false);
+        }
+
+        let output_origin = if candidate.output_preview == canonical.output_preview {
+            ReceiptOrigin::StoredCanonical(key)
+        } else {
+            ReceiptOrigin::NewInput(key)
+        };
+        let output_preview = candidate
+            .output_preview
+            .as_deref()
+            .map(|value| metadata_safe_text_receipt("run_output", value, output_origin));
+        if output_preview != canonical.output_preview {
+            return Ok(false);
+        }
+
+        let error = candidate
+            .error
+            .as_ref()
+            .map(|error| {
+                minimize_composite_for_update(error, canonical.error.as_ref(), |value| {
+                    minimize_error(value, ReceiptOrigin::NewInput(key))
+                })
+            })
+            .transpose()?;
+        if !records_are_equal(&error, &canonical.error) {
+            return Ok(false);
+        }
+
+        if Self::normalize_proposal_ids(&candidate.id, &candidate.generated_proposals)?
+            != canonical.generated_proposals
+        {
+            return Ok(false);
+        }
+        if candidate.actions.len() != canonical.actions.len()
+            || candidate.observations.len() != canonical.observations.len()
+        {
+            return Ok(false);
+        }
+        for (candidate_action, canonical_action) in candidate.actions.iter().zip(&canonical.actions)
+        {
+            if !self.action_delta_matches_canonical(candidate_action, canonical_action)? {
+                return Ok(false);
+            }
+        }
+        for (candidate_observation, canonical_observation) in
+            candidate.observations.iter().zip(&canonical.observations)
+        {
+            if !self
+                .observation_delta_matches_canonical(candidate_observation, canonical_observation)
+            {
+                return Ok(false);
+            }
+        }
+
+        let strategy_origin = if candidate.reasoning_strategy == canonical.reasoning_strategy {
+            ReceiptOrigin::StoredCanonical(key)
+        } else {
+            ReceiptOrigin::NewInput(key)
+        };
+        let reasoning_strategy = candidate.reasoning_strategy.as_deref().map(|value| {
+            metadata_safe_enum_or_receipt(
+                "reasoning_strategy",
+                value,
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
+                strategy_origin,
+            )
+        });
+        if reasoning_strategy != canonical.reasoning_strategy {
+            return Ok(false);
+        }
+
+        let hs_selection_audit = candidate
+            .hs_selection_audit
+            .as_ref()
+            .map(|audit| {
+                minimize_composite_for_update(
+                    audit,
+                    canonical.hs_selection_audit.as_ref(),
+                    |value| minimize_hs_selection_audit(value, ReceiptOrigin::NewInput(key)),
+                )
+            })
+            .transpose()?;
+        if !records_are_equal(&hs_selection_audit, &canonical.hs_selection_audit) {
+            return Ok(false);
+        }
+
+        let behavior_checks = minimized_behavior_checks_json_for_update(
+            &candidate.behavior_checks,
+            &canonical.behavior_checks,
+            key,
+        )?;
+        if behavior_checks != serde_json::to_string(&canonical.behavior_checks)? {
+            return Ok(false);
+        }
+        let status_updates = minimized_status_updates_json_for_update(
+            &candidate.status_updates,
+            &canonical.status_updates,
+            key,
+        )?;
+        if status_updates != serde_json::to_string(&canonical.status_updates)? {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    /// Observation counterpart to `action_deltas_match` for exact duplicate
+    /// collapse within a single typed batch.
+    pub fn observation_deltas_match(
+        &self,
+        left: &crate::agent::types::AgentObservation,
+        right: &crate::agent::types::AgentObservation,
+    ) -> bool {
+        records_are_equal(
+            &minimize_observation(left, ReceiptOrigin::NewInput(self.receipt_key.as_ref())),
+            &minimize_observation(right, ReceiptOrigin::NewInput(self.receipt_key.as_ref())),
+        )
+    }
+
+    pub fn canonical_action_identity(&self, candidate_id: &str) -> String {
+        metadata_safe_label_or_ref(
+            "action_id",
+            candidate_id,
+            ReceiptOrigin::NewInput(self.receipt_key.as_ref()),
+        )
+    }
+
+    pub fn canonical_observation_identity(&self, candidate_id: &str) -> String {
+        metadata_safe_label_or_ref(
+            "observation_id",
+            candidate_id,
+            ReceiptOrigin::NewInput(self.receipt_key.as_ref()),
+        )
+    }
+
     pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_with_receipt_key(db_path, AgentRunReceiptKey::test_key());
+            Self::new_with_receipt_key(db_path, AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -2409,7 +3002,7 @@ impl AgentRunStore {
     pub fn new_in_memory() -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::new_in_memory_with_receipt_key(AgentRunReceiptKey::test_key());
+            Self::new_in_memory_with_receipt_key(AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -2432,10 +3025,7 @@ impl AgentRunStore {
     pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            return Self::open_read_only_existing_with_receipt_key(
-                db_path,
-                AgentRunReceiptKey::test_key(),
-            );
+            Self::open_read_only_existing_with_receipt_key(db_path, AgentRunReceiptKey::test_key())
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
@@ -2744,6 +3334,11 @@ impl AgentRunStore {
 
     /// Fixed lock order: canonical AgentRun owner first, then LifeEventStore.
     /// No caller-provided closure or external await executes under the guard.
+    // Event admission binds run, source, category, body, and privacy separately.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub(crate) fn create_life_event_from_active_run(
         &self,
         life_event_store: &crate::agent::LifeEventStore,
@@ -2918,10 +3513,12 @@ impl AgentRunStore {
         };
         let mut quarantined_rows = Vec::with_capacity(rows.len());
         for (run_id, actions_json, observations_json) in rows {
-            let mut actions: Vec<crate::agent::types::AgentAction> =
-                serde_json::from_str(&actions_json).with_context(|| {
-                    format!("agent_run_legacy_receipt_actions_invalid:{run_id}")
-                })?;
+            let mut actions = parse_legacy_trace_array::<crate::agent::types::AgentAction>(
+                &run_id,
+                "actions_json",
+                Some(&actions_json),
+            )
+            .with_context(|| format!("agent_run_legacy_receipt_actions_invalid:{run_id}"))?;
             for action in &mut actions {
                 if action
                     .output
@@ -2954,8 +3551,13 @@ impl AgentRunStore {
                 }
                 action.runtime_execution_receipt = None;
             }
-            let mut observations: Vec<crate::agent::types::AgentObservation> =
-                serde_json::from_str(&observations_json).with_context(|| {
+            let mut observations =
+                parse_legacy_trace_array::<crate::agent::types::AgentObservation>(
+                    &run_id,
+                    "observations_json",
+                    Some(&observations_json),
+                )
+                .with_context(|| {
                     format!("agent_run_legacy_receipt_observations_invalid:{run_id}")
                 })?;
             for observation in &mut observations {
@@ -3320,8 +3922,9 @@ impl AgentRunStore {
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_deleted_at ON agent_runs(deleted_at)",
             [],
         )?;
+        conn.execute("DROP INDEX IF EXISTS idx_agent_runs_waiting_permission", [])?;
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_agent_runs_waiting_permission
+            "CREATE INDEX IF NOT EXISTS idx_agent_runs_review_reconciliation
              ON agent_runs(status, id)
              WHERE deleted_at IS NULL",
             [],
@@ -3350,8 +3953,42 @@ impl AgentRunStore {
             "CREATE TABLE IF NOT EXISTS agent_run_proposal_links (
                 run_id TEXT NOT NULL,
                 proposal_id TEXT NOT NULL,
+                relation_kind TEXT CHECK(relation_kind IN (
+                    'non_blocking_successor',
+                    'effect_blocking_prerequisite',
+                    'action_resume_prerequisite'
+                )),
+                relation_digest TEXT,
+                source_outbox_event_id TEXT,
+                source_outbox_target TEXT,
+                target_binding_digest TEXT,
+                agent_run_store_identity_digest TEXT,
+                target_owner_revision INTEGER,
+                target_status_at_issue TEXT,
+                projected_at TEXT,
                 PRIMARY KEY (run_id, proposal_id),
-                FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+                FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+                CHECK(
+                    (relation_kind IS NULL
+                     AND relation_digest IS NULL
+                     AND source_outbox_event_id IS NULL
+                     AND source_outbox_target IS NULL
+                     AND target_binding_digest IS NULL
+                     AND agent_run_store_identity_digest IS NULL
+                     AND target_owner_revision IS NULL
+                     AND target_status_at_issue IS NULL
+                     AND projected_at IS NULL)
+                    OR
+                    (relation_kind IS NOT NULL
+                     AND relation_digest IS NOT NULL
+                     AND source_outbox_event_id IS NOT NULL
+                     AND source_outbox_target IS NOT NULL
+                     AND target_binding_digest IS NOT NULL
+                     AND agent_run_store_identity_digest IS NOT NULL
+                     AND target_owner_revision > 0
+                     AND target_status_at_issue IS NOT NULL
+                     AND projected_at IS NOT NULL)
+                )
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS idx_agent_run_proposal_links_proposal
              ON agent_run_proposal_links(proposal_id, run_id);",
@@ -3436,8 +4073,26 @@ impl AgentRunStore {
             )
             .optional()?
             .unwrap_or(0);
-        if proposal_link_schema_version < 1 {
-            let legacy_links = {
+        if proposal_link_schema_version < 2 {
+            let has_relation_kind_column = {
+                let mut statement = conn.prepare("PRAGMA table_info(agent_run_proposal_links)")?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                columns.iter().any(|column| column == "relation_kind")
+            };
+            if has_relation_kind_column {
+                let unversioned_typed_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_run_proposal_links
+                     WHERE relation_kind IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if unversioned_typed_count != 0 {
+                    anyhow::bail!("agent_run_review_relation_unversioned_typed_rows");
+                }
+            }
+            let legacy_links = if proposal_link_schema_version < 1 {
                 let mut statement =
                     conn.prepare("SELECT id, generated_proposals_json FROM agent_runs")?;
                 let rows = statement
@@ -3445,32 +4100,110 @@ impl AgentRunStore {
                         Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                rows
+                Some(rows)
+            } else {
+                None
             };
             let tx = conn.unchecked_transaction()?;
-            tx.execute("DELETE FROM agent_run_proposal_links", [])?;
-            for (run_id, proposals_json) in legacy_links {
-                let proposal_ids = proposals_json
-                    .as_deref()
-                    .map(serde_json::from_str::<Vec<String>>)
-                    .transpose()
-                    .with_context(|| {
-                        format!("invalid generated_proposals_json for AgentRun {run_id}")
-                    })?
-                    .unwrap_or_default();
-                let proposal_ids = Self::normalize_proposal_ids(&run_id, &proposal_ids)?;
-                tx.execute(
-                    "UPDATE agent_runs SET generated_proposals_json = ?2 WHERE id = ?1",
-                    params![
-                        run_id,
-                        serde_json::to_string(&proposal_ids)
-                            .context("failed to serialize legacy AgentRun proposal references")?,
-                    ],
-                )?;
-                Self::replace_proposal_links(&tx, &run_id, &proposal_ids)?;
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS agent_run_proposal_links_v2;
+                 CREATE TABLE agent_run_proposal_links_v2 (
+                    run_id TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    relation_kind TEXT CHECK(relation_kind IN (
+                        'non_blocking_successor',
+                        'effect_blocking_prerequisite',
+                        'action_resume_prerequisite'
+                    )),
+                    relation_digest TEXT,
+                    source_outbox_event_id TEXT,
+                    source_outbox_target TEXT,
+                    target_binding_digest TEXT,
+                    agent_run_store_identity_digest TEXT,
+                    target_owner_revision INTEGER,
+                    target_status_at_issue TEXT,
+                    projected_at TEXT,
+                    PRIMARY KEY (run_id, proposal_id),
+                    FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    CHECK(
+                        (relation_kind IS NULL
+                         AND relation_digest IS NULL
+                         AND source_outbox_event_id IS NULL
+                         AND source_outbox_target IS NULL
+                         AND target_binding_digest IS NULL
+                         AND agent_run_store_identity_digest IS NULL
+                         AND target_owner_revision IS NULL
+                         AND target_status_at_issue IS NULL
+                         AND projected_at IS NULL)
+                        OR
+                        (relation_kind IS NOT NULL
+                         AND relation_digest IS NOT NULL
+                         AND source_outbox_event_id IS NOT NULL
+                         AND source_outbox_target IS NOT NULL
+                         AND target_binding_digest IS NOT NULL
+                         AND agent_run_store_identity_digest IS NOT NULL
+                         AND target_owner_revision > 0
+                         AND target_status_at_issue IS NOT NULL
+                         AND projected_at IS NOT NULL)
+                    )
+                 ) WITHOUT ROWID;
+                 INSERT INTO agent_run_proposal_links_v2 (run_id, proposal_id)
+                 SELECT run_id, proposal_id FROM agent_run_proposal_links;
+                 DROP TABLE agent_run_proposal_links;
+                 ALTER TABLE agent_run_proposal_links_v2
+                    RENAME TO agent_run_proposal_links;",
+            )?;
+            if let Some(legacy_links) = legacy_links {
+                tx.execute("DELETE FROM agent_run_proposal_links", [])?;
+                for (run_id, proposals_json) in legacy_links {
+                    let proposal_ids = proposals_json
+                        .as_deref()
+                        .map(serde_json::from_str::<Vec<String>>)
+                        .transpose()
+                        .with_context(|| {
+                            format!("invalid generated_proposals_json for AgentRun {run_id}")
+                        })?
+                        .unwrap_or_default();
+                    let proposal_ids = Self::normalize_proposal_ids(&run_id, &proposal_ids)?;
+                    tx.execute(
+                        "UPDATE agent_runs SET generated_proposals_json = ?2 WHERE id = ?1",
+                        params![
+                            run_id,
+                            serde_json::to_string(&proposal_ids).context(
+                                "failed to serialize legacy AgentRun proposal references"
+                            )?,
+                        ],
+                    )?;
+                    Self::replace_proposal_links(&tx, &run_id, &proposal_ids)?;
+                }
             }
-            crate::sqlite_migration::record_schema_version(&tx, "agent_run_proposal_links", 1)?;
+            Self::validate_agent_run_review_relation_schema(&tx)?;
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_agent_run_proposal_links_proposal
+                 ON agent_run_proposal_links(proposal_id, run_id);
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_typed_proposal_owner
+                 ON agent_run_proposal_links(proposal_id)
+                 WHERE relation_kind IS NOT NULL;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_review_relation_outbox
+                 ON agent_run_proposal_links(source_outbox_event_id)
+                 WHERE source_outbox_event_id IS NOT NULL;",
+            )?;
+            crate::sqlite_migration::record_schema_version(&tx, "agent_run_proposal_links", 2)?;
             tx.commit()?;
+        }
+        Self::validate_agent_run_review_relation_schema(&conn)?;
+        let typed_index_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index' AND name IN (
+                'idx_agent_run_proposal_links_proposal',
+                'idx_agent_run_typed_proposal_owner',
+                'idx_agent_run_review_relation_outbox'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if typed_index_count != 3 {
+            anyhow::bail!("agent_run_review_relation_index_contract_missing");
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agent_run_session_tombstone_projections (
@@ -4368,18 +5101,54 @@ impl AgentRunStore {
         proposal_ids: &[String],
     ) -> Result<()> {
         let proposal_ids = Self::normalize_proposal_ids(run_id, proposal_ids)?;
+        let typed_ids = Self::typed_proposal_ids(tx, run_id)?;
+        if typed_ids.iter().any(|typed_id| {
+            !proposal_ids
+                .iter()
+                .any(|proposal_id| proposal_id == typed_id)
+        }) {
+            anyhow::bail!("agent_run_typed_review_relation_display_omission");
+        }
         tx.execute(
-            "DELETE FROM agent_run_proposal_links WHERE run_id = ?1",
+            "DELETE FROM agent_run_proposal_links
+             WHERE run_id = ?1 AND relation_kind IS NULL",
             [run_id],
         )?;
         for proposal_id in proposal_ids {
             tx.execute(
                 "INSERT INTO agent_run_proposal_links (run_id, proposal_id)
-                 VALUES (?1, ?2)",
+                 VALUES (?1, ?2)
+                 ON CONFLICT(run_id, proposal_id) DO NOTHING",
                 params![run_id, proposal_id],
             )?;
         }
         Ok(())
+    }
+
+    fn typed_proposal_ids(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Result<Vec<String>> {
+        let typed_ids = {
+            let mut statement = tx.prepare(
+                "SELECT proposal_id FROM agent_run_proposal_links
+                 WHERE run_id = ?1 AND relation_kind IS NOT NULL
+                 ORDER BY proposal_id ASC",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        Ok(typed_ids)
+    }
+
+    fn merge_typed_proposal_ids(
+        tx: &rusqlite::Transaction<'_>,
+        run_id: &str,
+        proposal_ids: &[String],
+    ) -> Result<Vec<String>> {
+        let mut proposal_ids = Self::normalize_proposal_ids(run_id, proposal_ids)?;
+        let typed_ids = Self::typed_proposal_ids(tx, run_id)?;
+        proposal_ids.extend(typed_ids);
+        Self::normalize_proposal_ids(run_id, &proposal_ids)
     }
 
     fn normalize_proposal_ids(run_id: &str, proposal_ids: &[String]) -> Result<Vec<String>> {
@@ -4581,7 +5350,14 @@ impl AgentRunStore {
                 metadata_safe_enum_or_receipt(
                     "reasoning_strategy",
                     value,
-                    &["layered", "direct", "react", "plan_execute", "unknown"],
+                    &[
+                        "layered",
+                        "direct",
+                        "react",
+                        "plan_execute",
+                        "memory_governance",
+                        "unknown",
+                    ],
                     legacy_origin,
                 )
             });
@@ -4769,6 +5545,105 @@ impl AgentRunStore {
         bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    }
+
+    fn validate_agent_run_review_relation_schema(conn: &Connection) -> Result<()> {
+        let rows = {
+            let mut statement = conn.prepare(
+                "SELECT relation_kind, relation_digest, source_outbox_event_id,
+                        source_outbox_target, target_binding_digest,
+                        agent_run_store_identity_digest, target_owner_revision,
+                        target_status_at_issue, projected_at
+                 FROM agent_run_proposal_links",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for row in rows {
+            let all_typed_fields_are_none = row.1.is_none()
+                && row.2.is_none()
+                && row.3.is_none()
+                && row.4.is_none()
+                && row.5.is_none()
+                && row.6.is_none()
+                && row.7.is_none()
+                && row.8.is_none();
+            if row.0.is_none() {
+                if !all_typed_fields_are_none {
+                    anyhow::bail!("agent_run_review_relation_partial_contract");
+                }
+                continue;
+            }
+            let (
+                Some(relation_kind),
+                Some(relation_digest),
+                Some(source_outbox_event_id),
+                Some(source_outbox_target),
+                Some(target_binding_digest),
+                Some(agent_run_store_identity_digest),
+                Some(target_owner_revision),
+                Some(target_status_at_issue),
+                Some(projected_at),
+            ) = row
+            else {
+                anyhow::bail!("agent_run_review_relation_partial_contract");
+            };
+            let relation_kind = match relation_kind.as_str() {
+                "non_blocking_successor" => {
+                    crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor
+                }
+                "effect_blocking_prerequisite" => crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                "action_resume_prerequisite" => crate::agent::proposal_store::ProposalTerminalRelationKind::ActionResumePrerequisite,
+                _ => anyhow::bail!("agent_run_review_relation_kind_invalid"),
+            };
+            let status_at_issue = match target_status_at_issue.as_str() {
+                "running" => AgentRunStatus::Running,
+                "waiting_permission" => AgentRunStatus::WaitingPermission,
+                "completed" => AgentRunStatus::Completed,
+                "failed" => AgentRunStatus::Failed,
+                "remote_unknown" => AgentRunStatus::RemoteUnknown,
+                "cancelled" => AgentRunStatus::Cancelled,
+                _ => anyhow::bail!("agent_run_review_relation_status_invalid"),
+            };
+            let status_is_compatible = match relation_kind {
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor => matches!(status_at_issue, AgentRunStatus::Running | AgentRunStatus::Completed),
+                crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+                | crate::agent::proposal_store::ProposalTerminalRelationKind::ActionResumePrerequisite => matches!(status_at_issue, AgentRunStatus::Running | AgentRunStatus::WaitingPermission),
+                crate::agent::proposal_store::ProposalTerminalRelationKind::LegacyUnclassified => false,
+            };
+            let expected_target = match relation_kind {
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor => "agent_run_review_link.non_blocking",
+                crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite => "agent_run_review_link.effect_blocking",
+                crate::agent::proposal_store::ProposalTerminalRelationKind::ActionResumePrerequisite => "agent_run_review_link.action_resume",
+                crate::agent::proposal_store::ProposalTerminalRelationKind::LegacyUnclassified => unreachable!(),
+            };
+            if !is_exact_sha256_digest(&relation_digest)
+                || !is_exact_sha256_digest(&target_binding_digest)
+                || !is_exact_sha256_digest(&agent_run_store_identity_digest)
+                || source_outbox_event_id.trim().is_empty()
+                || source_outbox_target != expected_target
+                || target_owner_revision <= 0
+                || !status_is_compatible
+                || chrono::DateTime::parse_from_rfc3339(&projected_at).is_err()
+            {
+                anyhow::bail!("agent_run_review_relation_contract_invalid");
+            }
+        }
+        Ok(())
     }
 
     fn add_column_if_missing(
@@ -5238,7 +6113,14 @@ impl AgentRunStore {
             metadata_safe_enum_or_receipt(
                 "reasoning_strategy",
                 value,
-                &["layered", "direct", "react", "plan_execute", "unknown"],
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
                 ReceiptOrigin::NewInput(receipt_key),
             )
         });
@@ -5259,7 +6141,7 @@ impl AgentRunStore {
         let delete_reason = run.delete_reason.as_deref().map(|value| {
             metadata_safe_text_receipt("delete_reason", value, ReceiptOrigin::NewInput(receipt_key))
         });
-        let proposal_ids = Self::normalize_proposal_ids(&run.id, &run.generated_proposals)?;
+        let proposal_ids = Self::merge_typed_proposal_ids(&tx, &run.id, &run.generated_proposals)?;
         let proposal_ids_json = serde_json::to_string(&proposal_ids)
             .context("failed to serialize AgentRun proposal references")?;
         ensure_minimized_payload_bounds(
@@ -5292,6 +6174,9 @@ impl AgentRunStore {
             if tombstoned {
                 anyhow::bail!("agent_run_session_canonical_source_tombstoned");
             }
+        }
+        if persistence_outbox::has_active_tombstone(&tx, "agent_run", &run.id)? {
+            anyhow::bail!("agent_run_create_canonical_tombstone_active: {}", run.id);
         }
         tx.execute(
             "INSERT INTO agent_runs (
@@ -5512,7 +6397,14 @@ impl AgentRunStore {
             metadata_safe_enum_or_receipt(
                 "reasoning_strategy",
                 value,
-                &["layered", "direct", "react", "plan_execute", "unknown"],
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
                 reasoning_strategy_origin,
             )
         });
@@ -5541,7 +6433,7 @@ impl AgentRunStore {
             &stored_run.status_updates,
             receipt_key,
         )?;
-        let proposal_ids = Self::normalize_proposal_ids(&run.id, &run.generated_proposals)?;
+        let proposal_ids = Self::merge_typed_proposal_ids(&tx, &run.id, &run.generated_proposals)?;
         let proposal_ids_json = serde_json::to_string(&proposal_ids)
             .context("failed to serialize AgentRun proposal references")?;
         ensure_minimized_payload_bounds(
@@ -5684,6 +6576,58 @@ impl AgentRunStore {
         Self::active_bound_content_owner_exists_on_connection(&conn, run_id)
     }
 
+    /// Minimal canonical binding for delete/restore lifecycle serialization.
+    /// Unlike product-visible reads, this includes tombstoned rows, but it
+    /// exposes no input, output, event, proposal, or receipt content.
+    pub fn lifecycle_task_id(&self, run_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        conn.query_row(
+            "SELECT task_id FROM agent_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Minimal immutable parent binding used only by MemoryStore while it
+    /// fences a restore against the canonical Conversation tombstone. The
+    /// caller must not retain this as a second parent-truth source.
+    pub(crate) fn lifecycle_parent_conversation_id(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Option<String>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        conn.query_row(
+            "SELECT session_id FROM agent_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn bound_canonical_memory_store_identity(&self) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        conn.query_row(
+            "SELECT value FROM agent_run_store_metadata
+             WHERE key = 'canonical_memory_store_identity'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn get_run_including_deleted(&self, run_id: &str) -> Result<Option<AgentRun>> {
         let conn = self
             .conn
@@ -5751,21 +6695,22 @@ impl AgentRunStore {
         runs.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Returns a bounded set of Proposal ids that still have at least one live
-    /// WaitingPermission AgentRun projection. This is an indexed reconciliation queue,
-    /// not a scan across all historical AgentRuns.
-    pub fn list_waiting_permission_linked_proposal_ids(&self, limit: i64) -> Result<Vec<String>> {
+    /// Returns a bounded set of Proposal ids whose live AgentRun projection is
+    /// still waiting for review or carries an unresolved remote-unknown effect.
+    /// This is an indexed reconciliation queue, not a historical scan.
+    pub fn list_review_reconcilable_linked_proposal_ids(&self, limit: i64) -> Result<Vec<String>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let query = format!(
             "SELECT DISTINCT link.proposal_id
-             FROM agent_runs AS run INDEXED BY idx_agent_runs_waiting_permission
+             FROM agent_runs AS run INDEXED BY idx_agent_runs_review_reconciliation
              CROSS JOIN agent_run_proposal_links AS link
-             WHERE run.status = 'waiting_permission'
+             WHERE run.status IN ('waiting_permission', 'remote_unknown')
                AND {LIVE_AGENT_RUN_SQL_PREDICATE}
                AND link.run_id = run.id
+               AND link.relation_kind IS NOT NULL
              LIMIT ?1"
         );
         let mut statement = conn.prepare(&query)?;
@@ -5773,6 +6718,133 @@ impl AgentRunStore {
         proposal_ids
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Takes one bounded, fair page from the durable review-reconciliation
+    /// queue. The cursor is operational metadata, not AgentRun canonical
+    /// truth: an indefinitely unknown first row must not starve later rows.
+    pub fn take_review_reconciliation_page(
+        &self,
+        limit: i64,
+    ) -> Result<AgentRunReviewReconciliationPage> {
+        const CURSOR_KEY: &str = "review_reconciliation_cursor_v1";
+        let bounded_limit = limit.clamp(1, 200);
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous_cursor = transaction
+            .query_row(
+                "SELECT value FROM agent_run_store_metadata WHERE key = ?1",
+                [CURSOR_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let fetch_limit = bounded_limit.saturating_add(1);
+        let mut proposal_ids = Vec::with_capacity(fetch_limit as usize);
+        if let Some(cursor) = previous_cursor.as_deref() {
+            let query = format!(
+                "SELECT link.proposal_id
+                 FROM agent_run_proposal_links AS link
+                      INDEXED BY idx_agent_run_proposal_links_proposal
+                 WHERE link.proposal_id > ?1
+                   AND link.relation_kind IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1
+                       FROM agent_runs AS run
+                            INDEXED BY idx_agent_runs_review_reconciliation
+                       WHERE run.status IN ('waiting_permission', 'remote_unknown')
+                         AND run.id = link.run_id
+                         AND {LIVE_AGENT_RUN_SQL_PREDICATE}
+                   )
+                 GROUP BY link.proposal_id
+                 ORDER BY link.proposal_id ASC
+                 LIMIT ?2"
+            );
+            let mut statement = transaction.prepare(&query)?;
+            proposal_ids.extend(
+                statement
+                    .query_map(params![cursor, fetch_limit], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
+        } else {
+            let query = format!(
+                "SELECT link.proposal_id
+                 FROM agent_run_proposal_links AS link
+                      INDEXED BY idx_agent_run_proposal_links_proposal
+                 WHERE EXISTS (
+                       SELECT 1
+                       FROM agent_runs AS run
+                            INDEXED BY idx_agent_runs_review_reconciliation
+                       WHERE run.status IN ('waiting_permission', 'remote_unknown')
+                         AND run.id = link.run_id
+                         AND {LIVE_AGENT_RUN_SQL_PREDICATE}
+                   )
+                   AND link.relation_kind IS NOT NULL
+                 GROUP BY link.proposal_id
+                 ORDER BY link.proposal_id ASC
+                 LIMIT ?1"
+            );
+            let mut statement = transaction.prepare(&query)?;
+            proposal_ids.extend(
+                statement
+                    .query_map([fetch_limit], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
+        }
+
+        let mut wrapped = false;
+        if proposal_ids.is_empty() {
+            if let Some(cursor) = previous_cursor.as_deref() {
+                let query = format!(
+                    "SELECT link.proposal_id
+                     FROM agent_run_proposal_links AS link
+                          INDEXED BY idx_agent_run_proposal_links_proposal
+                     WHERE link.proposal_id <= ?1
+                       AND link.relation_kind IS NOT NULL
+                       AND EXISTS (
+                           SELECT 1
+                           FROM agent_runs AS run
+                                INDEXED BY idx_agent_runs_review_reconciliation
+                           WHERE run.status IN ('waiting_permission', 'remote_unknown')
+                             AND run.id = link.run_id
+                             AND {LIVE_AGENT_RUN_SQL_PREDICATE}
+                       )
+                     GROUP BY link.proposal_id
+                     ORDER BY link.proposal_id ASC
+                     LIMIT ?2"
+                );
+                let mut statement = transaction.prepare(&query)?;
+                let wrapped_ids = statement
+                    .query_map(params![cursor, fetch_limit], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                wrapped = !wrapped_ids.is_empty();
+                proposal_ids.extend(wrapped_ids);
+            }
+        }
+
+        let has_extra = proposal_ids.len() > bounded_limit as usize;
+        proposal_ids.truncate(bounded_limit as usize);
+
+        let cursor = proposal_ids.last().cloned().or(previous_cursor.clone());
+        let cursor_advanced = cursor != previous_cursor;
+        if let Some(cursor) = cursor.as_deref() {
+            transaction.execute(
+                "INSERT INTO agent_run_store_metadata(key, value)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![CURSOR_KEY, cursor],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(AgentRunReviewReconciliationPage {
+            backlog_may_remain: has_extra || (!wrapped && previous_cursor.is_some()),
+            proposal_ids,
+            cursor,
+            cursor_advanced,
+            wrapped,
+        })
     }
 
     pub fn list_runs(&self, limit: i64, offset: i64) -> Result<Vec<AgentRun>> {
@@ -6003,7 +7075,14 @@ impl AgentRunStore {
             metadata_safe_enum_or_receipt(
                 "reasoning_strategy",
                 strategy,
-                &["layered", "direct", "react", "plan_execute", "unknown"],
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
                 ReceiptOrigin::StoredCanonical(receipt_key),
             ) != strategy
         }) {
@@ -6150,6 +7229,125 @@ impl AgentRunStore {
         Ok(count)
     }
 
+    /// Cheap owner-read preflight for boundaries that pass a cloned store
+    /// handle into a lower execution layer. It validates the canonical store
+    /// identity and touches the live owner table without scanning all rows.
+    pub fn verify_readable(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        Self::existing_canonical_store_identity(&conn)?;
+        conn.query_row("SELECT 1 FROM agent_runs LIMIT 1", [], |_| Ok(()))
+            .optional()?;
+        Ok(())
+    }
+
+    /// Mint a one-turn target intent only after MemoryStore has fenced and
+    /// re-read the canonical user-message body and this store has re-read the
+    /// exact live AgentRun owner. This proves admission intent, not a completed
+    /// cross-store link.
+    pub(crate) fn issue_terminal_relation_target_intent(
+        &self,
+        origin: &crate::agent::TerminalOwnerReviewOriginProof,
+        message_proof: &CanonicalConversationMessageProof,
+        canonical_user_message_body: &str,
+    ) -> Result<AgentRunTerminalRelationTargetIntentAdmission> {
+        origin.validate()?;
+        if message_proof.role() != "user"
+            || message_proof.canonical_ref() != origin.canonical_user_message_ref()
+            || message_proof.content_digest() != origin.canonical_user_message_digest()
+            || message_proof.canonical_store_identity() != origin.canonical_store_identity()
+            || canonical_owner_content_digest(canonical_user_message_body)
+                != message_proof.content_digest()
+        {
+            anyhow::bail!("agent_run_terminal_relation_target_message_owner_mismatch");
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        let agent_run_store_identity = Self::existing_canonical_store_identity(&conn)?;
+        let canonical_memory_store_identity = conn
+            .query_row(
+                "SELECT value FROM agent_run_store_metadata
+                 WHERE key = 'canonical_memory_store_identity'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .context("agent_run_canonical_memory_store_not_bound")?;
+        let query = format!(
+            "SELECT run.task_id, run.input_ref, run.input_digest, run.status,
+                    revision.revision
+             FROM agent_runs AS run
+             JOIN agent_run_canonical_revisions AS revision ON revision.run_id = run.id
+             WHERE run.id = ?1 AND {LIVE_AGENT_RUN_SQL_PREDICATE}"
+        );
+        let owner = conn
+            .query_row(&query, [origin.run_id()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })
+            .optional()?
+            .context("agent_run_terminal_relation_target_missing")?;
+        let expected_agent_run_input_digest = scoped_run_content_digest(
+            self.receipt_key.as_ref(),
+            origin.run_id(),
+            "run_input",
+            canonical_user_message_body,
+        );
+        if owner.0 != origin.task_session_id()
+            || owner.1.as_deref() != Some(origin.canonical_user_message_ref())
+            || owner.2.as_deref() != Some(expected_agent_run_input_digest.as_str())
+            || canonical_memory_store_identity != origin.canonical_store_identity()
+            || canonical_memory_store_identity != message_proof.canonical_store_identity()
+            || owner.4 == 0
+        {
+            anyhow::bail!("agent_run_terminal_relation_target_identity_mismatch");
+        }
+        let status_at_issue = match owner.3.as_str() {
+            "running" => AgentRunStatus::Running,
+            "waiting_permission" => AgentRunStatus::WaitingPermission,
+            "completed" => AgentRunStatus::Completed,
+            "failed" => AgentRunStatus::Failed,
+            "remote_unknown" => AgentRunStatus::RemoteUnknown,
+            "cancelled" => AgentRunStatus::Cancelled,
+            _ => anyhow::bail!("agent_run_terminal_relation_target_status_invalid"),
+        };
+        let binding_digest = agent_run_terminal_relation_target_binding_digest(
+            origin.run_id(),
+            origin.task_session_id(),
+            origin.canonical_user_message_ref(),
+            origin.canonical_user_message_digest(),
+            &canonical_memory_store_identity,
+            &agent_run_store_identity,
+            owner.4,
+            status_at_issue,
+        )?;
+        let agent_run_store_identity_digest =
+            crate::persistence_outbox::metadata_digest(&agent_run_store_identity);
+        Ok(AgentRunTerminalRelationTargetIntentAdmission {
+            run_id: origin.run_id().to_string(),
+            task_session_id: origin.task_session_id().to_string(),
+            canonical_user_message_ref: origin.canonical_user_message_ref().to_string(),
+            canonical_user_message_digest: origin.canonical_user_message_digest().to_string(),
+            canonical_memory_store_identity,
+            agent_run_store_identity,
+            agent_run_store_identity_digest,
+            owner_revision: owner.4,
+            status_at_issue,
+            binding_digest,
+            authority:
+                AgentRunTerminalRelationTargetIntentAuthority::VerifiedByCanonicalAgentRunStore,
+        })
+    }
+
     pub fn last_run_for_session(&self, session_id: &str) -> Result<Option<AgentRun>> {
         let conn = self
             .conn
@@ -6172,6 +7370,237 @@ impl AgentRunStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Apply one ProposalStore-verified typed Review relation to the canonical
+    /// AgentRun. The typed row and the compatibility-only proposal-id display
+    /// list commit in the same transaction. Exact replay is a no-op; any
+    /// proposal, event, lineage, or relation drift fails closed.
+    pub fn apply_terminal_review_relation_projection(
+        &self,
+        projection: &crate::agent::proposal_store::ProposalTerminalRelationProjectionProof,
+        lane: &AgentRunReviewRelationProjectionLaneAdmission,
+    ) -> Result<AgentRunReviewRelationProjectionOutcome> {
+        projection.validate()?;
+        lane.validate_for(projection)?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let agent_run_store_identity = Self::existing_canonical_store_identity(&tx)?;
+        if crate::persistence_outbox::metadata_digest(&agent_run_store_identity)
+            != projection.agent_run_store_identity_digest()
+        {
+            anyhow::bail!("agent_run_review_relation_projection_store_mismatch");
+        }
+        let canonical_memory_store_identity = tx
+            .query_row(
+                "SELECT value FROM agent_run_store_metadata
+                 WHERE key = 'canonical_memory_store_identity'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .context("agent_run_canonical_memory_store_not_bound")?;
+        if canonical_memory_store_identity != projection.canonical_store_identity() {
+            anyhow::bail!("agent_run_review_relation_projection_memory_store_mismatch");
+        }
+
+        let owner_query = format!(
+            "SELECT run.task_id, run.input_ref, run.status,
+                    run.generated_proposals_json, run.payload_minimized_version,
+                    revision.revision
+             FROM agent_runs AS run
+             JOIN agent_run_canonical_revisions AS revision ON revision.run_id = run.id
+             WHERE run.id = ?1 AND {LIVE_AGENT_RUN_SQL_PREDICATE}"
+        );
+        let owner = tx
+            .query_row(&owner_query, [projection.run_id()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, u64>(5)?,
+                ))
+            })
+            .optional()?
+            .context("agent_run_review_relation_projection_owner_missing")?;
+        if owner.0 != projection.task_session_id()
+            || owner.1.as_deref() != Some(projection.canonical_user_message_ref())
+            || owner.4 != AGENT_RUN_PAYLOAD_VERSION
+            || owner.5 < projection.target_owner_revision()
+        {
+            anyhow::bail!("agent_run_review_relation_projection_lineage_mismatch");
+        }
+        let current_status = match owner.2.as_str() {
+            "running" => AgentRunStatus::Running,
+            "waiting_permission" => AgentRunStatus::WaitingPermission,
+            "completed" => AgentRunStatus::Completed,
+            "failed" => AgentRunStatus::Failed,
+            "remote_unknown" => AgentRunStatus::RemoteUnknown,
+            "cancelled" => AgentRunStatus::Cancelled,
+            _ => anyhow::bail!("agent_run_review_relation_projection_status_invalid"),
+        };
+        let expected_target_binding = agent_run_terminal_relation_target_binding_digest(
+            projection.run_id(),
+            projection.task_session_id(),
+            projection.canonical_user_message_ref(),
+            projection.canonical_user_message_digest(),
+            projection.canonical_store_identity(),
+            &agent_run_store_identity,
+            projection.target_owner_revision(),
+            projection.target_status_at_issue(),
+        )?;
+        if expected_target_binding != projection.target_binding_digest() {
+            anyhow::bail!("agent_run_review_relation_projection_target_binding_mismatch");
+        }
+
+        let relation_kind = projection.relation_kind();
+        let next_status = match relation_kind {
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor => {
+                current_status
+            }
+            crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+            | crate::agent::proposal_store::ProposalTerminalRelationKind::ActionResumePrerequisite => {
+                match (lane.lane(), current_status) {
+                    (_, AgentRunStatus::Running) => AgentRunStatus::WaitingPermission,
+                    (_, AgentRunStatus::WaitingPermission) => AgentRunStatus::WaitingPermission,
+                    (AgentRunReviewRelationProjectionLane::RecoverySealed, terminal) => terminal,
+                    (AgentRunReviewRelationProjectionLane::ForegroundOpen, _) => {
+                        anyhow::bail!(
+                            "agent_run_review_relation_foreground_status_incompatible"
+                        )
+                    }
+                }
+            }
+            crate::agent::proposal_store::ProposalTerminalRelationKind::LegacyUnclassified => {
+                anyhow::bail!("agent_run_review_relation_legacy_kind_invalid")
+            }
+        };
+
+        let existing_typed = tx
+            .query_row(
+                "SELECT run_id, relation_kind, relation_digest,
+                        source_outbox_event_id, source_outbox_target,
+                        target_binding_digest, agent_run_store_identity_digest,
+                        target_owner_revision, target_status_at_issue
+                 FROM agent_run_proposal_links
+                 WHERE proposal_id = ?1 AND relation_kind IS NOT NULL",
+                [projection.proposal_id()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, u64>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing_typed {
+            let exact = existing.0 == projection.run_id()
+                && existing.1 == relation_kind.as_str()
+                && existing.2 == projection.relation_digest()
+                && existing.3 == projection.source_outbox_event_id()
+                && existing.4 == projection.projection_target()
+                && existing.5 == projection.target_binding_digest()
+                && existing.6 == projection.agent_run_store_identity_digest()
+                && existing.7 == projection.target_owner_revision()
+                && existing.8 == projection.target_status_at_issue().to_string();
+            if !exact {
+                anyhow::bail!("agent_run_review_relation_projection_drift");
+            }
+            let display = owner
+                .3
+                .as_deref()
+                .map(serde_json::from_str::<Vec<String>>)
+                .transpose()
+                .context("agent_run_review_relation_display_invalid")?
+                .unwrap_or_default();
+            if !display.iter().any(|id| id == projection.proposal_id()) {
+                anyhow::bail!("agent_run_review_relation_display_missing");
+            }
+            tx.commit()?;
+            return Ok(AgentRunReviewRelationProjectionOutcome::AlreadyApplied);
+        }
+        let event_owner = tx
+            .query_row(
+                "SELECT run_id, proposal_id FROM agent_run_proposal_links
+                 WHERE source_outbox_event_id = ?1",
+                [projection.source_outbox_event_id()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if event_owner.is_some() {
+            anyhow::bail!("agent_run_review_relation_projection_event_drift");
+        }
+
+        let mut display = owner
+            .3
+            .as_deref()
+            .map(serde_json::from_str::<Vec<String>>)
+            .transpose()
+            .context("agent_run_review_relation_display_invalid")?
+            .unwrap_or_default();
+        display.push(projection.proposal_id().to_string());
+        let display = Self::normalize_proposal_ids(projection.run_id(), &display)?;
+        let projected_at = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO agent_run_proposal_links (
+                run_id, proposal_id, relation_kind, relation_digest,
+                source_outbox_event_id, source_outbox_target,
+                target_binding_digest, agent_run_store_identity_digest,
+                target_owner_revision, target_status_at_issue, projected_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(run_id, proposal_id) DO UPDATE SET
+                relation_kind = excluded.relation_kind,
+                relation_digest = excluded.relation_digest,
+                source_outbox_event_id = excluded.source_outbox_event_id,
+                source_outbox_target = excluded.source_outbox_target,
+                target_binding_digest = excluded.target_binding_digest,
+                agent_run_store_identity_digest = excluded.agent_run_store_identity_digest,
+                target_owner_revision = excluded.target_owner_revision,
+                target_status_at_issue = excluded.target_status_at_issue,
+                projected_at = excluded.projected_at
+             WHERE agent_run_proposal_links.relation_kind IS NULL",
+            params![
+                projection.run_id(),
+                projection.proposal_id(),
+                relation_kind.as_str(),
+                projection.relation_digest(),
+                projection.source_outbox_event_id(),
+                projection.projection_target(),
+                projection.target_binding_digest(),
+                projection.agent_run_store_identity_digest(),
+                i64::try_from(projection.target_owner_revision())?,
+                projection.target_status_at_issue().to_string(),
+                projected_at,
+            ],
+        )?;
+        let changed = tx.execute(
+            "UPDATE agent_runs
+             SET generated_proposals_json = ?2, status = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![
+                projection.run_id(),
+                serde_json::to_string(&display)
+                    .context("agent_run_review_relation_display_serialization_failed")?,
+                next_status.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("agent_run_review_relation_projection_owner_missing");
+        }
+        tx.commit()?;
+        Ok(AgentRunReviewRelationProjectionOutcome::Applied)
     }
 
     pub fn add_generated_proposal(&self, run_id: &str, proposal_id: &str) -> Result<()> {
@@ -6199,7 +7628,7 @@ impl AgentRunStore {
             anyhow::bail!("noncanonical generated_proposals_json for AgentRun {run_id}");
         }
         proposals.push(proposal_id.to_string());
-        let proposals = Self::normalize_proposal_ids(run_id, &proposals)?;
+        let proposals = Self::merge_typed_proposal_ids(&tx, run_id, &proposals)?;
         let updated = serde_json::to_string(&proposals)
             .context("failed to serialize AgentRun proposal references")?;
         let update_query = format!(
@@ -6571,7 +8000,7 @@ impl AgentRunStore {
         if usize::try_from(other_payload_bytes)
             .ok()
             .and_then(|other| other.checked_add(updated.len()))
-            .map_or(true, |total| total > MAX_AGENT_RUN_STORED_PAYLOAD_BYTES)
+            .is_none_or(|total| total > MAX_AGENT_RUN_STORED_PAYLOAD_BYTES)
         {
             anyhow::bail!("agent_run_minimized_payload_limit_exceeded:{run_id}");
         }
@@ -6654,7 +8083,7 @@ impl AgentRunStore {
         if usize::try_from(other_payload_bytes)
             .ok()
             .and_then(|other| other.checked_add(updated.len()))
-            .map_or(true, |total| total > MAX_AGENT_RUN_STORED_PAYLOAD_BYTES)
+            .is_none_or(|total| total > MAX_AGENT_RUN_STORED_PAYLOAD_BYTES)
         {
             anyhow::bail!("agent_run_minimized_payload_limit_exceeded:{run_id}");
         }
@@ -7228,6 +8657,599 @@ mod tests {
         assert_eq!(linked[0].id, run_id);
     }
 
+    fn canonical_review_relation_run_fixture(
+        label: &str,
+    ) -> (
+        crate::memory::MemoryStore,
+        AgentRunStore,
+        AgentRun,
+        crate::agent::TerminalOwnerReviewOriginProof,
+    ) {
+        let memory = crate::memory::MemoryStore::new_in_memory().unwrap();
+        let store = AgentRunStore::new_in_memory().unwrap();
+        store.bind_canonical_memory_store(&memory).unwrap();
+        let (run, origin) = add_canonical_review_relation_run(&memory, &store, label);
+        (memory, store, run, origin)
+    }
+
+    fn add_canonical_review_relation_run(
+        memory: &crate::memory::MemoryStore,
+        store: &AgentRunStore,
+        label: &str,
+    ) -> (AgentRun, crate::agent::TerminalOwnerReviewOriginProof) {
+        let session_id = format!("review-relation-session:{label}");
+        let operation_id = format!("review-relation-run:{label}");
+        memory
+            .create_chat_session(&session_id, "typed relation fixture")
+            .unwrap();
+        let message = crate::llm::ChatMessage {
+            role: "user".into(),
+            content: format!("typed relation body {label}"),
+        };
+        let commit = memory
+            .save_message_idempotent_with_proof(&session_id, &message, &operation_id)
+            .unwrap();
+        let mut run = AgentRun::new_chat_run(&session_id, &message.content);
+        run.id = operation_id.clone();
+        run.task_id = operation_id;
+        run.session_id = Some(session_id);
+        run.input_ref = Some(commit.receipt().canonical_ref.clone());
+        memory
+            .create_agent_run_from_active_conversation_message(store, &run, commit.proof())
+            .unwrap();
+        let origin = crate::agent::review_workflow::terminal_owner_review_origin_fixture_for_run(
+            &run.task_id,
+            &run.id,
+            &commit.receipt().canonical_ref,
+            &commit.receipt().content_digest,
+            memory.canonical_store_identity(),
+        );
+        (run, origin)
+    }
+
+    #[test]
+    fn agent_run_review_relation_target_requires_exact_live_canonical_owner() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("target");
+        let target = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &origin)
+            .expect("live canonical AgentRun should issue an opaque target intent");
+        assert_eq!(target.run_id(), run.id);
+        assert_eq!(target.task_session_id(), run.task_id);
+        assert_eq!(
+            target.canonical_user_message_ref(),
+            origin.canonical_user_message_ref()
+        );
+
+        let wrong_origin =
+            crate::agent::review_workflow::terminal_owner_review_origin_fixture_for_run(
+                &run.task_id,
+                &run.id,
+                "conversation://wrong/message/1",
+                origin.canonical_user_message_digest(),
+                origin.canonical_store_identity(),
+            );
+        let error = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &wrong_origin)
+            .expect_err("a message-reference transplant must fail closed")
+            .to_string();
+        assert_eq!(
+            error,
+            "agent_run_terminal_relation_target_message_owner_mismatch"
+        );
+
+        let wrong_digest_origin =
+            crate::agent::review_workflow::terminal_owner_review_origin_fixture_for_run(
+                &run.task_id,
+                &run.id,
+                origin.canonical_user_message_ref(),
+                &format!("sha256:{}", "f".repeat(64)),
+                origin.canonical_store_identity(),
+            );
+        let error = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &wrong_digest_origin)
+            .expect_err("a message-digest transplant must fail closed")
+            .to_string();
+        assert_eq!(
+            error,
+            "agent_run_terminal_relation_target_message_owner_mismatch"
+        );
+    }
+
+    #[test]
+    fn agent_run_review_relation_target_binds_revision_status_and_excludes_body() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("state");
+        let running = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &origin)
+            .unwrap();
+        assert!(running.owner_revision() > 0);
+        running
+            .validate_for(
+                &origin,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            )
+            .unwrap();
+        running
+            .validate_for(
+                &origin,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            )
+            .unwrap();
+        assert!(!format!("{running:?}").contains("typed relation body state"));
+
+        let mut completed = store.get_run(&run.id).unwrap().unwrap();
+        completed.status = AgentRunStatus::Completed;
+        completed.finished_at = Some(chrono::Utc::now());
+        store.update_run(&completed).unwrap();
+        let completed_target = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &origin)
+            .unwrap();
+        assert!(completed_target.owner_revision() > running.owner_revision());
+        completed_target
+            .validate_for(
+                &origin,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            )
+            .unwrap();
+        let error = completed_target
+            .validate_for(
+                &origin,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            )
+            .expect_err("completed runs cannot acquire a blocking prerequisite")
+            .to_string();
+        assert_eq!(
+            error,
+            "agent_run_terminal_relation_target_status_incompatible"
+        );
+        let error = completed_target
+            .validate_for(
+                &origin,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::ActionResumePrerequisite,
+            )
+            .expect_err("completed runs cannot acquire an action-resume prerequisite")
+            .to_string();
+        assert_eq!(
+            error,
+            "agent_run_terminal_relation_target_status_incompatible"
+        );
+    }
+
+    #[test]
+    fn agent_run_review_relation_target_rejects_deleted_and_terminal_incompatible_runs() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("terminal");
+        let mut failed = store.get_run(&run.id).unwrap().unwrap();
+        failed.status = AgentRunStatus::Failed;
+        failed.finished_at = Some(chrono::Utc::now());
+        store.update_run(&failed).unwrap();
+        let failed_target = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &origin)
+            .expect("the owner proof records observed status before policy validation");
+        let error = failed_target
+            .validate_for(
+                &origin,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            )
+            .expect_err("failed runs cannot acquire any new terminal relation")
+            .to_string();
+        assert_eq!(
+            error,
+            "agent_run_terminal_relation_target_status_incompatible"
+        );
+
+        store
+            .delete_run_with_tombstone(&run.id, Some("terminal relation target deletion test"))
+            .unwrap();
+        let error = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &origin)
+            .expect_err("deleted AgentRuns are not live relation owners")
+            .to_string();
+        assert_eq!(error, "agent_run_terminal_relation_target_missing");
+    }
+
+    #[test]
+    fn agent_run_review_relation_projection_is_atomic_idempotent_and_body_free() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("projection");
+        let target = memory
+            .issue_agent_run_terminal_relation_target_intent(&store, &origin)
+            .unwrap();
+        let proposal_id = uuid::Uuid::new_v4().to_string();
+        let projection =
+            crate::agent::proposal_store::proposal_terminal_relation_projection_fixture(
+                &origin,
+                &target,
+                &proposal_id,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            );
+        let lane = agent_run_review_relation_projection_lane_fixture(
+            &origin,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        let revision_before = store.canonical_revision(&run.id).unwrap();
+        let first = store
+            .apply_terminal_review_relation_projection(&projection, &lane)
+            .expect("typed relation and display projection must commit atomically");
+        assert_eq!(first, AgentRunReviewRelationProjectionOutcome::Applied);
+        let revision_after = store.canonical_revision(&run.id).unwrap();
+        assert!(revision_after > revision_before);
+        let stored = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(stored.generated_proposals, vec![proposal_id.clone()]);
+        assert_eq!(stored.status, AgentRunStatus::Running);
+
+        let replay = store
+            .apply_terminal_review_relation_projection(&projection, &lane)
+            .expect("apply-before-mark crash replay must be an exact no-op");
+        assert_eq!(
+            replay,
+            AgentRunReviewRelationProjectionOutcome::AlreadyApplied
+        );
+        assert_eq!(store.canonical_revision(&run.id).unwrap(), revision_after);
+
+        let conn = store.conn.lock().unwrap();
+        let typed = conn
+            .query_row(
+                "SELECT relation_kind, relation_digest, source_outbox_event_id,
+                        source_outbox_target, target_binding_digest,
+                        agent_run_store_identity_digest, target_owner_revision,
+                        target_status_at_issue, projected_at
+                 FROM agent_run_proposal_links
+                 WHERE run_id = ?1 AND proposal_id = ?2",
+                params![run.id, proposal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, u64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(typed.0, "non_blocking_successor");
+        assert_eq!(typed.1, projection.relation_digest());
+        assert_eq!(typed.2, projection.source_outbox_event_id());
+        assert_eq!(typed.3, projection.projection_target());
+        assert_eq!(typed.4, projection.target_binding_digest());
+        assert_eq!(typed.5, projection.agent_run_store_identity_digest());
+        assert_eq!(typed.6, projection.target_owner_revision());
+        assert_eq!(typed.7, projection.target_status_at_issue().to_string());
+        assert!(!format!("{typed:?}").contains("typed relation body projection"));
+    }
+
+    #[test]
+    fn agent_run_review_relation_projection_reopens_with_canonical_sha256_metadata() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let memory = crate::memory::MemoryStore::new(temp_dir.path().join("conversation.db"))
+            .expect("create persistent canonical Conversation store");
+        let receipt_key = AgentRunReceiptKey::from_bytes([0x53; 32]).unwrap();
+        let db_path = temp_dir.path().join("agent-run.db");
+        let (run_id, proposal_id) = {
+            let store = AgentRunStore::new_with_receipt_key(&db_path, receipt_key.clone())
+                .expect("create persistent AgentRun store");
+            store
+                .bind_canonical_memory_store(&memory)
+                .expect("bind persistent AgentRun store");
+            let (run, origin) =
+                add_canonical_review_relation_run(&memory, &store, "restart-contract");
+            let proposal_id = uuid::Uuid::new_v4().to_string();
+            let (projection, lane) = typed_review_projection_fixture(
+                &memory,
+                &store,
+                &origin,
+                &proposal_id,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                AgentRunReviewRelationProjectionLane::ForegroundOpen,
+            );
+            store
+                .apply_terminal_review_relation_projection(&projection, &lane)
+                .expect("persist canonical typed Review relation");
+            (run.id, proposal_id)
+        };
+
+        let reopened = AgentRunStore::new_with_receipt_key(&db_path, receipt_key)
+            .expect("canonical typed Review relation must survive process restart");
+        reopened
+            .bind_canonical_memory_store(&memory)
+            .expect("rebind reopened AgentRun store");
+        let linked = reopened
+            .list_runs_linked_to_proposal(&proposal_id)
+            .expect("query reopened typed Review relation");
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].id, run_id);
+        assert_eq!(linked[0].status, AgentRunStatus::WaitingPermission);
+    }
+
+    fn typed_review_projection_fixture(
+        memory: &crate::memory::MemoryStore,
+        store: &AgentRunStore,
+        origin: &crate::agent::TerminalOwnerReviewOriginProof,
+        proposal_id: &str,
+        relation_kind: crate::agent::proposal_store::ProposalTerminalRelationKind,
+        lane: AgentRunReviewRelationProjectionLane,
+    ) -> (
+        crate::agent::proposal_store::ProposalTerminalRelationProjectionProof,
+        AgentRunReviewRelationProjectionLaneAdmission,
+    ) {
+        let target = memory
+            .issue_agent_run_terminal_relation_target_intent(store, origin)
+            .unwrap();
+        let projection =
+            crate::agent::proposal_store::proposal_terminal_relation_projection_fixture(
+                origin,
+                &target,
+                proposal_id,
+                relation_kind,
+            );
+        let lane = agent_run_review_relation_projection_lane_fixture(origin, lane);
+        (projection, lane)
+    }
+
+    #[test]
+    fn agent_run_review_relation_projection_promotes_display_and_survives_full_update_once() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("promotion");
+        let proposal_id = uuid::Uuid::new_v4().to_string();
+        store
+            .add_generated_proposal(&run.id, &proposal_id)
+            .expect("legacy display row seed");
+        let (projection, lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &proposal_id,
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        let before_projection = store.canonical_revision(&run.id).unwrap();
+        assert_eq!(
+            store
+                .apply_terminal_review_relation_projection(&projection, &lane)
+                .unwrap(),
+            AgentRunReviewRelationProjectionOutcome::Applied
+        );
+        assert_eq!(
+            store.canonical_revision(&run.id).unwrap(),
+            before_projection + 1,
+            "one projection transaction must advance canonical revision once"
+        );
+
+        let mut full_update = store.get_run(&run.id).unwrap().unwrap();
+        full_update.generated_proposals.clear();
+        full_update.warnings.push("unrelated update".into());
+        let before_update = store.canonical_revision(&run.id).unwrap();
+        store.update_run(&full_update).unwrap();
+        assert_eq!(
+            store.canonical_revision(&run.id).unwrap(),
+            before_update + 1,
+            "typed-id union must happen before the one canonical UPDATE"
+        );
+        let stored = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(stored.generated_proposals, vec![proposal_id.clone()]);
+        let conn = store.conn.lock().unwrap();
+        let relation_kind: String = conn
+            .query_row(
+                "SELECT relation_kind FROM agent_run_proposal_links
+                 WHERE run_id = ?1 AND proposal_id = ?2",
+                params![run.id, proposal_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(relation_kind, "non_blocking_successor");
+    }
+
+    #[test]
+    fn agent_run_review_relation_projection_enforces_foreground_and_recovery_status_rules() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("blocking-open");
+        let (effect, foreground) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &uuid::Uuid::new_v4().to_string(),
+            crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        store
+            .apply_terminal_review_relation_projection(&effect, &foreground)
+            .unwrap();
+        assert_eq!(
+            store.get_run(&run.id).unwrap().unwrap().status,
+            AgentRunStatus::WaitingPermission
+        );
+
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("nonblock-done");
+        let mut completed = store.get_run(&run.id).unwrap().unwrap();
+        completed.status = AgentRunStatus::Completed;
+        completed.finished_at = Some(chrono::Utc::now());
+        store.update_run(&completed).unwrap();
+        let (nonblocking, foreground) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &uuid::Uuid::new_v4().to_string(),
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        store
+            .apply_terminal_review_relation_projection(&nonblocking, &foreground)
+            .unwrap();
+        assert_eq!(
+            store.get_run(&run.id).unwrap().unwrap().status,
+            AgentRunStatus::Completed
+        );
+
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("recovery-failed");
+        let (effect, recovery) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &uuid::Uuid::new_v4().to_string(),
+            crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            AgentRunReviewRelationProjectionLane::RecoverySealed,
+        );
+        let mut failed = store.get_run(&run.id).unwrap().unwrap();
+        failed.status = AgentRunStatus::Failed;
+        failed.finished_at = Some(chrono::Utc::now());
+        store.update_run(&failed).unwrap();
+        store
+            .apply_terminal_review_relation_projection(&effect, &recovery)
+            .unwrap();
+        assert_eq!(
+            store.get_run(&run.id).unwrap().unwrap().status,
+            AgentRunStatus::Failed
+        );
+
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("open-failed");
+        let (effect, foreground) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &uuid::Uuid::new_v4().to_string(),
+            crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        let mut failed = store.get_run(&run.id).unwrap().unwrap();
+        failed.status = AgentRunStatus::Failed;
+        failed.finished_at = Some(chrono::Utc::now());
+        store.update_run(&failed).unwrap();
+        let error = store
+            .apply_terminal_review_relation_projection(&effect, &foreground)
+            .expect_err("ForegroundOpen cannot regress a terminal run")
+            .to_string();
+        assert_eq!(
+            error,
+            "agent_run_review_relation_foreground_status_incompatible"
+        );
+        assert!(store
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap()
+            .generated_proposals
+            .is_empty());
+    }
+
+    #[test]
+    fn agent_run_review_relation_projection_rejects_proposal_event_run_and_kind_drift() {
+        let (memory, store, run, origin) = canonical_review_relation_run_fixture("drift-owner");
+        let proposal_id = uuid::Uuid::new_v4().to_string();
+        let (projection, lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &proposal_id,
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        let first_event_id = projection.source_outbox_event_id().to_string();
+        store
+            .apply_terminal_review_relation_projection(&projection, &lane)
+            .unwrap();
+
+        let (event_drift, lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &proposal_id,
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        assert_eq!(
+            store
+                .apply_terminal_review_relation_projection(&event_drift, &lane)
+                .unwrap_err()
+                .to_string(),
+            "agent_run_review_relation_projection_drift"
+        );
+
+        let (kind_drift, lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &proposal_id,
+            crate::agent::proposal_store::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        assert_eq!(
+            store
+                .apply_terminal_review_relation_projection(&kind_drift, &lane)
+                .unwrap_err()
+                .to_string(),
+            "agent_run_review_relation_projection_drift"
+        );
+
+        let second_session = "review-relation-session:drift-second";
+        memory
+            .create_chat_session(second_session, "second projection owner")
+            .unwrap();
+        let second_message = crate::llm::ChatMessage {
+            role: "user".into(),
+            content: "second canonical projection owner".into(),
+        };
+        let second_commit = memory
+            .save_message_idempotent_with_proof(
+                second_session,
+                &second_message,
+                "review-relation-message:drift-second",
+            )
+            .unwrap();
+        let mut second_run = AgentRun::new_chat_run(second_session, &second_message.content);
+        second_run.session_id = Some(second_session.into());
+        second_run.input_ref = Some(second_commit.receipt().canonical_ref.clone());
+        memory
+            .create_agent_run_from_active_conversation_message(
+                &store,
+                &second_run,
+                second_commit.proof(),
+            )
+            .unwrap();
+        let second_origin =
+            crate::agent::review_workflow::terminal_owner_review_origin_fixture_for_run(
+                &second_run.task_id,
+                &second_run.id,
+                &second_commit.receipt().canonical_ref,
+                &second_commit.receipt().content_digest,
+                memory.canonical_store_identity(),
+            );
+        let (run_drift, second_lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &second_origin,
+            &proposal_id,
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        assert_eq!(
+            store
+                .apply_terminal_review_relation_projection(&run_drift, &second_lane)
+                .unwrap_err()
+                .to_string(),
+            "agent_run_review_relation_projection_drift"
+        );
+
+        let (mut proposal_drift, lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            &uuid::Uuid::new_v4().to_string(),
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        proposal_drift.replace_source_outbox_event_id_for_test(&first_event_id);
+        assert_eq!(
+            store
+                .apply_terminal_review_relation_projection(&proposal_drift, &lane)
+                .unwrap_err()
+                .to_string(),
+            "agent_run_review_relation_projection_event_drift"
+        );
+        assert_eq!(
+            store.get_run(&run.id).unwrap().unwrap().generated_proposals,
+            vec![proposal_id]
+        );
+    }
+
     #[test]
     fn proposal_link_legacy_backfill_runs_once_not_on_every_open() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -7261,23 +9283,162 @@ mod tests {
     }
 
     #[test]
-    fn waiting_permission_reconciliation_query_uses_status_and_link_indexes() {
+    fn agent_run_review_relation_schema_v1_reopens_via_atomic_v2_rebuild() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("agent-run-review-v1.db");
+        let proposal_id = "legacy-display-only";
+        let run_id = {
+            let store = AgentRunStore::new(&db_path).unwrap();
+            let run = create_test_run();
+            let run_id = run.id.clone();
+            store.create_run(&run).unwrap();
+            store.add_generated_proposal(&run_id, proposal_id).unwrap();
+            run_id
+        };
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE agent_run_proposal_links
+                    RENAME TO agent_run_proposal_links_v2_retired;
+                 CREATE TABLE agent_run_proposal_links (
+                    run_id TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    PRIMARY KEY (run_id, proposal_id),
+                    FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+                 ) WITHOUT ROWID;
+                 INSERT INTO agent_run_proposal_links(run_id, proposal_id)
+                 SELECT run_id, proposal_id
+                 FROM agent_run_proposal_links_v2_retired;
+                 DROP TABLE agent_run_proposal_links_v2_retired;
+                 UPDATE openlife_schema_versions
+                 SET version = 1
+                 WHERE component = 'agent_run_proposal_links';",
+            )
+            .unwrap();
+        }
+
+        let reopened = AgentRunStore::new(&db_path).unwrap();
+        let stored = reopened.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(stored.generated_proposals, vec![proposal_id]);
+        let conn = reopened.conn.lock().unwrap();
+        let version: i64 = conn
+            .query_row(
+                "SELECT version FROM openlife_schema_versions
+                 WHERE component = 'agent_run_proposal_links'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        let typed_kind: Option<String> = conn
+            .query_row(
+                "SELECT relation_kind FROM agent_run_proposal_links
+                 WHERE run_id = ?1 AND proposal_id = ?2",
+                params![run_id, proposal_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            typed_kind.is_none(),
+            "v1 display rows must not gain a guessed kind"
+        );
+        assert!(conn
+            .execute(
+                "INSERT INTO agent_run_proposal_links (
+                    run_id, proposal_id, relation_kind
+                 ) VALUES (?1, 'partial-insert', 'non_blocking_successor')",
+                [&run_id],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE agent_run_proposal_links
+                 SET relation_kind = 'non_blocking_successor'
+                 WHERE run_id = ?1 AND proposal_id = ?2",
+                params![run_id, proposal_id],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn review_reconciliation_query_includes_waiting_and_unknown_and_uses_indexes() {
+        let memory = crate::memory::MemoryStore::new_in_memory().unwrap();
         let store = AgentRunStore::new_in_memory().unwrap();
-        let mut run = create_test_run();
-        run.status = AgentRunStatus::WaitingPermission;
-        run.generated_proposals = vec!["proposal-indexed".into()];
-        store.create_run(&run).unwrap();
+        store.bind_canonical_memory_store(&memory).unwrap();
+        for (label, proposal_id, status) in [
+            (
+                "reconciliation-waiting",
+                "proposal-indexed",
+                AgentRunStatus::WaitingPermission,
+            ),
+            (
+                "reconciliation-unknown",
+                "proposal-unknown-indexed",
+                AgentRunStatus::RemoteUnknown,
+            ),
+        ] {
+            let (run, origin) = add_canonical_review_relation_run(&memory, &store, label);
+            let (projection, lane) = typed_review_projection_fixture(
+                &memory,
+                &store,
+                &origin,
+                proposal_id,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+                AgentRunReviewRelationProjectionLane::ForegroundOpen,
+            );
+            store
+                .apply_terminal_review_relation_projection(&projection, &lane)
+                .unwrap();
+            let mut projected = store.get_run(&run.id).unwrap().unwrap();
+            projected.status = status;
+            projected.finished_at =
+                (status == AgentRunStatus::RemoteUnknown).then(chrono::Utc::now);
+            store.update_run(&projected).unwrap();
+        }
+        store
+            .add_generated_proposal(
+                "review-relation-run:reconciliation-waiting",
+                "display-only-not-authority",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .list_review_reconcilable_linked_proposal_ids(20)
+                .unwrap()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "proposal-indexed".to_string(),
+                "proposal-unknown-indexed".to_string(),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(store
+            .list_review_reconcilable_linked_proposal_ids(20)
+            .unwrap()
+            .iter()
+            .all(|proposal_id| proposal_id != "display-only-not-authority"));
 
         let connection = store.conn.lock().unwrap();
         let query = format!(
             "EXPLAIN QUERY PLAN
-             SELECT DISTINCT link.proposal_id
-             FROM agent_runs AS run INDEXED BY idx_agent_runs_waiting_permission
-             CROSS JOIN agent_run_proposal_links AS link
-             WHERE run.status = 'waiting_permission'
-               AND {LIVE_AGENT_RUN_SQL_PREDICATE}
-               AND link.run_id = run.id
-             LIMIT 200"
+             SELECT link.proposal_id
+             FROM agent_run_proposal_links AS link
+                  INDEXED BY idx_agent_run_proposal_links_proposal
+             WHERE link.proposal_id > ''
+               AND EXISTS (
+                   SELECT 1
+                   FROM agent_runs AS run
+                        INDEXED BY idx_agent_runs_review_reconciliation
+                   WHERE run.status IN ('waiting_permission', 'remote_unknown')
+                     AND run.id = link.run_id
+                     AND {LIVE_AGENT_RUN_SQL_PREDICATE}
+               )
+             GROUP BY link.proposal_id
+             ORDER BY link.proposal_id ASC
+             LIMIT 201"
         );
         let mut statement = connection.prepare(&query).unwrap();
         let details = statement
@@ -7287,12 +9448,67 @@ mod tests {
             .unwrap()
             .join("\n");
         assert!(
-            details.contains("idx_agent_runs_waiting_permission"),
+            details.contains("idx_agent_runs_review_reconciliation"),
             "{details}"
         );
         assert!(
-            details.contains("SEARCH link USING PRIMARY KEY"),
+            details.contains("idx_agent_run_proposal_links_proposal"),
             "{details}"
+        );
+        assert!(!details.contains("USE TEMP B-TREE"), "{details}");
+    }
+
+    #[test]
+    fn bounded_review_reconciliation_advances_a_fair_durable_cursor() {
+        let memory = crate::memory::MemoryStore::new_in_memory().unwrap();
+        let store = AgentRunStore::new_in_memory().unwrap();
+        store.bind_canonical_memory_store(&memory).unwrap();
+        for ordinal in 0..3 {
+            let (run, origin) = add_canonical_review_relation_run(
+                &memory,
+                &store,
+                &format!("reconciliation-cursor-{ordinal}"),
+            );
+            let proposal_id = format!("proposal-cursor-{ordinal}");
+            let (projection, lane) = typed_review_projection_fixture(
+                &memory,
+                &store,
+                &origin,
+                &proposal_id,
+                crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+                AgentRunReviewRelationProjectionLane::ForegroundOpen,
+            );
+            store
+                .apply_terminal_review_relation_projection(&projection, &lane)
+                .unwrap();
+            let mut projected = store.get_run(&run.id).unwrap().unwrap();
+            projected.status = AgentRunStatus::RemoteUnknown;
+            projected.finished_at = Some(chrono::Utc::now());
+            store.update_run(&projected).unwrap();
+        }
+
+        let pages = (0..3)
+            .map(|_| {
+                store
+                    .take_review_reconciliation_page(1)
+                    .unwrap()
+                    .proposal_ids
+                    .into_iter()
+                    .next()
+                    .unwrap()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            pages,
+            [
+                "proposal-cursor-0".to_string(),
+                "proposal-cursor-1".to_string(),
+                "proposal-cursor-2".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+            "a permanently unknown first row must not starve later reconcilable Proposals"
         );
     }
 
@@ -7340,6 +9556,21 @@ mod tests {
         assert!(fetched.model_route.is_some());
         assert!(fetched.context_summary.is_some());
         assert!(fetched.finished_at.is_some());
+    }
+
+    #[test]
+    fn canonical_runtime_reasoning_strategies_remain_typed_after_round_trip() {
+        for strategy in ["direct", "react", "memory_governance"] {
+            let store = AgentRunStore::new_in_memory().unwrap();
+            let mut run = create_test_run();
+            run.id = format!("run-{strategy}");
+            run.task_id = format!("task-{strategy}");
+            run.reasoning_strategy = Some(strategy.into());
+            store.create_run(&run).unwrap();
+
+            let fetched = store.get_run(&run.id).unwrap().unwrap();
+            assert_eq!(fetched.reasoning_strategy.as_deref(), Some(strategy));
+        }
     }
 
     #[test]
@@ -7911,7 +10142,7 @@ mod tests {
         }
 
         let reopened = AgentRunStore::new(&path).unwrap();
-        let upgraded = reopened.get_run(&run_id).unwrap().unwrap();
+        let upgraded = reopened.get_run(run_id).unwrap().unwrap();
         assert!(upgraded.legacy_payload_unverified);
         assert_ne!(
             upgraded.output_preview.as_deref(),
@@ -9032,13 +11263,24 @@ mod tests {
 
     #[test]
     fn active_tombstone_hides_every_product_read_until_explicit_restore() {
-        let store = AgentRunStore::new_in_memory().unwrap();
-        let mut owner = AgentRun::new_tool_execution_run("product-live-fence");
-        owner.task_id = "product-live-fence-task".into();
-        owner.session_id = Some("product-live-fence-session".into());
+        let (memory, store, mut owner, origin) =
+            canonical_review_relation_run_fixture("product-live-fence");
+        let proposal_id = "product-live-fence-proposal";
+        let (projection, lane) = typed_review_projection_fixture(
+            &memory,
+            &store,
+            &origin,
+            proposal_id,
+            crate::agent::proposal_store::ProposalTerminalRelationKind::NonBlockingSuccessor,
+            AgentRunReviewRelationProjectionLane::ForegroundOpen,
+        );
+        store
+            .apply_terminal_review_relation_projection(&projection, &lane)
+            .unwrap();
+        owner = store.get_run(&owner.id).unwrap().unwrap();
         owner.status = AgentRunStatus::WaitingPermission;
-        owner.generated_proposals = vec!["product-live-fence-proposal".into()];
-        store.create_run(&owner).unwrap();
+        store.update_run(&owner).unwrap();
+        let session_id = owner.session_id.clone().unwrap();
         store
             .delete_run_with_tombstone(&owner.id, Some("product live fence"))
             .unwrap();
@@ -9064,19 +11306,16 @@ mod tests {
         assert!(store.get_run_for_task_id(&owner.task_id).unwrap().is_none());
         assert!(store.list_runs(20, 0).unwrap().is_empty());
         assert!(store
-            .list_runs_for_session("product-live-fence-session", 20)
+            .list_runs_for_session(&session_id, 20)
+            .unwrap()
+            .is_empty());
+        assert!(store.last_run_for_session(&session_id).unwrap().is_none());
+        assert!(store
+            .list_runs_linked_to_proposal(proposal_id)
             .unwrap()
             .is_empty());
         assert!(store
-            .last_run_for_session("product-live-fence-session")
-            .unwrap()
-            .is_none());
-        assert!(store
-            .list_runs_linked_to_proposal("product-live-fence-proposal")
-            .unwrap()
-            .is_empty());
-        assert!(store
-            .list_waiting_permission_linked_proposal_ids(20)
+            .list_review_reconcilable_linked_proposal_ids(20)
             .unwrap()
             .is_empty());
         assert_eq!(store.run_count().unwrap(), 0);
@@ -9093,24 +11332,21 @@ mod tests {
         );
         assert_eq!(store.list_runs(20, 0).unwrap().len(), 1);
         assert_eq!(
+            store.list_runs_for_session(&session_id, 20).unwrap().len(),
+            1
+        );
+        assert_eq!(
             store
-                .list_runs_for_session("product-live-fence-session", 20)
+                .list_runs_linked_to_proposal(proposal_id)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             store
-                .list_runs_linked_to_proposal("product-live-fence-proposal")
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            store
-                .list_waiting_permission_linked_proposal_ids(20)
+                .list_review_reconcilable_linked_proposal_ids(20)
                 .unwrap(),
-            vec!["product-live-fence-proposal"]
+            vec![proposal_id]
         );
         assert_eq!(store.run_count().unwrap(), 1);
         let conn = store.conn.lock().unwrap();
@@ -9204,6 +11440,26 @@ mod tests {
         store
             .update_run(&replay)
             .expect("the owner may idempotently replay the same verified raw graph");
+
+        let before_forgery = store.get_run(&run.id).unwrap().unwrap();
+        let mut forged_raw_replay = replay;
+        forged_raw_replay.actions[0].output = Some(serde_json::json!({
+            "text": "forged replay body",
+        }));
+        forged_raw_replay.observations[0].content = "forged replay body".into();
+        let error = store
+            .update_run(&forged_raw_replay)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bound_content_receipt_attached_body_ref_drift"),
+            "an attached receipt must not authorize a different raw body: {error}"
+        );
+        assert_eq!(
+            serde_json::to_value(store.get_run(&run.id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(before_forgery).unwrap(),
+            "a rejected raw replay must leave the canonical owner unchanged"
+        );
     }
 
     #[tokio::test]
@@ -9365,8 +11621,7 @@ mod tests {
                 symlink(&source_path, &link_path).unwrap();
             },
         )
-        .err()
-        .expect("writable open must reject a changed symlink slot")
+        .expect_err("writable open must reject a changed symlink slot")
         .to_string();
         assert!(
             writable_error.contains("agent_run_database_slot_changed_during_open"),
@@ -9386,8 +11641,7 @@ mod tests {
                 symlink(&source_path, &link_path).unwrap();
             },
         )
-        .err()
-        .expect("read-only open must reject a changed symlink slot")
+        .expect_err("read-only open must reject a changed symlink slot")
         .to_string();
         assert!(
             read_only_error.contains("agent_run_database_slot_changed_during_read_only_open"),
@@ -9395,6 +11649,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn same_path_database_replacement_cannot_create_two_agent_run_owners() {
         let dir = tempfile::tempdir().unwrap();
@@ -9445,6 +11700,38 @@ mod tests {
             AgentRunStore::existing_canonical_store_identity(&conn).unwrap()
         };
         assert_eq!(reopened_identity, original_identity);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_agent_run_owner_prevents_same_path_database_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let slot = directory.path().join("agent-runs.db");
+        let displaced = directory.path().join("agent-runs-old.db");
+        let key = AgentRunReceiptKey::from_bytes(
+            [0x3a; crate::agent::types::AGENT_RUN_RECEIPT_KEY_BYTES],
+        )
+        .unwrap();
+        let first = AgentRunStore::new_with_receipt_key(&slot, key.clone()).unwrap();
+
+        let replacement_error = std::fs::rename(&slot, &displaced)
+            .expect_err("Windows must not replace a live SQLite database pathname");
+        assert!(
+            replacement_error.raw_os_error().is_some(),
+            "expected an OS-backed sharing violation: {replacement_error}"
+        );
+        let second_error = AgentRunStore::new_with_receipt_key(&slot, key.clone())
+            .err()
+            .expect("the live canonical slot must not create a second AgentRun owner")
+            .to_string();
+        assert!(
+            second_error.contains("agent_run_store_sqlite_slot_owner_lease_unavailable"),
+            "{second_error}"
+        );
+
+        drop(first);
+        AgentRunStore::new_with_receipt_key(&slot, key)
+            .expect("final owner drop releases the AgentRun canonical slot lease");
     }
 
     #[tokio::test]
@@ -9544,7 +11831,13 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(ledger_rows, 0);
-            let error = rebound.update_run(&run).unwrap_err().to_string();
+            let mut candidate = rebound
+                .get_run(&run.id)
+                .unwrap()
+                .expect("quarantined owner remains readable as minimized history");
+            candidate.actions = run.actions.clone();
+            candidate.observations = run.observations.clone();
+            let error = rebound.update_run(&candidate).unwrap_err().to_string();
             assert!(
                 error.contains("bound_content_receipt"),
                 "legacy pending graph must fail at receipt authority: {error}"

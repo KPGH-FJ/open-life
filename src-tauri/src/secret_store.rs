@@ -4,6 +4,8 @@ use openlife_core::config::AppConfig;
 use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 const SERVICE: &str = "com.openlife.desktop";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
@@ -120,8 +122,89 @@ pub(crate) trait SecretStore {
     fn delete(&self, secret_ref: &str) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntegrityKeyInspection {
+    Available,
+    Missing,
+    Invalid,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct KeyringSecretStore;
+
+const STARTUP_SECRET_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Startup runs before Tauri owns an event loop or can present a useful
+/// credential prompt. A blocked OS credential call must therefore degrade the
+/// affected capabilities instead of preventing the product window from ever
+/// appearing. Settings keeps using `KeyringSecretStore` directly so explicit
+/// user-initiated credential changes may still use the platform UI.
+#[derive(Debug, Default)]
+pub(crate) struct StartupKeyringSecretStore {
+    timed_out: AtomicBool,
+}
+
+impl StartupKeyringSecretStore {
+    fn run<T, F>(&self, operation_name: &'static str, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        self.run_with_timeout(operation_name, STARTUP_SECRET_OPERATION_TIMEOUT, operation)
+    }
+
+    fn run_with_timeout<T, F>(
+        &self,
+        operation_name: &'static str,
+        timeout: Duration,
+        operation: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        if self.timed_out.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "OS credential startup access is unavailable after a prior bounded timeout"
+            );
+        }
+
+        // Keep the platform interaction guard on the caller. Even if the OS
+        // worker outlives the bounded deadline, returning from this function
+        // restores normal Keychain UI for later user-initiated Settings work.
+        #[cfg(target_os = "macos")]
+        let _interaction_guard = disable_startup_keyring_interaction()?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name(format!("openlife-startup-secret-{operation_name}"))
+            .spawn(move || {
+                let result = operation();
+                let _ = sender.send(result);
+            })
+            .context("spawn bounded OS credential startup operation")?;
+
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.timed_out.store(true, Ordering::Release);
+                anyhow::bail!(
+                    "OS credential {operation_name} exceeded the bounded startup deadline"
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("OS credential {operation_name} worker exited without a result")
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn disable_startup_keyring_interaction(
+) -> Result<security_framework::os::macos::keychain::KeychainUserInteractionLock> {
+    security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
+        .context("disable interactive macOS Keychain UI during startup")
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
@@ -174,6 +257,41 @@ pub(crate) fn hydrate_or_create_integrity_key(
     }
 
     create_random_integrity_key(secret_ref, store)
+}
+
+/// Inspect one internal integrity-key reference without creating, rotating, or
+/// returning key material. Product recovery may use this with the interactive
+/// credential store so macOS can re-authorize an updated signed application,
+/// while the frontend receives only this bounded state.
+pub(crate) fn inspect_integrity_key_access(
+    secret_ref: &'static str,
+    store: &dyn SecretStore,
+) -> IntegrityKeyInspection {
+    if !matches!(
+        secret_ref,
+        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
+            | ACTION_QUEUE_AUTHORITY_KEY_REF
+            | TASK_STORE_AUTHORITY_KEY_REF
+            | AGENT_RUN_RECEIPT_KEY_REF
+    ) {
+        return IntegrityKeyInspection::Invalid;
+    }
+
+    let encoded = match store.get(secret_ref) {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => return IntegrityKeyInspection::Missing,
+        Err(_) => return IntegrityKeyInspection::Unavailable,
+    };
+    let Ok(decoded) = general_purpose::STANDARD.decode(encoded) else {
+        return IntegrityKeyInspection::Invalid;
+    };
+    let Ok(key) = <Vec<u8> as TryInto<[u8; 32]>>::try_into(decoded) else {
+        return IntegrityKeyInspection::Invalid;
+    };
+    if key.iter().all(|byte| *byte == 0) {
+        return IntegrityKeyInspection::Invalid;
+    }
+    IntegrityKeyInspection::Available
 }
 
 fn create_random_integrity_key(
@@ -294,6 +412,24 @@ impl SecretStore for KeyringSecretStore {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error).context("delete secret from OS credential store"),
         }
+    }
+}
+
+impl SecretStore for StartupKeyringSecretStore {
+    fn get(&self, secret_ref: &str) -> Result<Option<String>> {
+        let secret_ref = secret_ref.to_string();
+        self.run("read", move || KeyringSecretStore.get(&secret_ref))
+    }
+
+    fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
+        let secret_ref = secret_ref.to_string();
+        let value = value.to_string();
+        self.run("write", move || KeyringSecretStore.set(&secret_ref, &value))
+    }
+
+    fn delete(&self, secret_ref: &str) -> Result<()> {
+        let secret_ref = secret_ref.to_string();
+        self.run("delete", move || KeyringSecretStore.delete(&secret_ref))
     }
 }
 
@@ -506,14 +642,41 @@ pub(crate) struct McpAuditKeyHydration {
     pub(crate) configs: Vec<AuditKeyConfig>,
     pub(crate) materials: Vec<AuditKeyMaterial>,
     pub(crate) config_changed: bool,
+    staged_secret_ref: Option<String>,
 }
 
-pub(crate) fn hydrate_or_create_mcp_audit_keys(
-    mut configs: Vec<AuditKeyConfig>,
+impl McpAuditKeyHydration {
+    pub(crate) fn ensure_write_epoch(&mut self, store: &dyn SecretStore) -> Result<()> {
+        let needs_keychain_epoch = match self.configs.last() {
+            Some(config) => config.mode != KeyMode::Keychain,
+            None => true,
+        };
+        if !needs_keychain_epoch {
+            return Ok(());
+        }
+        let latest_epoch = self.configs.last().map_or(0, |config| config.epoch);
+        let material = create_mcp_audit_key_material(next_audit_epoch(latest_epoch)?, store)?;
+        self.staged_secret_ref = material.config.key_ref.clone();
+        self.configs.push(material.config.clone());
+        self.materials.push(material);
+        self.config_changed = true;
+        Ok(())
+    }
+
+    pub(crate) fn rollback_staged_secret(&mut self, store: &dyn SecretStore) -> Result<()> {
+        if let Some(secret_ref) = self.staged_secret_ref.take() {
+            store.delete(&secret_ref)?;
+        }
+        self.config_changed = false;
+        Ok(())
+    }
+}
+
+pub(crate) fn hydrate_existing_mcp_audit_keys(
+    configs: Vec<AuditKeyConfig>,
     store: &dyn SecretStore,
 ) -> Result<McpAuditKeyHydration> {
-    configs.sort_by_key(|config| config.epoch);
-    configs.dedup_by_key(|config| config.epoch);
+    validate_mcp_audit_key_configs(&configs)?;
     let mut materials = Vec::new();
     for config in &configs {
         if config.mode == KeyMode::Keychain {
@@ -529,6 +692,9 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
             let key: [u8; 32] = decoded
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("MCP audit key must contain exactly 32 bytes"))?;
+            if key.iter().all(|byte| *byte == 0) {
+                anyhow::bail!("MCP audit key must not be all-zero");
+            }
             materials.push(AuditKeyMaterial {
                 config: config.clone(),
                 key,
@@ -539,24 +705,60 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
             )?);
         }
     }
-
-    let latest_epoch = configs.last().map_or(0, |config| config.epoch);
-    let needs_keychain_epoch = match configs.last() {
-        Some(config) => config.mode != KeyMode::Keychain,
-        None => true,
-    };
-    if needs_keychain_epoch {
-        let epoch = next_audit_epoch(latest_epoch);
-        let material = create_mcp_audit_key_material(epoch, store)?;
-        configs.push(material.config.clone());
-        materials.push(material);
-    }
-
     Ok(McpAuditKeyHydration {
         configs,
         materials,
-        config_changed: needs_keychain_epoch,
+        config_changed: false,
+        staged_secret_ref: None,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn hydrate_or_create_mcp_audit_keys(
+    configs: Vec<AuditKeyConfig>,
+    store: &dyn SecretStore,
+) -> Result<McpAuditKeyHydration> {
+    let mut hydration = hydrate_existing_mcp_audit_keys(configs, store)?;
+    hydration.ensure_write_epoch(store)?;
+    Ok(hydration)
+}
+
+fn validate_mcp_audit_key_configs(configs: &[AuditKeyConfig]) -> Result<()> {
+    for pair in configs.windows(2) {
+        if pair[0].epoch >= pair[1].epoch {
+            anyhow::bail!("MCP audit key epochs must be strictly increasing in persisted order");
+        }
+    }
+    for config in configs {
+        i64::try_from(config.epoch)
+            .context("MCP audit key epoch exceeds the SQLite integer range")?;
+        chrono::DateTime::parse_from_rfc3339(&config.created_at)
+            .context("MCP audit key created_at must be RFC3339")?;
+        if config.mode != KeyMode::Keychain {
+            continue;
+        }
+        let secret_ref = config
+            .key_ref
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("MCP audit keychain config has no secret reference"))?;
+        let encoded_epoch = secret_ref
+            .strip_prefix(MCP_AUDIT_KEY_REF_PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("MCP audit keychain reference has an invalid prefix"))?;
+        if encoded_epoch.is_empty()
+            || !encoded_epoch
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            anyhow::bail!("MCP audit keychain reference has an invalid epoch");
+        }
+        let reference_epoch = encoded_epoch
+            .parse::<u64>()
+            .context("parse MCP audit keychain reference epoch")?;
+        if reference_epoch != config.epoch {
+            anyhow::bail!("MCP audit keychain reference epoch does not match its config epoch");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn create_mcp_audit_key_material(
@@ -564,8 +766,16 @@ pub(crate) fn create_mcp_audit_key_material(
     store: &dyn SecretStore,
 ) -> Result<AuditKeyMaterial> {
     let secret_ref = format!("{MCP_AUDIT_KEY_REF_PREFIX}{epoch}");
-    let key = rand::random::<[u8; 32]>();
-    write_new_mcp_audit_secret(&secret_ref, &general_purpose::STANDARD.encode(key), store)?;
+    if store.get(&secret_ref)?.is_some() {
+        anyhow::bail!("MCP audit key reference already contains credential material");
+    }
+    let key = loop {
+        let candidate = rand::random::<[u8; 32]>();
+        if candidate.iter().any(|byte| *byte != 0) {
+            break candidate;
+        }
+    };
+    store.set(&secret_ref, &general_purpose::STANDARD.encode(key))?;
     Ok(AuditKeyMaterial {
         config: AuditKeyConfig {
             mode: KeyMode::Keychain,
@@ -579,52 +789,15 @@ pub(crate) fn create_mcp_audit_key_material(
     })
 }
 
-/// Single product primitive for persisting newly generated MCP audit key
-/// material. D064 freezes create-only behavior at this exact boundary; the
-/// current replacement write is intentionally left unchanged for the RED slice.
-pub(crate) fn write_new_mcp_audit_secret(
-    secret_ref: &str,
-    encoded_key: &str,
-    store: &dyn SecretStore,
-) -> Result<()> {
-    store.set(secret_ref, encoded_key)
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static FIXED_MCP_AUDIT_EPOCH: std::cell::RefCell<Option<u64>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) struct FixedMcpAuditEpochGuard {
-    previous: Option<u64>,
-}
-
-#[cfg(test)]
-impl Drop for FixedMcpAuditEpochGuard {
-    fn drop(&mut self) {
-        FIXED_MCP_AUDIT_EPOCH.with(|slot| {
-            slot.replace(self.previous.take());
-        });
-    }
-}
-
-/// Fix only the audit epoch source while retaining the complete product key
-/// creation path. Thread-local scope prevents parallel-test contamination.
-#[cfg(test)]
-pub(crate) fn inject_fixed_mcp_audit_epoch_for_test(epoch: u64) -> FixedMcpAuditEpochGuard {
-    let previous = FIXED_MCP_AUDIT_EPOCH.with(|slot| slot.replace(Some(epoch)));
-    FixedMcpAuditEpochGuard { previous }
-}
-
-fn next_audit_epoch(previous: u64) -> u64 {
-    #[cfg(test)]
-    if let Some(epoch) = FIXED_MCP_AUDIT_EPOCH.with(|slot| *slot.borrow()) {
-        return epoch.max(previous.saturating_add(1));
-    }
+fn next_audit_epoch(previous: u64) -> Result<u64> {
     let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
-    timestamp.max(previous.saturating_add(1))
+    let next = timestamp.max(
+        previous
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("MCP audit key epoch is exhausted"))?,
+    );
+    i64::try_from(next).context("MCP audit key epoch exceeds the SQLite integer range")?;
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -883,6 +1056,61 @@ mod tests {
     }
 
     #[test]
+    fn persisted_audit_key_authority_rejects_duplicates_order_drift_and_ref_mismatch() {
+        let store = MemorySecretStore::default();
+        let config = |epoch: u64, reference_epoch: u64| AuditKeyConfig {
+            mode: KeyMode::Keychain,
+            salt_b64: None,
+            env_var: None,
+            key_ref: Some(format!("{MCP_AUDIT_KEY_REF_PREFIX}{reference_epoch}")),
+            epoch,
+            created_at: "2026-07-16T00:00:00Z".into(),
+        };
+
+        for configs in [
+            vec![config(7, 7), config(7, 7)],
+            vec![config(8, 8), config(7, 7)],
+            vec![config(7, 8)],
+        ] {
+            assert!(hydrate_existing_mcp_audit_keys(configs, &store).is_err());
+        }
+        assert!(store.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn staged_audit_write_epoch_can_be_rolled_back_before_reference_commit() {
+        let store = MemorySecretStore::default();
+        let mut hydration = hydrate_existing_mcp_audit_keys(Vec::new(), &store).unwrap();
+        hydration.ensure_write_epoch(&store).unwrap();
+        let staged_ref = hydration.configs[0].key_ref.clone().unwrap();
+        assert!(store.get(&staged_ref).unwrap().is_some());
+
+        hydration.rollback_staged_secret(&store).unwrap();
+
+        assert!(store.get(&staged_ref).unwrap().is_none());
+        assert!(!hydration.config_changed);
+    }
+
+    #[test]
+    fn startup_secret_timeout_opens_a_circuit_for_later_operations() {
+        let store = StartupKeyringSecretStore::default();
+        let first = store
+            .run_with_timeout("test-read", Duration::from_millis(20), || {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(first.to_string().contains("bounded startup deadline"));
+
+        let started = std::time::Instant::now();
+        let second = store
+            .run_with_timeout("test-write", Duration::from_secs(1), || Ok(()))
+            .unwrap_err();
+        assert!(second.to_string().contains("prior bounded timeout"));
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
     fn integrity_keys_are_stable_and_purpose_isolated() {
         let store = MemorySecretStore::default();
         let directory = tempfile::tempdir().unwrap();
@@ -923,6 +1151,61 @@ mod tests {
         assert!(action_key.iter().any(|byte| *byte != 0));
         assert!(task_store_key.iter().any(|byte| *byte != 0));
         assert!(agent_run_key.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn integrity_key_inspection_is_metadata_only_and_never_creates_or_rotates() {
+        let store = MemorySecretStore::default();
+
+        assert_eq!(
+            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            IntegrityKeyInspection::Missing
+        );
+        assert!(store.get(AGENT_RUN_RECEIPT_KEY_REF).unwrap().is_none());
+
+        let original = hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap();
+        assert_eq!(
+            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            IntegrityKeyInspection::Available
+        );
+        assert_eq!(
+            hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap(),
+            original
+        );
+
+        store.set(AGENT_RUN_RECEIPT_KEY_REF, "not-base64").unwrap();
+        assert_eq!(
+            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            IntegrityKeyInspection::Invalid
+        );
+    }
+
+    #[test]
+    fn integrity_key_inspection_collapses_credential_errors_without_exposing_details() {
+        #[derive(Default)]
+        struct UnavailableSecretStore;
+
+        impl SecretStore for UnavailableSecretStore {
+            fn get(&self, _secret_ref: &str) -> Result<Option<String>> {
+                anyhow::bail!("sensitive platform error detail")
+            }
+
+            fn set(&self, _secret_ref: &str, _value: &str) -> Result<()> {
+                unreachable!("inspection must not write")
+            }
+
+            fn delete(&self, _secret_ref: &str) -> Result<()> {
+                unreachable!("inspection must not delete")
+            }
+        }
+
+        assert_eq!(
+            inspect_integrity_key_access(
+                MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+                &UnavailableSecretStore
+            ),
+            IntegrityKeyInspection::Unavailable
+        );
     }
 
     #[test]

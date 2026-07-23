@@ -200,14 +200,16 @@ Commands executed against the current worktree:
 | `cargo check -p openlife-tauri --features dev-extensions` | pass | debug dev surface remains buildable |
 | `cargo check -p openlife-tauri --release --features dev-extensions` | expected compile failure | high-risk dev surface cannot enter a non-debug build |
 | `cargo test -p openlife-tauri backend_remediation_phase0 -- --nocapture` | pass, 7 tests | document/config/source guards plus backend build-capability projection; not a substitute for artifact proof |
-| `env -u OPENLIFE_ENABLE_UNAUTHENTICATED_DEV_A2A OPENLIFE_PROFILE=dev cargo run -p openlife-tauri --bin openlife-a2a-server --features dev-extensions` | expected exit 2 before bind | direct debug binary cannot expose unauthenticated A2A without the explicit unsafe opt-in |
+| `env -u OPENLIFE_PROFILE -u OPENLIFE_ENABLE_DEV_A2A -u OPENLIFE_A2A_PAIRED_TOKEN -u OPENLIFE_DATA_DIR -u OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR cargo run -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions --locked` | expected exit 2 before bind; observed `requires OPENLIFE_PROFILE=dev` | the current standalone development tool fails closed unless the isolated dev profile, explicit enablement, and paired authentication token are present |
 
 The release WebView capability now contains only core, dialog, and text
 read/write commands whose paths must be supplied through dialog dynamic scope.
 Shell, store, HTTP, and recursive AppData permissions are absent. A2A no longer
-auto-starts by default; pre-authentication A2A requires explicit unsafe debug
-opt-in, an isolated `dev` profile, and an explicit override before any custom
-data directory can be used. Release diagnostics return
+auto-starts by default and is no longer a binary target in the Tauri product
+package. The separate `tools/openlife-a2a-server` workspace tool requires an
+isolated `dev` profile, explicit enablement, a paired authentication token, and
+an explicit override before any custom data directory can be used; there is no
+unauthenticated opt-in. Release diagnostics return
 `a2aStatus=disabled_by_build` without probing a local port and expose backend
 build facts for dev extensions/MCP registration. These surfaces earn no
 product capability credit.

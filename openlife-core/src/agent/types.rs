@@ -869,14 +869,17 @@ impl BoundContentReceipt {
         self.version
     }
 
+    #[cfg(test)]
     pub(crate) fn digest(&self) -> &str {
         &self.authority_tag
     }
 
+    #[cfg(test)]
     pub(crate) fn observed_body_receipt(&self) -> &str {
         &self.body_receipt
     }
 
+    #[cfg(test)]
     pub(crate) fn binding_receipt(&self) -> &str {
         &self.binding_receipt
     }

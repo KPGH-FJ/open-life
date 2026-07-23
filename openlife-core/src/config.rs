@@ -168,7 +168,7 @@ pub struct SystemConfig {
     /// Proactive engine: days before a pending proposal triggers a reminder
     #[serde(default = "default_proposal_reminder_days")]
     pub proposal_reminder_days: i64,
-    /// Web search provider: "duckduckgo" (default), "brave", or "searxng"
+    /// Web search provider: "duckduckgo" (default), "brave", "deepseek", or "searxng"
     #[serde(default = "default_search_provider")]
     pub search_provider: String,
     /// Runtime-only API key for the web search provider.
@@ -530,6 +530,7 @@ mod tests {
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let mut config = AppConfig::default();
         config.llm.provider = "deepseek".into();
+        config.llm.openai_base = crate::llm::default_base_for_provider("deepseek").into();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
         assert_eq!(config.effective_cloud_api_key(), "sk-deepseek");
         std::env::remove_var("DEEPSEEK_API_KEY");

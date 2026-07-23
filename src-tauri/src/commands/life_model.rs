@@ -556,6 +556,7 @@ mod tests {
             persistence_coordinator: Arc::new(
                 crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
             ),
+            governed_data_import_journal: None,
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::LifeModelManager::new(
@@ -608,9 +609,6 @@ mod tests {
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
-            mcp_audit_read_gateway: Arc::new(
-                crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
-            ),
             agent_run_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
             ))),
@@ -671,6 +669,8 @@ mod tests {
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            resource_runtime: None,
+            state_store: None,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }

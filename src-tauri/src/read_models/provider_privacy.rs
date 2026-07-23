@@ -349,18 +349,23 @@ mod tests {
             &state,
             "provider-privacy-task",
             "provider-privacy-run",
-            "provider.failed",
-            "diagnostic",
-            "not-a-provider-receipt",
+            "provider.started",
+            "provider_request",
+            "non-adapter-provider-request",
             "test_fixture",
             serde_json::json!({
+                "requestId": "non-adapter-provider-request",
                 "provider": "openai",
-                "status": "failed",
+                "model": "gpt-test",
+                "status": "started",
             }),
         )
         .await
         .unwrap_err();
-        assert!(rejected.contains("main_chat_provider_lifecycle_conflict:invalid_object_type"));
+        assert!(
+            rejected.contains("provider_lifecycle_start_proof_mismatch"),
+            "a schema-valid non-adapter lifecycle event must fail before it can obtain provider durability authority: {rejected}"
+        );
 
         let envelope = get_provider_privacy_boundary_summary_with_state(&state)
             .await

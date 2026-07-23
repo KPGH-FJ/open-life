@@ -90,6 +90,8 @@ impl MainChatProviderAttemptRecordDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainChatProviderAttemptError {
     NoActiveTurn,
+    CancelRequested,
+    DuplicateStart,
     InvalidMetadata,
     CapacityExceeded,
     MissingStart,
@@ -101,6 +103,8 @@ impl std::fmt::Display for MainChatProviderAttemptError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::NoActiveTurn => "provider_attempt_no_active_turn",
+            Self::CancelRequested => "provider_start_admission_rejected:cancel_requested",
+            Self::DuplicateStart => "provider_start_admission_rejected:duplicate_start",
             Self::InvalidMetadata => "provider_attempt_invalid_metadata",
             Self::CapacityExceeded => "provider_attempt_capacity_exceeded",
             Self::MissingStart => "provider_attempt_terminal_without_start",
@@ -298,6 +302,7 @@ struct InflightCanonicalCommit {
 struct MainChatExecutionEpochState {
     cancel_requested: bool,
     terminalization_degraded: bool,
+    terminal_owner_generation: Option<u64>,
     next_commit_id: u64,
     inflight_commits: HashMap<u64, InflightCanonicalCommit>,
     commit_facts: Vec<MainChatCanonicalCommitFact>,
@@ -329,6 +334,34 @@ impl MainChatExecutionEpoch {
 
     pub(crate) fn execution_id(&self) -> &str {
         &self.inner.execution_id
+    }
+
+    pub(crate) fn bind_terminal_owner_generation(&self, generation: u64) -> Result<(), String> {
+        if generation == 0 {
+            return Err("main_chat_terminal_owner_generation_invalid".into());
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "main_chat execution epoch mutex poisoned".to_string())?;
+        match state.terminal_owner_generation {
+            None => {
+                state.terminal_owner_generation = Some(generation);
+                Ok(())
+            }
+            Some(existing) if existing == generation => Ok(()),
+            Some(_) => Err("main_chat_terminal_owner_generation_rebind_forbidden".into()),
+        }
+    }
+
+    pub(crate) fn terminal_owner_generation(&self) -> Result<u64, String> {
+        self.inner
+            .state
+            .lock()
+            .map_err(|_| "main_chat execution epoch mutex poisoned".to_string())?
+            .terminal_owner_generation
+            .ok_or_else(|| "main_chat_terminal_owner_generation_unbound".to_string())
     }
 
     fn request_cancel(&self) {
@@ -464,10 +497,6 @@ impl MainChatExecutionEpoch {
                 .clone()
         };
         for registration in registrations {
-            let receipt = registration.snapshot();
-            if receipt.finished_at.is_some() {
-                continue;
-            }
             registration.settle_after_local_abort();
         }
         self.snapshot()
@@ -489,9 +518,6 @@ impl MainChatExecutionEpoch {
                 .clone()
         };
         for registration in registrations {
-            if registration.snapshot().finished_at.is_some() {
-                continue;
-            }
             registration.settle_after_runtime_failure();
         }
         self.snapshot()
@@ -840,6 +866,57 @@ impl MainChatCancellationRegistry {
             status: MainChatProviderAttemptStateStatus::Started,
         });
         Ok(MainChatProviderAttemptRecordDisposition::Recorded)
+    }
+
+    /// Linearize the real provider adapter-start edge against cancellation.
+    /// `request_cancel` and `record_provider_started` both acquire the same
+    /// registry mutex, so exactly one side wins: a recorded start may proceed
+    /// to HTTP and later becomes `remote_unknown` on cancellation, while a
+    /// cancel-first observation rejects the adapter before `.send()`.
+    pub(crate) fn admit_provider_start(
+        &self,
+        task_session_id: &str,
+        request_id: &str,
+        provider: &str,
+        model: &str,
+        started_at: DateTime<Utc>,
+        policy_evidence: &ProviderPolicyReceiptEvidence,
+    ) -> Result<MainChatProviderAttemptRecordDisposition, MainChatProviderAttemptError> {
+        match self.record_provider_started(
+            task_session_id,
+            request_id,
+            provider,
+            model,
+            started_at,
+            policy_evidence,
+        )? {
+            MainChatProviderAttemptRecordDisposition::IgnoredAfterCancel => {
+                Err(MainChatProviderAttemptError::CancelRequested)
+            }
+            MainChatProviderAttemptRecordDisposition::Duplicate => {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("main chat cancellation registry mutex poisoned");
+                let Some(TurnCancellationEntry::Active(active)) =
+                    state.entries.get_mut(task_session_id)
+                else {
+                    return Err(MainChatProviderAttemptError::NoActiveTurn);
+                };
+                if active.cancel_observed_at.is_some() {
+                    return Err(MainChatProviderAttemptError::CancelRequested);
+                }
+                // Reject and stop this execution, but keep the first recorded
+                // attempt readable. Terminalization must still project that
+                // real adapter edge as attempted/remote_unknown even though
+                // the duplicate-start invariant makes the overall turn fail.
+                active.cancel_observed_at.get_or_insert_with(Utc::now);
+                active.execution_epoch.request_cancel();
+                active.token.cancel();
+                Err(MainChatProviderAttemptError::DuplicateStart)
+            }
+            disposition => Ok(disposition),
+        }
     }
 
     pub(crate) fn record_provider_completed(
@@ -2258,6 +2335,99 @@ mod tests {
             super::MainChatProviderAttemptStatus::Completed
         );
         assert_eq!(snapshot.attempts[0].finished_at, Some(finished_at));
+    }
+
+    #[test]
+    fn provider_start_admission_linearizes_cancel_first_and_start_first() {
+        use chrono::{TimeZone, Utc};
+
+        let started_at = Utc.timestamp_opt(1_720_000_025, 0).unwrap();
+
+        let cancel_first = MainChatCancellationRegistry::default();
+        let _cancel_first_registration = cancel_first.register("task-provider-cancel-first");
+        cancel_first.request_cancel("task-provider-cancel-first");
+        assert_eq!(
+            cancel_first
+                .admit_provider_start(
+                    "task-provider-cancel-first",
+                    "request-provider-cancel-first",
+                    "openai",
+                    "gpt-test",
+                    started_at,
+                    &test_provider_policy_evidence("request-provider-cancel-first"),
+                )
+                .expect_err("cancel must reject the adapter-start edge before HTTP send"),
+            super::MainChatProviderAttemptError::CancelRequested
+        );
+        assert!(cancel_first
+            .snapshot_provider_attempts_for_cancel("task-provider-cancel-first", started_at,)
+            .expect("cancel-first snapshot remains valid")
+            .attempts
+            .is_empty());
+
+        let start_first = MainChatCancellationRegistry::default();
+        let _start_first_registration = start_first.register("task-provider-start-first");
+        assert_eq!(
+            start_first
+                .admit_provider_start(
+                    "task-provider-start-first",
+                    "request-provider-start-first",
+                    "openai",
+                    "gpt-test",
+                    started_at,
+                    &test_provider_policy_evidence("request-provider-start-first"),
+                )
+                .expect("start must win atomically before cancellation"),
+            super::MainChatProviderAttemptRecordDisposition::Recorded
+        );
+        start_first.request_cancel("task-provider-start-first");
+        let snapshot = start_first
+            .snapshot_provider_attempts_for_cancel("task-provider-start-first", started_at)
+            .expect("start-first snapshot remains valid");
+        assert_eq!(snapshot.attempts.len(), 1);
+        assert_eq!(
+            snapshot.attempts[0].status,
+            super::MainChatProviderAttemptStatus::RemoteUnknown
+        );
+
+        let duplicate = MainChatCancellationRegistry::default();
+        let duplicate_registration = duplicate.register("task-provider-duplicate-start");
+        duplicate
+            .admit_provider_start(
+                "task-provider-duplicate-start",
+                "request-provider-duplicate-start",
+                "openai",
+                "gpt-test",
+                started_at,
+                &test_provider_policy_evidence("request-provider-duplicate-start"),
+            )
+            .expect("first physical dispatch admission succeeds");
+        assert_eq!(
+            duplicate
+                .admit_provider_start(
+                    "task-provider-duplicate-start",
+                    "request-provider-duplicate-start",
+                    "openai",
+                    "gpt-test",
+                    started_at,
+                    &test_provider_policy_evidence("request-provider-duplicate-start"),
+                )
+                .expect_err("one request id cannot authorize a second physical dispatch"),
+            super::MainChatProviderAttemptError::DuplicateStart
+        );
+        assert!(duplicate_registration.token.is_cancelled());
+        let duplicate_snapshot = duplicate
+            .snapshot_provider_attempts_for_cancel("task-provider-duplicate-start", started_at)
+            .expect("duplicate rejection must preserve the first real adapter attempt");
+        assert_eq!(duplicate_snapshot.attempts.len(), 1);
+        assert_eq!(
+            duplicate_snapshot.attempts[0].request_id,
+            "request-provider-duplicate-start"
+        );
+        assert_eq!(
+            duplicate_snapshot.attempts[0].status,
+            super::MainChatProviderAttemptStatus::RemoteUnknown
+        );
     }
 
     #[test]

@@ -76,7 +76,7 @@ pub(crate) struct ProviderValidationSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProviderValidationLoad {
     Missing,
-    Valid(ProviderValidationRecord),
+    Valid(Box<ProviderValidationRecord>),
     Corrupt,
     IoError,
 }
@@ -104,7 +104,7 @@ pub(crate) fn load_provider_validation_record_from_path(path: &Path) -> Provider
     };
     match serde_json::from_str::<ProviderValidationRecord>(&text) {
         Ok(record) if validate_provider_validation_record_semantics(&record).is_ok() => {
-            ProviderValidationLoad::Valid(record)
+            ProviderValidationLoad::Valid(Box::new(record))
         }
         Ok(_) | Err(_) => ProviderValidationLoad::Corrupt,
     }
@@ -175,6 +175,12 @@ pub(crate) fn failed_provider_validation_record(
 /// A public/deserialized receipt is observation data and is never accepted as
 /// validation authority. The non-clone proof is consumed so one capability
 /// cannot authorize multiple durable writes.
+// Validation authenticity binds the full provider generation, endpoint,
+// credential, terminal proof, and observation times as separate fields.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) fn provider_validation_record_with_terminal_proof(
     config: &AppConfig,
     validation_source: impl Into<String>,
@@ -204,6 +210,10 @@ pub(crate) fn provider_validation_record_with_terminal_proof(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn provider_validation_record_with_synthetic_test_proof(
     config: &AppConfig,
     validation_source: impl Into<String>,

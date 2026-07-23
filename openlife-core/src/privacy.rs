@@ -653,8 +653,10 @@ mod tests {
 
     #[test]
     fn disabled_policy_passes_everything() {
-        let mut policy = PrivacyPolicy::default();
-        policy.enabled = false;
+        let policy = PrivacyPolicy {
+            enabled: false,
+            ..Default::default()
+        };
         let engine = PrivacyEngine::with_policy(policy);
         let text = "身份证号 110101199001011234，电话 13800138000";
         let (masked, map) = engine.desensitize(text);
@@ -731,8 +733,10 @@ mod tests {
 
     #[test]
     fn secrets_only_redacts_credentials_even_when_general_privacy_is_disabled() {
-        let mut policy = PrivacyPolicy::default();
-        policy.enabled = false;
+        let policy = PrivacyPolicy {
+            enabled: false,
+            ..Default::default()
+        };
         let engine = PrivacyEngine::with_policy(policy);
         let text = "普通上下文保留，但 api key: sk-test-secret-123456 仍必须拦截";
 

@@ -397,6 +397,7 @@ struct SchedulerToolDispatchObserver {
     store: Arc<TaskStore>,
     claim: Arc<ScheduledTaskClaim>,
     observer_state: Arc<SchedulerReceiptObserverState>,
+    persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
 }
 
 struct SchedulerCanonicalWritePermit {
@@ -435,6 +436,15 @@ impl openlife_core::agent::CanonicalWriteAdmission for SchedulerToolDispatchObse
         Box<dyn openlife_core::agent::CanonicalWritePermit>,
         openlife_core::agent::CanonicalWriteAdmissionRejection,
     > {
+        if self
+            .persistence_coordinator
+            .require_effects_allowed()
+            .is_err()
+        {
+            return Err(openlife_core::agent::CanonicalWriteAdmissionRejection::new(
+                "persistence_effects_blocked",
+            ));
+        }
         if request.domain != "proposal" || !request.object_ref.starts_with("proposal:") {
             return Err(openlife_core::agent::CanonicalWriteAdmissionRejection::new(
                 "scheduler_canonical_write_scope_invalid",
@@ -469,6 +479,9 @@ impl openlife_core::agent::CanonicalWriteAdmission for SchedulerToolDispatchObse
 #[async_trait::async_trait]
 impl ToolDispatchObserver for SchedulerToolDispatchObserver {
     async fn before_dispatch(&self, attempt: &ToolDispatchAttempt) -> anyhow::Result<()> {
+        self.persistence_coordinator
+            .require_effects_allowed()
+            .map_err(anyhow::Error::msg)?;
         if self.observer_state.persistence_failed() {
             return Err(anyhow::anyhow!(
                 "scheduler_provider_receipt_persistence_failed"
@@ -592,7 +605,10 @@ async fn execute_scheduled_task(
         resources.agent_runtime_config.clone(),
     );
     let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
-        openlife_core::agent::ActionExecutorConfig::default(),
+        openlife_core::agent::ActionExecutorConfig {
+            search_provider: resources.governed.search_provider.clone(),
+            ..Default::default()
+        },
     );
     let loop_config = AgentLoopConfig {
         max_steps: 2,
@@ -631,6 +647,7 @@ async fn execute_scheduled_task(
         store: Arc::clone(&state.scheduled_task_store),
         claim: Arc::clone(&claim),
         observer_state: Arc::clone(&observer_state),
+        persistence_coordinator: Arc::clone(&state.persistence_coordinator),
     };
 
     let mut loop_result = {
@@ -640,6 +657,12 @@ async fn execute_scheduled_task(
             &resources.governed.shared.audit_store,
             &resources.governed.shared.privacy_engine,
             &safe_paths,
+        )
+        .with_tool_audit_persistence_observer(
+            resources.governed.shared.persistence_coordinator.as_ref(),
+        )
+        .with_durable_store_failure_observer(
+            resources.governed.shared.persistence_coordinator.as_ref(),
         )
         .with_calendar_ics_paths(&calendar_ics_paths)
         .with_life_model(&life_model)
@@ -671,6 +694,7 @@ async fn execute_scheduled_task(
             )
             .await
             .map_err(|error| {
+                crate::terminal_owner_write_gateway::register_agent_run_store_error(state, &error);
                 ScheduledExecutionFailure::from_error("scheduled_agent_loop_failed", error)
             })
     }?;
@@ -701,24 +725,19 @@ async fn execute_scheduled_task(
     .map_err(|reason_code| {
         ScheduledExecutionFailure::from_error(reason_code, "terminal truth rejected")
     })?;
-    let delivery = {
-        let memory_store = state.memory_store.lock().await;
-        memory_store
-            .save_message_idempotent(
-                &task.session_id,
-                &ChatMessage {
-                    role: "assistant".into(),
-                    content: response,
-                },
-                &format!("scheduled:{}:final", claim.attempt_id()),
-            )
-            .map_err(|error| {
-                ScheduledExecutionFailure::from_error(
-                    "scheduled_final_delivery_persistence_failed",
-                    error,
-                )
-            })?
-    };
+    let delivery = crate::memory_gateway::save_conversation_message_idempotent_with_state(
+        &task.session_id,
+        &ChatMessage {
+            role: "assistant".into(),
+            content: response,
+        },
+        &format!("scheduled:{}:final", claim.attempt_id()),
+        state,
+    )
+    .await
+    .map_err(|error| {
+        ScheduledExecutionFailure::from_error("scheduled_final_delivery_persistence_failed", error)
+    })?;
     state
         .scheduled_task_store
         .stage_claim_result_delivery(&claim, &delivery.canonical_ref, &delivery.content_digest)
@@ -729,9 +748,8 @@ async fn execute_scheduled_task(
         "canonical_delivery_ref={};digest={}",
         delivery.canonical_ref, delivery.content_digest
     ));
-    resources
-        .agent_run_store
-        .create_run(&loop_result.run)
+    crate::terminal_owner_write_gateway::create_agent_run(state, &loop_result.run)
+        .await
         .map_err(|error| {
             ScheduledExecutionFailure::from_error("scheduled_agent_run_persistence_failed", error)
         })?;
@@ -872,6 +890,22 @@ mod tests {
         task.source_proposal_id = Some("scheduler-runner-test-proposal".into());
         task.seal_deterministic_local_provider_grant();
         task
+    }
+
+    fn isolated_persistence_coordinator(
+    ) -> Arc<crate::persistence_coordinator::PersistenceCoordinator> {
+        Arc::new(crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation())
+    }
+
+    fn healthy_release_persistence_coordinator(
+    ) -> Arc<crate::persistence_coordinator::PersistenceCoordinator> {
+        let coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            coordinator.register_read_write(*store);
+        }
+        coordinator.seal();
+        Arc::new(coordinator)
     }
 
     fn scheduled_provider_evidence(claim: &ScheduledTaskClaim) -> ProviderPolicyReceiptEvidence {
@@ -1099,6 +1133,7 @@ mod tests {
             store: Arc::clone(&preflight_store),
             claim: Arc::clone(&preflight_claim),
             observer_state: Arc::clone(&preflight_state),
+            persistence_coordinator: isolated_persistence_coordinator(),
         };
         let preflight_registration =
             openlife_core::agent::ToolExecutionReceiptRegistration::test_inflight_network_mutation(
@@ -1148,6 +1183,7 @@ mod tests {
             store: Arc::clone(&started_store),
             claim: Arc::clone(&started_claim),
             observer_state: started_state,
+            persistence_coordinator: isolated_persistence_coordinator(),
         };
         started_observer.before_dispatch(&attempt).await.unwrap();
         started_observer
@@ -1168,6 +1204,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn d067_degraded_audit_store_blocks_next_scheduler_effect_in_same_loop() {
+        let store = Arc::new(TaskStore::new_in_memory().unwrap());
+        let task = due_task();
+        store.create_task_idempotent(&task).unwrap();
+        let claim = Arc::new(
+            store
+                .claim_next_due(chrono::Utc::now(), chrono::Duration::seconds(30))
+                .unwrap()
+                .unwrap(),
+        );
+        store.begin_claim_execution(&claim).unwrap();
+        let persistence = healthy_release_persistence_coordinator();
+        let observer_state = Arc::new(SchedulerReceiptObserverState::default());
+        let observer = SchedulerToolDispatchObserver {
+            store,
+            claim,
+            observer_state: Arc::clone(&observer_state),
+            persistence_coordinator: Arc::clone(&persistence),
+        };
+        let registration =
+            openlife_core::agent::ToolExecutionReceiptRegistration::test_inflight_network_mutation(
+                Some("d067-scheduler-run".into()),
+                Some("d067.scheduler.effect".into()),
+                "d067 scheduler effect".into(),
+            );
+        let receipt = registration.snapshot();
+        let attempt = ToolDispatchAttempt {
+            receipt_id: receipt.receipt_id,
+            manifest_id: receipt.manifest_id.unwrap(),
+            tool_name: "calendar.write".into(),
+            manifest_contract_digest: digest_text("d067 scheduler manifest"),
+            input_hash: digest_text("d067 scheduler input"),
+            input_length_bytes: 21,
+            source_run_id: receipt.source_run_id,
+            request_digest: receipt.request_digest,
+            action_effect: receipt.action_effect,
+            idempotency_contract: receipt.idempotency_contract,
+            process_risk:
+                openlife_core::agent::action_executor::ToolDispatchProcessRisk::MayOutliveLocalProcess,
+            effect_may_survive_local_process: true,
+        };
+
+        persistence.register_unavailable(
+            "McpAuditStore",
+            "runtime_audit_commit_failed",
+            "d067 injected runtime audit failure",
+        );
+        let error = observer
+            .before_dispatch(&attempt)
+            .await
+            .expect_err("the next tool effect must fail before dispatch");
+        assert!(error.to_string().contains("persistence_effects_blocked"));
+        assert!(observer_state.prepared_tools.lock().unwrap().is_empty());
+        assert!(openlife_core::agent::CanonicalWriteAdmission::acquire(
+            &observer,
+            openlife_core::agent::CanonicalWriteAdmissionRequest {
+                domain: "proposal".into(),
+                object_ref: "proposal:d067".into(),
+            },
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
     async fn scheduler_memory_read_uses_gateway_prepared_and_real_local_adapter_edge() {
         let store = Arc::new(TaskStore::new_in_memory().unwrap());
         let task = due_task();
@@ -1183,6 +1283,7 @@ mod tests {
             store: Arc::clone(&store),
             claim: Arc::clone(&claim),
             observer_state: Arc::clone(&observer_state),
+            persistence_coordinator: isolated_persistence_coordinator(),
         };
 
         let registry = openlife_core::mcp::McpRegistry::new();
@@ -1195,6 +1296,11 @@ mod tests {
         let memory_lifecycle_store =
             openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap();
         let memory_lifecycle_reader = memory_lifecycle_store.retrieval_reader();
+        let owner_store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
+        let owner_run =
+            openlife_core::agent::AgentRun::new_tool_execution_run("scheduler-memory-read");
+        let owner_run_id = owner_run.id.clone();
+        owner_store.create_run(&owner_run).unwrap();
         memory_store
             .save_message(
                 "scheduler-memory-session",
@@ -1213,6 +1319,7 @@ mod tests {
         )
         .with_memory_store(&memory_store)
         .with_memory_lifecycle_retrieval_reader(&memory_lifecycle_reader)
+        .with_agent_run_store(&owner_store)
         .with_tool_dispatch_observer(&observer)
         .with_tool_started_transition_observer(&observer);
         let result = openlife_core::agent::ToolGateway::from_executor_config(
@@ -1227,7 +1334,7 @@ mod tests {
                     "session_id": "scheduler-memory-session",
                     "limit": 3,
                 }),
-                source_run_id: Some("scheduler-memory-run".into()),
+                source_run_id: Some(owner_run_id),
                 step_index: 0,
             },
             &ctx,
@@ -1237,7 +1344,9 @@ mod tests {
 
         assert_eq!(
             result.status,
-            openlife_core::agent::ActionExecutionStatus::Succeeded
+            openlife_core::agent::ActionExecutionStatus::Succeeded,
+            "unexpected scheduler memory-read blocker: {:?}",
+            result.stop_reason
         );
         assert_eq!(
             result.execution_receipt.dispatch_kind,
@@ -1286,6 +1395,7 @@ mod tests {
             store: Arc::clone(&store),
             claim: Arc::clone(&claim),
             observer_state: Arc::clone(&observer_state),
+            persistence_coordinator: isolated_persistence_coordinator(),
         };
         let registration =
             openlife_core::agent::ToolExecutionReceiptRegistration::test_inflight_network_mutation(

@@ -131,6 +131,10 @@ pub struct DailyGoal {
     #[serde(alias = "completed")]
     pub done: bool,
     pub time_block: Option<TimeBlock>,
+    /// RFC3339 due instant used by the StateStore-derived compatibility view.
+    /// Legacy YAML goals may omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
     /// Canonical UUIDv4 of the product effect that created this goal. Older
     /// goals legitimately have no operation identity.
     #[serde(skip_serializing_if = "Option::is_none")]

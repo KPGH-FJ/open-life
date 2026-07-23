@@ -166,7 +166,7 @@ if [ "${OPENLIFE_DEV_AUTOSTART_A2A:-0}" = "1" ]; then
         exit 1
     fi
     echo -e "${BLUE}[INFO]${NC} 构建显式启用的开发 A2A sidecar..."
-    cargo build --bin openlife-a2a-server --features dev-extensions
+    cargo build -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
 fi
 
 # 自动检测 Tauri CLI 启动方式

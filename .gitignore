@@ -32,6 +32,9 @@
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/dist-phase4b/
+frontend/dist-phase4c/
+frontend/dist-phase4d/
 frontend/dist-ssr/
 *.log
 npm-debug.log*

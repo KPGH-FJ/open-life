@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,8 +25,8 @@ use openlife_core::llm::{
 };
 use openlife_core::scheduler::ProviderInvocationDurabilityProof;
 use openlife_core::tool_execution_receipt::{
-    ToolActionEffect, ToolDispatchKind, ToolEffectStatus, ToolExecutionOutcome,
-    ToolExecutionReceipt, ToolTransportStatus,
+    ToolActionEffect, ToolAuditPersistenceStatus, ToolDispatchKind, ToolEffectStatus,
+    ToolExecutionOutcome, ToolExecutionReceipt, ToolTransportStatus,
 };
 
 const DURABLE_EVENT_PAYLOAD_VERSION: i64 = 7;
@@ -55,6 +57,106 @@ pub(crate) struct MainChatTurnLifecycleSnapshot {
     pub(crate) latest_sequence: u64,
     pub(crate) bound_run_id: Option<String>,
     pub(crate) lifecycle_event: Option<MainChatAgentDurableEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalOwnerSealState {
+    Open,
+    Sealing,
+    Sealed,
+}
+
+impl TerminalOwnerSealState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Sealing => "sealing",
+            Self::Sealed => "sealed",
+        }
+    }
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "open" => Ok(Self::Open),
+            "sealing" => Ok(Self::Sealing),
+            "sealed" => Ok(Self::Sealed),
+            _ => anyhow::bail!("terminal_owner_epoch_state_invalid"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TerminalOwnerEpoch {
+    epoch_id: String,
+    task_session_id: String,
+    run_id: String,
+    generation: u64,
+    state: TerminalOwnerSealState,
+    canonical_user_message_ref: String,
+    canonical_user_message_digest: String,
+    final_event_id: Option<String>,
+    final_event_payload_digest: Option<String>,
+    replayed: bool,
+    review_origin: Option<openlife_core::agent::TerminalOwnerReviewOriginProof>,
+}
+
+impl TerminalOwnerEpoch {
+    pub(crate) fn epoch_id(&self) -> &str {
+        &self.epoch_id
+    }
+
+    pub(crate) fn task_session_id(&self) -> &str {
+        &self.task_session_id
+    }
+
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn state(&self) -> TerminalOwnerSealState {
+        self.state
+    }
+
+    pub(crate) fn canonical_user_message_ref(&self) -> &str {
+        &self.canonical_user_message_ref
+    }
+
+    pub(crate) fn canonical_user_message_digest(&self) -> &str {
+        &self.canonical_user_message_digest
+    }
+
+    pub(crate) fn final_event_id(&self) -> Option<&str> {
+        self.final_event_id.as_deref()
+    }
+
+    pub(crate) fn final_event_payload_digest(&self) -> Option<&str> {
+        self.final_event_payload_digest.as_deref()
+    }
+
+    pub(crate) fn replayed(&self) -> bool {
+        self.replayed
+    }
+
+    pub(crate) fn review_origin_proof(
+        &self,
+    ) -> Option<&openlife_core::agent::TerminalOwnerReviewOriginProof> {
+        self.review_origin.as_ref()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MainChatTerminalFinalizationInput {
+    pub(crate) task_session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) epoch_generation: u64,
+    pub(crate) delivery_id: String,
+    pub(crate) expected_task_owner_revision: u64,
+    pub(crate) expected_task_owner_digest: String,
+    pub(crate) status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,11 +282,8 @@ impl MainChatToolLifecycleObserver {
         });
         Ok(self)
     }
-}
 
-#[async_trait::async_trait]
-impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserver {
-    async fn before_dispatch(
+    async fn persist_prepared_fact(
         &self,
         attempt: &openlife_core::agent::ToolDispatchAttempt,
     ) -> anyhow::Result<()> {
@@ -253,6 +352,28 @@ impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserve
         .map(|_| ())
         .map_err(anyhow::Error::msg)
     }
+
+    #[cfg(test)]
+    pub(crate) async fn persist_prepared_fact_for_crash_fixture(
+        &self,
+        attempt: &openlife_core::agent::ToolDispatchAttempt,
+    ) -> anyhow::Result<()> {
+        self.persist_prepared_fact(attempt).await
+    }
+}
+
+#[async_trait::async_trait]
+impl openlife_core::agent::ToolDispatchObserver for MainChatToolLifecycleObserver {
+    async fn before_dispatch(
+        &self,
+        attempt: &openlife_core::agent::ToolDispatchAttempt,
+    ) -> anyhow::Result<()> {
+        self.state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .map_err(anyhow::Error::msg)?;
+        self.persist_prepared_fact(attempt).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -298,11 +419,22 @@ impl MainChatAgentRuntimeEventInput {
         self.occurred_at = Some(occurred_at);
         self
     }
+
+    pub(crate) fn occurred_at(&self) -> Option<DateTime<Utc>> {
+        self.occurred_at
+    }
 }
 
+#[derive(Clone)]
 pub struct MainChatAgentEventStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     digest_key: Arc<MainChatEventDigestKey>,
+}
+
+#[cfg(test)]
+fn terminal_final_seal_failpoints() -> &'static Mutex<std::collections::HashSet<String>> {
+    static FAILPOINTS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    FAILPOINTS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -520,10 +652,10 @@ impl MainChatAgentEventStore {
     pub(crate) fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         #[cfg(test)]
         {
-            return Self::new_with_digest_key(
+            Self::new_with_digest_key(
                 db_path,
                 MainChatEventDigestKey::from_key_material(&[0x5a; 32])?,
-            );
+            )
         }
         #[cfg(not(test))]
         {
@@ -541,9 +673,9 @@ impl MainChatAgentEventStore {
             std::fs::create_dir_all(parent)?;
         }
         let store = Self {
-            conn: Mutex::new(Connection::open(&db_path).with_context(|| {
-                format!("failed to open main chat agent event db at {:?}", db_path)
-            })?),
+            conn: Arc::new(Mutex::new(Connection::open(&db_path).with_context(
+                || format!("failed to open main chat agent event db at {:?}", db_path),
+            )?)),
             digest_key: Arc::new(digest_key),
         };
         store.configure_connection()?;
@@ -553,10 +685,10 @@ impl MainChatAgentEventStore {
 
     pub(crate) fn new_in_memory() -> Result<Self> {
         let store = Self {
-            conn: Mutex::new(
+            conn: Arc::new(Mutex::new(
                 Connection::open_in_memory()
                     .context("failed to open in-memory main chat agent event db")?,
-            ),
+            )),
             digest_key: Arc::new(MainChatEventDigestKey::random()?),
         };
         store.configure_connection()?;
@@ -584,6 +716,668 @@ impl MainChatAgentEventStore {
         )?;
         transaction.rollback()?;
         Ok(())
+    }
+
+    pub(crate) fn open_terminal_owner_epoch_from_admission(
+        &self,
+        admission: openlife_core::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission,
+    ) -> Result<TerminalOwnerEpoch> {
+        admission.validate()?;
+        let task_session_id = admission.task_session_id().to_string();
+        let run_id = admission.run_id().to_string();
+        let canonical_user_message_ref = admission.canonical_user_message_ref().to_string();
+        let canonical_user_message_digest = admission.canonical_user_message_digest().to_string();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = select_terminal_owner_epoch(&tx, admission.task_session_id())?;
+        if let Some(mut existing) = existing {
+            if existing.state != TerminalOwnerSealState::Open {
+                anyhow::bail!("terminal_owner_review_origin_epoch_not_open");
+            }
+            let (stored_admission_id, stored_canonical_store_identity) = tx.query_row(
+                "SELECT admission_id, canonical_store_identity
+                 FROM terminal_owner_epochs WHERE epoch_id = ?1",
+                [&existing.epoch_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            if existing.run_id != admission.run_id()
+                || stored_admission_id != admission.admission_id()
+                || existing.canonical_user_message_ref != admission.canonical_user_message_ref()
+                || existing.canonical_user_message_digest
+                    != admission.canonical_user_message_digest()
+                || stored_canonical_store_identity != admission.canonical_store_identity()
+            {
+                anyhow::bail!("terminal_owner_epoch_admission_conflict");
+            }
+            existing.replayed = true;
+            tx.commit()?;
+            existing.review_origin = Some(issue_opened_epoch_review_origin(
+                admission,
+                existing.epoch_id.clone(),
+                existing.generation,
+            )?);
+            return Ok(existing);
+        }
+        let epoch_id = format!("terminal-epoch:{}", uuid::Uuid::new_v4());
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO terminal_owner_epochs (
+                epoch_id, task_session_id, run_id, generation, state, admission_id,
+                canonical_user_message_ref, canonical_user_message_digest,
+                canonical_store_identity, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 1, 'open', ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                epoch_id,
+                admission.task_session_id(),
+                admission.run_id(),
+                admission.admission_id(),
+                admission.canonical_user_message_ref(),
+                admission.canonical_user_message_digest(),
+                admission.canonical_store_identity(),
+                now,
+            ],
+        )?;
+        tx.commit()?;
+        let review_origin = issue_opened_epoch_review_origin(admission, epoch_id.clone(), 1)?;
+        Ok(TerminalOwnerEpoch {
+            epoch_id,
+            task_session_id,
+            run_id,
+            generation: 1,
+            state: TerminalOwnerSealState::Open,
+            canonical_user_message_ref,
+            canonical_user_message_digest,
+            final_event_id: None,
+            final_event_payload_digest: None,
+            replayed: false,
+            review_origin: Some(review_origin),
+        })
+    }
+
+    pub(crate) fn terminal_owner_epoch(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<TerminalOwnerEpoch>> {
+        let conn = self.lock_conn()?;
+        select_terminal_owner_epoch(&conn, task_session_id)
+    }
+
+    /// Re-read the durable epoch immediately before a typed Review relation is
+    /// submitted. A proof issued while the epoch was Open is not authority if
+    /// sealing won the race before ProposalStore admission.
+    pub(crate) fn revalidate_open_review_origin(
+        &self,
+        origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
+    ) -> Result<()> {
+        origin.validate()?;
+        let conn = self.lock_conn()?;
+        let row = conn
+            .query_row(
+                "SELECT epoch_id, task_session_id, run_id, generation, state,
+                        admission_id, canonical_user_message_ref,
+                        canonical_user_message_digest, canonical_store_identity
+                 FROM terminal_owner_epochs WHERE task_session_id = ?1",
+                [origin.task_session_id()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+            .context("terminal_owner_review_origin_epoch_missing")?;
+        let generation =
+            u64::try_from(row.3).context("terminal owner review origin generation invalid")?;
+        if row.0 != origin.epoch_id()
+            || row.1 != origin.task_session_id()
+            || row.2 != origin.run_id()
+            || generation != origin.epoch_generation()
+            || row.4 != TerminalOwnerSealState::Open.as_str()
+            || row.5 != origin.admission_id()
+            || row.6 != origin.canonical_user_message_ref()
+            || row.7 != origin.canonical_user_message_digest()
+            || row.8 != origin.canonical_store_identity()
+        {
+            anyhow::bail!("terminal_owner_review_origin_not_current_open_epoch");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn terminal_owner_final_event(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<MainChatAgentDurableEvent>> {
+        let conn = self.lock_conn()?;
+        let Some(epoch) = select_terminal_owner_epoch(&conn, task_session_id)? else {
+            return Ok(None);
+        };
+        let Some(final_event_id) = epoch.final_event_id else {
+            return Ok(None);
+        };
+        select_event_by_id(&conn, &final_event_id)
+    }
+
+    pub(crate) fn terminal_owner_successor_head(
+        &self,
+        task_session_id: &str,
+    ) -> Result<(u64, String)> {
+        let conn = self.lock_conn()?;
+        let epoch = select_terminal_owner_epoch(&conn, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.state != TerminalOwnerSealState::Sealed {
+            anyhow::bail!("terminal_owner_successor_requires_sealed_epoch");
+        }
+        let final_event_id = epoch
+            .final_event_id
+            .as_deref()
+            .context("terminal_owner_sealed_final_missing")?;
+        let final_event = select_event_by_id(&conn, final_event_id)?
+            .context("terminal_owner_sealed_event_missing")?;
+        terminal_owner_successor_head_from_conn(
+            &conn,
+            task_session_id,
+            final_event_id,
+            &final_event,
+        )
+    }
+
+    pub(crate) fn open_terminal_owner_replay_epoch_from_admission(
+        &self,
+        admission: &crate::terminal_owner_write_gateway::TerminalOwnerReplayEpochAdmission,
+    ) -> Result<TerminalOwnerEpoch> {
+        admission.validate().map_err(anyhow::Error::msg)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut epoch = select_terminal_owner_epoch(&tx, admission.task_session_id())?
+            .context("terminal_owner_replay_epoch_missing")?;
+        if epoch.state != TerminalOwnerSealState::Sealed
+            || epoch.epoch_id != admission.prior_epoch_id()
+            || epoch.run_id != admission.run_id()
+            || epoch.generation != admission.prior_epoch_generation()
+            || epoch.final_event_id.as_deref() != Some(admission.prior_final_event_id())
+            || epoch.canonical_user_message_ref != admission.canonical_user_message_ref()
+            || epoch.canonical_user_message_digest != admission.canonical_user_message_digest()
+        {
+            anyhow::bail!("terminal_owner_replay_epoch_admission_conflict");
+        }
+        let next_generation = epoch
+            .generation
+            .checked_add(1)
+            .context("terminal_owner_replay_epoch_generation_exhausted")?;
+        let changed = tx.execute(
+            "UPDATE terminal_owner_epochs
+             SET generation = ?4, state = 'open', admission_id = ?5,
+                 final_event_id = NULL, final_event_payload_digest = NULL,
+                 expected_task_owner_revision = NULL,
+                 expected_task_owner_digest = NULL, updated_at = ?6
+             WHERE task_session_id = ?1 AND run_id = ?2
+               AND generation = ?3 AND state = 'sealed'
+               AND final_event_id = ?7",
+            params![
+                admission.task_session_id(),
+                admission.run_id(),
+                i64::try_from(admission.prior_epoch_generation())?,
+                i64::try_from(next_generation)?,
+                admission.admission_id(),
+                Utc::now().to_rfc3339(),
+                admission.prior_final_event_id(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_replay_epoch_open_cas_lost");
+        }
+        tx.execute(
+            "DELETE FROM terminal_owner_final_payloads WHERE epoch_id = ?1",
+            [epoch.epoch_id.as_str()],
+        )?;
+        bind_task_run(&tx, admission.task_session_id(), admission.run_id())?;
+        append_event_in_transaction(
+            &tx,
+            MainChatAgentEventDraft {
+                task_session_id: admission.task_session_id().to_string(),
+                run_id: admission.run_id().to_string(),
+                event_type: "turn_started".into(),
+                object_type: "turn".into(),
+                object_id: format!("replay:{}", admission.admission_id()),
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.replay_epoch".into(),
+                payload: json!({
+                    "status": "started",
+                    "requestId": admission.action_id(),
+                    "policyRoute": "governed_replay_successor",
+                    "selectedStrategy": match admission.cause() {
+                        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => "direct_answer",
+                        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry
+                        | crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission => "react_tool_execution",
+                    },
+                    "replayCause": admission.cause().as_str(),
+                    "replayCauseRef": admission.cause_ref(),
+                    "rawUserTextStored": false,
+                }),
+                backfilled: false,
+            },
+            &self.digest_key,
+        )?;
+        tx.commit()?;
+        epoch.generation = next_generation;
+        epoch.state = TerminalOwnerSealState::Open;
+        epoch.final_event_id = None;
+        epoch.final_event_payload_digest = None;
+        epoch.replayed = true;
+        epoch.review_origin = None;
+        Ok(epoch)
+    }
+
+    pub(crate) fn begin_terminal_owner_seal(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        generation: u64,
+    ) -> Result<TerminalOwnerEpoch> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut epoch = select_terminal_owner_epoch(&tx, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != run_id || epoch.generation != generation {
+            anyhow::bail!("terminal_owner_epoch_identity_mismatch");
+        }
+        match epoch.state {
+            TerminalOwnerSealState::Open => {
+                let changed = tx.execute(
+                    "UPDATE terminal_owner_epochs
+                     SET state = 'sealing', updated_at = ?4
+                     WHERE task_session_id = ?1 AND run_id = ?2
+                       AND generation = ?3 AND state = 'open'",
+                    params![
+                        task_session_id,
+                        run_id,
+                        i64::try_from(generation)?,
+                        Utc::now().to_rfc3339(),
+                    ],
+                )?;
+                if changed != 1 {
+                    anyhow::bail!("terminal_owner_epoch_seal_cas_lost");
+                }
+                epoch.state = TerminalOwnerSealState::Sealing;
+            }
+            TerminalOwnerSealState::Sealing | TerminalOwnerSealState::Sealed => {}
+        }
+        tx.commit()?;
+        Ok(epoch)
+    }
+
+    pub(crate) fn stage_terminal_final_payload(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        generation: u64,
+        delivery_id: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        let payload_json = serde_json::to_string(payload)?;
+        let payload_digest = metadata_safe_digest(&payload_json);
+        let conn = self.lock_conn()?;
+        let epoch = select_terminal_owner_epoch(&conn, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != run_id
+            || epoch.generation != generation
+            || epoch.state != TerminalOwnerSealState::Sealing
+        {
+            anyhow::bail!("terminal_owner_final_payload_not_sealing");
+        }
+        let changed = conn.execute(
+            "INSERT INTO terminal_owner_final_payloads (
+                epoch_id, delivery_id, payload_json, payload_digest, staged_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(epoch_id) DO UPDATE SET
+                delivery_id = excluded.delivery_id,
+                payload_json = excluded.payload_json,
+                payload_digest = excluded.payload_digest,
+                staged_at = excluded.staged_at
+             WHERE terminal_owner_final_payloads.delivery_id = excluded.delivery_id
+               AND terminal_owner_final_payloads.payload_digest = excluded.payload_digest",
+            params![
+                epoch.epoch_id,
+                delivery_id,
+                payload_json,
+                payload_digest,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_final_payload_identity_conflict");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn terminal_owner_staged_final_delivery_id(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let Some(epoch) = select_terminal_owner_epoch(&conn, task_session_id)? else {
+            return Ok(None);
+        };
+        conn.query_row(
+            "SELECT delivery_id FROM terminal_owner_final_payloads WHERE epoch_id = ?1",
+            [epoch.epoch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn terminal_owner_staged_final_status(
+        &self,
+        task_session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let Some(epoch) = select_terminal_owner_epoch(&conn, task_session_id)? else {
+            return Ok(None);
+        };
+        let payload_json = conn
+            .query_row(
+                "SELECT payload_json FROM terminal_owner_final_payloads WHERE epoch_id = ?1",
+                [epoch.epoch_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload_json) = payload_json else {
+            return Ok(None);
+        };
+        let payload: Value = serde_json::from_str(&payload_json)?;
+        let status = payload
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| {
+                matches!(
+                    *status,
+                    "completed"
+                        | "completed_with_pending_items"
+                        | "waiting_permission"
+                        | "blocked"
+                        | "failed"
+                        | "interrupted"
+                        | "cancelled"
+                )
+            })
+            .context("terminal_owner_staged_final_status_invalid")?;
+        Ok(Some(status.to_string()))
+    }
+
+    pub(crate) fn append_terminal_final_and_seal(
+        &self,
+        input: MainChatTerminalFinalizationInput,
+    ) -> Result<MainChatAgentDurableEvent> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_task_sequence_domain(&tx, &input.task_session_id)?;
+        validate_task_run_binding(&tx, &input.task_session_id)?;
+        bind_task_run(&tx, &input.task_session_id, &input.run_id)?;
+        if event_scope_hidden(&tx, "task", &input.task_session_id)?
+            || event_scope_hidden(&tx, "run", &input.run_id)?
+        {
+            anyhow::bail!("main_chat_event_canonical_source_tombstoned");
+        }
+        let epoch = select_terminal_owner_epoch(&tx, &input.task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != input.run_id || epoch.generation != input.epoch_generation {
+            anyhow::bail!("terminal_owner_epoch_identity_mismatch");
+        }
+        if epoch.state == TerminalOwnerSealState::Sealed {
+            let event_id = epoch
+                .final_event_id
+                .as_deref()
+                .context("terminal_owner_sealed_final_missing")?;
+            let event = select_event_by_id(&tx, event_id)?
+                .context("terminal_owner_sealed_event_missing")?;
+            tx.commit()?;
+            return Ok(event);
+        }
+        if epoch.state != TerminalOwnerSealState::Sealing {
+            anyhow::bail!("terminal_owner_epoch_not_sealing");
+        }
+        let staged_payload = tx
+            .query_row(
+                "SELECT delivery_id, payload_json FROM terminal_owner_final_payloads
+                 WHERE epoch_id = ?1",
+                [&epoch.epoch_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let mut payload = if let Some((delivery_id, payload_json)) = staged_payload {
+            if delivery_id != input.delivery_id {
+                anyhow::bail!("terminal_owner_final_payload_identity_mismatch");
+            }
+            serde_json::from_str::<Value>(&payload_json)?
+        } else {
+            json!({
+                "deliveryId": input.delivery_id,
+                "taskSessionId": input.task_session_id,
+                "runId": input.run_id,
+                "status": if input.status == "waiting_permission" {
+                    "completed_with_pending_items"
+                } else {
+                    input.status.as_str()
+                },
+                "bodyStored": false,
+                "runtimeOwner": "openlife_turn_runtime",
+            })
+        };
+        let payload_object = payload
+            .as_object_mut()
+            .context("terminal_owner_final_payload_not_object")?;
+        payload_object.insert(
+            "taskOwnerRevision".into(),
+            json!(input.expected_task_owner_revision),
+        );
+        payload_object.insert(
+            "taskOwnerDigest".into(),
+            json!(input.expected_task_owner_digest),
+        );
+        let event = append_event_in_transaction(
+            &tx,
+            MainChatAgentEventDraft {
+                task_session_id: input.task_session_id.clone(),
+                run_id: input.run_id.clone(),
+                event_type: "final_delivery.created".into(),
+                object_type: "final_delivery".into(),
+                object_id: input.delivery_id,
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.final_delivery_owner".into(),
+                payload,
+                backfilled: false,
+            },
+            &self.digest_key,
+        )?;
+        #[cfg(test)]
+        if terminal_final_seal_failpoints()
+            .lock()
+            .map_err(|error| anyhow::anyhow!("terminal seal failpoint mutex: {error}"))?
+            .contains(&input.task_session_id)
+        {
+            anyhow::bail!("injected_failure_after_final_insert_before_sealed_epoch_cas");
+        }
+        let changed = tx.execute(
+            "UPDATE terminal_owner_epochs
+             SET state = 'sealed', final_event_id = ?4,
+                 final_event_payload_digest = ?5,
+                 expected_task_owner_revision = ?6,
+                 expected_task_owner_digest = ?7,
+                 updated_at = ?8
+             WHERE task_session_id = ?1 AND run_id = ?2
+               AND generation = ?3 AND state = 'sealing'",
+            params![
+                input.task_session_id,
+                input.run_id,
+                i64::try_from(input.epoch_generation)?,
+                event.event_id,
+                event.payload_digest,
+                i64::try_from(input.expected_task_owner_revision)?,
+                input.expected_task_owner_digest,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("terminal_owner_epoch_sealed_cas_lost");
+        }
+        tx.commit()?;
+        Ok(event)
+    }
+
+    pub(crate) fn append_terminal_owner_successor(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        proposal_id: &str,
+        receipt: &openlife_core::agent::main_chat_agent_v1::VerifiedTerminalOwnerTransitionReceipt,
+    ) -> Result<MainChatAgentDurableEvent> {
+        if receipt.owner_kind() != "agent_task_session"
+            || receipt.owner_id() != task_session_id
+            || receipt.proposal_id() != proposal_id
+        {
+            anyhow::bail!("terminal_owner_successor_receipt_identity_mismatch");
+        }
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_task_sequence_domain(&tx, task_session_id)?;
+        validate_task_run_binding(&tx, task_session_id)?;
+        bind_task_run(&tx, task_session_id, run_id)?;
+        if event_scope_hidden(&tx, "task", task_session_id)?
+            || event_scope_hidden(&tx, "run", run_id)?
+        {
+            anyhow::bail!("main_chat_event_canonical_source_tombstoned");
+        }
+        let epoch = select_terminal_owner_epoch(&tx, task_session_id)?
+            .context("terminal_owner_epoch_missing")?;
+        if epoch.run_id != run_id || epoch.state != TerminalOwnerSealState::Sealed {
+            anyhow::bail!("terminal_owner_successor_requires_sealed_epoch");
+        }
+        let final_event_id = epoch
+            .final_event_id
+            .as_deref()
+            .context("terminal_owner_sealed_final_missing")?;
+        let final_event = select_event_by_id(&tx, final_event_id)?
+            .context("terminal_owner_sealed_event_missing")?;
+        let successor_object_id = format!("successor:{proposal_id}");
+        let current_head = terminal_owner_successor_head_from_conn(
+            &tx,
+            task_session_id,
+            final_event_id,
+            &final_event,
+        )?;
+        if let Some(existing) = select_event_by_immutable_identity(
+            &tx,
+            task_session_id,
+            "terminal_owner.successor_confirmed",
+            &successor_object_id,
+        )? {
+            if existing.run_id != run_id
+                || existing.payload.get("ownerKind").and_then(Value::as_str)
+                    != Some("agent_task_session")
+                || existing.payload.get("ownerId").and_then(Value::as_str) != Some(task_session_id)
+                || existing.payload.get("causeRef").and_then(Value::as_str) != Some(proposal_id)
+                || existing.payload.get("finalEventId").and_then(Value::as_str)
+                    != Some(final_event_id)
+                || existing
+                    .payload
+                    .get("beforeOwnerRevision")
+                    .and_then(Value::as_u64)
+                    != Some(receipt.before_revision())
+                || existing
+                    .payload
+                    .get("afterOwnerRevision")
+                    .and_then(Value::as_u64)
+                    != Some(receipt.after_revision())
+                || existing
+                    .payload
+                    .get("beforeOwnerDigest")
+                    .and_then(Value::as_str)
+                    != Some(receipt.before_digest())
+                || existing
+                    .payload
+                    .get("afterOwnerDigest")
+                    .and_then(Value::as_str)
+                    != Some(receipt.after_digest())
+                || existing
+                    .payload
+                    .get("localTransitionReceiptRef")
+                    .and_then(Value::as_str)
+                    != Some(receipt.receipt_ref())
+                || existing
+                    .payload
+                    .get("localTransitionReceiptDigest")
+                    .and_then(Value::as_str)
+                    != Some(receipt.receipt_digest())
+            {
+                anyhow::bail!("terminal_owner_successor_replay_identity_mismatch");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        if current_head.0 != receipt.before_revision() || current_head.1 != receipt.before_digest()
+        {
+            anyhow::bail!("terminal_owner_successor_head_mismatch");
+        }
+        let event = append_event_in_transaction(
+            &tx,
+            MainChatAgentEventDraft {
+                task_session_id: task_session_id.to_string(),
+                run_id: run_id.to_string(),
+                event_type: "terminal_owner.successor_confirmed".into(),
+                object_type: "terminal_owner_successor".into(),
+                object_id: successor_object_id,
+                created_at: Utc::now(),
+                source: "terminal_owner_write_gateway.review_successor".into(),
+                payload: json!({
+                    "causeKind": "proposal_review_acceptance",
+                    "causeRef": proposal_id,
+                    "finalEventId": final_event_id,
+                    "ownerKind": receipt.owner_kind(),
+                    "ownerId": receipt.owner_id(),
+                    "beforeOwnerRevision": receipt.before_revision(),
+                    "afterOwnerRevision": receipt.after_revision(),
+                    "beforeOwnerDigest": receipt.before_digest(),
+                    "afterOwnerDigest": receipt.after_digest(),
+                    "localTransitionReceiptRef": receipt.receipt_ref(),
+                    "localTransitionReceiptDigest": receipt.receipt_digest(),
+                }),
+                backfilled: false,
+            },
+            &self.digest_key,
+        )?;
+        tx.commit()?;
+        Ok(event)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_fail_after_final_insert_before_sealed_epoch_cas_for_test(
+        &self,
+        task_session_id: &str,
+    ) -> Result<()> {
+        terminal_final_seal_failpoints()
+            .lock()
+            .map_err(|error| anyhow::anyhow!("terminal seal failpoint mutex: {error}"))?
+            .insert(task_session_id.to_string());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_fail_after_final_insert_before_sealed_epoch_cas_for_test(
+        &self,
+        task_session_id: &str,
+    ) {
+        if let Ok(mut failpoints) = terminal_final_seal_failpoints().lock() {
+            failpoints.remove(task_session_id);
+        }
     }
 
     pub(crate) fn reconciliation_attestation_public_key(&self) -> Result<[u8; 32]> {
@@ -698,6 +1492,7 @@ impl MainChatAgentEventStore {
                 "transportStatus": transport_status,
                 "effectStatus": effect_status,
                 "executionOutcome": "unknown",
+                "auditPersistenceStatus": "unknown",
                 "startedAt": Value::Null,
                 "dispatchedAt": Value::Null,
                 "responseObservedAt": Value::Null,
@@ -1255,6 +2050,33 @@ impl MainChatAgentEventStore {
             )",
             [],
         )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS terminal_owner_epochs (
+                epoch_id TEXT PRIMARY KEY,
+                task_session_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL UNIQUE,
+                generation INTEGER NOT NULL CHECK(generation > 0),
+                state TEXT NOT NULL CHECK(state IN ('open', 'sealing', 'sealed')),
+                admission_id TEXT NOT NULL UNIQUE,
+                canonical_user_message_ref TEXT NOT NULL,
+                canonical_user_message_digest TEXT NOT NULL,
+                canonical_store_identity TEXT NOT NULL,
+                final_event_id TEXT,
+                final_event_payload_digest TEXT,
+                expected_task_owner_revision INTEGER,
+                expected_task_owner_digest TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS terminal_owner_final_payloads (
+                epoch_id TEXT PRIMARY KEY,
+                delivery_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                staged_at TEXT NOT NULL,
+                FOREIGN KEY(epoch_id) REFERENCES terminal_owner_epochs(epoch_id)
+             ) WITHOUT ROWID;",
+        )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS main_chat_agent_events (
                 event_id TEXT PRIMARY KEY,
@@ -1503,10 +2325,12 @@ impl MainChatAgentEventStore {
             .context("single event append returned no durable event")
     }
 
-    /// Close an exact prepared fence from the same process-local, sealed
-    /// ToolGateway receipt that observed zero adapter attempts. Generic event
-    /// inputs cannot construct this admission. The event and its ActionQueue
-    /// outbox row commit in the same EventStore transaction.
+    /// Persist a zero-attempt terminal from the same process-local, sealed
+    /// ToolGateway receipt. If a prepared dispatch fence exists, the terminal
+    /// closes it and enqueues the ActionQueue reconciliation in the same
+    /// transaction. A contract or policy rejection may have no prepared fence;
+    /// its live receipt still owns a standalone `tool.not_dispatched` fact.
+    /// Generic event inputs cannot construct either admission.
     fn append_live_not_dispatched_tool_receipt(
         &self,
         task_session_id: &str,
@@ -1532,23 +2356,19 @@ impl MainChatAgentEventStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_task_sequence_domain(&tx, task_session_id)?;
         validate_task_run_binding(&tx, task_session_id)?;
-        let Some(prepared) = select_event_by_immutable_identity(
+        let prepared = select_event_by_immutable_identity(
             &tx,
             task_session_id,
             "tool.dispatch_prepared",
             &receipt.receipt_id,
-        )?
-        else {
-            tx.commit()?;
-            return Ok(None);
-        };
+        )?;
         bind_task_run(&tx, task_session_id, run_id)?;
         if event_scope_hidden(&tx, "task", task_session_id)?
             || event_scope_hidden(&tx, "run", run_id)?
         {
             anyhow::bail!("main_chat_event_canonical_source_tombstoned");
         }
-        let payload = json!({
+        let mut payload = json!({
             "receiptId": receipt.receipt_id,
             "requestId": receipt.receipt_id,
             "sourceRunId": run_id,
@@ -1562,14 +2382,17 @@ impl MainChatAgentEventStore {
             "transportStatus": "not_attempted",
             "effectStatus": "not_attempted",
             "executionOutcome": receipt.execution_outcome.as_str(),
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "status": "not_dispatched",
             "startedAt": receipt.started_at,
             "dispatchedAt": Value::Null,
             "responseObservedAt": Value::Null,
             "finishedAt": finished_at,
             "reconciledAfterProcessRestart": false,
-            "preparedEventId": prepared.event_id,
         });
+        if let (Some(object), Some(prepared)) = (payload.as_object_mut(), prepared.as_ref()) {
+            object.insert("preparedEventId".into(), json!(prepared.event_id.clone()));
+        }
         let resolution = append_event_in_transaction_with_tool_admission(
             &tx,
             MainChatAgentEventDraft {
@@ -1586,14 +2409,16 @@ impl MainChatAgentEventStore {
             &self.digest_key,
             ToolLifecycleAdmission::LiveNotDispatched(receipt),
         )?;
-        enqueue_tool_queue_reconciliation_projection(
-            &tx,
-            &prepared,
-            &resolution,
-            MainChatToolQueueReconciliationDisposition::EffectNotAttempted,
-            finished_at,
-            &self.digest_key,
-        )?;
+        if let Some(prepared) = prepared.as_ref() {
+            enqueue_tool_queue_reconciliation_projection(
+                &tx,
+                prepared,
+                &resolution,
+                MainChatToolQueueReconciliationDisposition::EffectNotAttempted,
+                finished_at,
+                &self.digest_key,
+            )?;
+        }
         tx.commit()?;
         Ok(Some(resolution))
     }
@@ -2074,6 +2899,68 @@ impl MainChatAgentEventStore {
         run_id: &str,
     ) -> Result<Option<MainChatAgentDurableEvent>> {
         self.latest_provider_event_for_run_matching(run_id, None)
+    }
+
+    pub(crate) fn latest_terminal_owner_replay_start(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<MainChatAgentDurableEvent>> {
+        let conn = self.lock_conn()?;
+        validate_task_sequence_domain(&conn, task_session_id)?;
+        validate_task_run_binding(&conn, task_session_id)?;
+        conn.query_row(
+            "SELECT event_id, task_session_id, run_id, sequence, event_type, object_type,
+                    object_id, created_at, source, payload_digest, payload_json, backfilled,
+                    payload_minimized_version
+             FROM main_chat_agent_events
+             WHERE task_session_id = ?1 AND run_id = ?2
+               AND event_type = 'turn_started'
+               AND source = 'openlife_turn_runtime.replay_epoch'
+               AND backfilled = 0
+             ORDER BY sequence DESC
+             LIMIT 1",
+            params![task_session_id, run_id],
+            row_to_event,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Return the latest adapter-edge provider fact observed after one exact
+    /// replay start. This is a startup-reconciliation read only: it never
+    /// invents a provider terminal when the last durable fact is `started`.
+    pub(crate) fn latest_provider_event_after_replay_start(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        replay_start_sequence: u64,
+    ) -> Result<Option<MainChatAgentDurableEvent>> {
+        let conn = self.lock_conn()?;
+        validate_task_sequence_domain(&conn, task_session_id)?;
+        validate_task_run_binding(&conn, task_session_id)?;
+        validate_persisted_provider_lifecycles_for_task(&conn, task_session_id)?;
+        let replay_start_sequence = i64::try_from(replay_start_sequence)
+            .map_err(|_| MainChatAgentEventStoreFault::SequenceExhausted)?;
+        conn.query_row(
+            "SELECT event_id, task_session_id, run_id, sequence, event_type, object_type,
+                    object_id, created_at, source, payload_digest, payload_json, backfilled,
+                    payload_minimized_version
+             FROM main_chat_agent_events
+             WHERE task_session_id = ?1 AND run_id = ?2 AND sequence > ?3
+               AND event_type IN ('provider.started', 'provider.completed', 'provider.failed', 'provider.remote_unknown')
+               AND backfilled = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM main_chat_agent_event_fact_quarantine quarantine
+                   WHERE quarantine.event_id = main_chat_agent_events.event_id
+               )
+             ORDER BY sequence DESC
+             LIMIT 1",
+            params![task_session_id, run_id, replay_start_sequence],
+            row_to_event,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub(crate) fn latest_completed_provider_event_for_run(
@@ -2699,7 +3586,7 @@ fn migrate_legacy_event_identities(
     {
         return Ok(());
     }
-    if current_version < 0 || current_version > DURABLE_EVENT_IDENTITY_VERSION {
+    if !(0..=DURABLE_EVENT_IDENTITY_VERSION).contains(&current_version) {
         return Err(MainChatAgentEventStoreFault::CorruptRow {
             field: "event_identity_version",
             reason: "unsupported",
@@ -3206,16 +4093,19 @@ fn collect_provider_tasks_missing_policy_evidence(
         let (task_session_id, object_id, payload_json) = row?;
         let payload = serde_json::from_str::<Value>(&payload_json).ok();
         let object = payload.as_ref().and_then(Value::as_object);
-        let missing = object.is_none_or(|object| {
-            REQUIRED_POLICY_FIELDS
-                .iter()
-                .any(|field| !object.contains_key(*field))
-                || object.get("rawLifeModelIncluded").and_then(Value::as_bool) != Some(false)
-                || object
-                    .get("rawUnboundedMemoryIncluded")
-                    .and_then(Value::as_bool)
-                    != Some(false)
-        });
+        let missing = match object {
+            None => true,
+            Some(object) => {
+                REQUIRED_POLICY_FIELDS
+                    .iter()
+                    .any(|field| !object.contains_key(*field))
+                    || object.get("rawLifeModelIncluded").and_then(Value::as_bool) != Some(false)
+                    || object
+                        .get("rawUnboundedMemoryIncluded")
+                        .and_then(Value::as_bool)
+                        != Some(false)
+            }
+        };
         if missing {
             invalid
                 .entry(task_session_id)
@@ -4877,37 +5767,41 @@ fn validate_tool_lifecycle_transition(
             &draft.task_session_id,
             "tool.dispatch_prepared",
             &draft.object_id,
-        )?
-        .ok_or_else(|| MainChatAgentEventStoreFault::ToolLifecycleConflict {
-            reason: format!("not_dispatched_without_prepared:{}", draft.object_id),
-        })?;
-        for key in [
-            "receiptId",
-            "sourceRunId",
-            "manifestId",
-            "requestDigest",
-            "actionEffect",
-            "idempotencyContract",
-        ] {
-            if prepared.payload.get(key) != draft.payload.get(key) {
+        )?;
+        if let Some(prepared) = prepared.as_ref() {
+            for key in [
+                "receiptId",
+                "sourceRunId",
+                "manifestId",
+                "requestDigest",
+                "actionEffect",
+                "idempotencyContract",
+            ] {
+                if prepared.payload.get(key) != draft.payload.get(key) {
+                    return Err(MainChatAgentEventStoreFault::ToolLifecycleConflict {
+                        reason: format!(
+                            "prepared_not_dispatched_identity_conflict:{}:{key}",
+                            draft.object_id
+                        ),
+                    }
+                    .into());
+                }
+            }
+            if draft.payload.get("preparedEventId").and_then(Value::as_str)
+                != Some(prepared.event_id.as_str())
+                || draft.created_at < prepared.created_at
+            {
                 return Err(MainChatAgentEventStoreFault::ToolLifecycleConflict {
                     reason: format!(
-                        "prepared_not_dispatched_identity_conflict:{}:{key}",
+                        "not_dispatched_prepared_binding_invalid:{}",
                         draft.object_id
                     ),
                 }
                 .into());
             }
-        }
-        if draft.payload.get("preparedEventId").and_then(Value::as_str)
-            != Some(prepared.event_id.as_str())
-            || draft.created_at < prepared.created_at
-        {
+        } else if draft.payload.get("preparedEventId").is_some() {
             return Err(MainChatAgentEventStoreFault::ToolLifecycleConflict {
-                reason: format!(
-                    "not_dispatched_prepared_binding_invalid:{}",
-                    draft.object_id
-                ),
+                reason: format!("not_dispatched_unexpected_prepared_ref:{}", draft.object_id),
             }
             .into());
         }
@@ -5861,6 +6755,7 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
         "payloadPurpose",
         &[
             "main_chat_direct_answer",
+            "main_chat_artifact_draft",
             "main_chat_react_ranking",
             "agent_loop_step",
             "agent_runtime_generation",
@@ -5919,23 +6814,27 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
         .payload
         .get("declaredPayloadCategories")
         .and_then(Value::as_array);
-    if declared_payload_categories.is_none_or(|categories| {
-        categories.is_empty()
-            || categories.iter().any(|category| {
-                category.as_str().is_none_or(|value| {
-                    ![
-                        "current_user_conversation",
-                        "runtime_compiled_messages",
-                        "frozen_evaluation_input",
-                        "main_chat_react_candidate_ranking",
-                        "a2a_authenticated_user_message",
-                        "explicit_provider_probe",
-                        "privacy_policy_masked",
-                    ]
-                    .contains(&value)
+    let declared_payload_categories_valid = match declared_payload_categories {
+        None => false,
+        Some(categories) => {
+            !categories.is_empty()
+                && categories.iter().all(|category| {
+                    matches!(
+                        category.as_str(),
+                        Some(
+                            "current_user_conversation"
+                                | "runtime_compiled_messages"
+                                | "frozen_evaluation_input"
+                                | "main_chat_react_candidate_ranking"
+                                | "a2a_authenticated_user_message"
+                                | "explicit_provider_probe"
+                                | "privacy_policy_masked"
+                        )
+                    )
                 })
-            })
-    }) {
+        }
+    };
+    if !declared_payload_categories_valid {
         return Err(persisted_provider_lifecycle_unverified(
             "declared_payload_categories_invalid",
             &event.object_id,
@@ -6198,6 +7097,7 @@ enum PayloadValueSchema {
     ToolTransportStatus,
     ToolEffectStatus,
     ToolExecutionOutcome,
+    ToolAuditPersistenceStatus,
     RedactedString,
     RedactedStringOrNull,
     ReasonCode,
@@ -6208,7 +7108,9 @@ enum PayloadValueSchema {
     Bool,
     Count,
     MetadataStringArray,
+    ContextReferenceArray,
     OpaqueDigestArray,
+    ToolOwnerBindingArray,
     MetadataStringArrayOrRedacted,
     ReadExecutionOrNull,
     ChildWorkflowProvenance,
@@ -6259,6 +7161,12 @@ const TURN_STARTED_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("requestId", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("policyRoute", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("selectedStrategy", PayloadValueSchema::MetadataString),
+    // Replay identity must remain queryable after payload minimization. Startup
+    // reconciliation uses this typed cause to distinguish a ToolGateway replay
+    // from a provider-consent continuation; treating an empty ActionQueue as a
+    // completed provider continuation would otherwise fabricate success.
+    PayloadFieldSchema::optional("replayCause", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::optional("replayCauseRef", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("rawUserTextStored", PayloadValueSchema::Bool),
 ];
 const TURN_TERMINAL_FIELDS: &[PayloadFieldSchema] = &[
@@ -6320,7 +7228,7 @@ const PROVIDER_STARTED_FIELDS: &[PayloadFieldSchema] = &[
     ),
     PayloadFieldSchema::required(
         "selectedContextRefs",
-        PayloadValueSchema::MetadataStringArray,
+        PayloadValueSchema::ContextReferenceArray,
     ),
     PayloadFieldSchema::required(
         "includedContextCategories",
@@ -6376,7 +7284,7 @@ const PROVIDER_COMPLETED_FIELDS: &[PayloadFieldSchema] = &[
     ),
     PayloadFieldSchema::required(
         "selectedContextRefs",
-        PayloadValueSchema::MetadataStringArray,
+        PayloadValueSchema::ContextReferenceArray,
     ),
     PayloadFieldSchema::required(
         "includedContextCategories",
@@ -6432,7 +7340,7 @@ const PROVIDER_REMOTE_UNKNOWN_FIELDS: &[PayloadFieldSchema] = &[
     ),
     PayloadFieldSchema::required(
         "selectedContextRefs",
-        PayloadValueSchema::MetadataStringArray,
+        PayloadValueSchema::ContextReferenceArray,
     ),
     PayloadFieldSchema::required(
         "includedContextCategories",
@@ -6483,6 +7391,10 @@ const TOOL_RECEIPT_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::required("transportStatus", PayloadValueSchema::ToolTransportStatus),
     PayloadFieldSchema::required("effectStatus", PayloadValueSchema::ToolEffectStatus),
     PayloadFieldSchema::optional("executionOutcome", PayloadValueSchema::ToolExecutionOutcome),
+    PayloadFieldSchema::optional(
+        "auditPersistenceStatus",
+        PayloadValueSchema::ToolAuditPersistenceStatus,
+    ),
     PayloadFieldSchema::required("status", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("startedAt", PayloadValueSchema::TimestampOrNull),
     PayloadFieldSchema::optional("dispatchedAt", PayloadValueSchema::TimestampOrNull),
@@ -6778,6 +7690,37 @@ const MEMORY_ROLLED_BACK_FIELDS: &[PayloadFieldSchema] = &[
         PayloadValueSchema::MetadataStringOrNull,
     ),
 ];
+const EFFECT_COMMITTED_FIELDS: &[PayloadFieldSchema] = &[
+    PayloadFieldSchema::required("status", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("receiptId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("operationId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("assetId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("assetVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::required("mutationKind", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("payloadDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::required("outboxEventId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("projectionStatus", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("replayed", PayloadValueSchema::Bool),
+];
+const TERMINAL_OWNER_SUCCESSOR_FIELDS: &[PayloadFieldSchema] = &[
+    PayloadFieldSchema::required("causeKind", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("causeRef", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("finalEventId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("ownerKind", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("ownerId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("beforeOwnerRevision", PayloadValueSchema::Count),
+    PayloadFieldSchema::required("afterOwnerRevision", PayloadValueSchema::Count),
+    PayloadFieldSchema::required("beforeOwnerDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::required("afterOwnerDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::required(
+        "localTransitionReceiptRef",
+        PayloadValueSchema::MetadataString,
+    ),
+    PayloadFieldSchema::required(
+        "localTransitionReceiptDigest",
+        PayloadValueSchema::MetadataString,
+    ),
+];
 const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("deliveryId", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskSessionId", PayloadValueSchema::MetadataString),
@@ -6803,6 +7746,7 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("runtimeOwner", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskOwnerStatus", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskOwnerDigestVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional("taskOwnerRevision", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("taskOwnerDigest", PayloadValueSchema::OpaqueDigest),
     PayloadFieldSchema::optional("runOwnerStatus", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("runOwnerRevision", PayloadValueSchema::Count),
@@ -6824,6 +7768,11 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
         PayloadValueSchema::OpaqueDigestArray,
     ),
     PayloadFieldSchema::optional("toolReceiptRefs", PayloadValueSchema::MetadataStringArray),
+    PayloadFieldSchema::optional("toolOwnerBindingsVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional(
+        "toolOwnerBindings",
+        PayloadValueSchema::ToolOwnerBindingArray,
+    ),
     PayloadFieldSchema::optional(
         "toolTerminalEventRefs",
         PayloadValueSchema::MetadataStringArray,
@@ -6867,6 +7816,9 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("durableEventCount", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("requiresProvider", PayloadValueSchema::Bool),
     PayloadFieldSchema::optional("requiresToolLoop", PayloadValueSchema::Bool),
+    PayloadFieldSchema::optional("replayEpochGeneration", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional("replayExecutionRef", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::optional("errorBodyStored", PayloadValueSchema::Bool),
 ];
 const DIAGNOSTIC_CREATED_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::required("gapId", PayloadValueSchema::MetadataString),
@@ -7141,6 +8093,18 @@ fn durable_event_payload_schema(
             object_type: "memory",
             fields: MEMORY_ROLLED_BACK_FIELDS,
             reject_unknown_fields: false,
+            expected_status: None,
+        },
+        "effect_committed" => DurableEventPayloadSchema {
+            object_type: "state_effect",
+            fields: EFFECT_COMMITTED_FIELDS,
+            reject_unknown_fields: true,
+            expected_status: Some("committed"),
+        },
+        "terminal_owner.successor_confirmed" => DurableEventPayloadSchema {
+            object_type: "terminal_owner_successor",
+            fields: TERMINAL_OWNER_SUCCESSOR_FIELDS,
+            reject_unknown_fields: true,
             expected_status: None,
         },
         "final_delivery.created" => DurableEventPayloadSchema {
@@ -7504,6 +8468,11 @@ fn normalize_schema_field_value(
             bounded_enum_string(value, &["not_observed", "succeeded", "failed", "unknown"])
                 .ok_or_else(invalid)
         }
+        Schema::ToolAuditPersistenceStatus => bounded_enum_string(
+            value,
+            &["not_required", "pending", "committed", "failed", "unknown"],
+        )
+        .ok_or_else(invalid),
         Schema::RedactedString => bounded_redacted_string(value, digest_key).ok_or_else(invalid),
         Schema::RedactedStringOrNull => {
             if value.is_null() {
@@ -7570,6 +8539,9 @@ fn normalize_schema_field_value(
             .map(|_| value.clone())
             .ok_or_else(invalid),
         Schema::MetadataStringArray => normalize_metadata_string_array(value).ok_or_else(invalid),
+        Schema::ContextReferenceArray => {
+            normalize_context_reference_array(value).ok_or_else(invalid)
+        }
         Schema::OpaqueDigestArray => {
             let values = value.as_array().ok_or_else(invalid)?;
             if values.len() > MAX_METADATA_ARRAY_ITEMS {
@@ -7585,6 +8557,9 @@ fn normalize_schema_field_value(
                 })
                 .then(|| value.clone())
                 .ok_or_else(invalid)
+        }
+        Schema::ToolOwnerBindingArray => {
+            normalize_tool_owner_binding_array(value).ok_or_else(invalid)
         }
         Schema::MetadataStringArrayOrRedacted => {
             normalize_metadata_string_array_or_redacted(value, digest_key).ok_or_else(invalid)
@@ -7688,6 +8663,8 @@ fn is_registered_event_reason_code(value: &str) -> bool {
             | "projection_delivery_failed"
             | "policy_blocked"
             | "permission_required"
+            | "replay_terminal_committed"
+            | "replay_terminal_error"
             | "unknown"
     )
 }
@@ -7700,6 +8677,56 @@ fn normalize_metadata_string_array(value: &Value) -> Option<Value> {
     values
         .iter()
         .map(bounded_metadata_string)
+        .collect::<Option<Vec<_>>>()
+        .map(Value::Array)
+}
+
+fn normalize_tool_owner_binding_array(value: &Value) -> Option<Value> {
+    const FIELDS: [&str; 4] = [
+        "actionQueueId",
+        "receiptId",
+        "terminalEventId",
+        "terminalEventDigest",
+    ];
+    let bindings = value.as_array()?;
+    if bindings.len() > MAX_METADATA_ARRAY_ITEMS {
+        return None;
+    }
+    for binding in bindings {
+        let object = binding.as_object()?;
+        if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+            return None;
+        }
+        for field in &FIELDS[..3] {
+            bounded_metadata_string(object.get(*field)?)?;
+        }
+        let digest = object.get("terminalEventDigest")?.as_str()?;
+        if digest.chars().count() > MAX_METADATA_STRING_CHARS || !is_exact_metadata_digest(digest) {
+            return None;
+        }
+    }
+    Some(value.clone())
+}
+
+fn normalize_context_reference_array(value: &Value) -> Option<Value> {
+    let values = value.as_array()?;
+    if values.len() > MAX_METADATA_ARRAY_ITEMS {
+        return None;
+    }
+    values
+        .iter()
+        .map(|value| {
+            let raw = value.as_str()?;
+            if raw.starts_with("websearch:") {
+                openlife_core::web_search::is_canonical_web_search_context_ref(raw)
+                    .then(|| Value::String(raw.to_string()))
+            } else if raw.starts_with("resource:") {
+                openlife_core::resource_selection::is_canonical_resource_context_ref(raw)
+                    .then(|| Value::String(raw.to_string()))
+            } else {
+                bounded_metadata_string(value)
+            }
+        })
         .collect::<Option<Vec<_>>>()
         .map(Value::Array)
 }
@@ -8252,6 +9279,110 @@ fn select_latest_event_by_identity(
     .map_err(Into::into)
 }
 
+fn terminal_owner_successor_head_from_conn(
+    conn: &Connection,
+    task_session_id: &str,
+    final_event_id: &str,
+    final_event: &MainChatAgentDurableEvent,
+) -> Result<(u64, String)> {
+    let mut revision = final_event
+        .payload
+        .get("taskOwnerRevision")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_final_revision_missing"))?;
+    let mut digest = final_event
+        .payload
+        .get("taskOwnerDigest")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_final_digest_missing"))?
+        .to_string();
+    let mut statement = conn.prepare(
+        "SELECT event_id, task_session_id, run_id, sequence, event_type, object_type,
+                object_id, created_at, source, payload_digest, payload_json, backfilled,
+                payload_minimized_version
+         FROM main_chat_agent_events
+         WHERE task_session_id = ?1
+           AND event_type = 'terminal_owner.successor_confirmed'
+           AND NOT EXISTS (
+               SELECT 1 FROM main_chat_agent_event_fact_quarantine quarantine
+               WHERE quarantine.event_id = main_chat_agent_events.event_id
+           )
+         ORDER BY sequence ASC",
+    )?;
+    let successors = statement
+        .query_map([task_session_id], row_to_event)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for successor in successors {
+        let cause_ref = successor
+            .payload
+            .get("causeRef")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_cause_missing"))?;
+        let before_revision = successor
+            .payload
+            .get("beforeOwnerRevision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_before_revision_missing"))?;
+        let after_revision = successor
+            .payload
+            .get("afterOwnerRevision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_after_revision_missing"))?;
+        let before_digest = successor
+            .payload
+            .get("beforeOwnerDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_before_digest_missing"))?;
+        let after_digest = successor
+            .payload
+            .get("afterOwnerDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_after_digest_missing"))?;
+        let receipt_ref = successor
+            .payload
+            .get("localTransitionReceiptRef")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_receipt_ref_missing"))?;
+        let receipt_digest = successor
+            .payload
+            .get("localTransitionReceiptDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_receipt_digest_missing"))?;
+        let expected_after_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_successor_revision_exhausted"))?;
+        if successor.run_id != final_event.run_id
+            || successor.object_type != "terminal_owner_successor"
+            || successor.object_id != format!("successor:{cause_ref}")
+            || successor
+                .payload
+                .get("finalEventId")
+                .and_then(Value::as_str)
+                != Some(final_event_id)
+            || successor.payload.get("ownerKind").and_then(Value::as_str)
+                != Some("agent_task_session")
+            || successor.payload.get("ownerId").and_then(Value::as_str) != Some(task_session_id)
+            || before_revision != revision
+            || before_digest != digest
+            || after_revision != expected_after_revision
+            || after_digest == before_digest
+            || !receipt_ref.starts_with("terminal-transition:")
+            || !receipt_digest.starts_with("hmac-sha256:")
+        {
+            anyhow::bail!("terminal_owner_successor_chain_invalid");
+        }
+        revision = after_revision;
+        digest = after_digest.to_string();
+    }
+    Ok((revision, digest))
+}
+
 fn validate_task_sequence_domain(conn: &Connection, task_session_id: &str) -> Result<()> {
     let (minimum, maximum, count) = conn.query_row(
         "SELECT MIN(sequence), MAX(sequence), COUNT(*)
@@ -8305,6 +9436,69 @@ fn select_event_by_id(
         )
         .optional()?;
     Ok(event)
+}
+
+fn issue_opened_epoch_review_origin(
+    admission: openlife_core::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission,
+    epoch_id: String,
+    epoch_generation: u64,
+) -> Result<openlife_core::agent::TerminalOwnerReviewOriginProof> {
+    admission.into_opened_epoch_review_origin(epoch_id, epoch_generation)
+}
+
+fn select_terminal_owner_epoch(
+    conn: &Connection,
+    task_session_id: &str,
+) -> Result<Option<TerminalOwnerEpoch>> {
+    let row = conn
+        .query_row(
+            "SELECT epoch_id, task_session_id, run_id, generation, state,
+                    canonical_user_message_ref, canonical_user_message_digest,
+                    final_event_id, final_event_payload_digest
+             FROM terminal_owner_epochs WHERE task_session_id = ?1",
+            [task_session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        epoch_id,
+        task_session_id,
+        run_id,
+        generation,
+        state,
+        canonical_user_message_ref,
+        canonical_user_message_digest,
+        final_event_id,
+        final_event_payload_digest,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TerminalOwnerEpoch {
+        epoch_id,
+        task_session_id,
+        run_id,
+        generation: u64::try_from(generation).context("terminal owner epoch generation invalid")?,
+        state: TerminalOwnerSealState::from_str(&state)?,
+        canonical_user_message_ref,
+        canonical_user_message_digest,
+        final_event_id,
+        final_event_payload_digest,
+        replayed: false,
+        review_origin: None,
+    }))
 }
 
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<MainChatAgentDurableEvent> {
@@ -8505,6 +9699,7 @@ pub(crate) async fn append_main_chat_agent_runtime_event_batch_with_provider_pro
         return Err("main_chat_agent_event_store_unavailable".into());
     };
     let store = store_arc.lock().await;
+    let inputs = omit_already_durable_tool_started_inputs(&store, task_session_id, run_id, inputs)?;
     store
         .append_batch_with_provider_proofs(
             runtime_event_drafts(task_session_id, run_id, inputs),
@@ -8644,6 +9839,7 @@ pub(crate) fn project_main_chat_tool_receipt(
             "transportStatus": receipt.transport_status.as_str(),
             "effectStatus": receipt.effect_status.as_str(),
             "executionOutcome": receipt.execution_outcome.as_str(),
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "startedAt": receipt.started_at,
             "dispatchedAt": receipt.dispatched_at,
             "responseObservedAt": receipt.response_observed_at,
@@ -8699,6 +9895,7 @@ pub(crate) fn main_chat_tool_started_event_input(
             "transportStatus": "dispatched",
             "effectStatus": "not_attempted",
             "executionOutcome": "not_observed",
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "status": "started",
             "startedAt": receipt.started_at,
             "dispatchedAt": dispatched_at,
@@ -8739,6 +9936,9 @@ pub(crate) fn main_chat_tool_dispatch_event_input(
         started_receipt.transport_status = ToolTransportStatus::Dispatched;
         started_receipt.execution_outcome = ToolExecutionOutcome::NotObserved;
         started_receipt.effect_status = ToolEffectStatus::NotAttempted;
+        if started_receipt.audit_persistence_status != ToolAuditPersistenceStatus::NotRequired {
+            started_receipt.audit_persistence_status = ToolAuditPersistenceStatus::Pending;
+        }
         started_receipt.response_observed_at = None;
         started_receipt.finished_at = None;
         return main_chat_tool_started_event_input(run_id, &started_receipt, source);
@@ -8786,6 +9986,7 @@ pub(crate) fn main_chat_tool_dispatch_event_input(
             "transportStatus": receipt.transport_status.as_str(),
             "effectStatus": receipt.effect_status.as_str(),
             "executionOutcome": receipt.execution_outcome.as_str(),
+            "auditPersistenceStatus": receipt.audit_persistence_status.as_str(),
             "status": "dispatch_ambiguous",
             "startedAt": receipt.started_at,
             "dispatchedAt": Value::Null,
@@ -8832,6 +10033,65 @@ pub(crate) fn main_chat_tool_receipt_event_inputs(
         );
     }
     Ok(inputs)
+}
+
+fn omit_already_durable_tool_started_inputs(
+    store: &MainChatAgentEventStore,
+    task_session_id: &str,
+    run_id: &str,
+    inputs: Vec<MainChatAgentRuntimeEventInput>,
+) -> std::result::Result<Vec<MainChatAgentRuntimeEventInput>, String> {
+    const IMMUTABLE_START_FIELDS: [&str; 10] = [
+        "receiptId",
+        "requestId",
+        "sourceRunId",
+        "manifestId",
+        "requestDigest",
+        "actionEffect",
+        "idempotencyContract",
+        "dispatchKind",
+        "startedAt",
+        "dispatchedAt",
+    ];
+    let mut filtered = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if input.event_type != "tool.started" {
+            filtered.push(input);
+            continue;
+        }
+        let existing = store
+            .get_immutable_event(task_session_id, "tool.started", &input.object_id)
+            .map_err(|error| error.to_string())?;
+        let Some(existing) = existing else {
+            filtered.push(input);
+            continue;
+        };
+        if existing.run_id != run_id
+            || IMMUTABLE_START_FIELDS
+                .iter()
+                .any(|field| existing.payload.get(field) != input.payload.get(field))
+        {
+            return Err(format!(
+                "durable_tool_started_identity_mismatch:{}",
+                input.object_id
+            ));
+        }
+        // MainChatToolLifecycleObserver owns the immutable adapter-edge start.
+        // A later terminal receipt may have a larger retry count and must not
+        // reconstruct or overwrite that earlier fact.
+    }
+    Ok(filtered)
+}
+
+fn append_main_chat_tool_receipt_event_batch_in_store(
+    store: &MainChatAgentEventStore,
+    task_session_id: &str,
+    run_id: &str,
+    inputs: Vec<MainChatAgentRuntimeEventInput>,
+) -> std::result::Result<Vec<MainChatAgentDurableEvent>, String> {
+    let inputs = omit_already_durable_tool_started_inputs(store, task_session_id, run_id, inputs)?;
+    append_main_chat_agent_runtime_event_batch_in_store(store, task_session_id, run_id, inputs)
+        .map_err(|error| error.to_string())
 }
 
 /// Persist live zero-attempt closures before any ActionQueue or product
@@ -8885,19 +10145,24 @@ pub(crate) async fn append_main_chat_tool_receipt_events(
     if inputs.is_empty() {
         return Ok(durable);
     }
-    durable.extend(
-        append_main_chat_agent_runtime_event_batch(
-            state,
-            task_session_id.to_string(),
-            run_id.to_string(),
-            inputs,
-        )
-        .await?,
-    );
+    let store_arc = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?;
+    let store = store_arc.lock().await;
+    durable.extend(append_main_chat_tool_receipt_event_batch_in_store(
+        &store,
+        task_session_id,
+        run_id,
+        inputs,
+    )?);
     Ok(durable)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 pub(crate) async fn append_main_chat_agent_runtime_event(
     state: &Arc<AppState>,
     task_session_id: impl Into<String>,
@@ -9690,7 +10955,7 @@ fn bounded_label(value: &str, max_chars: usize) -> String {
 /// Production registry shared by append-time schema lookup and coverage tests.
 /// Adding an event requires one authority update; a test-only source map cannot
 /// silently drift from the executable decoder.
-const DURABLE_EVENT_REGISTRY: [(&str, &str); 48] = [
+const DURABLE_EVENT_REGISTRY: [(&str, &str); 50] = [
     ("turn_started", "turn"),
     ("cancel_requested", "turn"),
     ("local_aborted", "turn"),
@@ -9736,6 +11001,11 @@ const DURABLE_EVENT_REGISTRY: [(&str, &str); 48] = [
     ("proposal.updated", "proposal"),
     ("memory.materialized", "memory"),
     ("memory.rolled_back", "memory"),
+    ("effect_committed", "state_effect"),
+    (
+        "terminal_owner.successor_confirmed",
+        "terminal_owner_successor",
+    ),
     ("final_delivery.created", "final_delivery"),
     ("diagnostic.created", "diagnostic"),
     ("task.updated", "task"),
@@ -9762,6 +11032,36 @@ mod tests {
             durable_event_payload_schema("task.updated", DURABLE_EVENT_PAYLOAD_VERSION - 1)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn replay_final_receipt_metadata_remains_typed_and_readable() {
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let event = store
+            .append(MainChatAgentEventDraft {
+                task_session_id: "task-replay-final-schema".into(),
+                run_id: "run-replay-final-schema".into(),
+                event_type: "final_delivery.created".into(),
+                object_type: "final_delivery".into(),
+                object_id: "replay-delivery:task-replay-final-schema:2:execution-1".into(),
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.final_delivery_owner".into(),
+                payload: json!({
+                    "status": "failed",
+                    "reasonCode": "replay_terminal_error",
+                    "replayEpochGeneration": 2,
+                    "replayExecutionRef": "execution-1",
+                    "errorBodyStored": false,
+                }),
+                backfilled: false,
+            })
+            .unwrap();
+
+        assert_eq!(event.payload["reasonCode"], "replay_terminal_error");
+        assert_eq!(event.payload["replayEpochGeneration"], 2);
+        assert_eq!(event.payload["replayExecutionRef"], "execution-1");
+        assert_eq!(event.payload["errorBodyStored"], false);
+        assert!(event.payload.get(UNRECOGNIZED_FIELDS_RECEIPT).is_none());
     }
 
     #[test]
@@ -10341,7 +11641,91 @@ mod tests {
             "transportStatus": if status == "started" { "dispatched" } else { "local_aborted" },
             "effectStatus": if status == "started" { "not_attempted" } else { "unknown" },
             "executionOutcome": if status == "started" { "not_observed" } else { "unknown" },
+            "auditPersistenceStatus": if status == "started" { "pending" } else { "unknown" },
         })
+    }
+
+    #[tokio::test]
+    async fn d067_durable_tool_lifecycle_preserves_failed_audit_disposition() {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let mut registry = openlife_core::mcp::McpRegistry::new();
+        registry.register_builtin(
+            openlife_core::tool_manifest::ToolManifest {
+                id: "d067.event.read".into(),
+                name: "d067.event.read".into(),
+                description: "D067 durable event fixture.".into(),
+                parameters: json!({"type": "object"}),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                idempotency_contract:
+                    openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
+                tags: vec![],
+            },
+            Box::new(|_| Ok(json!({"ok": true}).to_string())),
+        );
+        let permission_store =
+            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_store = openlife_core::mcp_audit::McpAuditStore::unavailable_sentinel(
+            "d067_event_audit_failure",
+        );
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let owner_store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
+        let mut owner_run =
+            openlife_core::agent::AgentRun::new_tool_execution_run("d067.event.read");
+        owner_run.id = run_id.clone();
+        owner_store.create_run(&owner_run).unwrap();
+        let context = openlife_core::agent::ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &[],
+        )
+        .with_agent_run_store(&owner_store);
+        let result = openlife_core::agent::ToolGateway::from_executor_config(Default::default())
+            .execute(
+                openlife_core::agent::AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "d067.event.read".into(),
+                    input: json!({}),
+                    source_run_id: Some(run_id.clone()),
+                    step_index: 0,
+                },
+                &context,
+            )
+            .await
+            .expect("tool result remains available after audit failure");
+        assert_eq!(
+            result.execution_receipt.audit_persistence_status,
+            ToolAuditPersistenceStatus::Failed
+        );
+
+        let inputs = main_chat_tool_receipt_event_inputs(
+            &run_id,
+            &[result.execution_receipt],
+            "openlife_turn_runtime",
+        )
+        .expect("project typed lifecycle");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].event_type, "tool.started");
+        assert_eq!(inputs[0].payload["auditPersistenceStatus"], "pending");
+        assert_eq!(inputs[1].event_type, "tool.completed");
+        assert_eq!(inputs[1].payload["auditPersistenceStatus"], "failed");
+
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let durable =
+            append_main_chat_tool_receipt_event_batch_in_store(&store, &run_id, &run_id, inputs)
+                .expect("persist typed lifecycle atomically");
+        assert_eq!(durable.len(), 2);
+        assert_eq!(durable[0].payload["auditPersistenceStatus"], "pending");
+        assert_eq!(durable[1].payload["auditPersistenceStatus"], "failed");
     }
 
     #[test]
@@ -10521,7 +11905,7 @@ mod tests {
             );
         let inputs = main_chat_tool_receipt_event_inputs(
             "run-regular-tool-timeout",
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
             "openlife_turn_runtime.regular_tool_receipt",
         )
         .expect("materialize regular tool receipt inputs");
@@ -10562,7 +11946,7 @@ mod tests {
 
         let inputs = main_chat_tool_receipt_event_inputs(
             "run-regular-ambiguous-attempt",
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
             "openlife_turn_runtime.regular_tool_receipt",
         )
         .expect("materialize ambiguous regular receipt inputs");
@@ -10612,6 +11996,62 @@ mod tests {
         assert_eq!(inputs[1].event_type, "tool.completed");
         assert_eq!(inputs[0].payload["dispatchKind"], "local");
         assert_eq!(inputs[1].payload["status"], "completed");
+    }
+
+    #[test]
+    fn terminal_projection_keeps_the_first_durable_start_across_http_retries() {
+        let task_id = "task-tool-retry-start-owner";
+        let run_id = "run-tool-retry-start-owner";
+        let mut terminal =
+            openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+                Some(run_id.into()),
+                Some("web.search".into()),
+                "retry-start-owner".into(),
+                true,
+            );
+        terminal.dispatch_attempt_count = 2;
+
+        let mut first_start = terminal.clone();
+        first_start.dispatch_attempt_count = 1;
+        first_start.transport_status = ToolTransportStatus::Dispatched;
+        first_start.effect_status = ToolEffectStatus::NotAttempted;
+        first_start.execution_outcome = ToolExecutionOutcome::NotObserved;
+        first_start.response_observed_at = None;
+        first_start.finished_at = None;
+
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        append_main_chat_agent_runtime_event_batch_in_store(
+            &store,
+            task_id,
+            run_id,
+            vec![main_chat_tool_started_event_input(
+                run_id,
+                &first_start,
+                "openlife_turn_runtime.tool_started",
+            )
+            .unwrap()],
+        )
+        .unwrap();
+
+        let projected = main_chat_tool_receipt_event_inputs(
+            run_id,
+            std::slice::from_ref(&terminal),
+            "openlife_turn_runtime.regular_tool_receipt",
+        )
+        .unwrap();
+        assert_eq!(projected[0].event_type, "tool.started");
+        assert_eq!(projected[0].payload["dispatchAttemptCount"], 2);
+        let appended =
+            append_main_chat_tool_receipt_event_batch_in_store(&store, task_id, run_id, projected)
+                .unwrap();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].event_type, "tool.completed");
+        let events = store.list(task_id, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "tool.started");
+        assert_eq!(events[0].payload["dispatchAttemptCount"], 1);
+        assert_eq!(events[1].event_type, "tool.completed");
+        assert_eq!(events[1].payload["dispatchAttemptCount"], 2);
     }
 
     #[test]
@@ -10944,6 +12384,39 @@ mod tests {
             outbox.items[0].disposition,
             MainChatToolQueueReconciliationDisposition::EffectNotAttempted
         );
+
+        let standalone_store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let standalone_task_id = "task-live-gateway-rejection";
+        let standalone_run_id = "run-live-gateway-rejection";
+        let standalone_registration = openlife_core::tool_execution_receipt::ToolExecutionReceiptRegistration::test_never_dispatched_read(
+            Some(standalone_run_id.into()),
+            Some("mcp:gateway-rejection".into()),
+            "request-live-gateway-rejection".into(),
+        );
+        let standalone_receipt = standalone_registration.settle_after_runtime_failure();
+        let standalone = standalone_store
+            .append_live_not_dispatched_tool_receipt(
+                standalone_task_id,
+                standalone_run_id,
+                &standalone_receipt,
+                "openlife_turn_runtime.tool_not_dispatched",
+            )
+            .unwrap()
+            .expect("a sealed ToolGateway rejection is a standalone zero-dispatch terminal");
+        assert_eq!(standalone.event_type, "tool.not_dispatched");
+        assert!(standalone.payload.get("preparedEventId").is_none());
+        assert_eq!(
+            standalone_store
+                .list(standalone_task_id, 0, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(standalone_store
+            .pending_tool_queue_reconciliation_projections(10)
+            .unwrap()
+            .items
+            .is_empty());
 
         let restored: ToolExecutionReceipt =
             serde_json::from_value(serde_json::to_value(&receipt).unwrap()).unwrap();
@@ -11536,6 +13009,112 @@ mod tests {
     }
 
     #[test]
+    fn provider_selected_context_refs_accept_only_canonical_bounded_source_refs() {
+        let mut valid = provider_started_draft(
+            "task-web-context-ref",
+            "run-web-context-ref",
+            "request-web-context-ref",
+            "provider-a",
+        )
+        .payload;
+        valid["selectedContextRefs"] = json!([
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_0123456789abcdef01234567",
+            "resource://4b014569-cd91-4a9f-8bba-e4b605c9a412/chunk/0?citation=cite_c6857bb9f404f647ccae812c"
+        ]);
+        normalize_durable_event_payload(
+            "provider.started",
+            "provider_request",
+            &valid,
+            PayloadNormalizationOrigin::New,
+        )
+        .expect("a canonical current-run Web reference is bounded provider evidence");
+
+        for invalid_ref in [
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0",
+            "websearch://550e8400-e29b-41d4-a716-446655440000/00?citation=webref_0123456789abcdef01234567",
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_NOT_A_DIGEST____________",
+            "resource://4b014569-cd91-4a9f-8bba-e4b605c9a412/chunk/00?citation=cite_c6857bb9f404f647ccae812c",
+            "resource://4b014569-cd91-4a9f-8bba-e4b605c9a412/chunk/0?citation=cite_c6857bb9f404f647ccae812c&filename=secret.md",
+            "https://example.com/path?private=user-derived-content",
+        ] {
+            let mut invalid = valid.clone();
+            invalid["selectedContextRefs"] = json!([invalid_ref]);
+            let error = normalize_durable_event_payload(
+                "provider.started",
+                "provider_request",
+                &invalid,
+                PayloadNormalizationOrigin::New,
+            )
+            .expect_err("untyped, malformed, or raw Web references must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid_field_type_or_bound:selectedContextRefs"),
+                "{invalid_ref}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_web_context_reference_survives_restart_without_copying_web_content() {
+        const WEB_CONTEXT_REF: &str =
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_0123456789abcdef01234567";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("web-provider-events.sqlite");
+        let task_id = "task-web-provider-restart";
+        let run_id = "run-web-provider-restart";
+        let request_id = "request-web-provider-restart";
+        let mut evidence =
+            synthetic_provider_policy_evidence_for_test(request_id, "test-provider-generation");
+        evidence.selected_context_refs = vec![WEB_CONTEXT_REF.into()];
+        evidence.included_context_categories = vec!["web_search_untrusted".into()];
+        let started_at = Utc::now();
+        let receipt = ProviderInvocationReceipt {
+            request_id: request_id.into(),
+            provider: "provider-a".into(),
+            model: "model-1".into(),
+            status: ProviderInvocationStatus::Completed,
+            started_at,
+            finished_at: started_at + chrono::Duration::milliseconds(5),
+            error_digest: None,
+            simulated: false,
+            policy_evidence: Some(evidence),
+        };
+        let proof = ProviderInvocationDurabilityProof::synthetic_for_test(receipt.clone()).unwrap();
+        let drafts = provider_event_drafts(task_id, run_id, &[receipt]).unwrap();
+        let scope = crate::main_chat_turn_runtime::MainChatProviderDurabilityScope::test_fixture(
+            task_id, run_id,
+        );
+
+        {
+            let store = MainChatAgentEventStore::new(&path).unwrap();
+            store
+                .append_provider_lifecycle_for_test(drafts, &scope, &[proof])
+                .unwrap();
+        }
+
+        let reopened = MainChatAgentEventStore::new(&path).unwrap();
+        let events = reopened.list(task_id, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events.iter().all(|event| {
+                event
+                    .payload
+                    .get("selectedContextRefs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|refs| refs == &vec![json!(WEB_CONTEXT_REF)])
+            }),
+            "{events:#?}"
+        );
+        for event in &events {
+            let payload = event.payload.as_object().unwrap();
+            for forbidden_field in ["messages", "content", "body", "snippet", "query", "url"] {
+                assert!(!payload.contains_key(forbidden_field), "{forbidden_field}");
+            }
+        }
+    }
+
+    #[test]
     fn durable_payload_does_not_retain_unrecognized_user_derived_object_keys() {
         const SENSITIVE_KEY: &str = "diagnosis_HIV_positive_for_Alice";
         const NESTED_SENSITIVE_KEY: &str = "private_case_number_74291";
@@ -11970,6 +13549,10 @@ mod tests {
         draft
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     fn synthetic_provider_pair(
         task_session_id: &str,
         run_id: &str,

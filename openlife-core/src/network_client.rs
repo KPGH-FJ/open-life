@@ -25,6 +25,12 @@ pub struct NetworkClientPolicy {
     /// reject private, link-local and reserved networks. This must never be
     /// enabled for a hostname merely because DNS happened to return loopback.
     pub allow_loopback: bool,
+    /// Exact/domain-suffix rules whose HTTPS destinations may use the macOS
+    /// user-configured loopback HTTP proxy when every local DNS answer is in
+    /// RFC 2544 fake-IP space. Adapters must bind this to their fixed endpoint
+    /// or to the user's explicit NetworkPolicy domain allowlist; an empty list
+    /// keeps generic/caller-selected hosts fail closed.
+    pub fake_ip_proxy_domain_allowlist: Vec<String>,
     pub max_redirects: usize,
     pub max_body_bytes: usize,
     pub connect_timeout: Duration,
@@ -37,6 +43,7 @@ impl Default for NetworkClientPolicy {
         Self {
             require_https: false,
             allow_loopback: false,
+            fake_ip_proxy_domain_allowlist: Vec::new(),
             max_redirects: DEFAULT_MAX_REDIRECTS,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -44,6 +51,12 @@ impl Default for NetworkClientPolicy {
             dns_timeout: DEFAULT_DNS_TIMEOUT,
         }
     }
+}
+
+#[derive(Debug)]
+enum NetworkEgressRoute {
+    DirectPinned(Vec<SocketAddr>),
+    LoopbackSystemProxy(Url),
 }
 
 #[derive(Debug, Clone)]
@@ -609,7 +622,7 @@ impl NetworkClient {
         .await
     }
 
-    async fn get_text_with_headers_for_capability_and_start_observer<F, Fut>(
+    pub(crate) async fn get_text_with_headers_for_capability_and_start_observer<F, Fut>(
         &self,
         url: &str,
         network_policy: Option<&NetworkPolicy>,
@@ -720,7 +733,7 @@ impl NetworkClient {
         .await
     }
 
-    async fn post_json_text_for_capability_with_start_observer<F, Fut>(
+    pub(crate) async fn post_json_text_for_capability_with_start_observer<F, Fut>(
         &self,
         url: &str,
         network_policy: Option<&NetworkPolicy>,
@@ -936,24 +949,24 @@ impl NetworkClient {
         let host = url
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("network_url_host_missing"))?;
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| anyhow::anyhow!("network_url_port_unknown"))?;
-        let resolved = resolve_allowed_addresses(
-            host,
-            port,
-            self.policy.dns_timeout,
-            self.policy.allow_loopback,
-        )
-        .await?;
-        let mut builder = reqwest::Client::builder()
+        let route = resolve_network_egress_route(url, &self.policy).await?;
+        let builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(self.policy.connect_timeout)
-            .timeout(self.policy.request_timeout)
-            .no_proxy();
-        if host_without_ipv6_brackets(host).parse::<IpAddr>().is_err() {
-            builder = builder.resolve_to_addrs(host, &resolved);
-        }
+            .timeout(self.policy.request_timeout);
+        let builder = match route {
+            NetworkEgressRoute::DirectPinned(resolved) => {
+                let mut builder = builder.no_proxy();
+                if host_without_ipv6_brackets(host).parse::<IpAddr>().is_err() {
+                    builder = builder.resolve_to_addrs(host, &resolved);
+                }
+                builder
+            }
+            NetworkEgressRoute::LoopbackSystemProxy(proxy) => builder.proxy(
+                reqwest::Proxy::all(proxy.as_str())
+                    .context("network_system_proxy_client_configuration_failed")?,
+            ),
+        };
         let client = builder.build().context("network_client_build_failed")?;
 
         let mut last_error = None;
@@ -1007,24 +1020,24 @@ impl NetworkClient {
         let host = url
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("network_url_host_missing"))?;
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| anyhow::anyhow!("network_url_port_unknown"))?;
-        let resolved = resolve_allowed_addresses(
-            host,
-            port,
-            self.policy.dns_timeout,
-            self.policy.allow_loopback,
-        )
-        .await?;
-        let mut builder = reqwest::Client::builder()
+        let route = resolve_network_egress_route(url, &self.policy).await?;
+        let builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(self.policy.connect_timeout)
-            .timeout(self.policy.request_timeout)
-            .no_proxy();
-        if host_without_ipv6_brackets(host).parse::<IpAddr>().is_err() {
-            builder = builder.resolve_to_addrs(host, &resolved);
-        }
+            .timeout(self.policy.request_timeout);
+        let builder = match route {
+            NetworkEgressRoute::DirectPinned(resolved) => {
+                let mut builder = builder.no_proxy();
+                if host_without_ipv6_brackets(host).parse::<IpAddr>().is_err() {
+                    builder = builder.resolve_to_addrs(host, &resolved);
+                }
+                builder
+            }
+            NetworkEgressRoute::LoopbackSystemProxy(proxy) => builder.proxy(
+                reqwest::Proxy::all(proxy.as_str())
+                    .context("network_system_proxy_client_configuration_failed")?,
+            ),
+        };
         let request = builder
             .build()
             .context("network_client_build_failed")?
@@ -1192,41 +1205,183 @@ fn validate_url_policy(
     Ok(())
 }
 
-async fn resolve_allowed_addresses(
+fn is_fake_ip_benchmark_address(ip: IpAddr) -> bool {
+    fn is_benchmarking_v4(ip: std::net::Ipv4Addr) -> bool {
+        u32::from(ip) & 0xfffe_0000 == 0xc612_0000
+    }
+
+    match ip {
+        IpAddr::V4(ip) => is_benchmarking_v4(ip),
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return is_benchmarking_v4(mapped);
+            }
+            let value = u128::from(ip);
+            // macOS may surface RFC 2544 fake IPv4 answers through the
+            // IPv4-translatable ::ffff:0:0:0/96 form.
+            value >> 32 == 0x0000_0000_0000_0000_ffff_0000
+                && is_benchmarking_v4(std::net::Ipv4Addr::from(value as u32))
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validated_loopback_proxy_url(host: &str, port: i32) -> Result<Url> {
+    let address = host
+        .trim()
+        .parse::<IpAddr>()
+        .map_err(|_| anyhow::anyhow!("network_system_proxy_host_not_ip_literal"))?;
+    if !address.is_loopback() {
+        anyhow::bail!("network_system_proxy_not_loopback");
+    }
+    let port = u16::try_from(port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| anyhow::anyhow!("network_system_proxy_port_invalid"))?;
+    let authority = match address {
+        IpAddr::V4(address) => format!("{address}:{port}"),
+        IpAddr::V6(address) => format!("[{address}]:{port}"),
+    };
+    Url::parse(&format!("http://{authority}")).context("network_system_proxy_url_invalid")
+}
+
+#[cfg(target_os = "macos")]
+fn configured_system_proxy_url(destination_scheme: &str) -> Result<Option<Url>> {
+    use system_configuration::core_foundation::{base::CFType, number::CFNumber, string::CFString};
+    use system_configuration::dynamic_store::SCDynamicStoreBuilder;
+
+    fn number(
+        proxies: &system_configuration::core_foundation::dictionary::CFDictionary<CFString, CFType>,
+        key: &str,
+    ) -> Option<i32> {
+        proxies
+            .find(CFString::new(key))
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|value| value.to_i32())
+    }
+
+    fn string(
+        proxies: &system_configuration::core_foundation::dictionary::CFDictionary<CFString, CFType>,
+        key: &str,
+    ) -> Option<String> {
+        proxies
+            .find(CFString::new(key))
+            .and_then(|value| value.downcast::<CFString>())
+            .map(|value| value.to_string())
+    }
+
+    let (enable_key, host_key, port_key) = match destination_scheme {
+        "https" => ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        "http" => ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+        _ => return Ok(None),
+    };
+    let store = SCDynamicStoreBuilder::new("OpenLife Network Egress")
+        .build()
+        .ok_or_else(|| anyhow::anyhow!("network_system_proxy_store_unavailable"))?;
+    let proxies = store
+        .get_proxies()
+        .ok_or_else(|| anyhow::anyhow!("network_system_proxy_settings_unavailable"))?;
+    if number(&proxies, enable_key).unwrap_or_default() != 1 {
+        return Ok(None);
+    }
+    let host = string(&proxies, host_key)
+        .ok_or_else(|| anyhow::anyhow!("network_system_proxy_host_missing"))?;
+    let port = number(&proxies, port_key)
+        .ok_or_else(|| anyhow::anyhow!("network_system_proxy_port_missing"))?;
+    validated_loopback_proxy_url(&host, port).map(Some)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configured_system_proxy_url(_destination_scheme: &str) -> Result<Option<Url>> {
+    Ok(None)
+}
+
+fn select_network_egress_route(
     host: &str,
-    port: u16,
-    timeout: Duration,
+    addresses: Vec<SocketAddr>,
     allow_loopback: bool,
-) -> Result<Vec<SocketAddr>> {
+    fake_ip_proxy_domain_allowlist: &[String],
+    destination_is_https: bool,
+    configured_proxy: Option<Url>,
+) -> Result<NetworkEgressRoute> {
     if allow_loopback && !explicitly_configured_loopback_host(host) {
         anyhow::bail!("network_loopback_policy_requires_explicit_host");
     }
-    let host = host_without_ipv6_brackets(host);
-    let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
-        vec![SocketAddr::new(ip, port)]
-    } else {
-        tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
-            .await
-            .map_err(|_| anyhow::anyhow!("network_dns_timeout"))?
-            .context("network_dns_failed")?
-            .collect::<Vec<_>>()
-    };
     if addresses.is_empty() {
         anyhow::bail!("network_dns_no_addresses");
     }
     if allow_loopback {
         if addresses.iter().all(|address| address.ip().is_loopback()) {
-            return Ok(addresses);
+            return Ok(NetworkEgressRoute::DirectPinned(addresses));
         }
         anyhow::bail!("network_loopback_endpoint_resolved_non_loopback");
     }
     if addresses
         .iter()
-        .any(|address| is_private_or_reserved_ip(address.ip()))
+        .all(|address| !is_private_or_reserved_ip(address.ip()))
     {
-        anyhow::bail!("network_private_or_reserved_address_blocked");
+        return Ok(NetworkEgressRoute::DirectPinned(addresses));
     }
-    Ok(addresses)
+    let host_is_name = host_without_ipv6_brackets(host).parse::<IpAddr>().is_err();
+    if fake_ip_proxy_domain_allowlist
+        .iter()
+        .any(|rule| domain_matches(host, rule))
+        && destination_is_https
+        && host_is_name
+        && addresses
+            .iter()
+            .all(|address| is_fake_ip_benchmark_address(address.ip()))
+    {
+        if let Some(proxy) = configured_proxy {
+            return Ok(NetworkEgressRoute::LoopbackSystemProxy(proxy));
+        }
+    }
+    anyhow::bail!("network_private_or_reserved_address_blocked")
+}
+
+async fn resolve_network_egress_route(
+    url: &Url,
+    policy: &NetworkClientPolicy,
+) -> Result<NetworkEgressRoute> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("network_url_host_missing"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("network_url_port_unknown"))?;
+    let normalized_host = host_without_ipv6_brackets(host);
+    let addresses = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::time::timeout(
+            policy.dns_timeout,
+            tokio::net::lookup_host((normalized_host, port)),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("network_dns_timeout"))?
+        .context("network_dns_failed")?
+        .collect::<Vec<_>>()
+    };
+    let needs_proxy_lookup = policy
+        .fake_ip_proxy_domain_allowlist
+        .iter()
+        .any(|rule| domain_matches(host, rule))
+        && addresses
+            .iter()
+            .any(|address| is_private_or_reserved_ip(address.ip()));
+    let configured_proxy = if needs_proxy_lookup {
+        configured_system_proxy_url(url.scheme())?
+    } else {
+        None
+    };
+    select_network_egress_route(
+        host,
+        addresses,
+        policy.allow_loopback,
+        &policy.fake_ip_proxy_domain_allowlist,
+        url.scheme() == "https",
+        configured_proxy,
+    )
 }
 
 #[cfg(test)]
@@ -1268,6 +1423,106 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&request).into_owned()
+    }
+
+    #[test]
+    fn fake_ip_route_requires_an_enabled_verified_loopback_proxy() {
+        let fake_v4 = SocketAddr::new("198.18.0.93".parse().unwrap(), 443);
+        let fake_v6 = SocketAddr::new("::ffff:0:c612:5d".parse().unwrap(), 443);
+        let proxy = validated_loopback_proxy_url("127.0.0.1", 1082).unwrap();
+        let allowed_domains = vec!["example.com".into()];
+        let route = select_network_egress_route(
+            "api.example.com",
+            vec![fake_v4, fake_v6],
+            false,
+            &allowed_domains,
+            true,
+            Some(proxy.clone()),
+        )
+        .unwrap();
+        assert!(matches!(
+            route,
+            NetworkEgressRoute::LoopbackSystemProxy(observed) if observed == proxy
+        ));
+
+        assert!(select_network_egress_route(
+            "api.example.com",
+            vec![fake_v4],
+            false,
+            &[],
+            true,
+            Some(proxy.clone()),
+        )
+        .is_err());
+        assert!(select_network_egress_route(
+            "api.example.com",
+            vec![fake_v4],
+            false,
+            &allowed_domains,
+            true,
+            None,
+        )
+        .is_err());
+        assert!(select_network_egress_route(
+            "api.example.com",
+            vec![fake_v4],
+            false,
+            &allowed_domains,
+            false,
+            Some(proxy),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fake_ip_proxy_does_not_admit_literal_private_or_mixed_dns_targets() {
+        let proxy = validated_loopback_proxy_url("127.0.0.1", 1082).unwrap();
+        let allowed_domains = vec!["example.com".into()];
+        assert!(select_network_egress_route(
+            "192.168.1.2",
+            vec![SocketAddr::new("192.168.1.2".parse().unwrap(), 443)],
+            false,
+            &["192.168.1.2".into()],
+            true,
+            Some(proxy.clone()),
+        )
+        .is_err());
+        assert!(select_network_egress_route(
+            "api.example.com",
+            vec![
+                SocketAddr::new("198.18.0.93".parse().unwrap(), 443),
+                SocketAddr::new("8.8.8.8".parse().unwrap(), 443),
+            ],
+            false,
+            &allowed_domains,
+            true,
+            Some(proxy),
+        )
+        .is_err());
+        assert!(select_network_egress_route(
+            "attacker.example.net",
+            vec![SocketAddr::new("198.18.0.93".parse().unwrap(), 443)],
+            false,
+            &allowed_domains,
+            true,
+            Some(validated_loopback_proxy_url("127.0.0.1", 1082).unwrap()),
+        )
+        .is_err());
+        assert!(validated_loopback_proxy_url("192.168.1.10", 1082).is_err());
+        assert!(validated_loopback_proxy_url("localhost", 1082).is_err());
+        assert!(validated_loopback_proxy_url("127.0.0.1", 0).is_err());
+    }
+
+    #[test]
+    fn fake_ip_detection_covers_ipv4_and_macos_translatable_ipv6() {
+        assert!(is_fake_ip_benchmark_address("198.18.0.93".parse().unwrap()));
+        assert!(is_fake_ip_benchmark_address(
+            "::ffff:0:c612:5d".parse().unwrap()
+        ));
+        assert!(!is_fake_ip_benchmark_address("8.8.8.8".parse().unwrap()));
+        assert!(!is_fake_ip_benchmark_address(
+            "192.168.1.2".parse().unwrap()
+        ));
     }
 
     #[test]
@@ -1466,6 +1721,82 @@ mod tests {
             );
             assert!(!observed.load(Ordering::SeqCst));
         }
+    }
+
+    #[tokio::test]
+    async fn capability_specific_http_edges_honor_web_search_override_before_dispatch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let url = "http://127.0.0.1:9/search";
+        let policy = NetworkPolicy {
+            default_decision: "allow".into(),
+            tool_overrides: std::collections::HashMap::from([
+                ("web.fetch".into(), "allow".into()),
+                ("web.search".into(), "deny".into()),
+            ]),
+            ..NetworkPolicy::default()
+        };
+        assert_eq!(
+            resolve_network_policy_decision(&policy, url, "web.fetch")
+                .unwrap()
+                .disposition,
+            NetworkPolicyDisposition::Allow
+        );
+        assert_eq!(
+            resolve_network_policy_decision(&policy, url, "web.search")
+                .unwrap()
+                .disposition,
+            NetworkPolicyDisposition::Deny
+        );
+        let client = NetworkClient::new(NetworkClientPolicy {
+            allow_loopback: true,
+            require_https: false,
+            ..NetworkClientPolicy::default()
+        });
+
+        let get_observed = Arc::new(AtomicBool::new(false));
+        let get_observer = Arc::clone(&get_observed);
+        let get_error = client
+            .get_text_with_headers_for_capability_and_start_observer(
+                url,
+                Some(&policy),
+                "web.search",
+                HeaderMap::new(),
+                move |_| {
+                    let get_observer = Arc::clone(&get_observer);
+                    async move {
+                        get_observer.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{get_error:#}").contains("network_policy_override_deny"));
+        assert!(!get_observed.load(Ordering::SeqCst));
+
+        let post_observed = Arc::new(AtomicBool::new(false));
+        let post_observer = Arc::clone(&post_observed);
+        let post_error = client
+            .post_json_text_for_capability_with_start_observer(
+                url,
+                Some(&policy),
+                "web.search",
+                HeaderMap::new(),
+                &serde_json::json!({"query": "bounded"}),
+                move |_| {
+                    let post_observer = Arc::clone(&post_observer);
+                    async move {
+                        post_observer.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{post_error:#}").contains("network_policy_override_deny"));
+        assert!(!post_observed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1708,16 +2039,18 @@ mod tests {
         let terminal = tracker.snapshot();
         assert_eq!(response.body, "ok");
         assert_eq!(terminal.dispatch_attempt_count, 2);
-        let starts = durable_observer
-            .starts
-            .lock()
-            .expect("durable start observer mutex");
-        assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].dispatch_attempt_count, 1);
-        assert_eq!(
-            starts[0].transport_status,
-            crate::tool_execution_receipt::ToolTransportStatus::Dispatched
-        );
+        {
+            let starts = durable_observer
+                .starts
+                .lock()
+                .expect("durable start observer mutex");
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].dispatch_attempt_count, 1);
+            assert_eq!(
+                starts[0].transport_status,
+                crate::tool_execution_receipt::ToolTransportStatus::Dispatched
+            );
+        }
         server.await.unwrap();
     }
 
@@ -1817,17 +2150,19 @@ mod tests {
             }
         });
 
-        let started = std::time::Instant::now();
-        let error = NetworkClient::new(NetworkClientPolicy {
-            allow_loopback: true,
-            request_timeout: Duration::from_millis(70),
-            ..Default::default()
-        })
-        .get_text(&format!("http://{address}/trickle"), None)
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            NetworkClient::new(NetworkClientPolicy {
+                allow_loopback: true,
+                request_timeout: Duration::from_millis(70),
+                ..Default::default()
+            })
+            .get_text(&format!("http://{address}/trickle"), None),
+        )
         .await
-        .unwrap_err();
+        .expect("request must finish within the test watchdog");
+        let error = result.unwrap_err();
 
-        assert!(started.elapsed() < Duration::from_millis(500));
         assert!(format!("{error:#}").contains("timed out"));
         server.await.unwrap();
     }

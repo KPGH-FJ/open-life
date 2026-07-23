@@ -33,6 +33,18 @@ ring = "0.17"
 log = "0.4"
 unicode-normalization = "0.1"
 libc = "0.2"
+calamine = "0.36.0"
+csv = "1.4.0"
+infer = "0.19.0"
+lopdf = { version = "0.44.0", default-features = false }
+quick-xml = "0.41.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

@@ -153,8 +153,9 @@ fn normalize_ollama_base_url(value: &str) -> Option<String> {
         return None;
     }
     let host = parsed.host_str()?;
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
-        || host
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    let is_loopback = normalized_host.eq_ignore_ascii_case("localhost")
+        || normalized_host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback());
     if !is_loopback {
@@ -391,8 +392,9 @@ pub(crate) fn validate_prepared_ollama_chat_endpoint(endpoint: &str) -> Result<(
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("prepared Ollama chat endpoint has no host"))?;
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
-        || host
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    let is_loopback = normalized_host.eq_ignore_ascii_case("localhost")
+        || normalized_host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback());
     if !matches!(parsed.scheme(), "http" | "https")
@@ -1227,7 +1229,23 @@ mod tests {
             "http://localhost:11434/api/chat",
             "http://[::1]:11434/api/chat",
         ] {
-            validate_prepared_ollama_chat_endpoint(endpoint).unwrap();
+            validate_prepared_ollama_chat_endpoint(endpoint)
+                .unwrap_or_else(|error| {
+                    let parsed = reqwest::Url::parse(endpoint).unwrap();
+                    let host = parsed.host_str().unwrap();
+                    let normalized = host.trim_start_matches('[').trim_end_matches(']');
+                    panic!(
+                        "{endpoint}: {error:#}; scheme={:?}; host={host:?}; normalized={normalized:?}; ip={:?}; loopback={}; path={:?}; username={:?}; password={:?}; query={:?}; fragment={:?}",
+                        parsed.scheme(),
+                        normalized.parse::<std::net::IpAddr>(),
+                        normalized.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()),
+                        parsed.path(),
+                        parsed.username(),
+                        parsed.password(),
+                        parsed.query(),
+                        parsed.fragment(),
+                    )
+                });
         }
         for endpoint in [
             "http://127.0.0.1:11434/api/tags",
@@ -1270,6 +1288,12 @@ mod tests {
         );
     }
 
+    // These tests mutate a process-global endpoint and must retain the shared
+    // environment lock until every async request and server task completes.
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test(flavor = "current_thread")]
     async fn concurrent_diagnostics_share_one_generation_keyed_ollama_inspection() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1399,6 +1423,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn embedding_parser_rejects_non_numeric_elements_instead_of_filtering_them() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1503,6 +1531,10 @@ mod tests {
         assert_ne!(one, two);
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test(flavor = "current_thread")]
     async fn bound_stream_endpoint_ignores_environment_and_eof_is_not_completion() {
         use futures::StreamExt as _;

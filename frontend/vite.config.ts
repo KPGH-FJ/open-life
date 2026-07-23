@@ -1,11 +1,16 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
-const vitePort = Number(process.env.PORT || process.env.VITE_PORT || 5173)
+const vitePort = Number(process.env.PORT || process.env.VITE_PORT || 5173);
 
 export default defineConfig(async ({ command }) => ({
-  base: command === 'build' ? './' : '/',
+  base: command === "build" ? "./" : "/",
   plugins: [react()],
+  define: {
+    __OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false),
+    __OPENLIFE_PHASE4C_HARNESS__: JSON.stringify(false),
+    __OPENLIFE_PHASE4D_HARNESS__: JSON.stringify(false),
+  },
   resolve: {
     alias: {
       "@": new URL("./src", import.meta.url).pathname,
@@ -20,7 +25,7 @@ export default defineConfig(async ({ command }) => ({
     },
   },
   build: {
-    minify: 'terser',
+    minify: "terser",
     terserOptions: {
       compress: {
         drop_console: true,
@@ -28,4 +33,4 @@ export default defineConfig(async ({ command }) => ({
       },
     },
   },
-}))
+}));

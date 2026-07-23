@@ -69,7 +69,7 @@ jobs:
         run: cargo test --all --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
-        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+        run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   frontend-check:
     name: Frontend Check
@@ -150,6 +150,8 @@ jobs:
     if: github.base_ref == 'main' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -163,7 +165,7 @@ jobs:
         run: cargo test --all --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
-        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+        run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   rust-check-windows:
     name: Rust Check (Windows)
@@ -190,7 +192,7 @@ jobs:
         run: cargo test -p openlife-tauri --bins --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
-        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+        run: cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked
 
   # ============================================
   # Rust 覆盖率（可选，仅在 dev → main 时运行）
@@ -209,7 +211,9 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Run coverage for openlife-core
-        run: cargo tarpaulin -p openlife-core --out json --output-dir coverage-rust
+        # Tarpaulin's default is one minute without a test response. The
+        # final-acceptance tests remain bounded but exceed that under ptrace.
+        run: cargo tarpaulin -p openlife-core --timeout 300 --out json --output-dir coverage-rust
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
@@ -248,6 +252,8 @@ jobs:
     needs: [rust-check, frontend-check]
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

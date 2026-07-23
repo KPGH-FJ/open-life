@@ -1,5 +1,6 @@
 use crate::main_chat_command_surface_eval::{
-    configure_main_chat_command_surface_eval_state, json_contains_direct_write_true,
+    configure_main_chat_command_surface_eval_state,
+    configure_main_chat_command_surface_eval_state_for_operation, json_contains_direct_write_true,
     main_chat_command_surface_eval_has_silent_write, MainChatCommandSurfaceEvalScenario,
 };
 use crate::AppState;
@@ -315,12 +316,14 @@ async fn collect_main_chat_capability_eval_artifacts(
     fixture_mode: MainChatCapabilityEvalFixtureMode,
 ) -> Result<MainChatCapabilityEvalArtifacts, String> {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    configure_main_chat_capability_eval_state(&state, scenario, fixture_mode).await?;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    configure_main_chat_capability_eval_state(&state, scenario, fixture_mode, &operation_id)
+        .await?;
     let network_policy_enabled = state.config.lock().await.system.network_policy.enabled;
     let session_id = main_chat_capability_eval_session_id(scenario, fixture_mode);
     let prompt = main_chat_capability_eval_prompt(scenario, fixture_mode);
     let response = crate::main_chat_send::send_message_with_operation_state(
-        uuid::Uuid::new_v4().to_string(),
+        operation_id,
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
@@ -415,6 +418,7 @@ async fn configure_main_chat_capability_eval_state(
     state: &Arc<AppState>,
     scenario: MainChatCapabilityEvalScenario,
     fixture_mode: MainChatCapabilityEvalFixtureMode,
+    operation_id: &str,
 ) -> Result<(), String> {
     match (scenario, fixture_mode) {
         (MainChatCapabilityEvalScenario::CfDirect01, _) => {
@@ -432,9 +436,10 @@ async fn configure_main_chat_capability_eval_state(
             .await
         }
         (MainChatCapabilityEvalScenario::CfWeb01, _) => {
-            configure_main_chat_command_surface_eval_state(
+            configure_main_chat_command_surface_eval_state_for_operation(
                 state,
                 MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess,
+                operation_id,
             )
             .await
         }
@@ -570,13 +575,21 @@ fn evaluate_main_chat_capability_eval_artifacts(
             .and_then(serde_json::Value::as_str)
             == Some("main_chat_direct_answer_scheduler")
             && generation
-                .get("schedulerGenerationCalled")
+                .get("scriptedProviderResponse")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
             && generation
                 .get("modelGenerated")
                 .and_then(serde_json::Value::as_bool)
-                == Some(true)
+                == Some(false)
+            && generation
+                .get("liveProviderInvoked")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && generation
+                .get("providerEndpointKind")
+                .and_then(serde_json::Value::as_str)
+                == Some("scripted_scheduler_response")
     });
     let structured_blocker = structured_capability_blocker(artifacts);
     let mut report = MainChatCapabilityEvalCaseReport {
@@ -746,16 +759,39 @@ fn assert_cf_direct_01(
             .evidence
             .push("provider_scheduler_trace_observed".into());
     }
-    if !artifacts.runs.iter().any(|run| {
-        run.reasoning_strategy.as_deref() == Some("main_chat_agent_v1_direct_answer")
-            && run.model_route.is_some()
-            && run.tool_call_count == 0
-    }) {
+    let Some(run) = artifacts.runs.first() else {
+        report.blockers.push("direct_agent_run_missing".into());
+        return;
+    };
+    if run.reasoning_strategy.as_deref() != Some("direct") {
         report
             .blockers
-            .push("direct_agent_run_route_or_tool_count_missing".into());
-    } else {
-        report.evidence.push("direct_agent_run_observed".into());
+            .push("direct_agent_run_reasoning_strategy_mismatch".into());
+    }
+    if !run
+        .model_route
+        .as_ref()
+        .is_some_and(|route| route.provider == "openai" && route.route_type == "cloud")
+    {
+        report
+            .blockers
+            .push("direct_agent_run_route_decision_missing".into());
+    }
+    if run.tool_call_count != 0 {
+        report
+            .blockers
+            .push("direct_agent_run_tool_count_nonzero".into());
+    }
+    if run.reasoning_strategy.as_deref() == Some("direct")
+        && run
+            .model_route
+            .as_ref()
+            .is_some_and(|route| route.provider == "openai" && route.route_type == "cloud")
+        && run.tool_call_count == 0
+    {
+        report
+            .evidence
+            .push("direct_agent_run_route_decision_without_live_credit".into());
     }
 }
 
@@ -781,6 +817,31 @@ fn assert_cf_web_01(
         || report.read_execution_kind.as_deref() == Some("web_search_network")
     {
         report.blockers.push("web_fixture_credited_as_live".into());
+    }
+    let web_generation = artifacts
+        .response_value
+        .get("reasoning_trace")
+        .and_then(|trace| trace.get("generation_result"));
+    let reply_has_bound_source_footer = matches!(
+        artifacts
+            .response_value
+            .get("reply")
+            .and_then(serde_json::Value::as_str),
+        Some(reply) if reply.contains("来源（OpenLife 引用已绑定，内容未背书）")
+    );
+    if web_generation
+        .and_then(|generation| generation.get("scriptedProviderResponse"))
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || !reply_has_bound_source_footer
+    {
+        report
+            .blockers
+            .push("web_fixture_citation_synthesis_missing".into());
+    } else {
+        report
+            .evidence
+            .push("web_fixture_citation_synthesis_observed".into());
     }
 }
 
@@ -973,10 +1034,17 @@ fn assert_read_capability(
             .push(format!("{action_type}_direct_write_flag_missing"));
     }
     if !artifacts.transcript.iter().any(|entry| {
-        entry
-            .summary
-            .contains("MainChatKernel read-only tool loop completed")
-            || entry.summary.contains("Governed ReAct AgentLoop completed")
+        entry.kind == ExecutionTranscriptEntryKind::FinalResult
+            && entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
     }) {
         report.blockers.push(format!(
             "{action_type}_read_loop_completion_transcript_missing"
@@ -987,7 +1055,7 @@ fn assert_read_capability(
             .push(format!("{action_type}_read_loop_completion_transcript"));
     }
     if generation_provider_path(&artifacts.response_value)
-        != Some("main_chat_kernel_read_tool_synthesis")
+        != Some("main_chat_kernel_read_tool_local_synthesis")
     {
         report
             .blockers

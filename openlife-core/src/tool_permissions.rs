@@ -573,6 +573,100 @@ impl ToolPermissionStore {
         }))
     }
 
+    /// Atomically consume the ReviewWorkflow-linked AllowOnce issued by the
+    /// exact accepted Proposal. Continuations must use this entrypoint: a
+    /// merely scope-equivalent grant belongs to another review decision and
+    /// cannot authorize this replay generation.
+    pub fn consume_reviewed_network_once_for_proposal(
+        &self,
+        proposal_id: &str,
+        tool_name: &str,
+        source: &str,
+        risk_level: &str,
+        action_type: &str,
+    ) -> Result<Option<ConsumedReviewedNetworkPermission>> {
+        if proposal_id.trim().is_empty() {
+            anyhow::bail!("reviewed network permission proposal_id is empty");
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let candidate = tx
+            .query_row(
+                "SELECT p.id
+                 FROM tool_permissions p
+                 INNER JOIN reviewed_network_permissions r ON r.permission_id = p.id
+                 WHERE r.proposal_id = ?1
+                   AND p.tool_name = ?2 AND p.source = ?3 AND p.risk_level = ?4
+                   AND p.action_type = ?5 AND p.policy = 'allow_once'
+                   AND p.consumed_at IS NULL
+                   AND (p.expires_at IS NULL OR p.expires_at >= ?6)
+                 LIMIT 1",
+                params![proposal_id, tool_name, source, risk_level, action_type, now],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(permission_id) = candidate else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let changed = tx.execute(
+            "UPDATE tool_permissions SET consumed_at = ?2
+             WHERE id = ?1 AND consumed_at IS NULL",
+            params![permission_id, now],
+        )?;
+        if changed != 1 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        tx.commit()?;
+        Ok(Some(ConsumedReviewedNetworkPermission {
+            permission_id,
+            proposal_id: proposal_id.to_string(),
+            tool_name: tool_name.to_string(),
+            source: source.to_string(),
+            risk_level: risk_level.to_string(),
+            action_type: action_type.to_string(),
+            authority: ReviewedNetworkPermissionAuthority::ConsumedByCanonicalStore,
+        }))
+    }
+
+    /// Read-only preflight used before a continuation epoch is opened. The
+    /// actual authority is still the atomic exact-Proposal consume above.
+    pub fn reviewed_network_once_available_for_proposal(
+        &self,
+        proposal_id: &str,
+        tool_name: &str,
+        source: &str,
+        risk_level: &str,
+        action_type: &str,
+    ) -> Result<bool> {
+        if proposal_id.trim().is_empty() {
+            anyhow::bail!("reviewed network permission proposal_id is empty");
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let now = Utc::now().to_rfc3339();
+        let count = conn.query_row(
+            "SELECT COUNT(*)
+             FROM tool_permissions p
+             INNER JOIN reviewed_network_permissions r ON r.permission_id = p.id
+             WHERE r.proposal_id = ?1
+               AND p.tool_name = ?2 AND p.source = ?3 AND p.risk_level = ?4
+               AND p.action_type = ?5 AND p.policy = 'allow_once'
+               AND p.consumed_at IS NULL
+               AND (p.expires_at IS NULL OR p.expires_at >= ?6)",
+            params![proposal_id, tool_name, source, risk_level, action_type, now],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count == 1)
+    }
+
     /// Create the exact generic AllowOnce row plus an immutable proposal link
     /// in one SQLite transaction. Only accepted network-policy proposals use
     /// this path; generic grants cannot later masquerade as reviewed consent.
@@ -855,6 +949,11 @@ impl ToolPermissionStore {
         .map_err(Into::into)
     }
 
+    // Permission consumption binds the grant to the complete action and tool identity.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub fn consume_action_bound(
         &self,
         authorization: &ActionBoundToolPermissionAuthorization,
@@ -2070,5 +2169,86 @@ mod tests {
 
         assert!(!permission.id.is_empty());
         scheduler.prepare_explicit_provider_probe(grant).unwrap();
+    }
+
+    #[test]
+    fn provider_continuation_consumes_only_its_exact_reviewed_proposal() {
+        let store = ToolPermissionStore::new_in_memory().unwrap();
+        let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+        let scope = "provider.openai@decision#endpoint:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let create_reviewed = |suffix: &str| {
+            let affected_path = format!("tool_permission.provider.openai.{suffix}");
+            let proposal = crate::agent::AgentProposal::new(
+                crate::agent::ProposalType::ToolPermission,
+                &affected_path,
+                serde_json::json!({
+                    "permission_scope_kind": "network_policy",
+                    "permission": "allow_once",
+                    "tool_name": scope,
+                    "source": "provider",
+                    "risk_level": "high",
+                    "action_type": "network",
+                    "canonical_scope": {
+                        "tool_name": scope,
+                        "source": "provider",
+                        "risk_level": "high",
+                        "action_type": "network",
+                        "network_policy_decision_id": "decision",
+                        "endpoint_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
+                }),
+                "review exact provider dispatch",
+                1.0,
+                crate::agent::RiskLevel::High,
+                crate::agent::ProposalSource::NetworkConsent,
+            );
+            proposal_store.create_proposal(&proposal).unwrap();
+            let claim_id = proposal_store
+                .claim_dispatch(&proposal.id)
+                .unwrap()
+                .unwrap();
+            let acceptance = crate::agent::ReviewWorkflow::new(&proposal_store)
+                .claimed_acceptance_snapshot(&proposal.id, &claim_id)
+                .unwrap();
+            store
+                .grant_reviewed_network_once(&acceptance, scope, "provider", "high", "network")
+                .unwrap();
+            proposal.id
+        };
+        let first = create_reviewed("first");
+        let second = create_reviewed("second");
+
+        assert!(store
+            .reviewed_network_once_available_for_proposal(
+                &first, scope, "provider", "high", "network",
+            )
+            .unwrap());
+
+        let consumed_first = store
+            .consume_reviewed_network_once_for_proposal(
+                &first, "provider.openai@decision#endpoint:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "provider", "high", "network",
+            )
+            .unwrap()
+            .expect("the exact first Proposal grant must remain independently consumable");
+        assert_eq!(consumed_first.proposal_id, first);
+        assert!(!store
+            .reviewed_network_once_available_for_proposal(
+                &first, scope, "provider", "high", "network",
+            )
+            .unwrap());
+        assert!(store
+            .consume_reviewed_network_once_for_proposal(
+                &first, scope, "provider", "high", "network",
+            )
+            .unwrap()
+            .is_none());
+        let consumed_second = store
+            .consume_reviewed_network_once_for_proposal(
+                &second, scope, "provider", "high", "network",
+            )
+            .unwrap()
+            .expect("consuming the first Proposal must not consume the second");
+        assert_eq!(consumed_second.proposal_id, second);
     }
 }

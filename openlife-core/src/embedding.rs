@@ -310,6 +310,12 @@ pub struct EmbeddingOutcome {
 }
 
 #[derive(Debug, Clone)]
+// Both outcomes are consumed immediately; keeping them inline avoids an
+// allocation on every embedding request.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "owner=backend-platform; expires=2026-10-01; measured inline allocation tradeoff"
+)]
 pub enum PreparedEmbeddingRequestOutcome {
     Prepared(PreparedEmbeddingRequest),
     Rejected(EmbeddingOutcome),
@@ -1002,9 +1008,7 @@ async fn execute_cloud_embedding(
             headers,
             &body,
             |phase| {
-                if phase
-                    == crate::network_client::NetworkDispatchAttemptPhase::ResponseHeadersObserved
-                {
+                if phase == crate::network_client::NetworkDispatchAttemptPhase::Attempting {
                     started_at = Some(chrono::Utc::now());
                 }
                 std::future::ready(Ok::<(), anyhow::Error>(()))
@@ -1612,7 +1616,7 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    static EMBEDDING_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static EMBEDDING_CACHE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn privacy_plan(text: &str, cloud_allowed: bool) -> EmbeddingPrivacyPlan {
         EmbeddingPrivacyPlan {
@@ -1621,9 +1625,11 @@ mod tests {
             hs_local_only: !cloud_allowed,
             detected_privacy_types: Vec::new(),
             sensitive_topic: None,
-            blocking_reasons: (!cloud_allowed)
-                .then(|| vec!["test_local_only".to_string()])
-                .unwrap_or_default(),
+            blocking_reasons: if !cloud_allowed {
+                vec!["test_local_only".to_string()]
+            } else {
+                Default::default()
+            },
         }
     }
 
@@ -1868,7 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn deterministic_hash_and_cache_receipts_preserve_profile() {
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let first = execute_embedding(
             prepare_embedding_request(
@@ -1921,7 +1927,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_503_fails_without_switching_profile() {
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let (base, call_count, server) =
             one_response_server("503 Service Unavailable", r#"{"error":"offline"}"#).await;
@@ -1954,7 +1960,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_disconnect_after_dispatch_is_remote_unknown() {
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1989,7 +1995,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_success_uses_full_embeddings_endpoint_once() {
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let (base, call_count, server) = one_response_server(
             "200 OK",
@@ -2110,10 +2116,16 @@ mod tests {
         assert!(credential_outcome.receipt.provider_dispatches.is_empty());
     }
 
+    // The process-global environment lock intentionally spans dispatch so no
+    // concurrently running test can observe a temporary Ollama endpoint.
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn ollama_observes_manifest_digest_and_uses_current_embed_contract() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let digest = format!("sha256:{}", "a".repeat(64));
         let tags = ollama_embedding_manifest("nomic-embed-text:latest", &digest);
@@ -2166,10 +2178,14 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn ollama_tag_change_during_embed_fails_unknown_without_caching() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let pre_digest = format!("sha256:{}", "a".repeat(64));
         let post_digest = format!("sha256:{}", "b".repeat(64));
@@ -2231,10 +2247,14 @@ mod tests {
             .is_empty());
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn ollama_post_manifest_failure_fails_unknown_without_caching() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let digest = format!("sha256:{}", "c".repeat(64));
         let (base, call_count, server) = response_sequence_server(vec![
@@ -2278,10 +2298,14 @@ mod tests {
             .is_empty());
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn ollama_verified_cache_hit_dispatches_only_current_manifest() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let digest = format!("sha256:{}", "d".repeat(64));
         let tags = ollama_embedding_manifest("nomic-embed-text:latest", &digest);
@@ -2342,10 +2366,14 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn ollama_does_not_use_cache_entry_without_sandwich_proof() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let model = "nomic-embed-text:latest";
         let digest = format!("sha256:{}", "e".repeat(64));
@@ -2391,10 +2419,14 @@ mod tests {
         assert_eq!(outcome.receipt.provider_dispatches.len(), 3);
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn ollama_manifest_failure_records_only_the_manifest_dispatch() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let (base, call_count, server) =
             one_response_server("503 Service Unavailable", r#"{"error":"offline"}"#).await;
@@ -2431,7 +2463,7 @@ mod tests {
 
     #[tokio::test]
     async fn custom_provider_without_explicit_revision_stays_unknown_and_is_not_cached() {
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let body = serde_json::json!({
             "model": "custom-test-embedding",
@@ -2481,7 +2513,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_contract_rejects_response_model_mismatch_after_dispatch() {
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let (base, _, server) = one_response_server(
             "200 OK",
@@ -2602,10 +2634,14 @@ mod tests {
         assert_eq!(outcome.profile.route, EmbeddingRouteKind::Unknown);
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
     #[tokio::test]
     async fn invalid_ollama_endpoint_has_zero_dispatch_receipt() {
         let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = EMBEDDING_CACHE_TEST_LOCK.lock().await;
         for (case, endpoint) in [
             ("remote", "https://remote-model.example:11434"),
             ("empty", "   "),

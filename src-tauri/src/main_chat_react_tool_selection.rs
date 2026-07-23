@@ -314,7 +314,7 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_authorization(
     network_policy: &NetworkPolicy,
     privacy_engine: &openlife_core::privacy::PrivacyEngine,
 ) -> (MainChatReactActionPlan, MainChatReactToolSelectionRanking) {
-    let mut ignore_progress = |_: MainChatModelProgress| {};
+    let mut ignore_progress = |_: MainChatModelProgress| Ok(());
     rank_main_chat_react_tool_candidates_with_authorization_and_progress(
         scheduler,
         messages_for_generation,
@@ -334,7 +334,7 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_authorization_and_
     provider_authorization: &MainChatProviderAuthorization,
     network_policy: &NetworkPolicy,
     privacy_engine: &openlife_core::privacy::PrivacyEngine,
-    emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+    emit_progress: &mut (dyn FnMut(MainChatModelProgress) -> anyhow::Result<()> + Send),
 ) -> (MainChatReactActionPlan, MainChatReactToolSelectionRanking) {
     if provider_authorization.data_route == ProviderDataRoute::LocalOnly
         || plan.tool_candidate_count() < 2
@@ -412,61 +412,58 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_authorization_and_
     }
 
     let outcome = scheduler
-        .execute_prepared_with_observer(prepared, |progress| {
-            match progress {
-                ProviderInvocationProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                } => emit_progress(MainChatModelProgress::Started {
-                    request_id,
-                    provider,
-                    model,
-                    started_at,
-                    policy_evidence,
-                }),
-                ProviderInvocationProgress::Completed(receipt) => {
-                    emit_progress(MainChatModelProgress::Completed {
-                        request_id: receipt.request_id,
-                        provider: receipt.provider,
-                        model: receipt.model,
-                        finished_at: receipt.finished_at,
-                    });
-                }
-                ProviderInvocationProgress::Failed(receipt) => {
-                    emit_progress(MainChatModelProgress::Failed {
-                        request_id: receipt.request_id,
-                        provider: receipt.provider,
-                        model: receipt.model,
-                        finished_at: receipt.finished_at,
-                        error_digest: receipt.error_digest.unwrap_or_else(|| {
-                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-                                &serde_json::json!({ "error": "provider_failed_without_digest" }),
-                            )
-                            .1
-                        }),
-                    });
-                }
-                ProviderInvocationProgress::RemoteUnknown(receipt) => {
-                    emit_progress(MainChatModelProgress::RemoteUnknown {
-                        request_id: receipt.request_id,
-                        provider: receipt.provider,
-                        model: receipt.model,
-                        finished_at: receipt.finished_at,
-                        reason_digest: receipt.error_digest.unwrap_or_else(|| {
-                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-                                &serde_json::json!({
-                                    "error": "provider_remote_unknown_without_digest"
-                                }),
-                            )
-                            .1
-                        }),
-                    });
-                }
+        .execute_prepared_with_observer(prepared, |progress| match progress {
+            ProviderInvocationProgress::Started {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence,
+            } => emit_progress(MainChatModelProgress::Started {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence: Box::new(policy_evidence),
+            }),
+            ProviderInvocationProgress::Completed(receipt) => {
+                emit_progress(MainChatModelProgress::Completed {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                })
             }
-            Ok(())
+            ProviderInvocationProgress::Failed(receipt) => {
+                emit_progress(MainChatModelProgress::Failed {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                    error_digest: receipt.error_digest.unwrap_or_else(|| {
+                        openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                            &serde_json::json!({ "error": "provider_failed_without_digest" }),
+                        )
+                        .1
+                    }),
+                })
+            }
+            ProviderInvocationProgress::RemoteUnknown(receipt) => {
+                emit_progress(MainChatModelProgress::RemoteUnknown {
+                    request_id: receipt.request_id,
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    finished_at: receipt.finished_at,
+                    reason_digest: receipt.error_digest.unwrap_or_else(|| {
+                        openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                            &serde_json::json!({
+                                "error": "provider_remote_unknown_without_digest"
+                            }),
+                        )
+                        .1
+                    }),
+                })
+            }
         })
         .await;
     let provider_receipt = outcome.receipt;
@@ -1193,15 +1190,36 @@ pub(crate) fn resolve_main_chat_mcp_read_target(
         };
     }
 
+    let supplied_arguments = plan
+        .arguments
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let arguments = normalize_main_chat_mcp_read_arguments(&manifest, supplied_arguments);
     MainChatMcpReadResolution {
         target: manifest.name,
-        arguments: plan
-            .arguments
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
+        arguments,
         resolved: true,
         blocker_reason: None,
+    }
+}
+
+/// Produce the exact governed input used for both initial Kernel dispatch and
+/// permission replay. Replay intentionally reconstructs and hashes this input
+/// instead of persisting a second copy of arbitrary tool arguments, so every
+/// deterministic built-in default must have one owner.
+pub(crate) fn normalize_main_chat_mcp_read_arguments(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+    supplied_arguments: serde_json::Value,
+) -> serde_json::Value {
+    if manifest.name == "builtin_echo"
+        && supplied_arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        serde_json::json!({ "text": "kernel registered MCP read" })
+    } else {
+        supplied_arguments
     }
 }
 

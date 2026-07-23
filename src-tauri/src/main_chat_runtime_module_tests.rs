@@ -19,6 +19,7 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
         "obsolete_ordinary_chat_legacy_only_guard_wording_is_retired",
         "ordinary_chat_entrypoints_avoid_retired_agent_loop_helpers_and_direct_executor_construction",
         "chat_page_does_not_call_default_adapter_migration_preview_or_review_commands",
+        "transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypass",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces_or_w73_readiness_report_or_w74_invocation",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces",
     ] {
@@ -380,16 +381,16 @@ fn retired_default_adapter_type_token() -> &'static str {
 }
 
 #[test]
-fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands() {
+fn production_conversation_does_not_call_default_adapter_migration_preview_or_review_commands() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
-    let chat_paths = [
-        repo_root.join("frontend/src/pages/ChatPage.tsx"),
-        repo_root.join("frontend/src/pages/chat/ChatInputArea.tsx"),
-        repo_root.join("frontend/src/pages/chat/useChatStreaming.ts"),
-        repo_root.join("frontend/src/pages/chat/useChatContext.ts"),
-        repo_root.join("frontend/src/pages/chat/useChatSessions.ts"),
+    let conversation_paths = [
+        repo_root.join("frontend/src/ui/journeys/governedAction/WorkspaceConversationPanel.tsx"),
+        repo_root.join("frontend/src/ui/journeys/governedAction/useWorkspaceConversation.ts"),
+        repo_root
+            .join("frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts"),
+        repo_root.join("frontend/src/App.tsx"),
     ];
     let forbidden = [
         retired_default_adapter_token(),
@@ -421,7 +422,7 @@ fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands(
         "getRuntimeStrategyRegistryStatus",
     ];
 
-    for path in chat_paths {
+    for path in conversation_paths {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         for forbidden in forbidden {
@@ -433,6 +434,103 @@ fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands(
             );
         }
     }
+}
+
+#[test]
+fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypass() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root");
+    let conversation = std::fs::read_to_string(
+        repo_root
+            .join("frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts"),
+    )
+    .expect("read production Workspace conversation data source");
+    let frontend_bridge = std::fs::read_to_string(repo_root.join("frontend/src/tauri.ts"))
+        .expect("read frontend Tauri bridge");
+    let shipped_handlers = std::fs::read_to_string(repo_root.join("src-tauri/src/lib.rs"))
+        .expect("read shipped Tauri handlers");
+    let state_commands = std::fs::read_to_string(repo_root.join("src-tauri/src/commands/state.rs"))
+        .expect("read state commands");
+    let runtime = std::fs::read_to_string(repo_root.join("src-tauri/src/main_chat_kernel.rs"))
+        .expect("read Main Chat kernel");
+    let policy =
+        std::fs::read_to_string(repo_root.join("openlife-core/src/agent/main_chat_agent_v1.rs"))
+            .expect("read Main Chat policy");
+
+    for forbidden in [
+        "tryHandleQuickCommand",
+        "addDailyGoal(",
+        "toggleDailyGoal(",
+        "updateDailyGoal(",
+        "deleteDailyGoal(",
+        "recordState(",
+        "saveChatMessage(",
+        "handleSaveAsDailyGoal",
+    ] {
+        assert!(
+            !conversation.contains(forbidden),
+            "production Workspace conversation must not bypass TurnRuntime through {forbidden}"
+        );
+    }
+
+    for retired_bridge in [
+        "export async function addDailyGoal",
+        "export async function toggleDailyGoal",
+        "export async function updateDailyGoal",
+        "export async function deleteDailyGoal",
+        "invoke(\"add_daily_goal\"",
+        "invoke(\"toggle_daily_goal\"",
+        "invoke(\"update_daily_goal\"",
+        "invoke(\"delete_daily_goal\"",
+        "export async function recordState",
+        "invoke(\"record_state\"",
+    ] {
+        assert!(
+            !frontend_bridge.contains(retired_bridge),
+            "frontend bridge must not retain retired state mutation route {retired_bridge}"
+        );
+    }
+
+    for retired_command in [
+        "commands::state::add_daily_goal",
+        "commands::state::toggle_daily_goal",
+        "commands::state::update_daily_goal",
+        "commands::state::delete_daily_goal",
+        "record_state,",
+    ] {
+        assert!(
+            !shipped_handlers.contains(retired_command),
+            "shipped handler surface must not retain {retired_command}"
+        );
+    }
+
+    for retired_implementation in [
+        "pub async fn add_daily_goal",
+        "pub async fn toggle_daily_goal",
+        "pub async fn update_daily_goal",
+        "pub async fn delete_daily_goal",
+        "pub async fn record_state",
+        "record_state_with_state",
+    ] {
+        assert!(
+            !state_commands.contains(retired_implementation),
+            "state command module must not retain {retired_implementation}"
+        );
+    }
+
+    assert!(
+        conversation.contains("sendMessageV2"),
+        "production Workspace conversation must enter the shared buffered TurnRuntime command"
+    );
+    assert!(
+        policy.contains("TransientStateCommand"),
+        "PolicyRouter must own the typed transient-state route"
+    );
+    assert!(
+        runtime.contains("StateGateway::new("),
+        "Main Chat runtime must commit authorized transient-state effects through StateGateway"
+    );
 }
 
 fn extract_rust_function_body(source: &str, signature: &str) -> String {
@@ -1078,18 +1176,31 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         runtime_product_source,
         "async fn recover_openlife_turn_from_durable_final(",
     );
+    let replay_final_receipt_persistence = extract_rust_function_body(
+        runtime_product_source,
+        "async fn persist_openlife_replay_final_receipt(",
+    );
+    let final_append_owner = extract_rust_function_body(
+        &event_store,
+        "pub(crate) fn append_terminal_final_and_seal(",
+    );
     const FINAL_OWNER_SOURCE: &str = "openlife_turn_runtime.final_delivery_owner";
     assert_eq!(
         runtime_product_source.matches(FINAL_OWNER_SOURCE).count(),
-        2,
-        "production TurnRuntime must contain exactly one final append owner and one recovery authentication use"
+        1,
+        "production TurnRuntime must contain exactly one final-owner authentication use"
     );
     assert_eq!(
         final_receipt_persistence
-            .matches(FINAL_OWNER_SOURCE)
+            .matches(".append_terminal_final_and_seal(")
             .count(),
         1,
-        "ordinary FinalDelivery must have exactly one durable TurnRuntime append owner"
+        "ordinary FinalDelivery persistence must delegate exactly once to the atomic EventStore append owner"
+    );
+    assert_eq!(
+        final_append_owner.matches(FINAL_OWNER_SOURCE).count(),
+        1,
+        "the atomic EventStore transaction must assign exactly one durable FinalDelivery owner"
     );
     assert_eq!(
         final_receipt_recovery.matches(FINAL_OWNER_SOURCE).count(),
@@ -1101,8 +1212,8 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         runtime_product_source
             .matches(TASK_OWNER_RECEIPT_CALL)
             .count(),
-        2,
-        "production TurnRuntime must obtain the versioned Task owner receipt once for persistence and once for recovery"
+        3,
+        "production TurnRuntime must obtain the versioned Task owner receipt once for ordinary persistence, once for ordinary recovery, and once for replay finalization"
     );
     assert_eq!(
         final_receipt_persistence
@@ -1115,6 +1226,13 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
             .matches(TASK_OWNER_RECEIPT_CALL)
             .count(),
         1
+    );
+    assert_eq!(
+        replay_final_receipt_persistence
+            .matches(TASK_OWNER_RECEIPT_CALL)
+            .count(),
+        1,
+        "replay finalization must bind its own terminal epoch to one versioned Task owner receipt"
     );
     assert_eq!(
         final_receipt_persistence

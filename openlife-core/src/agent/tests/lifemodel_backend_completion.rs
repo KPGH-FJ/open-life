@@ -196,7 +196,7 @@ fn w125_life_event_store_accepts_metadata_safe_event_and_does_not_store_raw_cont
     assert_eq!(event.risk_level, RiskLevel::Low);
     assert_eq!(event.source_refs.len(), 1);
     assert_eq!(event.source_refs[0].source_id, "run-low-energy-1");
-    assert_eq!(event.contains_raw_content, false);
+    assert!(!event.contains_raw_content);
     assert_ne!(event.payload_digest, raw_prompt);
     assert!(event.metadata_safe_summary.is_some());
     assert!(event.dedupe_key.starts_with("life_event:"));
@@ -1418,7 +1418,10 @@ fn agent_run_revision_and_stale_permit_resist_a_b_a_updates() {
         .commit_prepared_life_event_for_test(&fixture.event_store, stale, draft)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("life_event_create_permit_owner_revision_stale"));
+    assert!(
+        error.contains("life_event_create_permit_owner_revision_stale"),
+        "{error}"
+    );
     assert!(fixture
         .event_store
         .query_events(None, None)
@@ -1476,7 +1479,7 @@ fn deterministic_life_event_policy_rejects_medium_and_high_risk_or_sensitivity()
 }
 
 #[test]
-fn stale_permit_stays_invalid_across_soft_delete_restore_and_physical_recreate() {
+fn stale_permit_stays_invalid_and_physical_recreate_cannot_bypass_tombstone() {
     let fixture = GovernedLifeEventFixture::new("generation", "今天午饭吃了牛肉面，下午犯困");
     let execution = fixture
         .owner
@@ -1537,20 +1540,18 @@ fn stale_permit_stays_invalid_across_soft_delete_restore_and_physical_recreate()
         .canonical_revision_for_test(&fixture.run.id)
         .unwrap();
     assert!(revision_after_delete >= 5);
-    fixture
+    let recreate_error = fixture
         .memory
         .create_agent_run_from_active_conversation_message(
             &fixture.owner,
             &fixture.run,
             fixture.commit.proof(),
         )
-        .unwrap();
+        .unwrap_err()
+        .to_string();
     assert!(
-        fixture
-            .owner
-            .canonical_revision_for_test(&fixture.run.id)
-            .unwrap()
-            > revision_after_delete
+        recreate_error.contains("agent_run_create_canonical_tombstone_active"),
+        "{recreate_error}"
     );
     let error = fixture
         .owner
@@ -1561,7 +1562,10 @@ fn stale_permit_stays_invalid_across_soft_delete_restore_and_physical_recreate()
         )
         .unwrap_err()
         .to_string();
-    assert!(error.contains("life_event_create_permit_owner_revision_stale"));
+    assert!(
+        error.contains("canonical_agent_run_life_event_source_missing"),
+        "{error}"
+    );
     assert!(fixture
         .event_store
         .query_events(None, None)

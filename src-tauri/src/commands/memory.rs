@@ -166,7 +166,6 @@ pub async fn rebuild_memory_index(
             requested_target: None,
             affected_count: Some(affected_count),
             reference: confirmation_evidence.as_ref(),
-            preflight_scope_arguments: None,
             arguments: &serde_json::json!({
                 "canonical_memory_row_count": affected_count,
                 "owner_scope": ["knowledge_note", "memory_lifecycle", "legacy_memory_record"],
@@ -176,6 +175,7 @@ pub async fn rebuild_memory_index(
             arguments_summary: &format!(
                 "扫描 {affected_count} 条 canonical Memory 记录重建本地索引；仅关系证据完整的 KnowledgeNote/Lifecycle 资产会进入向量空间，未验证记录计入 skipped。"
             ),
+            governed_data_import_recovery: None,
         },
         &window,
         state.inner(),
@@ -223,11 +223,11 @@ mod tests {
     use openlife_core::{embedding::clear_embedding_cache, llm::ChatMessage};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc as StdArc, Mutex,
+        Arc as StdArc,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    static OLLAMA_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static OLLAMA_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn fake_cloud_embedding_endpoint() -> (String, StdArc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -777,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_a_hung_rebuild_keeps_the_active_projection_unchanged() {
-        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let (ollama_base, accepted_count) = fake_hanging_embedding_endpoint().await;
@@ -882,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedding_failure_preserves_text_hits_with_degraded_receipt() {
-        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -937,15 +937,28 @@ mod tests {
             openlife_core::embedding::EmbeddingInvocationStatus::Failed
         );
         assert!(result.embedding_receipt.error_digest.is_some());
+        let stored = state
+            .memory_store
+            .lock()
+            .await
+            .export_active_memory_records()
+            .unwrap();
+        let searched = stored
+            .iter()
+            .find(|record| record.content == "DEGRADED_TEXT_HIT_SENTINEL")
+            .expect("text search result remains canonical");
+        assert_eq!(searched.access_count, 1);
+        assert!(searched.last_accessed_at.is_some());
     }
 
     #[tokio::test]
-    async fn mutable_ollama_profile_is_text_only_and_rebuild_required() {
-        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+    async fn ollama_search_verifies_artifact_identity_and_preserves_text_hits() {
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().await;
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
         std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
         std::env::remove_var("OLLAMA_HOST");
         {
@@ -968,60 +981,69 @@ mod tests {
                 )
                 .unwrap();
         }
+        let expected_digest = digest.clone();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let _ = socket.read(&mut request).await.unwrap();
-            let body = r#"{"embedding":[0.1,0.2,0.3,0.4]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            let manifest = serde_json::json!({
+                "models": [{
+                    "name": "nomic-embed-text:latest",
+                    "model": "nomic-embed-text:latest",
+                    "digest": expected_digest,
+                    "size": 1234,
+                }]
+            })
+            .to_string();
+            let embedding = serde_json::json!({
+                "model": "nomic-embed-text:latest",
+                "embeddings": [[0.1, 0.2, 0.3, 0.4]],
+            })
+            .to_string();
+            let mut requests = Vec::new();
+            for body in [manifest.clone(), embedding, manifest] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
         });
 
         let result = search_memory_with_state("MUTABLE_PROFILE_TEXT_HIT".into(), 5, &state).await;
         std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
-        server.await.unwrap();
+        let requests = server.await.unwrap();
         let result = result.unwrap();
 
         assert!(result
             .hits
             .iter()
             .any(|(chunk, _)| chunk.content == "MUTABLE_PROFILE_TEXT_HIT"));
-        assert_eq!(result.vector_status, "rebuild_required");
-        assert_eq!(result.embedding_profile.id, "unknown");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET /api/tags "));
+        assert!(requests[1].starts_with("POST /api/embed "));
+        assert!(requests[2].starts_with("GET /api/tags "));
+        assert_eq!(result.vector_status, "ready");
+        assert_ne!(result.embedding_profile.id, "unknown");
+        assert_eq!(result.embedding_profile.model_artifact_identity, digest);
         assert_eq!(
             result.embedding_receipt.status,
             openlife_core::embedding::EmbeddingInvocationStatus::Completed
         );
-        assert_eq!(
-            result
-                .degraded_evidence
-                .as_ref()
-                .map(|evidence| evidence.reason_code.as_str()),
-            Some("embedding_profile_identity_unknown")
-        );
+        assert!(result.degraded_evidence.is_none());
     }
 
     #[tokio::test]
     async fn undo_explicit_memory_command_archives_the_canonical_memory_once() {
         let state = crate::test_utils::test_app_state();
-        let source_user_message = "我早餐喜欢咖啡和面包";
-        let fact = openlife_core::agent::CanonicalMemoryFactDescriptor::new(
-            source_user_message,
-            openlife_core::agent::MemoryLifecycleScope::Global,
-            openlife_core::agent::MemoryLifecycleCategory::Fact,
-            openlife_core::agent::MemoryLifecycleRiskLevel::Low,
-            openlife_core::agent::MemoryLifecycleSensitivity::Internal,
-        )
-        .unwrap();
-        let (_policy, candidate, proof) =
+        let source_user_message = "请记住：我早餐喜欢咖啡和面包";
+        let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
                 "message-1",
                 source_user_message,
-                &fact,
             );
         let registry = {
             state

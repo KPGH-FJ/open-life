@@ -3,10 +3,6 @@ use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
 
-#[cfg(test)]
-#[path = "../mcp_audit_read_gateway_tests.rs"]
-mod mcp_audit_read_gateway_tests;
-
 #[tauri::command]
 pub async fn list_mcp_servers(
     state: State<'_, Arc<AppState>>,
@@ -237,10 +233,8 @@ pub async fn list_mcp_audit_logs(
     limit: usize,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<openlife_core::mcp_audit::McpLogEntry>, AppError> {
-    state
-        .mcp_audit_read_gateway
-        .list_logs(state.inner(), limit)
-        .await
+    let store = state.mcp_audit_store.lock().await;
+    store.list_logs(limit).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -249,4 +243,13 @@ pub async fn list_tool_manifests(
 ) -> Result<Vec<openlife_core::tool_manifest::ToolManifest>, AppError> {
     let registry = state.mcp_registry.lock().await;
     Ok(registry.list_manifests())
+}
+
+#[tauri::command]
+pub async fn clear_mcp_audit_logs(
+    days: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, AppError> {
+    let store = state.mcp_audit_store.lock().await;
+    store.clear_old_logs(days).map_err(AppError::from)
 }

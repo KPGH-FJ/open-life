@@ -3,7 +3,8 @@ use crate::embedding::{
     UNKNOWN_EMBEDDING_PROFILE_ID,
 };
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use ring::digest::{Context as DigestContext, SHA256};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -662,7 +663,6 @@ impl VectorStore {
     /// marker and vector row commit together; raw content is supplied by the
     /// replaceable materializer after loading the canonical owner and is never
     /// copied into the outbox or marker.
-    #[allow(clippy::too_many_arguments)]
     pub fn project_memory_embedding(
         &self,
         event_id: &str,
@@ -947,6 +947,8 @@ impl VectorStore {
         ))
     }
 
+    /// Pure vector lookup. Access telemetry is a separate explicit mutation
+    /// via [`Self::record_access_telemetry`].
     pub fn search(
         &self,
         query_embedding: &[f32],
@@ -978,7 +980,8 @@ impl VectorStore {
         self.score_matching_candidates(query_embedding, profile, candidates, rebuild, top_k)
     }
 
-    /// Search scoped to a specific session_id, with a hard limit on scan size.
+    /// Pure search scoped to a specific session_id, with a hard limit on scan
+    /// size. Access telemetry remains an explicit caller-owned mutation.
     pub fn search_by_session(
         &self,
         session_id: &str,
@@ -1057,7 +1060,6 @@ impl VectorStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let top = results.into_iter().take(top_k).collect::<Vec<_>>();
-        self.bump_access_for_chunks(&top)?;
         if !has_valid_match {
             if let Some(rebuild) = rebuild {
                 return Ok(VectorSearchOutcome::RebuildRequired(rebuild));
@@ -1078,21 +1080,38 @@ impl VectorStore {
         similarity + tier_bonus
     }
 
-    fn bump_access_for_chunks(&self, chunks: &[(MemoryChunk, f32)]) -> Result<()> {
+    /// Commit optional access telemetry for results returned by a prior pure
+    /// search. Callers must place this mutation behind their canonical owner
+    /// admission fence; a failed telemetry commit must never invalidate the
+    /// already-observed search result.
+    pub fn record_access_telemetry(&self, chunk_ids: &[i64]) -> Result<usize> {
+        let mut chunk_ids = chunk_ids
+            .iter()
+            .copied()
+            .filter(|chunk_id| *chunk_id > 0)
+            .collect::<Vec<_>>();
+        chunk_ids.sort_unstable();
+        chunk_ids.dedup();
+        if chunk_ids.is_empty() {
+            return Ok(0);
+        }
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let tx = conn.transaction()?;
         let now = chrono::Utc::now().to_rfc3339();
-        for (chunk, _) in chunks {
-            tx.execute(
-                "UPDATE vectors SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
-                params![&now, chunk.id],
+        let mut updated = 0usize;
+        for chunk_id in chunk_ids {
+            updated += tx.execute(
+                "UPDATE vectors
+                 SET access_count = access_count + 1, last_accessed_at = ?1
+                 WHERE id = ?2 AND archived = 0",
+                params![&now, chunk_id],
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(updated)
     }
 
     /// Run promotion/demotion heuristics considering access_count, last_accessed_at and importance_score.
@@ -1182,39 +1201,18 @@ impl VectorStore {
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT session_id, content, embedding_json, embedding_blob, source, created_at, tier, access_count, last_accessed_at, importance_score, archived, archived_at, summary, embedding_profile_id, embedding_dimension FROM vectors ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let embedding_json: String = row.get(2)?;
-            let embedding_blob: Option<Vec<u8>> = row.get(3)?;
-            let embedding = decode_embedding(embedding_blob.as_deref(), &embedding_json);
-            Ok(ExportedVectorChunk {
-                session_id: row.get(0)?,
-                content: row.get(1)?,
-                embedding,
-                source: row.get(4)?,
-                created_at: row.get(5)?,
-                tier: row.get(6)?,
-                access_count: row.get(7)?,
-                last_accessed_at: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                importance_score: row.get::<_, Option<f32>>(9)?.unwrap_or(0.5),
-                archived: row.get::<_, Option<i64>>(10)?.unwrap_or(0) != 0,
-                archived_at: row.get::<_, Option<String>>(11)?,
-                summary: row.get::<_, Option<String>>(12)?,
-                embedding_profile_id: row.get(13)?,
-                embedding_dimension: row.get::<_, i64>(14)?.max(0) as usize,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to export vectors")
+        export_all_chunks_from_conn(&conn)
     }
 
     /// Export only vector rows that have no canonical owner elsewhere.
     /// Canonical Memory and legacy chat rows are derived indexes and must be
     /// recreated from their owner instead of becoming generic import truth.
     pub fn export_portable_chunks(&self) -> Result<Vec<ExportedVectorChunk>> {
-        Ok(self
+        Ok(self.export_portable_archive()?.chunks)
+    }
+
+    pub fn export_portable_archive(&self) -> Result<PortableVectorArchiveSnapshot> {
+        let chunks = self
             .export_all_chunks()?
             .into_iter()
             .filter(|chunk| {
@@ -1223,7 +1221,9 @@ impl VectorStore {
                     PortableVectorDisposition::Portable
                 )
             })
-            .collect())
+            .collect::<Vec<_>>();
+        let digest = portable_vector_archive_digest(&chunks);
+        Ok(PortableVectorArchiveSnapshot { chunks, digest })
     }
 
     /// Validate the exact replacement payload without mutating the store.
@@ -1319,12 +1319,49 @@ impl VectorStore {
         &self,
         chunks: &[ExportedVectorChunk],
     ) -> Result<PortableVectorImportReport> {
+        let expected_before_digest = self.export_portable_archive()?.digest;
+        self.replace_portable_chunks_guarded(chunks, &expected_before_digest)
+            .map(|outcome| outcome.report)
+    }
+
+    /// Replace only the portable vector subset under an owner-local CAS.
+    /// The current digest is observed inside `BEGIN IMMEDIATE`, so a writer
+    /// racing a backup snapshot cannot be silently erased.
+    pub fn replace_portable_chunks_guarded(
+        &self,
+        chunks: &[ExportedVectorChunk],
+        expected_before_digest: &str,
+    ) -> Result<PortableVectorReplaceOutcome> {
+        validate_portable_vector_archive_digest(expected_before_digest)?;
+        let desired_digest = portable_vector_archive_digest(chunks);
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let report = validate_portable_vector_chunks(&tx, chunks)?;
+        let before_chunks = export_all_chunks_from_conn(&tx)?;
+        let before_digest = portable_vector_archive_digest(&before_chunks);
+        let has_legacy_chat_projection = before_chunks.iter().any(|chunk| {
+            matches!(
+                portable_vector_disposition(&chunk.source),
+                PortableVectorDisposition::LegacyChatProjection
+            )
+        });
+        if before_digest == desired_digest && !has_legacy_chat_projection {
+            tx.commit()?;
+            return Ok(PortableVectorReplaceOutcome {
+                disposition: PortableVectorReplaceDisposition::AlreadyCurrent,
+                report,
+                before_digest: before_digest.clone(),
+                after_digest: before_digest,
+            });
+        }
+        if before_digest != expected_before_digest {
+            anyhow::bail!(
+                "portable_vector_archive_drift expected={expected_before_digest} observed={before_digest}"
+            );
+        }
         tx.execute(
             "DELETE FROM vectors
              WHERE source NOT GLOB 'memory_lifecycle:*'
@@ -1346,8 +1383,18 @@ impl VectorStore {
             )?;
         }
         rebind_and_validate_materialization_markers(&tx)?;
+        let after_chunks = export_all_chunks_from_conn(&tx)?;
+        let after_digest = portable_vector_archive_digest(&after_chunks);
+        if after_digest != desired_digest {
+            anyhow::bail!("portable_vector_archive_digest_mismatch_after_replace");
+        }
         tx.commit()?;
-        Ok(report)
+        Ok(PortableVectorReplaceOutcome {
+            disposition: PortableVectorReplaceDisposition::Applied,
+            report,
+            before_digest,
+            after_digest,
+        })
     }
 
     pub fn start_or_resume_rebuild(
@@ -2057,7 +2104,7 @@ pub struct TierStats {
     pub archived: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExportedVectorChunk {
     pub session_id: String,
     pub content: String,
@@ -2089,6 +2136,35 @@ pub struct PortableVectorImportReport {
     pub applied: usize,
     pub skipped_canonical_projection: usize,
     pub skipped_legacy_chat_projection: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableVectorArchiveSnapshot {
+    pub chunks: Vec<ExportedVectorChunk>,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortableVectorReplaceDisposition {
+    Applied,
+    AlreadyCurrent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableVectorReplaceOutcome {
+    pub disposition: PortableVectorReplaceDisposition,
+    pub report: PortableVectorImportReport,
+    pub before_digest: String,
+    pub after_digest: String,
+}
+
+impl PortableVectorReplaceOutcome {
+    pub fn changed(&self) -> bool {
+        self.disposition == PortableVectorReplaceDisposition::Applied
+    }
 }
 
 impl PortableVectorImportReport {
@@ -2408,6 +2484,124 @@ fn portable_vector_disposition(source: &str) -> PortableVectorDisposition {
     } else {
         PortableVectorDisposition::Portable
     }
+}
+
+fn append_digest_field(target: &mut Vec<u8>, bytes: &[u8]) {
+    target.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    target.extend_from_slice(bytes);
+}
+
+fn portable_vector_digest_record(chunk: &ExportedVectorChunk) -> Vec<u8> {
+    let mut record = Vec::new();
+    append_digest_field(&mut record, chunk.session_id.as_bytes());
+    append_digest_field(&mut record, chunk.content.as_bytes());
+    record.extend_from_slice(&(chunk.embedding.len() as u64).to_le_bytes());
+    for value in &chunk.embedding {
+        record.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    append_digest_field(&mut record, chunk.embedding_profile_id.as_bytes());
+    record.extend_from_slice(&(chunk.embedding_dimension as u64).to_le_bytes());
+    append_digest_field(&mut record, chunk.source.as_bytes());
+    append_digest_field(&mut record, chunk.created_at.as_bytes());
+    record.extend_from_slice(&chunk.tier.to_le_bytes());
+    record.extend_from_slice(&chunk.access_count.to_le_bytes());
+    append_digest_field(&mut record, chunk.last_accessed_at.as_bytes());
+    record.extend_from_slice(&chunk.importance_score.to_bits().to_le_bytes());
+    record.push(u8::from(chunk.archived));
+    match &chunk.archived_at {
+        Some(value) => {
+            record.push(1);
+            append_digest_field(&mut record, value.as_bytes());
+        }
+        None => record.push(0),
+    }
+    match &chunk.summary {
+        Some(value) => {
+            record.push(1);
+            append_digest_field(&mut record, value.as_bytes());
+        }
+        None => record.push(0),
+    }
+    record
+}
+
+/// Deterministic digest of the portable Vector owner subset. Derived
+/// canonical-Memory and legacy chat projections are excluded. Records are
+/// sorted by their complete binary representation so SQLite row ids and input
+/// ordering cannot change the digest.
+pub fn portable_vector_archive_digest(chunks: &[ExportedVectorChunk]) -> String {
+    let mut records = chunks
+        .iter()
+        .filter(|chunk| {
+            matches!(
+                portable_vector_disposition(&chunk.source),
+                PortableVectorDisposition::Portable
+            )
+        })
+        .map(portable_vector_digest_record)
+        .collect::<Vec<_>>();
+    records.sort();
+
+    let mut context = DigestContext::new(&SHA256);
+    let domain = b"openlife:portable-vector-archive:v1";
+    context.update(&(domain.len() as u64).to_le_bytes());
+    context.update(domain);
+    context.update(&(records.len() as u64).to_le_bytes());
+    for record in records {
+        context.update(&(record.len() as u64).to_le_bytes());
+        context.update(&record);
+    }
+    let hash = context.finish();
+    let hex = hash
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+fn validate_portable_vector_archive_digest(value: &str) -> Result<()> {
+    if value.len() != 71
+        || !value.starts_with("sha256:")
+        || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("invalid portable vector archive digest");
+    }
+    Ok(())
+}
+
+fn export_all_chunks_from_conn(conn: &Connection) -> Result<Vec<ExportedVectorChunk>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, content, embedding_json, embedding_blob, source,
+                created_at, tier, access_count, last_accessed_at,
+                importance_score, archived, archived_at, summary,
+                embedding_profile_id, embedding_dimension
+         FROM vectors
+         ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let embedding_json: String = row.get(2)?;
+        let embedding_blob: Option<Vec<u8>> = row.get(3)?;
+        let embedding = decode_embedding(embedding_blob.as_deref(), &embedding_json);
+        Ok(ExportedVectorChunk {
+            session_id: row.get(0)?,
+            content: row.get(1)?,
+            embedding,
+            source: row.get(4)?,
+            created_at: row.get(5)?,
+            tier: row.get(6)?,
+            access_count: row.get(7)?,
+            last_accessed_at: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            importance_score: row.get::<_, Option<f32>>(9)?.unwrap_or(0.5),
+            archived: row.get::<_, Option<i64>>(10)?.unwrap_or(0) != 0,
+            archived_at: row.get::<_, Option<String>>(11)?,
+            summary: row.get::<_, Option<String>>(12)?,
+            embedding_profile_id: row.get(13)?,
+            embedding_dimension: row.get::<_, i64>(14)?.max(0) as usize,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("failed to export vectors")
 }
 
 fn validate_portable_vector_chunks(
@@ -3285,6 +3479,46 @@ mod tests {
     }
 
     #[test]
+    fn vector_searches_are_pure_reads_of_portable_owner_state() {
+        let store = VectorStore::new_in_memory().unwrap();
+        let profile = test_profile(4);
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+        store
+            .insert(
+                "portable-session",
+                "portable search result",
+                &embedding,
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let before = store.export_portable_archive().unwrap();
+
+        let global = expect_matches(store.search(&embedding, &profile, 5).unwrap());
+        let session = expect_matches(
+            store
+                .search_by_session("portable-session", &embedding, &profile, 5, 100)
+                .unwrap(),
+        );
+
+        assert_eq!(global.len(), 1);
+        assert_eq!(session.len(), 1);
+        assert_eq!(store.export_portable_archive().unwrap(), before);
+
+        assert_eq!(
+            store
+                .record_access_telemetry(&[global[0].0.id, session[0].0.id])
+                .unwrap(),
+            1,
+            "duplicate hits from multiple read paths count as one telemetry access"
+        );
+        let after_telemetry = store.export_portable_archive().unwrap();
+        assert_ne!(after_telemetry.digest, before.digest);
+        assert_eq!(after_telemetry.chunks[0].access_count, 1);
+        assert!(!after_telemetry.chunks[0].last_accessed_at.is_empty());
+    }
+
+    #[test]
     fn vector_store_tier_maintenance() {
         let dir = tempfile::tempdir().unwrap();
         let store = VectorStore::new(dir.path().join("vectors.db")).unwrap();
@@ -3495,6 +3729,90 @@ mod tests {
             .projected_materialization_vector_id("outbox:portable-archive-owner", &owner)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn guarded_portable_vector_replace_rejects_owner_drift_before_effect() {
+        let store = VectorStore::new_in_memory().unwrap();
+        let profile = test_profile(4);
+        store
+            .insert(
+                "before",
+                "before",
+                &[0.1, 0.2, 0.3, 0.4],
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let expected = store.export_portable_archive().unwrap();
+        store
+            .insert(
+                "concurrent",
+                "late vector owner write",
+                &[0.4, 0.3, 0.2, 0.1],
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let mut replacement = expected.chunks.clone();
+        replacement[0].content = "must not apply".into();
+
+        let error = store
+            .replace_portable_chunks_guarded(&replacement, &expected.digest)
+            .expect_err("stale vector digest must fail before delete");
+        assert!(error.to_string().contains("portable_vector_archive_drift"));
+        let after = store.export_portable_archive().unwrap();
+        assert_eq!(after.chunks.len(), 2);
+        assert!(after
+            .chunks
+            .iter()
+            .any(|chunk| chunk.content == "late vector owner write"));
+        assert!(!after
+            .chunks
+            .iter()
+            .any(|chunk| chunk.content == "must not apply"));
+    }
+
+    #[test]
+    fn guarded_portable_vector_replace_is_digest_exact_replay_safe_and_empty_is_target() {
+        let store = VectorStore::new_in_memory().unwrap();
+        let profile = test_profile(4);
+        store
+            .insert(
+                "before",
+                "before",
+                &[0.1, 0.2, 0.3, 0.4],
+                &profile,
+                "manual_note",
+            )
+            .unwrap();
+        let before = store.export_portable_archive().unwrap();
+        let mut replacement = before.chunks.clone();
+        replacement[0].session_id = "restored".into();
+        replacement[0].content = "portable replacement".into();
+        let desired_digest = portable_vector_archive_digest(&replacement);
+
+        let applied = store
+            .replace_portable_chunks_guarded(&replacement, &before.digest)
+            .unwrap();
+        assert!(applied.changed());
+        assert_eq!(applied.after_digest, desired_digest);
+        let replayed = store
+            .replace_portable_chunks_guarded(&replacement, &before.digest)
+            .unwrap();
+        assert_eq!(
+            replayed.disposition,
+            PortableVectorReplaceDisposition::AlreadyCurrent
+        );
+        assert!(!replayed.changed());
+
+        let current = store.export_portable_archive().unwrap();
+        let cleared = store
+            .replace_portable_chunks_guarded(&[], &current.digest)
+            .unwrap();
+        assert!(cleared.changed());
+        assert!(store.export_portable_archive().unwrap().chunks.is_empty());
+        assert_eq!(cleared.after_digest, portable_vector_archive_digest(&[]));
     }
 
     #[test]

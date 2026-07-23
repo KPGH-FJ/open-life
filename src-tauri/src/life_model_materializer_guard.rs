@@ -1,3 +1,6 @@
+pub(crate) const STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID: &str =
+    "state_store_daily_task_compatibility_projection";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LifeModelMaterializerCallerKind {
     GovernedManualOverride,

@@ -382,15 +382,18 @@ fn backend_remediation_phase0_inventory_freezes_all_audit_findings() {
         "fix-under-verification-concurrency-limit-pending",
         "fix-under-verification-full-suite-pending",
         "fix-under-verification-full-symbol-scan-pending",
+        "fix-under-verification-independent-review-pending",
         "fix-under-verification-live-redirect-pending",
         "fix-under-verification-real-keychain-smoke-pending",
         "fix-under-verification-restart-parity-pending",
         "fix-under-verification-store-migration-pending",
         "local-claim-fixed-remote-reconciliation-pending",
+        "mechanical-gates-green-independent-review-pending",
         "model-route-fixed-migration-proof-pending",
         "network-client-integrated-authentication-pending",
         "phase7-deletion-in-progress",
         "provider-facts-partial-projection-pending",
+        "dependency-gate-green-owned-advisories-remediation-open",
         "release-quarantined-authentication-pending",
         "release-quarantined-phase4-pending",
         "reproduced-dependency-gate-pending",
@@ -456,6 +459,15 @@ fn backend_remediation_phase0_inventory_freezes_all_audit_findings() {
             ] {
                 if evidence_ref.starts_with("test:") {
                     assert_executable_test_reference(evidence_ref);
+                } else if let Some(gate) = evidence_ref.strip_prefix("gate:") {
+                    assert!(
+                        !gate.trim().is_empty()
+                            && gate
+                                .chars()
+                                .all(|character| character.is_ascii_alphanumeric()
+                                    || character == '-'),
+                        "{id} has a malformed mechanical gate reference: {evidence_ref}"
+                    );
                 } else {
                     assert!(
                         evidence_ref.starts_with("planned:"),
@@ -564,9 +576,11 @@ fn backend_remediation_phase0_release_capabilities_fail_closed() {
 
 #[test]
 fn backend_remediation_phase0_high_risk_commands_are_dev_only() {
-    let cargo = read_repo_file("src-tauri/Cargo.toml");
-    assert!(cargo.contains("dev-extensions = []"));
-    assert!(cargo.contains("required-features = [\"dev-extensions\"]"));
+    let product_manifest = read_repo_file("src-tauri/Cargo.toml");
+    assert!(product_manifest.contains("dev-extensions = []"));
+    assert!(!product_manifest.contains("openlife-a2a-server"));
+    let dev_server_manifest = read_repo_file("tools/openlife-a2a-server/Cargo.toml");
+    assert!(dev_server_manifest.contains("required-features = [\"dev-extensions\"]"));
 
     let source = read_repo_file("src-tauri/src/lib.rs");
     assert!(source.contains(
@@ -576,6 +590,20 @@ fn backend_remediation_phase0_high_risk_commands_are_dev_only() {
         "execute_tool_call",
         "register_mcp_server",
         "unregister_mcp_server",
+        "inspect_mcp_call",
+        "list_mcp_servers",
+        "list_mcp_tools",
+        "list_mcp_templates",
+        "recommend_mcp_manifests",
+        "list_mcp_audit_logs",
+        "clear_mcp_audit_logs",
+        "export_mcp_audit_logs",
+        "cleanup_mcp_audit_logs",
+        "rotate_mcp_audit_key",
+        "list_plugins",
+        "reload_plugins",
+        "enable_plugin",
+        "disable_plugin",
     ] {
         let guarded = format!("#[cfg(feature = \"dev-extensions\")]\n            {command},");
         assert!(
@@ -589,17 +617,25 @@ fn backend_remediation_phase0_high_risk_commands_are_dev_only() {
     assert!(!source.contains("falling back to embedded a2a server"));
     assert!(!source.contains("OPENLIFE_AUTOSTART_FILESYSTEM_MCP"));
     assert!(source.contains("#[cfg(debug_assertions)]\nfn runtime_dev_url()"));
+    assert!(source.contains(
+        "#[cfg(feature = \"dev-extensions\")]\n            start_dev_extension_background_workers"
+    ));
+
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    assert!(bootstrap.contains(
+        "#[cfg(not(feature = \"dev-extensions\"))]\n    let mcp_registry = McpRegistry::new_release_product();"
+    ));
 
     let sidecar = read_repo_file("src-tauri/src/a2a_sidecar.rs");
     assert!(sidecar.contains("A2A_PARENT_PIPE_GUARD_ENV"));
     assert!(sidecar.contains(".stdin(Stdio::piped())"));
-    let sidecar_bin = read_repo_file("src-tauri/src/bin/a2a_server.rs");
+    let sidecar_bin = read_repo_file("tools/openlife-a2a-server/src/main.rs");
     assert!(sidecar_bin.contains("wait_for_parent_pipe_close"));
     assert!(sidecar_bin.contains("A2A_PARENT_PIPE_GUARD_ENV"));
     let ci = read_repo_file(".github/workflows/ci.yml");
     assert_eq!(
         ci.matches(
-            "cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked"
+            "cargo test -p openlife-a2a-server --features dev-extensions --test parent_guard --locked"
         )
         .count(),
         3,
@@ -610,7 +646,7 @@ fn backend_remediation_phase0_high_risk_commands_are_dev_only() {
 #[test]
 fn backend_remediation_phase0_a2a_has_one_router_and_no_embedded_server_owner() {
     let library_server = read_repo_file("src-tauri/src/a2a_server.rs");
-    let binary_entrypoint = read_repo_file("src-tauri/src/bin/a2a_server.rs");
+    let binary_entrypoint = read_repo_file("tools/openlife-a2a-server/src/main.rs");
     let combined = format!("{library_server}\n{binary_entrypoint}");
 
     assert!(
@@ -639,17 +675,61 @@ fn backend_remediation_phase0_a2a_has_one_router_and_no_embedded_server_owner() 
 
 #[test]
 fn backend_remediation_phase0_release_registry_does_not_expose_a2a_execution() {
-    let mut registry = openlife_core::mcp::McpRegistry::new();
+    let registry = openlife_core::mcp::McpRegistry::new_release_product();
     assert!(!registry
         .list_manifests()
         .iter()
         .any(|manifest| manifest.name == "a2a.call_agent"));
+    assert!(!registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == "mcp.call_tool"));
+    assert!(!registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == "builtin_echo"));
+    assert!(registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == "web.search"));
 
+    let mut registry = openlife_core::mcp::McpRegistry::new();
     registry.register_dev_a2a_tool();
     assert!(registry
         .list_manifests()
         .iter()
         .any(|manifest| manifest.name == "a2a.call_agent"));
+}
+
+#[test]
+fn backend_remediation_phase0_release_package_owns_no_a2a_binary_target() {
+    let product_manifest = read_repo_file("src-tauri/Cargo.toml");
+    assert!(
+        !product_manifest.contains("openlife-a2a-server")
+            && !product_manifest.contains("src/bin/a2a_server.rs"),
+        "the Tauri product package must not advertise a development A2A binary to the release bundler"
+    );
+
+    let dev_server_manifest = read_repo_file("tools/openlife-a2a-server/Cargo.toml");
+    assert!(dev_server_manifest.contains("name = \"openlife-a2a-server\""));
+    assert!(dev_server_manifest.contains("openlife-tauri/dev-extensions"));
+    assert!(
+        read_repo_file("Cargo.toml").contains("tools/openlife-a2a-server"),
+        "the quarantined A2A server must remain an explicit workspace development tool"
+    );
+}
+
+#[test]
+fn backend_remediation_phase0_startup_keyring_is_bounded_and_noninteractive() {
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    assert!(bootstrap.contains("StartupKeyringSecretStore::default()"));
+    assert!(!bootstrap.contains("bootstrap_with_secret_store(data_dir, &KeyringSecretStore)"));
+
+    let secret_store = read_repo_file("src-tauri/src/secret_store.rs");
+    assert!(secret_store.contains("STARTUP_SECRET_OPERATION_TIMEOUT"));
+    assert!(secret_store.contains("recv_timeout(timeout)"));
+    assert!(secret_store.contains("disable_user_interaction()"));
+    assert!(secret_store.contains("prior bounded timeout"));
 }
 
 #[cfg(not(feature = "dev-extensions"))]
@@ -706,7 +786,7 @@ fn backend_remediation_phase0_dev_entrypoints_are_explicit_and_match_dev_capabil
     assert!(a2a_server.contains("OPENLIFE_A2A_PAIRED_TOKEN"));
     assert!(!a2a_server.contains("OPENLIFE_ENABLE_UNAUTHENTICATED_DEV_A2A"));
     assert!(a2a_server.contains("OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR"));
-    let a2a_bin = read_repo_file("src-tauri/src/bin/a2a_server.rs");
+    let a2a_bin = read_repo_file("tools/openlife-a2a-server/src/main.rs");
     assert!(a2a_bin.contains("require_authenticated_dev_a2a_opt_in"));
 }
 

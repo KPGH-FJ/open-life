@@ -134,6 +134,11 @@ pub struct MainChatTurnRouteEvidenceSnapshot {
 #[derive(Clone)]
 pub struct AppState {
     pub persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
+    /// Bootstrap-owned governed import journal. Construction performs schema
+    /// migration, so product commands must reuse this instance and fail closed
+    /// when bootstrap could not open it.
+    pub(crate) governed_data_import_journal:
+        Option<Arc<openlife_core::persistence_outbox::GovernedDataImportJournal>>,
     pub config: Arc<Mutex<AppConfig>>,
     pub life_model_manager: Arc<Mutex<LifeModelManager>>,
     /// Operation-level serialization for the file journal, canonical rename,
@@ -151,7 +156,6 @@ pub struct AppState {
     pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
-    pub(crate) mcp_audit_read_gateway: Arc<crate::mcp_audit_read_gateway::McpAuditReadGateway>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
     pub life_event_store: Option<Arc<Mutex<openlife_core::agent::LifeEventStore>>>,
@@ -181,6 +185,10 @@ pub struct AppState {
     pub(crate) runtime_clock_source:
         Arc<tokio::sync::Mutex<crate::main_chat_runtime_facts::MainChatRuntimeClockSource>>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
+    pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
+    /// Canonical ADR 0015 owner. Absence is an explicit degraded state; release
+    /// bootstrap never replaces it with a temporary or in-memory product store.
+    pub(crate) state_store: Option<Arc<openlife_core::state_store::StateStore>>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
 

@@ -1,129 +1,44 @@
 use crate::errors::AppError;
-use crate::life_model_materializer_guard::{
-    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
-    LifeModelMaterializerCallerPurpose,
-};
-use crate::memory_gateway;
-use crate::{persist_life_model, AppState};
-use openlife_core::life_model::{
-    AlertLevel, CustomStateDimension, DailyGoal, StateAlert, TimeBlock,
-};
-use openlife_core::memory::StateHistoryEntry;
+use crate::AppState;
+use openlife_core::life_model::{AlertLevel, DailyGoal, StateAlert};
+use openlife_core::state_store::StateHistoryEntry;
 use std::sync::Arc;
 use tauri::State;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn record_state_with_state(
-    operation_id: String,
-    dimension_name: String,
-    value: f64,
-    unit: String,
-    note: Option<String>,
-    min_threshold: Option<f32>,
-    max_threshold: Option<f32>,
-    alert_days: Option<u32>,
+fn canonical_state_store(
     state: &Arc<AppState>,
-) -> Result<openlife_core::memory::CanonicalStateEntryWrite, AppError> {
-    let canonical_write = memory_gateway::record_state_entry_with_state(
-        &operation_id,
-        &dimension_name,
-        value,
-        &unit,
-        note.as_deref(),
-        min_threshold,
-        max_threshold,
-        alert_days,
-        state,
-    )
-    .await?;
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    let projection_already_applied = model
-        .state
-        .custom_dimensions
-        .iter()
-        .find(|dimension| dimension.name == dimension_name)
-        .is_some_and(|dimension| {
-            dimension.current_value == value as f32
-                && min_threshold.map_or(true, |minimum| dimension.min_threshold == Some(minimum))
-                && max_threshold.map_or(true, |maximum| dimension.max_threshold == Some(maximum))
-                && alert_days.map_or(true, |days| dimension.alert_days == days)
-        });
-    if canonical_write.replayed && projection_already_applied {
-        drop(manager);
-        crate::life_model_write_gateway::reconcile_lifemodel_file_mutations_with_state(state)
-            .await
-            .map_err(AppError::from)?;
-        return Ok(canonical_write);
-    }
-    if let Some(dim) = model
-        .state
-        .custom_dimensions
-        .iter_mut()
-        .find(|d| d.name == dimension_name)
-    {
-        dim.current_value = value as f32;
-        if let Some(min) = min_threshold {
-            dim.min_threshold = Some(min);
-        }
-        if let Some(max) = max_threshold {
-            dim.max_threshold = Some(max);
-        }
-        if let Some(days) = alert_days {
-            dim.alert_days = days;
-        }
-    } else {
-        model.state.custom_dimensions.push(CustomStateDimension {
-            name: dimension_name,
-            unit,
-            current_value: value as f32,
-            min_threshold,
-            max_threshold,
-            alert_days: alert_days.unwrap_or(3),
-        });
-    }
-    model.state.last_updated = Some(chrono::Utc::now().to_rfc3339());
-    drop(manager);
-    persist_life_model(
-        &state.clone(),
-        model,
-        true,
-        LifeModelMaterializerCallerContext::new(
-            "state_record_state_source_data",
-            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-        ),
-    )
-    .await
-    .map_err(AppError::from)?;
-    Ok(canonical_write)
+) -> Result<&openlife_core::state_store::StateStore, AppError> {
+    state
+        .state_store
+        .as_deref()
+        .ok_or_else(|| {
+            AppError::db_with_hint(
+                "StateStore is unavailable; state history truth is degraded and no temporary fallback is allowed.",
+                "restart_after_repairing_state_db",
+            )
+        })
 }
 
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn record_state(
-    operation_id: String,
-    dimension_name: String,
-    value: f64,
-    unit: String,
-    note: Option<String>,
-    min_threshold: Option<f32>,
-    max_threshold: Option<f32>,
-    alert_days: Option<u32>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<openlife_core::memory::CanonicalStateEntryWrite, AppError> {
-    record_state_with_state(
-        operation_id,
-        dimension_name,
-        value,
-        unit,
-        note,
-        min_threshold,
-        max_threshold,
-        alert_days,
-        &state.inner().clone(),
-    )
-    .await
+fn state_history_error(error: anyhow::Error) -> AppError {
+    let message = error.to_string();
+    if message.contains("state_history_product_owner_") {
+        AppError::db_with_hint(
+            format!("State history canonical owner is unavailable: {message}"),
+            "restart_after_repairing_state_db",
+        )
+    } else {
+        AppError::from(error)
+    }
+}
+
+pub(crate) fn get_state_history_with_state(
+    state: &Arc<AppState>,
+    dimension_name: &str,
+    limit: usize,
+) -> Result<Vec<StateHistoryEntry>, AppError> {
+    canonical_state_store(state)?
+        .get_product_state_history(dimension_name, limit)
+        .map_err(state_history_error)
 }
 
 #[tauri::command]
@@ -132,24 +47,21 @@ pub async fn get_state_history(
     limit: usize,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<StateHistoryEntry>, AppError> {
-    let store = state.memory_store.lock().await;
-    store
-        .get_state_history(&dimension_name, limit)
-        .map_err(AppError::from)
+    get_state_history_with_state(&state.inner().clone(), &dimension_name, limit)
 }
 
-#[tauri::command]
-pub async fn get_state_alerts(
-    state: State<'_, Arc<AppState>>,
+pub(crate) async fn get_state_alerts_with_state(
+    state: &Arc<AppState>,
 ) -> Result<Vec<StateAlert>, AppError> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
-    let store = state.memory_store.lock().await;
+    drop(manager);
+    let store = canonical_state_store(state)?;
     let mut alerts = Vec::new();
     for dim in &model.state.custom_dimensions {
         let entries = store
-            .get_state_history(&dim.name, (dim.alert_days.max(1) as usize) * 2)
-            .map_err(AppError::from)?;
+            .get_product_state_history(&dim.name, (dim.alert_days.max(1) as usize) * 2)
+            .map_err(state_history_error)?;
         if entries.len() < dim.alert_days.max(1) as usize {
             continue;
         }
@@ -200,148 +112,41 @@ pub async fn get_state_alerts(
     Ok(alerts)
 }
 
+#[tauri::command]
+pub async fn get_state_alerts(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<StateAlert>, AppError> {
+    get_state_alerts_with_state(&state.inner().clone()).await
+}
+
 pub(crate) async fn get_daily_goals_with_state(
     state: &Arc<AppState>,
 ) -> Result<Vec<DailyGoal>, AppError> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        AppError::db_with_hint(
+            "StateStore is unavailable; daily task truth is degraded and no temporary fallback is allowed.",
+            "restart_after_repairing_state_db",
+        )
+    })?;
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
-    Ok(model.goals.daily)
+    crate::state_projection::validate_legacy_yaml_daily_task_cutover_source(store, &model)
+        .map_err(|error| {
+            AppError::db_with_hint(
+                format!("daily task StateStore authority is degraded: {error}"),
+                "restart_after_repairing_state_db",
+            )
+        })?;
+    let canonical = store.get_product_daily_tasks().map_err(AppError::from)?;
+    Ok(canonical
+        .iter()
+        .map(crate::state_projection::projected_daily_goal)
+        .collect())
 }
 
 #[tauri::command]
 pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<DailyGoal>, AppError> {
     get_daily_goals_with_state(&state.inner().clone()).await
-}
-
-#[tauri::command]
-pub(crate) async fn add_daily_goal(
-    operation_id: String,
-    name: String,
-    time_block: Option<TimeBlock>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<crate::life_model_write_gateway::DailyGoalEffectReceipt, AppError> {
-    add_daily_goal_with_state(operation_id, name, time_block, state.inner()).await
-}
-
-pub(crate) async fn add_daily_goal_with_state(
-    operation_id: String,
-    name: String,
-    time_block: Option<TimeBlock>,
-    state: &Arc<AppState>,
-) -> Result<crate::life_model_write_gateway::DailyGoalEffectReceipt, AppError> {
-    crate::life_model_write_gateway::add_daily_goal_idempotent_with_gateway(
-        state,
-        &operation_id,
-        name,
-        time_block,
-        LifeModelMaterializerCallerContext::new(
-            "state_add_daily_goal_source_data",
-            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-        ),
-    )
-    .await
-    .map_err(|error| {
-        if error.contains("operation id") || error.contains("name must not be empty") {
-            AppError::permission(error)
-        } else {
-            AppError::from(error)
-        }
-    })
-}
-
-#[tauri::command]
-pub async fn update_daily_goal(
-    index: usize,
-    name: String,
-    time_block: Option<TimeBlock>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    if let Some(goal) = model.goals.daily.get_mut(index) {
-        goal.name = name;
-        goal.time_block = time_block;
-        drop(manager);
-        persist_life_model(
-            &state.inner().clone(),
-            model,
-            true,
-            LifeModelMaterializerCallerContext::new(
-                "state_update_daily_goal_source_data",
-                LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-            ),
-        )
-        .await
-        .map_err(AppError::from)
-        .map(|_| ())
-    } else {
-        Err(AppError::not_found("invalid index"))
-    }
-}
-
-#[tauri::command]
-pub async fn delete_daily_goal(
-    index: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    if index < model.goals.daily.len() {
-        model.goals.daily.remove(index);
-        drop(manager);
-        persist_life_model(
-            &state.inner().clone(),
-            model,
-            true,
-            LifeModelMaterializerCallerContext::new(
-                "state_delete_daily_goal_source_data",
-                LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-            ),
-        )
-        .await
-        .map_err(AppError::from)
-        .map(|_| ())
-    } else {
-        Err(AppError::not_found("invalid index"))
-    }
-}
-
-pub(crate) async fn toggle_daily_goal_with_state(
-    index: usize,
-    state: &Arc<AppState>,
-) -> Result<bool, AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    if index >= model.goals.daily.len() {
-        return Err(AppError::not_found("invalid index"));
-    }
-    model.goals.daily[index].done = !model.goals.daily[index].done;
-    let completed = model.goals.daily[index].done;
-    drop(manager);
-    persist_life_model(
-        &state.clone(),
-        model,
-        true,
-        LifeModelMaterializerCallerContext::new(
-            "state_toggle_daily_goal_source_data",
-            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-        ),
-    )
-    .await
-    .map_err(AppError::from)?;
-    Ok(completed)
-}
-
-#[tauri::command]
-pub async fn toggle_daily_goal(
-    index: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<bool, AppError> {
-    toggle_daily_goal_with_state(index, &state.inner().clone()).await
 }
 
 #[cfg(test)]
@@ -357,6 +162,7 @@ mod tests {
             persistence_coordinator: Arc::new(
                 crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
             ),
+            governed_data_import_journal: None,
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::LifeModelManager::new(
@@ -409,9 +215,6 @@ mod tests {
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
-            mcp_audit_read_gateway: Arc::new(
-                crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
-            ),
             agent_run_store: None,
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
@@ -470,12 +273,16 @@ mod tests {
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            resource_runtime: None,
+            state_store: Some(Arc::new(
+                openlife_core::state_store::StateStore::new_in_memory().unwrap(),
+            )),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
     #[tokio::test]
-    async fn add_and_get_daily_goal() {
+    async fn daily_goal_product_read_fails_closed_then_uses_imported_statestore_owner() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
 
@@ -486,202 +293,155 @@ mod tests {
             model.goals.daily.push(DailyGoal {
                 name: "Exercise".to_string(),
                 done: false,
-                time_block: None,
+                time_block: Some(openlife_core::life_model::TimeBlock {
+                    start: "09:00".into(),
+                    end: "10:00".into(),
+                }),
+                due_at: None,
                 operation_id: None,
                 operation_digest: None,
             });
             manager.save(&model).unwrap();
         }
 
-        // Get daily goals
+        let blocked = get_daily_goals_with_state(&state).await.unwrap_err();
+        assert!(matches!(&blocked, AppError::Database { .. }));
+        assert!(blocked
+            .message()
+            .contains("daily_task_product_owner_not_ready"));
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+            state.state_store.as_ref().unwrap(),
+            &model,
+            chrono::Utc::now(),
+        )
+        .unwrap();
         let goals = get_daily_goals_with_state(&state).await.unwrap();
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].name, "Exercise");
         assert!(!goals[0].done);
-    }
+        assert_eq!(
+            goals[0]
+                .time_block
+                .as_ref()
+                .map(|block| block.start.as_str()),
+            Some("09:00")
+        );
 
-    #[tokio::test]
-    async fn toggle_daily_goal_changes_state() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
+        crate::state_projection::reconcile_state_store_lifemodel_projection(&state)
+            .await
+            .unwrap();
+        let projected = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(projected.goals.daily.len(), 1);
+        assert!(
+            crate::state_projection::is_state_store_projected_daily_goal(&projected.goals.daily[0])
+        );
+        assert_eq!(
+            projected.goals.daily[0]
+                .time_block
+                .as_ref()
+                .map(|block| block.end.as_str()),
+            Some("10:00")
+        );
+        assert_eq!(
+            get_daily_goals_with_state(&state).await.unwrap()[0].name,
+            "Exercise"
+        );
 
-        // Add a goal directly
         {
             let manager = state.life_model_manager.lock().await;
-            let mut model = manager.load().unwrap_or_default();
-            model.goals.daily.push(DailyGoal {
-                name: "Read".to_string(),
+            let mut drifted = manager.load().unwrap();
+            drifted.goals.daily.push(DailyGoal {
+                name: "切换后旧路线写入".into(),
                 done: false,
                 time_block: None,
+                due_at: None,
                 operation_id: None,
                 operation_digest: None,
             });
+            manager.save(&drifted).unwrap();
+        }
+        let drift = get_daily_goals_with_state(&state).await.unwrap_err();
+        assert!(drift
+            .message()
+            .contains("legacy_daily_task_source_changed_after_cutover"));
+    }
+
+    #[test]
+    fn state_history_product_read_fails_closed_without_import_receipt() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let error = get_state_history_with_state(&state, "focus", 10).unwrap_err();
+        assert!(matches!(&error, AppError::Database { .. }));
+        assert!(error
+            .message()
+            .contains("state_history_product_owner_not_ready"));
+    }
+
+    #[tokio::test]
+    async fn state_history_and_alerts_read_only_canonical_statestore_after_cutover() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let store = state.state_store.as_ref().unwrap();
+        store
+            .reconcile_legacy_state_history_shadow(
+                openlife_core::persistence_outbox::metadata_digest(
+                    "commands-state-history-cutover",
+                ),
+                vec![
+                    openlife_core::state_store::LegacyStateHistoryShadowCandidate {
+                        legacy_id: 1,
+                        dimension_name: "focus".into(),
+                        value: 3.0,
+                        unit: "/10".into(),
+                        recorded_at: chrono::Utc::now() - chrono::Duration::days(1),
+                        note: Some("legacy day one".into()),
+                        legacy_operation_id: None,
+                        legacy_operation_digest: None,
+                    },
+                    openlife_core::state_store::LegacyStateHistoryShadowCandidate {
+                        legacy_id: 2,
+                        dimension_name: "focus".into(),
+                        value: 4.0,
+                        unit: "/10".into(),
+                        recorded_at: chrono::Utc::now(),
+                        note: Some("legacy day two".into()),
+                        legacy_operation_id: None,
+                        legacy_operation_digest: None,
+                    },
+                ],
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        store
+            .import_legacy_state_history_shadow(chrono::Utc::now())
+            .unwrap();
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap_or_default();
+            model
+                .state
+                .custom_dimensions
+                .push(openlife_core::life_model::CustomStateDimension {
+                    name: "focus".into(),
+                    current_value: 4.0,
+                    unit: "/10".into(),
+                    min_threshold: Some(5.0),
+                    max_threshold: None,
+                    alert_days: 2,
+                });
             manager.save(&model).unwrap();
         }
 
-        // Toggle it
-        let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
-        assert!(completed);
-
-        // Verify
-        let goals = get_daily_goals_with_state(&state).await.unwrap();
-        assert!(goals[0].done);
-
-        // Toggle back
-        let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
-        assert!(!completed);
-    }
-
-    #[tokio::test]
-    async fn daily_goal_effect_reuses_uuid_and_rejects_payload_drift() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let operation_id = uuid::Uuid::new_v4().to_string();
-
-        let first = add_daily_goal_with_state(operation_id.clone(), "Read".into(), None, &state)
-            .await
-            .unwrap();
-        let replay = add_daily_goal_with_state(operation_id.clone(), "Read".into(), None, &state)
-            .await
-            .unwrap();
-
-        assert!(!first.replayed);
-        assert!(replay.replayed);
-        assert_eq!(first.operation_digest, replay.operation_digest);
-        let goals = get_daily_goals_with_state(&state).await.unwrap();
-        assert_eq!(goals.len(), 1);
-        assert_eq!(
-            goals[0].operation_id.as_deref(),
-            Some(operation_id.as_str())
-        );
-        assert!(
-            add_daily_goal_with_state(operation_id, "Write".into(), None, &state)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("different payload")
-        );
-    }
-
-    #[tokio::test]
-    async fn state_effect_replay_fills_projection_without_duplicate_history() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let operation_id = uuid::Uuid::new_v4().to_string();
-
-        let first = record_state_with_state(
-            operation_id.clone(),
-            "focus".into(),
-            8.0,
-            "points".into(),
-            Some("afternoon".into()),
-            Some(1.0),
-            Some(10.0),
-            Some(2),
-            &state,
-        )
-        .await
-        .unwrap();
-        let replay = record_state_with_state(
-            operation_id.clone(),
-            "focus".into(),
-            8.0,
-            "points".into(),
-            Some("afternoon".into()),
-            Some(1.0),
-            Some(10.0),
-            Some(2),
-            &state,
-        )
-        .await
-        .unwrap();
-
-        assert!(!first.replayed);
-        assert!(replay.replayed);
-        assert_eq!(first.state_entry_id, replay.state_entry_id);
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .get_state_history("focus", 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(record_state_with_state(
-            operation_id.clone(),
-            "focus".into(),
-            9.0,
-            "points".into(),
-            Some("afternoon".into()),
-            Some(1.0),
-            Some(10.0),
-            Some(2),
-            &state,
-        )
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("different payload"));
-        for (dimension_name, unit, note) in [
-            ("energy", "points", Some("afternoon")),
-            ("focus", "percent", Some("afternoon")),
-            ("focus", "points", Some("evening")),
-        ] {
-            assert!(record_state_with_state(
-                operation_id.clone(),
-                dimension_name.into(),
-                8.0,
-                unit.into(),
-                note.map(str::to_string),
-                Some(1.0),
-                Some(10.0),
-                Some(2),
-                &state,
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("different payload"));
-        }
-        for (min_threshold, max_threshold, alert_days) in [
-            (Some(2.0), Some(10.0), Some(2)),
-            (Some(1.0), Some(9.0), Some(2)),
-            (Some(1.0), Some(10.0), Some(3)),
-        ] {
-            assert!(record_state_with_state(
-                operation_id.clone(),
-                "focus".into(),
-                8.0,
-                "points".into(),
-                Some("afternoon".into()),
-                min_threshold,
-                max_threshold,
-                alert_days,
-                &state,
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("different payload"));
-        }
-        let model = state.life_model_manager.lock().await.load().unwrap();
-        let focus = model
-            .state
-            .custom_dimensions
-            .iter()
-            .find(|dimension| dimension.name == "focus")
-            .expect("focus projection");
-        assert_eq!(focus.current_value, 8.0);
-        assert_eq!(focus.unit, "points");
-        assert_eq!(focus.min_threshold, Some(1.0));
-        assert_eq!(focus.max_threshold, Some(10.0));
-        assert_eq!(focus.alert_days, 2);
-        assert!(model
-            .state
-            .custom_dimensions
-            .iter()
-            .all(|dimension| dimension.name != "energy"));
+        let history = get_state_history_with_state(&state, "focus", 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].note.as_deref(), Some("legacy day one"));
+        assert_eq!(history[1].note.as_deref(), Some("legacy day two"));
+        let alerts = get_state_alerts_with_state(&state).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].dimension_name, "focus");
+        assert!(alerts[0].message.contains("连续 2 天低于阈值 5"));
     }
 }

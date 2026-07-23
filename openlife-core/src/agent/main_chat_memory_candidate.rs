@@ -221,6 +221,12 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
     if is_current_external_fact_request(&normalized) {
         return Vec::new();
     }
+    let normalized_lower = normalized.to_ascii_lowercase();
+    if is_supplied_text_transformation_request(&normalized_lower)
+        && !has_explicit_memory_marker(&normalized_lower)
+    {
+        return Vec::new();
+    }
 
     let spans = split_spans(user_text);
     let mut candidates = Vec::new();
@@ -315,6 +321,7 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
             && !future_rule
             && !identity_or_preference
             && !is_life_event_expression(&lower)
+            && !hypothetical_only
             && !is_quoted_or_structured_content(&compact)
             && is_supported_stable_user_fact_expression(&lower)
         {
@@ -339,10 +346,18 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
                 (!previous_memory_spans.is_empty()).then(|| previous_memory_spans.join(" "))
             });
             if let Some(claim) = claim.filter(|value| meaningful_claim(value)) {
+                let claim_kind = if contains_any(
+                    &claim.to_ascii_lowercase(),
+                    &["偏好", "prefer", "preference"],
+                ) {
+                    MemoryCandidateKind::Preference
+                } else {
+                    MemoryCandidateKind::SemanticUserFact
+                };
                 push_candidate(
                     &mut candidates,
                     &span_id,
-                    MemoryCandidateKind::SemanticUserFact,
+                    claim_kind,
                     MemoryDestination::MemoryProposal,
                     &compact,
                     &claim,
@@ -469,7 +484,10 @@ pub fn plan_main_chat_memory_routing(user_text: &str) -> MainChatMemoryRoutingRe
     route_memory_candidates(&candidates)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+)]
 fn push_candidate(
     candidates: &mut Vec<MainChatMemoryCandidate>,
     source_span_id: &str,
@@ -845,8 +863,55 @@ fn is_action_or_advice_request(lower: &str) -> bool {
             "advice only",
             "do not modify",
             "do not execute",
+            "rewrite",
+            "rephrase",
+            "polish",
+            "translate",
+            "summarize",
+            "把这句话",
+            "把这段话",
+            "改得更",
+            "改写",
+            "重写",
+            "润色",
+            "翻译",
+            "总结",
         ],
     )
+}
+
+pub(crate) fn is_supplied_text_transformation_request(lower: &str) -> bool {
+    let requests_transformation = contains_any(
+        lower,
+        &[
+            "rewrite",
+            "rephrase",
+            "polish",
+            "translate",
+            "summarize",
+            "改写",
+            "重写",
+            "润色",
+            "翻译",
+            "总结",
+        ],
+    );
+    let identifies_supplied_text = contains_any(
+        lower,
+        &[
+            "this text",
+            "this paragraph",
+            "this sentence",
+            "the following",
+            "below",
+            "这段",
+            "这句话",
+            "这个介绍",
+            "下面",
+        ],
+    );
+
+    requests_transformation && identifies_supplied_text
 }
 
 fn is_supported_stable_user_fact_expression(lower: &str) -> bool {
@@ -1204,6 +1269,38 @@ mod tests {
         assert!(result.life_event_candidate_ids.is_empty());
         assert!(result.memory_proposal_candidate_ids.is_empty());
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn transformation_requests_do_not_turn_supplied_text_into_user_memory() {
+        for text in [
+            "把这句话改得更清楚：我们需要尽快把事情做好并且不要出问题。",
+            "请改写这段话：我通常需要在周五完成报告。",
+            "Translate this sentence: I usually work in UTC.",
+            "Summarize this text: The user normally needs short reports.",
+            "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。",
+        ] {
+            let result = routed(text);
+            assert!(
+                result.candidates.is_empty(),
+                "transformation input is bounded conversation content, not Memory authority: {text}"
+            );
+            assert!(result.life_event_candidate_ids.is_empty());
+            assert!(result.memory_proposal_candidate_ids.is_empty());
+            assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        }
+    }
+
+    #[test]
+    fn transformation_verb_does_not_hide_a_separate_real_user_preference() {
+        let result = routed("Please rewrite the heading. I prefer short direct answers.");
+
+        assert_eq!(result.memory_proposal_candidate_ids.len(), 1);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].normalized_claim,
+            "I prefer short direct answers"
+        );
     }
 
     #[test]

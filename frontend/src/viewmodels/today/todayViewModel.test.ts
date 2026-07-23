@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildTodayViewModelEnvelope } from "./todayViewModelAdapter";
+import {
+  buildTodayViewModelEnvelope,
+  TODAY_VIEW_MODEL_AUTHORITY_CONTRACT,
+} from "./todayViewModelAdapter";
 import {
   emptyTodayViewModelInput,
   errorTodayViewModelInput,
@@ -11,6 +14,26 @@ import {
 } from "./todayViewModel.fixtures";
 
 describe("todayViewModelAdapter", () => {
+  it("freezes the adapter as composition-only over named backend owners", () => {
+    expect(TODAY_VIEW_MODEL_AUTHORITY_CONTRACT).toEqual({
+      version: "openlife.today-adapter.v1",
+      compositionOwner: "strict_frontend_adapter",
+      inputs: {
+        readinessAndSafeMode: "LifeStateProjection",
+        taskPressureAndPendingReview: "LifeStateProjection",
+        dailyGoals: "get_daily_goals compatibility projection",
+        providerPrivacyBoundary: "ProviderPrivacyBoundarySummary",
+      },
+      forbiddenLocalTruth: [
+        "proposal status",
+        "task lifecycle",
+        "provider route",
+        "external transmission",
+        "durable completion",
+      ],
+    });
+  });
+
   it("builds a ready envelope from LifeStateProjection and daily goals", () => {
     const envelope = buildTodayViewModelEnvelope(readyTodayViewModelInput);
 
@@ -130,6 +153,21 @@ describe("todayViewModelAdapter", () => {
     expect(envelope.warnings?.map(warning => warning.code)).toContain(
       "today.goal_classification_limited"
     );
+  });
+
+  it("keeps provider/privacy unknown when its backend owner is missing", () => {
+    const envelope = buildTodayViewModelEnvelope({
+      projection: makeLifeStateProjection(),
+      dailyGoals: [makeDailyGoal()],
+      providerPrivacyBoundary: null,
+    });
+
+    expect(envelope.data?.dailyStateSummary.providerPrivacyBoundary).toMatchObject({
+      routeType: "unknown",
+      externalTransmission: "unknown",
+      risk: "unknown",
+      blockedReason: "Provider/privacy boundary is not backend-owned by the Today limited slice.",
+    });
   });
 
   it("keeps debug-only actions out of primary actions", () => {

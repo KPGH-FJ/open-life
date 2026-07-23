@@ -160,7 +160,14 @@ fn collect_durable_write_requirement_from_memory_routing(
         return;
     }
 
-    if !memory_routing.memory_proposal_candidate_ids.is_empty() {
+    let has_explicit_memory_request = memory_routing.candidates.iter().any(|candidate| {
+        candidate.destination == crate::agent::MemoryDestination::MemoryProposal
+            && candidate.explicitness == "explicit"
+            && memory_routing
+                .memory_proposal_candidate_ids
+                .contains(&candidate.candidate_id)
+    });
+    if has_explicit_memory_request {
         set_durable_write_requirement(
             intent,
             MainChatDurableWriteRequirement::MemoryProposal,
@@ -474,7 +481,10 @@ fn matched_external_write_term(value: &str) -> Option<&'static str> {
 }
 
 fn is_external_write_confirmation_intent(normalized: &str) -> bool {
-    if is_external_write_planning_only(normalized) {
+    if is_external_write_planning_only(normalized)
+        || is_external_write_effect_explicitly_negated(normalized)
+        || is_external_write_education_only(normalized)
+    {
         return false;
     }
 
@@ -496,7 +506,10 @@ fn is_external_write_confirmation_intent(normalized: &str) -> bool {
         return false;
     }
 
-    if has_explicit_external_write_phrase(normalized) || is_calendar_write_intent(normalized) {
+    if has_explicit_external_write_phrase(normalized)
+        || is_chinese_email_write_intent(normalized)
+        || is_calendar_write_intent(normalized)
+    {
         return true;
     }
 
@@ -505,6 +518,80 @@ fn is_external_write_confirmation_intent(normalized: &str) -> bool {
     ]
     .into_iter()
     .any(|term| ascii_write_action_has_external_target(normalized, term))
+}
+
+fn is_chinese_email_write_intent(normalized: &str) -> bool {
+    if contains_any(
+        normalized,
+        &[
+            "已经发送",
+            "已经发",
+            "刚刚发送",
+            "刚刚发",
+            "刚才发送",
+            "刚才发",
+            "发送了",
+            "发了一封",
+        ],
+    ) {
+        return false;
+    }
+
+    let has_email_object = contains_any(normalized, &["邮件", "电子邮件"]);
+    let has_send_action = contains_any(normalized, &["发送", "发一封", "发邮件", "寄出", "转发"]);
+    let has_request_shape = normalized.starts_with("发送")
+        || normalized.starts_with("发邮件")
+        || normalized.starts_with("发一封")
+        || normalized.starts_with("给")
+        || contains_any(
+            normalized,
+            &["请发送", "请发", "帮我发送", "帮我发", "替我发送", "替我发"],
+        );
+
+    has_email_object && has_send_action && has_request_shape
+}
+
+fn is_external_write_effect_explicitly_negated(normalized: &str) -> bool {
+    contains_any(
+        normalized,
+        &[
+            "不要发送",
+            "不要发",
+            "别发送",
+            "别发",
+            "无需发送",
+            "不需要发送",
+            "只生成草稿",
+            "仅生成草稿",
+            "只写草稿",
+            "仅写草稿",
+            "do not send",
+            "don't send",
+            "do not publish",
+            "don't publish",
+            "draft only",
+        ],
+    )
+}
+
+fn is_external_write_education_only(normalized: &str) -> bool {
+    let asks_how = contains_any(
+        normalized,
+        &[
+            "如何发送",
+            "怎么发送",
+            "怎样发送",
+            "发送邮件的流程",
+            "发送邮件的方法",
+            "how to send",
+        ],
+    );
+    let explicitly_requests_effect = contains_any(
+        normalized,
+        &["请发送", "请发", "帮我发送", "帮我发", "替我发送", "替我发"],
+    );
+
+    asks_how && !explicitly_requests_effect
 }
 
 fn has_explicit_external_write_phrase(normalized: &str) -> bool {
@@ -782,6 +869,38 @@ mod tests {
             Some(MainChatBlockerRequirement::ExternalWriteConfirmation)
         );
         assert!(intent.durable_write_requirement.is_none());
+    }
+
+    #[test]
+    fn main_chat_governance_intent_classifies_chinese_email_action_request() {
+        for prompt in [
+            "给 alice@example.com 发送一封邮件说会议推迟了。",
+            "请发送一封邮件给项目负责人。",
+            "帮我发邮件通知客户会议延期。",
+        ] {
+            let intent = extract_main_chat_intent_signals(prompt);
+            assert_eq!(
+                intent.blocker_requirement,
+                Some(MainChatBlockerRequirement::ExternalWriteConfirmation),
+                "{prompt} should require confirmation"
+            );
+        }
+    }
+
+    #[test]
+    fn main_chat_governance_intent_does_not_promote_chinese_email_history_or_draft() {
+        for prompt in [
+            "我刚刚发送了一封邮件给项目负责人。",
+            "不要发送邮件，只生成草稿。",
+            "总结这封邮件的关键内容。",
+            "给我解释如何发送一封邮件。",
+        ] {
+            let intent = extract_main_chat_intent_signals(prompt);
+            assert!(
+                intent.blocker_requirement.is_none(),
+                "{prompt} should not authorize an external side effect"
+            );
+        }
     }
 
     #[test]

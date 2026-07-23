@@ -252,7 +252,10 @@ impl AgentRuntime {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn execute_task_with_hs_packet(
         &self,
         task: &AgentTask,
@@ -276,7 +279,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn execute_task_with_hs_packet_and_guidance_mode(
         &self,
         task: &AgentTask,
@@ -301,7 +307,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn execute_task_inner(
         &self,
         task: &AgentTask,
@@ -437,7 +446,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn generate_direct_with_hs_packet(
         &self,
         task: &AgentTask,
@@ -461,7 +473,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     pub async fn generate_direct_with_hs_packet_and_guidance_mode(
         &self,
         task: &AgentTask,
@@ -486,7 +501,10 @@ impl AgentRuntime {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
+    )]
     async fn generate_direct_inner(
         &self,
         task: &AgentTask,
