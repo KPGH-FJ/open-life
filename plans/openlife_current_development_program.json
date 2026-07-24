@@ -2,8 +2,8 @@
   "schema_version": "1.0.0",
   "program_id": "openlife-current-development-program-20260724",
   "generated_at": "2026-07-24T06:32:16.913Z",
-  "status": "DRAFT_AWAITING_USER_APPROVAL",
-  "execution_authorized": false,
+  "status": "APPROVED_FOR_EXECUTION",
+  "execution_authorized": true,
   "authority": {
     "scope": "CURRENT_TASK_ORDER_AND_EXECUTION_GOVERNANCE_ONLY",
     "subordinate_to_phase7": true,
@@ -174,22 +174,26 @@
     "evidence_support": "STRONG_FOR_CURRENT_DIRECTION_WITH_EXPLICIT_RECONSIDERATION_CRITERIA"
   },
   "program_approval": {
-    "status": "PENDING_USER_APPROVAL",
-    "execution_authority_granted": false,
+    "status": "APPROVED_BY_USER",
+    "execution_authority_granted": true,
     "program_author_id": "/root",
-    "approved_program_schema_version": null,
-    "approved_draft_commit_sha": null,
-    "approved_by": null,
-    "approved_at": null,
-    "approval_record": null,
+    "approved_program_schema_version": "1.0.0",
+    "approved_draft_commit_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
+    "approved_by": "USER",
+    "approved_at": "2026-07-24T09:54:54Z",
+    "approval_record": "codex-thread:user-approved-exact-draft-6d2783ad-by-message-20260724T095454Z",
     "github_formal_approval_credit": false,
     "note": "Creating or independently reviewing the Program does not authorize implementation. The user must explicitly approve execution.",
     "independent_challenge": {
-      "status": "PENDING_REVIEW_AFTER_CORRECTIONS",
-      "reviewed_head_sha": null,
-      "reviewer_ids": [],
-      "outcome": null,
-      "artifact_or_record": null,
+      "status": "PASS",
+      "reviewed_head_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
+      "reviewer_ids": [
+        "/root/program_authority_integration",
+        "/root/program_ledger_mapping",
+        "/root/program_schema_design"
+      ],
+      "outcome": "PASS",
+      "artifact_or_record": "codex-independent-challenge:exact-draft-6d2783ad-three-reviewer-pass",
       "blocking_findings": [],
       "github_formal_approval_credit": false,
       "invalidation_rule": "Any substantive Program, ledger, authority or validator change requires a new bound challenge."
@@ -301,11 +305,63 @@
   "gates": [
     {
       "id": "G-PROGRAM-ACTIVATION",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "fail_closed": true,
       "required_guard_ids": [],
       "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY", "VALIDATOR_SELF_TEST"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
+          "artifact_or_record": "codex-thread:user-approved-exact-draft-6d2783ad-by-message-20260724T095454Z",
+          "record_id": "PROGRAM-ACTIVATION-USER-20260724",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": ["plans/openlife_current_development_program.json"],
+          "guard_ids": [],
+          "dimensions": ["USER_PROGRAM_APPROVAL"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "USER",
+          "reviewer_id": "/root",
+          "credit_allowed": true,
+          "active": true
+        },
+        {
+          "subject_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
+          "artifact_or_record": "codex-independent-challenge:exact-draft-6d2783ad-three-reviewer-pass",
+          "record_id": "PROGRAM-ACTIVATION-AUTHORITY-20260724",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": [
+            "plans/openlife_current_development_program.json",
+            "plans/openlife_problem_ledger.json"
+          ],
+          "guard_ids": [],
+          "dimensions": ["TRACKED_AUTHORITY"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root",
+          "reviewer_id": "/root/program_authority_integration",
+          "credit_allowed": true,
+          "active": true
+        },
+        {
+          "subject_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
+          "artifact_or_record": "codex-validator-self-test:exact-draft-6d2783ad-scenarios-11-pass",
+          "record_id": "PROGRAM-ACTIVATION-VALIDATOR-20260724",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": [
+            "scripts/validate-current-development-program.mjs",
+            "scripts/test-current-development-program-validator.mjs"
+          ],
+          "guard_ids": [],
+          "dimensions": ["VALIDATOR_SELF_TEST"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/program_schema_design",
+          "reviewer_id": "/root/program_ledger_mapping",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
       "criteria": [
         "The draft Program validator passes.",
         "The disposable Git-fixture validator self-test passes against the exact approved draft.",
@@ -518,7 +574,7 @@
       "order": 0,
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
-      "status": "PLANNED_NOT_AUTHORIZED",
+      "status": "READY",
       "refinement_level": "CURRENT_SLICE_BLUEPRINT_READY_REQUIRES_INTEGRATOR_FREEZE",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],
@@ -1302,7 +1358,7 @@
   ],
   "program_activation": {
     "stage_id": "PROGRAM-BOOTSTRAP",
-    "status": "DRAFT_VALIDATED_AWAITING_CHALLENGE_AND_USER_APPROVAL",
+    "status": "ACTIVE",
     "occurs_before_wave_id": "WAVE-0",
     "ordered_steps": [
       "Draft Program, ledger, active authority, validator and mutation self-test agree.",
