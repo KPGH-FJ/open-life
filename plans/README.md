@@ -1,7 +1,8 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-07-23
-> Status: active authority map for the Phase7 restart-baseline cleanup
+> Last updated: 2026-07-24
+> Status: active authority map for Phase7 remediation and the Current
+> Development Program
 
 This file is the active plan index for Agents. Its purpose is to keep old
 planning documents from steering new work and to keep current claims at the
@@ -13,28 +14,47 @@ evidence level actually proved by the current baseline.
 2. `plans/README.md`
 3. `plans/openlife_single_system_deletion_manifest.md`
 4. `plans/openlife_single_system_development_preparation.md`
-5. `plans/openlife_restart_baseline_cleanup.json` for restart-baseline refs,
-   facts, finding states, retention boundaries, and deletion evidence only.
-6. A task-specific decision/preparation file explicitly named by the user,
-   subordinate to items 1-5.
+5. `plans/openlife_current_development_program.md` for current goals, Wave
+   order, go/no-go gates, feature-reopen rules, and Agent task contracts.
+6. `plans/openlife_current_development_program.json` for the machine-readable
+   live Program status, dependencies, gate state, and approval boundary. Item 5
+   is the stable human contract; any substantive drift from its approved
+   version stops activation.
+7. `plans/openlife_problem_ledger.json` for the current 101-card owner,
+   evidence, assigned-Wave, next-proof, and closure state.
+8. `plans/openlife_restart_baseline_cleanup.json` for the frozen 2026-07-22
+   ref, retention, V4, historical 72-card, and cleanup evidence snapshot only.
+9. A task-specific decision/preparation file explicitly named by the user,
+   subordinate to items 1-8 and bound to a Current Development Program slice.
+
+The Program's immutable machine gate is
+`scripts/validate-current-development-program.mjs`; its disposable Git-fixture
+mutation suite is `scripts/test-current-development-program-validator.mjs`.
+Both are part of the approved Program surface, not optional helper scripts.
 
 V4, roadshow, Goal, Stage, Step6, Beta, dogfood, eval, adapter, migration,
-cutover, productization, maturity, W-series, and older roadmap documents are
-historical reference and evidence only. Their point-in-time `active` or
-execution wording does not grant current authority and must not restart their
-task order.
+cutover, productization, maturity, W-series that predate the Current
+Development Program, and older roadmap documents are historical reference and
+evidence only. Their point-in-time `active` or execution wording does not grant
+current authority and must not restart their task order.
 
-## Restart Baseline Cleanup Boundary
+## Current Baseline And Development Boundary
 
 - `/Users/tw/Desktop/open-life` is the only writable OpenLife checkout.
 - `main` is the only long-term local and remote product branch. A short-lived
   `codex/...` branch may exist only in this checkout for a reviewed PR and must
   be removed after merge.
-- PR #64 is merged in the recorded baseline
-  `74059dbc819851f0ef4597f055d0d6c956e0cd77`. That fact does not close an
-  unrelated product finding.
-- The exact branch/ref inventory, V4 13-commit classification, 72-finding
-  registry, recovery assets, and evidence statuses are owned by
+- PR #65 completed the restart-baseline cleanup. The formal review evidence
+  baseline is `de158ce53018c9c649f7dc0dcb3bdd8271ed4977`; it is not a claim
+  that later Program commits or execution slices have the same HEAD.
+- The formal review run completed its fact-collection pass and produced 101
+  distinct baseline problem cards, but closed zero findings. This is not an
+  exhaustive claim that every possible repository defect is known. The current
+  owner, evidence, Wave, next-proof, and closure record is
+  `plans/openlife_problem_ledger.json`.
+- The exact cleanup-time branch/ref inventory, V4 13-commit classification,
+  historical 72-finding registry, recovery assets, and retention evidence are
+  frozen in
   `plans/openlife_restart_baseline_cleanup.json`.
 - Finding closure requires current-baseline implementation, independent
   verification, and closure evidence. Passing tests or historical evidence
@@ -47,10 +67,12 @@ task order.
 - Phase7 remains `red-until-trial-green`. Browser-shell, native-Tauri, and
   external-live evidence stay separate.
 
-This cleanup does not repair, delete, or refactor production-code findings such
-as `ReflexEngine`, invalid V4 config, `save_chat_message`, old route references,
-or Projection error folding. Those remain inputs to the next formal full-repo
-review.
+The Current Development Program reorganizes remediation on current `main`.
+Creating or reviewing that Program does not authorize execution while its JSON
+sets `execution_authorized` to `false`. Production-code candidates such as
+`ReflexEngine`, invalid V4 config, `save_chat_message`, old route references,
+or Projection error folding may change only through a finding-bound,
+current-SHA slice after Program authorization.
 
 ## Phase7 Contract
 
@@ -72,6 +94,9 @@ The shipped product must have:
 
 - `plans/openlife_single_system_deletion_manifest.md`
 - `plans/openlife_single_system_development_preparation.md`
+- `plans/openlife_current_development_program.md`
+- `plans/openlife_current_development_program.json`
+- `plans/openlife_problem_ledger.json`
 - `plans/openlife_restart_baseline_cleanup.json`
 - `plans/openlife_single_system_phase1_inventory.json` (supporting source-map
   and guard inventory, not current task order)
@@ -80,9 +105,13 @@ The shipped product must have:
 - `plans/adr/0015-transient-state-command-lane.md`
 
 The deletion manifest owns expected-absent and current-authority disposition.
-The restart cleanup JSON owns this cleanup's machine-readable baseline facts.
-The Phase1 inventory supports guards and source tracing. None of these artifacts
-may infer implementation or finding closure that lacks current-SHA evidence.
+The development preparation owns single-system architecture boundaries. The
+Current Development Program Markdown owns task order and execution policy; its
+JSON owns machine state and dependencies; the problem ledger owns per-card
+facts and closure credit. The restart cleanup JSON is a frozen recovery/fact
+snapshot, and the Phase1 inventory supports guards and source tracing. None of
+these artifacts may infer implementation or finding closure that lacks
+current-SHA evidence.
 
 ## Historical Evidence
 
@@ -105,6 +134,12 @@ This historical set includes:
 - Stage, Step6, Goal, Beta, migration, cutover, productization, maturity, and
   older Main Chat planning documents.
 
+V4 may contribute its subordinate root-cause method: source map, real RED,
+root invariant, minimal fix, same-slice old-path deletion, and
+positive/counterfactual/absence/non-regression evidence. Its branch, 13
+commits, old phase order, and historical state do not regain execution
+authority. Roadshow evidence grants no current product or feature credit.
+
 If historical wording conflicts with this active stack, the current
 single-system contract wins. Expected-absent paths in historical evidence must
 not be recreated to make an old document or scan pass.
@@ -118,3 +153,5 @@ not be recreated to make an old document or scan pass.
 - no readiness/completion claim without the required gates and exact trial
   evidence;
 - no browser-shell result described as native Tauri or external-live credit.
+- no new Goal, Stage, Roadshow, or legacy W-series document may bypass the
+  Current Development Program or assign work without a Program slice ID.

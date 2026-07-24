@@ -13,11 +13,37 @@ Read in this order when starting non-trivial OpenLife work:
    expected-absent contract.
 4. `plans/openlife_single_system_development_preparation.md` - single-system
    development boundaries and phase definitions.
-5. Task-specific decision/preparation files named by the user.
+5. `plans/openlife_current_development_program.md` - current Wave order,
+   feature-reopen gates, and Agent dispatch rules.
+6. Integrator/reconciliation/validator work only:
+   `plans/openlife_current_development_program.json` - machine-readable Program
+   status, dependencies, gates, and approval state.
+7. Integrator/reconciliation/validator work only:
+   `plans/openlife_problem_ledger.json` - current problem-card owner, evidence,
+   Wave, next-proof, and closure state.
+8. Integrator/ref-recovery/V4-fact work only:
+   `plans/openlife_restart_baseline_cleanup.json` - frozen restart refs,
+   retention, V4 classification, historical 72-card, and cleanup evidence.
+9. Task-specific decision/preparation files named by the user and bound to a
+   Current Development Program slice.
 
 Older Goal, Stage, Beta, migration, cutover, productization, maturity,
-W-series, and roadmap documents are historical reference only unless the user
-explicitly names one as input and keeps it subordinate to the Phase7 contract.
+W-series that predate the Current Development Program, and roadmap documents
+are historical reference only unless the user explicitly names one as input
+and keeps it subordinate to the Phase7 contract.
+
+The Current Development Program controls task order and feature-reopen gates
+only. It cannot restore an object classified `done` or expected-absent in the
+deletion manifest, replace a single-system architecture boundary, or grant
+finding/Phase7 closure without current evidence. When its machine interface
+sets `execution_authorized` to `false`, Agents may review or refine the Program
+but must not implement a Program slice.
+
+Ordinary Implementers, Verifiers, and Challengers must not ingest the full
+101-card ledger by default. They read items 1-5, the digest-frozen task packet,
+and only the named cards/guards/source facts machine-extracted by the
+Integrator. The full JSON files remain authoritative; scoped consumption keeps
+task context bounded and does not permit an Agent to invent omitted facts.
 
 ## Project Shape
 
@@ -167,6 +193,7 @@ cargo test -p openlife-tauri single_system -- --nocapture
 cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture
 corepack pnpm --dir frontend typecheck
 corepack pnpm --dir frontend format:check
+node scripts/test-current-development-program-validator.mjs
 ```
 
 Use task-specific absence and claim scans from the active plan or decision
