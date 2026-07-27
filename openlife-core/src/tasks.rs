@@ -11975,13 +11975,31 @@ mod tests {
                     Ok(_) => panic!(
                         "a child process acquired the canonical TaskStore while the parent still owned it"
                     ),
-                    Err(error) => error.to_string(),
+                    Err(error) => error,
                 };
+                let failure = error
+                    .downcast_ref::<crate::sqlite_migration::SqliteSlotOwnerLeaseUnavailable>()
+                    .expect("owner-lease rejection must preserve its structured failure layer");
+                assert_eq!(
+                    failure.failure_layer(),
+                    crate::sqlite_migration::SqliteSlotOwnerLeaseFailureLayer::OsOwnerLockWouldBlock
+                );
+                let os_error_kind = error.chain().find_map(|source| {
+                    source
+                        .downcast_ref::<std::io::Error>()
+                        .map(std::io::Error::kind)
+                });
+                assert_eq!(os_error_kind, Some(std::io::ErrorKind::WouldBlock));
                 assert!(
-                    error.contains("scheduled_task_store_sqlite_slot_owner_lease_unavailable"),
+                    error
+                        .to_string()
+                        .contains("scheduled_task_store_sqlite_slot_owner_lease_unavailable"),
                     "{error}"
                 );
-                println!("task_store_cross_process_probe:lease_unavailable");
+                println!(
+                    "task_store_cross_process_probe:lease_unavailable:\
+                     failure_layer=os_owner_lock_would_block:source_kind=would_block"
+                );
             }
             "expect_link_count_rejected" => {
                 let error = match TaskStore::new_with_authority_key(&path, &authority_key) {
@@ -12124,6 +12142,27 @@ mod tests {
             .canonical_store_identity
             .to_string();
         let parent_process_epoch = parent_owner.runtime_authority().unwrap().process_epoch_id;
+        let same_process_error = match TaskStore::new_with_authority_key(&path, &authority_key) {
+            Ok(_) => panic!("a same-process second owner acquired the canonical TaskStore"),
+            Err(error) => error,
+        };
+        let same_process_failure = same_process_error
+            .downcast_ref::<crate::sqlite_migration::SqliteSlotOwnerLeaseUnavailable>()
+            .expect("same-process rejection must preserve its structured failure layer");
+        assert_eq!(
+            same_process_failure.failure_layer(),
+            crate::sqlite_migration::SqliteSlotOwnerLeaseFailureLayer::ProcessRegistry
+        );
+        assert!(
+            same_process_error
+                .chain()
+                .all(|source| source.downcast_ref::<std::io::Error>().is_none()),
+            "process-registry rejection must not be reported as an OS lock error"
+        );
+        println!(
+            "task_store_owner_lease_probe:same_process:\
+             failure_layer=process_registry:source_kind=none"
+        );
 
         let rejected = run_scheduled_task_store_cross_process_writer_helper(
             &path,
@@ -12140,10 +12179,17 @@ mod tests {
         );
         assert!(
             String::from_utf8_lossy(&rejected.stdout)
-                .contains("task_store_cross_process_probe:lease_unavailable"),
+                .contains(
+                    "task_store_cross_process_probe:lease_unavailable:\
+                     failure_layer=os_owner_lock_would_block:source_kind=would_block"
+                ),
             "child process exited without proving that it executed the lease-unavailable branch\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&rejected.stdout),
             String::from_utf8_lossy(&rejected.stderr)
+        );
+        println!(
+            "task_store_cross_process_probe:lease_unavailable:\
+             failure_layer=os_owner_lock_would_block:source_kind=would_block"
         );
 
         drop(parent_owner);
@@ -12167,6 +12213,7 @@ mod tests {
             String::from_utf8_lossy(&reopened.stdout),
             String::from_utf8_lossy(&reopened.stderr)
         );
+        println!("task_store_cross_process_probe:opened_same_canonical_store");
     }
 
     #[test]
