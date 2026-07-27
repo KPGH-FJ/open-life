@@ -1,7 +1,7 @@
 {
-  "schema_version": "1.0.1",
-  "program_id": "openlife-current-development-program-v1.0.1-20260727",
-  "generated_at": "2026-07-27T06:31:21Z",
+  "schema_version": "1.0.2",
+  "program_id": "openlife-current-development-program-v1.0.2-validator-recovery-20260727",
+  "generated_at": "2026-07-27T10:05:00Z",
   "status": "APPROVED_FOR_EXECUTION",
   "execution_authorized": true,
   "authority": {
@@ -66,18 +66,21 @@
     "future_execution_head_policy": "Every dispatched slice must record a real execution baseline SHA that descends from this review baseline."
   },
   "predecessor_program": {
-    "program_id": "openlife-current-development-program-20260724",
-    "schema_version": "1.0.0",
-    "approved_draft_commit_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
-    "activation_commit_sha": "8b5830dd6339572234fb86021735de901c0a84e4",
+    "program_id": "openlife-current-development-program-v1.0.1-20260727",
+    "schema_version": "1.0.1",
+    "approved_draft_commit_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
+    "activation_commit_sha": "93f7ccc176ebd3dab0557b1dc157008318742bee",
+    "handoff_main_sha": "410bd26aab03daa58451f871f96b002206518d7c",
     "transition_reason": [
-      "The W0-S1 blueprint omitted the mixed current/historical owner frontend/src/tauri.test.ts.",
-      "The v1.0.0 self-test copied active Program state into a synthetic draft and was not repeatable.",
-      "The attempted v1.0.1 expansion over-designed future promotion, receipt and feature states before W0."
+      "The v1.0.1 ongoing validator double-counted clean PR merge commits by replaying only their first-parent diff.",
+      "The false RED prevented the already authorized and independently reviewed W0-S1 receipt from being reconciled.",
+      "The user explicitly approved a narrowly named Validator Recovery successor; no Wave, product, closure or external-action authority is expanded."
     ],
-    "retained_credit": "HISTORICAL_GOVERNANCE_EVIDENCE_ONLY",
+    "retained_credit": "AUTHORIZED_PREDECESSOR_W0_S1_TASK_EVIDENCE_ONLY",
     "closure_credit_true": 0,
-    "integration_records": 0
+    "integration_records": 0,
+    "tracked_task_packet_artifacts": 1,
+    "tracked_attempt_artifacts": 1
   },
   "source_inputs": [
     {
@@ -191,19 +194,22 @@
     "status": "APPROVED_BY_USER",
     "execution_authority_granted": true,
     "program_author_id": "/root",
-    "approved_program_schema_version": "1.0.1",
-    "approved_draft_commit_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
+    "approved_program_schema_version": "1.0.2",
+    "approved_draft_commit_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
     "approved_by": "USER",
-    "approved_at": "2026-07-27T07:31:39Z",
-    "approval_record": "codex-thread:user-approved-exact-draft-66e5f57-20260727T073139Z",
+    "approved_at": "2026-07-27T15:55:04Z",
+    "approval_record": "codex-thread:user-approved-exact-draft:2fd9df02e906f438bb4858422751f7d0cd1d4030",
     "github_formal_approval_credit": false,
     "note": "Creating or independently reviewing the Program does not authorize implementation. The user must explicitly approve execution.",
     "independent_challenge": {
       "status": "PASS",
-      "reviewed_head_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
-      "reviewer_ids": ["codex-auto-review:019fa262-17ff-77e3-9517-d0065fd37df9"],
+      "reviewed_head_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
+      "reviewer_ids": [
+        "/root/reconciliation_receipt_scope_audit",
+        "/root/post_unknown_green_static_review"
+      ],
       "outcome": "PASS",
-      "artifact_or_record": "codex-exact-sha-review:66e5f57:no-blocking-findings",
+      "artifact_or_record": "codex-agent-challenge:exact-sha:2fd9df02e906f438bb4858422751f7d0cd1d4030",
       "blocking_findings": [],
       "github_formal_approval_credit": false,
       "invalidation_rule": "Any substantive Program, ledger, authority or validator change requires a new bound challenge."
@@ -321,9 +327,9 @@
       "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY"],
       "evidence_records": [
         {
-          "subject_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
-          "artifact_or_record": "codex-thread:user-approved-exact-draft-66e5f57-20260727T073139Z",
-          "record_id": "PROGRAM-ACTIVATION-USER-20260727",
+          "subject_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
+          "artifact_or_record": "codex-thread:user-approved-exact-draft:2fd9df02e906f438bb4858422751f7d0cd1d4030",
+          "record_id": "PROGRAM-V1.0.2-ACTIVATION-USER-APPROVAL",
           "scope_id": "G-PROGRAM-ACTIVATION",
           "scope_paths": ["plans/openlife_current_development_program.json"],
           "guard_ids": [],
@@ -331,14 +337,14 @@
           "outcome": "PASS",
           "limitations": [],
           "producer_id": "USER",
-          "reviewer_id": "/root",
+          "reviewer_id": "/root/openlife-program-integrator",
           "credit_allowed": true,
           "active": true
         },
         {
-          "subject_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
-          "artifact_or_record": "codex-exact-sha-review:66e5f57:no-blocking-findings",
-          "record_id": "PROGRAM-ACTIVATION-AUTHORITY-20260727",
+          "subject_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
+          "artifact_or_record": "codex-agent-challenge:reconciliation_receipt_scope_audit+post_unknown_green_static_review",
+          "record_id": "PROGRAM-V1.0.2-ACTIVATION-TRACKED-AUTHORITY",
           "scope_id": "G-PROGRAM-ACTIVATION",
           "scope_paths": [
             "plans/openlife_current_development_program.json",
@@ -348,8 +354,8 @@
           "dimensions": ["TRACKED_AUTHORITY"],
           "outcome": "PASS",
           "limitations": [],
-          "producer_id": "/root",
-          "reviewer_id": "codex-auto-review:019fa262-17ff-77e3-9517-d0065fd37df9",
+          "producer_id": "/root/openlife-program-integrator",
+          "reviewer_id": "/root/reconciliation_receipt_scope_audit",
           "credit_allowed": true,
           "active": true
         }
@@ -567,7 +573,7 @@
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
       "status": "READY",
-      "refinement_level": "CURRENT_SLICE_BLUEPRINT_READY_REQUIRES_INTEGRATOR_FREEZE",
+      "refinement_level": "CURRENT_SLICE_PREPARATION_REQUIRED",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],
       "exit_gate_ids": [
@@ -597,7 +603,7 @@
           "order": 1,
           "predecessor_slice_ids": [],
           "name": "Truthful Frontend Evidence",
-          "status": "PLANNED_NOT_AUTHORIZED",
+          "status": "PREDECESSOR_TASK_EVIDENCE_INTEGRATED_NO_CLOSURE",
           "finding_ids": ["R3-N010", "R3-N020"],
           "governance_task": false,
           "risk_class": "MEDIUM",
@@ -615,14 +621,14 @@
             "W0-TEST-ID-DRIFT"
           ],
           "exit": "All four coverage and three test-selection counterexamples deterministically fail, valid inputs pass, and the credited default test set excludes retired Stage/Step/dev-harness evidence.",
-          "packet_status": "READY_FOR_INTEGRATOR_FREEZE_AFTER_PROGRAM_ACTIVATION",
+          "packet_status": "PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE",
           "task_packet_blueprint": {
             "task_id": "W0-S1-IMPL-001",
-            "packet_status": "BLUEPRINT_NOT_FROZEN",
+            "packet_status": "HISTORICAL_BLUEPRINT_NOT_DISPATCHABLE",
             "packet_sha256": null,
             "packet_payload_sha256": null,
             "packet_freeze_review": null,
-            "program_schema_version": "1.0.1",
+            "program_schema_version": "1.0.2",
             "program_activation_sha": null,
             "mode": "IMPLEMENTATION",
             "wave_id": "WAVE-0",
@@ -955,7 +961,7 @@
         "Read-only preparation of a successor Program that separately scopes native Tauri, external provider/non-loopback/MCP, proposal/permission and durable-write trials."
       ],
       "prohibited_work": [
-        "Dispatching any W5 implementation or trial packet under Program schema 1.0.1.",
+        "Dispatching any W5 implementation or trial packet under Program schema 1.0.2.",
         "Performing external-provider, non-loopback, live MCP/A2A or real durable-write actions under this Program.",
         "Transferring browser-shell credit to native/external-live.",
         "Calling Phase7 green while any required scenario is BLOCKED, FAIL, NOT_RUN or UNKNOWN."
@@ -1380,7 +1386,7 @@
       "Independent challenge is bound to the exact frozen draft commit.",
       "The user explicitly approves that exact reviewed draft.",
       "An activation change records the approved draft commit and sets execution_authorized=true.",
-      "Activation validation passes before W0-S1 dispatch."
+      "Activation validation passes before W0-S2 packet preparation and dispatch."
     ],
     "activation_is_not_a_wave_slice": true,
     "activation_commit_derivation": "For the approved draft, the first commit on the ancestry path to the current HEAD must be its single-parent direct child, change only Program JSON and ledger JSON, and pass the activation-only overlay contract. Ongoing and task-packet validation replays that commit instead of trusting current status fields."

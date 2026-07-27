@@ -1,4 +1,4 @@
-# OpenLife Current Development Program v1.0.1
+# OpenLife Current Development Program v1.0.2 — Validator Recovery
 
 > Date: 2026-07-27
 > Initial publication state: `DRAFT_AWAITING_USER_APPROVAL`
@@ -34,12 +34,13 @@ The V4 commit facts remain historical evidence: 13 unique commits were
 classified as 4 integrated, 8 superseded, 1 evidence-only, and 0
 still-needed-port. That classification grants **no finding closure**.
 
-This v1.0.1 successor is deliberately smaller than the abandoned uncommitted
-v1.0.1 attempt. It corrects only the W0-S1 mixed test-owner omission, restores
-repeatable validator self-testing, and hardens the exact draft snapshot. It
-does not pre-implement future GitHub promotion, multi-PR receipt, dynamic
-feature-domain, or W1-W4 reconciliation state machines. Those controls are
-specified only when the corresponding Wave actually starts.
+This v1.0.2 successor is a narrow validator-recovery release. It preserves the
+v1.0.1 Wave order, findings, product boundaries, no-external-action defaults,
+and closure policy. It changes only merge-history replay and predecessor
+receipt carry-forward so the already authorized W0-S1 task can be reconciled
+without inventing a receipt for Program activation. A merge contributes only
+paths whose result differs from every parent; side-branch commits remain
+individually receipt-covered. R3-N010, R3-N020 and R4-FLAKY-001 remain open.
 
 ## 2. Authority And Approval Boundary
 
@@ -83,7 +84,7 @@ Program activation is a **pre-Wave transition**, not W0-S4:
 3. the user explicitly approves that reviewed version;
 4. an activation change records the approved draft commit and sets
    `execution_authorized=true`;
-5. the activation validator passes before W0-S1 is dispatched.
+5. the activation validator passes before W0-S2 packet preparation and dispatch.
 
 Later validation does not trust a copied `execution_authorized=true` field. It
 replays the first commit after the approved draft and requires that commit to
@@ -169,14 +170,14 @@ flowchart LR
   W4 --> W5["WAVE-5<br/>后继 Program 交接"]
 ```
 
-| Wave                                                         | Assigned cards | Detail now                                                                | Feature credit      |
-| ------------------------------------------------------------ | -------------: | ------------------------------------------------------------------------- | ------------------- |
-| `WAVE-0` — 可信证据、门禁与隔离基线                          |              3 | W0-S1 blueprint ready; Integrator must freeze the packet after activation | none                |
-| `WAVE-1` — P0 修复与历史 P0/当前 UNKNOWN 裁决                |             15 | outcome and gates only                                                    | none                |
-| `WAVE-2` — 单权威、统一门禁与真实状态                        |             41 | outcome and gates only                                                    | bounded domain only |
-| `WAVE-3` — 操作级原子 owner、边界能力与全局副作用            |             21 | outcome and gates only                                                    | bounded domain only |
-| `WAVE-4` — 逐卡 closure、契约生成、死表面删除与 owner 降重   |             21 | outcome and gates only                                                    | bounded domain only |
-| `WAVE-5` — 后继 Program 交接：真实产品试用与正常功能开发解冻 |              0 | handoff marker; not executable in schema 1.0.1                            | none                |
+| Wave                                                         | Assigned cards | Detail now                                                            | Feature credit      |
+| ------------------------------------------------------------ | -------------: | --------------------------------------------------------------------- | ------------------- |
+| `WAVE-0` — 可信证据、门禁与隔离基线                          |              3 | W0-S1 predecessor receipt retained; W0-S2 requires packet preparation | none                |
+| `WAVE-1` — P0 修复与历史 P0/当前 UNKNOWN 裁决                |             15 | outcome and gates only                                                | none                |
+| `WAVE-2` — 单权威、统一门禁与真实状态                        |             41 | outcome and gates only                                                | bounded domain only |
+| `WAVE-3` — 操作级原子 owner、边界能力与全局副作用            |             21 | outcome and gates only                                                | bounded domain only |
+| `WAVE-4` — 逐卡 closure、契约生成、死表面删除与 owner 降重   |             21 | outcome and gates only                                                | bounded domain only |
+| `WAVE-5` — 后继 Program 交接：真实产品试用与正常功能开发解冻 |              0 | handoff marker; not executable in schema 1.0.2                        | none                |
 
 W1-W4 are deliberately not decomposed into speculative implementation tasks
 yet. Before each starts, its current source map and ledger facts must be
@@ -214,14 +215,12 @@ current/historical counts and digests are measured by W0-S1 rather than treated
 as already-proved implementation facts. A passing job before those
 counterexamples gives no coverage or selection credit.
 
-The machine Program contains the complete W0-S1 task-packet blueprint:
-canonical owners, source map, allowed/forbidden paths, non-goals, risk,
-verification commands, review fields, stop conditions, ledger handoff, and
-budgets. It is `READY_FOR_INTEGRATOR_FREEZE_AFTER_PROGRAM_ACTIVATION`, not yet
-dispatched: the Integrator must create a frozen packet with the actual
-activation SHA, execution baseline, parent `main` SHA, short branch, and
-canonical packet digest. A blueprint or a CLI `--slice` value without that
-packet grants no implementation or evidence credit.
+The machine Program retains the complete W0-S1 task-packet blueprint as
+historical dispatch evidence. Its independently reviewed predecessor receipt
+and immutable successful-attempt record are carried into this successor, but
+they grant no finding closure and cannot be dispatched again. The live status
+is `PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE`; the next executable slice
+after successor activation is W0-S2.
 
 ### W0-S2 — Owner-Lease Evidence Determinism
 
@@ -347,7 +346,7 @@ feature development.
 Normal feature work remains blocked until bounded eligibility is satisfied for
 the domain **and** `G-W2-AUTHORITY-TRUTH`,
 `G-W3-ATOMICITY-BOUNDARY`, `G-W4-CLOSURE-CONVERGENCE`, and
-`G-W5-PHASE7-TRIAL` all pass. Program schema 1.0.1 cannot grant or run W5;
+`G-W5-PHASE7-TRIAL` all pass. Program schema 1.0.2 cannot grant or run W5;
 the successor Program must own that gate and explicitly grant
 `NORMAL_AFTER_GATE` credit.
 
@@ -423,7 +422,7 @@ packet_freeze_review:
   integrator_id:
   reviewer_id:
   artifact_or_record:
-program_schema_version: "1.0.1"
+program_schema_version: "1.0.2"
 program_activation_sha:
 mode: IMPLEMENTATION | VERIFICATION | VERIFICATION_THEN_CONDITIONAL_IMPLEMENTATION | CHALLENGE
 wave_id:
@@ -499,8 +498,11 @@ It also rechecks the immutable Phase7 expected-absent path registry and requires
 the canonical `single_system` guard command; a packet cannot narrow those
 global protections by reporting a smaller local absence list.
 
-W0-S1 must match its inline blueprint. W0-S2/W0-S3 and later-Wave slices use
-the same reviewed freeze contract after their Wave preparation: all finding
+The retained W0-S1 receipt is replayed against the v1.0.1 dispatch Program and
+its digest-addressed historical packet; the v1.0.2 inline blueprint is not a
+new W0-S1 dispatch authority. W0-S2 is the next packet-preparation subject.
+W0-S2/W0-S3 and later-Wave slices use the same reviewed freeze contract after
+their Wave preparation: all finding
 IDs must currently belong to that ready/in-progress Wave (except an explicitly
 named Program prerequisite such as D064 in W0-S3), one root cluster is named,
 owner/source paths resolve at the baseline, external-action defaults stay
@@ -573,7 +575,9 @@ W0 code, external actions, merges, or closures.
 
 After activation, this paragraph remains historical publication context;
 current execution, Wave, gate, approval, and next-slice state comes from the
-machine Program and ledger. The Integrator freezes the W0-S1 blueprint with the
-real baseline/branch and dispatches **W0-S1 — Truthful Frontend Evidence**. W0-S2
-and W0-S3 each require their own prepared packet; W0-S4 reconciles the Wave
-ledger after the preceding slices have their required evidence and challenge.
+machine Program and ledger. W0-S1 is retained as predecessor task evidence
+without closure credit and must not be dispatched again. After successor
+activation, the Integrator prepares and freezes **W0-S2 — Owner-Lease Evidence
+Determinism** against the live baseline. W0-S3 requires its own later prepared
+packet; W0-S4 reconciles the Wave ledger after the preceding slices have their
+required evidence and challenge.
