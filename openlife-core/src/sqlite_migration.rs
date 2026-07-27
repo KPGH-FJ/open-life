@@ -353,6 +353,63 @@ fn sqlite_slot_owner_lease_path(canonical_slot: &Path) -> Result<PathBuf> {
     Ok(canonical_slot.with_file_name(lease_name))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqliteSlotOwnerLeaseFailureLayer {
+    ProcessRegistry,
+    OsOwnerLockWouldBlock,
+    OsOwnerLockIo,
+}
+
+impl SqliteSlotOwnerLeaseFailureLayer {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessRegistry => "process_registry",
+            Self::OsOwnerLockWouldBlock => "os_owner_lock_would_block",
+            Self::OsOwnerLockIo => "os_owner_lock_io",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SqliteSlotOwnerLeaseUnavailable {
+    component: String,
+    canonical_slot: PathBuf,
+    failure_layer: SqliteSlotOwnerLeaseFailureLayer,
+}
+
+impl SqliteSlotOwnerLeaseUnavailable {
+    fn new(
+        component: &str,
+        canonical_slot: &Path,
+        failure_layer: SqliteSlotOwnerLeaseFailureLayer,
+    ) -> Self {
+        Self {
+            component: component.to_string(),
+            canonical_slot: canonical_slot.to_path_buf(),
+            failure_layer,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failure_layer(&self) -> SqliteSlotOwnerLeaseFailureLayer {
+        self.failure_layer
+    }
+}
+
+impl std::fmt::Display for SqliteSlotOwnerLeaseUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}_sqlite_slot_owner_lease_unavailable:{}:failure_layer={}",
+            self.component,
+            self.canonical_slot.display(),
+            self.failure_layer.as_str()
+        )
+    }
+}
+
+impl std::error::Error for SqliteSlotOwnerLeaseUnavailable {}
+
 impl SqliteSlotOwnerLease {
     pub fn acquire(canonical_slot: &Path, component: &str) -> Result<Self> {
         let lease_path = sqlite_slot_owner_lease_path(canonical_slot)?;
@@ -360,10 +417,11 @@ impl SqliteSlotOwnerLease {
             .lock()
             .map_err(|error| anyhow::anyhow!("sqlite_slot_owner_registry_poisoned:{error}"))?;
         if leases.get(&lease_path).and_then(Weak::upgrade).is_some() {
-            anyhow::bail!(
-                "{component}_sqlite_slot_owner_lease_unavailable:{}",
-                canonical_slot.display()
-            );
+            return Err(anyhow::Error::new(SqliteSlotOwnerLeaseUnavailable::new(
+                component,
+                canonical_slot,
+                SqliteSlotOwnerLeaseFailureLayer::ProcessRegistry,
+            )));
         }
         leases.remove(&lease_path);
 
@@ -452,12 +510,17 @@ impl SqliteSlotOwnerLease {
                 lease_path.display()
             )
         })?;
-        lock_file.try_lock().with_context(|| {
-            format!(
-                "{component}_sqlite_slot_owner_lease_unavailable:{}",
-                canonical_slot.display()
-            )
-        })?;
+        if let Err(error) = lock_file.try_lock() {
+            let io_error: std::io::Error = error.into();
+            let failure_layer = if io_error.kind() == std::io::ErrorKind::WouldBlock {
+                SqliteSlotOwnerLeaseFailureLayer::OsOwnerLockWouldBlock
+            } else {
+                SqliteSlotOwnerLeaseFailureLayer::OsOwnerLockIo
+            };
+            return Err(anyhow::Error::new(io_error).context(
+                SqliteSlotOwnerLeaseUnavailable::new(component, canonical_slot, failure_layer),
+            ));
+        }
         let lock_file_identity =
             DatabaseFileIdentity::from_file(&lock_file, &lease_path, &lock_component)?;
         let lock_path_identity =
