@@ -340,6 +340,70 @@
         "reviewer_id": "codex-independent-integration-reviewer",
         "artifact_or_record": "codex-cli-session:019fa2bd-304e-72d3-b0e0-fcdee78f70b4"
       }
+    },
+    {
+      "record_id": "W0-S2-INTEGRATION-001",
+      "task_id": "W0-S2-IMPL-001",
+      "slice_id": "W0-S2",
+      "integrator_id": "/root",
+      "producer_id": "/root/w0-s2-implementer",
+      "program_approved_draft_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
+      "program_activation_sha": "3d17c88b5b81b646cd23c8f2b185eb505ea0dba6",
+      "execution_baseline_sha": "fdbe67ca1a40479f7db43af965422769115ef37f",
+      "packet_sha256": "0ba68bf9922efaa217f75330c1039823c8b57590868e35bda27a0d13c7175f8e",
+      "packet_artifact_path": "plans/openlife_task_packets/0ba68bf9922efaa217f75330c1039823c8b57590868e35bda27a0d13c7175f8e.json",
+      "range_base_sha": "fdbe67ca1a40479f7db43af965422769115ef37f",
+      "range_head_sha": "7ca4fcc4dbb329128d5cc2f5e7fca1231d82cdb4",
+      "changed_paths": [
+        "openlife-core/src/sqlite_migration.rs",
+        "openlife-core/src/tasks.rs",
+        "scripts/run-w0-s2-owner-lease-evidence.mjs"
+      ],
+      "allowed_touched_paths": [
+        "openlife-core/src/sqlite_migration.rs",
+        "openlife-core/src/tasks.rs",
+        "scripts/run-w0-s2-owner-lease-evidence.mjs"
+      ],
+      "required_guard_ids": ["CQ-G11", "CQ-G13"],
+      "completion_outcome": "PASS",
+      "task_evidence_records": [
+        {
+          "subject_sha": "7ca4fcc4dbb329128d5cc2f5e7fca1231d82cdb4",
+          "artifact_or_record": "github-pr:70;actions-run:30290871886;attempt-artifact:7f214cce4049d6fb1e5484146d5ca5f25bd6cc392e887972519dbe057addac9a",
+          "record_id": "W0-S2-TASK-EVIDENCE-001",
+          "scope_id": "W0-S2",
+          "scope_paths": [
+            "openlife-core/src/sqlite_migration.rs",
+            "openlife-core/src/tasks.rs",
+            "scripts/run-w0-s2-owner-lease-evidence.mjs"
+          ],
+          "guard_ids": ["CQ-G11", "CQ-G13"],
+          "dimensions": [
+            "SOURCE_MAP",
+            "RED",
+            "FAULT",
+            "BEHAVIOR_OR_FAULT",
+            "PROCESS_MODEL",
+            "REPETITION",
+            "POSITIVE",
+            "COUNTERFACTUAL",
+            "NON_REGRESSION",
+            "INDEPENDENT_CHALLENGE"
+          ],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/w0-s2-implementer",
+          "reviewer_id": "/root/w0_s2_diff_reviewer",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
+      "independent_review": {
+        "outcome": "PASS",
+        "reviewed_head_sha": "7ca4fcc4dbb329128d5cc2f5e7fca1231d82cdb4",
+        "reviewer_id": "/root/w0_s2_diff_reviewer",
+        "artifact_or_record": "codex-independent-challenge:w0-s2:7ca4fcc4dbb329128d5cc2f5e7fca1231d82cdb4"
+      }
     }
   ],
   "attempt_contract": {
@@ -449,6 +513,23 @@
       "producer_id": "/root/w0-s1-implementer",
       "integrator_id": "/root/openlife-program-integrator",
       "record_note": "Settles the frozen W0-S1 packet only. R3-N010 and R3-N020 retain closure_credit=false; the original macOS R4-FLAKY-001 failure remains open for W0-S2."
+    },
+    {
+      "attempt_id": "W0-S2-ATTEMPT-001",
+      "task_id": "W0-S2-IMPL-001",
+      "slice_id": "W0-S2",
+      "root_cause_cluster_id": "CQ-C08",
+      "packet_sha256": "0ba68bf9922efaa217f75330c1039823c8b57590868e35bda27a0d13c7175f8e",
+      "packet_artifact_path": "plans/openlife_task_packets/0ba68bf9922efaa217f75330c1039823c8b57590868e35bda27a0d13c7175f8e.json",
+      "execution_baseline_sha": "fdbe67ca1a40479f7db43af965422769115ef37f",
+      "artifact_commit_sha": "5e3c497d6e291c36d08f62831e3253882a7975a0",
+      "attempt_artifact_path": "plans/openlife_attempt_artifacts/7f214cce4049d6fb1e5484146d5ca5f25bd6cc392e887972519dbe057addac9a.json",
+      "attempt_artifact_sha256": "7f214cce4049d6fb1e5484146d5ca5f25bd6cc392e887972519dbe057addac9a",
+      "outcome": "SUCCEEDED",
+      "reason": "W0-S2 preserved the exact owner-lease failure layer and completed the fixed macOS arm64 fork-to-exec repetition contract without changing lease acquisition or release semantics.",
+      "producer_id": "/root/w0-s2-implementer",
+      "integrator_id": "/root",
+      "record_note": "Settles only the frozen W0-S2 task packet and its bounded macOS arm64 20+2 evidence. R4-FLAKY-001 remains P1 OPEN with closure_credit=false; non-WouldBlock OS-I/O injection, other platforms, and behavior beyond the fixed repetition window remain UNKNOWN."
     }
   ],
   "architecture_review_records": [],
@@ -10941,6 +11022,6 @@
       "WAVE-0": 3
     },
     "closure_credit_true": 0,
-    "last_reconciled_execution_sha": "410bd26aab03daa58451f871f96b002206518d7c"
+    "last_reconciled_execution_sha": "5e3c497d6e291c36d08f62831e3253882a7975a0"
   }
 }
