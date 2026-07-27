@@ -157,6 +157,8 @@ Vitest ID set. The selection checker fails on an empty collection, retired
 Stage1/Step6/dev/archive paths, or an unexpected ID/count digest. Historical
 Stage1, Step6, dev-harness, and `tauriDev` diagnostic tests remain runnable only
 through `test:historical`; their pass result grants no current-product credit.
+The default test, watch, and coverage runners force the current scope even when
+the caller has a conflicting `OPENLIFE_VITEST_SCOPE` environment value.
 
 Coverage uses Vitest's `json-summary` reporter and one Node checker. Missing,
 malformed, zero-line, and below-60-percent artifacts fail with separate

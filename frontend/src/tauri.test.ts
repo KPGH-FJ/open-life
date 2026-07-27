@@ -2653,7 +2653,7 @@ describe("tauri command argument aliases", () => {
     expect(result.approvedCandidates[0].candidateRunId).toBe("run-candidate-3");
   });
 
-  ht("invokes Main Chat runtime status as kernel truth", async () => {
+  ct("invokes Main Chat runtime status as kernel truth", async () => {
     vi.mocked(invoke).mockResolvedValue({
       statusVersion: 2,
       authoritativeRuntime: "main_chat_kernel",

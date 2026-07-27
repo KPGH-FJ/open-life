@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateCurrentTestSelection } from "./current-test-selection.mjs";
+import { currentTestEnv, validateCurrentTestSelection } from "./current-test-selection.mjs";
 
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const vitestCli = resolve(frontendRoot, "node_modules/vitest/vitest.mjs");
 const result = spawnSync(process.execPath, [vitestCli, "list", "--json"], {
   cwd: frontendRoot,
   encoding: "utf8",
-  env: { ...process.env, OPENLIFE_VITEST_SCOPE: "current" },
+  env: currentTestEnv(),
 });
 
 if (result.status !== 0) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import {
+  currentTestEnv,
   normalizeTestIds,
   testIdDigest,
   validateCurrentTestSelection,
@@ -42,6 +43,11 @@ assert.throws(
   /W0-TEST-ID-DRIFT/
 );
 console.log("PASS W0-TEST-ID-DRIFT");
+
+const pinnedEnv = currentTestEnv({ OPENLIFE_VITEST_SCOPE: "historical", SENTINEL: "kept" });
+assert.equal(pinnedEnv.OPENLIFE_VITEST_SCOPE, "current");
+assert.equal(pinnedEnv.SENTINEL, "kept");
+console.log("PASS W0-TEST-SCOPE-PINNED");
 
 const valid = validateCurrentTestSelection(validEntries, root, validEntries.length, validDigest);
 assert.equal(valid.count, 2);

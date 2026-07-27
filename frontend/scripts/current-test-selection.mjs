@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 
-export const EXPECTED_CURRENT_TEST_COUNT = 192;
+export const EXPECTED_CURRENT_TEST_COUNT = 193;
 export const EXPECTED_CURRENT_TEST_SHA256 =
-  "a066cc3e6f66a6c9d9eeaf3aa622bb14f3fa55305048113c1d08c2d1e7cc7700";
+  "7299bcdb9ff6e7a6ac6988579a32c49e457ad58dbec5597d4f400c6e27ef302e";
 
 const forbiddenPaths = ["src/stage1BrowserEvidence.test.ts", "src/step6ProductAcceptance.test.ts"];
+
+export function currentTestEnv(env = process.env) {
+  return { ...env, OPENLIFE_VITEST_SCOPE: "current" };
+}
 
 function normalizedPath(path, root) {
   return relative(root, path).split(sep).join("/");
