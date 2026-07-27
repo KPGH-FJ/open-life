@@ -9,10 +9,16 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    exclude: [
+      "src/stage1BrowserEvidence.test.ts",
+      "src/step6ProductAcceptance.test.ts",
+      "src/dev/**",
+      "src/test/archive/**",
+    ],
     coverage: {
-      reporter: ["text", "json", "html"],
+      reporter: ["text", "json", "json-summary", "html"],
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**/*", "src/dev/**/*"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**/*", "src/dev/**/*", "src/tauriDev.ts"],
       thresholds: {
         lines: 60,
         functions: 40,

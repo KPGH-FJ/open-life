@@ -28,6 +28,12 @@ it was reproduced.
   `src-tauri/Cargo.toml`
 - frontend scripts and lockfile: `frontend/package.json`,
   `frontend/pnpm-lock.yaml`
+- current Vitest authority: `frontend/vitest.config.ts`,
+  `frontend/scripts/current-test-selection.mjs`
+- historical Vitest entry:
+  `frontend/scripts/vitest.historical.config.ts`
+- coverage artifact checker:
+  `frontend/scripts/check-coverage-threshold.mjs`
 - browser-shell runner: `frontend/playwright.config.ts`
 - current browser-shell spec:
   `frontend/e2e/workbench-browser-shell.spec.ts`
@@ -133,7 +139,11 @@ Frontend:
 ```sh
 corepack pnpm --dir frontend format:check
 corepack pnpm --dir frontend typecheck
+corepack pnpm --dir frontend test:coverage:checker
+corepack pnpm --dir frontend test:selection:checker
 corepack pnpm --dir frontend test
+corepack pnpm --dir frontend test:historical
+corepack pnpm --dir frontend test:coverage
 corepack pnpm --dir frontend build
 corepack pnpm --dir frontend verify:release-absence
 corepack pnpm --dir frontend test:e2e
@@ -141,6 +151,17 @@ corepack pnpm --dir frontend test:e2e
 
 `test:e2e` must collect at least one test and execute only the current Workbench
 browser-shell spec by default.
+
+Default `test` and `test:coverage` credit only the frozen current-product
+Vitest ID set. The selection checker fails on an empty collection, retired
+Stage1/Step6/dev/archive paths, or an unexpected ID/count digest. Historical
+Stage1, Step6, dev-harness, and `tauriDev` diagnostic tests remain runnable only
+through `test:historical`; their pass result grants no current-product credit.
+
+Coverage uses Vitest's `json-summary` reporter and one Node checker. Missing,
+malformed, zero-line, and below-60-percent artifacts fail with separate
+machine-readable diagnostics. CI does not parse coverage with shell pipelines
+or `bc`.
 
 Focused Rust:
 
