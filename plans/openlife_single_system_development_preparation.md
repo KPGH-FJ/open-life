@@ -776,7 +776,9 @@ Phase 1 sequence.
 The first planned Wave is:
 
 1. `W0-S1` - make Frontend Coverage and the default current-product test signal
-   truthful, including four deterministic coverage failure counterexamples;
+   truthful, including four deterministic coverage failure counterexamples,
+   three test-selection counterexamples, and an explicit split of the mixed
+   `frontend/src/tauri.test.ts` current versus `tauriDev`-dependent records;
 2. `W0-S2` - make owner-lease failure layers observable and run the fixed
    macOS fork-to-exec repetition contract;
 3. `W0-S3` - establish bounded filesystem, Keychain, lock, FD, and socket
@@ -786,9 +788,11 @@ The first planned Wave is:
 
 The Program currently sets `execution_authorized` to `false`. Until the user
 approves the exact Program version, Agents may review or refine it but must not
-implement these slices. Approval and activation occur before W0-S1, not inside
-W0-S4. Normal feature work remains blocked until the Program's bounded and
-normal feature gates pass.
+implement these slices. Approval, activation, and merge to protected `main`
+occur before W0-S1, not inside W0-S4. The repository validator proves local
+state and packet scope only; GitHub PR/check state, exact-SHA challenge, and
+user approval are separate recorded facts. Normal feature work remains blocked
+until the Program's bounded and normal feature gates pass.
 
 ## 11. Historical Stage4C Repository Missing-Record Closure
 

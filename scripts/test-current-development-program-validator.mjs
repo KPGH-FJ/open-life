@@ -1,15 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +12,7 @@ const fixturePrefix = join(realpathSync(tmpdir()), "openlife-program-validator-t
 const tempRoot = mkdtempSync(fixturePrefix);
 const fixtureRoot = join(tempRoot, "fixture");
 const baselineSha = "de158ce53018c9c649f7dc0dcb3bdd8271ed4977";
+const predecessorActivationSha = "8b5830dd6339572234fb86021735de901c0a84e4";
 const validatorPath = "scripts/validate-current-development-program.mjs";
 const programPath = "plans/openlife_current_development_program.json";
 const ledgerPath = "plans/openlife_problem_ledger.json";
@@ -34,6 +27,35 @@ const overlayPaths = [
   validatorPath,
   "scripts/test-current-development-program-validator.mjs",
 ];
+const expectedScenarioLabels = [
+  "DRAFT_VALID",
+  "DRAFT_REPLACE_REF_NEGATIVE",
+  "DRAFT_DIRTY_NEGATIVE",
+  "DRAFT_MERGE_NEGATIVE",
+  "ACTIVATION_VALID",
+  "ACTIVATION_SELF_CREDIT_NEGATIVE",
+  "ACTIVATION_SUBSTANTIVE_NEGATIVE",
+  "ONGOING_BOOTSTRAP",
+  "ONGOING_RELOCATED_DETACHED_CI",
+  "PACKET_VALID",
+  "PACKET_ROLE_NEGATIVE",
+  "PACKET_COMMAND_NEGATIVE",
+  "PACKET_BLUEPRINT_TAMPER_NEGATIVE",
+  "PREDECESSOR_NEGATIVE",
+  "W5_DISPATCH_NEGATIVE",
+];
+const observedScenarioLabels = [];
+const cleanup = () => {
+  if (tempRoot.startsWith(fixturePrefix)) {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+};
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    cleanup();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  });
+}
 
 const canonicalize = value => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -56,6 +78,11 @@ const git = (cwd, ...args) =>
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+const readBlobAtCommit = (cwd, sha, path) =>
+  execFileSync("git", ["show", `${sha}:${path}`], {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 const readJson = (cwd, path) => JSON.parse(readFileSync(join(cwd, path), "utf8"));
 const writeJson = (cwd, path, value) =>
   writeFileSync(join(cwd, path), `${JSON.stringify(value, null, 2)}\n`);
@@ -69,16 +96,22 @@ const validator = (cwd, args) =>
     cwd,
     encoding: "utf8",
     env: { ...process.env, CI: "1" },
+    timeout: 60_000,
   });
 const expectValidator = ({ cwd, args, expectedExit, diagnostic = null, label }) => {
+  observedScenarioLabels.push(label);
+  const ordinal = observedScenarioLabels.length;
+  process.stdout.write(`START ${ordinal}/${expectedScenarioLabels.length} ${label}\n`);
   const result = validator(cwd, args);
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   if (result.status !== expectedExit || (diagnostic && !diagnostic.test(output))) {
     throw new Error(
       `${label}: expected exit ${expectedExit}` +
-        `${diagnostic ? ` and ${diagnostic}` : ""}, got ${result.status}\n${output}`
+        `${diagnostic ? ` and ${diagnostic}` : ""}, got ${result.status}` +
+        `${result.error ? ` (${result.error.message})` : ""}\n${output}`
     );
   }
+  process.stdout.write(`PASS ${ordinal}/${expectedScenarioLabels.length} ${label}\n`);
 };
 const freezePacket = packet => {
   packet.packet_status = "FROZEN_FOR_DISPATCH";
@@ -118,25 +151,27 @@ const removeUnexpectedRemoteRefs = cwd => {
 };
 
 try {
+  if (git(sourceRoot, "status", "--porcelain=v1", "--untracked-files=all") !== "") {
+    throw new Error(
+      "Validator self-test requires a clean source checkout so every fixture byte is bound to HEAD"
+    );
+  }
+  const sourceHeadSha = git(sourceRoot, "rev-parse", "HEAD");
   execFileSync("git", ["clone", "--local", "--no-hardlinks", sourceRoot, fixtureRoot], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
   git(fixtureRoot, "config", "user.name", "OpenLife Validator Selftest");
   git(fixtureRoot, "config", "user.email", "openlife-validator-selftest@example.invalid");
-  git(fixtureRoot, "branch", "-f", "main", baselineSha);
-  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", baselineSha);
-  git(fixtureRoot, "update-ref", "refs/remotes/origin/main", baselineSha);
+  git(fixtureRoot, "branch", "-f", "main", predecessorActivationSha);
+  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", predecessorActivationSha);
+  git(fixtureRoot, "update-ref", "refs/remotes/origin/main", predecessorActivationSha);
   removeUnexpectedRemoteRefs(fixtureRoot);
 
   for (const path of overlayPaths) {
     mkdirSync(dirname(join(fixtureRoot, path)), { recursive: true });
-    copyFileSync(join(sourceRoot, path), join(fixtureRoot, path));
+    writeFileSync(join(fixtureRoot, path), readBlobAtCommit(sourceRoot, sourceHeadSha, path));
   }
-  const draftProgram = readJson(fixtureRoot, programPath);
-  draftProgram.slice_contract.writable_checkout = fixtureRoot;
-  draftProgram.waves[0].slices[0].task_packet_blueprint.checkout = fixtureRoot;
-  writeJson(fixtureRoot, programPath, draftProgram);
   const draftSha = commitAll(fixtureRoot, "test: synthetic Program draft");
 
   expectValidator({
@@ -145,6 +180,53 @@ try {
     expectedExit: 0,
     label: "DRAFT_VALID",
   });
+  git(fixtureRoot, "replace", draftSha, predecessorActivationSha);
+  expectValidator({
+    cwd: fixtureRoot,
+    args: ["--profile=draft"],
+    expectedExit: 1,
+    diagnostic: /replacement refs are forbidden/,
+    label: "DRAFT_REPLACE_REF_NEGATIVE",
+  });
+  git(fixtureRoot, "replace", "-d", draftSha);
+  const dirtyProbePath = join(fixtureRoot, "plans/selftest-dirty-probe.json");
+  writeFileSync(dirtyProbePath, "dirty\n");
+  expectValidator({
+    cwd: fixtureRoot,
+    args: ["--profile=draft"],
+    expectedExit: 1,
+    diagnostic: /clean tracked commit/,
+    label: "DRAFT_DIRTY_NEGATIVE",
+  });
+  rmSync(dirtyProbePath);
+
+  git(fixtureRoot, "checkout", "-B", "selftest-merge-side", predecessorActivationSha);
+  git(fixtureRoot, "commit", "--allow-empty", "-m", "test: synthetic merge side");
+  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", predecessorActivationSha);
+  git(fixtureRoot, "merge", "--no-ff", "selftest-merge-side", "-m", "test: synthetic merge draft");
+  for (const path of overlayPaths) {
+    writeFileSync(join(fixtureRoot, path), readBlobAtCommit(sourceRoot, sourceHeadSha, path));
+  }
+  git(fixtureRoot, "add", "-A");
+  git(fixtureRoot, "commit", "--amend", "--no-edit");
+  git(fixtureRoot, "branch", "-D", "selftest-merge-side");
+  expectValidator({
+    cwd: fixtureRoot,
+    args: ["--profile=draft"],
+    expectedExit: 1,
+    diagnostic: /single-parent direct child/,
+    label: "DRAFT_MERGE_NEGATIVE",
+  });
+
+  git(fixtureRoot, "reset", "--hard", predecessorActivationSha);
+  for (const path of overlayPaths) {
+    writeFileSync(join(fixtureRoot, path), readBlobAtCommit(sourceRoot, sourceHeadSha, path));
+  }
+  const relocatedDraftProgram = readJson(fixtureRoot, programPath);
+  relocatedDraftProgram.slice_contract.writable_checkout = fixtureRoot;
+  relocatedDraftProgram.waves[0].slices[0].task_packet_blueprint.checkout = fixtureRoot;
+  writeJson(fixtureRoot, programPath, relocatedDraftProgram);
+  const relocatedDraftSha = commitAll(fixtureRoot, "test: synthetic relocated Program draft");
 
   const activationProgram = readJson(fixtureRoot, programPath);
   const activationLedger = readJson(fixtureRoot, ledgerPath);
@@ -154,14 +236,14 @@ try {
     status: "APPROVED_BY_USER",
     execution_authority_granted: true,
     approved_program_schema_version: activationProgram.schema_version,
-    approved_draft_commit_sha: draftSha,
+    approved_draft_commit_sha: relocatedDraftSha,
     approved_by: "USER",
     approved_at: "2026-07-24T00:00:00.000Z",
     approval_record: "selftest:user-approved-exact-draft",
   });
   Object.assign(activationProgram.program_approval.independent_challenge, {
     status: "PASS",
-    reviewed_head_sha: draftSha,
+    reviewed_head_sha: relocatedDraftSha,
     reviewer_ids: ["selftest-independent-challenger"],
     outcome: "PASS",
     artifact_or_record: "selftest:exact-draft-challenge",
@@ -172,7 +254,7 @@ try {
   activationGate.status = "PASS";
   activationGate.evidence_records = [
     {
-      subject_sha: draftSha,
+      subject_sha: relocatedDraftSha,
       artifact_or_record: "selftest:user-approval",
       record_id: "SELFTEST-ACTIVATION-USER",
       scope_id: "G-PROGRAM-ACTIVATION",
@@ -187,7 +269,7 @@ try {
       active: true,
     },
     {
-      subject_sha: draftSha,
+      subject_sha: relocatedDraftSha,
       artifact_or_record: "selftest:tracked-authority",
       record_id: "SELFTEST-ACTIVATION-AUTHORITY",
       scope_id: "G-PROGRAM-ACTIVATION",
@@ -198,21 +280,6 @@ try {
       limitations: [],
       producer_id: "selftest-authority-record",
       reviewer_id: "selftest-authority-record-reviewer",
-      credit_allowed: true,
-      active: true,
-    },
-    {
-      subject_sha: draftSha,
-      artifact_or_record: "selftest:validator-mutation-suite",
-      record_id: "SELFTEST-ACTIVATION-VALIDATOR",
-      scope_id: "G-PROGRAM-ACTIVATION",
-      scope_paths: [validatorPath, "scripts/test-current-development-program-validator.mjs"],
-      guard_ids: [],
-      dimensions: ["VALIDATOR_SELF_TEST"],
-      outcome: "PASS",
-      limitations: [],
-      producer_id: "selftest-validator-run",
-      reviewer_id: "selftest-validator-run-reviewer",
       credit_allowed: true,
       active: true,
     },
@@ -243,16 +310,53 @@ try {
     "user.email",
     "openlife-validator-selftest@example.invalid"
   );
-  git(activationNegativeRoot, "checkout", "-B", "codex/current-development-program", draftSha);
+  git(
+    activationNegativeRoot,
+    "checkout",
+    "-B",
+    "codex/current-development-program",
+    relocatedDraftSha
+  );
   git(activationNegativeRoot, "branch", "-f", "main", baselineSha);
   git(activationNegativeRoot, "update-ref", "refs/remotes/origin/main", baselineSha);
   removeUnexpectedRemoteRefs(activationNegativeRoot);
-  const mutatedActivationProgram = JSON.parse(
+  const activationProgramSnapshot = JSON.parse(
     git(fixtureRoot, "show", `${activationSha}:${programPath}`)
   );
   const activationLedgerSnapshot = JSON.parse(
     git(fixtureRoot, "show", `${activationSha}:${ledgerPath}`)
   );
+  const selfCreditedActivationProgram = structuredClone(activationProgramSnapshot);
+  selfCreditedActivationProgram.gates
+    .find(gate => gate.id === "G-PROGRAM-ACTIVATION")
+    .evidence_records.push({
+      subject_sha: relocatedDraftSha,
+      artifact_or_record: "selftest:forbidden-self-credit",
+      record_id: "SELFTEST-ACTIVATION-FORBIDDEN-SELF-CREDIT",
+      scope_id: "G-PROGRAM-ACTIVATION",
+      scope_paths: [validatorPath],
+      guard_ids: [],
+      dimensions: ["VALIDATOR_SELF_TEST"],
+      outcome: "PASS",
+      limitations: [],
+      producer_id: "selftest-validator-run",
+      reviewer_id: "selftest-validator-run-reviewer",
+      credit_allowed: true,
+      active: true,
+    });
+  writeJson(activationNegativeRoot, programPath, selfCreditedActivationProgram);
+  writeJson(activationNegativeRoot, ledgerPath, activationLedgerSnapshot);
+  commitAll(activationNegativeRoot, "test: forbidden activation self-credit");
+  expectValidator({
+    cwd: activationNegativeRoot,
+    args: ["--profile=activation"],
+    expectedExit: 1,
+    diagnostic: /surplus self-credited dimension/,
+    label: "ACTIVATION_SELF_CREDIT_NEGATIVE",
+  });
+
+  git(activationNegativeRoot, "reset", "--hard", relocatedDraftSha);
+  const mutatedActivationProgram = structuredClone(activationProgramSnapshot);
   mutatedActivationProgram.decision.plain_language += " SELFTEST-MUTATION";
   writeJson(activationNegativeRoot, programPath, mutatedActivationProgram);
   writeJson(activationNegativeRoot, ledgerPath, activationLedgerSnapshot);
@@ -406,16 +510,26 @@ try {
     label: "W5_DISPATCH_NEGATIVE",
   });
 
+  if (
+    observedScenarioLabels.length !== expectedScenarioLabels.length ||
+    observedScenarioLabels.some((label, index) => label !== expectedScenarioLabels[index])
+  ) {
+    throw new Error(
+      `Self-test scenario inventory drifted: ${JSON.stringify(observedScenarioLabels)}`
+    );
+  }
   process.stdout.write(
     [
       "Current Development Program validator self-test: PASS",
-      "scenarios=11",
+      `scenarios=${observedScenarioLabels.length}`,
+      `source_head_sha=${sourceHeadSha}`,
       "profiles=draft,activation,ongoing,scoped",
-      "negative=activation-substantive,role,command,blueprint-tamper,predecessor,w5",
+      `scenario_labels_sha256=${createHash("sha256")
+        .update(`${observedScenarioLabels.join("\n")}\n`, "utf8")
+        .digest("hex")}`,
+      "negative=replace-ref,dirty,merge,activation-self-credit,activation-substantive,role,command,blueprint-tamper,predecessor,w5",
     ].join("\n") + "\n"
   );
 } finally {
-  if (tempRoot.startsWith(fixturePrefix)) {
-    rmSync(tempRoot, { recursive: true, force: true });
-  }
+  cleanup();
 }

@@ -1,9 +1,9 @@
 {
-  "schema_version": "1.0.0",
-  "program_id": "openlife-current-development-program-20260724",
-  "generated_at": "2026-07-24T06:32:16.913Z",
-  "status": "APPROVED_FOR_EXECUTION",
-  "execution_authorized": true,
+  "schema_version": "1.0.1",
+  "program_id": "openlife-current-development-program-v1.0.1-20260727",
+  "generated_at": "2026-07-27T06:31:21Z",
+  "status": "DRAFT_AWAITING_USER_APPROVAL",
+  "execution_authorized": false,
   "authority": {
     "scope": "CURRENT_TASK_ORDER_AND_EXECUTION_GOVERNANCE_ONLY",
     "subordinate_to_phase7": true,
@@ -64,6 +64,20 @@
     "tracked_worktree_clean_at_review": true,
     "worktree_count_at_review": 1,
     "future_execution_head_policy": "Every dispatched slice must record a real execution baseline SHA that descends from this review baseline."
+  },
+  "predecessor_program": {
+    "program_id": "openlife-current-development-program-20260724",
+    "schema_version": "1.0.0",
+    "approved_draft_commit_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
+    "activation_commit_sha": "8b5830dd6339572234fb86021735de901c0a84e4",
+    "transition_reason": [
+      "The W0-S1 blueprint omitted the mixed current/historical owner frontend/src/tauri.test.ts.",
+      "The v1.0.0 self-test copied active Program state into a synthetic draft and was not repeatable.",
+      "The attempted v1.0.1 expansion over-designed future promotion, receipt and feature states before W0."
+    ],
+    "retained_credit": "HISTORICAL_GOVERNANCE_EVIDENCE_ONLY",
+    "closure_credit_true": 0,
+    "integration_records": 0
   },
   "source_inputs": [
     {
@@ -174,26 +188,22 @@
     "evidence_support": "STRONG_FOR_CURRENT_DIRECTION_WITH_EXPLICIT_RECONSIDERATION_CRITERIA"
   },
   "program_approval": {
-    "status": "APPROVED_BY_USER",
-    "execution_authority_granted": true,
+    "status": "PENDING_USER_APPROVAL",
+    "execution_authority_granted": false,
     "program_author_id": "/root",
-    "approved_program_schema_version": "1.0.0",
-    "approved_draft_commit_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
-    "approved_by": "USER",
-    "approved_at": "2026-07-24T09:54:54Z",
-    "approval_record": "codex-thread:user-approved-exact-draft-6d2783ad-by-message-20260724T095454Z",
+    "approved_program_schema_version": null,
+    "approved_draft_commit_sha": null,
+    "approved_by": null,
+    "approved_at": null,
+    "approval_record": null,
     "github_formal_approval_credit": false,
     "note": "Creating or independently reviewing the Program does not authorize implementation. The user must explicitly approve execution.",
     "independent_challenge": {
-      "status": "PASS",
-      "reviewed_head_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
-      "reviewer_ids": [
-        "/root/program_authority_integration",
-        "/root/program_ledger_mapping",
-        "/root/program_schema_design"
-      ],
-      "outcome": "PASS",
-      "artifact_or_record": "codex-independent-challenge:exact-draft-6d2783ad-three-reviewer-pass",
+      "status": "PENDING_REVIEW_AFTER_CORRECTIONS",
+      "reviewed_head_sha": null,
+      "reviewer_ids": [],
+      "outcome": null,
+      "artifact_or_record": null,
       "blocking_findings": [],
       "github_formal_approval_credit": false,
       "invalidation_rule": "Any substantive Program, ledger, authority or validator change requires a new bound challenge."
@@ -305,66 +315,14 @@
   "gates": [
     {
       "id": "G-PROGRAM-ACTIVATION",
-      "status": "PASS",
+      "status": "NOT_RUN",
       "fail_closed": true,
       "required_guard_ids": [],
-      "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY", "VALIDATOR_SELF_TEST"],
-      "evidence_records": [
-        {
-          "subject_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
-          "artifact_or_record": "codex-thread:user-approved-exact-draft-6d2783ad-by-message-20260724T095454Z",
-          "record_id": "PROGRAM-ACTIVATION-USER-20260724",
-          "scope_id": "G-PROGRAM-ACTIVATION",
-          "scope_paths": ["plans/openlife_current_development_program.json"],
-          "guard_ids": [],
-          "dimensions": ["USER_PROGRAM_APPROVAL"],
-          "outcome": "PASS",
-          "limitations": [],
-          "producer_id": "USER",
-          "reviewer_id": "/root",
-          "credit_allowed": true,
-          "active": true
-        },
-        {
-          "subject_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
-          "artifact_or_record": "codex-independent-challenge:exact-draft-6d2783ad-three-reviewer-pass",
-          "record_id": "PROGRAM-ACTIVATION-AUTHORITY-20260724",
-          "scope_id": "G-PROGRAM-ACTIVATION",
-          "scope_paths": [
-            "plans/openlife_current_development_program.json",
-            "plans/openlife_problem_ledger.json"
-          ],
-          "guard_ids": [],
-          "dimensions": ["TRACKED_AUTHORITY"],
-          "outcome": "PASS",
-          "limitations": [],
-          "producer_id": "/root",
-          "reviewer_id": "/root/program_authority_integration",
-          "credit_allowed": true,
-          "active": true
-        },
-        {
-          "subject_sha": "6d2783ad221982c99b1eea484f2c975e5e6b10d8",
-          "artifact_or_record": "codex-validator-self-test:exact-draft-6d2783ad-scenarios-11-pass",
-          "record_id": "PROGRAM-ACTIVATION-VALIDATOR-20260724",
-          "scope_id": "G-PROGRAM-ACTIVATION",
-          "scope_paths": [
-            "scripts/validate-current-development-program.mjs",
-            "scripts/test-current-development-program-validator.mjs"
-          ],
-          "guard_ids": [],
-          "dimensions": ["VALIDATOR_SELF_TEST"],
-          "outcome": "PASS",
-          "limitations": [],
-          "producer_id": "/root/program_schema_design",
-          "reviewer_id": "/root/program_ledger_mapping",
-          "credit_allowed": true,
-          "active": true
-        }
-      ],
+      "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY"],
+      "evidence_records": [],
       "criteria": [
         "The draft Program validator passes.",
-        "The disposable Git-fixture validator self-test passes against the exact approved draft.",
+        "The disposable Git-fixture validator self-test is run and reviewed against the exact approved draft before activation; it is a required external check, not a self-attested machine-credit dimension.",
         "An independent challenge is bound to the exact frozen draft commit and has no blocking finding.",
         "The user explicitly approves that exact reviewed draft.",
         "The activation record names the approved draft commit; Program JSON sets execution_authorized=true before any W0 dispatch.",
@@ -376,7 +334,7 @@
       "status": "NOT_RUN",
       "fail_closed": true,
       "required_guard_ids": ["CQ-G09", "CQ-G13"],
-      "evidence_dimensions": ["CI_FAULT", "TEST_SIGNAL"],
+      "evidence_dimensions": ["CI_FAULT", "TEST_SIGNAL", "TEST_SELECTION"],
       "evidence_records": [],
       "criteria": [
         "Missing, nonnumeric, zero-collection and below-threshold counterexamples fail.",
@@ -574,7 +532,7 @@
       "order": 0,
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
-      "status": "READY",
+      "status": "PLANNED_NOT_AUTHORIZED",
       "refinement_level": "CURRENT_SLICE_BLUEPRINT_READY_REQUIRES_INTEGRATOR_FREEZE",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],
@@ -617,9 +575,12 @@
             "W0-COV-MISSING",
             "W0-COV-NONNUMERIC",
             "W0-COV-ZERO-COLLECTION",
-            "W0-COV-BELOW-THRESHOLD"
+            "W0-COV-BELOW-THRESHOLD",
+            "W0-TEST-ZERO-COLLECTION",
+            "W0-TEST-FORBIDDEN-CREDIT",
+            "W0-TEST-ID-DRIFT"
           ],
-          "exit": "All four counterexamples deterministically fail, valid input passes, and the credited default test set excludes retired Stage/Step/dev-harness evidence.",
+          "exit": "All four coverage and three test-selection counterexamples deterministically fail, valid inputs pass, and the credited default test set excludes retired Stage/Step/dev-harness evidence.",
           "packet_status": "READY_FOR_INTEGRATOR_FREEZE_AFTER_PROGRAM_ACTIVATION",
           "task_packet_blueprint": {
             "task_id": "W0-S1-IMPL-001",
@@ -627,7 +588,7 @@
             "packet_sha256": null,
             "packet_payload_sha256": null,
             "packet_freeze_review": null,
-            "program_schema_version": "1.0.0",
+            "program_schema_version": "1.0.1",
             "program_activation_sha": null,
             "mode": "IMPLEMENTATION",
             "wave_id": "WAVE-0",
@@ -652,14 +613,19 @@
               "Do not delete historical evidence; remove it only from default current-product credit.",
               "Do not touch Rust, Tauri, external providers, Keychain or product data."
             ],
-            "invariant": "Missing, malformed, zero-collection and below-threshold evidence fails; valid evidence passes; default credited tests represent current product surfaces only.",
-            "canonical_owner": [".github/workflows/ci.yml", "frontend/vitest.config.ts"],
+            "invariant": "Missing, malformed, zero-collection, below-threshold, forbidden-credit and test-ID-drift evidence fails; valid evidence passes; default credited tests represent current product surfaces only.",
+            "canonical_owner": [
+              ".github/workflows/ci.yml",
+              "frontend/vitest.config.ts",
+              "frontend/package.json"
+            ],
             "source_map": [
               ".github/workflows/ci.yml",
               "frontend/vitest.config.ts",
               "frontend/package.json",
               "frontend/src/stage1BrowserEvidence.test.ts",
               "frontend/src/step6ProductAcceptance.test.ts",
+              "frontend/src/tauri.test.ts",
               "frontend/src/tauriDev.ts"
             ],
             "allowed_touched_paths": [
@@ -668,14 +634,22 @@
               "frontend/package.json",
               "frontend/scripts/**",
               "frontend/src/test/**",
-              "frontend/src/stage1BrowserEvidence.test.ts",
-              "frontend/src/step6ProductAcceptance.test.ts"
+              "frontend/src/tauri.test.ts",
+              ".github/workflows/stage1-tauri-dogfood.yml",
+              ".github/workflows/step6-tauri-product-acceptance.yml",
+              "docs/development/testing.md"
             ],
             "forbidden_touched_paths": [
               "openlife-core/**",
               "src-tauri/**",
               "frontend/src/ui/**",
               "frontend/src/App.tsx",
+              "frontend/src/tauri.ts",
+              "frontend/src/tauriDev.ts",
+              "frontend/pnpm-lock.yaml",
+              "frontend/src/stage1BrowserEvidence.test.ts",
+              "frontend/src/step6ProductAcceptance.test.ts",
+              "frontend/src/dev/**",
               "plans/openlife_single_system_deletion_manifest.md"
             ],
             "expected_absent_paths": [
@@ -696,14 +670,20 @@
               "W0-COV-MISSING",
               "W0-COV-NONNUMERIC",
               "W0-COV-ZERO-COLLECTION",
-              "W0-COV-BELOW-THRESHOLD"
+              "W0-COV-BELOW-THRESHOLD",
+              "W0-TEST-ZERO-COLLECTION",
+              "W0-TEST-FORBIDDEN-CREDIT",
+              "W0-TEST-ID-DRIFT"
             ],
             "minimal_fix_contract": "Use one deterministic parser/checker authority and an explicit current-test include/exclude contract; do not add a second coverage truth.",
             "old_path_deletion_contract": "Remove the inline false-green parser when the single checker replaces it; retired tests remain historical but lose default credit.",
             "verification_commands": [
               "corepack pnpm --dir frontend format:check",
               "corepack pnpm --dir frontend typecheck",
+              "corepack pnpm --dir frontend test:coverage:checker",
+              "corepack pnpm --dir frontend test:selection:checker",
               "corepack pnpm --dir frontend test",
+              "corepack pnpm --dir frontend test:historical",
               "corepack pnpm --dir frontend test:coverage",
               "corepack pnpm --dir frontend build",
               "cargo test -p openlife-tauri single_system -- --nocapture"
@@ -718,8 +698,9 @@
             ],
             "acceptance_criteria": [
               "All four named coverage counterexamples exit nonzero for the stated reason.",
+              "All three named selection counterexamples exit nonzero for the stated reason.",
               "A valid coverage artifact passes the same checker.",
-              "Default credited test IDs/count exclude retired Stage1, Step6 and dev-harness evidence.",
+              "Default credited test IDs/count exclude retired Stage1, Step6, dev-harness and tauriDev-dependent evidence while retaining current tauri wrapper tests.",
               "Production build and absence guard remain green."
             ],
             "closure_claim_allowed": false,
@@ -940,7 +921,7 @@
         "Read-only preparation of a successor Program that separately scopes native Tauri, external provider/non-loopback/MCP, proposal/permission and durable-write trials."
       ],
       "prohibited_work": [
-        "Dispatching any W5 implementation or trial packet under Program schema 1.0.0.",
+        "Dispatching any W5 implementation or trial packet under Program schema 1.0.1.",
         "Performing external-provider, non-loopback, live MCP/A2A or real durable-write actions under this Program.",
         "Transferring browser-shell credit to native/external-live.",
         "Calling Phase7 green while any required scenario is BLOCKED, FAIL, NOT_RUN or UNKNOWN."
@@ -1070,7 +1051,7 @@
         "^cargo fmt --check$",
         "^cargo clippy(?: .*)?$",
         "^cargo test(?: .*)?$",
-        "^corepack pnpm --dir frontend (?:format:check|typecheck|test|test:coverage|build)(?: .*)?$",
+        "^corepack pnpm --dir frontend (?:format:check|typecheck|test|test:coverage|test:coverage:checker|test:selection:checker|test:historical|build)(?: .*)?$",
         "^node scripts/[A-Za-z0-9._/-]+\\.mjs(?: .*)?$"
       ],
       "forbidden_fragments": [
@@ -1358,7 +1339,7 @@
   ],
   "program_activation": {
     "stage_id": "PROGRAM-BOOTSTRAP",
-    "status": "ACTIVE",
+    "status": "DRAFT_VALIDATED_AWAITING_CHALLENGE_AND_USER_APPROVAL",
     "occurs_before_wave_id": "WAVE-0",
     "ordered_steps": [
       "Draft Program, ledger, active authority, validator and mutation self-test agree.",
@@ -1392,7 +1373,7 @@
   "validation_profiles": {
     "self_test": {
       "command": "node scripts/test-current-development-program-validator.mjs",
-      "purpose": "Create disposable local Git fixtures and prove draft, activation, bare ongoing and scoped packet paths plus fail-closed role, command, source-line, predecessor and W5 counterexamples."
+      "purpose": "Create disposable local Git fixtures with per-scenario timeout/progress and prove the untouched single-parent successor draft, replacement-ref rejection, clean snapshot, merge rejection, activation without surplus self-credit, bare ongoing and scoped packet paths plus fail-closed role, command, blueprint, predecessor and W5 counterexamples."
     },
     "draft": {
       "command": "node scripts/validate-current-development-program.mjs --profile=draft",

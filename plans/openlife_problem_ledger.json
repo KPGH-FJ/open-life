@@ -1,15 +1,23 @@
 {
-  "schema_version": "1.0.0",
-  "ledger_id": "openlife-current-problem-ledger-20260724",
-  "generated_at": "2026-07-24T06:32:16.913Z",
-  "status": "ACTIVE",
+  "schema_version": "1.0.1",
+  "ledger_id": "openlife-current-problem-ledger-v1.0.1-20260727",
+  "generated_at": "2026-07-27T06:31:21Z",
+  "status": "DRAFT_AWAITING_USER_APPROVAL",
   "authority": {
     "scope": "Current 101-card owner, evidence, wave, next-proof and closure ledger.",
     "program_file": "plans/openlife_current_development_program.json",
     "subordinate_to_phase7": true,
-    "execution_authorized": true,
+    "execution_authorized": false,
     "self_contained": true,
     "append_only_baseline_policy": "The 101 baseline IDs may not be deleted or renamed. A future finding first appears in a reviewed creation commit; the following reconciliation commit records the review bound to that creation SHA. The creation commit alone is never a green handoff. Existing merge records are immutable in this Program."
+  },
+  "predecessor_snapshot": {
+    "program_id": "openlife-current-development-program-20260724",
+    "schema_version": "1.0.0",
+    "activation_commit_sha": "8b5830dd6339572234fb86021735de901c0a84e4",
+    "closure_credit_true": 0,
+    "integration_records": 0,
+    "credit_policy": "HISTORICAL_GOVERNANCE_EVIDENCE_ONLY"
   },
   "review_baseline": {
     "review_run_id": "FR-20260723-01",

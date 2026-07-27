@@ -1,6 +1,6 @@
-# OpenLife Current Development Program
+# OpenLife Current Development Program v1.0.1
 
-> Date: 2026-07-24
+> Date: 2026-07-27
 > Initial publication state: `DRAFT_AWAITING_USER_APPROVAL`
 > Live status and execution authority: read
 > `plans/openlife_current_development_program.json`; this Markdown never grants
@@ -33,6 +33,13 @@ This means:
 The V4 commit facts remain historical evidence: 13 unique commits were
 classified as 4 integrated, 8 superseded, 1 evidence-only, and 0
 still-needed-port. That classification grants **no finding closure**.
+
+This v1.0.1 successor is deliberately smaller than the abandoned uncommitted
+v1.0.1 attempt. It corrects only the W0-S1 mixed test-owner omission, restores
+repeatable validator self-testing, and hardens the exact draft snapshot. It
+does not pre-implement future GitHub promotion, multi-PR receipt, dynamic
+feature-domain, or W1-W4 reconciliation state machines. Those controls are
+specified only when the corresponding Wave actually starts.
 
 ## 2. Authority And Approval Boundary
 
@@ -105,8 +112,15 @@ the scoped form; it checks committed, staged, unstaged, and untracked paths
 against the frozen packet.
 
 The self-test uses disposable local Git fixtures under the system temporary
-directory. It performs no network or product-data action and deletes only its
+directory. It performs no network or product-data action, prints one bounded
+result per scenario, applies a per-scenario timeout, and deletes only its
 validated temporary prefix.
+
+The validator proves repository structure, state consistency, exact digests,
+and packet scope. It does not prove that a human or Agent identity is
+independent merely because two strings differ, and it does not convert local
+Git state into GitHub approval. Exact-SHA challenge and user approval remain
+separate recorded actions.
 
 ## 3. Frozen Facts
 
@@ -162,7 +176,7 @@ flowchart LR
 | `WAVE-2` — 单权威、统一门禁与真实状态                        |             41 | outcome and gates only                                                    | bounded domain only |
 | `WAVE-3` — 操作级原子 owner、边界能力与全局副作用            |             21 | outcome and gates only                                                    | bounded domain only |
 | `WAVE-4` — 逐卡 closure、契约生成、死表面删除与 owner 降重   |             21 | outcome and gates only                                                    | bounded domain only |
-| `WAVE-5` — 后继 Program 交接：真实产品试用与正常功能开发解冻 |              0 | handoff marker; not executable in schema 1.0.0                            | none                |
+| `WAVE-5` — 后继 Program 交接：真实产品试用与正常功能开发解冻 |              0 | handoff marker; not executable in schema 1.0.1                            | none                |
 
 W1-W4 are deliberately not decomposed into speculative implementation tasks
 yet. Before each starts, its current source map and ledger facts must be
@@ -187,13 +201,18 @@ Objective:
 - add deterministic failures for `W0-COV-MISSING`,
   `W0-COV-NONNUMERIC`, `W0-COV-ZERO-COLLECTION`, and
   `W0-COV-BELOW-THRESHOLD`;
+- add deterministic failures for `W0-TEST-ZERO-COLLECTION`,
+  `W0-TEST-FORBIDDEN-CREDIT`, and `W0-TEST-ID-DRIFT`;
 - ensure default Vitest credit excludes retired Stage1, Step6, and dev-harness
-  evidence while retaining explicitly named historical tests outside the
-  default product signal.
+  evidence plus the `tauriDev`-dependent records from the mixed
+  `frontend/src/tauri.test.ts` owner, while retaining its current-product
+  wrapper tests.
 
-Exit: four counterexamples fail, valid coverage passes, and the current
-credited test IDs/count are explicit. A passing coverage job before those
-counterexamples gives no coverage credit.
+Exit: four coverage and three selection counterexamples fail, valid inputs
+pass, and the current credited test IDs/count are explicit. The precise
+current/historical counts and digests are measured by W0-S1 rather than treated
+as already-proved implementation facts. A passing job before those
+counterexamples gives no coverage or selection credit.
 
 The machine Program contains the complete W0-S1 task-packet blueprint:
 canonical owners, source map, allowed/forbidden paths, non-goals, risk,
@@ -328,7 +347,7 @@ feature development.
 Normal feature work remains blocked until bounded eligibility is satisfied for
 the domain **and** `G-W2-AUTHORITY-TRUTH`,
 `G-W3-ATOMICITY-BOUNDARY`, `G-W4-CLOSURE-CONVERGENCE`, and
-`G-W5-PHASE7-TRIAL` all pass. Program schema 1.0.0 cannot grant or run W5;
+`G-W5-PHASE7-TRIAL` all pass. Program schema 1.0.1 cannot grant or run W5;
 the successor Program must own that gate and explicitly grant
 `NORMAL_AFTER_GATE` credit.
 
@@ -404,7 +423,7 @@ packet_freeze_review:
   integrator_id:
   reviewer_id:
   artifact_or_record:
-program_schema_version: "1.0.0"
+program_schema_version: "1.0.1"
 program_activation_sha:
 mode: IMPLEMENTATION | VERIFICATION | VERIFICATION_THEN_CONDITIONAL_IMPLEMENTATION | CHALLENGE
 wave_id:
@@ -554,7 +573,7 @@ W0 code, external actions, merges, or closures.
 
 After activation, this paragraph remains historical publication context;
 current execution, Wave, gate, approval, and next-slice state comes from the
-machine Program and ledger. The Integrator freezes the W0-S1 blueprint with the real
-baseline/branch and dispatches **W0-S1 — Truthful Frontend Evidence**. W0-S2
+machine Program and ledger. The Integrator freezes the W0-S1 blueprint with the
+real baseline/branch and dispatches **W0-S1 — Truthful Frontend Evidence**. W0-S2
 and W0-S3 each require their own prepared packet; W0-S4 reconciles the Wave
 ledger after the preceding slices have their required evidence and challenge.

@@ -10,6 +10,13 @@ const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const programPath = "plans/openlife_current_development_program.json";
 const programMarkdownPath = "plans/openlife_current_development_program.md";
 const ledgerPath = "plans/openlife_problem_ledger.json";
+const CURRENT_SCHEMA_VERSION = "1.0.1";
+const CURRENT_PROGRAM_ID = "openlife-current-development-program-v1.0.1-20260727";
+const CURRENT_LEDGER_ID = "openlife-current-problem-ledger-v1.0.1-20260727";
+const PREDECESSOR_PROGRAM_ID = "openlife-current-development-program-20260724";
+const PREDECESSOR_SCHEMA_VERSION = "1.0.0";
+const PREDECESSOR_DRAFT_SHA = "6d2783ad221982c99b1eea484f2c975e5e6b10d8";
+const PREDECESSOR_ACTIVATION_SHA = "8b5830dd6339572234fb86021735de901c0a84e4";
 const REVIEW_BASELINE_SHA = "de158ce53018c9c649f7dc0dcb3bdd8271ed4977";
 const REVIEW_BASELINE_TREE = "3aa4d4d793ca7a8b687be9e6f21515296db63dff";
 const BASELINE_CARD_HASH = "f22a107dd933a38700aa38fb9aa98764a276f50bc006e79740d8d39bca4c6627";
@@ -17,6 +24,15 @@ const BASELINE_FACT_HASH = "17cec370fd46971d36a6c3e73ab1a4e53d3f3689749f16842f6f
 const GUARD_CATALOG_HASH = "838dad6e35bfd1912c04d78299534829a6576d16a943ac9c13ff40945a146670";
 const EXPECTED_ABSENT_PATH_HASH =
   "8730120e829ba1a1a74240d4a09afbf831a1b4e376ecbfa512c85216e38963b4";
+const SUCCESSOR_DRAFT_PATHS = [
+  "plans/openlife_current_development_program.json",
+  "plans/openlife_current_development_program.md",
+  "plans/openlife_problem_ledger.json",
+  "plans/openlife_single_system_development_preparation.md",
+  "scripts/test-current-development-program-validator.mjs",
+  "scripts/validate-current-development-program.mjs",
+];
+const gitEnvironment = { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" };
 
 const fail = message => {
   throw new Error(message);
@@ -33,18 +49,21 @@ const git = (...args) =>
     cwd: repositoryRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env: gitEnvironment,
   }).trim();
 const gitRaw = (...args) =>
   execFileSync("git", args, {
     cwd: repositoryRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env: gitEnvironment,
   });
 const gitNul = (...args) =>
   execFileSync("git", args, {
     cwd: repositoryRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env: gitEnvironment,
   })
     .split("\0")
     .filter(Boolean);
@@ -55,13 +74,24 @@ const canGit = (...args) => {
     return null;
   }
 };
+const gitPath = relativePath => {
+  const resolved = git("rev-parse", "--git-path", relativePath);
+  return isAbsolute(resolved) ? resolved : join(repositoryRoot, resolved);
+};
+assert(
+  git("for-each-ref", "--format=%(refname)", "refs/replace") === "",
+  "Git replacement refs are forbidden during Program validation"
+);
+assert(!existsSync(gitPath("info/grafts")), "Git grafts are forbidden during Program validation");
+const validationHeadSha = git("rev-parse", "HEAD");
+const validationBranch = git("branch", "--show-current");
 const readTextAtCommit = (sha, path) => gitRaw("show", `${sha}:${path}`);
 const readJsonAtCommit = (sha, path) => JSON.parse(readTextAtCommit(sha, path));
 const isSha = value => typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 const isCommitAncestorOfHead = value =>
   isSha(value) &&
   canGit("cat-file", "-t", value) === "commit" &&
-  canGit("merge-base", "--is-ancestor", value, "HEAD") !== null;
+  canGit("merge-base", "--is-ancestor", value, validationHeadSha) !== null;
 const clone = value => JSON.parse(JSON.stringify(value));
 const canonicalize = value => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -520,8 +550,52 @@ assert(
 const program = readJson(programPath);
 const ledger = readJson(ledgerPath);
 const programMarkdown = readText(programMarkdownPath);
-assert(program.schema_version === "1.0.0", "Unexpected Program schema version");
-assert(ledger.schema_version === "1.0.0", "Unexpected ledger schema version");
+const predecessorProgram = readJsonAtCommit(PREDECESSOR_ACTIVATION_SHA, programPath);
+const predecessorLedger = readJsonAtCommit(PREDECESSOR_ACTIVATION_SHA, ledgerPath);
+const predecessorFacts = {
+  program_id: predecessorProgram.program_id,
+  schema_version: predecessorProgram.schema_version,
+  approved_draft_commit_sha: predecessorProgram.program_approval?.approved_draft_commit_sha,
+  activation_commit_sha: PREDECESSOR_ACTIVATION_SHA,
+  closure_credit_true: predecessorLedger.cards.filter(card => card.closure_credit === true).length,
+  integration_records: predecessorLedger.integration_records.length,
+};
+assert(program.schema_version === CURRENT_SCHEMA_VERSION, "Unexpected Program schema version");
+assert(ledger.schema_version === CURRENT_SCHEMA_VERSION, "Unexpected ledger schema version");
+assert(program.program_id === CURRENT_PROGRAM_ID, "Unexpected Program ID");
+assert(ledger.ledger_id === CURRENT_LEDGER_ID, "Unexpected ledger ID");
+assert(
+  program.predecessor_program?.program_id === predecessorFacts.program_id &&
+    program.predecessor_program.schema_version === predecessorFacts.schema_version &&
+    program.predecessor_program.approved_draft_commit_sha ===
+      predecessorFacts.approved_draft_commit_sha &&
+    program.predecessor_program.activation_commit_sha === predecessorFacts.activation_commit_sha &&
+    program.predecessor_program.closure_credit_true === predecessorFacts.closure_credit_true &&
+    program.predecessor_program.integration_records === predecessorFacts.integration_records &&
+    predecessorFacts.program_id === PREDECESSOR_PROGRAM_ID &&
+    predecessorFacts.schema_version === PREDECESSOR_SCHEMA_VERSION &&
+    predecessorFacts.approved_draft_commit_sha === PREDECESSOR_DRAFT_SHA &&
+    predecessorFacts.closure_credit_true === 0 &&
+    predecessorFacts.integration_records === 0,
+  "Successor Program predecessor binding drifted"
+);
+assert(
+  ledger.predecessor_snapshot?.program_id === predecessorFacts.program_id &&
+    ledger.predecessor_snapshot.schema_version === predecessorFacts.schema_version &&
+    ledger.predecessor_snapshot.activation_commit_sha === predecessorFacts.activation_commit_sha &&
+    ledger.predecessor_snapshot.closure_credit_true === predecessorFacts.closure_credit_true &&
+    ledger.predecessor_snapshot.integration_records === predecessorFacts.integration_records,
+  "Successor ledger predecessor binding drifted"
+);
+const corruptedPredecessorFacts = { ...predecessorFacts, closure_credit_true: 1 };
+assert(
+  canonicalDigest(corruptedPredecessorFacts) !== canonicalDigest(program.predecessor_program),
+  "Predecessor lineage primitive accepted a corrupted frozen fact"
+);
+assert(
+  canGit("merge-base", "--is-ancestor", PREDECESSOR_ACTIVATION_SHA, validationHeadSha) !== null,
+  "Current HEAD does not descend from the predecessor activation"
+);
 assert(
   program.authority.subordinate_to_phase7 === true &&
     ledger.authority.subordinate_to_phase7 === true,
@@ -568,7 +642,7 @@ const worktreeCount = git("worktree", "list", "--porcelain")
   .split("\n")
   .filter(line => line.startsWith("worktree ")).length;
 assert(worktreeCount === 1, `Expected one worktree, found ${worktreeCount}`);
-const currentBranch = git("branch", "--show-current");
+const currentBranch = validationBranch;
 const localMainTip = canGit("rev-parse", "--verify", "refs/heads/main");
 const originMainTip = canGit("rev-parse", "--verify", "refs/remotes/origin/main");
 assert(localMainTip || originMainTip, "No local or origin main ref is available");
@@ -797,6 +871,36 @@ assert(
     w0s1.task_packet_blueprint.branch === null,
   "W0-S1 packet must be complete except dispatch-time baseline and branch"
 );
+sameSet(
+  w0s1.red_contract,
+  [
+    "W0-COV-MISSING",
+    "W0-COV-NONNUMERIC",
+    "W0-COV-ZERO-COLLECTION",
+    "W0-COV-BELOW-THRESHOLD",
+    "W0-TEST-ZERO-COLLECTION",
+    "W0-TEST-FORBIDDEN-CREDIT",
+    "W0-TEST-ID-DRIFT",
+  ],
+  "W0-S1 RED contract"
+);
+assert(
+  w0s1.task_packet_blueprint.program_schema_version === CURRENT_SCHEMA_VERSION &&
+    w0s1.task_packet_blueprint.source_map.includes("frontend/src/tauri.test.ts") &&
+    w0s1.task_packet_blueprint.allowed_touched_paths.includes("frontend/src/tauri.test.ts") &&
+    w0s1.task_packet_blueprint.forbidden_touched_paths.includes("frontend/src/tauriDev.ts") &&
+    w0s1.task_packet_blueprint.verification_commands.includes(
+      "corepack pnpm --dir frontend test:coverage:checker"
+    ) &&
+    w0s1.task_packet_blueprint.verification_commands.includes(
+      "corepack pnpm --dir frontend test:selection:checker"
+    ) &&
+    w0s1.task_packet_blueprint.verification_commands.includes(
+      "corepack pnpm --dir frontend test:historical"
+    ),
+  "W0-S1 mixed-owner and truthful-selection boundary drifted"
+);
+sameSet(w0s1.task_packet_blueprint.red_contract, w0s1.red_contract, "W0-S1 packet RED contract");
 const w0s3 = w0.slices.find(slice => slice.id === "W0-S3");
 assert(
   w0s3.finding_ids.includes("BR4-D064") &&
@@ -835,6 +939,26 @@ for (const gate of program.gates) {
     });
   }
 }
+sameSet(
+  gateById.get("G-PROGRAM-ACTIVATION").evidence_dimensions,
+  ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY"],
+  "Program activation evidence dimensions"
+);
+assert(
+  gateById
+    .get("G-PROGRAM-ACTIVATION")
+    .evidence_records.every(record =>
+      record.dimensions.every(dimension =>
+        gateById.get("G-PROGRAM-ACTIVATION").evidence_dimensions.includes(dimension)
+      )
+    ),
+  "Program activation evidence contains a surplus self-credited dimension"
+);
+sameSet(
+  gateById.get("G-W0-COVERAGE-TRUTH").evidence_dimensions,
+  ["CI_FAULT", "TEST_SIGNAL", "TEST_SELECTION"],
+  "W0 truthful frontend evidence dimensions"
+);
 for (const wave of program.waves) {
   for (const gateId of [...wave.entry_gate_ids, ...wave.exit_gate_ids]) {
     assert(gateById.has(gateId), `${wave.id} references unknown gate ${gateId}`);
@@ -2240,6 +2364,7 @@ const assertAuthorizedProgramState = () => {
   for (const key of [
     "schema_version",
     "ledger_id",
+    "predecessor_snapshot",
     "review_baseline",
     "provenance",
     "vocabularies",
@@ -3397,6 +3522,19 @@ const validateIntegratedMainHistory = () => {
 };
 
 if (profile === "draft") {
+  assert(dirtyPaths.length === 0, "Successor draft must be a clean tracked commit");
+  const draftParents = git("rev-list", "--parents", "-n", "1", validationHeadSha).split(" ");
+  assert(
+    draftParents.length === 2 &&
+      draftParents[0] === validationHeadSha &&
+      draftParents[1] === PREDECESSOR_ACTIVATION_SHA,
+    "Successor draft must be a single-parent direct child of the predecessor activation"
+  );
+  sameSet(
+    changedPathsBetween(PREDECESSOR_ACTIVATION_SHA, validationHeadSha),
+    SUCCESSOR_DRAFT_PATHS,
+    "Successor draft governance-only changed paths"
+  );
   assert(
     program.status === "DRAFT_AWAITING_USER_APPROVAL" && program.execution_authorized === false,
     "Draft profile requires fail-closed Program status"
@@ -3700,7 +3838,7 @@ if (profile === "draft") {
       normalFeatureGate.status === "BLOCKED" &&
       normalFeatureGate.reopened === false &&
       normalFeatureGate.evidence_records.length === 0,
-    "Program schema 1.0.0 cannot execute W5 or reopen normal feature work"
+    "Program schema 1.0.1 cannot execute W5 or reopen normal feature work"
   );
   const scopedOngoingValidation =
     Boolean(args.slice) || Boolean(args["task-packet"]) || Boolean(args["execution-baseline"]);
@@ -3879,6 +4017,19 @@ if (hasReconciledLivingEvidence) {
     "Ledger claims reconciliation before any living evidence changed"
   );
 }
+
+const finalTrackedDirtyPaths = uniquePaths(
+  gitNul("diff", "--name-only", "-z", "--no-renames", "--"),
+  gitNul("diff", "--cached", "--name-only", "-z", "--no-renames", "--")
+);
+const finalUntrackedPaths = gitNul("ls-files", "--others", "--exclude-standard", "-z");
+const finalDirtyPaths = uniquePaths(finalTrackedDirtyPaths, finalUntrackedPaths);
+assert(
+  git("rev-parse", "HEAD") === validationHeadSha &&
+    git("branch", "--show-current") === validationBranch &&
+    canonicalDigest(finalDirtyPaths) === canonicalDigest(dirtyPaths),
+  "Repository HEAD, branch or dirty state changed during Program validation"
+);
 
 process.stdout.write(
   [
