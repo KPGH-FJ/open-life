@@ -10,13 +10,17 @@ const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const programPath = "plans/openlife_current_development_program.json";
 const programMarkdownPath = "plans/openlife_current_development_program.md";
 const ledgerPath = "plans/openlife_problem_ledger.json";
-const CURRENT_SCHEMA_VERSION = "1.0.1";
-const CURRENT_PROGRAM_ID = "openlife-current-development-program-v1.0.1-20260727";
-const CURRENT_LEDGER_ID = "openlife-current-problem-ledger-v1.0.1-20260727";
-const PREDECESSOR_PROGRAM_ID = "openlife-current-development-program-20260724";
-const PREDECESSOR_SCHEMA_VERSION = "1.0.0";
-const PREDECESSOR_DRAFT_SHA = "6d2783ad221982c99b1eea484f2c975e5e6b10d8";
-const PREDECESSOR_ACTIVATION_SHA = "8b5830dd6339572234fb86021735de901c0a84e4";
+const CURRENT_SCHEMA_VERSION = "1.0.2";
+const CURRENT_PROGRAM_ID =
+  "openlife-current-development-program-v1.0.2-validator-recovery-20260727";
+const CURRENT_LEDGER_ID = "openlife-current-problem-ledger-v1.0.2-validator-recovery-20260727";
+const PREDECESSOR_PROGRAM_ID = "openlife-current-development-program-v1.0.1-20260727";
+const PREDECESSOR_SCHEMA_VERSION = "1.0.1";
+const PREDECESSOR_DRAFT_SHA = "66e5f57ecfa86e5a44b70229a06ff77d8d473343";
+const PREDECESSOR_ACTIVATION_SHA = "93f7ccc176ebd3dab0557b1dc157008318742bee";
+const PREDECESSOR_HANDOFF_SHA = "410bd26aab03daa58451f871f96b002206518d7c";
+const PREDECESSOR_PUBLICATION_MERGE_SHA = "83e7dd25b45ba77df3a7eeddfb980dd2fc930592";
+const PREDECESSOR_W0_S1_MERGE_SHA = "79849ba44a36e6b1a28e848fa359903170256c0c";
 const REVIEW_BASELINE_SHA = "de158ce53018c9c649f7dc0dcb3bdd8271ed4977";
 const REVIEW_BASELINE_TREE = "3aa4d4d793ca7a8b687be9e6f21515296db63dff";
 const BASELINE_CARD_HASH = "f22a107dd933a38700aa38fb9aa98764a276f50bc006e79740d8d39bca4c6627";
@@ -28,7 +32,6 @@ const SUCCESSOR_DRAFT_PATHS = [
   "plans/openlife_current_development_program.json",
   "plans/openlife_current_development_program.md",
   "plans/openlife_problem_ledger.json",
-  "plans/openlife_single_system_development_preparation.md",
   "scripts/test-current-development-program-validator.mjs",
   "scripts/validate-current-development-program.mjs",
 ];
@@ -275,6 +278,21 @@ const changedPathsFrom = sha => gitNul("diff", "--name-only", "-z", "--no-rename
 const changedPathsBetween = (baseSha, headSha) =>
   gitNul("diff", "--name-only", "-z", "--no-renames", baseSha, headSha, "--");
 const uniquePaths = (...pathSets) => [...new Set(pathSets.flat())].sort();
+const commitNovelPaths = commitSha => {
+  const parents = git("rev-list", "--parents", "-n", "1", commitSha).split(" ").slice(1);
+  if (parents.length === 0) return [];
+  const changedByParent = parents.map(parent => new Set(changedPathsBetween(parent, commitSha)));
+  return [...changedByParent[0]]
+    .filter(path => changedByParent.every(paths => paths.has(path)))
+    .sort();
+};
+for (const [sha, label] of [
+  [PREDECESSOR_PUBLICATION_MERGE_SHA, "predecessor publication merge"],
+  [PREDECESSOR_W0_S1_MERGE_SHA, "predecessor W0-S1 merge"],
+  [PREDECESSOR_HANDOFF_SHA, "predecessor artifact merge"],
+]) {
+  sameSet(commitNovelPaths(sha), [], `${label} novel-path replay`);
+}
 const enforcePathScope = ({
   paths,
   allowedPaths,
@@ -550,15 +568,26 @@ assert(
 const program = readJson(programPath);
 const ledger = readJson(ledgerPath);
 const programMarkdown = readText(programMarkdownPath);
-const predecessorProgram = readJsonAtCommit(PREDECESSOR_ACTIVATION_SHA, programPath);
-const predecessorLedger = readJsonAtCommit(PREDECESSOR_ACTIVATION_SHA, ledgerPath);
+const predecessorProgram = readJsonAtCommit(PREDECESSOR_HANDOFF_SHA, programPath);
+const predecessorLedger = readJsonAtCommit(PREDECESSOR_HANDOFF_SHA, ledgerPath);
+const countTrackedAtCommit = (sha, prefix) =>
+  git("ls-tree", "-r", "--name-only", sha, "--", prefix).split("\n").filter(Boolean).length;
 const predecessorFacts = {
   program_id: predecessorProgram.program_id,
   schema_version: predecessorProgram.schema_version,
   approved_draft_commit_sha: predecessorProgram.program_approval?.approved_draft_commit_sha,
   activation_commit_sha: PREDECESSOR_ACTIVATION_SHA,
+  handoff_main_sha: PREDECESSOR_HANDOFF_SHA,
   closure_credit_true: predecessorLedger.cards.filter(card => card.closure_credit === true).length,
   integration_records: predecessorLedger.integration_records.length,
+  tracked_task_packet_artifacts: countTrackedAtCommit(
+    PREDECESSOR_HANDOFF_SHA,
+    predecessorLedger.integration_contract.packet_archive_prefix
+  ),
+  tracked_attempt_artifacts: countTrackedAtCommit(
+    PREDECESSOR_HANDOFF_SHA,
+    predecessorLedger.attempt_contract.attempt_artifact_prefix
+  ),
 };
 assert(program.schema_version === CURRENT_SCHEMA_VERSION, "Unexpected Program schema version");
 assert(ledger.schema_version === CURRENT_SCHEMA_VERSION, "Unexpected ledger schema version");
@@ -570,21 +599,33 @@ assert(
     program.predecessor_program.approved_draft_commit_sha ===
       predecessorFacts.approved_draft_commit_sha &&
     program.predecessor_program.activation_commit_sha === predecessorFacts.activation_commit_sha &&
+    program.predecessor_program.handoff_main_sha === predecessorFacts.handoff_main_sha &&
     program.predecessor_program.closure_credit_true === predecessorFacts.closure_credit_true &&
     program.predecessor_program.integration_records === predecessorFacts.integration_records &&
+    program.predecessor_program.tracked_task_packet_artifacts ===
+      predecessorFacts.tracked_task_packet_artifacts &&
+    program.predecessor_program.tracked_attempt_artifacts ===
+      predecessorFacts.tracked_attempt_artifacts &&
     predecessorFacts.program_id === PREDECESSOR_PROGRAM_ID &&
     predecessorFacts.schema_version === PREDECESSOR_SCHEMA_VERSION &&
     predecessorFacts.approved_draft_commit_sha === PREDECESSOR_DRAFT_SHA &&
     predecessorFacts.closure_credit_true === 0 &&
-    predecessorFacts.integration_records === 0,
+    predecessorFacts.integration_records === 0 &&
+    predecessorFacts.tracked_task_packet_artifacts === 1 &&
+    predecessorFacts.tracked_attempt_artifacts === 1,
   "Successor Program predecessor binding drifted"
 );
 assert(
   ledger.predecessor_snapshot?.program_id === predecessorFacts.program_id &&
     ledger.predecessor_snapshot.schema_version === predecessorFacts.schema_version &&
     ledger.predecessor_snapshot.activation_commit_sha === predecessorFacts.activation_commit_sha &&
+    ledger.predecessor_snapshot.handoff_main_sha === predecessorFacts.handoff_main_sha &&
     ledger.predecessor_snapshot.closure_credit_true === predecessorFacts.closure_credit_true &&
-    ledger.predecessor_snapshot.integration_records === predecessorFacts.integration_records,
+    ledger.predecessor_snapshot.integration_records === predecessorFacts.integration_records &&
+    ledger.predecessor_snapshot.tracked_task_packet_artifacts ===
+      predecessorFacts.tracked_task_packet_artifacts &&
+    ledger.predecessor_snapshot.tracked_attempt_artifacts ===
+      predecessorFacts.tracked_attempt_artifacts,
   "Successor ledger predecessor binding drifted"
 );
 const corruptedPredecessorFacts = { ...predecessorFacts, closure_credit_true: 1 };
@@ -593,8 +634,8 @@ assert(
   "Predecessor lineage primitive accepted a corrupted frozen fact"
 );
 assert(
-  canGit("merge-base", "--is-ancestor", PREDECESSOR_ACTIVATION_SHA, validationHeadSha) !== null,
-  "Current HEAD does not descend from the predecessor activation"
+  canGit("merge-base", "--is-ancestor", PREDECESSOR_HANDOFF_SHA, validationHeadSha) !== null,
+  "Current HEAD does not descend from the predecessor handoff"
 );
 assert(
   program.authority.subordinate_to_phase7 === true &&
@@ -800,6 +841,43 @@ const evidenceRecordIsFresh = record =>
     );
     return !pathOverlap && !guardOverlap;
   });
+const predecessorReceiptLineage = (record, programState) => {
+  if (
+    record.program_approved_draft_sha === programState.program_approval.approved_draft_commit_sha
+  ) {
+    return {
+      kind: "CURRENT_PROGRAM",
+      activation_sha:
+        programState.program_activation.status === "ACTIVE"
+          ? deriveAndValidateActivationCommit(
+              programState.program_approval.approved_draft_commit_sha
+            ).activationSha
+          : null,
+    };
+  }
+  const declaredPredecessor = programState.predecessor_program;
+  if (
+    declaredPredecessor &&
+    record.program_approved_draft_sha === declaredPredecessor.approved_draft_commit_sha &&
+    record.program_activation_sha === declaredPredecessor.activation_commit_sha
+  ) {
+    return {
+      kind: "DECLARED_PREDECESSOR",
+      activation_sha: declaredPredecessor.activation_commit_sha,
+    };
+  }
+  return null;
+};
+assert(
+  predecessorReceiptLineage(
+    {
+      program_approved_draft_sha: "0000000000000000000000000000000000000000",
+      program_activation_sha: "1111111111111111111111111111111111111111",
+    },
+    program
+  ) === null,
+  "Predecessor lineage primitive accepted an unrelated historical Program"
+);
 
 const expectedWaveIds = ["WAVE-0", "WAVE-1", "WAVE-2", "WAVE-3", "WAVE-4", "WAVE-5"];
 assert(
@@ -822,8 +900,8 @@ for (const [index, wave] of program.waves.entries()) {
   );
   if (index === 0) {
     assert(
-      wave.refinement_level === "CURRENT_SLICE_BLUEPRINT_READY_REQUIRES_INTEGRATOR_FREEZE",
-      "WAVE-0 overclaims executable packet readiness"
+      wave.refinement_level === "CURRENT_SLICE_PREPARATION_REQUIRED",
+      "WAVE-0 does not identify the current packet-preparation boundary"
     );
   } else {
     assert(
@@ -853,6 +931,7 @@ sameJson(
   "WAVE-0 predecessor DAG"
 );
 const w0s1 = w0.slices[0];
+const w0s2 = w0.slices[1];
 const missingTaskFields = program.agent_task_contract.required_fields.filter(
   field => !(field in w0s1.task_packet_blueprint)
 );
@@ -866,10 +945,17 @@ sameSet(
   "W0-S1 blueprint fields"
 );
 assert(
-  w0s1.packet_status === "READY_FOR_INTEGRATOR_FREEZE_AFTER_PROGRAM_ACTIVATION" &&
+  w0s1.status === "PREDECESSOR_TASK_EVIDENCE_INTEGRATED_NO_CLOSURE" &&
+    w0s1.packet_status === "PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE" &&
+    w0s1.task_packet_blueprint.packet_status === "HISTORICAL_BLUEPRINT_NOT_DISPATCHABLE" &&
     w0s1.task_packet_blueprint.execution_baseline_sha === null &&
     w0s1.task_packet_blueprint.branch === null,
-  "W0-S1 packet must be complete except dispatch-time baseline and branch"
+  "W0-S1 predecessor receipt and historical blueprint boundary drifted"
+);
+assert(
+  w0s2.status === "PLANNED_NOT_AUTHORIZED" &&
+    w0s2.packet_status === "TASK_PACKET_PREPARATION_REQUIRED",
+  "W0-S2 must remain the next unprepared, unauthorized slice"
 );
 sameSet(
   w0s1.red_contract,
@@ -2178,12 +2264,21 @@ for (const requiredMarkdownFact of [
   "hard_stop_churn_lines:",
   "new_worktree: false",
   "risk_class: LOW | MEDIUM | HIGH",
+  "PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE",
+  "after successor activation is W0-S2.",
+  "The retained W0-S1 receipt is replayed against the v1.0.1 dispatch Program",
 ]) {
   assert(
     programMarkdown.includes(requiredMarkdownFact),
     `Program Markdown misses machine fact: ${requiredMarkdownFact}`
   );
 }
+assert(
+  !programMarkdown.includes("dispatches **W0-S1") &&
+    !programMarkdown.includes("W0-S1 blueprint ready") &&
+    !programMarkdown.includes("W0-S1 must match its inline blueprint"),
+  "Program Markdown still instructs Agents to redispatch settled W0-S1"
+);
 for (const slice of w0.slices) {
   assert(
     programMarkdown.includes(`### ${slice.id} — ${slice.name}`),
@@ -2831,12 +2926,20 @@ const validateFrozenPacketSemantics = ({
         predecessorRecord,
         `${label} predecessor slice is not integrated: ${predecessorSliceId}`
       );
+      const receiptLineage = predecessorReceiptLineage(predecessorRecord, programState);
+      assert(
+        receiptLineage,
+        `${label} predecessor ${predecessorSliceId} is not from the current or declared predecessor Program`
+      );
       validateIntegrationRecordReceipt({
         record: predecessorRecord,
         programState,
         ledgerState,
         snapshotSha: executionBaseline,
-        expectedActivationSha: packet.program_activation_sha,
+        expectedActivationSha:
+          receiptLineage.kind === "CURRENT_PROGRAM"
+            ? packet.program_activation_sha
+            : receiptLineage.activation_sha,
         label: `${label} predecessor ${predecessorSliceId}`,
       });
     }
@@ -3198,6 +3301,9 @@ const validateIntegrationRecordReceipt = ({
   );
   const dispatchProgram = readJsonAtCommit(record.execution_baseline_sha, programPath);
   const dispatchLedger = readJsonAtCommit(record.execution_baseline_sha, ledgerPath);
+  const dispatchActivationSha = deriveAndValidateActivationCommit(
+    dispatchProgram.program_approval.approved_draft_commit_sha
+  ).activationSha;
   validateFrozenPacketSemantics({
     packet: archivedPacket,
     programState: dispatchProgram,
@@ -3207,8 +3313,10 @@ const validateIntegrationRecordReceipt = ({
     label: `${label} task packet`,
   });
   assert(
-    record.program_approved_draft_sha === programState.program_approval.approved_draft_commit_sha &&
+    record.program_approved_draft_sha ===
+      dispatchProgram.program_approval.approved_draft_commit_sha &&
       record.program_activation_sha === archivedPacket.program_activation_sha &&
+      record.program_activation_sha === dispatchActivationSha &&
       (!expectedActivationSha || record.program_activation_sha === expectedActivationSha) &&
       canGit(
         "merge-base",
@@ -3226,8 +3334,8 @@ const validateIntegrationRecordReceipt = ({
       record.integrator_id.trim() &&
       record.integrator_id === archivedPacket.packet_freeze_review.integrator_id &&
       record.producer_id !== record.integrator_id &&
-      archivedPacket.program_schema_version === programState.schema_version &&
-      archivedPacket.checkout === programState.slice_contract.writable_checkout &&
+      archivedPacket.program_schema_version === dispatchProgram.schema_version &&
+      archivedPacket.checkout === dispatchProgram.slice_contract.writable_checkout &&
       typeof archivedPacket.branch === "string" &&
       archivedPacket.branch.startsWith("codex/"),
     `${label} packet identity, role, activation or baseline binding is invalid`
@@ -3337,7 +3445,6 @@ const validateIntegrationRecordReceipt = ({
 };
 const validateIntegratedMainHistory = () => {
   const approvedDraft = program.program_approval.approved_draft_commit_sha;
-  const activationSha = deriveAndValidateActivationCommit(approvedDraft).activationSha;
   const currentApprovalRecords = [];
   const recordIds = new Set();
   const packetDigests = new Set();
@@ -3370,7 +3477,6 @@ const validateIntegratedMainHistory = () => {
       programState: program,
       ledgerState: ledger,
       snapshotSha: "HEAD",
-      expectedActivationSha: activationSha,
       label: record.record_id,
     });
     currentApprovalRecords.push(record);
@@ -3491,7 +3597,10 @@ const validateIntegratedMainHistory = () => {
   const touchedProductPaths = touchedSinceApproval.filter(
     path => !pathIsStateOnly(path, ledger.integration_contract)
   );
-  const coveredProductPaths = currentApprovalRecords.flatMap(record =>
+  const currentProgramRecords = currentApprovalRecords.filter(
+    record => record.program_approved_draft_sha === approvedDraft
+  );
+  const coveredProductPaths = currentProgramRecords.flatMap(record =>
     record.changed_paths.filter(path => !pathIsStateOnly(path, ledger.integration_contract))
   );
   sameSet(coveredProductPaths, touchedProductPaths, "Integrated main task-receipt coverage");
@@ -3499,14 +3608,11 @@ const validateIntegratedMainHistory = () => {
     .split("\n")
     .filter(Boolean);
   for (const commitSha of commitsSinceApproval) {
-    const commitParents = git("rev-list", "--parents", "-n", "1", commitSha).split(" ");
-    const firstParent = commitParents[1];
-    assert(firstParent, `Integrated commit has no parent: ${commitSha}`);
-    const commitProductPaths = changedPathsBetween(firstParent, commitSha).filter(
+    const commitProductPaths = commitNovelPaths(commitSha).filter(
       path => !pathIsStateOnly(path, ledger.integration_contract)
     );
     if (commitProductPaths.length === 0) continue;
-    const coveringRecords = currentApprovalRecords.filter(
+    const coveringRecords = currentProgramRecords.filter(
       record =>
         record.range_base_sha !== commitSha &&
         canGit("merge-base", "--is-ancestor", record.range_base_sha, commitSha) !== null &&
@@ -3527,11 +3633,11 @@ if (profile === "draft") {
   assert(
     draftParents.length === 2 &&
       draftParents[0] === validationHeadSha &&
-      draftParents[1] === PREDECESSOR_ACTIVATION_SHA,
-    "Successor draft must be a single-parent direct child of the predecessor activation"
+      draftParents[1] === PREDECESSOR_HANDOFF_SHA,
+    "Successor draft must be a single-parent direct child of the predecessor handoff"
   );
   sameSet(
-    changedPathsBetween(PREDECESSOR_ACTIVATION_SHA, validationHeadSha),
+    changedPathsBetween(PREDECESSOR_HANDOFF_SHA, validationHeadSha),
     SUCCESSOR_DRAFT_PATHS,
     "Successor draft governance-only changed paths"
   );
@@ -3577,9 +3683,20 @@ if (profile === "draft") {
   );
   assert(cards.length === 101, "Draft profile must contain exactly 101 cards");
   assert(
-    ledger.integration_records.length === 0,
-    "Initial draft contains premature integration receipts"
+    ledger.integration_records.length === 1 &&
+      ledger.integration_records[0].record_id === "W0-S1-INTEGRATION-001" &&
+      ledger.integration_records[0].program_approved_draft_sha === PREDECESSOR_DRAFT_SHA &&
+      ledger.implementation_attempt_records.length === 1 &&
+      ledger.implementation_attempt_records[0].attempt_id === "W0-S1-ATTEMPT-001",
+    "Successor draft did not preserve the exact authorized predecessor W0-S1 receipt"
   );
+  validateIntegrationRecordReceipt({
+    record: ledger.integration_records[0],
+    programState: program,
+    ledgerState: ledger,
+    snapshotSha: validationHeadSha,
+    label: "successor predecessor W0-S1 receipt",
+  });
   for (const card of baselineCards) {
     const fact = baselineFactById.get(card.card_id);
     const { fact_sha256: _factDigest, ...factWithoutDigest } = fact;
@@ -3594,7 +3711,9 @@ if (profile === "draft") {
   for (const path of dirtyPaths) {
     assert(pathMatches(path, planningPaths), `Out-of-scope draft change: ${path}`);
   }
-  for (const path of git("diff", "--name-only", baseline.sha, "--").split("\n").filter(Boolean)) {
+  for (const path of git("diff", "--name-only", PREDECESSOR_HANDOFF_SHA, "--")
+    .split("\n")
+    .filter(Boolean)) {
     assert(pathMatches(path, planningPaths), `Product changed in draft: ${path}`);
   }
   assert(
@@ -3659,9 +3778,19 @@ if (profile === "draft") {
   );
   assert(cards.length === 101, "Activation may not add/delete baseline cards");
   assert(
-    ledger.integration_records.length === 0,
-    "Initial activation contains premature integration receipts"
+    ledger.integration_records.length === 1 &&
+      ledger.integration_records[0].record_id === "W0-S1-INTEGRATION-001" &&
+      ledger.implementation_attempt_records.length === 1 &&
+      ledger.implementation_attempt_records[0].attempt_id === "W0-S1-ATTEMPT-001",
+    "Successor activation changed the authorized predecessor W0-S1 receipt"
   );
+  validateIntegrationRecordReceipt({
+    record: ledger.integration_records[0],
+    programState: program,
+    ledgerState: ledger,
+    snapshotSha: validationHeadSha,
+    label: "activated predecessor W0-S1 receipt",
+  });
   for (const card of baselineCards) {
     const fact = baselineFactById.get(card.card_id);
     const { fact_sha256: _factDigest, ...factWithoutDigest } = fact;
@@ -3838,7 +3967,7 @@ if (profile === "draft") {
       normalFeatureGate.status === "BLOCKED" &&
       normalFeatureGate.reopened === false &&
       normalFeatureGate.evidence_records.length === 0,
-    "Program schema 1.0.1 cannot execute W5 or reopen normal feature work"
+    "Program schema 1.0.2 cannot execute W5 or reopen normal feature work"
   );
   const scopedOngoingValidation =
     Boolean(args.slice) || Boolean(args["task-packet"]) || Boolean(args["execution-baseline"]);

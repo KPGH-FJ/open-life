@@ -12,7 +12,7 @@ const fixturePrefix = join(realpathSync(tmpdir()), "openlife-program-validator-t
 const tempRoot = mkdtempSync(fixturePrefix);
 const fixtureRoot = join(tempRoot, "fixture");
 const baselineSha = "de158ce53018c9c649f7dc0dcb3bdd8271ed4977";
-const predecessorActivationSha = "8b5830dd6339572234fb86021735de901c0a84e4";
+const predecessorHandoffSha = "410bd26aab03daa58451f871f96b002206518d7c";
 const validatorPath = "scripts/validate-current-development-program.mjs";
 const programPath = "plans/openlife_current_development_program.json";
 const ledgerPath = "plans/openlife_problem_ledger.json";
@@ -36,11 +36,14 @@ const expectedScenarioLabels = [
   "ACTIVATION_SELF_CREDIT_NEGATIVE",
   "ACTIVATION_SUBSTANTIVE_NEGATIVE",
   "ONGOING_BOOTSTRAP",
+  "ONGOING_CLEAN_TASK_MERGE",
+  "ONGOING_UNRECEIPTED_SIDE_COMMIT_NEGATIVE",
+  "ONGOING_MERGE_RESOLUTION_NEGATIVE",
   "ONGOING_RELOCATED_DETACHED_CI",
   "PACKET_VALID",
   "PACKET_ROLE_NEGATIVE",
   "PACKET_COMMAND_NEGATIVE",
-  "PACKET_BLUEPRINT_TAMPER_NEGATIVE",
+  "PACKET_SOURCE_TAMPER_NEGATIVE",
   "PREDECESSOR_NEGATIVE",
   "W5_DISPATCH_NEGATIVE",
 ];
@@ -72,6 +75,7 @@ const canonicalDigest = value =>
   createHash("sha256")
     .update(JSON.stringify(canonicalize(value)), "utf8")
     .digest("hex");
+const textDigest = value => createHash("sha256").update(value, "utf8").digest("hex");
 const git = (cwd, ...args) =>
   execFileSync("git", args, {
     cwd,
@@ -149,6 +153,15 @@ const removeUnexpectedRemoteRefs = cwd => {
     }
   }
 };
+const removeUnexpectedLocalBranches = (cwd, allowedBranches) => {
+  for (const branch of git(cwd, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    .split("\n")
+    .filter(Boolean)) {
+    if (!allowedBranches.includes(branch)) {
+      git(cwd, "branch", "-D", branch);
+    }
+  }
+};
 
 try {
   if (git(sourceRoot, "status", "--porcelain=v1", "--untracked-files=all") !== "") {
@@ -163,9 +176,10 @@ try {
   });
   git(fixtureRoot, "config", "user.name", "OpenLife Validator Selftest");
   git(fixtureRoot, "config", "user.email", "openlife-validator-selftest@example.invalid");
-  git(fixtureRoot, "branch", "-f", "main", predecessorActivationSha);
-  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", predecessorActivationSha);
-  git(fixtureRoot, "update-ref", "refs/remotes/origin/main", predecessorActivationSha);
+  git(fixtureRoot, "branch", "-f", "main", predecessorHandoffSha);
+  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", predecessorHandoffSha);
+  removeUnexpectedLocalBranches(fixtureRoot, ["main", "codex/current-development-program"]);
+  git(fixtureRoot, "update-ref", "refs/remotes/origin/main", predecessorHandoffSha);
   removeUnexpectedRemoteRefs(fixtureRoot);
 
   for (const path of overlayPaths) {
@@ -180,7 +194,7 @@ try {
     expectedExit: 0,
     label: "DRAFT_VALID",
   });
-  git(fixtureRoot, "replace", draftSha, predecessorActivationSha);
+  git(fixtureRoot, "replace", draftSha, predecessorHandoffSha);
   expectValidator({
     cwd: fixtureRoot,
     args: ["--profile=draft"],
@@ -200,9 +214,9 @@ try {
   });
   rmSync(dirtyProbePath);
 
-  git(fixtureRoot, "checkout", "-B", "selftest-merge-side", predecessorActivationSha);
+  git(fixtureRoot, "checkout", "-B", "selftest-merge-side", predecessorHandoffSha);
   git(fixtureRoot, "commit", "--allow-empty", "-m", "test: synthetic merge side");
-  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", predecessorActivationSha);
+  git(fixtureRoot, "checkout", "-B", "codex/current-development-program", predecessorHandoffSha);
   git(fixtureRoot, "merge", "--no-ff", "selftest-merge-side", "-m", "test: synthetic merge draft");
   for (const path of overlayPaths) {
     writeFileSync(join(fixtureRoot, path), readBlobAtCommit(sourceRoot, sourceHeadSha, path));
@@ -218,7 +232,7 @@ try {
     label: "DRAFT_MERGE_NEGATIVE",
   });
 
-  git(fixtureRoot, "reset", "--hard", predecessorActivationSha);
+  git(fixtureRoot, "reset", "--hard", predecessorHandoffSha);
   for (const path of overlayPaths) {
     writeFileSync(join(fixtureRoot, path), readBlobAtCommit(sourceRoot, sourceHeadSha, path));
   }
@@ -380,6 +394,232 @@ try {
     label: "ONGOING_BOOTSTRAP",
   });
 
+  const integratedRoot = join(tempRoot, "integrated-clean-task-merge");
+  execFileSync("git", ["clone", "--local", "--no-hardlinks", fixtureRoot, integratedRoot], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  git(integratedRoot, "config", "user.name", "OpenLife Validator Selftest");
+  git(integratedRoot, "config", "user.email", "openlife-validator-selftest@example.invalid");
+  git(integratedRoot, "checkout", "-b", "codex/selftest-w0-s2-integration", activationSha);
+  const integratedProgram = readJson(integratedRoot, programPath);
+  const integratedBlueprint = integratedProgram.waves[0].slices[0].task_packet_blueprint;
+  const integratedW0s2 = integratedProgram.waves[0].slices.find(slice => slice.id === "W0-S2");
+  const integratedPacket = structuredClone(integratedBlueprint);
+  Object.assign(integratedPacket, {
+    task_id: "W0-S2-SELFTEST-INTEGRATION",
+    wave_id: "WAVE-0",
+    slice_id: "W0-S2",
+    slice_exit_contract_id: integratedW0s2.exit_contract_id,
+    finding_ids: [...integratedW0s2.finding_ids],
+    required_guard_ids: [...integratedW0s2.required_guard_ids],
+    root_cause_cluster_id: integratedW0s2.root_cause_cluster_id,
+    objective: integratedW0s2.objective,
+    non_goals: [...integratedW0s2.non_goals],
+    invariant:
+      "Owner-lease evidence identifies the exact failure layer and fixed repetition parameters.",
+    canonical_owner: ["openlife-core/src/tasks.rs"],
+    source_map: ["openlife-core/src/tasks.rs", "openlife-core/src/sqlite_migration.rs"],
+    allowed_touched_paths: ["openlife-core/src/tasks.rs"],
+    forbidden_touched_paths: ["src-tauri/**", "frontend/**"],
+    red_contract: [...integratedW0s2.red_contract],
+    minimal_fix_contract:
+      "Expose the failure layer and prove fixed repetitions before any product fix is considered.",
+    old_path_deletion_contract:
+      "No owner-lease path is deleted unless the scoped evidence proves it obsolete.",
+    verification_commands: [
+      "cargo test -p openlife-tauri single_system -- --nocapture",
+      "cargo test -p openlife-core owner_lease -- --nocapture",
+    ],
+    required_evidence_dimensions: ["SOURCE_MAP", "RED", "BEHAVIOR_OR_FAULT", "NON_REGRESSION"],
+    acceptance_criteria: [
+      integratedW0s2.exit,
+      "Focused owner-lease repetitions have no unexplained variation.",
+      "Serial full-workspace repetitions retain the same failure-layer contract.",
+    ],
+    program_activation_sha: activationSha,
+    execution_baseline_sha: activationSha,
+    expected_parent_main_sha: activationSha,
+    branch: "codex/selftest-w0-s2-integration",
+    assigned_agent_id: "selftest-implementer",
+  });
+  freezePacket(integratedPacket);
+  writeFileSync(
+    join(integratedRoot, "openlife-core/src/tasks.rs"),
+    `${readFileSync(join(integratedRoot, "openlife-core/src/tasks.rs"), "utf8")}\n// selftest receipted W0-S2 change\n`
+  );
+  const integratedTaskHead = commitAll(integratedRoot, "test: receipted W0-S2 task");
+  git(integratedRoot, "checkout", "main");
+  git(
+    integratedRoot,
+    "merge",
+    "--no-ff",
+    "codex/selftest-w0-s2-integration",
+    "-m",
+    "test: clean receipted W0-S2 merge"
+  );
+  git(integratedRoot, "branch", "-D", "codex/selftest-w0-s2-integration");
+  const packetArtifactPath = `plans/openlife_task_packets/${integratedPacket.packet_sha256}.json`;
+  writeJson(integratedRoot, packetArtifactPath, integratedPacket);
+  const attemptArtifact = {
+    attempt_id: "W0-S2-SELFTEST-ATTEMPT",
+    task_id: integratedPacket.task_id,
+    slice_id: integratedPacket.slice_id,
+    root_cause_cluster_id: integratedPacket.root_cause_cluster_id,
+    packet_sha256: integratedPacket.packet_sha256,
+    execution_baseline_sha: activationSha,
+    outcome: "SUCCEEDED",
+    reason: "Synthetic self-test receipt proves clean task merge coverage.",
+    producer_id: integratedPacket.assigned_agent_id,
+    hypothesis: "A narrow receipted task range is sufficient to test per-commit coverage.",
+    change_summary: ["Added one bounded self-test-only source comment in the disposable clone."],
+    evaluated_gate_ids: [...integratedPacket.red_contract, ...integratedPacket.required_guard_ids],
+    failed_gate_ids: [],
+    failure_signature: "NONE",
+    observed_diff_or_log: `range ${activationSha}..${integratedTaskHead}\nopenlife-core/src/tasks.rs\n`,
+    observed_diff_or_log_sha256: null,
+  };
+  attemptArtifact.observed_diff_or_log_sha256 = textDigest(attemptArtifact.observed_diff_or_log);
+  const attemptArtifactText = `${JSON.stringify(attemptArtifact, null, 2)}\n`;
+  const attemptArtifactDigest = textDigest(attemptArtifactText);
+  const attemptArtifactPath = `plans/openlife_attempt_artifacts/${attemptArtifactDigest}.json`;
+  mkdirSync(dirname(join(integratedRoot, attemptArtifactPath)), { recursive: true });
+  writeFileSync(join(integratedRoot, attemptArtifactPath), attemptArtifactText);
+  const artifactCommitSha = commitAll(integratedRoot, "test: archive W0-S2 selftest artifacts");
+  const integratedLedger = readJson(integratedRoot, ledgerPath);
+  integratedLedger.integration_records.push({
+    record_id: "W0-S2-SELFTEST-INTEGRATION",
+    task_id: integratedPacket.task_id,
+    slice_id: integratedPacket.slice_id,
+    integrator_id: integratedPacket.packet_freeze_review.integrator_id,
+    producer_id: integratedPacket.assigned_agent_id,
+    program_approved_draft_sha: relocatedDraftSha,
+    program_activation_sha: activationSha,
+    execution_baseline_sha: activationSha,
+    packet_sha256: integratedPacket.packet_sha256,
+    packet_artifact_path: packetArtifactPath,
+    range_base_sha: activationSha,
+    range_head_sha: integratedTaskHead,
+    changed_paths: ["openlife-core/src/tasks.rs"],
+    allowed_touched_paths: [...integratedPacket.allowed_touched_paths],
+    required_guard_ids: [...integratedPacket.required_guard_ids],
+    completion_outcome: "PASS",
+    task_evidence_records: [
+      {
+        subject_sha: integratedTaskHead,
+        artifact_or_record: "selftest:W0-S2-task-evidence",
+        record_id: "W0-S2-SELFTEST-TASK-EVIDENCE",
+        scope_id: "W0-S2",
+        scope_paths: ["openlife-core/src/tasks.rs"],
+        guard_ids: [...integratedPacket.required_guard_ids],
+        dimensions: [...integratedPacket.required_evidence_dimensions],
+        outcome: "PASS",
+        limitations: [],
+        producer_id: integratedPacket.assigned_agent_id,
+        reviewer_id: "selftest-task-evidence-reviewer",
+        credit_allowed: true,
+        active: true,
+      },
+    ],
+    independent_review: {
+      outcome: "PASS",
+      reviewed_head_sha: integratedTaskHead,
+      reviewer_id: "selftest-integration-reviewer",
+      artifact_or_record: "selftest:W0-S2-independent-review",
+    },
+  });
+  integratedLedger.implementation_attempt_records.push({
+    attempt_id: attemptArtifact.attempt_id,
+    task_id: integratedPacket.task_id,
+    slice_id: integratedPacket.slice_id,
+    root_cause_cluster_id: integratedPacket.root_cause_cluster_id,
+    packet_sha256: integratedPacket.packet_sha256,
+    packet_artifact_path: packetArtifactPath,
+    execution_baseline_sha: activationSha,
+    artifact_commit_sha: artifactCommitSha,
+    attempt_artifact_path: attemptArtifactPath,
+    attempt_artifact_sha256: attemptArtifactDigest,
+    outcome: "SUCCEEDED",
+    reason: attemptArtifact.reason,
+    producer_id: integratedPacket.assigned_agent_id,
+    integrator_id: integratedPacket.packet_freeze_review.integrator_id,
+    record_note: "Synthetic receipt exists only inside the disposable validator fixture.",
+  });
+  integratedLedger.current_inventory.last_reconciled_execution_sha = artifactCommitSha;
+  writeJson(integratedRoot, ledgerPath, integratedLedger);
+  const integratedHead = commitAll(integratedRoot, "test: record W0-S2 selftest receipt");
+  git(integratedRoot, "update-ref", "refs/remotes/origin/main", integratedHead);
+  removeUnexpectedRemoteRefs(integratedRoot);
+  expectValidator({
+    cwd: integratedRoot,
+    args: ["--profile=ongoing"],
+    expectedExit: 0,
+    label: "ONGOING_CLEAN_TASK_MERGE",
+  });
+
+  const unreceiptedRoot = join(tempRoot, "unreceipted-side-commit");
+  execFileSync("git", ["clone", "--local", "--no-hardlinks", integratedRoot, unreceiptedRoot], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  git(unreceiptedRoot, "config", "user.name", "OpenLife Validator Selftest");
+  git(unreceiptedRoot, "config", "user.email", "openlife-validator-selftest@example.invalid");
+  git(unreceiptedRoot, "checkout", "-b", "selftest-unreceipted-side", integratedHead);
+  writeFileSync(
+    join(unreceiptedRoot, "openlife-core/src/tasks.rs"),
+    `${readFileSync(join(unreceiptedRoot, "openlife-core/src/tasks.rs"), "utf8")}\n// selftest unreceipted side\n`
+  );
+  commitAll(unreceiptedRoot, "test: unreceipted side commit");
+  git(unreceiptedRoot, "checkout", "main");
+  git(
+    unreceiptedRoot,
+    "merge",
+    "--no-ff",
+    "selftest-unreceipted-side",
+    "-m",
+    "test: clean unreceipted merge"
+  );
+  git(unreceiptedRoot, "branch", "-D", "selftest-unreceipted-side");
+  const unreceiptedHead = git(unreceiptedRoot, "rev-parse", "HEAD");
+  git(unreceiptedRoot, "update-ref", "refs/remotes/origin/main", unreceiptedHead);
+  removeUnexpectedRemoteRefs(unreceiptedRoot);
+  expectValidator({
+    cwd: unreceiptedRoot,
+    args: ["--profile=ongoing"],
+    expectedExit: 1,
+    diagnostic: /Integrated product commit lacks a verifiable task receipt/,
+    label: "ONGOING_UNRECEIPTED_SIDE_COMMIT_NEGATIVE",
+  });
+
+  const mergeResolutionRoot = join(tempRoot, "merge-resolution");
+  execFileSync("git", ["clone", "--local", "--no-hardlinks", integratedRoot, mergeResolutionRoot], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  git(mergeResolutionRoot, "config", "user.name", "OpenLife Validator Selftest");
+  git(mergeResolutionRoot, "config", "user.email", "openlife-validator-selftest@example.invalid");
+  git(mergeResolutionRoot, "checkout", "-b", "selftest-merge-resolution-side", integratedHead);
+  git(mergeResolutionRoot, "commit", "--allow-empty", "-m", "test: empty merge-resolution side");
+  git(mergeResolutionRoot, "checkout", "main");
+  git(mergeResolutionRoot, "commit", "--allow-empty", "-m", "test: empty merge-resolution main");
+  git(mergeResolutionRoot, "merge", "--no-ff", "--no-commit", "selftest-merge-resolution-side");
+  writeFileSync(
+    join(mergeResolutionRoot, "openlife-core/src/tasks.rs"),
+    `${readFileSync(join(mergeResolutionRoot, "openlife-core/src/tasks.rs"), "utf8")}\n// selftest merge-only resolution\n`
+  );
+  commitAll(mergeResolutionRoot, "test: merge-only resolution");
+  git(mergeResolutionRoot, "branch", "-D", "selftest-merge-resolution-side");
+  const mergeResolutionHead = git(mergeResolutionRoot, "rev-parse", "HEAD");
+  git(mergeResolutionRoot, "update-ref", "refs/remotes/origin/main", mergeResolutionHead);
+  removeUnexpectedRemoteRefs(mergeResolutionRoot);
+  expectValidator({
+    cwd: mergeResolutionRoot,
+    args: ["--profile=ongoing"],
+    expectedExit: 1,
+    diagnostic: /Integrated product commit lacks a verifiable task receipt/,
+    label: "ONGOING_MERGE_RESOLUTION_NEGATIVE",
+  });
+
   const relocatedRoot = join(tempRoot, "relocated-ci");
   execFileSync("git", ["clone", "--local", "--no-hardlinks", fixtureRoot, relocatedRoot], {
     encoding: "utf8",
@@ -396,22 +636,58 @@ try {
     label: "ONGOING_RELOCATED_DETACHED_CI",
   });
 
-  git(fixtureRoot, "checkout", "-b", "codex/selftest-w0-s1", activationSha);
+  git(fixtureRoot, "checkout", "-b", "codex/selftest-w0-s2", activationSha);
   const activeProgram = readJson(fixtureRoot, programPath);
   const blueprint = activeProgram.waves[0].slices[0].task_packet_blueprint;
+  const w0s2 = activeProgram.waves[0].slices.find(slice => slice.id === "W0-S2");
   const makeW0Packet = () => {
     const packet = structuredClone(blueprint);
+    packet.task_id = "W0-S2-SELFTEST";
+    packet.wave_id = "WAVE-0";
+    packet.slice_id = "W0-S2";
+    packet.slice_exit_contract_id = w0s2.exit_contract_id;
+    packet.finding_ids = [...w0s2.finding_ids];
+    packet.required_guard_ids = [...w0s2.required_guard_ids];
+    packet.root_cause_cluster_id = w0s2.root_cause_cluster_id;
+    packet.objective = w0s2.objective;
+    packet.non_goals = [...w0s2.non_goals];
+    packet.invariant =
+      "Owner-lease evidence identifies the exact failure layer and fixed repetition parameters.";
+    packet.canonical_owner = ["openlife-core/src/tasks.rs"];
+    packet.source_map = ["openlife-core/src/tasks.rs", "openlife-core/src/sqlite_migration.rs"];
+    packet.allowed_touched_paths = ["openlife-core/src/tasks.rs"];
+    packet.forbidden_touched_paths = ["src-tauri/**", "frontend/**"];
+    packet.red_contract = [...w0s2.red_contract];
+    packet.minimal_fix_contract =
+      "Expose the failure layer and prove fixed repetitions before any product fix is considered.";
+    packet.old_path_deletion_contract =
+      "No owner-lease path is deleted unless the scoped evidence proves it obsolete.";
+    packet.verification_commands = [
+      "cargo test -p openlife-tauri single_system -- --nocapture",
+      "cargo test -p openlife-core owner_lease -- --nocapture",
+    ];
+    packet.required_evidence_dimensions = [
+      "SOURCE_MAP",
+      "RED",
+      "BEHAVIOR_OR_FAULT",
+      "NON_REGRESSION",
+    ];
+    packet.acceptance_criteria = [
+      w0s2.exit,
+      "Focused owner-lease repetitions have no unexplained variation.",
+      "Serial full-workspace repetitions retain the same failure-layer contract.",
+    ];
     packet.program_activation_sha = activationSha;
     packet.execution_baseline_sha = activationSha;
     packet.expected_parent_main_sha = activationSha;
-    packet.branch = "codex/selftest-w0-s1";
+    packet.branch = "codex/selftest-w0-s2";
     packet.assigned_agent_id = "selftest-implementer";
     return freezePacket(packet);
   };
-  const validPacketPath = writePacket("w0-s1-valid", makeW0Packet());
+  const validPacketPath = writePacket("w0-s2-valid", makeW0Packet());
   const scopedArgs = [
     "--profile=ongoing",
-    "--slice=W0-S1",
+    "--slice=W0-S2",
     `--task-packet=${validPacketPath}`,
     `--execution-baseline=${activationSha}`,
   ];
@@ -424,12 +700,12 @@ try {
 
   const rolePacket = makeW0Packet();
   rolePacket.assigned_agent_id = rolePacket.packet_freeze_review.integrator_id;
-  const rolePacketPath = writePacket("w0-s1-role-negative", freezePacket(rolePacket));
+  const rolePacketPath = writePacket("w0-s2-role-negative", freezePacket(rolePacket));
   expectValidator({
     cwd: fixtureRoot,
     args: [
       "--profile=ongoing",
-      "--slice=W0-S1",
+      "--slice=W0-S2",
       `--task-packet=${rolePacketPath}`,
       `--execution-baseline=${activationSha}`,
     ],
@@ -440,12 +716,12 @@ try {
 
   const unsafePacket = makeW0Packet();
   unsafePacket.verification_commands.push("cargo test | tee /tmp/fake-pass");
-  const unsafePacketPath = writePacket("w0-s1-command-negative", freezePacket(unsafePacket));
+  const unsafePacketPath = writePacket("w0-s2-command-negative", freezePacket(unsafePacket));
   expectValidator({
     cwd: fixtureRoot,
     args: [
       "--profile=ongoing",
-      "--slice=W0-S1",
+      "--slice=W0-S2",
       `--task-packet=${unsafePacketPath}`,
       `--execution-baseline=${activationSha}`,
     ],
@@ -455,39 +731,39 @@ try {
   });
 
   const linePacket = makeW0Packet();
-  linePacket.source_map[0] = ".github/workflows/ci.yml:999999";
-  const linePacketPath = writePacket("w0-s1-line-negative", freezePacket(linePacket));
+  linePacket.source_map[0] = "openlife-core/src/tasks.rs:999999";
+  const linePacketPath = writePacket("w0-s2-line-negative", freezePacket(linePacket));
   expectValidator({
     cwd: fixtureRoot,
     args: [
       "--profile=ongoing",
-      "--slice=W0-S1",
+      "--slice=W0-S2",
       `--task-packet=${linePacketPath}`,
       `--execution-baseline=${activationSha}`,
     ],
     expectedExit: 1,
-    diagnostic: /diverges from the approved slice blueprint/,
-    label: "PACKET_BLUEPRINT_TAMPER_NEGATIVE",
+    diagnostic: /line range is outside/,
+    label: "PACKET_SOURCE_TAMPER_NEGATIVE",
   });
 
   const predecessorPacket = makeW0Packet();
-  predecessorPacket.task_id = "W0-S2-SELFTEST";
-  predecessorPacket.slice_id = "W0-S2";
-  predecessorPacket.slice_exit_contract_id = "W0-S2-LEASE-DETERMINISM";
+  predecessorPacket.task_id = "W0-S3-SELFTEST";
+  predecessorPacket.slice_id = "W0-S3";
+  predecessorPacket.slice_exit_contract_id = "W0-S3-EXTERNAL-STATE-ISOLATION";
   const predecessorPacketPath = writePacket(
-    "w0-s2-predecessor-negative",
+    "w0-s3-predecessor-negative",
     freezePacket(predecessorPacket)
   );
   expectValidator({
     cwd: fixtureRoot,
     args: [
       "--profile=ongoing",
-      "--slice=W0-S2",
+      "--slice=W0-S3",
       `--task-packet=${predecessorPacketPath}`,
       `--execution-baseline=${activationSha}`,
     ],
     expectedExit: 1,
-    diagnostic: /predecessor slice is not integrated: W0-S1/,
+    diagnostic: /predecessor slice is not integrated: W0-S2/,
     label: "PREDECESSOR_NEGATIVE",
   });
 
@@ -527,7 +803,7 @@ try {
       `scenario_labels_sha256=${createHash("sha256")
         .update(`${observedScenarioLabels.join("\n")}\n`, "utf8")
         .digest("hex")}`,
-      "negative=replace-ref,dirty,merge,activation-self-credit,activation-substantive,role,command,blueprint-tamper,predecessor,w5",
+      "negative=replace-ref,dirty,draft-merge,unreceipted-side,merge-resolution,activation-self-credit,activation-substantive,role,command,source-tamper,predecessor,w5",
     ].join("\n") + "\n"
   );
 } finally {
