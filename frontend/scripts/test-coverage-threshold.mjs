@@ -35,8 +35,14 @@ try {
     1
   );
   runCase(
+    "inconsistent",
+    { total: { lines: { total: 100, covered: 0, skipped: 0, pct: 100 } } },
+    "W0-COV-INCONSISTENT",
+    1
+  );
+  runCase(
     "below",
-    { total: { lines: { total: 100, covered: 59, skipped: 0, pct: 59.9 } } },
+    { total: { lines: { total: 1000, covered: 599, skipped: 0, pct: 59.9 } } },
     "W0-COV-BELOW-THRESHOLD",
     1
   );

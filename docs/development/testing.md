@@ -161,9 +161,9 @@ The default test, watch, and coverage runners force the current scope even when
 the caller has a conflicting `OPENLIFE_VITEST_SCOPE` environment value.
 
 Coverage uses Vitest's `json-summary` reporter and one Node checker. Missing,
-malformed, zero-line, and below-60-percent artifacts fail with separate
-machine-readable diagnostics. CI does not parse coverage with shell pipelines
-or `bc`.
+malformed, internally inconsistent, zero-line, and below-60-percent artifacts
+fail with separate machine-readable diagnostics. CI does not parse coverage
+with shell pipelines or `bc`.
 
 Focused Rust:
 

@@ -6,13 +6,36 @@ export const COVERAGE_THRESHOLD = 60;
 export function validateCoverageSummary(summary) {
   const lines = summary?.total?.lines;
   const total = lines?.total;
+  const covered = lines?.covered;
+  const skipped = lines?.skipped;
   const percent = lines?.pct;
 
   if (!Number.isFinite(total) || total <= 0) {
     throw new Error("W0-COV-ZERO-COLLECTION: total.lines.total must be greater than zero");
   }
-  if (!Number.isFinite(percent)) {
-    throw new Error("W0-COV-NONNUMERIC: total.lines.pct must be a finite number");
+  if (
+    !Number.isInteger(total) ||
+    !Number.isInteger(covered) ||
+    !Number.isInteger(skipped) ||
+    !Number.isFinite(percent)
+  ) {
+    throw new Error(
+      "W0-COV-NONNUMERIC: total.lines total, covered, skipped and pct must be numeric"
+    );
+  }
+  const expectedPercent = Math.floor((covered / total) * 10_000) / 100;
+  if (
+    covered < 0 ||
+    covered > total ||
+    skipped < 0 ||
+    skipped > total ||
+    percent < 0 ||
+    percent > 100 ||
+    percent !== expectedPercent
+  ) {
+    throw new Error(
+      `W0-COV-INCONSISTENT: total.lines fields disagree (${covered}/${total}, skipped ${skipped}, pct ${percent})`
+    );
   }
   if (percent < COVERAGE_THRESHOLD) {
     throw new Error(
@@ -20,7 +43,7 @@ export function validateCoverageSummary(summary) {
     );
   }
 
-  return { total, percent, threshold: COVERAGE_THRESHOLD };
+  return { total, covered, skipped, percent, threshold: COVERAGE_THRESHOLD };
 }
 
 export function checkCoverageFile(path) {
