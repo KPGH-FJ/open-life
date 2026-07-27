@@ -10,9 +10,6 @@ export function validateCoverageSummary(summary) {
   const skipped = lines?.skipped;
   const percent = lines?.pct;
 
-  if (!Number.isFinite(total) || total <= 0) {
-    throw new Error("W0-COV-ZERO-COLLECTION: total.lines.total must be greater than zero");
-  }
   if (
     !Number.isInteger(total) ||
     !Number.isInteger(covered) ||
@@ -23,12 +20,15 @@ export function validateCoverageSummary(summary) {
       "W0-COV-NONNUMERIC: total.lines total, covered, skipped and pct must be numeric"
     );
   }
+  if (total <= 0) {
+    throw new Error("W0-COV-ZERO-COLLECTION: total.lines.total must be greater than zero");
+  }
   const expectedPercent = Math.floor((covered / total) * 10_000) / 100;
   if (
     covered < 0 ||
     covered > total ||
     skipped < 0 ||
-    skipped > total ||
+    skipped !== 0 ||
     percent < 0 ||
     percent > 100 ||
     percent !== expectedPercent

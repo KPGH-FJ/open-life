@@ -29,6 +29,12 @@ try {
     1
   );
   runCase(
+    "nonnumeric-total",
+    { total: { lines: { total: "100", covered: 100, skipped: 0, pct: 100 } } },
+    "W0-COV-NONNUMERIC",
+    1
+  );
+  runCase(
     "zero",
     { total: { lines: { total: 0, covered: 0, skipped: 0, pct: 100 } } },
     "W0-COV-ZERO-COLLECTION",
@@ -37,6 +43,12 @@ try {
   runCase(
     "inconsistent",
     { total: { lines: { total: 100, covered: 0, skipped: 0, pct: 100 } } },
+    "W0-COV-INCONSISTENT",
+    1
+  );
+  runCase(
+    "skipped",
+    { total: { lines: { total: 100, covered: 100, skipped: 1, pct: 100 } } },
     "W0-COV-INCONSISTENT",
     1
   );
