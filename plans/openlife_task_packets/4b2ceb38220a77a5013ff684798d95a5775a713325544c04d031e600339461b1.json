@@ -1,0 +1,173 @@
+{
+  "task_id": "W0-S3-IMPL-001",
+  "packet_status": "FROZEN_FOR_DISPATCH",
+  "packet_sha256": "4b2ceb38220a77a5013ff684798d95a5775a713325544c04d031e600339461b1",
+  "packet_payload_sha256": "b214e9ec313bc1ba50f5dc2d5a8c6dd383bf4d74e6e5d6538cba281c86a2a4f6",
+  "packet_freeze_review": {
+    "outcome": "PASS",
+    "reviewed_payload_sha256": "b214e9ec313bc1ba50f5dc2d5a8c6dd383bf4d74e6e5d6538cba281c86a2a4f6",
+    "integrator_id": "/root",
+    "reviewer_id": "/root/w0_s3_source_review",
+    "artifact_or_record": "codex-independent-payload-review:w0-s3:b214e9ec313bc1ba50f5dc2d5a8c6dd383bf4d74e6e5d6538cba281c86a2a4f6:PASS"
+  },
+  "program_schema_version": "1.0.2",
+  "program_activation_sha": "3d17c88b5b81b646cd23c8f2b185eb505ea0dba6",
+  "mode": "VERIFICATION_THEN_CONDITIONAL_IMPLEMENTATION",
+  "wave_id": "WAVE-0",
+  "slice_id": "W0-S3",
+  "slice_exit_contract_id": "W0-S3-EXTERNAL-STATE-ISOLATION",
+  "execution_baseline_sha": "590f7e493af71c5a30255237bf9ace196d95882f",
+  "expected_parent_main_sha": "590f7e493af71c5a30255237bf9ace196d95882f",
+  "checkout": "/Users/tw/Desktop/open-life",
+  "branch": "codex/w0-s3-native-external-state-isolation",
+  "assigned_agent_id": "/root/w0-s3-implementer",
+  "finding_ids": [
+    "BR4-D064"
+  ],
+  "preimplementation_proof_ids": [],
+  "architecture_review_id": null,
+  "architecture_review_constraints": [],
+  "required_guard_ids": [
+    "CQ-G11",
+    "CQ-G13"
+  ],
+  "governance_task": false,
+  "root_cause_cluster_id": "CQ-C08",
+  "objective": "Inventory declared filesystem, Keychain, lock, FD and socket effects and provide an isolated secret-store seam without claiming D064 closure.",
+  "non_goals": [
+    "Do not claim BR4-D064 remediation or closure.",
+    "Do not migrate, rotate or delete the retained Keychain secret.",
+    "Do not expand into provider or product-data trials.",
+    "Do not change product Keychain service/account naming, MCP audit key authority, writer leasing, migration, backout, orphan reconciliation, SQLite schema, Tauri commands, or frontend behavior.",
+    "Do not treat a Rust native harness as Tauri desktop, external-provider, real-Keychain, or full product-trial credit."
+  ],
+  "invariant": "One fresh macOS arm64 native bootstrap evidence process inherits one isolated temporary data directory before process start and uses only an injected in-memory SecretStore. It records endpoint-visible before/during/after filesystem, secret-reference, lock, file-descriptor, and socket effects and fails closed on any observed added effect outside its exact allowlist. It never reads, writes, migrates, rotates, enumerates, or deletes the real OS Keychain or real OpenLife product data; transient, global, unsupported, or unattributable surfaces remain UNKNOWN.",
+  "canonical_owner": [
+    "openlife-core/src/mcp_audit.rs",
+    "src-tauri/src/bootstrap.rs",
+    "src-tauri/src/secret_store.rs"
+  ],
+  "source_map": [
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/storage.rs",
+    "src-tauri/src/bootstrap.rs",
+    "src-tauri/src/secret_store.rs",
+    "openlife-core/src/mcp_audit.rs",
+    "src-tauri/src/backend_remediation_phase0_tests.rs",
+    "src-tauri/Cargo.toml",
+    "Cargo.toml"
+  ],
+  "allowed_touched_paths": [
+    "openlife-core/src/mcp_audit.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/bootstrap.rs",
+    "src-tauri/src/secret_store.rs",
+    "src-tauri/src/native_external_state_evidence.rs",
+    "scripts/run-w0-s3-native-external-state-evidence.mjs"
+  ],
+  "forbidden_touched_paths": [
+    "src-tauri/src/storage.rs",
+    "src-tauri/src/main.rs",
+    "frontend/**",
+    "plans/openlife_single_system_deletion_manifest.md",
+    "plans/openlife_current_development_program.json",
+    "plans/openlife_problem_ledger.json",
+    "Cargo.lock"
+  ],
+  "expected_absent_paths": [
+    "frontend/e2e/smoke.spec.ts",
+    "frontend/e2e/main-chat-stage1-dogfood.spec.ts",
+    "frontend/e2e/main-chat-step6-product-acceptance.spec.ts"
+  ],
+  "risk_class": "HIGH",
+  "external_action_policy": {
+    "external_provider_or_network": false,
+    "real_durable_write": false,
+    "keychain_delete": false,
+    "product_data_delete": false,
+    "new_worktree": false,
+    "sibling_repository": false
+  },
+  "red_contract": [
+    "W0-NATIVE-UNDECLARED-EXTERNAL-STATE",
+    "W0-NATIVE-DATA-DIR-DOES-NOT-ISOLATE-KEYCHAIN"
+  ],
+  "minimal_fix_contract": "Keep release bootstrap and Keychain behavior unchanged. First verify the existing injected bootstrap seam; if the structured evidence owner is absent, add one cfg(test) native external-state module, one cfg(test) module registration in lib.rs, and one repository runner. The runner starts the exact filtered Rust test as a fresh process with OPENLIFE_DATA_DIR set before process start. The module injects an in-memory SecretStore, snapshots the isolated data directory and endpoint-visible native resources before/during/after, emits one structured fail-closed record, and rejects any observed effect outside exact declared filesystem, secret-reference, lock, FD, and socket allowlists. Any need to change release bootstrap, SecretStore, storage, or MCP audit product behavior stops for packet re-freeze.",
+  "old_path_deletion_contract": "Do not recreate retired product routes or add a second product SecretStore authority. If an existing ad hoc native-effect assertion becomes redundant, replace it with the single structured W0-S3 evidence owner in the same slice; otherwise leave historical tests unchanged and outside current W0-S3 credit.",
+  "verification_commands": [
+    "git diff --check",
+    "cargo fmt --check",
+    "cargo clippy -p openlife-tauri --all-targets --features dev-extensions -- -D warnings",
+    "cargo test -p openlife-tauri native_external_state_evidence::tests::w0_s3_native_external_state_isolation -- --exact --nocapture",
+    "node scripts/run-w0-s3-native-external-state-evidence.mjs",
+    "cargo test -p openlife-tauri single_system -- --nocapture"
+  ],
+  "required_evidence_dimensions": [
+    "SOURCE_MAP",
+    "RED",
+    "BEHAVIOR_OR_FAULT",
+    "NATIVE_BOOTSTRAP_AND_EXTERNAL_STATE",
+    "PROCESS_MODEL",
+    "FILESYSTEM",
+    "SECRET_STORE",
+    "LOCK",
+    "FILE_DESCRIPTOR",
+    "SOCKET",
+    "POSITIVE",
+    "COUNTERFACTUAL",
+    "ABSENCE",
+    "NON_REGRESSION",
+    "UNKNOWN_BOUNDARY",
+    "INDEPENDENT_CHALLENGE"
+  ],
+  "acceptance_criteria": [
+    "Source evidence proves that OPENLIFE_DATA_DIR selects filesystem state while the real Tauri entrypoint still selects StartupKeyringSecretStore; filesystem isolation alone therefore does not prove Keychain isolation.",
+    "The native harness reaches the same bootstrap owner through the existing injected SecretStore seam and never calls the product bootstrap wrapper, KeyringSecretStore, or StartupKeyringSecretStore.",
+    "The exact filtered Rust test starts as a fresh process with OPENLIFE_DATA_DIR already equal to the explicit bootstrap temporary root; no environment variable is mutated inside a shared test process.",
+    "Before/during/after evidence records the isolated data-directory tree and every intercepted secret-reference get, set, and delete operation without storing credential values; the positive path has zero delete and validates fixed references plus the MCP epoch-reference pattern.",
+    "On supported macOS arm64 evidence runs, every endpoint-visible newly observed lock, file descriptor, and socket is attributed to the isolated harness and exact allowlist; deliberate undeclared temporary-root file, FD, and loopback-socket fixtures exit nonzero for W0-NATIVE-UNDECLARED-EXTERNAL-STATE.",
+    "The positive run observes no added endpoint-visible non-allowlisted socket, no mutation in explicitly observed roots outside the temporary isolated root, no real product-data path, no real OS Keychain operation, and no secret delete.",
+    "Transient sockets between snapshots, arbitrary filesystem locations outside explicitly observed roots, real Tauri window/setup/reconciliation, Settings/direct Keyring commands, and real OS Keychain contents remain UNKNOWN.",
+    "If native inventory is unsupported, incomplete, or unattributable, that surface is emitted as UNKNOWN and cannot be reported as PASS or silently omitted.",
+    "The retained real Keychain secret is neither read nor deleted; no command enumerates or mutates real Keychain contents, and the ignored real OS Keychain round-trip test is never selected.",
+    "The canonical single-system guard, formatting, strict clippy, and exact native evidence test pass at the exact implementation head.",
+    "Allowlist-external changes fail; inventory-unsupported surfaces remain UNKNOWN; the retained Keychain secret is not deleted."
+  ],
+  "closure_claim_allowed": false,
+  "budget": {
+    "warning_files": 30,
+    "warning_churn_lines": 3000,
+    "hard_stop_files": 80,
+    "hard_stop_churn_lines": 10000
+  },
+  "stop_conditions": [
+    "Frozen source map or canonical owner is false.",
+    "A write is required outside allowed_touched_paths.",
+    "An expected-absent object would be recreated.",
+    "A required RED cannot be made to fail for the stated reason.",
+    "A closure-candidate proof has not failed before conditional implementation.",
+    "The same root cause has failed three implementation attempts.",
+    "The hard-stop size budget is exceeded; split the slice or stop for a successor Program.",
+    "External action or durable write needs authority not present in the packet.",
+    "A real OS Keychain read, write, migration, rotation, enumeration, or delete would be required.",
+    "The test selects the product bootstrap wrapper, KeyringSecretStore, StartupKeyringSecretStore, Settings credential paths, or the ignored real OS Keychain round-trip test.",
+    "OPENLIFE_DATA_DIR would be mutated inside a shared Rust test process rather than inherited by one fresh exact-test process.",
+    "The evidence process cannot distinguish pre-existing process resources from effects opened by the isolated native harness.",
+    "A lock, file descriptor, socket, filesystem path, or secret-reference operation is observed outside the exact allowlist.",
+    "The evidence allowlist is learned from the observed positive run instead of being declared before execution.",
+    "Endpoint snapshots would be used to claim absence of transient sockets or writes outside explicitly observed roots.",
+    "A platform or inspection mechanism is unsupported but the harness would otherwise report PASS instead of UNKNOWN.",
+    "The minimal evidence seam would require a shipped Tauri command, product runtime switch, plaintext credential persistence, or change to release bootstrap behavior."
+  ],
+  "review_contract": {
+    "risk_class": "HIGH",
+    "independent_challenge_required": true,
+    "reviewed_head_sha": null,
+    "review_type": "INDEPENDENT_AGENT_CHALLENGE",
+    "review_artifact": null,
+    "github_formal_review_count": 0,
+    "github_formal_approval_credit": false
+  },
+  "ledger_update_contract": "The Integrator records the exact W0-S3 packet, attempt, implementation range, declared and observed native-effect inventory, residual UNKNOWN, and independently reviewed head. The Implementer does not change BR4-D064 severity, disposition, closure, Wave assignment, or any W0/W1 gate.",
+  "handoff_contract": "Return exact changed paths and head SHA; source-backed RED proving filesystem isolation alone does not isolate Keychain; the undeclared-effect counterexample; structured before/during/after filesystem, secret-reference, lock, FD, and socket inventory; explicit unsupported/UNKNOWN surfaces; single-system non-regression; and independent challenge without D064, Wave, Program, desktop-trial, or Phase7 closure credit."
+}
