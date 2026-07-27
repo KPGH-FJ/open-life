@@ -80,6 +80,9 @@ pub(crate) mod workspace_file_resolver;
 mod main_chat_acceptance_test_support;
 
 #[cfg(test)]
+mod native_external_state_evidence;
+
+#[cfg(test)]
 mod main_chat_live_provider_tests;
 
 #[cfg(test)]
