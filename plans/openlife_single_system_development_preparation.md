@@ -39,21 +39,27 @@ Phase7 contract. Their absence is expected evidence, not a reason to restore
 them. Industry-practice references remain background guidance rather than
 current repository proof.
 
-### Current Restart Baseline
+### Current Post-Review Baseline
 
 - `/Users/tw/Desktop/open-life` is the only writable checkout.
-- `main` is the only long-term branch; the cleanup branch is a short-lived PR
-  branch in that checkout.
-- PR #64 is merged at the baseline recorded in
-  `plans/openlife_restart_baseline_cleanup.json`.
-- That JSON owns current ref facts, the V4 13-commit classification, all 72
-  finding states, retention/deletion boundaries, and exact evidence status.
+- `main` is the only long-term branch; a short-lived `codex/...` task branch may
+  exist only in that checkout.
+- The formal review evidence baseline is
+  `de158ce53018c9c649f7dc0dcb3bdd8271ed4977`. The review changed no product
+  source and closed zero findings.
+- `plans/openlife_restart_baseline_cleanup.json` is the frozen cleanup-time ref,
+  V4 13-commit, historical 72-card, retention, and deletion snapshot.
+- `plans/openlife_problem_ledger.json` owns the current 101-card owner,
+  assigned-Wave, source/evidence, next-proof, and closure state.
+- `plans/openlife_current_development_program.md` owns current remediation order
+  and feature-reopen gates. It does not replace this file's
+  one-authority-per-domain boundaries.
 - `plans/openlife_single_system_deletion_manifest.md` owns current
   expected-absent and product-authority disposition.
 - Phase7 remains `red-until-trial-green`. No historical observation or passing
   test independently closes a finding.
-- The current restart cleanup deliberately does not change Rust, Tauri, React,
-  product DTOs, SQLite schema, or product behavior.
+- The Current Development Program planning slice does not change Rust, Tauri,
+  React, product DTOs, SQLite schema, or product behavior.
 
 Current source-map anchors are:
 
@@ -761,25 +767,32 @@ Review pass 3, risk:
 
 ## 10. Current Development Entry
 
-The current entry is the restart-baseline cleanup, not a return to Phase 1:
+Restart-baseline cleanup and the formal review run/fact-collection pass are
+complete. Its 101-card registry is a governed baseline, not a claim that every
+possible repository defect has been exhaustively discovered. The current entry is the draft
+`plans/openlife_current_development_program.md`, not a return to the historical
+Phase 1 sequence.
 
-1. keep the independently reviewed restart fact manifest authoritative;
-2. create and verify recovery tags before deleting any classified branch ref;
-3. remove V4, roadshow, Stage, and Step6 from active execution authority;
-4. replace retired default E2E/CI entrypoints with honest compile/unit-contract
-   and Workbench browser-shell evidence;
-5. delete only the approved derived artifacts while retaining build caches,
-   credentials, trial evidence, and product data;
-6. run the complete pre-merge gate set, open the cleanup PR, and require the
-   recorded human review before merge;
-7. update `main`, rerun native Tauri `/settings` against that exact merged SHA,
-   remove the cleanup/historical branch refs only after recovery checks, freeze
-   the clean baseline, and stop this cleanup.
+The first planned Wave is:
 
-The following task is a separate formal full-repository review. It consumes the
-72-finding registry and current source evidence before proposing production
-fixes or a new development roadmap. This cleanup must not pre-empt that review
-by refactoring the preserved problem surface.
+1. `W0-S1` - make Frontend Coverage and the default current-product test signal
+   truthful, including four deterministic coverage failure counterexamples,
+   three test-selection counterexamples, and an explicit split of the mixed
+   `frontend/src/tauri.test.ts` current versus `tauriDev`-dependent records;
+2. `W0-S2` - make owner-lease failure layers observable and run the fixed
+   macOS fork-to-exec repetition contract;
+3. `W0-S3` - establish bounded filesystem, Keychain, lock, FD, and socket
+   inventory plus an isolated secret-store evidence seam;
+4. `W0-S4` - reconcile Wave-0 execution-SHA evidence, card outcomes, residual
+   `UNKNOWN`, and W1 entry facts in the already activated Program/ledger.
+
+The Program currently sets `execution_authorized` to `false`. Until the user
+approves the exact Program version, Agents may review or refine it but must not
+implement these slices. Approval, activation, and merge to protected `main`
+occur before W0-S1, not inside W0-S4. The repository validator proves local
+state and packet scope only; GitHub PR/check state, exact-SHA challenge, and
+user approval are separate recorded facts. Normal feature work remains blocked
+until the Program's bounded and normal feature gates pass.
 
 ## 11. Historical Stage4C Repository Missing-Record Closure
 
@@ -787,15 +800,15 @@ Stage4C keeps this preparation document subordinate to the Phase7 deletion
 manifest and closes the repository-link baseline's remaining active missing
 records as expected-absent evidence.
 
-| Category | Records |
-| --- | ---: |
-| `active_doc_missing_records` | 37 |
-| `active_expected_absent_records` | 37 |
-| `stage4c_verified_expected_absent_records` | 37 |
-| `active_actionable_repair_records` | 0 |
-| `active_future_blocked_records` | 0 |
-| `active_adr_blocked_records` | 0 |
-| `active_unresolved_missing_records` | 0 |
+| Category                                   | Records |
+| ------------------------------------------ | ------: |
+| `active_doc_missing_records`               |      37 |
+| `active_expected_absent_records`           |      37 |
+| `stage4c_verified_expected_absent_records` |      37 |
+| `active_actionable_repair_records`         |       0 |
+| `active_future_blocked_records`            |       0 |
+| `active_adr_blocked_records`               |       0 |
+| `active_unresolved_missing_records`        |       0 |
 
 This is not Phase7 completion. The Computer Use trial remains
 `red-until-trial-green`, Main Chat Agent Execution v1 remains incomplete, and
