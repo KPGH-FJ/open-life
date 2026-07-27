@@ -1,0 +1,31 @@
+{
+  "attempt_id": "W0-S3-ATTEMPT-001",
+  "task_id": "W0-S3-IMPL-001",
+  "slice_id": "W0-S3",
+  "root_cause_cluster_id": "CQ-C08",
+  "packet_sha256": "4b2ceb38220a77a5013ff684798d95a5775a713325544c04d031e600339461b1",
+  "execution_baseline_sha": "590f7e493af71c5a30255237bf9ace196d95882f",
+  "outcome": "SUCCEEDED",
+  "reason": "W0-S3 added one test-only native external-state evidence owner, proved undeclared filesystem, file-descriptor, and socket effects fail closed, and preserved the real Keychain, release bootstrap, product data, Tauri commands, and product behavior unchanged.",
+  "producer_id": "/root/w0-s3-implementer",
+  "hypothesis": "The existing injected SecretStore bootstrap seam plus a fresh process inheriting one isolated OPENLIFE_DATA_DIR can inventory a bounded native bootstrap's declared filesystem, secret-reference, lock, file-descriptor, and socket effects without selecting the product Keychain bootstrap or touching real product data.",
+  "change_summary": [
+    "Added one cfg(test) native external-state evidence module and registered it only in the Tauri library test graph.",
+    "Added one repository runner that launches the exact Rust evidence test in fresh processes, validates a strict positive schema, and rejects undeclared file, file-descriptor, and loopback-socket fixtures.",
+    "Kept release bootstrap, StartupKeyringSecretStore, storage, MCP audit product behavior, SQLite schema, Tauri commands, frontend behavior, real Keychain contents, and real product data unchanged.",
+    "Recorded unsupported, transient, global, real-Tauri, real-Keychain, and filesystem-outside-observed-roots surfaces as UNKNOWN rather than PASS."
+  ],
+  "evaluated_gate_ids": [
+    "W0-NATIVE-UNDECLARED-EXTERNAL-STATE",
+    "W0-NATIVE-DATA-DIR-DOES-NOT-ISOLATE-KEYCHAIN",
+    "CQ-G11",
+    "CQ-G13",
+    "W0-S3-LOCAL-GATES",
+    "W0-S3-INDEPENDENT-CHALLENGE",
+    "W0-S3-PR-CHECKS"
+  ],
+  "failed_gate_ids": [],
+  "failure_signature": "NONE",
+  "observed_diff_or_log": "range 590f7e493af71c5a30255237bf9ace196d95882f..3dfcacf61abdc56bc271f69da147b5dcb41b3fff\n3 changed paths; 1048 insertions; 0 deletions\nRED: the exact filtered test initially collected zero tests; source evidence proved OPENLIFE_DATA_DIR selects filesystem state while the product bootstrap selects StartupKeyringSecretStore, so filesystem isolation alone cannot prove Keychain isolation\npositive native evidence: filesystem before/during/after=2/55/33; endpoint before/during/after=5/53/5; declared added endpoints=50; owner locks held=3; added sockets=0; secret-reference operations=10; secret delete operations=0; violations=[]\nnegative file: exact violation filesystem:file:undeclared-file.txt; exit 101\nnegative FD: exact undeclared regular-file endpoint under the isolated sandbox; exit 101\nnegative socket: exact undeclared IPv4 loopback endpoint; exit 101\nsource hashes: storage.rs=96601ac; bootstrap.rs=91e61d; lib.rs=0f97799\nsingle_system: 44/44 PASS\nindependent exact-head challenge: PASS_NO_FINDINGS; codex-independent-challenge:w0-s3:3dfcacf61abdc56bc271f69da147b5dcb41b3fff:PASS_NO_FINDINGS\nPR: https://github.com/KPGH-FJ/open-life/pull/73\nCI run 30300056388 attempt 1: eight checks PASS; macOS failed in pre-existing R4-FLAKY-001 owner-envelope test with os_owner_lock_would_block; W0-S3 did not touch openlife-core/src/tasks.rs and the failure is not claimed fixed\nlocal macOS follow-up: exact owner-envelope test 10/10 PASS; default-concurrency openlife-core suite 1/1 PASS\nCI run 30300056388 attempt 2: all nine checks PASS after one failed-job rerun\nresidual UNKNOWN: transient sockets between snapshots, arbitrary filesystem locations outside observed roots, real Tauri window/setup/reconciliation, Settings/direct Keyring commands, real OS Keychain contents, external providers, and native runtime behavior on unsupported platforms\nBR4-D064 remains P0 OPEN with closure_credit=false; R4-FLAKY-001 remains P1 OPEN with closure_credit=false",
+  "observed_diff_or_log_sha256": "448eed7cc64907863382a4e5bcf1258cb6a5f5052577926f6354e4d00107e4ac"
+}
