@@ -80,7 +80,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Enable corepack
         run: corepack enable
@@ -103,7 +103,7 @@ jobs:
 
       - name: Run tests
         working-directory: frontend
-        run: corepack pnpm vitest run
+        run: corepack pnpm test
 
   workbench-browser-shell:
     name: Workbench Browser Shell Smoke
@@ -115,7 +115,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Enable corepack
         run: corepack enable
@@ -141,7 +141,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Enable corepack
         run: corepack enable
@@ -150,23 +150,9 @@ jobs:
         working-directory: frontend
         run: corepack pnpm install --frozen-lockfile
 
-      - name: Install coverage tooling
-        run: sudo apt-get update && sudo apt-get install -y bc
-
       - name: Run tests with coverage
         working-directory: frontend
-        run: corepack pnpm vitest run --coverage
-
-      - name: Check coverage threshold
-        working-directory: frontend
-        run: |
-          COVERAGE=$(cat coverage/coverage-summary.json | grep -o '"lines":{"total":[0-9]*,"covered":[0-9]*,"skipped":[0-9]*,"pct":[0-9.]*' | grep -o '"pct":[0-9.]*' | cut -d':' -f2)
-          echo "Coverage: ${COVERAGE}%"
-          if (( $(echo "$COVERAGE < 60" | bc -l) )); then
-            echo "❌ Coverage ${COVERAGE}% is below 60% threshold"
-            exit 1
-          fi
-          echo "✅ Coverage ${COVERAGE}% meets 60% threshold"
+        run: corepack pnpm test:coverage
 
   # ============================================
   # 全平台检查（严格模式）
@@ -288,7 +274,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install Linux system dependencies
         run: |

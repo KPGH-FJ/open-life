@@ -84,6 +84,11 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+const historicalTestScope = process.env.OPENLIFE_VITEST_SCOPE === "historical";
+const disabledIt = (() => undefined) as unknown as typeof it;
+const ct = historicalTestScope ? disabledIt : it;
+const ht = historicalTestScope ? it : disabledIt;
+
 describe("tauri command argument aliases", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockResolvedValue(undefined);
@@ -97,7 +102,7 @@ describe("tauri command argument aliases", () => {
     return JSON.stringify(redactInvokeArgs(cmd, args));
   }
 
-  it("runtime-validates v1 and v2 backup owner contracts", () => {
+  ct("runtime-validates v1 and v2 backup owner contracts", () => {
     const common = {
       exported_at: "2026-06-03T00:00:00Z",
       life_model: {},
@@ -131,7 +136,7 @@ describe("tauri command argument aliases", () => {
     ).toThrow(/v1/);
   });
 
-  it("rejects oversized import collections before invoking the backend", () => {
+  ct("rejects oversized import collections before invoking the backend", () => {
     expect(() =>
       parseOpenLifeExportPayload(
         JSON.stringify({
@@ -145,7 +150,7 @@ describe("tauri command argument aliases", () => {
     ).toThrow(/消息条目导入上限/);
   });
 
-  it("keeps recovery and degraded import outcomes truthful", () => {
+  ct("keeps recovery and degraded import outcomes truthful", () => {
     expect(
       describeDataImportResult({
         success: true,
@@ -187,7 +192,7 @@ describe("tauri command argument aliases", () => {
     ).toMatch(/^导入未完成/);
   });
 
-  it("redacts send_message content from dev invoke logs", async () => {
+  ct("redacts send_message content from dev invoke logs", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
       reasoning_trace: {},
@@ -208,7 +213,7 @@ describe("tauri command argument aliases", () => {
     expect(redacted).toContain('"redacted":true');
   });
 
-  it("redacts save_config secrets from dev invoke logs", async () => {
+  ct("redacts save_config secrets from dev invoke logs", async () => {
     await saveConfig({
       llm: {
         provider: "openai",
@@ -227,7 +232,7 @@ describe("tauri command argument aliases", () => {
     expect(redacted).toContain('"redacted":true');
   });
 
-  it("redacts import_all_data payloads from dev invoke logs", async () => {
+  ct("redacts import_all_data payloads from dev invoke logs", async () => {
     vi.mocked(invoke).mockResolvedValue({
       success: true,
       legacy: false,
@@ -272,7 +277,7 @@ describe("tauri command argument aliases", () => {
     expect(redacted).toContain('"redacted":true');
   });
 
-  it("binds governed import abandonment to the exact operation and native evidence", async () => {
+  ct("binds governed import abandonment to the exact operation and native evidence", async () => {
     const operationId = "11111111-1111-4111-8111-222222222222";
     const evidence = {
       actionType: "data_import_abandon_recovery" as const,
@@ -308,7 +313,7 @@ describe("tauri command argument aliases", () => {
     });
   });
 
-  it("reads bounded governed import status without sending payload or operation data", async () => {
+  ct("reads bounded governed import status without sending payload or operation data", async () => {
     vi.mocked(invoke).mockResolvedValue({
       status: "abandoned_preserving_current",
       operationId: "11111111-1111-4111-8111-444444444444",
@@ -334,7 +339,7 @@ describe("tauri command argument aliases", () => {
     expect(invoke).toHaveBeenCalledWith("get_governed_data_import_status", undefined);
   });
 
-  it("redacts tool arguments and file or email content from dev invoke logs", async () => {
+  ct("redacts tool arguments and file or email content from dev invoke logs", async () => {
     vi.mocked(invoke).mockResolvedValue({
       name: "email.propose_draft",
       arguments: {},
@@ -357,7 +362,7 @@ describe("tauri command argument aliases", () => {
     expect(redacted).toContain('"redacted":true');
   });
 
-  it("adds camelCase aliases for snake_case command arguments", async () => {
+  ct("adds camelCase aliases for snake_case command arguments", async () => {
     await getStateHistory("专注度", 7);
     await restoreArchivedMemory({ ownerKind: "knowledge_note", ownerId: "note-1" });
 
@@ -377,7 +382,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("keeps existing explicit aliases for high-traffic chat and builder commands", async () => {
+  ct("keeps existing explicit aliases for high-traffic chat and builder commands", async () => {
     await startStreamMessage("session-1", [{ role: "user", content: "你好" }], {
       operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
     });
@@ -424,7 +429,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("passes exact durable identities to the governed resource commands", async () => {
+  ct("passes exact durable identities to the governed resource commands", async () => {
     const importOperationId = "c7414f1e-35dc-4aec-b2f0-f704313003b1";
     const turnOperationId = "c7414f1e-35dc-4aec-b2f0-f704313003b2";
     const detachOperationId = "c7414f1e-35dc-4aec-b2f0-f704313003b3";
@@ -459,7 +464,7 @@ describe("tauri command argument aliases", () => {
     });
   });
 
-  it("passes selected skill id aliases through chat command wrappers", async () => {
+  ct("passes selected skill id aliases through chat command wrappers", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
       reasoning_trace: {},
@@ -501,7 +506,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("adds aliases for durable Main Chat event replay commands", async () => {
+  ct("adds aliases for durable Main Chat event replay commands", async () => {
     vi.mocked(invoke)
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce({ task: { taskId: "mainchat-task-1" } });
@@ -528,7 +533,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("sends governed restore and import request envelopes", async () => {
+  ct("sends governed restore and import request envelopes", async () => {
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke).mockResolvedValue({
       success: true,
@@ -610,7 +615,7 @@ describe("tauri command argument aliases", () => {
     });
   });
 
-  it("normalizes proposal command arguments", async () => {
+  ct("normalizes proposal command arguments", async () => {
     await acceptProposal("proposal-1");
     await editProposal("proposal-1", { name: "新值" });
     await draftEditMemoryProposal("proposal-memory-1", { content: "draft" });
@@ -642,7 +647,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("normalizes Stage 4 managed knowledge command arguments", async () => {
+  ht("normalizes Stage 4 managed knowledge command arguments", async () => {
     await listStage4KnowledgeAssetInventory("review");
     await createManagedKnowledgeWriteDraft("USER.md", "profile", "proposal-1", ["memory:1"]);
     await confirmManagedKnowledgeWrite("proposal-managed-1");
@@ -684,7 +689,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("defaults calibration apply calls to proposal mode", async () => {
+  ct("defaults calibration apply calls to proposal mode", async () => {
     await applyCalibration([]);
 
     expect(invoke).toHaveBeenCalledWith(
@@ -696,7 +701,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("invokes multi-strategy preview command behind explicit wrapper", async () => {
+  ht("invokes multi-strategy preview command behind explicit wrapper", async () => {
     vi.mocked(invoke).mockResolvedValue({
       runId: "run-preview-1",
       strategyKind: "react",
@@ -726,7 +731,7 @@ describe("tauri command argument aliases", () => {
     expect(result.runId).toBe("run-preview-1");
   });
 
-  it("invokes Main Chat execution v1 eval gate as explicit non-default diagnostic", async () => {
+  ht("invokes Main Chat execution v1 eval gate as explicit non-default diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_agent_execution_v1_eval_gate",
       runtimeEval: {
@@ -794,70 +799,73 @@ describe("tauri command argument aliases", () => {
     expect(result.metadataSafeSummary.liveProviderPreflightModelInvoked).toBe(false);
   });
 
-  it("invokes Main Chat agent productization v1 gate as full deterministic runtime diagnostic", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      totalScenarioCount: 93,
-      defaultDeterministicScenarioCount: 92,
-      readinessSemantics: "full_deterministic_productization_v1_runtime_ready",
-      runtimeExecutionScope:
-        "default_deterministic_scenarios_runtime_backed_external_live_excluded",
-      executedScenarioCount: 92,
-      passedScenarioCount: 81,
-      expectedBlockerScenarioCount: 11,
-      failedScenarioCount: 0,
-      externalLiveExcludedCount: 1,
-      runtimePayloadSnapshotEventGatePassed: true,
-      runtimeRequiredGroupCount: 92,
-      runtimeRequiredGroupPassedCount: 92,
-      representativeRuntimeGroupCount: 0,
-      representativeRuntimeGroupPassedCount: 0,
-      fullDeterministicRuntimeScenarioCount: 92,
-      fullDeterministicRuntimeScenarioExecutedCount: 92,
-      runtimeRequiredGroupEvidence: [
-        {
-          scenarioId: "OA-02",
-          group: "direct_answer:OA-02",
-          passed: true,
-          runtimeObjectCount: 2,
-          observationCount: 0,
-          createdActionIds: [],
-          createdObservationIds: [],
-          createdProposalIds: [],
-          createdMemoryIds: [],
-          rollbackEventIds: [],
-          materializedViewVersions: [],
-          inactiveMemoryIds: [],
-          finalDeliveryId: "delivery-direct",
-          diagnostics: [],
+  ht(
+    "invokes Main Chat agent productization v1 gate as full deterministic runtime diagnostic",
+    async () => {
+      vi.mocked(invoke).mockResolvedValue({
+        totalScenarioCount: 93,
+        defaultDeterministicScenarioCount: 92,
+        readinessSemantics: "full_deterministic_productization_v1_runtime_ready",
+        runtimeExecutionScope:
+          "default_deterministic_scenarios_runtime_backed_external_live_excluded",
+        executedScenarioCount: 92,
+        passedScenarioCount: 81,
+        expectedBlockerScenarioCount: 11,
+        failedScenarioCount: 0,
+        externalLiveExcludedCount: 1,
+        runtimePayloadSnapshotEventGatePassed: true,
+        runtimeRequiredGroupCount: 92,
+        runtimeRequiredGroupPassedCount: 92,
+        representativeRuntimeGroupCount: 0,
+        representativeRuntimeGroupPassedCount: 0,
+        fullDeterministicRuntimeScenarioCount: 92,
+        fullDeterministicRuntimeScenarioExecutedCount: 92,
+        runtimeRequiredGroupEvidence: [
+          {
+            scenarioId: "OA-02",
+            group: "direct_answer:OA-02",
+            passed: true,
+            runtimeObjectCount: 2,
+            observationCount: 0,
+            createdActionIds: [],
+            createdObservationIds: [],
+            createdProposalIds: [],
+            createdMemoryIds: [],
+            rollbackEventIds: [],
+            materializedViewVersions: [],
+            inactiveMemoryIds: [],
+            finalDeliveryId: "delivery-direct",
+            diagnostics: [],
+          },
+        ],
+        eventSemantics:
+          "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit",
+        finalReadinessReady: true,
+        fullProductizationV1Complete: true,
+        futureWork: [],
+        routeCounts: {
+          direct_answer: { passed: 10, failed: 0, expectedBlocker: 0, unsupported: 0 },
         },
-      ],
-      eventSemantics:
-        "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit",
-      finalReadinessReady: true,
-      fullProductizationV1Complete: true,
-      futureWork: [],
-      routeCounts: {
-        direct_answer: { passed: 10, failed: 0, expectedBlocker: 0, unsupported: 0 },
-      },
-      unsupportedScenarios: [],
-      failedScenarios: [],
-      blockers: [],
-    });
+        unsupportedScenarios: [],
+        failedScenarios: [],
+        blockers: [],
+      });
 
-    const result = await runMainChatAgentProductizationV1Gate();
+      const result = await runMainChatAgentProductizationV1Gate();
 
-    expect(invoke).toHaveBeenCalledWith("run_main_chat_runtime_contract_gate", undefined);
-    expect(result.finalReadinessReady).toBe(true);
-    expect(result.fullProductizationV1Complete).toBe(true);
-    expect(result.futureWork).toEqual([]);
-    expect(result.runtimeRequiredGroupCount).toBe(92);
-    expect(result.runtimeRequiredGroupPassedCount).toBe(92);
-    expect(result.runtimeExecutionScope).toBe(
-      "default_deterministic_scenarios_runtime_backed_external_live_excluded"
-    );
-  });
+      expect(invoke).toHaveBeenCalledWith("run_main_chat_runtime_contract_gate", undefined);
+      expect(result.finalReadinessReady).toBe(true);
+      expect(result.fullProductizationV1Complete).toBe(true);
+      expect(result.futureWork).toEqual([]);
+      expect(result.runtimeRequiredGroupCount).toBe(92);
+      expect(result.runtimeRequiredGroupPassedCount).toBe(92);
+      expect(result.runtimeExecutionScope).toBe(
+        "default_deterministic_scenarios_runtime_backed_external_live_excluded"
+      );
+    }
+  );
 
-  it("invokes Main Chat Stage 3 execution UX report without readiness semantics", async () => {
+  ht("invokes Main Chat Stage 3 execution UX report without readiness semantics", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_stage3_execution_ux",
       schemaVersion: "stage3-execution-ux-v1",
@@ -911,7 +919,7 @@ describe("tauri command argument aliases", () => {
     expect(result.nonGoals).toContain("manual_dogfood_rows_not_run_or_fabricated");
   });
 
-  it("invokes Main Chat Stage 4 memory knowledge report without readiness claim", async () => {
+  ht("invokes Main Chat Stage 4 memory knowledge report without readiness claim", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_stage4_memory_knowledge",
       schemaVersion: "stage4.v1",
@@ -946,165 +954,168 @@ describe("tauri command argument aliases", () => {
     expect(result.stage2ReadinessPreserved).toBe(true);
   });
 
-  it("invokes Main Chat Stage 5 release/debug operations with metadata-safe arguments", async () => {
-    vi.mocked(invoke)
-      .mockResolvedValueOnce({
-        reportKind: "main_chat_stage5_release_debug_preflight",
-        schemaVersion: "stage5-preflight-v1",
-        failure: { class: "environment_preflight_failure" },
-        provider: { keyPresent: false },
-        externalProviderInvokedByDefault: false,
-        modelInvoked: false,
-        directWritesExecuted: false,
-        metadataSafe: true,
-      })
-      .mockResolvedValueOnce({
-        bundleId: "stage5-bundle-test",
-        schemaVersion: "stage5-debug-bundle-v1",
-        task: { taskSessionId: "task-stage5", runId: "run-stage5" },
-        failure: { class: "tool_selection_failure" },
-        artifact: {
-          artifactId: "stage5-bundle-test",
-          storageAlias: "stage5/debug_bundles/stage5-bundle-test.json",
-          byteSize: 2048,
-        },
-      })
-      .mockResolvedValueOnce({
-        reportId: "stage5-issue-test",
-        schemaVersion: "stage5-issue-report-v1",
-        notesPreview: null,
-        artifact: { artifactId: "stage5-issue-test", byteSize: 512 },
-      })
-      .mockResolvedValueOnce([{ artifactId: "stage5-bundle-test" }])
-      .mockResolvedValueOnce({ bundleId: "stage5-bundle-test" })
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce([{ artifactId: "stage5-issue-test" }])
-      .mockResolvedValueOnce({ reportId: "stage5-issue-test" })
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce({
-        reportKind: "main_chat_stage5_release_debug",
-        schemaVersion: "stage5-release-debug-v1",
-        scenarioCount: 24,
-        passedScenarioCount: 12,
-        blockedScenarioCount: 12,
-        notAReadinessGate: true,
-        readinessClaim: false,
-        managedKnowledgeEval: {
-          isolatedEvalAppState: true,
-          tempWorkspace: true,
-          realWorkspaceWriteExecuted: false,
-          userWriteCompleted: true,
-          memoryRollbackCompleted: true,
-          managedKnowledgeWriteVersionIds: ["knowledge_version:test"],
-          managedKnowledgeAuditIds: ["knowledge_audit:test"],
-          rollbackSnapshotIds: ["snapshot:test"],
-          evidenceIds: ["stage5_isolated_managed_knowledge_eval"],
-          blockers: [],
-        },
-        stage2ReadinessPreserved: true,
-      });
+  ht(
+    "invokes Main Chat Stage 5 release/debug operations with metadata-safe arguments",
+    async () => {
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          reportKind: "main_chat_stage5_release_debug_preflight",
+          schemaVersion: "stage5-preflight-v1",
+          failure: { class: "environment_preflight_failure" },
+          provider: { keyPresent: false },
+          externalProviderInvokedByDefault: false,
+          modelInvoked: false,
+          directWritesExecuted: false,
+          metadataSafe: true,
+        })
+        .mockResolvedValueOnce({
+          bundleId: "stage5-bundle-test",
+          schemaVersion: "stage5-debug-bundle-v1",
+          task: { taskSessionId: "task-stage5", runId: "run-stage5" },
+          failure: { class: "tool_selection_failure" },
+          artifact: {
+            artifactId: "stage5-bundle-test",
+            storageAlias: "stage5/debug_bundles/stage5-bundle-test.json",
+            byteSize: 2048,
+          },
+        })
+        .mockResolvedValueOnce({
+          reportId: "stage5-issue-test",
+          schemaVersion: "stage5-issue-report-v1",
+          notesPreview: null,
+          artifact: { artifactId: "stage5-issue-test", byteSize: 512 },
+        })
+        .mockResolvedValueOnce([{ artifactId: "stage5-bundle-test" }])
+        .mockResolvedValueOnce({ bundleId: "stage5-bundle-test" })
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce([{ artifactId: "stage5-issue-test" }])
+        .mockResolvedValueOnce({ reportId: "stage5-issue-test" })
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce({
+          reportKind: "main_chat_stage5_release_debug",
+          schemaVersion: "stage5-release-debug-v1",
+          scenarioCount: 24,
+          passedScenarioCount: 12,
+          blockedScenarioCount: 12,
+          notAReadinessGate: true,
+          readinessClaim: false,
+          managedKnowledgeEval: {
+            isolatedEvalAppState: true,
+            tempWorkspace: true,
+            realWorkspaceWriteExecuted: false,
+            userWriteCompleted: true,
+            memoryRollbackCompleted: true,
+            managedKnowledgeWriteVersionIds: ["knowledge_version:test"],
+            managedKnowledgeAuditIds: ["knowledge_audit:test"],
+            rollbackSnapshotIds: ["snapshot:test"],
+            evidenceIds: ["stage5_isolated_managed_knowledge_eval"],
+            blockers: [],
+          },
+          stage2ReadinessPreserved: true,
+        });
 
-    const callStart = vi.mocked(invoke).mock.calls.length;
-    const preflight = await evaluateMainChatStage5ReleaseDebugPreflight();
-    const bundle = await exportMainChatAgentDebugBundle("task-stage5", {
-      scenarioId: "DBG5-04",
-      reviewerId: "tester-alpha",
-      uiEvidence: {
-        frontendRoute: "/companion",
-        surface: "AgentControlPlane",
-        visibleControlLabels: ["Export debug bundle"],
-        taskSessionId: "task-stage5",
-        timestamp: "2026-06-20T00:00:00Z",
-      },
-    });
-    const issue = await createMainChatInternalIssueReport({
-      scenarioId: "DBG5-19",
-      reviewerId: "tester-alpha",
-      status: "fail",
-      taskSessionId: "task-stage5",
-      runId: "run-stage5",
-      bundleId: "stage5-bundle-test",
-      failureClass: "tool_selection_failure",
-      notes: "Authorization: Bearer sk-stage5-secret",
-    });
-    const bundles = await listMainChatDebugBundles();
-    await getMainChatDebugBundle("stage5-bundle-test");
-    await deleteMainChatDebugBundle("stage5-bundle-test");
-    const issues = await listMainChatInternalIssueReports();
-    await getMainChatInternalIssueReport("stage5-issue-test");
-    await deleteMainChatInternalIssueReport("stage5-issue-test");
-    const report = await runMainChatStage5ReleaseDebugReport();
-    const calls = vi.mocked(invoke).mock.calls.slice(callStart);
-
-    expect(calls[0]).toEqual(["evaluate_main_chat_stage5_release_debug_preflight", undefined]);
-    expect(calls[1]).toEqual([
-      "export_main_chat_agent_debug_bundle",
-      expect.objectContaining({
-        taskSessionId: "task-stage5",
-        task_session_id: "task-stage5",
+      const callStart = vi.mocked(invoke).mock.calls.length;
+      const preflight = await evaluateMainChatStage5ReleaseDebugPreflight();
+      const bundle = await exportMainChatAgentDebugBundle("task-stage5", {
         scenarioId: "DBG5-04",
-        scenario_id: "DBG5-04",
-      }),
-    ]);
-    expect(calls[2]).toEqual([
-      "create_main_chat_internal_issue_report",
-      expect.objectContaining({
-        input: expect.objectContaining({
-          notes: "Authorization: Bearer sk-stage5-secret",
-        }),
-      }),
-    ]);
-    expect(calls[3]).toEqual(["list_main_chat_debug_bundles", undefined]);
-    expect(calls[4]).toEqual([
-      "get_main_chat_debug_bundle",
-      expect.objectContaining({
+        reviewerId: "tester-alpha",
+        uiEvidence: {
+          frontendRoute: "/companion",
+          surface: "AgentControlPlane",
+          visibleControlLabels: ["Export debug bundle"],
+          taskSessionId: "task-stage5",
+          timestamp: "2026-06-20T00:00:00Z",
+        },
+      });
+      const issue = await createMainChatInternalIssueReport({
+        scenarioId: "DBG5-19",
+        reviewerId: "tester-alpha",
+        status: "fail",
+        taskSessionId: "task-stage5",
+        runId: "run-stage5",
         bundleId: "stage5-bundle-test",
-        bundle_id: "stage5-bundle-test",
-      }),
-    ]);
-    expect(calls[5]).toEqual([
-      "delete_main_chat_debug_bundle",
-      expect.objectContaining({
-        bundleId: "stage5-bundle-test",
-        bundle_id: "stage5-bundle-test",
-      }),
-    ]);
-    expect(calls[6]).toEqual(["list_main_chat_internal_issue_reports", undefined]);
-    expect(calls[7]).toEqual([
-      "get_main_chat_internal_issue_report",
-      expect.objectContaining({
-        reportId: "stage5-issue-test",
-        report_id: "stage5-issue-test",
-      }),
-    ]);
-    expect(calls[8]).toEqual([
-      "delete_main_chat_internal_issue_report",
-      expect.objectContaining({
-        reportId: "stage5-issue-test",
-        report_id: "stage5-issue-test",
-      }),
-    ]);
-    expect(calls[9]).toEqual(["run_main_chat_stage5_release_debug_report", undefined]);
-    expect(preflight.externalProviderInvokedByDefault).toBe(false);
-    expect(bundle.artifact.storageAlias).toMatch(/^stage5\/debug_bundles\//);
-    expect(issue.notesPreview).toBeNull();
-    expect(bundles).toHaveLength(1);
-    expect(issues).toHaveLength(1);
-    expect(report.notAReadinessGate).toBe(true);
-    expect(report.readinessClaim).toBe(false);
-    expect(report.managedKnowledgeEval.isolatedEvalAppState).toBe(true);
-    expect(report.managedKnowledgeEval.realWorkspaceWriteExecuted).toBe(false);
-
-    const redacted = redactInvokeArgs("create_main_chat_internal_issue_report", {
-      input: {
+        failureClass: "tool_selection_failure",
         notes: "Authorization: Bearer sk-stage5-secret",
-      },
-    });
-    expect(JSON.stringify(redacted)).not.toContain("sk-stage5-secret");
-    expect(JSON.stringify(redacted)).not.toContain("Authorization");
-  });
+      });
+      const bundles = await listMainChatDebugBundles();
+      await getMainChatDebugBundle("stage5-bundle-test");
+      await deleteMainChatDebugBundle("stage5-bundle-test");
+      const issues = await listMainChatInternalIssueReports();
+      await getMainChatInternalIssueReport("stage5-issue-test");
+      await deleteMainChatInternalIssueReport("stage5-issue-test");
+      const report = await runMainChatStage5ReleaseDebugReport();
+      const calls = vi.mocked(invoke).mock.calls.slice(callStart);
 
-  it("invokes external live productization gate as opt-in non-default evidence", async () => {
+      expect(calls[0]).toEqual(["evaluate_main_chat_stage5_release_debug_preflight", undefined]);
+      expect(calls[1]).toEqual([
+        "export_main_chat_agent_debug_bundle",
+        expect.objectContaining({
+          taskSessionId: "task-stage5",
+          task_session_id: "task-stage5",
+          scenarioId: "DBG5-04",
+          scenario_id: "DBG5-04",
+        }),
+      ]);
+      expect(calls[2]).toEqual([
+        "create_main_chat_internal_issue_report",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            notes: "Authorization: Bearer sk-stage5-secret",
+          }),
+        }),
+      ]);
+      expect(calls[3]).toEqual(["list_main_chat_debug_bundles", undefined]);
+      expect(calls[4]).toEqual([
+        "get_main_chat_debug_bundle",
+        expect.objectContaining({
+          bundleId: "stage5-bundle-test",
+          bundle_id: "stage5-bundle-test",
+        }),
+      ]);
+      expect(calls[5]).toEqual([
+        "delete_main_chat_debug_bundle",
+        expect.objectContaining({
+          bundleId: "stage5-bundle-test",
+          bundle_id: "stage5-bundle-test",
+        }),
+      ]);
+      expect(calls[6]).toEqual(["list_main_chat_internal_issue_reports", undefined]);
+      expect(calls[7]).toEqual([
+        "get_main_chat_internal_issue_report",
+        expect.objectContaining({
+          reportId: "stage5-issue-test",
+          report_id: "stage5-issue-test",
+        }),
+      ]);
+      expect(calls[8]).toEqual([
+        "delete_main_chat_internal_issue_report",
+        expect.objectContaining({
+          reportId: "stage5-issue-test",
+          report_id: "stage5-issue-test",
+        }),
+      ]);
+      expect(calls[9]).toEqual(["run_main_chat_stage5_release_debug_report", undefined]);
+      expect(preflight.externalProviderInvokedByDefault).toBe(false);
+      expect(bundle.artifact.storageAlias).toMatch(/^stage5\/debug_bundles\//);
+      expect(issue.notesPreview).toBeNull();
+      expect(bundles).toHaveLength(1);
+      expect(issues).toHaveLength(1);
+      expect(report.notAReadinessGate).toBe(true);
+      expect(report.readinessClaim).toBe(false);
+      expect(report.managedKnowledgeEval.isolatedEvalAppState).toBe(true);
+      expect(report.managedKnowledgeEval.realWorkspaceWriteExecuted).toBe(false);
+
+      const redacted = redactInvokeArgs("create_main_chat_internal_issue_report", {
+        input: {
+          notes: "Authorization: Bearer sk-stage5-secret",
+        },
+      });
+      expect(JSON.stringify(redacted)).not.toContain("sk-stage5-secret");
+      expect(JSON.stringify(redacted)).not.toContain("Authorization");
+    }
+  );
+
+  ht("invokes external live productization gate as opt-in non-default evidence", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_external_live_productization_gate",
       scenarioCount: 6,
@@ -1161,7 +1172,7 @@ describe("tauri command argument aliases", () => {
     expect(result.blockers).toContain("explicit_live_eval_required");
   });
 
-  it("invokes Product Maturity v2 event gate as an explicit read-only diagnostic", async () => {
+  ht("invokes Product Maturity v2 event gate as an explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       scenarioCount: 8,
       defaultGateScenarioCount: 8,
@@ -1196,7 +1207,7 @@ describe("tauri command argument aliases", () => {
     expect(result.proofs[0]?.emittedEventIds).toEqual(result.proofs[0]?.replayedEventIds);
   });
 
-  it("invokes Product Maturity v2 plan gate as an explicit read-only diagnostic", async () => {
+  ht("invokes Product Maturity v2 plan gate as an explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       scenarioCount: 10,
       defaultGateScenarioCount: 10,
@@ -1250,7 +1261,7 @@ describe("tauri command argument aliases", () => {
     expect(result.proofs[0]?.eventTypes).toContain("plan.created");
   });
 
-  it("invokes Product Maturity v2 skills/tools gate and command-backed selectors", async () => {
+  ht("invokes Product Maturity v2 skills/tools gate and command-backed selectors", async () => {
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke)
       .mockResolvedValueOnce({
@@ -1429,114 +1440,117 @@ describe("tauri command argument aliases", () => {
     expect(tools.blockedTools[0]?.reasonCode).toBe("write_like_tool_blocked");
   });
 
-  it("invokes Product Maturity v2 final readiness gate with deterministic and opt-in live readiness separated", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      reportKind: "main_chat_agent_product_maturity_v2_final_readiness_gate",
-      readinessSemantics:
-        "phase_g_final_readiness_default_deterministic_live_product_opt_in_separate",
-      defaultReadinessScope: "MR_EV_PI_LT2_SK2_deterministic_only",
-      optInLiveReadinessScope: "LIVE_PROD_external_live_opt_in_only",
-      finalReady: false,
-      deterministicReady: true,
-      optInLiveReady: false,
-      finalReadinessStatus: "blocked_live_productization_not_ready",
-      deterministicReadinessStatus: "ready",
-      optInLiveReadinessStatus: "blocked",
-      defaultDeterministicScenarioCount: 43,
-      defaultLiveProdExcludedCount: 6,
-      externalLiveScenarioCount: 6,
-      defaultScenarioPassedCount: 33,
-      defaultScenarioExpectedBlockerCount: 10,
-      defaultScenarioFailedCount: 0,
-      defaultScenarioBlockedCount: 0,
-      externalLivePassedCount: 0,
-      externalLiveBlockedCount: 6,
-      externalLiveFailedCount: 0,
-      phaseCounts: [
-        {
-          phaseId: "phase_a",
-          phaseLabel: "Phase A Memory lifecycle",
-          capabilityGroup: "memory_lifecycle",
-          scenarioCount: 8,
-          passed: 6,
-          expectedBlocker: 2,
-          failed: 0,
-          blocked: 0,
-          status: "ready",
-          ready: true,
-          defaultGate: true,
-          optInOnly: false,
-          blockers: [],
-          supportedScenarios: ["MR-01", "MR-02", "MR-03", "MR-06", "MR-07", "MR-08"],
-          blockedScenarios: ["MR-04", "MR-05"],
-          unsupportedScenarios: [],
-          futureScenarios: [],
-        },
-        {
-          phaseId: "phase_f",
-          phaseLabel: "Phase F External live product evidence",
-          capabilityGroup: "external_live_productization",
-          scenarioCount: 6,
-          passed: 0,
-          expectedBlocker: 0,
-          failed: 0,
-          blocked: 6,
-          status: "blocked",
-          ready: false,
-          defaultGate: false,
-          optInOnly: true,
-          blockers: ["explicit_live_eval_required"],
-          supportedScenarios: [],
-          blockedScenarios: ["LIVE-PROD-01"],
-          unsupportedScenarios: [],
-          futureScenarios: [],
-        },
-      ],
-      supportedScenarios: [
-        {
-          scenarioId: "MR-03",
-          phaseId: "phase_a",
-          capabilityGroup: "memory_lifecycle",
-          status: "supported",
-          reason: "passed",
-        },
-      ],
-      blockedScenarios: [
-        {
-          scenarioId: "LIVE-PROD-01",
-          phaseId: "phase_f",
-          capabilityGroup: "external_live_productization",
-          status: "blocked",
-          reason: "explicit_live_eval_required",
-        },
-      ],
-      unsupportedScenarios: [],
-      futureScenarios: [],
-      blockers: ["explicit_live_eval_required"],
-      deterministicBlockers: [],
-      optInLiveBlockers: ["explicit_live_eval_required"],
-      directWritesExecuted: false,
-      noSilentDurableWrites: true,
-      defaultLiveProdExcluded: true,
-    });
+  ht(
+    "invokes Product Maturity v2 final readiness gate with deterministic and opt-in live readiness separated",
+    async () => {
+      vi.mocked(invoke).mockResolvedValue({
+        reportKind: "main_chat_agent_product_maturity_v2_final_readiness_gate",
+        readinessSemantics:
+          "phase_g_final_readiness_default_deterministic_live_product_opt_in_separate",
+        defaultReadinessScope: "MR_EV_PI_LT2_SK2_deterministic_only",
+        optInLiveReadinessScope: "LIVE_PROD_external_live_opt_in_only",
+        finalReady: false,
+        deterministicReady: true,
+        optInLiveReady: false,
+        finalReadinessStatus: "blocked_live_productization_not_ready",
+        deterministicReadinessStatus: "ready",
+        optInLiveReadinessStatus: "blocked",
+        defaultDeterministicScenarioCount: 43,
+        defaultLiveProdExcludedCount: 6,
+        externalLiveScenarioCount: 6,
+        defaultScenarioPassedCount: 33,
+        defaultScenarioExpectedBlockerCount: 10,
+        defaultScenarioFailedCount: 0,
+        defaultScenarioBlockedCount: 0,
+        externalLivePassedCount: 0,
+        externalLiveBlockedCount: 6,
+        externalLiveFailedCount: 0,
+        phaseCounts: [
+          {
+            phaseId: "phase_a",
+            phaseLabel: "Phase A Memory lifecycle",
+            capabilityGroup: "memory_lifecycle",
+            scenarioCount: 8,
+            passed: 6,
+            expectedBlocker: 2,
+            failed: 0,
+            blocked: 0,
+            status: "ready",
+            ready: true,
+            defaultGate: true,
+            optInOnly: false,
+            blockers: [],
+            supportedScenarios: ["MR-01", "MR-02", "MR-03", "MR-06", "MR-07", "MR-08"],
+            blockedScenarios: ["MR-04", "MR-05"],
+            unsupportedScenarios: [],
+            futureScenarios: [],
+          },
+          {
+            phaseId: "phase_f",
+            phaseLabel: "Phase F External live product evidence",
+            capabilityGroup: "external_live_productization",
+            scenarioCount: 6,
+            passed: 0,
+            expectedBlocker: 0,
+            failed: 0,
+            blocked: 6,
+            status: "blocked",
+            ready: false,
+            defaultGate: false,
+            optInOnly: true,
+            blockers: ["explicit_live_eval_required"],
+            supportedScenarios: [],
+            blockedScenarios: ["LIVE-PROD-01"],
+            unsupportedScenarios: [],
+            futureScenarios: [],
+          },
+        ],
+        supportedScenarios: [
+          {
+            scenarioId: "MR-03",
+            phaseId: "phase_a",
+            capabilityGroup: "memory_lifecycle",
+            status: "supported",
+            reason: "passed",
+          },
+        ],
+        blockedScenarios: [
+          {
+            scenarioId: "LIVE-PROD-01",
+            phaseId: "phase_f",
+            capabilityGroup: "external_live_productization",
+            status: "blocked",
+            reason: "explicit_live_eval_required",
+          },
+        ],
+        unsupportedScenarios: [],
+        futureScenarios: [],
+        blockers: ["explicit_live_eval_required"],
+        deterministicBlockers: [],
+        optInLiveBlockers: ["explicit_live_eval_required"],
+        directWritesExecuted: false,
+        noSilentDurableWrites: true,
+        defaultLiveProdExcluded: true,
+      });
 
-    const result = await runMainChatAgentProductMaturityV2FinalReadinessGate();
+      const result = await runMainChatAgentProductMaturityV2FinalReadinessGate();
 
-    expect(invoke).toHaveBeenCalledWith(
-      "run_main_chat_agent_product_maturity_v2_final_readiness_gate",
-      undefined
-    );
-    expect(result.deterministicReady).toBe(true);
-    expect(result.optInLiveReady).toBe(false);
-    expect(result.finalReadinessStatus).toBe("blocked_live_productization_not_ready");
-    expect(result.defaultLiveProdExcludedCount).toBe(6);
-    expect(result.unsupportedScenarios).toEqual([]);
-    expect(result.phaseCounts[0]?.passed).toBe(6);
-    expect(result.phaseCounts[0]?.expectedBlocker).toBe(2);
-    expect(result.phaseCounts[1]?.blocked).toBe(6);
-  });
+      expect(invoke).toHaveBeenCalledWith(
+        "run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+        undefined
+      );
+      expect(result.deterministicReady).toBe(true);
+      expect(result.optInLiveReady).toBe(false);
+      expect(result.finalReadinessStatus).toBe("blocked_live_productization_not_ready");
+      expect(result.defaultLiveProdExcludedCount).toBe(6);
+      expect(result.unsupportedScenarios).toEqual([]);
+      expect(result.phaseCounts[0]?.passed).toBe(6);
+      expect(result.phaseCounts[0]?.expectedBlocker).toBe(2);
+      expect(result.phaseCounts[1]?.blocked).toBe(6);
+    }
+  );
 
-  it("invokes Main Chat Agent readiness gate with deterministic and live sections", async () => {
+  ht("invokes Main Chat Agent readiness gate with deterministic and live sections", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_agent_beta_v1_readiness_gate",
       readinessSemantics: "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
@@ -1625,7 +1639,7 @@ describe("tauri command argument aliases", () => {
     ).toBe(true);
   });
 
-  it("invokes Main Chat Agent Stage 2 readiness gate with manual and live blockers", async () => {
+  ht("invokes Main Chat Agent Stage 2 readiness gate with manual and live blockers", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_agent_stage2_readiness_gate",
       schemaVersion: "stage2-readiness-v1",
@@ -2027,7 +2041,7 @@ describe("tauri command argument aliases", () => {
     });
   });
 
-  it("invokes Main Chat Agent Stage 2 manual dogfood artifact validator", async () => {
+  ht("invokes Main Chat Agent Stage 2 manual dogfood artifact validator", async () => {
     vi.mocked(invoke).mockResolvedValue({
       attempted: false,
       ready: false,
@@ -2053,7 +2067,7 @@ describe("tauri command argument aliases", () => {
     expect(result.blockers).toContain("stage2_manual_dogfood_evidence_missing");
   });
 
-  it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {
+  ht("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "multi_strategy_runtime_maturity",
       maturityReady: true,
@@ -2084,7 +2098,7 @@ describe("tauri command argument aliases", () => {
     expect(result.migrationPermission).toBe(false);
   });
 
-  it("invokes runtime migration gate as explicit read-only diagnostic", async () => {
+  ht("invokes runtime migration gate as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       previewPathHealthy: true,
       metadataSafeTraceReady: true,
@@ -2109,7 +2123,7 @@ describe("tauri command argument aliases", () => {
     expect(result.blockingReasons).toEqual([]);
   });
 
-  it("invokes controlled Chat pilot eligibility as explicit read-only diagnostic", async () => {
+  ht("invokes controlled Chat pilot eligibility as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       eligible: true,
       requiredCleanRuns: 3,
@@ -2135,7 +2149,7 @@ describe("tauri command argument aliases", () => {
     expect(result.cleanRunCount).toBe(3);
   });
 
-  it("invokes controlled pilot promotion readiness as explicit read-only diagnostic", async () => {
+  ht("invokes controlled pilot promotion readiness as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ready: true,
       requiredPromotions: 3,
@@ -2166,7 +2180,7 @@ describe("tauri command argument aliases", () => {
     expect(result.promotedCount).toBe(3);
   });
 
-  it("invokes controlled chat migration plan draft as explicit read-only diagnostic", async () => {
+  ht("invokes controlled chat migration plan draft as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       draftReady: true,
       readinessReport: {
@@ -2205,7 +2219,7 @@ describe("tauri command argument aliases", () => {
     expect(result.notAutomaticMigration).toBe(true);
   });
 
-  it("records controlled chat migration review decision through explicit wrapper", async () => {
+  ht("records controlled chat migration review decision through explicit wrapper", async () => {
     vi.mocked(invoke).mockResolvedValue({
       recorded: true,
       evidenceId: "ev_review_1",
@@ -2235,74 +2249,80 @@ describe("tauri command argument aliases", () => {
     expect(result.evidenceId).toBe("ev_review_1");
   });
 
-  it("reads controlled chat migration review decision summary through explicit wrapper", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      latestDecision: {
-        evidenceId: "ev_review_1",
-        decisionKind: "request_rework",
-        draftReady: true,
-        draftHash: "sha256:test-draft",
-        createdAt: "2026-05-31T01:02:03Z",
-      },
-      approvedCount: 1,
-      reworkRejectCount: 2,
-      latestTimestamp: "2026-05-31T01:02:03Z",
-      blockingReasons: [],
-    });
-
-    const result = await getControlledChatMigrationReviewDecisionSummary();
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_controlled_chat_migration_review_decision_summary",
-      undefined
-    );
-    expect(result.latestDecision?.decisionKind).toBe("request_rework");
-    expect(result.approvedCount).toBe(1);
-    expect(result.reworkRejectCount).toBe(2);
-  });
-
-  it("invokes controlled chat migration implementation gate as explicit read-only diagnostic", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      implementationEligible: true,
-      latestDecision: {
-        evidenceId: "ev_review_2",
-        decisionKind: "approve",
-        draftReady: true,
-        draftHash: "sha256:test-draft",
-        createdAt: "2026-05-31T02:03:04Z",
-      },
-      readinessReport: {
-        ready: true,
-        requiredPromotions: 3,
-        promotedCount: 3,
-        recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
-        latestPromotionTimestamp: "2026-05-30T03:04:05Z",
-        sourceTargetMismatchBlockCount: 0,
-        metadataSafeEvidenceReady: true,
+  ht(
+    "reads controlled chat migration review decision summary through explicit wrapper",
+    async () => {
+      vi.mocked(invoke).mockResolvedValue({
+        latestDecision: {
+          evidenceId: "ev_review_1",
+          decisionKind: "request_rework",
+          draftReady: true,
+          draftHash: "sha256:test-draft",
+          createdAt: "2026-05-31T01:02:03Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 2,
+        latestTimestamp: "2026-05-31T01:02:03Z",
         blockingReasons: [],
-      },
-      draftHashMatched: true,
-      approvedAfterLatestDraft: true,
-      blockingReasons: [],
-    });
+      });
 
-    const result = await checkControlledChatMigrationImplementationGate({
-      requiredPromotions: 3,
-      sessionId: "session-1",
-    });
+      const result = await getControlledChatMigrationReviewDecisionSummary();
 
-    expect(invoke).toHaveBeenCalledWith("check_controlled_chat_migration_implementation_gate", {
-      input: {
+      expect(invoke).toHaveBeenCalledWith(
+        "get_controlled_chat_migration_review_decision_summary",
+        undefined
+      );
+      expect(result.latestDecision?.decisionKind).toBe("request_rework");
+      expect(result.approvedCount).toBe(1);
+      expect(result.reworkRejectCount).toBe(2);
+    }
+  );
+
+  ht(
+    "invokes controlled chat migration implementation gate as explicit read-only diagnostic",
+    async () => {
+      vi.mocked(invoke).mockResolvedValue({
+        implementationEligible: true,
+        latestDecision: {
+          evidenceId: "ev_review_2",
+          decisionKind: "approve",
+          draftReady: true,
+          draftHash: "sha256:test-draft",
+          createdAt: "2026-05-31T02:03:04Z",
+        },
+        readinessReport: {
+          ready: true,
+          requiredPromotions: 3,
+          promotedCount: 3,
+          recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+          latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+          sourceTargetMismatchBlockCount: 0,
+          metadataSafeEvidenceReady: true,
+          blockingReasons: [],
+        },
+        draftHashMatched: true,
+        approvedAfterLatestDraft: true,
+        blockingReasons: [],
+      });
+
+      const result = await checkControlledChatMigrationImplementationGate({
         requiredPromotions: 3,
         sessionId: "session-1",
-      },
-    });
-    expect(result.implementationEligible).toBe(true);
-    expect(result.latestDecision?.decisionKind).toBe("approve");
-    expect(result.draftHashMatched).toBe(true);
-  });
+      });
 
-  it("invokes controlled chat migration shadow run as explicit non-default command", async () => {
+      expect(invoke).toHaveBeenCalledWith("check_controlled_chat_migration_implementation_gate", {
+        input: {
+          requiredPromotions: 3,
+          sessionId: "session-1",
+        },
+      });
+      expect(result.implementationEligible).toBe(true);
+      expect(result.latestDecision?.decisionKind).toBe("approve");
+      expect(result.draftHashMatched).toBe(true);
+    }
+  );
+
+  ht("invokes controlled chat migration shadow run as explicit non-default command", async () => {
     vi.mocked(invoke).mockResolvedValue({
       shadowRunReady: true,
       shadowRunId: "run-shadow-1",
@@ -2359,35 +2379,41 @@ describe("tauri command argument aliases", () => {
     expect(result.metadataSafeSummary.allowWrites).toBe(false);
   });
 
-  it("records controlled chat migration shadow review decision through explicit wrapper", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      recorded: true,
-      evidenceId: "ev_shadow_review_1",
-      shadowRunId: "run-shadow-1",
-      decisionKind: "approve",
-      readinessSummaryDigest: "sha256:shadow-readiness",
-      createdAt: "2026-05-31T04:05:06Z",
-      blockingReasons: [],
-    });
+  ht(
+    "records controlled chat migration shadow review decision through explicit wrapper",
+    async () => {
+      vi.mocked(invoke).mockResolvedValue({
+        recorded: true,
+        evidenceId: "ev_shadow_review_1",
+        shadowRunId: "run-shadow-1",
+        decisionKind: "approve",
+        readinessSummaryDigest: "sha256:shadow-readiness",
+        createdAt: "2026-05-31T04:05:06Z",
+        blockingReasons: [],
+      });
 
-    const result = await recordControlledChatMigrationShadowReviewDecision({
-      shadowRunId: "run-shadow-1",
-      decisionKind: "approve",
-      optionalReviewerNote: "Reviewer note stays checksum-only.",
-    });
-
-    expect(invoke).toHaveBeenCalledWith("record_controlled_chat_migration_shadow_review_decision", {
-      input: {
+      const result = await recordControlledChatMigrationShadowReviewDecision({
         shadowRunId: "run-shadow-1",
         decisionKind: "approve",
         optionalReviewerNote: "Reviewer note stays checksum-only.",
-      },
-    });
-    expect(result.recorded).toBe(true);
-    expect(result.evidenceId).toBe("ev_shadow_review_1");
-  });
+      });
 
-  it("reads controlled chat migration shadow review summary through explicit wrapper", async () => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_controlled_chat_migration_shadow_review_decision",
+        {
+          input: {
+            shadowRunId: "run-shadow-1",
+            decisionKind: "approve",
+            optionalReviewerNote: "Reviewer note stays checksum-only.",
+          },
+        }
+      );
+      expect(result.recorded).toBe(true);
+      expect(result.evidenceId).toBe("ev_shadow_review_1");
+    }
+  );
+
+  ht("reads controlled chat migration shadow review summary through explicit wrapper", async () => {
     vi.mocked(invoke).mockResolvedValue({
       latestDecision: {
         evidenceId: "ev_shadow_review_2",
@@ -2416,7 +2442,7 @@ describe("tauri command argument aliases", () => {
     expect(result.reworkRejectCount).toBe(2);
   });
 
-  it("invokes controlled chat cutover readiness as explicit read-only diagnostic", async () => {
+  ht("invokes controlled chat cutover readiness as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       cutoverPlanningEligible: true,
       implementationGateReport: {
@@ -2478,7 +2504,7 @@ describe("tauri command argument aliases", () => {
     expect(result.metadataSafeSummary.metadataSafe).toBe(true);
   });
 
-  it("invokes controlled chat cutover candidate as an explicit non-default adapter", async () => {
+  ht("invokes controlled chat cutover candidate as an explicit non-default adapter", async () => {
     vi.mocked(invoke).mockResolvedValue({
       candidateReady: true,
       candidateRunId: "run-candidate-1",
@@ -2511,7 +2537,7 @@ describe("tauri command argument aliases", () => {
     expect(result.candidateRunId).toBe("run-candidate-1");
   });
 
-  it("invokes controlled chat cutover candidate review decision explicitly", async () => {
+  ht("invokes controlled chat cutover candidate review decision explicitly", async () => {
     vi.mocked(invoke).mockResolvedValue({
       recorded: true,
       evidenceId: "ev_candidate_review_1",
@@ -2543,7 +2569,7 @@ describe("tauri command argument aliases", () => {
     expect(result.candidateSummaryDigest).toBe("sha256:candidate-summary");
   });
 
-  it("invokes controlled chat cutover candidate review summary as read-only", async () => {
+  ht("invokes controlled chat cutover candidate review summary as read-only", async () => {
     vi.mocked(invoke).mockResolvedValue({
       latestDecision: {
         evidenceId: "ev_candidate_review_2",
@@ -2573,7 +2599,7 @@ describe("tauri command argument aliases", () => {
     expect(result.reworkRejectCount).toBe(2);
   });
 
-  it("invokes controlled chat cutover candidate promotion readiness as read-only", async () => {
+  ht("invokes controlled chat cutover candidate promotion readiness as read-only", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ready: true,
       cutoverReadinessEligible: true,
@@ -2627,7 +2653,7 @@ describe("tauri command argument aliases", () => {
     expect(result.approvedCandidates[0].candidateRunId).toBe("run-candidate-3");
   });
 
-  it("invokes Main Chat runtime status as kernel truth", async () => {
+  ct("invokes Main Chat runtime status as kernel truth", async () => {
     vi.mocked(invoke).mockResolvedValue({
       statusVersion: 2,
       authoritativeRuntime: "main_chat_kernel",
