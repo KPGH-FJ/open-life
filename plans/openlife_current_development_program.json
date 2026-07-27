@@ -2,8 +2,8 @@
   "schema_version": "1.0.1",
   "program_id": "openlife-current-development-program-v1.0.1-20260727",
   "generated_at": "2026-07-27T06:31:21Z",
-  "status": "DRAFT_AWAITING_USER_APPROVAL",
-  "execution_authorized": false,
+  "status": "APPROVED_FOR_EXECUTION",
+  "execution_authorized": true,
   "authority": {
     "scope": "CURRENT_TASK_ORDER_AND_EXECUTION_GOVERNANCE_ONLY",
     "subordinate_to_phase7": true,
@@ -188,22 +188,22 @@
     "evidence_support": "STRONG_FOR_CURRENT_DIRECTION_WITH_EXPLICIT_RECONSIDERATION_CRITERIA"
   },
   "program_approval": {
-    "status": "PENDING_USER_APPROVAL",
-    "execution_authority_granted": false,
+    "status": "APPROVED_BY_USER",
+    "execution_authority_granted": true,
     "program_author_id": "/root",
-    "approved_program_schema_version": null,
-    "approved_draft_commit_sha": null,
-    "approved_by": null,
-    "approved_at": null,
-    "approval_record": null,
+    "approved_program_schema_version": "1.0.1",
+    "approved_draft_commit_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
+    "approved_by": "USER",
+    "approved_at": "2026-07-27T07:31:39Z",
+    "approval_record": "codex-thread:user-approved-exact-draft-66e5f57-20260727T073139Z",
     "github_formal_approval_credit": false,
     "note": "Creating or independently reviewing the Program does not authorize implementation. The user must explicitly approve execution.",
     "independent_challenge": {
-      "status": "PENDING_REVIEW_AFTER_CORRECTIONS",
-      "reviewed_head_sha": null,
-      "reviewer_ids": [],
-      "outcome": null,
-      "artifact_or_record": null,
+      "status": "PASS",
+      "reviewed_head_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
+      "reviewer_ids": ["codex-auto-review:019fa262-17ff-77e3-9517-d0065fd37df9"],
+      "outcome": "PASS",
+      "artifact_or_record": "codex-exact-sha-review:66e5f57:no-blocking-findings",
       "blocking_findings": [],
       "github_formal_approval_credit": false,
       "invalidation_rule": "Any substantive Program, ledger, authority or validator change requires a new bound challenge."
@@ -315,11 +315,45 @@
   "gates": [
     {
       "id": "G-PROGRAM-ACTIVATION",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "fail_closed": true,
       "required_guard_ids": [],
       "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
+          "artifact_or_record": "codex-thread:user-approved-exact-draft-66e5f57-20260727T073139Z",
+          "record_id": "PROGRAM-ACTIVATION-USER-20260727",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": ["plans/openlife_current_development_program.json"],
+          "guard_ids": [],
+          "dimensions": ["USER_PROGRAM_APPROVAL"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "USER",
+          "reviewer_id": "/root",
+          "credit_allowed": true,
+          "active": true
+        },
+        {
+          "subject_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
+          "artifact_or_record": "codex-exact-sha-review:66e5f57:no-blocking-findings",
+          "record_id": "PROGRAM-ACTIVATION-AUTHORITY-20260727",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": [
+            "plans/openlife_current_development_program.json",
+            "plans/openlife_problem_ledger.json"
+          ],
+          "guard_ids": [],
+          "dimensions": ["TRACKED_AUTHORITY"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root",
+          "reviewer_id": "codex-auto-review:019fa262-17ff-77e3-9517-d0065fd37df9",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
       "criteria": [
         "The draft Program validator passes.",
         "The disposable Git-fixture validator self-test is run and reviewed against the exact approved draft before activation; it is a required external check, not a self-attested machine-credit dimension.",
@@ -532,7 +566,7 @@
       "order": 0,
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
-      "status": "PLANNED_NOT_AUTHORIZED",
+      "status": "READY",
       "refinement_level": "CURRENT_SLICE_BLUEPRINT_READY_REQUIRES_INTEGRATOR_FREEZE",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],
@@ -1339,7 +1373,7 @@
   ],
   "program_activation": {
     "stage_id": "PROGRAM-BOOTSTRAP",
-    "status": "DRAFT_VALIDATED_AWAITING_CHALLENGE_AND_USER_APPROVAL",
+    "status": "ACTIVE",
     "occurs_before_wave_id": "WAVE-0",
     "ordered_steps": [
       "Draft Program, ledger, active authority, validator and mutation self-test agree.",
