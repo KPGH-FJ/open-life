@@ -518,6 +518,78 @@
         "reviewer_id": "/root/w0_s3_diff_reviewer",
         "artifact_or_record": "codex-independent-challenge:w0-s3:3dfcacf61abdc56bc271f69da147b5dcb41b3fff:PASS_NO_FINDINGS"
       }
+    },
+    {
+      "record_id": "W0-S3-RECOVERY-INTEGRATION-001",
+      "task_id": "W0-S3-VERIFY-RECOVERY-001",
+      "slice_id": "W0-S3",
+      "integrator_id": "/root",
+      "producer_id": "/root/w0_s3_recovery_verifier",
+      "program_approved_draft_sha": "a846e540c97d424df04fe93c5f8ed429a490a7f6",
+      "program_activation_sha": "d55f812de2d496ea607a3c262b6a0fa53b8ea9da",
+      "execution_baseline_sha": "527814713ce248049c86908164cd55b45edc8d47",
+      "packet_sha256": "f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d",
+      "packet_artifact_path": "plans/openlife_task_packets/f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d.json",
+      "range_base_sha": "527814713ce248049c86908164cd55b45edc8d47",
+      "range_head_sha": "527814713ce248049c86908164cd55b45edc8d47",
+      "changed_paths": [],
+      "allowed_touched_paths": [
+        "openlife-core/src/mcp_audit.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/bootstrap.rs",
+        "src-tauri/src/secret_store.rs",
+        "src-tauri/src/native_external_state_evidence.rs",
+        "scripts/run-w0-s3-native-external-state-evidence.mjs"
+      ],
+      "required_guard_ids": ["CQ-G11", "CQ-G13"],
+      "completion_outcome": "PASS",
+      "task_evidence_records": [
+        {
+          "subject_sha": "527814713ce248049c86908164cd55b45edc8d47",
+          "artifact_or_record": "attempt-artifact:519b9770a96199f01e404b6ab93f2ea86905ffd68ed921203abe8c8edda88721;challenge:codex-independent-challenge:w0-s3-recovery:head:527814713ce248049c86908164cd55b45edc8d47:packet:f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d:PASS",
+          "record_id": "W0-S3-RECOVERY-TASK-EVIDENCE-001",
+          "scope_id": "W0-S3",
+          "scope_paths": [
+            "scripts/run-w0-s3-native-external-state-evidence.mjs",
+            "src-tauri/src/lib.rs",
+            "src-tauri/src/native_external_state_evidence.rs",
+            "openlife-core/src/mcp_audit.rs",
+            "src-tauri/src/bootstrap.rs",
+            "src-tauri/src/secret_store.rs"
+          ],
+          "guard_ids": ["CQ-G11", "CQ-G13"],
+          "dimensions": [
+            "SOURCE_MAP",
+            "RED",
+            "BEHAVIOR_OR_FAULT",
+            "NATIVE_BOOTSTRAP_AND_EXTERNAL_STATE",
+            "PROCESS_MODEL",
+            "FILESYSTEM",
+            "SECRET_STORE",
+            "LOCK",
+            "FILE_DESCRIPTOR",
+            "SOCKET",
+            "POSITIVE",
+            "COUNTERFACTUAL",
+            "ABSENCE",
+            "NON_REGRESSION",
+            "UNKNOWN_BOUNDARY",
+            "INDEPENDENT_CHALLENGE"
+          ],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/w0_s3_recovery_verifier",
+          "reviewer_id": "/root/w0_s3_recovery_challenger",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
+      "independent_review": {
+        "outcome": "PASS",
+        "reviewed_head_sha": "527814713ce248049c86908164cd55b45edc8d47",
+        "reviewer_id": "/root/w0_s3_recovery_challenger",
+        "artifact_or_record": "codex-independent-challenge:w0-s3-recovery:head:527814713ce248049c86908164cd55b45edc8d47:packet:f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d:PASS"
+      }
     }
   ],
   "receipt_adjudication_records": [
@@ -687,6 +759,23 @@
       "producer_id": "/root/w0-s3-implementer",
       "integrator_id": "/root",
       "record_note": "Settles only the frozen W0-S3 native evidence prerequisite. BR4-D064 remains P0 OPEN with closure_credit=false; real Tauri, real Keychain, transient/global external state, unsupported platforms, and external-provider behavior remain UNKNOWN. CI attempt 1's R4-FLAKY-001 macOS failure remains recorded and R4-FLAKY-001 remains P1 OPEN with closure_credit=false."
+    },
+    {
+      "attempt_id": "W0-S3-RECOVERY-ATTEMPT-001",
+      "task_id": "W0-S3-VERIFY-RECOVERY-001",
+      "slice_id": "W0-S3",
+      "root_cause_cluster_id": "CQ-C08",
+      "packet_sha256": "f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d",
+      "packet_artifact_path": "plans/openlife_task_packets/f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d.json",
+      "execution_baseline_sha": "527814713ce248049c86908164cd55b45edc8d47",
+      "artifact_commit_sha": "aa1e01635eae9d2a203f3e718e9006be0f06a88b",
+      "attempt_artifact_path": "plans/openlife_attempt_artifacts/519b9770a96199f01e404b6ab93f2ea86905ffd68ed921203abe8c8edda88721.json",
+      "attempt_artifact_sha256": "519b9770a96199f01e404b6ab93f2ea86905ffd68ed921203abe8c8edda88721",
+      "outcome": "SUCCEEDED",
+      "reason": "A distinct v1.0.3 VERIFICATION packet reproduced the positive native external-state evidence and both historical RED contracts at the exact current SHA while covering the three historical changed paths and three frozen canonical-owner paths with zero product changes.",
+      "producer_id": "/root/w0_s3_recovery_verifier",
+      "integrator_id": "/root",
+      "record_note": "Settles only the v1.0.3 W0-S3 receipt-recovery verification. The invalid W0-S3-INTEGRATION-001 and W0-S3-ATTEMPT-001 remain immutable historical no-credit records; BR4-D064 remains P0 OPEN with closure_credit=false, and real Tauri, real OS Keychain, Settings/direct Keyring, external Provider, product data, transient sockets, sandbox-external filesystem, finding closure, trial, and Phase7 completion remain UNKNOWN or NOT_CREDITED."
     }
   ],
   "architecture_review_records": [],
