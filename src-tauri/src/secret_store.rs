@@ -190,16 +190,6 @@ impl StartupKeyringSecretStore {
             .map_err(|error| anyhow::anyhow!(error.clone()))
     }
 
-    pub(crate) fn service_classification(&self) -> Result<&'static str> {
-        self.service_name().map(|service| {
-            if service == SERVICE {
-                "default"
-            } else {
-                "isolated_trial"
-            }
-        })
-    }
-
     fn run<T, F>(&self, operation_name: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -251,6 +241,16 @@ impl StartupKeyringSecretStore {
             }
         }
     }
+}
+
+pub(crate) fn selected_keyring_service_classification() -> Result<&'static str> {
+    selected_keyring_service().map(|service| {
+        if service == SERVICE {
+            "default"
+        } else {
+            "isolated_trial"
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]

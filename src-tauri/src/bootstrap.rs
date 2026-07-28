@@ -8,9 +8,10 @@ use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX;
 use crate::secret_store::{
     hydrate_config_secrets_read_only, inspect_and_hydrate_integrity_key,
-    inspect_existing_mcp_audit_keys, IntegrityKeyHydration, McpAuditKeyHydrationInspection,
-    SecretReader, StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
-    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
+    inspect_existing_mcp_audit_keys, selected_keyring_service_classification,
+    IntegrityKeyHydration, McpAuditKeyHydrationInspection, SecretReader, StartupKeyringSecretStore,
+    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
@@ -1651,14 +1652,13 @@ fn stage_legacy_scheduled_task_review_proposals(
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
-    let secret_store = StartupKeyringSecretStore::default();
-    match secret_store.service_classification() {
+    match selected_keyring_service_classification() {
         Ok(classification) => {
             log::info!("[startup] OS credential service class: {classification}")
         }
         Err(error) => log::error!("[startup] OS credential service selection blocked: {error}"),
     }
-    bootstrap_with_secret_store(data_dir, &secret_store)
+    bootstrap_with_secret_store(data_dir, &StartupKeyringSecretStore::default())
 }
 
 #[cfg(test)]
