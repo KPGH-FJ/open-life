@@ -1,26 +1,36 @@
 {
-  "schema_version": "1.0.2",
-  "ledger_id": "openlife-current-problem-ledger-v1.0.2-validator-recovery-20260727",
-  "generated_at": "2026-07-27T06:31:21Z",
-  "status": "ACTIVE",
+  "schema_version": "1.0.3",
+  "ledger_id": "openlife-current-problem-ledger-v1.0.3-receipt-recovery-20260728",
+  "generated_at": "2026-07-28T00:00:00Z",
+  "status": "DRAFT_AWAITING_USER_APPROVAL",
   "authority": {
     "scope": "Current 101-card owner, evidence, wave, next-proof and closure ledger.",
     "program_file": "plans/openlife_current_development_program.json",
     "subordinate_to_phase7": true,
-    "execution_authorized": true,
+    "execution_authorized": false,
     "self_contained": true,
-    "append_only_baseline_policy": "The 101 baseline IDs may not be deleted or renamed. A future finding first appears in a reviewed creation commit; the following reconciliation commit records the review bound to that creation SHA. The creation commit alone is never a green handoff. Existing merge records are immutable in this Program."
+    "append_only_baseline_policy": "The 101 baseline IDs may not be deleted or renamed. A future finding first appears in a reviewed creation commit; the following reconciliation commit records the review bound to that creation SHA. The creation commit alone is never a green handoff. Existing merge and attempt records remain immutable; adjudication can only remove defective receipt credit, while recovery requires a distinct current-Program receipt."
   },
   "predecessor_snapshot": {
-    "program_id": "openlife-current-development-program-v1.0.1-20260727",
-    "schema_version": "1.0.1",
-    "activation_commit_sha": "93f7ccc176ebd3dab0557b1dc157008318742bee",
-    "handoff_main_sha": "410bd26aab03daa58451f871f96b002206518d7c",
+    "program_id": "openlife-current-development-program-v1.0.2-validator-recovery-20260727",
+    "schema_version": "1.0.2",
+    "activation_commit_sha": "3d17c88b5b81b646cd23c8f2b185eb505ea0dba6",
+    "handoff_main_sha": "8a607bb4f9f392f573c98fa74e8c575d6c2c014d",
     "closure_credit_true": 0,
-    "integration_records": 0,
-    "tracked_task_packet_artifacts": 1,
-    "tracked_attempt_artifacts": 1,
-    "credit_policy": "AUTHORIZED_PREDECESSOR_W0_S1_TASK_EVIDENCE_ONLY"
+    "integration_records": 3,
+    "tracked_task_packet_artifacts": 3,
+    "tracked_attempt_artifacts": 3,
+    "credit_policy": "W0_S1_AND_W0_S2_RETAINED_W0_S3_INVALIDATED_NO_CREDIT",
+    "retained_effective_receipts": [
+      {
+        "record_id": "W0-S1-INTEGRATION-001",
+        "record_canonical_sha256": "85aae971d82c2d20ef9080b61bc09fac869a1217b08e517904b5aeaa9be11363"
+      },
+      {
+        "record_id": "W0-S2-INTEGRATION-001",
+        "record_canonical_sha256": "dbb42bbdbb8bf8ca0596d86042a58c314f8e7296ac63c063ea3b2d3e0a108026"
+      }
+    ]
   },
   "review_baseline": {
     "review_run_id": "FR-20260723-01",
@@ -256,6 +266,37 @@
       "plans/openlife_architecture_review_artifacts/"
     ]
   },
+  "receipt_adjudication_contract": {
+    "required_fields": [
+      "adjudication_id",
+      "target_record_id",
+      "target_record_canonical_sha256",
+      "target_record_introduction_sha",
+      "target_ledger_blob_sha256",
+      "decision",
+      "reason_code",
+      "decision_subject_sha",
+      "defect_paths",
+      "invalidated_credit_scope",
+      "producer_id",
+      "independent_review"
+    ],
+    "allowed_decisions": ["INVALIDATED_NO_CREDIT"],
+    "allowed_target_record_ids": ["W0-S3-INTEGRATION-001"],
+    "allowed_reason_codes": ["MISSING_REQUIRED_TASK_SCOPE_PATHS"],
+    "invalidated_credit_scope": "TASK_COMPLETION_AND_INTEGRATED_MAIN_COVERAGE",
+    "independent_review_required_fields": [
+      "outcome",
+      "reviewed_target_record_sha256",
+      "reviewed_decision_subject_sha",
+      "reviewer_id",
+      "artifact_or_record"
+    ],
+    "append_only_rule": "Adjudications are append-only invalidation facts bound to the exact canonical digest, introduction commit and predecessor-ledger blob of one immutable integration record. A target may be invalidated once. The raw record and attempt remain unchanged.",
+    "invalidation_rule": "INVALIDATED_NO_CREDIT requires the exact recomputed missing canonical-owner paths, independent factual review bound to decision_subject_sha and zero closure credit. It preserves the historical range as a known uncredited gap and blocks all dispatch except the named v1.0.3 recovery verification.",
+    "recovery_rule": "Recovery never edits or re-credits the invalidated receipt. It requires a distinct v1.0.3 VERIFICATION task packet, attempt and integration receipt with fresh current-SHA evidence; effective slice credit then comes only from that new receipt.",
+    "forbidden_effect": "Receipt adjudication cannot authorize product edits, change task identity or range, convert an attempt outcome, close a finding, pass a Program gate or grant feature credit."
+  },
   "integration_records": [
     {
       "record_id": "W0-S1-INTEGRATION-001",
@@ -476,6 +517,32 @@
         "reviewed_head_sha": "3dfcacf61abdc56bc271f69da147b5dcb41b3fff",
         "reviewer_id": "/root/w0_s3_diff_reviewer",
         "artifact_or_record": "codex-independent-challenge:w0-s3:3dfcacf61abdc56bc271f69da147b5dcb41b3fff:PASS_NO_FINDINGS"
+      }
+    }
+  ],
+  "receipt_adjudication_records": [
+    {
+      "adjudication_id": "W0-S3-RECEIPT-ADJUDICATION-001",
+      "target_record_id": "W0-S3-INTEGRATION-001",
+      "target_record_canonical_sha256": "cea939908d35b302d131605e6cd6284e59bc21a905be129a7b95a183c628ef0d",
+      "target_record_introduction_sha": "a0004fb8a592d3404d2a92d8ecaf9adf916dd32a",
+      "target_ledger_blob_sha256": "24d5410bf9fb80165780e8742a479a938648c2b569e3a655c610966861329b4d",
+      "decision": "INVALIDATED_NO_CREDIT",
+      "reason_code": "MISSING_REQUIRED_TASK_SCOPE_PATHS",
+      "decision_subject_sha": "8a607bb4f9f392f573c98fa74e8c575d6c2c014d",
+      "defect_paths": [
+        "openlife-core/src/mcp_audit.rs",
+        "src-tauri/src/bootstrap.rs",
+        "src-tauri/src/secret_store.rs"
+      ],
+      "invalidated_credit_scope": "TASK_COMPLETION_AND_INTEGRATED_MAIN_COVERAGE",
+      "producer_id": "/root",
+      "independent_review": {
+        "outcome": "PASS",
+        "reviewed_target_record_sha256": "cea939908d35b302d131605e6cd6284e59bc21a905be129a7b95a183c628ef0d",
+        "reviewed_decision_subject_sha": "8a607bb4f9f392f573c98fa74e8c575d6c2c014d",
+        "reviewer_id": "/root/v103_adjudication_design",
+        "artifact_or_record": "codex-independent-fact-review:w0-s3-receipt-defect:8a607bb4f9f392f573c98fa74e8c575d6c2c014d"
       }
     }
   ],
@@ -11112,6 +11179,6 @@
       "WAVE-0": 3
     },
     "closure_credit_true": 0,
-    "last_reconciled_execution_sha": "5ea87489c413301bc6031316717495eb32fd3aef"
+    "last_reconciled_execution_sha": "8a607bb4f9f392f573c98fa74e8c575d6c2c014d"
   }
 }

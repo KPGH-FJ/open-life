@@ -10,17 +10,28 @@ const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const programPath = "plans/openlife_current_development_program.json";
 const programMarkdownPath = "plans/openlife_current_development_program.md";
 const ledgerPath = "plans/openlife_problem_ledger.json";
-const CURRENT_SCHEMA_VERSION = "1.0.2";
-const CURRENT_PROGRAM_ID =
+const CURRENT_SCHEMA_VERSION = "1.0.3";
+const CURRENT_PROGRAM_ID = "openlife-current-development-program-v1.0.3-receipt-recovery-20260728";
+const CURRENT_LEDGER_ID = "openlife-current-problem-ledger-v1.0.3-receipt-recovery-20260728";
+const PREDECESSOR_PROGRAM_ID =
   "openlife-current-development-program-v1.0.2-validator-recovery-20260727";
-const CURRENT_LEDGER_ID = "openlife-current-problem-ledger-v1.0.2-validator-recovery-20260727";
-const PREDECESSOR_PROGRAM_ID = "openlife-current-development-program-v1.0.1-20260727";
-const PREDECESSOR_SCHEMA_VERSION = "1.0.1";
-const PREDECESSOR_DRAFT_SHA = "66e5f57ecfa86e5a44b70229a06ff77d8d473343";
-const PREDECESSOR_ACTIVATION_SHA = "93f7ccc176ebd3dab0557b1dc157008318742bee";
-const PREDECESSOR_HANDOFF_SHA = "410bd26aab03daa58451f871f96b002206518d7c";
-const PREDECESSOR_PUBLICATION_MERGE_SHA = "83e7dd25b45ba77df3a7eeddfb980dd2fc930592";
-const PREDECESSOR_W0_S1_MERGE_SHA = "79849ba44a36e6b1a28e848fa359903170256c0c";
+const PREDECESSOR_SCHEMA_VERSION = "1.0.2";
+const PREDECESSOR_DRAFT_SHA = "2fd9df02e906f438bb4858422751f7d0cd1d4030";
+const PREDECESSOR_ACTIVATION_SHA = "3d17c88b5b81b646cd23c8f2b185eb505ea0dba6";
+const PREDECESSOR_HANDOFF_SHA = "8a607bb4f9f392f573c98fa74e8c575d6c2c014d";
+const INVALID_W0_S3_RECORD_ID = "W0-S3-INTEGRATION-001";
+const INVALID_W0_S3_RECORD_SHA256 =
+  "cea939908d35b302d131605e6cd6284e59bc21a905be129a7b95a183c628ef0d";
+const RETAINED_EFFECTIVE_RECEIPTS = [
+  {
+    record_id: "W0-S1-INTEGRATION-001",
+    record_canonical_sha256: "85aae971d82c2d20ef9080b61bc09fac869a1217b08e517904b5aeaa9be11363",
+  },
+  {
+    record_id: "W0-S2-INTEGRATION-001",
+    record_canonical_sha256: "dbb42bbdbb8bf8ca0596d86042a58c314f8e7296ac63c063ea3b2d3e0a108026",
+  },
+];
 const REVIEW_BASELINE_SHA = "de158ce53018c9c649f7dc0dcb3bdd8271ed4977";
 const REVIEW_BASELINE_TREE = "3aa4d4d793ca7a8b687be9e6f21515296db63dff";
 const BASELINE_CARD_HASH = "f22a107dd933a38700aa38fb9aa98764a276f50bc006e79740d8d39bca4c6627";
@@ -286,11 +297,7 @@ const commitNovelPaths = commitSha => {
     .filter(path => changedByParent.every(paths => paths.has(path)))
     .sort();
 };
-for (const [sha, label] of [
-  [PREDECESSOR_PUBLICATION_MERGE_SHA, "predecessor publication merge"],
-  [PREDECESSOR_W0_S1_MERGE_SHA, "predecessor W0-S1 merge"],
-  [PREDECESSOR_HANDOFF_SHA, "predecessor artifact merge"],
-]) {
+for (const [sha, label] of [[PREDECESSOR_HANDOFF_SHA, "predecessor handoff merge"]]) {
   sameSet(commitNovelPaths(sha), [], `${label} novel-path replay`);
 }
 const enforcePathScope = ({
@@ -568,6 +575,7 @@ assert(
 const program = readJson(programPath);
 const ledger = readJson(ledgerPath);
 const programMarkdown = readText(programMarkdownPath);
+let invalidatedReceiptIds = new Set();
 const predecessorProgram = readJsonAtCommit(PREDECESSOR_HANDOFF_SHA, programPath);
 const predecessorLedger = readJsonAtCommit(PREDECESSOR_HANDOFF_SHA, ledgerPath);
 const countTrackedAtCommit = (sha, prefix) =>
@@ -588,6 +596,7 @@ const predecessorFacts = {
     PREDECESSOR_HANDOFF_SHA,
     predecessorLedger.attempt_contract.attempt_artifact_prefix
   ),
+  retained_effective_receipts: RETAINED_EFFECTIVE_RECEIPTS,
 };
 assert(program.schema_version === CURRENT_SCHEMA_VERSION, "Unexpected Program schema version");
 assert(ledger.schema_version === CURRENT_SCHEMA_VERSION, "Unexpected ledger schema version");
@@ -606,13 +615,15 @@ assert(
       predecessorFacts.tracked_task_packet_artifacts &&
     program.predecessor_program.tracked_attempt_artifacts ===
       predecessorFacts.tracked_attempt_artifacts &&
+    canonicalDigest(program.predecessor_program.retained_effective_receipts) ===
+      canonicalDigest(predecessorFacts.retained_effective_receipts) &&
     predecessorFacts.program_id === PREDECESSOR_PROGRAM_ID &&
     predecessorFacts.schema_version === PREDECESSOR_SCHEMA_VERSION &&
     predecessorFacts.approved_draft_commit_sha === PREDECESSOR_DRAFT_SHA &&
     predecessorFacts.closure_credit_true === 0 &&
-    predecessorFacts.integration_records === 0 &&
-    predecessorFacts.tracked_task_packet_artifacts === 1 &&
-    predecessorFacts.tracked_attempt_artifacts === 1,
+    predecessorFacts.integration_records === 3 &&
+    predecessorFacts.tracked_task_packet_artifacts === 3 &&
+    predecessorFacts.tracked_attempt_artifacts === 3,
   "Successor Program predecessor binding drifted"
 );
 assert(
@@ -625,9 +636,26 @@ assert(
     ledger.predecessor_snapshot.tracked_task_packet_artifacts ===
       predecessorFacts.tracked_task_packet_artifacts &&
     ledger.predecessor_snapshot.tracked_attempt_artifacts ===
-      predecessorFacts.tracked_attempt_artifacts,
+      predecessorFacts.tracked_attempt_artifacts &&
+    canonicalDigest(ledger.predecessor_snapshot.retained_effective_receipts) ===
+      canonicalDigest(predecessorFacts.retained_effective_receipts),
   "Successor ledger predecessor binding drifted"
 );
+for (const field of [
+  "integration_records",
+  "implementation_attempt_records",
+  "architecture_review_records",
+]) {
+  const predecessorRecords = predecessorLedger[field] ?? [];
+  const successorRecords = ledger[field] ?? [];
+  assert(
+    predecessorRecords.length <= successorRecords.length &&
+      predecessorRecords.every(
+        (record, index) => canonicalDigest(record) === canonicalDigest(successorRecords[index])
+      ),
+    `Successor mutated predecessor append-only sequence: ${field}`
+  );
+}
 const corruptedPredecessorFacts = { ...predecessorFacts, closure_credit_true: 1 };
 assert(
   canonicalDigest(corruptedPredecessorFacts) !== canonicalDigest(program.predecessor_program),
@@ -866,7 +894,89 @@ const predecessorReceiptLineage = (record, programState) => {
       activation_sha: declaredPredecessor.activation_commit_sha,
     };
   }
+  const retainedReceipt = declaredPredecessor?.retained_effective_receipts?.find(
+    candidate =>
+      candidate.record_id === record.record_id &&
+      candidate.record_canonical_sha256 === canonicalDigest(record)
+  );
+  if (retainedReceipt) {
+    return {
+      kind: "DECLARED_RETAINED_PREDECESSOR",
+      activation_sha: record.program_activation_sha,
+    };
+  }
   return null;
+};
+const recoveryFrozenPacketFields = [
+  "canonical_owner",
+  "allowed_touched_paths",
+  "source_map",
+  "forbidden_touched_paths",
+  "expected_absent_paths",
+  "verification_commands",
+  "required_evidence_dimensions",
+  "required_guard_ids",
+  "red_contract",
+];
+const recoveryPacketMatchesFrozenScope = (candidatePacket, invalidatedPacket) =>
+  candidatePacket.mode === "VERIFICATION" &&
+  recoveryFrozenPacketFields.every(
+    field =>
+      Array.isArray(candidatePacket[field]) &&
+      Array.isArray(invalidatedPacket[field]) &&
+      canonicalDigest([...candidatePacket[field]].sort()) ===
+        canonicalDigest([...invalidatedPacket[field]].sort())
+  );
+const recoveryReceiptSatisfiesFrozenScope = ({
+  candidate,
+  invalidatedTarget,
+  programState,
+  ledgerState,
+  snapshotSha,
+}) => {
+  if (
+    !candidate ||
+    !invalidatedTarget ||
+    candidate.record_id === invalidatedTarget.record_id ||
+    candidate.slice_id !== invalidatedTarget.slice_id ||
+    candidate.program_approved_draft_sha !==
+      programState.program_approval.approved_draft_commit_sha ||
+    candidate.changed_paths.some(path => !pathIsStateOnly(path, ledgerState.integration_contract))
+  ) {
+    return false;
+  }
+  try {
+    const candidatePacket = readJsonAtCommit(snapshotSha, candidate.packet_artifact_path);
+    const invalidatedPacket = readJsonAtCommit(snapshotSha, invalidatedTarget.packet_artifact_path);
+    if (
+      !recoveryPacketMatchesFrozenScope(candidatePacket, invalidatedPacket) ||
+      candidate.task_id === invalidatedTarget.task_id ||
+      candidate.packet_sha256 === invalidatedTarget.packet_sha256
+    ) {
+      return false;
+    }
+    const creditedScope = new Set(
+      candidate.task_evidence_records
+        .filter(
+          evidence =>
+            evidence.outcome === "PASS" &&
+            evidence.credit_allowed === true &&
+            evidence.active === true &&
+            evidence.limitations.length === 0
+        )
+        .flatMap(evidence => evidence.scope_paths)
+    );
+    const requiredScope = uniquePaths(
+      invalidatedTarget.changed_paths,
+      (Array.isArray(invalidatedPacket.canonical_owner)
+        ? invalidatedPacket.canonical_owner
+        : [invalidatedPacket.canonical_owner]
+      ).map(ref => splitRef(ref).path)
+    );
+    return requiredScope.every(path => creditedScope.has(path));
+  } catch {
+    return false;
+  }
 };
 assert(
   predecessorReceiptLineage(
@@ -953,9 +1063,9 @@ assert(
   "W0-S1 predecessor receipt and historical blueprint boundary drifted"
 );
 assert(
-  w0s2.status === "PLANNED_NOT_AUTHORIZED" &&
-    w0s2.packet_status === "TASK_PACKET_PREPARATION_REQUIRED",
-  "W0-S2 must remain the next unprepared, unauthorized slice"
+  w0s2.status === "PREDECESSOR_TASK_EVIDENCE_INTEGRATED_NO_CLOSURE" &&
+    w0s2.packet_status === "PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE",
+  "W0-S2 retained predecessor receipt boundary drifted"
 );
 sameSet(
   w0s1.red_contract,
@@ -991,8 +1101,10 @@ const w0s3 = w0.slices.find(slice => slice.id === "W0-S3");
 assert(
   w0s3.finding_ids.includes("BR4-D064") &&
     w0s3.evidence_prerequisite_only === true &&
-    w0s3.risk_class === "HIGH",
-  "W0-S3 is not a bounded high-risk D064 evidence prerequisite"
+    w0s3.risk_class === "HIGH" &&
+    w0s3.status === "PREDECESSOR_RECEIPT_INVALIDATED_RECOVERY_REQUIRED" &&
+    w0s3.packet_status === "RECOVERY_VERIFICATION_PACKET_PREPARATION_REQUIRED",
+  "W0-S3 is not the bounded high-risk receipt-recovery prerequisite"
 );
 const w0s4 = w0.slices.find(slice => slice.id === "W0-S4");
 assert(
@@ -2265,8 +2377,9 @@ for (const requiredMarkdownFact of [
   "new_worktree: false",
   "risk_class: LOW | MEDIUM | HIGH",
   "PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE",
-  "after successor activation is W0-S2.",
-  "The retained W0-S1 receipt is replayed against the v1.0.1 dispatch Program",
+  "W0-S3 receipt recovery is the next packet-preparation subject.",
+  "The retained W0-S1 and W0-S2 receipts are replayed against their original",
+  "no evidence may be poured back into the old range",
 ]) {
   assert(
     programMarkdown.includes(requiredMarkdownFact),
@@ -2465,6 +2578,7 @@ const assertAuthorizedProgramState = () => {
     "vocabularies",
     "state_transition_contracts",
     "integration_contract",
+    "receipt_adjudication_contract",
     "attempt_contract",
     "initial_inventory",
     "root_cause_clusters",
@@ -2527,6 +2641,7 @@ const assertAuthorizedProgramState = () => {
       "integration_records",
       "implementation_attempt_records",
       "architecture_review_records",
+      "receipt_adjudication_records",
     ]) {
       const historicalRecords = historicalLedger[field] ?? [];
       const currentRecords = ledger[field] ?? [];
@@ -2913,24 +3028,60 @@ const validateFrozenPacketSemantics = ({
     `${label} Program/Wave/slice binding is invalid`
   );
   const declaredSlice = packetWave.slices.find(candidate => candidate.id === expectedSlice);
+  const unresolvedInvalidatedReceipts = ledgerState.integration_records
+    .filter(record => invalidatedReceiptIds.has(record.record_id))
+    .filter(
+      invalidated =>
+        !ledgerState.integration_records.some(
+          candidate =>
+            !invalidatedReceiptIds.has(candidate.record_id) &&
+            recoveryReceiptSatisfiesFrozenScope({
+              candidate,
+              invalidatedTarget: invalidated,
+              programState,
+              ledgerState,
+              snapshotSha: executionBaseline,
+            })
+        )
+    );
+  const unresolvedInvalidatedSlices = new Set(
+    unresolvedInvalidatedReceipts.map(record => record.slice_id)
+  );
+  if (unresolvedInvalidatedSlices.size > 0) {
+    assert(
+      packet.slice_id === "W0-S3" && packet.mode === "VERIFICATION",
+      `${label} cannot bypass unresolved receipt recovery`
+    );
+    const invalidatedTarget = unresolvedInvalidatedReceipts.find(
+      record => record.slice_id === packet.slice_id
+    );
+    const invalidatedPacket = readJsonAtCommit(
+      executionBaseline,
+      invalidatedTarget.packet_artifact_path
+    );
+    assert(
+      recoveryPacketMatchesFrozenScope(packet, invalidatedPacket),
+      `${label} does not reproduce the frozen predecessor packet contract`
+    );
+  }
   if (declaredSlice) {
     assert(
       Array.isArray(declaredSlice.predecessor_slice_ids),
       `${label} declared slice lacks predecessor metadata`
     );
     for (const predecessorSliceId of declaredSlice.predecessor_slice_ids) {
-      const predecessorRecord = ledgerState.integration_records.find(
-        record => record.slice_id === predecessorSliceId
+      const predecessorRecords = ledgerState.integration_records.filter(
+        record =>
+          record.slice_id === predecessorSliceId &&
+          !invalidatedReceiptIds.has(record.record_id) &&
+          predecessorReceiptLineage(record, programState)
       );
       assert(
-        predecessorRecord,
-        `${label} predecessor slice is not integrated: ${predecessorSliceId}`
+        predecessorRecords.length === 1,
+        `${label} predecessor slice lacks exactly one effective receipt: ${predecessorSliceId}`
       );
+      const [predecessorRecord] = predecessorRecords;
       const receiptLineage = predecessorReceiptLineage(predecessorRecord, programState);
-      assert(
-        receiptLineage,
-        `${label} predecessor ${predecessorSliceId} is not from the current or declared predecessor Program`
-      );
       validateIntegrationRecordReceipt({
         record: predecessorRecord,
         programState,
@@ -2945,7 +3096,10 @@ const validateFrozenPacketSemantics = ({
     }
     if (["IMPLEMENTATION", "VERIFICATION_THEN_CONDITIONAL_IMPLEMENTATION"].includes(packet.mode)) {
       assert(
-        !ledgerState.integration_records.some(record => record.slice_id === packet.slice_id),
+        !ledgerState.integration_records.some(
+          record =>
+            record.slice_id === packet.slice_id && !invalidatedReceiptIds.has(record.record_id)
+        ),
         `${label} implementation slice was already integrated`
       );
     }
@@ -3259,12 +3413,150 @@ const validateFrozenPacketSemantics = ({
     `${label} path, baseline, checkout, branch or activation boundary is invalid`
   );
 };
+const validateReceiptAdjudications = snapshotSha => {
+  const contract = ledger.receipt_adjudication_contract;
+  const records = ledger.receipt_adjudication_records;
+  assert(contract && Array.isArray(records), "Receipt adjudication authority is missing");
+  sameSet(
+    contract.allowed_target_record_ids,
+    [INVALID_W0_S3_RECORD_ID],
+    "Receipt adjudication target allowlist"
+  );
+  sameSet(contract.allowed_decisions, ["INVALIDATED_NO_CREDIT"], "Receipt adjudication decisions");
+  sameSet(
+    contract.allowed_reason_codes,
+    ["MISSING_REQUIRED_TASK_SCOPE_PATHS"],
+    "Receipt adjudication reason codes"
+  );
+  assert(
+    contract.invalidated_credit_scope === "TASK_COMPLETION_AND_INTEGRATED_MAIN_COVERAGE",
+    "Receipt adjudication credit boundary drifted"
+  );
+  const adjudicationIds = new Set();
+  const targetIds = new Set();
+  for (const adjudication of records) {
+    sameSet(
+      Object.keys(adjudication),
+      contract.required_fields,
+      `${adjudication.adjudication_id ?? "Receipt adjudication"} fields`
+    );
+    assert(
+      typeof adjudication.adjudication_id === "string" &&
+        adjudication.adjudication_id.trim() &&
+        !adjudicationIds.has(adjudication.adjudication_id),
+      "Receipt adjudication ID is empty or duplicated"
+    );
+    adjudicationIds.add(adjudication.adjudication_id);
+    assert(
+      contract.allowed_target_record_ids.includes(adjudication.target_record_id) &&
+        !targetIds.has(adjudication.target_record_id),
+      `${adjudication.adjudication_id} targets an unauthorized or duplicate receipt`
+    );
+    targetIds.add(adjudication.target_record_id);
+    const target = ledger.integration_records.find(
+      record => record.record_id === adjudication.target_record_id
+    );
+    assert(target, `${adjudication.adjudication_id} target receipt is missing`);
+    assert(
+      canonicalDigest(target) === adjudication.target_record_canonical_sha256 &&
+        adjudication.target_record_canonical_sha256 === INVALID_W0_S3_RECORD_SHA256,
+      `${adjudication.adjudication_id} target canonical digest is invalid`
+    );
+    assert(
+      adjudication.target_record_introduction_sha === "a0004fb8a592d3404d2a92d8ecaf9adf916dd32a" &&
+        isCommitAncestorOfHead(adjudication.target_record_introduction_sha),
+      `${adjudication.adjudication_id} target introduction SHA is invalid`
+    );
+    const introductionLedger = readJsonAtCommit(
+      adjudication.target_record_introduction_sha,
+      ledgerPath
+    );
+    const introducedTarget = introductionLedger.integration_records.find(
+      record => record.record_id === adjudication.target_record_id
+    );
+    assert(
+      introducedTarget &&
+        canonicalDigest(introducedTarget) === adjudication.target_record_canonical_sha256,
+      `${adjudication.adjudication_id} target was not introduced with the frozen bytes`
+    );
+    assert(
+      adjudication.target_ledger_blob_sha256 ===
+        textDigest(readTextAtCommit(PREDECESSOR_HANDOFF_SHA, ledgerPath)) &&
+        adjudication.target_ledger_blob_sha256 ===
+          "24d5410bf9fb80165780e8742a479a938648c2b569e3a655c610966861329b4d",
+      `${adjudication.adjudication_id} predecessor ledger blob binding is invalid`
+    );
+    assert(
+      adjudication.decision === "INVALIDATED_NO_CREDIT" &&
+        adjudication.reason_code === "MISSING_REQUIRED_TASK_SCOPE_PATHS" &&
+        adjudication.decision_subject_sha === PREDECESSOR_HANDOFF_SHA &&
+        canGit("merge-base", "--is-ancestor", adjudication.decision_subject_sha, snapshotSha) !==
+          null,
+      `${adjudication.adjudication_id} decision or discovery binding is invalid`
+    );
+    const archivedPacket = readJsonAtCommit(
+      adjudication.decision_subject_sha,
+      target.packet_artifact_path
+    );
+    const creditedScope = new Set(
+      target.task_evidence_records
+        .filter(
+          evidence =>
+            evidence.outcome === "PASS" &&
+            evidence.credit_allowed === true &&
+            evidence.active === true &&
+            evidence.limitations.length === 0
+        )
+        .flatMap(evidence => evidence.scope_paths)
+    );
+    const defectPaths = uniquePaths(
+      (Array.isArray(archivedPacket.canonical_owner)
+        ? archivedPacket.canonical_owner
+        : [archivedPacket.canonical_owner]
+      )
+        .map(ref => splitRef(ref).path)
+        .filter(path => !creditedScope.has(path))
+    );
+    sameSet(
+      adjudication.defect_paths,
+      defectPaths,
+      `${adjudication.adjudication_id} recomputed defect paths`
+    );
+    assert(
+      defectPaths.length > 0 &&
+        adjudication.invalidated_credit_scope === contract.invalidated_credit_scope &&
+        typeof adjudication.producer_id === "string" &&
+        adjudication.producer_id.trim(),
+      `${adjudication.adjudication_id} does not prove a bounded no-credit defect`
+    );
+    const review = adjudication.independent_review;
+    sameSet(
+      Object.keys(review),
+      contract.independent_review_required_fields,
+      `${adjudication.adjudication_id} independent-review fields`
+    );
+    assert(
+      review.outcome === "PASS" &&
+        review.reviewed_target_record_sha256 === adjudication.target_record_canonical_sha256 &&
+        review.reviewed_decision_subject_sha === adjudication.decision_subject_sha &&
+        typeof review.reviewer_id === "string" &&
+        review.reviewer_id.trim() &&
+        review.reviewer_id !== adjudication.producer_id &&
+        typeof review.artifact_or_record === "string" &&
+        review.artifact_or_record.trim(),
+      `${adjudication.adjudication_id} lacks independent bounded fact review`
+    );
+  }
+  return targetIds;
+};
+
 const validateIntegrationRecordReceipt = ({
   record,
   programState,
   ledgerState,
   snapshotSha,
   expectedActivationSha = null,
+  requireCanonicalOwnerCoverage = true,
   label,
 }) => {
   for (const field of ledgerState.integration_contract.required_fields) {
@@ -3420,11 +3712,65 @@ const validateIntegrationRecordReceipt = ({
       : [archivedPacket.canonical_owner]
     ).map(ref => splitRef(ref).path),
   ]);
-  for (const path of requiredTaskScopePaths) {
+  const invalidatedPredecessorForSlice = (ledgerState.receipt_adjudication_records ?? [])
+    .map(adjudication =>
+      ledgerState.integration_records.find(
+        candidate => candidate.record_id === adjudication.target_record_id
+      )
+    )
+    .find(candidate => candidate?.slice_id === record.slice_id);
+  const isCurrentProgramRecoveryReceipt =
+    invalidatedPredecessorForSlice &&
+    !invalidatedReceiptIds.has(record.record_id) &&
+    record.program_approved_draft_sha === programState.program_approval.approved_draft_commit_sha;
+  if (isCurrentProgramRecoveryReceipt) {
     assert(
-      creditedTaskScopePaths.has(path),
-      `${label} credited task evidence does not cover ${path}`
+      recoveryReceiptSatisfiesFrozenScope({
+        candidate: record,
+        invalidatedTarget: invalidatedPredecessorForSlice,
+        programState,
+        ledgerState,
+        snapshotSha,
+      }),
+      `${label} does not reproduce the frozen predecessor verification scope`
     );
+    const invalidatedPacket = readJsonAtCommit(
+      snapshotSha,
+      invalidatedPredecessorForSlice.packet_artifact_path
+    );
+    const invalidatedOwnerPaths = (
+      Array.isArray(invalidatedPacket.canonical_owner)
+        ? invalidatedPacket.canonical_owner
+        : [invalidatedPacket.canonical_owner]
+    ).map(ref => splitRef(ref).path);
+    for (const path of [
+      ...invalidatedPredecessorForSlice.changed_paths,
+      ...invalidatedOwnerPaths,
+    ]) {
+      requiredTaskScopePaths.add(path);
+    }
+    sameSet(
+      (Array.isArray(archivedPacket.canonical_owner)
+        ? archivedPacket.canonical_owner
+        : [archivedPacket.canonical_owner]
+      ).map(ref => splitRef(ref).path),
+      invalidatedOwnerPaths,
+      `${label} recovery canonical-owner set`
+    );
+    assert(
+      archivedPacket.mode === "VERIFICATION" &&
+        record.task_id !== invalidatedPredecessorForSlice.task_id &&
+        record.packet_sha256 !== invalidatedPredecessorForSlice.packet_sha256,
+      `${label} is not a distinct verification recovery receipt`
+    );
+  }
+  if (requireCanonicalOwnerCoverage) {
+    for (const path of requiredTaskScopePaths) {
+      assert(
+        creditedTaskScopePaths.has(path),
+        `${label} credited task evidence does not cover ${path}`
+      );
+    }
   }
   const review = record.independent_review;
   for (const field of ledgerState.integration_contract.independent_review_required_fields) {
@@ -3443,6 +3789,8 @@ const validateIntegrationRecordReceipt = ({
   );
   return archivedPacket;
 };
+invalidatedReceiptIds = validateReceiptAdjudications(validationHeadSha);
+
 const validateIntegratedMainHistory = () => {
   const approvedDraft = program.program_approval.approved_draft_commit_sha;
   const currentApprovalRecords = [];
@@ -3472,14 +3820,16 @@ const validateIntegratedMainHistory = () => {
       `${record.record_id} reuses a packet artifact`
     );
     packetArtifacts.add(record.packet_artifact_path);
+    const invalidated = invalidatedReceiptIds.has(record.record_id);
     validateIntegrationRecordReceipt({
       record,
       programState: program,
       ledgerState: ledger,
       snapshotSha: "HEAD",
+      requireCanonicalOwnerCoverage: !invalidated,
       label: record.record_id,
     });
-    currentApprovalRecords.push(record);
+    if (!invalidated) currentApprovalRecords.push(record);
   }
   const attemptPacketArtifacts = new Set();
   for (const attempt of ledger.implementation_attempt_records) {
@@ -3683,20 +4033,28 @@ if (profile === "draft") {
   );
   assert(cards.length === 101, "Draft profile must contain exactly 101 cards");
   assert(
-    ledger.integration_records.length === 1 &&
-      ledger.integration_records[0].record_id === "W0-S1-INTEGRATION-001" &&
-      ledger.integration_records[0].program_approved_draft_sha === PREDECESSOR_DRAFT_SHA &&
-      ledger.implementation_attempt_records.length === 1 &&
-      ledger.implementation_attempt_records[0].attempt_id === "W0-S1-ATTEMPT-001",
-    "Successor draft did not preserve the exact authorized predecessor W0-S1 receipt"
+    ledger.integration_records.length === 3 &&
+      ledger.implementation_attempt_records.length === 3 &&
+      canonicalDigest(ledger.integration_records) ===
+        canonicalDigest(predecessorLedger.integration_records) &&
+      canonicalDigest(ledger.implementation_attempt_records) ===
+        canonicalDigest(predecessorLedger.implementation_attempt_records),
+    "Successor draft did not preserve the exact predecessor receipt history"
   );
-  validateIntegrationRecordReceipt({
-    record: ledger.integration_records[0],
-    programState: program,
-    ledgerState: ledger,
-    snapshotSha: validationHeadSha,
-    label: "successor predecessor W0-S1 receipt",
-  });
+  for (const record of ledger.integration_records) {
+    validateIntegrationRecordReceipt({
+      record,
+      programState: program,
+      ledgerState: ledger,
+      snapshotSha: validationHeadSha,
+      requireCanonicalOwnerCoverage: !invalidatedReceiptIds.has(record.record_id),
+      label: `successor predecessor ${record.record_id}`,
+    });
+  }
+  assert(
+    invalidatedReceiptIds.size === 1 && invalidatedReceiptIds.has(INVALID_W0_S3_RECORD_ID),
+    "Successor draft did not explicitly invalidate the defective W0-S3 receipt"
+  );
   for (const card of baselineCards) {
     const fact = baselineFactById.get(card.card_id);
     const { fact_sha256: _factDigest, ...factWithoutDigest } = fact;
@@ -3778,19 +4136,26 @@ if (profile === "draft") {
   );
   assert(cards.length === 101, "Activation may not add/delete baseline cards");
   assert(
-    ledger.integration_records.length === 1 &&
-      ledger.integration_records[0].record_id === "W0-S1-INTEGRATION-001" &&
-      ledger.implementation_attempt_records.length === 1 &&
-      ledger.implementation_attempt_records[0].attempt_id === "W0-S1-ATTEMPT-001",
-    "Successor activation changed the authorized predecessor W0-S1 receipt"
+    ledger.integration_records.length === 3 &&
+      ledger.implementation_attempt_records.length === 3 &&
+      canonicalDigest(ledger.integration_records) ===
+        canonicalDigest(predecessorLedger.integration_records) &&
+      canonicalDigest(ledger.implementation_attempt_records) ===
+        canonicalDigest(predecessorLedger.implementation_attempt_records) &&
+      invalidatedReceiptIds.size === 1 &&
+      invalidatedReceiptIds.has(INVALID_W0_S3_RECORD_ID),
+    "Successor activation changed predecessor receipt or invalidation history"
   );
-  validateIntegrationRecordReceipt({
-    record: ledger.integration_records[0],
-    programState: program,
-    ledgerState: ledger,
-    snapshotSha: validationHeadSha,
-    label: "activated predecessor W0-S1 receipt",
-  });
+  for (const record of ledger.integration_records) {
+    validateIntegrationRecordReceipt({
+      record,
+      programState: program,
+      ledgerState: ledger,
+      snapshotSha: validationHeadSha,
+      requireCanonicalOwnerCoverage: !invalidatedReceiptIds.has(record.record_id),
+      label: `activated predecessor ${record.record_id}`,
+    });
+  }
   for (const card of baselineCards) {
     const fact = baselineFactById.get(card.card_id);
     const { fact_sha256: _factDigest, ...factWithoutDigest } = fact;
@@ -3967,7 +4332,7 @@ if (profile === "draft") {
       normalFeatureGate.status === "BLOCKED" &&
       normalFeatureGate.reopened === false &&
       normalFeatureGate.evidence_records.length === 0,
-    "Program schema 1.0.2 cannot execute W5 or reopen normal feature work"
+    "Program schema 1.0.3 cannot execute W5 or reopen normal feature work"
   );
   const scopedOngoingValidation =
     Boolean(args.slice) || Boolean(args["task-packet"]) || Boolean(args["execution-baseline"]);
@@ -4085,6 +4450,7 @@ const hasReconciledLivingEvidence =
   ledger.integration_records.length > 0 ||
   ledger.implementation_attempt_records.length > 0 ||
   ledger.architecture_review_records.length > 0 ||
+  ledger.receipt_adjudication_records.length > 0 ||
   ledger.new_card_creation_records.length > 0 ||
   boundedFeatureGate.evidence_records.length > 0 ||
   boundedFeatureGate.eligible_domains.length > 0 ||
@@ -4108,6 +4474,7 @@ if (hasReconciledLivingEvidence) {
     ...program.gates
       .filter(gate => gate.id !== "G-PROGRAM-ACTIVATION")
       .flatMap(gate => gate.evidence_records.map(record => record.subject_sha)),
+    ...ledger.receipt_adjudication_records.map(record => record.decision_subject_sha),
     ...boundedFeatureGate.evidence_records.map(record => record.subject_sha),
     ...normalFeatureGate.evidence_records.map(record => record.subject_sha),
     ...boundedFeatureGate.eligible_domains.map(domain => domain.subject_sha),

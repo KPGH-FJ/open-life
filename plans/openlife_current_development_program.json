@@ -1,9 +1,9 @@
 {
-  "schema_version": "1.0.2",
-  "program_id": "openlife-current-development-program-v1.0.2-validator-recovery-20260727",
-  "generated_at": "2026-07-27T10:05:00Z",
-  "status": "APPROVED_FOR_EXECUTION",
-  "execution_authorized": true,
+  "schema_version": "1.0.3",
+  "program_id": "openlife-current-development-program-v1.0.3-receipt-recovery-20260728",
+  "generated_at": "2026-07-28T00:00:00Z",
+  "status": "DRAFT_AWAITING_USER_APPROVAL",
+  "execution_authorized": false,
   "authority": {
     "scope": "CURRENT_TASK_ORDER_AND_EXECUTION_GOVERNANCE_ONLY",
     "subordinate_to_phase7": true,
@@ -66,21 +66,31 @@
     "future_execution_head_policy": "Every dispatched slice must record a real execution baseline SHA that descends from this review baseline."
   },
   "predecessor_program": {
-    "program_id": "openlife-current-development-program-v1.0.1-20260727",
-    "schema_version": "1.0.1",
-    "approved_draft_commit_sha": "66e5f57ecfa86e5a44b70229a06ff77d8d473343",
-    "activation_commit_sha": "93f7ccc176ebd3dab0557b1dc157008318742bee",
-    "handoff_main_sha": "410bd26aab03daa58451f871f96b002206518d7c",
+    "program_id": "openlife-current-development-program-v1.0.2-validator-recovery-20260727",
+    "schema_version": "1.0.2",
+    "approved_draft_commit_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
+    "activation_commit_sha": "3d17c88b5b81b646cd23c8f2b185eb505ea0dba6",
+    "handoff_main_sha": "8a607bb4f9f392f573c98fa74e8c575d6c2c014d",
     "transition_reason": [
-      "The v1.0.1 ongoing validator double-counted clean PR merge commits by replaying only their first-parent diff.",
-      "The false RED prevented the already authorized and independently reviewed W0-S1 receipt from being reconciled.",
-      "The user explicitly approved a narrowly named Validator Recovery successor; no Wave, product, closure or external-action authority is expanded."
+      "W0-S3-INTEGRATION-001 omitted three canonical-owner paths from credited task scope and therefore fails the approved v1.0.2 receipt contract on clean main.",
+      "The raw integration record and attempt are append-only historical facts, so correcting them in place would destroy the audit trail.",
+      "This successor adds a narrow append-only invalidation-and-fresh-recovery channel; it grants no product, closure or external-action authority before exact-draft approval."
     ],
-    "retained_credit": "AUTHORIZED_PREDECESSOR_W0_S1_TASK_EVIDENCE_ONLY",
+    "retained_credit": "AUTHORIZED_PREDECESSOR_W0_S1_AND_W0_S2_TASK_EVIDENCE_ONLY",
     "closure_credit_true": 0,
-    "integration_records": 0,
-    "tracked_task_packet_artifacts": 1,
-    "tracked_attempt_artifacts": 1
+    "integration_records": 3,
+    "tracked_task_packet_artifacts": 3,
+    "tracked_attempt_artifacts": 3,
+    "retained_effective_receipts": [
+      {
+        "record_id": "W0-S1-INTEGRATION-001",
+        "record_canonical_sha256": "85aae971d82c2d20ef9080b61bc09fac869a1217b08e517904b5aeaa9be11363"
+      },
+      {
+        "record_id": "W0-S2-INTEGRATION-001",
+        "record_canonical_sha256": "dbb42bbdbb8bf8ca0596d86042a58c314f8e7296ac63c063ea3b2d3e0a108026"
+      }
+    ]
   },
   "source_inputs": [
     {
@@ -191,25 +201,22 @@
     "evidence_support": "STRONG_FOR_CURRENT_DIRECTION_WITH_EXPLICIT_RECONSIDERATION_CRITERIA"
   },
   "program_approval": {
-    "status": "APPROVED_BY_USER",
-    "execution_authority_granted": true,
+    "status": "PENDING_USER_APPROVAL",
+    "execution_authority_granted": false,
     "program_author_id": "/root",
-    "approved_program_schema_version": "1.0.2",
-    "approved_draft_commit_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
-    "approved_by": "USER",
-    "approved_at": "2026-07-27T15:55:04Z",
-    "approval_record": "codex-thread:user-approved-exact-draft:2fd9df02e906f438bb4858422751f7d0cd1d4030",
+    "approved_program_schema_version": "1.0.3",
+    "approved_draft_commit_sha": null,
+    "approved_by": null,
+    "approved_at": null,
+    "approval_record": null,
     "github_formal_approval_credit": false,
     "note": "Creating or independently reviewing the Program does not authorize implementation. The user must explicitly approve execution.",
     "independent_challenge": {
-      "status": "PASS",
-      "reviewed_head_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
-      "reviewer_ids": [
-        "/root/reconciliation_receipt_scope_audit",
-        "/root/post_unknown_green_static_review"
-      ],
-      "outcome": "PASS",
-      "artifact_or_record": "codex-agent-challenge:exact-sha:2fd9df02e906f438bb4858422751f7d0cd1d4030",
+      "status": "PENDING_EXACT_DRAFT_REVIEW",
+      "reviewed_head_sha": null,
+      "reviewer_ids": [],
+      "outcome": "NOT_RUN",
+      "artifact_or_record": null,
       "blocking_findings": [],
       "github_formal_approval_credit": false,
       "invalidation_rule": "Any substantive Program, ledger, authority or validator change requires a new bound challenge."
@@ -321,45 +328,11 @@
   "gates": [
     {
       "id": "G-PROGRAM-ACTIVATION",
-      "status": "PASS",
+      "status": "NOT_RUN",
       "fail_closed": true,
       "required_guard_ids": [],
       "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY"],
-      "evidence_records": [
-        {
-          "subject_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
-          "artifact_or_record": "codex-thread:user-approved-exact-draft:2fd9df02e906f438bb4858422751f7d0cd1d4030",
-          "record_id": "PROGRAM-V1.0.2-ACTIVATION-USER-APPROVAL",
-          "scope_id": "G-PROGRAM-ACTIVATION",
-          "scope_paths": ["plans/openlife_current_development_program.json"],
-          "guard_ids": [],
-          "dimensions": ["USER_PROGRAM_APPROVAL"],
-          "outcome": "PASS",
-          "limitations": [],
-          "producer_id": "USER",
-          "reviewer_id": "/root/openlife-program-integrator",
-          "credit_allowed": true,
-          "active": true
-        },
-        {
-          "subject_sha": "2fd9df02e906f438bb4858422751f7d0cd1d4030",
-          "artifact_or_record": "codex-agent-challenge:reconciliation_receipt_scope_audit+post_unknown_green_static_review",
-          "record_id": "PROGRAM-V1.0.2-ACTIVATION-TRACKED-AUTHORITY",
-          "scope_id": "G-PROGRAM-ACTIVATION",
-          "scope_paths": [
-            "plans/openlife_current_development_program.json",
-            "plans/openlife_problem_ledger.json"
-          ],
-          "guard_ids": [],
-          "dimensions": ["TRACKED_AUTHORITY"],
-          "outcome": "PASS",
-          "limitations": [],
-          "producer_id": "/root/openlife-program-integrator",
-          "reviewer_id": "/root/reconciliation_receipt_scope_audit",
-          "credit_allowed": true,
-          "active": true
-        }
-      ],
+      "evidence_records": [],
       "criteria": [
         "The draft Program validator passes.",
         "The disposable Git-fixture validator self-test is run and reviewed against the exact approved draft before activation; it is a required external check, not a self-attested machine-credit dimension.",
@@ -572,7 +545,7 @@
       "order": 0,
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
-      "status": "READY",
+      "status": "PLANNED_NOT_AUTHORIZED",
       "refinement_level": "CURRENT_SLICE_PREPARATION_REQUIRED",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],
@@ -628,7 +601,7 @@
             "packet_sha256": null,
             "packet_payload_sha256": null,
             "packet_freeze_review": null,
-            "program_schema_version": "1.0.2",
+            "program_schema_version": "1.0.3",
             "program_activation_sha": null,
             "mode": "IMPLEMENTATION",
             "wave_id": "WAVE-0",
@@ -778,7 +751,7 @@
           "order": 2,
           "predecessor_slice_ids": ["W0-S1"],
           "name": "Owner-Lease Evidence Determinism",
-          "status": "PLANNED_NOT_AUTHORIZED",
+          "status": "PREDECESSOR_TASK_EVIDENCE_INTEGRATED_NO_CLOSURE",
           "finding_ids": ["R4-FLAKY-001"],
           "governance_task": false,
           "risk_class": "MEDIUM",
@@ -793,28 +766,33 @@
           ],
           "red_contract": ["W0-LEASE-FORKEXEC"],
           "exit": "Focused 20 repetitions and two serial full-workspace repetitions have no unexplained variation; otherwise the blocker remains.",
-          "packet_status": "TASK_PACKET_PREPARATION_REQUIRED"
+          "packet_status": "PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE"
         },
         {
           "id": "W0-S3",
           "order": 3,
           "predecessor_slice_ids": ["W0-S2"],
-          "name": "Native External-State Isolation",
-          "status": "PLANNED_NOT_AUTHORIZED",
+          "name": "Native External-State Receipt Recovery",
+          "status": "PREDECESSOR_RECEIPT_INVALIDATED_RECOVERY_REQUIRED",
           "finding_ids": ["BR4-D064"],
           "governance_task": false,
           "root_cause_cluster_id": "CQ-C08",
           "required_guard_ids": ["CQ-G11", "CQ-G13"],
           "prerequisite_for_card_ids": ["BR4-D064"],
-          "objective": "Inventory declared filesystem, Keychain, lock, FD and socket effects and provide an isolated secret-store seam without claiming D064 closure.",
-          "exit_contract_id": "W0-S3-EXTERNAL-STATE-ISOLATION",
-          "red_contract": ["W0-NATIVE-UNDECLARED-EXTERNAL-STATE"],
-          "exit": "Allowlist-external changes fail; inventory-unsupported surfaces remain UNKNOWN; the retained Keychain secret is not deleted.",
-          "packet_status": "TASK_PACKET_PREPARATION_REQUIRED",
+          "objective": "Re-run the frozen native external-state proof against the full canonical-owner scope and append a distinct v1.0.3 verification receipt without claiming D064 closure.",
+          "exit_contract_id": "W0-S3-RECEIPT-RECOVERY",
+          "red_contract": [
+            "W0-NATIVE-UNDECLARED-EXTERNAL-STATE",
+            "W0-NATIVE-DATA-DIR-DOES-NOT-ISOLATE-KEYCHAIN"
+          ],
+          "exit": "The invalid predecessor receipt remains immutable and no-credit; a distinct current-SHA verification receipt covers every changed and canonical-owner path, passes independent review, and grants zero closure credit.",
+          "packet_status": "RECOVERY_VERIFICATION_PACKET_PREPARATION_REQUIRED",
           "evidence_prerequisite_only": true,
           "risk_class": "HIGH",
           "non_goals": [
             "Do not claim BR4-D064 remediation or closure.",
+            "The recovery packet is VERIFICATION-only and may not edit product behavior; if it proves a product defect, this Program stops and any product fix requires a separately reviewed and user-approved successor.",
+            "Do not mutate W0-S3-INTEGRATION-001 or W0-S3-ATTEMPT-001 in place.",
             "Do not migrate, rotate or delete the retained Keychain secret.",
             "Do not expand into provider or product-data trials."
           ]
@@ -961,7 +939,7 @@
         "Read-only preparation of a successor Program that separately scopes native Tauri, external provider/non-loopback/MCP, proposal/permission and durable-write trials."
       ],
       "prohibited_work": [
-        "Dispatching any W5 implementation or trial packet under Program schema 1.0.2.",
+        "Dispatching any W5 implementation or trial packet under Program schema 1.0.3.",
         "Performing external-provider, non-loopback, live MCP/A2A or real durable-write actions under this Program.",
         "Transferring browser-shell credit to native/external-live.",
         "Calling Phase7 green while any required scenario is BLOCKED, FAIL, NOT_RUN or UNKNOWN."
@@ -1379,14 +1357,14 @@
   ],
   "program_activation": {
     "stage_id": "PROGRAM-BOOTSTRAP",
-    "status": "ACTIVE",
+    "status": "DRAFT_VALIDATED_AWAITING_CHALLENGE_AND_USER_APPROVAL",
     "occurs_before_wave_id": "WAVE-0",
     "ordered_steps": [
       "Draft Program, ledger, active authority, validator and mutation self-test agree.",
       "Independent challenge is bound to the exact frozen draft commit.",
       "The user explicitly approves that exact reviewed draft.",
       "An activation change records the approved draft commit and sets execution_authorized=true.",
-      "Activation validation passes before W0-S2 packet preparation and dispatch."
+      "Activation validation passes before W0-S3 receipt-recovery packet preparation and dispatch."
     ],
     "activation_is_not_a_wave_slice": true,
     "activation_commit_derivation": "For the approved draft, the first commit on the ancestry path to the current HEAD must be its single-parent direct child, change only Program JSON and ledger JSON, and pass the activation-only overlay contract. Ongoing and task-packet validation replays that commit instead of trusting current status fields."
