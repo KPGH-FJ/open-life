@@ -1621,7 +1621,12 @@ fn stage_legacy_scheduled_task_review_proposals(
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
-    bootstrap_with_secret_store(data_dir, &StartupKeyringSecretStore::default())
+    let secret_store = StartupKeyringSecretStore::default();
+    match secret_store.service_name() {
+        Ok(service) => log::info!("[startup] OS credential service selected: {service}"),
+        Err(error) => log::error!("[startup] OS credential service selection blocked: {error}"),
+    }
+    bootstrap_with_secret_store(data_dir, &secret_store)
 }
 
 #[cfg(test)]

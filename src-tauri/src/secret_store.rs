@@ -5,9 +5,16 @@ use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAud
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const SERVICE: &str = "com.openlife.desktop";
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+const NATIVE_ISOLATION_TRIAL_ENV: &str = "OPENLIFE_NATIVE_TAURI_ISOLATION_TRIAL";
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+const KEYCHAIN_SERVICE_OVERRIDE_ENV: &str = "OPENLIFE_KEYCHAIN_SERVICE_OVERRIDE";
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+const TRIAL_KEYCHAIN_SERVICE_PREFIX: &str = "com.openlife.desktop.trial.";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
 const SEARCH_ACCOUNT: &str = "search-provider-api-key";
 const MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT: &str = "main-chat-event-integrity-key-v1";
@@ -16,6 +23,7 @@ const TASK_STORE_AUTHORITY_ACCOUNT: &str = "task-store-authority-key-v1";
 const AGENT_RUN_RECEIPT_ACCOUNT: &str = "agent-run-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
 const PROVIDER_SECRET_ENVELOPE_VERSION: &str = "openlife_provider_secret_v1";
+static SELECTED_KEYRING_SERVICE: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 
 pub(crate) const PROVIDER_KEY_REF: &str = "keychain://com.openlife.desktop/provider-api-key";
 pub(crate) const SEARCH_KEY_REF: &str = "keychain://com.openlife.desktop/search-provider-api-key";
@@ -140,12 +148,28 @@ const STARTUP_SECRET_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// affected capabilities instead of preventing the product window from ever
 /// appearing. Settings keeps using `KeyringSecretStore` directly so explicit
 /// user-initiated credential changes may still use the platform UI.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct StartupKeyringSecretStore {
     timed_out: AtomicBool,
+    service: std::result::Result<String, String>,
+}
+
+impl Default for StartupKeyringSecretStore {
+    fn default() -> Self {
+        Self {
+            timed_out: AtomicBool::new(false),
+            service: selected_keyring_service().map_err(|error| error.to_string()),
+        }
+    }
 }
 
 impl StartupKeyringSecretStore {
+    pub(crate) fn service_name(&self) -> Result<&str> {
+        self.service
+            .as_deref()
+            .map_err(|error| anyhow::anyhow!(error.clone()))
+    }
+
     fn run<T, F>(&self, operation_name: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -207,7 +231,7 @@ fn disable_startup_keyring_interaction(
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
+fn keyring_entry_for_service(service: &str, secret_ref: &str) -> Result<keyring::Entry> {
     let account = match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
@@ -224,7 +248,89 @@ fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
         }
         _ => anyhow::bail!("unsupported OpenLife secret reference"),
     };
-    keyring::Entry::new(SERVICE, &account).context("initialize OS credential entry")
+    keyring::Entry::new(service, &account).context("initialize OS credential entry")
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn validate_trial_keychain_service(service: &str) -> Result<()> {
+    let suffix = service
+        .strip_prefix(TRIAL_KEYCHAIN_SERVICE_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("trial Keychain service has an invalid prefix"))?;
+    if suffix.len() < 32
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("trial Keychain service suffix must be at least 32 lowercase hex characters");
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn optional_utf8_env_value(
+    name: &str,
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("{name} must contain valid UTF-8"))
+        })
+        .transpose()
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn selected_keyring_service_from_values(
+    trial_marker: Option<&str>,
+    service_override: Option<&str>,
+) -> Result<String> {
+    match (trial_marker, service_override) {
+        (None, None) => Ok(SERVICE.to_string()),
+        (Some("1"), Some(service)) => {
+            validate_trial_keychain_service(service)?;
+            eprintln!("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE={service}");
+            Ok(service.to_string())
+        }
+        (Some("1"), None) => {
+            anyhow::bail!("native isolation trial requires an explicit Keychain service")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("Keychain service override requires the native isolation trial marker")
+        }
+        (Some(_), _) => anyhow::bail!("native isolation trial marker must equal 1"),
+    }
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn compute_selected_keyring_service() -> Result<String> {
+    let trial_marker = optional_utf8_env_value(
+        NATIVE_ISOLATION_TRIAL_ENV,
+        std::env::var_os(NATIVE_ISOLATION_TRIAL_ENV),
+    )?;
+    let service_override = optional_utf8_env_value(
+        KEYCHAIN_SERVICE_OVERRIDE_ENV,
+        std::env::var_os(KEYCHAIN_SERVICE_OVERRIDE_ENV),
+    )?;
+    selected_keyring_service_from_values(trial_marker.as_deref(), service_override.as_deref())
+}
+
+#[cfg(not(all(feature = "dev-extensions", debug_assertions)))]
+fn compute_selected_keyring_service() -> Result<String> {
+    Ok(SERVICE.to_string())
+}
+
+pub(crate) fn selected_keyring_service() -> Result<String> {
+    SELECTED_KEYRING_SERVICE
+        .get_or_init(|| compute_selected_keyring_service().map_err(|error| error.to_string()))
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
+    let service = selected_keyring_service()?;
+    keyring_entry_for_service(&service, secret_ref)
 }
 
 /// Hydrate one purpose-isolated 256-bit integrity key. Missing material is
@@ -415,21 +521,58 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl SecretStore for StartupKeyringSecretStore {
     fn get(&self, secret_ref: &str) -> Result<Option<String>> {
         let secret_ref = secret_ref.to_string();
-        self.run("read", move || KeyringSecretStore.get(&secret_ref))
+        let service = self.service_name()?.to_string();
+        self.run("read", move || {
+            match keyring_entry_for_service(&service, &secret_ref)?.get_password() {
+                Ok(value) => Ok(Some(value)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(error).context("read secret from OS credential store"),
+            }
+        })
     }
 
     fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
         let secret_ref = secret_ref.to_string();
         let value = value.to_string();
-        self.run("write", move || KeyringSecretStore.set(&secret_ref, &value))
+        let service = self.service_name()?.to_string();
+        self.run("write", move || {
+            if value.trim().is_empty() {
+                anyhow::bail!("refusing to store an empty secret");
+            }
+            keyring_entry_for_service(&service, &secret_ref)?
+                .set_password(&value)
+                .context("write secret to OS credential store")
+        })
     }
 
     fn delete(&self, secret_ref: &str) -> Result<()> {
         let secret_ref = secret_ref.to_string();
-        self.run("delete", move || KeyringSecretStore.delete(&secret_ref))
+        let service = self.service_name()?.to_string();
+        self.run("delete", move || {
+            match keyring_entry_for_service(&service, &secret_ref)?.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(error).context("delete secret from OS credential store"),
+            }
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+impl SecretStore for StartupKeyringSecretStore {
+    fn get(&self, _secret_ref: &str) -> Result<Option<String>> {
+        anyhow::bail!("OS credential storage is unsupported on this platform")
+    }
+
+    fn set(&self, _secret_ref: &str, _value: &str) -> Result<()> {
+        anyhow::bail!("OS credential storage is unsupported on this platform")
+    }
+
+    fn delete(&self, _secret_ref: &str) -> Result<()> {
+        anyhow::bail!("OS credential storage is unsupported on this platform")
     }
 }
 
@@ -805,6 +948,70 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    #[cfg(all(feature = "dev-extensions", debug_assertions))]
+    #[test]
+    fn trial_keychain_service_accepts_only_long_lowercase_hex_suffixes() {
+        for valid in [
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef00",
+        ] {
+            assert!(validate_trial_keychain_service(valid).is_ok());
+        }
+
+        for invalid in [
+            "com.openlife.desktop",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcde",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdeF",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdeg",
+            "com.openlife.desktop.trial.0123456789abcdef-123456789abcdef",
+        ] {
+            assert!(
+                validate_trial_keychain_service(invalid).is_err(),
+                "accepted invalid trial service: {invalid}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "dev-extensions", debug_assertions))]
+    #[test]
+    fn trial_keychain_service_selection_requires_both_exact_opt_ins() {
+        let valid = "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            selected_keyring_service_from_values(None, None).unwrap(),
+            SERVICE
+        );
+        assert_eq!(
+            selected_keyring_service_from_values(Some("1"), Some(valid)).unwrap(),
+            valid
+        );
+        assert!(selected_keyring_service_from_values(Some("1"), None).is_err());
+        assert!(selected_keyring_service_from_values(None, Some(valid)).is_err());
+        assert!(selected_keyring_service_from_values(Some("true"), Some(valid)).is_err());
+        assert!(selected_keyring_service_from_values(
+            Some("1"),
+            Some("com.openlife.desktop.trial.not-hex")
+        )
+        .is_err());
+    }
+
+    #[cfg(all(feature = "dev-extensions", debug_assertions, unix))]
+    #[test]
+    fn trial_keychain_service_rejects_non_utf8_environment_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        assert!(optional_utf8_env_value(
+            KEYCHAIN_SERVICE_OVERRIDE_ENV,
+            Some(std::ffi::OsString::from_vec(vec![0xff]))
+        )
+        .is_err());
+    }
+
+    #[cfg(not(all(feature = "dev-extensions", debug_assertions)))]
+    #[test]
+    fn release_keychain_service_is_fixed_to_product_default() {
+        assert_eq!(selected_keyring_service().unwrap(), SERVICE);
+    }
 
     struct KeychainCleanup<'a> {
         store: &'a dyn SecretStore,

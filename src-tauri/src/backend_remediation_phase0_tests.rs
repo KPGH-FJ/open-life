@@ -722,7 +722,7 @@ fn backend_remediation_phase0_release_package_owns_no_a2a_binary_target() {
 #[test]
 fn backend_remediation_phase0_startup_keyring_is_bounded_and_noninteractive() {
     let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
-    assert!(bootstrap.contains("StartupKeyringSecretStore::default()"));
+    assert!(bootstrap.contains("let secret_store = StartupKeyringSecretStore::default();"));
     assert!(!bootstrap.contains("bootstrap_with_secret_store(data_dir, &KeyringSecretStore)"));
 
     let secret_store = read_repo_file("src-tauri/src/secret_store.rs");
@@ -730,6 +730,41 @@ fn backend_remediation_phase0_startup_keyring_is_bounded_and_noninteractive() {
     assert!(secret_store.contains("recv_timeout(timeout)"));
     assert!(secret_store.contains("disable_user_interaction()"));
     assert!(secret_store.contains("prior bounded timeout"));
+}
+
+#[test]
+fn native_isolation_keychain_override_is_debug_dev_only_and_fail_closed() {
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    assert!(lib.contains(
+        "#[cfg(all(feature = \"dev-extensions\", not(debug_assertions)))]\ncompile_error!"
+    ));
+
+    let secret_store = read_repo_file("src-tauri/src/secret_store.rs");
+    assert!(secret_store.contains(
+        "#[cfg(all(feature = \"dev-extensions\", debug_assertions))]\nconst TRIAL_KEYCHAIN_SERVICE_PREFIX"
+    ));
+    assert!(
+        secret_store.contains("#[cfg(not(all(feature = \"dev-extensions\", debug_assertions)))]")
+    );
+    assert!(secret_store.contains("native isolation trial requires an explicit Keychain service"));
+    assert!(secret_store
+        .contains("Keychain service override requires the native isolation trial marker"));
+    assert!(secret_store.contains("suffix must be at least 32 lowercase hex characters"));
+    assert_eq!(
+        secret_store
+            .matches("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE={service}")
+            .count(),
+        1
+    );
+    assert!(secret_store.contains("keyring_entry_for_service(&service, secret_ref)"));
+    assert!(secret_store.contains("static SELECTED_KEYRING_SERVICE: OnceLock"));
+    assert_eq!(secret_store.matches("keyring::Entry::new(").count(), 1);
+    assert_eq!(
+        secret_store
+            .matches("OPENLIFE_KEYCHAIN_SERVICE_OVERRIDE")
+            .count(),
+        1
+    );
 }
 
 #[cfg(not(feature = "dev-extensions"))]
