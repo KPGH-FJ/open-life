@@ -1,6 +1,6 @@
-# OpenLife Current Development Program v1.0.2 — Validator Recovery
+# OpenLife Current Development Program v1.0.3 — Receipt Recovery and Wave-0 Closure
 
-> Date: 2026-07-27
+> Date: 2026-07-28
 > Initial publication state: `DRAFT_AWAITING_USER_APPROVAL`
 > Live status and execution authority: read
 > `plans/openlife_current_development_program.json`; this Markdown never grants
@@ -34,13 +34,15 @@ The V4 commit facts remain historical evidence: 13 unique commits were
 classified as 4 integrated, 8 superseded, 1 evidence-only, and 0
 still-needed-port. That classification grants **no finding closure**.
 
-This v1.0.2 successor is a narrow validator-recovery release. It preserves the
-v1.0.1 Wave order, findings, product boundaries, no-external-action defaults,
-and closure policy. It changes only merge-history replay and predecessor
-receipt carry-forward so the already authorized W0-S1 task can be reconciled
-without inventing a receipt for Program activation. A merge contributes only
-paths whose result differs from every parent; side-branch commits remain
-individually receipt-covered. R3-N010, R3-N020 and R4-FLAKY-001 remain open.
+This v1.0.3 successor is a narrow receipt-recovery release. It preserves the
+v1.0.2 Wave order, findings, product boundaries, no-external-action defaults,
+and closure policy. `W0-S3-INTEGRATION-001` remains immutable historical
+evidence, but loses task and integrated-main credit because its credited scope
+omitted three frozen canonical-owner paths. One append-only, independently
+reviewed invalidation records that defect. Recovery requires a distinct
+v1.0.3 `VERIFICATION` packet, attempt and receipt with fresh current-SHA
+evidence; no evidence may be poured back into the old range. BR4-D064,
+R3-N010, R3-N020 and R4-FLAKY-001 remain open.
 
 ## 2. Authority And Approval Boundary
 
@@ -65,7 +67,8 @@ The initial publication state is deliberately fail closed:
 
 - Program status: `DRAFT_AWAITING_USER_APPROVAL`
 - execution authorized: `false`
-- every Wave and slice: `PLANNED_NOT_AUTHORIZED`
+- every Wave: `PLANNED_NOT_AUTHORIZED`; retained predecessor slices are
+  non-dispatchable historical state
 - bounded feature eligibility: `false`
 - normal feature development reopened: `false`
 
@@ -84,7 +87,8 @@ Program activation is a **pre-Wave transition**, not W0-S4:
 3. the user explicitly approves that reviewed version;
 4. an activation change records the approved draft commit and sets
    `execution_authorized=true`;
-5. the activation validator passes before W0-S2 packet preparation and dispatch.
+5. the activation validator passes before W0-S3 receipt-recovery packet
+   preparation and dispatch.
 
 Later validation does not trust a copied `execution_authorized=true` field. It
 replays the first commit after the approved draft and requires that commit to
@@ -219,8 +223,7 @@ The machine Program retains the complete W0-S1 task-packet blueprint as
 historical dispatch evidence. Its independently reviewed predecessor receipt
 and immutable successful-attempt record are carried into this successor, but
 they grant no finding closure and cannot be dispatched again. The live status
-is `PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE`; the next executable slice
-after successor activation is W0-S2.
+is `PREDECESSOR_RECEIPT_RETAINED_NOT_DISPATCHABLE`.
 
 ### W0-S2 — Owner-Lease Evidence Determinism
 
@@ -237,22 +240,27 @@ Objective:
 
 Any unexplained variation keeps the gate blocked. This slice may diagnose a
 product root cause, but cannot silently expand into a product fix.
+The v1.0.2 W0-S2 receipt is retained as task evidence without finding closure;
+this successor does not rerun or edit it before W0-S3 receipt recovery.
 
-### W0-S3 — Native External-State Isolation
+### W0-S3 — Native External-State Receipt Recovery
 
-This is a high-risk evidence prerequisite linked to `BR4-D064`, not a second
-assignment, root fix, or P0 closure claim.
+This is a high-risk receipt recovery linked to `BR4-D064`, not a second
+implementation, root fix, or P0 closure claim.
 
 Objective:
 
-- inventory before/after filesystem data-dir, Keychain service/account prefix,
-  locks, file descriptors, and sockets;
-- create an isolated secret-store seam suitable for native verification;
-- fail on changes outside the declared allowlist and leave unobserved surfaces
-  `UNKNOWN`.
+- keep the old W0-S3 receipt and attempt byte-for-byte immutable;
+- run a new v1.0.3 `VERIFICATION` packet against the current SHA;
+- cover the three historical changed paths and the three frozen canonical-owner
+  paths in the fresh task evidence;
+- append a distinct receipt only after same-head independent review.
 
 The retained Keychain secret must not be deleted without separate explicit user
 authority. External providers and real product durable writes remain disabled.
+If verification finds a product defect, recovery stays RED and this Program
+stops. Any product fix then requires a separately reviewed and user-approved
+successor; it cannot be smuggled into receipt recovery.
 
 ### W0-S4 — Wave-0 Ledger Reconciliation
 
@@ -265,7 +273,9 @@ Objective:
 - confirm Program, ledger, and active authority still agree.
 
 Program activation has already occurred before W0. W0-S4 cannot retroactively
-authorize prior work; it closes the Wave's evidence ledger.
+authorize prior work, treat invalidation as recovery, or use the old W0-S3
+receipt; it closes the Wave's evidence ledger only after one fresh effective
+W0-S3 receipt exists.
 
 ## 6. Later Wave Outcomes
 
@@ -498,10 +508,11 @@ It also rechecks the immutable Phase7 expected-absent path registry and requires
 the canonical `single_system` guard command; a packet cannot narrow those
 global protections by reporting a smaller local absence list.
 
-The retained W0-S1 receipt is replayed against the v1.0.1 dispatch Program and
-its digest-addressed historical packet; the v1.0.2 inline blueprint is not a
-new W0-S1 dispatch authority. W0-S2 is the next packet-preparation subject.
-W0-S2/W0-S3 and later-Wave slices use the same reviewed freeze contract after
+The retained W0-S1 and W0-S2 receipts are replayed against their original
+dispatch Programs and digest-addressed historical packets. The invalidated
+W0-S3 receipt remains in raw history but is excluded from effective credit.
+W0-S3 receipt recovery is the next packet-preparation subject. Its fresh
+verification and later-Wave slices use the same reviewed freeze contract after
 their Wave preparation: all finding
 IDs must currently belong to that ready/in-progress Wave (except an explicitly
 named Program prerequisite such as D064 in W0-S3), one root cluster is named,
@@ -575,9 +586,9 @@ W0 code, external actions, merges, or closures.
 
 After activation, this paragraph remains historical publication context;
 current execution, Wave, gate, approval, and next-slice state comes from the
-machine Program and ledger. W0-S1 is retained as predecessor task evidence
-without closure credit and must not be dispatched again. After successor
-activation, the Integrator prepares and freezes **W0-S2 — Owner-Lease Evidence
-Determinism** against the live baseline. W0-S3 requires its own later prepared
-packet; W0-S4 reconciles the Wave ledger after the preceding slices have their
-required evidence and challenge.
+machine Program and ledger. W0-S1 and W0-S2 are retained as predecessor task
+evidence without closure credit and must not be dispatched again. After
+successor activation, the Integrator prepares and freezes **W0-S3 — Native
+External-State Receipt Recovery** against the live baseline. W0-S4 reconciles
+the Wave ledger only after the fresh receipt has its required evidence and
+challenge.
