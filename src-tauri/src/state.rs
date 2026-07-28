@@ -15,9 +15,94 @@ use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+const CREDENTIAL_BOOTSTRAP_SNAPSHOT_VERSION: &str = "credential_bootstrap_v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialBootstrapStatus {
+    Available,
+    InitializationRequired,
+    MissingExistingData,
+    Invalid,
+    Unavailable,
+    Unknown,
+}
+
+impl CredentialBootstrapStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::InitializationRequired => "initialization_required",
+            Self::MissingExistingData => "missing_existing_data",
+            Self::Invalid => "invalid",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialPurposeBootstrapState {
+    pub purpose: String,
+    pub status: CredentialBootstrapStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialBootstrapSnapshot {
+    pub version: String,
+    pub digest: String,
+    pub purposes: Vec<CredentialPurposeBootstrapState>,
+}
+
+impl CredentialBootstrapSnapshot {
+    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 5]) -> Self {
+        let purpose_names = [
+            "agent_run_receipts",
+            "main_chat_events",
+            "action_queue",
+            "task_store",
+            "mcp_audit",
+        ];
+        let purposes = purpose_names
+            .into_iter()
+            .zip(statuses)
+            .map(|(purpose, status)| CredentialPurposeBootstrapState {
+                purpose: purpose.into(),
+                status,
+            })
+            .collect::<Vec<_>>();
+        let digest_material = purposes.iter().fold(
+            CREDENTIAL_BOOTSTRAP_SNAPSHOT_VERSION.to_string(),
+            |mut material, item| {
+                material.push('|');
+                material.push_str(&item.purpose);
+                material.push('=');
+                material.push_str(item.status.as_str());
+                material
+            },
+        );
+        let digest = format!("{:x}", Sha256::digest(digest_material.as_bytes()));
+        Self {
+            version: CREDENTIAL_BOOTSTRAP_SNAPSHOT_VERSION.into(),
+            digest,
+            purposes,
+        }
+    }
+}
+
+impl Default for CredentialBootstrapSnapshot {
+    fn default() -> Self {
+        Self::from_statuses([CredentialBootstrapStatus::Unknown; 5])
+    }
+}
 
 /// Cached provider health status from ModelRouter, refreshed periodically.
 pub struct ProviderHealthCache {
@@ -180,6 +265,7 @@ pub struct AppState {
     pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
+    pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
     pub(crate) runtime_clock_source:

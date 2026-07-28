@@ -733,6 +733,29 @@ fn backend_remediation_phase0_startup_keyring_is_bounded_and_noninteractive() {
 }
 
 #[test]
+fn nkr_s1_startup_keyring_is_compile_time_read_only_and_projection_owned() {
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    let product_bootstrap = bootstrap
+        .split("#[cfg(test)]")
+        .next()
+        .expect("bootstrap product source");
+    assert!(!product_bootstrap.contains("hydrate_or_create_integrity_key("));
+    assert!(!product_bootstrap.contains("hydrate_or_create_canonical_store_integrity_key("));
+    assert!(!product_bootstrap.contains("ensure_write_epoch(secret_store)"));
+    assert!(!product_bootstrap.contains("save_mcp_audit_keyring_to_path("));
+
+    let secret_store = read_repo_file("src-tauri/src/secret_store.rs");
+    assert!(!secret_store.contains("impl SecretStore for StartupKeyringSecretStore"));
+    assert!(secret_store.contains("impl SecretReader for StartupKeyringSecretStore"));
+    assert!(!secret_store.contains("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE={service}"));
+
+    let state = read_repo_file("src-tauri/src/state.rs");
+    let projection = read_repo_file("src-tauri/src/life_state_projection.rs");
+    assert!(state.contains("CredentialBootstrapSnapshot"));
+    assert!(projection.contains("credential_bootstrap"));
+}
+
+#[test]
 fn native_isolation_keychain_override_is_debug_dev_only_and_fail_closed() {
     let lib = read_repo_file("src-tauri/src/lib.rs");
     assert!(lib.contains(
@@ -753,6 +776,12 @@ fn native_isolation_keychain_override_is_debug_dev_only_and_fail_closed() {
     assert_eq!(
         secret_store
             .matches("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE={service}")
+            .count(),
+        0
+    );
+    assert_eq!(
+        secret_store
+            .matches("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE_CLASS=isolated_trial")
             .count(),
         1
     );

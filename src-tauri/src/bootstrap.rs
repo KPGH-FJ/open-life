@@ -4,17 +4,16 @@
 use crate::a2a_sidecar;
 use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigestKey};
 use crate::persistence_coordinator::PersistenceCoordinator;
+#[cfg(test)]
+use crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX;
 use crate::secret_store::{
-    hydrate_config_secrets, hydrate_existing_mcp_audit_keys,
-    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key, SecretStore,
-    StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
-    MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
+    hydrate_config_secrets_read_only, inspect_and_hydrate_integrity_key,
+    inspect_existing_mcp_audit_keys, IntegrityKeyHydration, McpAuditKeyHydrationInspection,
+    SecretReader, StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
+    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
-use crate::state::AppState;
-use crate::storage::{
-    load_mcp_audit_keyring_from_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
-    McpAuditKeyringLoad,
-};
+use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
+use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
     reconcile_collaboration_guidance_authority, AgentProposal, AgentRunReceiptKey,
@@ -41,6 +40,37 @@ use tokio::sync::Mutex;
 /// Result of the bootstrap process: assembled application state and startup warnings.
 pub struct BootstrapResult {
     pub state: Arc<AppState>,
+}
+
+fn protected_paths_are_absent(data_dir: &Path, relative_paths: &[&str]) -> std::io::Result<bool> {
+    for relative_path in relative_paths {
+        match std::fs::symlink_metadata(data_dir.join(relative_path)) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn inspect_fixed_credential<R: SecretReader + ?Sized>(
+    data_dir: &Path,
+    secret_ref: &'static str,
+    protected_paths: &[&str],
+    store: &R,
+) -> (CredentialBootstrapStatus, Option<[u8; 32]>) {
+    match inspect_and_hydrate_integrity_key(secret_ref, store) {
+        IntegrityKeyHydration::Available(key) => (CredentialBootstrapStatus::Available, Some(key)),
+        IntegrityKeyHydration::Missing => {
+            match protected_paths_are_absent(data_dir, protected_paths) {
+                Ok(true) => (CredentialBootstrapStatus::InitializationRequired, None),
+                Ok(false) => (CredentialBootstrapStatus::MissingExistingData, None),
+                Err(_) => (CredentialBootstrapStatus::Unknown, None),
+            }
+        }
+        IntegrityKeyHydration::Invalid => (CredentialBootstrapStatus::Invalid, None),
+        IntegrityKeyHydration::Unavailable => (CredentialBootstrapStatus::Unavailable, None),
+    }
 }
 
 const STARTUP_PROPOSAL_RECONCILIATION_BATCH: i64 = 200;
@@ -1622,8 +1652,10 @@ fn stage_legacy_scheduled_task_review_proposals(
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
     let secret_store = StartupKeyringSecretStore::default();
-    match secret_store.service_name() {
-        Ok(service) => log::info!("[startup] OS credential service selected: {service}"),
+    match secret_store.service_classification() {
+        Ok(classification) => {
+            log::info!("[startup] OS credential service class: {classification}")
+        }
         Err(error) => log::error!("[startup] OS credential service selection blocked: {error}"),
     }
     bootstrap_with_secret_store(data_dir, &secret_store)
@@ -1632,14 +1664,81 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
 #[cfg(test)]
 pub(crate) fn bootstrap_with_secret_store_for_test(
     data_dir: PathBuf,
-    secret_store: &dyn SecretStore,
+    secret_store: &dyn SecretReader,
 ) -> BootstrapResult {
-    bootstrap_with_secret_store(data_dir, secret_store)
+    struct InitializedTestSecretReader<'a> {
+        inner: &'a dyn SecretReader,
+        mcp_key_refs: Vec<String>,
+    }
+
+    impl SecretReader for InitializedTestSecretReader<'_> {
+        fn read_secret(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+            if let Some(value) = self.inner.read_secret(secret_ref)? {
+                return Ok(Some(value));
+            }
+            if matches!(
+                secret_ref,
+                AGENT_RUN_RECEIPT_KEY_REF
+                    | MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
+                    | ACTION_QUEUE_AUTHORITY_KEY_REF
+                    | TASK_STORE_AUTHORITY_KEY_REF
+            ) {
+                use base64::Engine as _;
+                return Ok(Some(
+                    base64::engine::general_purpose::STANDARD.encode([0x54_u8; 32]),
+                ));
+            }
+            if self
+                .mcp_key_refs
+                .iter()
+                .any(|key_ref| key_ref == secret_ref)
+            {
+                use base64::Engine as _;
+                return Ok(Some(
+                    base64::engine::general_purpose::STANDARD.encode([0x4d_u8; 32]),
+                ));
+            }
+            Ok(None)
+        }
+    }
+
+    // The long-lived release-bootstrap fixtures exercise durable-store recovery,
+    // not first-run credential recovery. Model their already-initialized fixed
+    // credentials without mutating the supplied store. NKR first-run tests call
+    // `bootstrap_with_secret_store` directly so they observe the real product path.
+    let keyring_path = data_dir.join("mcp_audit_keys.json");
+    let database_path = data_dir.join("mcp_audit.db");
+    if !keyring_path.exists() && !database_path.exists() {
+        let epoch = 1_700_000_000_u64;
+        let config = openlife_core::mcp_audit::AuditKeyConfig {
+            mode: openlife_core::mcp_audit::KeyMode::Keychain,
+            salt_b64: None,
+            env_var: None,
+            key_ref: Some(format!("{MCP_AUDIT_KEY_REF_PREFIX}{epoch}")),
+            epoch,
+            created_at: "2026-07-29T00:00:00Z".into(),
+        };
+        let _ = crate::storage::save_mcp_audit_keyring_to_path(&keyring_path, &[config]);
+    }
+    let mcp_key_refs = match load_mcp_audit_keyring_from_path(&keyring_path) {
+        McpAuditKeyringLoad::Present(configs) => configs
+            .into_iter()
+            .filter_map(|config| config.key_ref)
+            .collect(),
+        _ => Vec::new(),
+    };
+    bootstrap_with_secret_store(
+        data_dir,
+        &InitializedTestSecretReader {
+            inner: secret_store,
+            mcp_key_refs,
+        },
+    )
 }
 
 fn bootstrap_with_secret_store(
     data_dir: PathBuf,
-    secret_store: &dyn SecretStore,
+    secret_store: &dyn SecretReader,
 ) -> BootstrapResult {
     let startup_warnings = std::cell::RefCell::new(Vec::new());
     let persistence = Arc::new(PersistenceCoordinator::for_release_bootstrap());
@@ -1661,7 +1760,7 @@ fn bootstrap_with_secret_store(
     } else {
         persistence.register_read_write("ConfigStore");
     }
-    let secret_hydration = hydrate_config_secrets(&mut config, secret_store);
+    let secret_hydration = hydrate_config_secrets_read_only(&mut config, secret_store);
     for capability in &secret_hydration.fail_closed_capabilities {
         let owner = match capability.as_str() {
             "provider_credential" => "ProviderCredentialStore",
@@ -1689,6 +1788,37 @@ fn bootstrap_with_secret_store(
             ));
         }
     }
+
+    let (agent_run_credential_status, agent_run_receipt_key_material) = inspect_fixed_credential(
+        &data_dir,
+        AGENT_RUN_RECEIPT_KEY_REF,
+        &[
+            "agent_runs.db",
+            "life_events.db",
+            "main_chat_agent_sessions.db",
+        ],
+        secret_store,
+    );
+    let (main_chat_event_credential_status, main_chat_event_integrity_key) =
+        inspect_fixed_credential(
+            &data_dir,
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            &["main_chat_agent_events.db"],
+            secret_store,
+        );
+    let (action_queue_credential_status, action_queue_authority_key) = inspect_fixed_credential(
+        &data_dir,
+        ACTION_QUEUE_AUTHORITY_KEY_REF,
+        &["main_chat_action_queue.db"],
+        secret_store,
+    );
+    let (task_store_credential_status, task_store_authority_key_material) =
+        inspect_fixed_credential(
+            &data_dir,
+            TASK_STORE_AUTHORITY_KEY_REF,
+            &["tasks.db"],
+            secret_store,
+        );
 
     // Apply system configuration
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
@@ -1801,24 +1931,24 @@ fn bootstrap_with_secret_store(
             VectorStore::unavailable_sentinel().map_err(|error| error.to_string())
         });
 
-    let agent_run_receipt_key =
-        match hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, secret_store) {
-            Ok(key) => match AgentRunReceiptKey::from_bytes(key) {
-                Ok(key) => Some(key),
-                Err(error) => {
-                    startup_warnings.borrow_mut().push(format!(
-                    "AgentRun receipt key is invalid; AgentRun persistence is disabled: {error}"
-                ));
-                    None
-                }
-            },
+    let agent_run_receipt_key = match agent_run_receipt_key_material {
+        Some(key) => match AgentRunReceiptKey::from_bytes(key) {
+            Ok(key) => Some(key),
             Err(error) => {
                 startup_warnings.borrow_mut().push(format!(
-                "AgentRun receipt key is unavailable; AgentRun persistence is disabled: {error}"
-            ));
+                    "AgentRun receipt key is invalid; AgentRun persistence is disabled: {error}"
+                ));
                 None
             }
-        };
+        },
+        None => {
+            startup_warnings.borrow_mut().push(format!(
+                "AgentRun receipt key is unavailable; AgentRun persistence is disabled: {}",
+                agent_run_credential_status.as_str()
+            ));
+            None
+        }
+    };
     let agent_runs_db_path = data_dir.join("agent_runs.db");
     let agent_run_store = init_store(
         || {
@@ -2119,25 +2249,15 @@ fn bootstrap_with_secret_store(
         },
     );
 
-    let action_queue_authority_key = match hydrate_or_create_integrity_key(
-        ACTION_QUEUE_AUTHORITY_KEY_REF,
-        secret_store,
-    ) {
-        Ok(key) => Some(key),
-        Err(error) => {
-            startup_warnings.borrow_mut().push(format!(
-                    "ActionQueue authority key is unavailable; automatic replay authority is disabled: {error}"
-                ));
-            None
-        }
-    };
+    if action_queue_authority_key.is_none() {
+        startup_warnings.borrow_mut().push(format!(
+            "ActionQueue authority key is unavailable; automatic replay authority is disabled: {}",
+            action_queue_credential_status.as_str()
+        ));
+    }
     let task_store_db_path = data_dir.join("tasks.db");
-    let task_store_authority_key = match hydrate_or_create_canonical_store_integrity_key(
-        TASK_STORE_AUTHORITY_KEY_REF,
-        &task_store_db_path,
-        secret_store,
-    ) {
-        Ok(key) => openlife_core::tasks::TaskStoreAuthorityKey::from_key_material(&key)
+    let task_store_authority_key = match task_store_authority_key_material {
+        Some(key) => openlife_core::tasks::TaskStoreAuthorityKey::from_key_material(&key)
             .map(Some)
             .unwrap_or_else(|error| {
                 startup_warnings.borrow_mut().push(format!(
@@ -2145,9 +2265,10 @@ fn bootstrap_with_secret_store(
                 ));
                 None
             }),
-        Err(error) => {
+        None => {
             startup_warnings.borrow_mut().push(format!(
-                "TaskStore authority key is unavailable; scheduled execution is disabled: {error}"
+                "TaskStore authority key is unavailable; scheduled execution is disabled: {}",
+                task_store_credential_status.as_str()
             ));
             None
         }
@@ -2176,18 +2297,12 @@ fn bootstrap_with_secret_store(
         &startup_warnings,
     );
 
-    let main_chat_event_integrity_key = match hydrate_or_create_integrity_key(
-        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-        secret_store,
-    ) {
-        Ok(key) => Some(key),
-        Err(error) => {
-            startup_warnings.borrow_mut().push(format!(
-                    "Main Chat event integrity key is unavailable; durable event truth is unavailable: {error}"
-                ));
-            None
-        }
-    };
+    if main_chat_event_integrity_key.is_none() {
+        startup_warnings.borrow_mut().push(format!(
+            "Main Chat event integrity key is unavailable; durable event truth is unavailable: {}",
+            main_chat_event_credential_status.as_str()
+        ));
+    }
     let main_chat_agent_events_db_path = data_dir.join("main_chat_agent_events.db");
     let main_chat_agent_event_store = init_store(
         || {
@@ -2298,137 +2413,159 @@ fn bootstrap_with_secret_store(
     let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
     let audit_keyring_path = data_dir.join("mcp_audit_keys.json");
     let mcp_audit_db_path = data_dir.join("mcp_audit.db");
-    let audit_key_hydration = (|| -> anyhow::Result<_> {
-        let configs = match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
+    let (audit_key_hydration, mcp_audit_credential_status, mcp_warning) =
+        match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
             McpAuditKeyringLoad::Absent => {
-                let inspection = McpAuditStore::inspect_existing_database(&mcp_audit_db_path)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
+                match McpAuditStore::inspect_existing_database(&mcp_audit_db_path) {
+                    Ok(inspection) if inspection.is_empty_or_absent() => (
+                        None,
+                        CredentialBootstrapStatus::InitializationRequired,
+                        None,
+                    ),
+                    Ok(inspection) => (
+                        None,
+                        CredentialBootstrapStatus::MissingExistingData,
+                        Some(format!(
+                            "MCP audit keyring is missing while the canonical audit database contains {} rows",
+                            inspection.row_count
+                        )),
+                    ),
+                    Err(error) => (
+                        None,
+                        CredentialBootstrapStatus::Unknown,
+                        Some(format!(
                             "missing MCP audit keyring beside an untrusted audit database: {error}"
-                        )
-                    })?;
-                if !inspection.is_empty_or_absent() {
-                    anyhow::bail!(
-                        "MCP audit keyring is missing while the canonical audit database contains {} rows",
-                        inspection.row_count
-                    );
+                        )),
+                    ),
                 }
-                Vec::new()
             }
-            McpAuditKeyringLoad::Present(configs) => configs,
-            McpAuditKeyringLoad::PresentInvalid { error } => {
-                anyhow::bail!("MCP audit keyring is present but invalid: {error}");
-            }
-            McpAuditKeyringLoad::Unreadable { error } => {
-                anyhow::bail!("MCP audit keyring is unreadable: {error}");
-            }
-        };
-        let mut hydration = hydrate_existing_mcp_audit_keys(configs, secret_store)?;
-        let payload_integrity_error = match McpAuditStore::preflight_existing_database_key_materials(
-            &mcp_audit_db_path,
-            &hydration.materials,
-        ) {
-            Ok(_) => None,
-            Err(error)
-                if openlife_core::mcp_audit::is_payload_integrity_failure(&error)
-                    && hydration.configs.last().is_some_and(|config| {
-                        config.mode == openlife_core::mcp_audit::KeyMode::Keychain
-                    }) =>
-            {
-                Some(error.to_string())
-            }
-            Err(error) => return Err(error),
-        };
-        if payload_integrity_error.is_none() {
-            hydration.ensure_write_epoch(secret_store)?;
-            if hydration.config_changed {
-                if let Err(save_error) =
-                    save_mcp_audit_keyring_to_path(&audit_keyring_path, &hydration.configs)
-                {
-                    match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
-                        McpAuditKeyringLoad::Present(observed) if observed == hydration.configs => {
-                            anyhow::bail!(
-                                "persist MCP audit key references reported failure after the intended reference file became observable; write-key activation is withheld for this startup: {save_error}"
-                            );
-                        }
-                        McpAuditKeyringLoad::Absent | McpAuditKeyringLoad::Present(_) => {
-                            let rollback_error =
-                                hydration.rollback_staged_secret(secret_store).err();
-                            return Err(match rollback_error {
-                                Some(rollback_error) => anyhow::anyhow!(
-                                    "persist MCP audit key references failed: {save_error}; staged secret rollback also failed: {rollback_error}"
-                                ),
-                                None => anyhow::anyhow!(
-                                    "persist MCP audit key references failed: {save_error}"
-                                ),
-                            });
-                        }
-                        McpAuditKeyringLoad::PresentInvalid { error }
-                        | McpAuditKeyringLoad::Unreadable { error } => {
-                            anyhow::bail!(
-                                "persist MCP audit key references failed and the final reference state is unknown; the staged secret is retained to avoid orphaning observable ciphertext authority: {save_error}; observe_error={error}"
-                            );
+            McpAuditKeyringLoad::Present(configs) => {
+                match inspect_existing_mcp_audit_keys(configs, secret_store) {
+                    McpAuditKeyHydrationInspection::Available(hydration) => {
+                        match McpAuditStore::preflight_existing_database_key_materials(
+                            &mcp_audit_db_path,
+                            &hydration.materials,
+                        ) {
+                            Ok(_)
+                                if hydration.configs.last().is_some_and(|config| {
+                                    config.mode == openlife_core::mcp_audit::KeyMode::Keychain
+                                }) =>
+                            {
+                                (Some(hydration), CredentialBootstrapStatus::Available, None)
+                            }
+                            Ok(_) => (
+                                Some(hydration),
+                                CredentialBootstrapStatus::InitializationRequired,
+                                None,
+                            ),
+                            Err(error)
+                                if openlife_core::mcp_audit::is_payload_integrity_failure(
+                                    &error,
+                                ) =>
+                            {
+                                (
+                                    Some(hydration),
+                                    CredentialBootstrapStatus::Invalid,
+                                    Some(format!(
+                                        "audit payload integrity is invalid; MCP audit effects remain disabled: {error}"
+                                    )),
+                                )
+                            }
+                            Err(error) => (
+                                Some(hydration),
+                                CredentialBootstrapStatus::Unknown,
+                                Some(format!(
+                                    "MCP audit database preflight is unavailable; effects remain disabled: {error}"
+                                )),
+                            ),
                         }
                     }
+                    McpAuditKeyHydrationInspection::MissingExistingData => (
+                        None,
+                        CredentialBootstrapStatus::MissingExistingData,
+                        Some("MCP audit keychain reference has no credential".into()),
+                    ),
+                    McpAuditKeyHydrationInspection::Invalid => (
+                        None,
+                        CredentialBootstrapStatus::Invalid,
+                        Some("MCP audit key material is invalid".into()),
+                    ),
+                    McpAuditKeyHydrationInspection::Unavailable => (
+                        None,
+                        CredentialBootstrapStatus::Unavailable,
+                        Some("MCP audit key material is unavailable".into()),
+                    ),
                 }
             }
-        }
-        Ok((hydration, payload_integrity_error))
-    })();
-    let audit_key_hydration = match audit_key_hydration {
-        Ok((hydration, payload_integrity_error)) => {
-            persistence.register_read_write("McpAuditKeyReferenceStore");
-            if let Some(error) = payload_integrity_error {
-                startup_warnings.borrow_mut().push(format!(
-                    "MCP audit key references remain canonical, but audit payload integrity is invalid; the audit store is unavailable and all effects are disabled: {error}"
-                ));
-            }
-            Some(hydration)
-        }
-        Err(error) => {
-            persistence.register_unavailable(
-                "McpAuditKeyReferenceStore",
-                "mcp_audit_key_hydration_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "MCP audit key material is unavailable; audit reads are unknown and all effects are disabled: {error}"
-            ));
-            None
-        }
-    };
+            McpAuditKeyringLoad::PresentInvalid { error } => (
+                None,
+                CredentialBootstrapStatus::Invalid,
+                Some(format!("MCP audit keyring is present but invalid: {error}")),
+            ),
+            McpAuditKeyringLoad::Unreadable { error } => (
+                None,
+                CredentialBootstrapStatus::Unavailable,
+                Some(format!("MCP audit keyring is unreadable: {error}")),
+            ),
+        };
+    let mcp_reference_available = audit_key_hydration.is_some();
+    if mcp_reference_available {
+        persistence.register_read_write("McpAuditKeyReferenceStore");
+    } else {
+        persistence.register_unavailable(
+            "McpAuditKeyReferenceStore",
+            "mcp_audit_key_hydration_failed",
+            mcp_audit_credential_status.as_str(),
+        );
+    }
+    if mcp_audit_credential_status != CredentialBootstrapStatus::Available {
+        let warning = mcp_warning.unwrap_or_else(|| {
+            "MCP audit credential initialization is required; audit effects remain disabled".into()
+        });
+        startup_warnings.borrow_mut().push(warning);
+    }
     let audit_materials = audit_key_hydration
         .map(|hydration| hydration.materials)
         .unwrap_or_default();
-    let mcp_audit_store = init_store(
-        || {
-            McpAuditStore::with_key_materials(&mcp_audit_db_path, audit_materials.clone())
+    let mcp_audit_store = if mcp_audit_credential_status == CredentialBootstrapStatus::Available {
+        let store = init_store(
+            || {
+                McpAuditStore::with_key_materials(&mcp_audit_db_path, audit_materials.clone())
+                    .map_err(|error| error.to_string())
+            },
+            || {
+                McpAuditStore::open_read_only_existing_with_key_materials(
+                    &mcp_audit_db_path,
+                    audit_materials.clone(),
+                )
                 .map_err(|error| error.to_string())
-        },
-        || {
-            McpAuditStore::open_read_only_existing_with_key_materials(
-                &mcp_audit_db_path,
-                audit_materials.clone(),
-            )
-            .map_err(|error| error.to_string())
-        },
-        || {
-            McpAuditStore::with_key_materials(
-                recovery_db_path("mcp_audit.db"),
-                audit_materials.clone(),
-            )
-            .map_err(|error| error.to_string())
-        },
-        "McpAuditStore",
-        &startup_warnings,
-        &persistence,
-    );
-    let mcp_audit_store =
-        required_store_or_unavailable(mcp_audit_store, "McpAuditStore", &startup_warnings, || {
+            },
+            || {
+                McpAuditStore::with_key_materials(
+                    recovery_db_path("mcp_audit.db"),
+                    audit_materials.clone(),
+                )
+                .map_err(|error| error.to_string())
+            },
+            "McpAuditStore",
+            &startup_warnings,
+            &persistence,
+        );
+        required_store_or_unavailable(store, "McpAuditStore", &startup_warnings, || {
             Ok(McpAuditStore::unavailable_sentinel(
                 "canonical and read-only audit store open failed",
             ))
-        });
+        })
+    } else {
+        persistence.register_unavailable(
+            "McpAuditStore",
+            "mcp_audit_credential_unavailable",
+            mcp_audit_credential_status.as_str(),
+        );
+        McpAuditStore::unavailable_sentinel(
+            "credential bootstrap did not prove an available MCP audit write epoch",
+        )
+    };
 
     let hot_cache: SharedHotCache = {
         let initial_cache = match life_model_manager.load() {
@@ -2777,6 +2914,13 @@ fn bootstrap_with_secret_store(
         }
     };
 
+    let credential_bootstrap_snapshot = CredentialBootstrapSnapshot::from_statuses([
+        agent_run_credential_status,
+        main_chat_event_credential_status,
+        action_queue_credential_status,
+        task_store_credential_status,
+        mcp_audit_credential_status,
+    ]);
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
         governed_data_import_journal,
@@ -2821,6 +2965,7 @@ fn bootstrap_with_secret_store(
         plugin_registry: Arc::new(Mutex::new(plugin_registry)),
         hot_cache,
         startup_warnings: startup_warnings.into_inner(),
+        credential_bootstrap_snapshot,
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_store: Arc::new(scheduled_task_store),
         runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
@@ -2838,6 +2983,7 @@ fn bootstrap_with_secret_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret_store::SecretStore;
     use openlife_core::agent::{
         EvidenceQuery, HeuristicQuery, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     };
@@ -3101,12 +3247,39 @@ mod tests {
         assert!(task_store.list_tasks(None).unwrap().is_empty());
     }
 
-    #[derive(Default)]
     struct TestSecretStore {
         values: std::sync::Mutex<std::collections::HashMap<String, String>>,
+        set_count: std::sync::atomic::AtomicUsize,
+        delete_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for TestSecretStore {
+        fn default() -> Self {
+            use base64::Engine as _;
+
+            let encoded = base64::engine::general_purpose::STANDARD.encode([0x41; 32]);
+            Self {
+                values: std::sync::Mutex::new(std::collections::HashMap::from([
+                    (AGENT_RUN_RECEIPT_KEY_REF.into(), encoded.clone()),
+                    (MAIN_CHAT_EVENT_INTEGRITY_KEY_REF.into(), encoded.clone()),
+                    (ACTION_QUEUE_AUTHORITY_KEY_REF.into(), encoded.clone()),
+                    (TASK_STORE_AUTHORITY_KEY_REF.into(), encoded),
+                ])),
+                set_count: std::sync::atomic::AtomicUsize::new(0),
+                delete_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
     }
 
     impl TestSecretStore {
+        fn empty() -> Self {
+            Self {
+                values: std::sync::Mutex::new(std::collections::HashMap::new()),
+                set_count: std::sync::atomic::AtomicUsize::new(0),
+                delete_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
         fn mcp_secret_snapshot(&self) -> Vec<(String, String)> {
             let mut values = self
                 .values
@@ -3146,6 +3319,19 @@ mod tests {
             )
             .unwrap();
         }
+
+        fn operation_counts(&self) -> (usize, usize) {
+            (
+                self.set_count.load(std::sync::atomic::Ordering::SeqCst),
+                self.delete_count.load(std::sync::atomic::Ordering::SeqCst),
+            )
+        }
+
+        fn reset_operation_counts(&self) {
+            self.set_count.store(0, std::sync::atomic::Ordering::SeqCst);
+            self.delete_count
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn d068_database_family_bytes(
@@ -3175,6 +3361,8 @@ mod tests {
         }
 
         fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
+            self.set_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.values
                 .lock()
                 .unwrap()
@@ -3183,9 +3371,103 @@ mod tests {
         }
 
         fn delete(&self, secret_ref: &str) -> anyhow::Result<()> {
+            self.delete_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.values.lock().unwrap().remove(secret_ref);
             Ok(())
         }
+    }
+
+    struct UnavailableSecretReader;
+
+    impl SecretReader for UnavailableSecretReader {
+        fn read_secret(&self, _secret_ref: &str) -> anyhow::Result<Option<String>> {
+            anyhow::bail!("credential backend unavailable")
+        }
+    }
+
+    #[test]
+    fn nkr_s1_fresh_bootstrap_is_zero_write_and_reports_five_initialization_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::empty();
+
+        let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(secrets.operation_counts(), (0, 0));
+        assert!(!directory.path().join("mcp_audit_keys.json").exists());
+        assert!(!directory.path().join("mcp_audit.db").exists());
+        assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 5);
+        assert!(result
+            .state
+            .credential_bootstrap_snapshot
+            .purposes
+            .iter()
+            .all(|purpose| purpose.status == CredentialBootstrapStatus::InitializationRequired));
+        assert_eq!(result.state.credential_bootstrap_snapshot.digest.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn nkr_s1_life_state_projection_publishes_the_bootstrap_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::empty();
+        let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+
+        let projection =
+            crate::life_state_projection::get_life_state_projection_with_state(&result.state)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            projection.credential_bootstrap,
+            result.state.credential_bootstrap_snapshot
+        );
+        assert!(projection
+            .source_refs
+            .contains(&"bootstrap:credential_snapshot".to_string()));
+    }
+
+    #[test]
+    fn nkr_s1_missing_key_beside_existing_data_is_never_initialization_required() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent_runs.db"), b"existing").unwrap();
+        let secrets = TestSecretStore::empty();
+
+        let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(secrets.operation_counts(), (0, 0));
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[0].status,
+            CredentialBootstrapStatus::MissingExistingData
+        );
+    }
+
+    #[test]
+    fn nkr_s1_invalid_and_unavailable_material_remain_fail_closed() {
+        let invalid_directory = tempfile::tempdir().unwrap();
+        let invalid = TestSecretStore::empty();
+        invalid
+            .set(AGENT_RUN_RECEIPT_KEY_REF, "not-base64")
+            .unwrap();
+        invalid.reset_operation_counts();
+        let invalid_result =
+            bootstrap_with_secret_store(invalid_directory.path().to_path_buf(), &invalid);
+        assert_eq!(invalid.operation_counts(), (0, 0));
+        assert_eq!(
+            invalid_result.state.credential_bootstrap_snapshot.purposes[0].status,
+            CredentialBootstrapStatus::Invalid
+        );
+
+        let unavailable_directory = tempfile::tempdir().unwrap();
+        let unavailable_result = bootstrap_with_secret_store(
+            unavailable_directory.path().to_path_buf(),
+            &UnavailableSecretReader,
+        );
+        assert!(unavailable_result
+            .state
+            .credential_bootstrap_snapshot
+            .purposes[..4]
+            .iter()
+            .all(|purpose| purpose.status == CredentialBootstrapStatus::Unavailable));
     }
 
     fn seed_governed_import_journal(
@@ -3326,6 +3608,35 @@ mod tests {
             epoch,
             created_at: "2026-07-16T00:00:00Z".into(),
         }
+    }
+
+    fn bootstrap_with_initialized_test_credentials(
+        data_dir: PathBuf,
+        secrets: &TestSecretStore,
+    ) -> BootstrapResult {
+        const EPOCH: u64 = 1_700_000_001;
+        let key = [0x52; 32];
+        let config = d057_key_config(EPOCH);
+        if SecretStore::get(
+            secrets,
+            config.key_ref.as_deref().expect("test MCP key reference"),
+        )
+        .unwrap()
+        .is_none()
+        {
+            secrets.preload_mcp_key(EPOCH, key);
+        }
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &data_dir.join("mcp_audit_keys.json"),
+            &[config],
+        )
+        .unwrap();
+        secrets.reset_operation_counts();
+        bootstrap_with_secret_store(data_dir, secrets)
+    }
+
+    fn bootstrap_with_default_initialized_test_credentials(data_dir: PathBuf) -> BootstrapResult {
+        bootstrap_with_initialized_test_credentials(data_dir, &TestSecretStore::default())
     }
 
     fn d057_seed_nonempty_audit_store(
@@ -3540,7 +3851,7 @@ mod tests {
 
         assert_eq!(
             mode("McpAuditKeyReferenceStore"),
-            Some(crate::persistence_coordinator::PersistenceStoreMode::Unavailable)
+            Some(crate::persistence_coordinator::PersistenceStoreMode::ReadWriteCanonical)
         );
         assert_eq!(
             mode("McpAuditStore"),
@@ -3555,66 +3866,50 @@ mod tests {
             .state
             .startup_warnings
             .iter()
-            .any(|warning| warning.contains("key material is unavailable")));
+            .any(|warning| warning.contains("MCP audit database preflight is unavailable")));
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[4].status,
+            CredentialBootstrapStatus::Unknown
+        );
     }
 
     #[tokio::test]
-    async fn d057_true_first_boot_creates_one_reference_and_restart_reuses_it() {
+    async fn nkr_s1_true_first_boot_defers_mcp_reference_creation_until_explicit_recovery() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
 
-        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
         assert!(first
             .state
             .mcp_audit_store
             .lock()
             .await
             .list_logs(1)
-            .unwrap()
-            .is_empty());
-        let first_refs = secrets.mcp_secret_refs();
-        assert_eq!(first_refs.len(), 1);
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        assert!(secrets.mcp_secret_refs().is_empty());
         let keyring_path = directory.path().join("mcp_audit_keys.json");
-        let first_keyring = std::fs::read(&keyring_path).unwrap();
-        let McpAuditKeyringLoad::Present(first_configs) =
-            crate::storage::load_mcp_audit_keyring_from_path(&keyring_path)
-        else {
-            panic!("first boot must persist one valid key authority");
-        };
-        assert_eq!(first_configs.len(), 1);
-        first
-            .state
-            .mcp_audit_store
-            .lock()
-            .await
-            .insert_log(
-                "d057.restart",
-                &serde_json::json!({"payload": "minimized"}),
-                "restart-readable",
-                true,
-                false,
-            )
-            .unwrap();
+        assert!(!keyring_path.exists());
+        assert!(!directory.path().join("mcp_audit.db").exists());
+        assert_eq!(
+            first.state.credential_bootstrap_snapshot.purposes[4].status,
+            CredentialBootstrapStatus::InitializationRequired
+        );
         drop(first);
 
-        let restarted =
-            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
 
-        assert_eq!(secrets.mcp_secret_refs(), first_refs);
-        assert_eq!(std::fs::read(&keyring_path).unwrap(), first_keyring);
-        let logs = restarted
-            .state
-            .mcp_audit_store
-            .lock()
-            .await
-            .list_logs(1)
-            .unwrap();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].tool_name, "d057.restart");
+        assert!(secrets.mcp_secret_refs().is_empty());
+        assert!(!keyring_path.exists());
+        assert_eq!(
+            restarted.state.credential_bootstrap_snapshot.purposes[4].status,
+            CredentialBootstrapStatus::InitializationRequired
+        );
     }
 
     #[tokio::test]
-    async fn d057_existing_empty_database_is_still_a_proven_first_boot() {
+    async fn nkr_s1_existing_empty_mcp_database_remains_initialization_required_without_mutation() {
         let directory = tempfile::tempdir().unwrap();
         let bootstrap_key = d057_key_config(29);
         let bootstrap_material = openlife_core::mcp_audit::AuditKeyMaterial {
@@ -3630,37 +3925,10 @@ mod tests {
         let before_db = std::fs::read(directory.path().join("mcp_audit.db")).unwrap();
         let secrets = TestSecretStore::default();
 
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-
-        assert_eq!(secrets.mcp_secret_refs().len(), 1);
-        assert!(directory.path().join("mcp_audit_keys.json").exists());
-        assert!(result
-            .state
-            .mcp_audit_store
-            .lock()
-            .await
-            .list_logs(1)
-            .unwrap()
-            .is_empty());
-        assert_ne!(
-            std::fs::read(directory.path().join("mcp_audit.db")).unwrap(),
-            Vec::<u8>::new()
-        );
-        assert!(!before_db.is_empty());
-    }
-
-    #[tokio::test]
-    async fn d057_reference_save_failure_rolls_back_staged_secret() {
-        let directory = tempfile::tempdir().unwrap();
-        let secrets = TestSecretStore::default();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        crate::storage::fail_next_mcp_audit_keyring_save_for_test(keyring_path.clone());
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
 
         assert!(secrets.mcp_secret_refs().is_empty());
-        assert!(!keyring_path.exists());
-        assert!(!directory.path().join("mcp_audit.db").exists());
+        assert!(!directory.path().join("mcp_audit_keys.json").exists());
         assert!(result
             .state
             .mcp_audit_store
@@ -3670,58 +3938,33 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unavailable"));
-        assert!(result
-            .state
-            .startup_warnings
-            .iter()
-            .any(|warning| { warning.contains("persist MCP audit key references failed") }));
+        assert_eq!(
+            std::fs::read(directory.path().join("mcp_audit.db")).unwrap(),
+            before_db
+        );
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[4].status,
+            CredentialBootstrapStatus::InitializationRequired
+        );
     }
 
-    #[tokio::test]
-    async fn d057_post_rename_save_error_withholds_activation_without_orphaning_reference() {
+    #[test]
+    fn mcp_keyring_failure_injection_remains_available_for_explicit_recovery_tests() {
         let directory = tempfile::tempdir().unwrap();
-        let secrets = TestSecretStore::default();
-        let keyring_path = directory.path().join("mcp_audit_keys.json");
-        crate::storage::fail_next_mcp_audit_keyring_save_after_write_for_test(keyring_path.clone());
+        let path = directory.path().join("mcp_audit_keys.json");
+        let config = d057_key_config(31);
 
-        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        crate::storage::fail_next_mcp_audit_keyring_save_for_test(path.clone());
+        assert!(crate::storage::save_mcp_audit_keyring_to_path(
+            &path,
+            std::slice::from_ref(&config)
+        )
+        .is_err());
+        assert!(!path.exists());
 
-        let first_refs = secrets.mcp_secret_refs();
-        assert_eq!(first_refs.len(), 1);
-        let McpAuditKeyringLoad::Present(configs) =
-            crate::storage::load_mcp_audit_keyring_from_path(&keyring_path)
-        else {
-            panic!("post-rename error must preserve the observable key reference");
-        };
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].key_ref.as_ref(), Some(&first_refs[0]));
-        assert!(!directory.path().join("mcp_audit.db").exists());
-        assert!(first
-            .state
-            .mcp_audit_store
-            .lock()
-            .await
-            .list_logs(1)
-            .unwrap_err()
-            .to_string()
-            .contains("unavailable"));
-        assert!(first.state.startup_warnings.iter().any(|warning| {
-            warning.contains("write-key activation is withheld for this startup")
-        }));
-        drop(first);
-
-        let restarted =
-            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-
-        assert_eq!(secrets.mcp_secret_refs(), first_refs);
-        assert!(restarted
-            .state
-            .mcp_audit_store
-            .lock()
-            .await
-            .list_logs(1)
-            .unwrap()
-            .is_empty());
+        crate::storage::fail_next_mcp_audit_keyring_save_after_write_for_test(path.clone());
+        assert!(crate::storage::save_mcp_audit_keyring_to_path(&path, &[config]).is_err());
+        assert!(path.exists());
     }
 
     async fn seed_failed_main_chat_owner_fixture(
@@ -3777,7 +4020,7 @@ mod tests {
     async fn bootstrap_initializes_hs_stores_and_seeds_mvp_heuristics() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let result =
-            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+            bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
 
         result
             .state
@@ -3883,7 +4126,7 @@ mod tests {
     async fn startup_releases_external_claim_when_artifact_intent_was_never_prepared() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let result =
-            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+            bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
         let target_path = temp_dir.path().join("never-written.txt");
         let proposal = openlife_core::agent::AgentProposal::new(
             openlife_core::agent::ProposalType::ExternalWriteAction,
@@ -3977,7 +4220,7 @@ mod tests {
         manager.save(&model).unwrap();
 
         let result =
-            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+            bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
         let store = result.state.state_store.as_ref().expect("StateStore");
         let receipt = store
             .legacy_daily_task_shadow_receipt(false)
@@ -4053,7 +4296,7 @@ mod tests {
         }
 
         let result =
-            bootstrap_with_secret_store(temp_dir.path().to_path_buf(), &TestSecretStore::default());
+            bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
         let store = result.state.state_store.as_ref().expect("StateStore");
         let receipt = store
             .legacy_state_history_shadow_receipt(false)
@@ -4109,7 +4352,8 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert!(first.state.agent_run_store.is_some());
         let first_key = secrets
             .get(AGENT_RUN_RECEIPT_KEY_REF)
@@ -4117,7 +4361,8 @@ mod tests {
             .expect("bootstrap creates purpose-isolated AgentRun key");
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert!(restarted.state.agent_run_store.is_some());
         assert_eq!(
             secrets.get(AGENT_RUN_RECEIPT_KEY_REF).unwrap().as_deref(),
@@ -4131,7 +4376,8 @@ mod tests {
                 &base64::engine::general_purpose::STANDARD.encode([0x5A_u8; 32]),
             )
             .unwrap();
-        let mismatched = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let mismatched =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert!(
             mismatched.state.agent_run_store.is_none(),
             "a different key must not reinterpret existing AgentRun receipts"
@@ -4147,7 +4393,8 @@ mod tests {
     async fn restart_reconciles_orphaned_running_replay_to_exact_durable_failed_terminal() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let (session, run_id) =
             seed_failed_main_chat_owner_fixture(&first.state, "restart-orphan-owner").await;
         {
@@ -4182,7 +4429,8 @@ mod tests {
         }
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let before = restarted
             .state
             .agent_run_store
@@ -4261,7 +4509,8 @@ mod tests {
     async fn restart_never_completes_open_provider_consent_epoch_from_empty_action_queue() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let preparation = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let preparation =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         {
             let manager = preparation.state.life_model_manager.lock().await;
             let heuristic_store = preparation.state.heuristic_store.lock().await;
@@ -4297,7 +4546,8 @@ mod tests {
         }
         drop(preparation);
 
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert!(first.state.startup_warnings.is_empty());
         first.state.persistence_coordinator.seal();
 
@@ -4403,7 +4653,8 @@ mod tests {
             .is_empty());
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert!(
             crate::main_chat_turn_runtime::reconcile_orphaned_openlife_replay_epoch_after_restart(
                 &restarted.state,
@@ -4479,7 +4730,8 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let operation_id = uuid::Uuid::new_v4().to_string();
         let chat_session_id = format!("restart-interrupted-final:{operation_id}");
         let user_goal = "Recover an interrupted final delivery without inventing cancellation.";
@@ -4593,7 +4845,8 @@ mod tests {
         };
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert_eq!(
             reconcile_startup_orphaned_main_chat_runs(&restarted.state)
                 .await
@@ -4638,7 +4891,8 @@ mod tests {
     async fn restart_repairs_both_directions_of_partial_terminal_projection() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         // Seed the durable terminal through the same release-like admission
         // used by normal product effects. The restart below is the only phase
         // that may use startup reconciliation while the coordinator is still
@@ -4693,7 +4947,8 @@ mod tests {
         }
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert_eq!(
             reconcile_startup_orphaned_main_chat_runs(&restarted.state)
                 .await
@@ -4756,7 +5011,8 @@ mod tests {
     async fn restart_materializes_pre_dispatch_failure_marker_before_enabling_effects() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let (session, run_id) =
             seed_failed_main_chat_owner_fixture(&first.state, "restart-predispatch-marker").await;
         first
@@ -4824,7 +5080,8 @@ mod tests {
             .is_empty());
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         assert!(restarted
             .state
             .persistence_coordinator
@@ -4866,7 +5123,8 @@ mod tests {
     async fn restart_degrades_inconsistent_terminal_projections_without_receipt_or_marker() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let (session, run_id) =
             seed_failed_main_chat_owner_fixture(&first.state, "restart-no-terminal-truth").await;
         {
@@ -4887,7 +5145,8 @@ mod tests {
         }
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let error = reconcile_startup_orphaned_main_chat_runs(&restarted.state)
             .await
             .expect_err("no receipt exists to choose between contradictory projections");
@@ -4914,7 +5173,8 @@ mod tests {
     async fn restart_with_unwritable_terminal_store_blocks_all_effects_without_false_projection() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
-        let first = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let first =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let (session, run_id) =
             seed_failed_main_chat_owner_fixture(&first.state, "restart-orphan-unwritable").await;
         {
@@ -4956,7 +5216,8 @@ mod tests {
             .expect("persist failed-event fault across restart");
         drop(first);
 
-        let restarted = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+        let restarted =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
         let error = reconcile_startup_orphaned_main_chat_runs(&restarted.state)
             .await
             .expect_err("startup must fail closed while terminal receipt is unwritable");

@@ -4139,6 +4139,7 @@ mod tests {
             ))),
             hot_cache,
             startup_warnings: vec![],
+            credential_bootstrap_snapshot: Default::default(),
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_store: Arc::new(
                 openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
