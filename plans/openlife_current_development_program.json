@@ -378,11 +378,36 @@
     },
     {
       "id": "G-W0-COVERAGE-TRUTH",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "fail_closed": true,
       "required_guard_ids": ["CQ-G09", "CQ-G13"],
       "evidence_dimensions": ["CI_FAULT", "TEST_SIGNAL", "TEST_SELECTION"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+          "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-artifact-review:w0-s4:commit:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+          "record_id": "G-W0-COVERAGE-TRUTH-EVIDENCE-001",
+          "scope_id": "G-W0-COVERAGE-TRUTH",
+          "scope_paths": [
+            ".github/workflows/ci.yml",
+            "frontend/vitest.config.ts",
+            "frontend/scripts/check-coverage-threshold.mjs",
+            "frontend/scripts/check-current-test-selection.mjs",
+            "frontend/scripts/current-test-selection.mjs",
+            "frontend/scripts/run-current-vitest.mjs",
+            "frontend/src/tauri.test.ts",
+            "docs/development/testing.md"
+          ],
+          "guard_ids": ["CQ-G09", "CQ-G13"],
+          "dimensions": ["CI_FAULT", "TEST_SIGNAL", "TEST_SELECTION"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/w0_s3_recovery_verifier",
+          "reviewer_id": "/root/w0_s3_recovery_challenger",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
       "criteria": [
         "Missing, nonnumeric, zero-collection and below-threshold counterexamples fail.",
         "Valid coverage input passes.",
@@ -391,11 +416,31 @@
     },
     {
       "id": "G-W0-LEASE-DETERMINISM",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "fail_closed": true,
       "required_guard_ids": ["CQ-G11", "CQ-G13"],
       "evidence_dimensions": ["FAULT", "PROCESS_MODEL", "REPETITION"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+          "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-artifact-review:w0-s4:commit:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+          "record_id": "G-W0-LEASE-DETERMINISM-EVIDENCE-001",
+          "scope_id": "G-W0-LEASE-DETERMINISM",
+          "scope_paths": [
+            "openlife-core/src/tasks.rs",
+            "openlife-core/src/sqlite_migration.rs",
+            "scripts/run-w0-s2-owner-lease-evidence.mjs"
+          ],
+          "guard_ids": ["CQ-G11", "CQ-G13"],
+          "dimensions": ["FAULT", "PROCESS_MODEL", "REPETITION"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/w0_s3_recovery_verifier",
+          "reviewer_id": "/root/w0_s3_recovery_challenger",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
       "criteria": [
         "macOS arm64 W0-LEASE-FORKEXEC records test ID, seed or N/A, clean parent, explicit fork-to-exec child, process model and concurrency.",
         "Focused 20 repetitions and full workspace concurrency=1 two repetitions have no unexplained variation."
@@ -403,11 +448,41 @@
     },
     {
       "id": "G-W0-EXTERNAL-STATE-ISOLATION",
-      "status": "NOT_RUN",
+      "status": "BLOCKED",
       "fail_closed": true,
       "required_guard_ids": ["CQ-G11", "CQ-G13"],
       "evidence_dimensions": ["NATIVE_TAURI", "EXTERNAL_STATE"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+          "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-artifact-review:w0-s4:commit:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+          "record_id": "G-W0-EXTERNAL-STATE-ISOLATION-EVIDENCE-001",
+          "scope_id": "G-W0-EXTERNAL-STATE-ISOLATION",
+          "scope_paths": [
+            "scripts/run-w0-s3-native-external-state-evidence.mjs",
+            "src-tauri/src/lib.rs",
+            "src-tauri/src/native_external_state_evidence.rs",
+            "openlife-core/src/mcp_audit.rs",
+            "src-tauri/src/bootstrap.rs",
+            "src-tauri/src/secret_store.rs"
+          ],
+          "guard_ids": ["CQ-G11", "CQ-G13"],
+          "dimensions": [
+            "NATIVE_BOOTSTRAP_AND_EXTERNAL_STATE",
+            "UNKNOWN_BOUNDARY"
+          ],
+          "outcome": "UNKNOWN",
+          "limitations": [
+            "Real Tauri window/setup/reconciliation was not exercised.",
+            "Real OS Keychain and Settings/direct Keyring paths were not exercised.",
+            "Transient sockets, sandbox-external filesystem, external Provider and product data remain unobserved."
+          ],
+          "producer_id": "/root/w0_s3_recovery_verifier",
+          "reviewer_id": "/root/w0_s3_recovery_challenger",
+          "credit_allowed": false,
+          "active": true
+        }
+      ],
       "criteria": [
         "Declared inventory covers filesystem data-dir, Keychain service/account prefix, locks, FDs and sockets.",
         "Allowlist-external mutations fail; unobserved surfaces remain UNKNOWN.",

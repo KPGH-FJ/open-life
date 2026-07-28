@@ -6321,8 +6321,89 @@
       },
       "closure_record": null,
       "initial_assigned_wave": "WAVE-0",
-      "current_wave": "WAVE-0",
-      "wave_outcome_history": []
+      "current_wave": "WAVE-4",
+      "wave_outcome_history": [
+        {
+          "outcome_id": "R3-N010-W0-CARRY-001",
+          "wave_id": "WAVE-0",
+          "status": "EXPLICIT_CARRY_FORWARD_WITH_REASON",
+          "execution_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+          "reason": "W0-S1 established truthful coverage enforcement at current source, but the retained receipt grants no finding closure and current-SHA independent closure requirements remain unmet.",
+          "evidence_records": [
+            {
+              "subject_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+              "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-artifact-review:w0-s4:commit:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+              "record_id": "R3-N010-W0-CARRY-EVIDENCE-001",
+              "scope_id": "R3-N010",
+              "scope_paths": [
+                ".github/workflows/ci.yml",
+                "frontend/vitest.config.ts",
+                "frontend/scripts/check-coverage-threshold.mjs"
+              ],
+              "guard_ids": ["CQ-G09", "CQ-G13"],
+              "dimensions": [
+                "CI_FAULT",
+                "TEST_SIGNAL",
+                "TEST_SELECTION",
+                "NON_REGRESSION"
+              ],
+              "outcome": "PASS",
+              "limitations": [],
+              "producer_id": "/root/w0_s3_recovery_verifier",
+              "reviewer_id": "/root/w0_s3_recovery_challenger",
+              "credit_allowed": true,
+              "active": true
+            }
+          ],
+          "resulting_live_fact": {
+            "current_severity": "P1",
+            "current_disposition": "OPEN",
+            "canonical_owner": {
+              "status": "SOURCE_CANDIDATE",
+              "path": ".github/workflows/ci.yml",
+              "note": "Review-derived starting owner for slice preparation; dispatch must revalidate the canonical owner at its frozen execution SHA."
+            },
+            "source_evidence": {
+              "status": "SOURCE-CONFIRMED",
+              "coverage": "PARTIAL",
+              "refs": ["frontend/vitest.config.ts:12", ".github/workflows/ci.yml:156"]
+            },
+            "behavior_evidence": {
+              "status": "REPRODUCED",
+              "coverage": "COMPLETE",
+              "records": [
+                {
+                  "evidence_id": "R4-FRONTEND-COVERAGE-FALSE-GREEN",
+                  "dimension": "FAULT",
+                  "status": "REPRODUCED",
+                  "coverage": "COMPLETE",
+                  "source_sha": "de158ce53018c9c649f7dc0dcb3bdd8271ed4977",
+                  "scenario": "The exact CI shell body exited zero after missing coverage-summary.json and bc parse errors.",
+                  "finding_closure_credit": false
+                }
+              ]
+            },
+            "feature_reopen": {
+              "global_blocker": true,
+              "note": "This card is part of the global feature-reopen gate."
+            },
+            "closure_credit": false,
+            "closure_requirements": {
+              "current_sha_implementation_or_adjudication": false,
+              "behavior_or_fault_proof": false,
+              "independent_closure_review_same_sha": false,
+              "capability_non_regression": false,
+              "expected_absence_if_applicable": false
+            },
+            "closure_record": null,
+            "current_wave": "WAVE-4"
+          },
+          "resulting_live_fact_sha256": "81340d8ad02e243fd84a1557a7c853ac1d41cd0e8f21fc6bc6fc84ef162eecdb",
+          "target_wave": "WAVE-4",
+          "target_slice_or_preparation_id": "W4-CQ-C09-CLOSURE-PREPARATION",
+          "owner_id": "/root"
+        }
+      ]
     },
     {
       "card_id": "R3-N012",
@@ -6900,8 +6981,93 @@
       },
       "closure_record": null,
       "initial_assigned_wave": "WAVE-0",
-      "current_wave": "WAVE-0",
-      "wave_outcome_history": []
+      "current_wave": "WAVE-4",
+      "wave_outcome_history": [
+        {
+          "outcome_id": "R3-N020-W0-CARRY-001",
+          "wave_id": "WAVE-0",
+          "status": "EXPLICIT_CARRY_FORWARD_WITH_REASON",
+          "execution_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+          "reason": "W0-S1 established truthful current-test selection at current source, but the retained receipt grants no finding closure and current-SHA independent closure requirements remain unmet.",
+          "evidence_records": [
+            {
+              "subject_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+              "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-artifact-review:w0-s4:commit:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+              "record_id": "R3-N020-W0-CARRY-EVIDENCE-001",
+              "scope_id": "R3-N020",
+              "scope_paths": [
+                "frontend/vitest.config.ts",
+                "frontend/src/tauri.test.ts",
+                "frontend/scripts/check-current-test-selection.mjs"
+              ],
+              "guard_ids": ["CQ-G09", "CQ-G13"],
+              "dimensions": [
+                "CI_FAULT",
+                "TEST_SIGNAL",
+                "TEST_SELECTION",
+                "NON_REGRESSION"
+              ],
+              "outcome": "PASS",
+              "limitations": [],
+              "producer_id": "/root/w0_s3_recovery_verifier",
+              "reviewer_id": "/root/w0_s3_recovery_challenger",
+              "credit_allowed": true,
+              "active": true
+            }
+          ],
+          "resulting_live_fact": {
+            "current_severity": "P2",
+            "current_disposition": "OPEN",
+            "canonical_owner": {
+              "status": "SOURCE_CANDIDATE",
+              "path": "frontend/vitest.config.ts",
+              "note": "Review-derived starting owner for slice preparation; dispatch must revalidate the canonical owner at its frozen execution SHA."
+            },
+            "source_evidence": {
+              "status": "SOURCE-CONFIRMED",
+              "coverage": "PARTIAL",
+              "refs": [
+                "frontend/vitest.config.ts:9",
+                "frontend/src/stage1BrowserEvidence.test.ts:1",
+                "frontend/src/step6ProductAcceptance.test.ts:1"
+              ]
+            },
+            "behavior_evidence": {
+              "status": "REPRODUCED",
+              "coverage": "COMPLETE",
+              "records": [
+                {
+                  "evidence_id": "R4-FRONTEND-DEFAULT-SUITE-CONTAMINATION",
+                  "dimension": "TEST_SIGNAL",
+                  "status": "REPRODUCED",
+                  "coverage": "COMPLETE",
+                  "source_sha": "de158ce53018c9c649f7dc0dcb3bdd8271ed4977",
+                  "scenario": "Default Vitest executed retired Stage1, Step6 and dev-harness tests.",
+                  "finding_closure_credit": false
+                }
+              ]
+            },
+            "feature_reopen": {
+              "global_blocker": true,
+              "note": "This card is part of the global feature-reopen gate."
+            },
+            "closure_credit": false,
+            "closure_requirements": {
+              "current_sha_implementation_or_adjudication": false,
+              "behavior_or_fault_proof": false,
+              "independent_closure_review_same_sha": false,
+              "capability_non_regression": false,
+              "expected_absence_if_applicable": false
+            },
+            "closure_record": null,
+            "current_wave": "WAVE-4"
+          },
+          "resulting_live_fact_sha256": "302504ded901751368c02bdcbef9adcb8dce0b6ffe7c814017dfa1d19f069d28",
+          "target_wave": "WAVE-4",
+          "target_slice_or_preparation_id": "W4-CQ-C09-CLOSURE-PREPARATION",
+          "owner_id": "/root"
+        }
+      ]
     },
     {
       "card_id": "R3-N022",
@@ -7548,8 +7714,88 @@
       },
       "closure_record": null,
       "initial_assigned_wave": "WAVE-0",
-      "current_wave": "WAVE-0",
-      "wave_outcome_history": []
+      "current_wave": "WAVE-3",
+      "wave_outcome_history": [
+        {
+          "outcome_id": "R4-FLAKY-001-W0-CARRY-001",
+          "wave_id": "WAVE-0",
+          "status": "EXPLICIT_CARRY_FORWARD_WITH_REASON",
+          "execution_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+          "reason": "W0-S2 proved the fixed macOS arm64 20 plus 2 determinism contract, but it did not remediate the inherited-lock window or resolve original occurrence, product impact, unsupported-platform, or out-of-window UNKNOWN.",
+          "evidence_records": [
+            {
+              "subject_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+              "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-artifact-review:w0-s4:commit:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+              "record_id": "R4-FLAKY-001-W0-CARRY-EVIDENCE-001",
+              "scope_id": "R4-FLAKY-001",
+              "scope_paths": [
+                "openlife-core/src/tasks.rs",
+                "openlife-core/src/sqlite_migration.rs",
+                "scripts/run-w0-s2-owner-lease-evidence.mjs"
+              ],
+              "guard_ids": ["CQ-G11", "CQ-G13"],
+              "dimensions": ["FAULT", "PROCESS_MODEL", "REPETITION", "NON_REGRESSION"],
+              "outcome": "PASS",
+              "limitations": [],
+              "producer_id": "/root/w0_s3_recovery_verifier",
+              "reviewer_id": "/root/w0_s3_recovery_challenger",
+              "credit_allowed": true,
+              "active": true
+            }
+          ],
+          "resulting_live_fact": {
+            "current_severity": "P1",
+            "current_disposition": "OPEN",
+            "canonical_owner": {
+              "status": "SOURCE_CANDIDATE",
+              "path": "openlife-core/src/tasks.rs",
+              "note": "Review-derived starting owner for slice preparation; dispatch must revalidate the canonical owner at its frozen execution SHA."
+            },
+            "source_evidence": {
+              "status": "SOURCE-CONFIRMED",
+              "coverage": "PARTIAL",
+              "refs": [
+                "openlife-core/src/tasks.rs:11680-11705",
+                "openlife-core/src/sqlite_migration.rs:341-368",
+                "openlife-core/src/resource_gateway.rs:513-530"
+              ]
+            },
+            "behavior_evidence": {
+              "status": "REPRODUCED",
+              "coverage": "PARTIAL",
+              "records": [
+                {
+                  "evidence_id": "R4-FLAKY-FORK-EXEC-DIAGNOSIS",
+                  "dimension": "FAULT",
+                  "status": "REPRODUCED",
+                  "coverage": "PARTIAL",
+                  "source_sha": "de158ce53018c9c649f7dc0dcb3bdd8271ed4977",
+                  "scenario": "Controlled macOS arm64 probes reproduced an inherited flock window; attribution of the original one-off failure and product impact remain UNKNOWN.",
+                  "finding_closure_credit": false
+                }
+              ]
+            },
+            "feature_reopen": {
+              "global_blocker": true,
+              "note": "This card is part of the global feature-reopen gate."
+            },
+            "closure_credit": false,
+            "closure_requirements": {
+              "current_sha_implementation_or_adjudication": false,
+              "behavior_or_fault_proof": false,
+              "independent_closure_review_same_sha": false,
+              "capability_non_regression": false,
+              "expected_absence_if_applicable": false
+            },
+            "closure_record": null,
+            "current_wave": "WAVE-3"
+          },
+          "resulting_live_fact_sha256": "7e3cadf39b29d58a8003b20d9b8cb005092f19b5535339c5eb1209365c469c73",
+          "target_wave": "WAVE-3",
+          "target_slice_or_preparation_id": "W3-CQ-C08-GLOBAL-SIDE-EFFECT-PREPARATION",
+          "owner_id": "/root"
+        }
+      ]
     }
   ],
   "closure_policy": {
@@ -11263,11 +11509,10 @@
     "current_wave_counts": {
       "WAVE-1": 15,
       "WAVE-2": 41,
-      "WAVE-3": 21,
-      "WAVE-4": 21,
-      "WAVE-0": 3
+      "WAVE-3": 22,
+      "WAVE-4": 23
     },
     "closure_credit_true": 0,
-    "last_reconciled_execution_sha": "8a607bb4f9f392f573c98fa74e8c575d6c2c014d"
+    "last_reconciled_execution_sha": "8e73d208cfeb3d983648518334e224fedc78c05c"
   }
 }
