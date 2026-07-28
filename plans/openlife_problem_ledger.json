@@ -2,12 +2,12 @@
   "schema_version": "1.0.3",
   "ledger_id": "openlife-current-problem-ledger-v1.0.3-receipt-recovery-20260728",
   "generated_at": "2026-07-28T00:00:00Z",
-  "status": "DRAFT_AWAITING_USER_APPROVAL",
+  "status": "ACTIVE",
   "authority": {
     "scope": "Current 101-card owner, evidence, wave, next-proof and closure ledger.",
     "program_file": "plans/openlife_current_development_program.json",
     "subordinate_to_phase7": true,
-    "execution_authorized": false,
+    "execution_authorized": true,
     "self_contained": true,
     "append_only_baseline_policy": "The 101 baseline IDs may not be deleted or renamed. A future finding first appears in a reviewed creation commit; the following reconciliation commit records the review bound to that creation SHA. The creation commit alone is never a green handoff. Existing merge and attempt records remain immutable; adjudication can only remove defective receipt credit, while recovery requires a distinct current-Program receipt."
   },

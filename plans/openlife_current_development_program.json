@@ -2,8 +2,8 @@
   "schema_version": "1.0.3",
   "program_id": "openlife-current-development-program-v1.0.3-receipt-recovery-20260728",
   "generated_at": "2026-07-28T00:00:00Z",
-  "status": "DRAFT_AWAITING_USER_APPROVAL",
-  "execution_authorized": false,
+  "status": "APPROVED_FOR_EXECUTION",
+  "execution_authorized": true,
   "authority": {
     "scope": "CURRENT_TASK_ORDER_AND_EXECUTION_GOVERNANCE_ONLY",
     "subordinate_to_phase7": true,
@@ -201,22 +201,22 @@
     "evidence_support": "STRONG_FOR_CURRENT_DIRECTION_WITH_EXPLICIT_RECONSIDERATION_CRITERIA"
   },
   "program_approval": {
-    "status": "PENDING_USER_APPROVAL",
-    "execution_authority_granted": false,
+    "status": "APPROVED_BY_USER",
+    "execution_authority_granted": true,
     "program_author_id": "/root",
     "approved_program_schema_version": "1.0.3",
-    "approved_draft_commit_sha": null,
-    "approved_by": null,
-    "approved_at": null,
-    "approval_record": null,
+    "approved_draft_commit_sha": "a846e540c97d424df04fe93c5f8ed429a490a7f6",
+    "approved_by": "USER",
+    "approved_at": "2026-07-28T03:05:44Z",
+    "approval_record": "codex-thread:user-approved-exact-draft:a846e540c97d424df04fe93c5f8ed429a490a7f6",
     "github_formal_approval_credit": false,
     "note": "Creating or independently reviewing the Program does not authorize implementation. The user must explicitly approve execution.",
     "independent_challenge": {
-      "status": "PENDING_EXACT_DRAFT_REVIEW",
-      "reviewed_head_sha": null,
-      "reviewer_ids": [],
-      "outcome": "NOT_RUN",
-      "artifact_or_record": null,
+      "status": "PASS",
+      "reviewed_head_sha": "a846e540c97d424df04fe93c5f8ed429a490a7f6",
+      "reviewer_ids": ["/root/current_program_selftest_review", "/root/v103_adjudication_design"],
+      "outcome": "PASS",
+      "artifact_or_record": "codex-agent-challenge:exact-sha:a846e540c97d424df04fe93c5f8ed429a490a7f6",
       "blocking_findings": [],
       "github_formal_approval_credit": false,
       "invalidation_rule": "Any substantive Program, ledger, authority or validator change requires a new bound challenge."
@@ -328,11 +328,45 @@
   "gates": [
     {
       "id": "G-PROGRAM-ACTIVATION",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "fail_closed": true,
       "required_guard_ids": [],
       "evidence_dimensions": ["USER_PROGRAM_APPROVAL", "TRACKED_AUTHORITY"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "a846e540c97d424df04fe93c5f8ed429a490a7f6",
+          "artifact_or_record": "codex-thread:user-approved-exact-draft:a846e540c97d424df04fe93c5f8ed429a490a7f6",
+          "record_id": "PROGRAM-V1.0.3-ACTIVATION-USER-APPROVAL",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": ["plans/openlife_current_development_program.json"],
+          "guard_ids": [],
+          "dimensions": ["USER_PROGRAM_APPROVAL"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "USER",
+          "reviewer_id": "/root/openlife-program-integrator",
+          "credit_allowed": true,
+          "active": true
+        },
+        {
+          "subject_sha": "a846e540c97d424df04fe93c5f8ed429a490a7f6",
+          "artifact_or_record": "codex-agent-challenge:current_program_selftest_review+v103_adjudication_design",
+          "record_id": "PROGRAM-V1.0.3-ACTIVATION-TRACKED-AUTHORITY",
+          "scope_id": "G-PROGRAM-ACTIVATION",
+          "scope_paths": [
+            "plans/openlife_current_development_program.json",
+            "plans/openlife_problem_ledger.json"
+          ],
+          "guard_ids": [],
+          "dimensions": ["TRACKED_AUTHORITY"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/openlife-program-integrator",
+          "reviewer_id": "/root/current_program_selftest_review",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
       "criteria": [
         "The draft Program validator passes.",
         "The disposable Git-fixture validator self-test is run and reviewed against the exact approved draft before activation; it is a required external check, not a self-attested machine-credit dimension.",
@@ -545,7 +579,7 @@
       "order": 0,
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
-      "status": "PLANNED_NOT_AUTHORIZED",
+      "status": "READY",
       "refinement_level": "CURRENT_SLICE_PREPARATION_REQUIRED",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],
@@ -1357,7 +1391,7 @@
   ],
   "program_activation": {
     "stage_id": "PROGRAM-BOOTSTRAP",
-    "status": "DRAFT_VALIDATED_AWAITING_CHALLENGE_AND_USER_APPROVAL",
+    "status": "ACTIVE",
     "occurs_before_wave_id": "WAVE-0",
     "ordered_steps": [
       "Draft Program, ledger, active authority, validator and mutation self-test agree.",
