@@ -491,11 +491,30 @@
     },
     {
       "id": "G-W0-LEDGER-RECONCILIATION",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "fail_closed": true,
       "required_guard_ids": ["CQ-G09", "CQ-G11", "CQ-G13"],
       "evidence_dimensions": ["TRACKED_AUTHORITY", "LEDGER_INTEGRITY"],
-      "evidence_records": [],
+      "evidence_records": [
+        {
+          "subject_sha": "b5702d42e6cfb3dccb779a58ebb1e18405f6ef13",
+          "artifact_or_record": "codex-independent-state-challenge:w0-s4:state:b5702d42e6cfb3dccb779a58ebb1e18405f6ef13:PASS",
+          "record_id": "G-W0-LEDGER-RECONCILIATION-EVIDENCE-001",
+          "scope_id": "G-W0-LEDGER-RECONCILIATION",
+          "scope_paths": [
+            "plans/openlife_current_development_program.json",
+            "plans/openlife_problem_ledger.json"
+          ],
+          "guard_ids": ["CQ-G09", "CQ-G11", "CQ-G13"],
+          "dimensions": ["TRACKED_AUTHORITY", "LEDGER_INTEGRITY"],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/w0_s3_recovery_verifier",
+          "reviewer_id": "/root/w0_s3_recovery_challenger",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
       "criteria": [
         "Every W0 card and D064 evidence prerequisite has a current execution-SHA outcome record.",
         "Program/ledger/active authority agree after W0 evidence updates.",
@@ -654,7 +673,7 @@
       "order": 0,
       "name": "可信证据、门禁与隔离基线",
       "purpose": "先修复会让后续判断失真的门禁、测试信用、lease 诊断和外部状态隔离，不开展广泛产品功能。",
-      "status": "READY",
+      "status": "BLOCKED",
       "refinement_level": "CURRENT_SLICE_PREPARATION_REQUIRED",
       "depends_on_wave_ids": [],
       "entry_gate_ids": ["G-PROGRAM-ACTIVATION"],

@@ -590,6 +590,65 @@
         "reviewer_id": "/root/w0_s3_recovery_challenger",
         "artifact_or_record": "codex-independent-challenge:w0-s3-recovery:head:527814713ce248049c86908164cd55b45edc8d47:packet:f5b56912fe324a3448371905e8b367d97be0d17e2ced540c8faddb3efccaa20d:PASS"
       }
+    },
+    {
+      "record_id": "W0-S4-INTEGRATION-001",
+      "task_id": "W0-S4-VERIFY-RECONCILIATION-001",
+      "slice_id": "W0-S4",
+      "integrator_id": "/root",
+      "producer_id": "/root/w0_s3_recovery_verifier",
+      "program_approved_draft_sha": "a846e540c97d424df04fe93c5f8ed429a490a7f6",
+      "program_activation_sha": "d55f812de2d496ea607a3c262b6a0fa53b8ea9da",
+      "execution_baseline_sha": "25566a1be58406581e97921589ca8eadc36e3995",
+      "packet_sha256": "4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325",
+      "packet_artifact_path": "plans/openlife_task_packets/4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325.json",
+      "range_base_sha": "25566a1be58406581e97921589ca8eadc36e3995",
+      "range_head_sha": "25566a1be58406581e97921589ca8eadc36e3995",
+      "changed_paths": [],
+      "allowed_touched_paths": [
+        "plans/openlife_current_development_program.json",
+        "plans/openlife_problem_ledger.json"
+      ],
+      "required_guard_ids": ["CQ-G09", "CQ-G11", "CQ-G13"],
+      "completion_outcome": "PASS",
+      "task_evidence_records": [
+        {
+          "subject_sha": "25566a1be58406581e97921589ca8eadc36e3995",
+          "artifact_or_record": "attempt-artifact:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59;review:codex-independent-integration-review:w0-s4:reviewed-head:25566a1be58406581e97921589ca8eadc36e3995:artifact:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS",
+          "record_id": "W0-S4-TASK-EVIDENCE-001",
+          "scope_id": "W0-S4",
+          "scope_paths": [
+            "plans/openlife_current_development_program.json",
+            "plans/openlife_problem_ledger.json"
+          ],
+          "guard_ids": ["CQ-G09", "CQ-G11", "CQ-G13"],
+          "dimensions": [
+            "CI_FAULT",
+            "TEST_SIGNAL",
+            "TEST_SELECTION",
+            "FAULT",
+            "PROCESS_MODEL",
+            "REPETITION",
+            "NATIVE_BOOTSTRAP_AND_EXTERNAL_STATE",
+            "TRACKED_AUTHORITY",
+            "LEDGER_INTEGRITY",
+            "UNKNOWN_BOUNDARY",
+            "INDEPENDENT_CHALLENGE"
+          ],
+          "outcome": "PASS",
+          "limitations": [],
+          "producer_id": "/root/w0_s3_recovery_verifier",
+          "reviewer_id": "/root/w0_s3_recovery_challenger",
+          "credit_allowed": true,
+          "active": true
+        }
+      ],
+      "independent_review": {
+        "outcome": "PASS",
+        "reviewed_head_sha": "25566a1be58406581e97921589ca8eadc36e3995",
+        "reviewer_id": "/root/w0_s3_recovery_challenger",
+        "artifact_or_record": "codex-independent-integration-review:w0-s4:reviewed-head:25566a1be58406581e97921589ca8eadc36e3995:artifact:8e73d208cfeb3d983648518334e224fedc78c05c:packet:4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325:attempt:9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59:PASS"
+      }
     }
   ],
   "receipt_adjudication_records": [
@@ -776,6 +835,23 @@
       "producer_id": "/root/w0_s3_recovery_verifier",
       "integrator_id": "/root",
       "record_note": "Settles only the v1.0.3 W0-S3 receipt-recovery verification. The invalid W0-S3-INTEGRATION-001 and W0-S3-ATTEMPT-001 remain immutable historical no-credit records; BR4-D064 remains P0 OPEN with closure_credit=false, and real Tauri, real OS Keychain, Settings/direct Keyring, external Provider, product data, transient sockets, sandbox-external filesystem, finding closure, trial, and Phase7 completion remain UNKNOWN or NOT_CREDITED."
+    },
+    {
+      "attempt_id": "W0-S4-RECONCILIATION-ATTEMPT-001",
+      "task_id": "W0-S4-VERIFY-RECONCILIATION-001",
+      "slice_id": "W0-S4",
+      "root_cause_cluster_id": "PROGRAM-GOVERNANCE",
+      "packet_sha256": "4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325",
+      "packet_artifact_path": "plans/openlife_task_packets/4840d8963c60fcc07c085250ea17e771b881112338ea8aa1a61b6984ebd1e325.json",
+      "execution_baseline_sha": "25566a1be58406581e97921589ca8eadc36e3995",
+      "artifact_commit_sha": "8e73d208cfeb3d983648518334e224fedc78c05c",
+      "attempt_artifact_path": "plans/openlife_attempt_artifacts/9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59.json",
+      "attempt_artifact_sha256": "9b149fe6ab7849b1705e235461666471920f5af46f76f43b72e5a5c8ce4dcd59",
+      "outcome": "SUCCEEDED",
+      "reason": "W0-S4 independently re-verified the effective W0 receipts and reproduced the stale-reconciliation RED at the exact current baseline, supporting truthful PASS for coverage and lease, fail-closed BLOCKED for real external-state isolation, and state-only reconciliation without product or closure credit.",
+      "producer_id": "/root/w0_s3_recovery_verifier",
+      "integrator_id": "/root",
+      "record_note": "Settles only the frozen W0-S4 governance verification and reconciliation. Wave 0 remains BLOCKED because real Tauri, real OS Keychain, Settings/direct Keyring, transient/global external state, external Provider and product data remain UNKNOWN or NOT_CREDITED; W1 and later Waves remain not authorized, all 101 cards remain open, and closure_credit remains zero."
     }
   ],
   "architecture_review_records": [],
@@ -11513,6 +11589,6 @@
       "WAVE-4": 23
     },
     "closure_credit_true": 0,
-    "last_reconciled_execution_sha": "8e73d208cfeb3d983648518334e224fedc78c05c"
+    "last_reconciled_execution_sha": "b5702d42e6cfb3dccb779a58ebb1e18405f6ef13"
   }
 }
