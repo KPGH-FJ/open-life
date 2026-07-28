@@ -1664,48 +1664,38 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
 #[cfg(test)]
 pub(crate) fn bootstrap_with_secret_store_for_test(
     data_dir: PathBuf,
-    secret_store: &dyn SecretReader,
+    secret_store: &dyn crate::secret_store::SecretStore,
 ) -> BootstrapResult {
-    struct InitializedTestSecretReader<'a> {
-        inner: &'a dyn SecretReader,
-        mcp_key_refs: Vec<String>,
-    }
+    struct RecordedTestSecretReader<'a>(&'a dyn crate::secret_store::SecretStore);
 
-    impl SecretReader for InitializedTestSecretReader<'_> {
+    impl SecretReader for RecordedTestSecretReader<'_> {
         fn read_secret(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
-            if let Some(value) = self.inner.read_secret(secret_ref)? {
-                return Ok(Some(value));
-            }
-            if matches!(
-                secret_ref,
-                AGENT_RUN_RECEIPT_KEY_REF
-                    | MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
-                    | ACTION_QUEUE_AUTHORITY_KEY_REF
-                    | TASK_STORE_AUTHORITY_KEY_REF
-            ) {
-                use base64::Engine as _;
-                return Ok(Some(
-                    base64::engine::general_purpose::STANDARD.encode([0x54_u8; 32]),
-                ));
-            }
-            if self
-                .mcp_key_refs
-                .iter()
-                .any(|key_ref| key_ref == secret_ref)
-            {
-                use base64::Engine as _;
-                return Ok(Some(
-                    base64::engine::general_purpose::STANDARD.encode([0x4d_u8; 32]),
-                ));
-            }
-            Ok(None)
+            crate::secret_store::SecretStore::get(self.0, secret_ref)
         }
     }
 
     // The long-lived release-bootstrap fixtures exercise durable-store recovery,
-    // not first-run credential recovery. Model their already-initialized fixed
-    // credentials without mutating the supplied store. NKR first-run tests call
-    // `bootstrap_with_secret_store` directly so they observe the real product path.
+    // not first-run credential recovery. Seed their fixture explicitly before
+    // entering the product path, so evidence recorders observe every fixture
+    // write instead of receiving synthetic, unreported reads. NKR first-run tests
+    // call `bootstrap_with_secret_store` directly and observe the real product path.
+    use base64::Engine as _;
+    let fixed_material = base64::engine::general_purpose::STANDARD.encode([0x54_u8; 32]);
+    for secret_ref in [
+        AGENT_RUN_RECEIPT_KEY_REF,
+        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+        ACTION_QUEUE_AUTHORITY_KEY_REF,
+        TASK_STORE_AUTHORITY_KEY_REF,
+    ] {
+        if crate::secret_store::SecretStore::get(secret_store, secret_ref)
+            .expect("inspect initialized test credential")
+            .is_none()
+        {
+            secret_store
+                .set(secret_ref, &fixed_material)
+                .expect("seed initialized test credential");
+        }
+    }
     let keyring_path = data_dir.join("mcp_audit_keys.json");
     let database_path = data_dir.join("mcp_audit.db");
     if !keyring_path.exists() && !database_path.exists() {
@@ -1718,22 +1708,19 @@ pub(crate) fn bootstrap_with_secret_store_for_test(
             epoch,
             created_at: "2026-07-29T00:00:00Z".into(),
         };
-        let _ = crate::storage::save_mcp_audit_keyring_to_path(&keyring_path, &[config]);
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &keyring_path,
+            std::slice::from_ref(&config),
+        )
+        .expect("seed initialized test MCP keyring");
+        secret_store
+            .set(
+                config.key_ref.as_deref().expect("test MCP key reference"),
+                &base64::engine::general_purpose::STANDARD.encode([0x4d_u8; 32]),
+            )
+            .expect("seed initialized test MCP credential");
     }
-    let mcp_key_refs = match load_mcp_audit_keyring_from_path(&keyring_path) {
-        McpAuditKeyringLoad::Present(configs) => configs
-            .into_iter()
-            .filter_map(|config| config.key_ref)
-            .collect(),
-        _ => Vec::new(),
-    };
-    bootstrap_with_secret_store(
-        data_dir,
-        &InitializedTestSecretReader {
-            inner: secret_store,
-            mcp_key_refs,
-        },
-    )
+    bootstrap_with_secret_store(data_dir, &RecordedTestSecretReader(secret_store))
 }
 
 fn bootstrap_with_secret_store(
@@ -2446,18 +2433,39 @@ fn bootstrap_with_secret_store(
                             &mcp_audit_db_path,
                             &hydration.materials,
                         ) {
-                            Ok(_)
-                                if hydration.configs.last().is_some_and(|config| {
+                            Ok(_) => {
+                                let latest_is_keychain = hydration.configs.last().is_some_and(
+                                    |config| {
+                                        config.mode
+                                            == openlife_core::mcp_audit::KeyMode::Keychain
+                                    },
+                                );
+                                let has_keychain_epoch = hydration.configs.iter().any(|config| {
                                     config.mode == openlife_core::mcp_audit::KeyMode::Keychain
-                                }) =>
-                            {
-                                (Some(hydration), CredentialBootstrapStatus::Available, None)
+                                });
+                                if latest_is_keychain {
+                                    (
+                                        Some(hydration),
+                                        CredentialBootstrapStatus::Available,
+                                        None,
+                                    )
+                                } else if !has_keychain_epoch {
+                                    (
+                                        Some(hydration),
+                                        CredentialBootstrapStatus::InitializationRequired,
+                                        None,
+                                    )
+                                } else {
+                                    (
+                                        Some(hydration),
+                                        CredentialBootstrapStatus::Invalid,
+                                        Some(
+                                            "MCP audit keyring has a legacy epoch after a Keychain write epoch; initialization is blocked"
+                                                .into(),
+                                        ),
+                                    )
+                                }
                             }
-                            Ok(_) => (
-                                Some(hydration),
-                                CredentialBootstrapStatus::InitializationRequired,
-                                None,
-                            ),
                             Err(error)
                                 if openlife_core::mcp_audit::is_payload_integrity_failure(
                                     &error,
@@ -3387,7 +3395,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s1_fresh_bootstrap_is_zero_write_and_reports_five_initialization_slots() {
+    fn nkr_s1_credential_fresh_bootstrap_is_zero_write_and_reports_five_initialization_slots() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::empty();
 
@@ -3407,7 +3415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nkr_s1_life_state_projection_publishes_the_bootstrap_snapshot() {
+    async fn nkr_s1_credential_life_state_projection_publishes_the_bootstrap_snapshot() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::empty();
         let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
@@ -3427,7 +3435,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s1_missing_key_beside_existing_data_is_never_initialization_required() {
+    fn nkr_s1_credential_missing_key_beside_existing_data_is_never_initialization_required() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("agent_runs.db"), b"existing").unwrap();
         let secrets = TestSecretStore::empty();
@@ -3442,7 +3450,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s1_invalid_and_unavailable_material_remain_fail_closed() {
+    fn nkr_s1_credential_invalid_and_unavailable_material_remain_fail_closed() {
         let invalid_directory = tempfile::tempdir().unwrap();
         let invalid = TestSecretStore::empty();
         invalid
@@ -3874,7 +3882,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nkr_s1_true_first_boot_defers_mcp_reference_creation_until_explicit_recovery() {
+    async fn nkr_s1_credential_true_first_boot_defers_mcp_reference_creation_until_explicit_recovery(
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::default();
 
@@ -3909,7 +3918,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nkr_s1_existing_empty_mcp_database_remains_initialization_required_without_mutation() {
+    async fn nkr_s1_credential_existing_empty_mcp_database_remains_initialization_required_without_mutation(
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let bootstrap_key = d057_key_config(29);
         let bootstrap_material = openlife_core::mcp_audit::AuditKeyMaterial {
@@ -3946,6 +3956,39 @@ mod tests {
             result.state.credential_bootstrap_snapshot.purposes[4].status,
             CredentialBootstrapStatus::InitializationRequired
         );
+    }
+
+    #[test]
+    fn nkr_s1_credential_mcp_keychain_epoch_followed_by_legacy_epoch_is_not_initializable() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let keychain = d057_key_config(41);
+        secrets.preload_mcp_key(41, [0x41; 32]);
+        let legacy = openlife_core::mcp_audit::AuditKeyConfig {
+            mode: openlife_core::mcp_audit::KeyMode::Derived,
+            epoch: 42,
+            created_at: "2026-07-29T00:00:01Z".into(),
+            ..Default::default()
+        };
+        crate::storage::save_mcp_audit_keyring_to_path(
+            &directory.path().join("mcp_audit_keys.json"),
+            &[keychain, legacy],
+        )
+        .unwrap();
+        secrets.reset_operation_counts();
+
+        let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(secrets.operation_counts(), (0, 0));
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[4].status,
+            CredentialBootstrapStatus::Invalid
+        );
+        assert!(result
+            .state
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("legacy epoch after a Keychain write epoch")));
     }
 
     #[test]

@@ -732,17 +732,43 @@ fn backend_remediation_phase0_startup_keyring_is_bounded_and_noninteractive() {
     assert!(secret_store.contains("prior bounded timeout"));
 }
 
-#[test]
-fn nkr_s1_startup_keyring_is_compile_time_read_only_and_projection_owned() {
-    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+fn nkr_s1_product_bootstrap_writer(bootstrap: &str) -> Option<&'static str> {
     let product_bootstrap = bootstrap
-        .split("#[cfg(test)]")
-        .next()
-        .expect("bootstrap product source");
-    assert!(!product_bootstrap.contains("hydrate_or_create_integrity_key("));
-    assert!(!product_bootstrap.contains("hydrate_or_create_canonical_store_integrity_key("));
-    assert!(!product_bootstrap.contains("ensure_write_epoch(secret_store)"));
-    assert!(!product_bootstrap.contains("save_mcp_audit_keyring_to_path("));
+        .split_once("\nfn bootstrap_with_secret_store(\n")
+        .map(|(_, source)| source)
+        .expect("bootstrap product implementation")
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map(|(source, _)| source)
+        .expect("bootstrap product implementation boundary");
+    [
+        "hydrate_or_create_integrity_key(",
+        "hydrate_or_create_canonical_store_integrity_key(",
+        "ensure_write_epoch(secret_store)",
+        "save_mcp_audit_keyring_to_path(",
+    ]
+    .into_iter()
+    .find(|forbidden| product_bootstrap.contains(forbidden))
+}
+
+#[test]
+fn nkr_s1_credential_startup_keyring_is_compile_time_read_only_and_projection_owned() {
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    assert_eq!(nkr_s1_product_bootstrap_writer(&bootstrap), None);
+    for forbidden in [
+        "hydrate_or_create_integrity_key(",
+        "hydrate_or_create_canonical_store_integrity_key(",
+        "ensure_write_epoch(secret_store)",
+        "save_mcp_audit_keyring_to_path(",
+    ] {
+        let counterexample = format!(
+            "header\nfn bootstrap_with_secret_store(\n) {{ {forbidden} }}\n#[cfg(test)]\nmod tests {{}}"
+        );
+        assert_eq!(
+            nkr_s1_product_bootstrap_writer(&counterexample),
+            Some(forbidden),
+            "source guard accepted forbidden counterexample: {forbidden}"
+        );
+    }
 
     let secret_store = read_repo_file("src-tauri/src/secret_store.rs");
     assert!(!secret_store.contains("impl SecretStore for StartupKeyringSecretStore"));

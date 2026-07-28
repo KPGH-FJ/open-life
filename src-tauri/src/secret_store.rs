@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s1_startup_hydration_never_migrates_legacy_plaintext() {
+    fn nkr_s1_credential_startup_hydration_never_migrates_legacy_plaintext() {
         let store = MemorySecretStore::default();
         let mut config = AppConfig::default();
         config.llm.openai_key = "sk-provider-secret".into();
