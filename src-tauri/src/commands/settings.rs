@@ -1,4 +1,5 @@
 use crate::errors::AppError;
+use base64::{engine::general_purpose, Engine as _};
 use once_cell::sync::Lazy as LazyLock;
 use openlife_core::config::AppConfig;
 use openlife_core::life_model::LifeModel;
@@ -15,6 +16,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,12 +46,14 @@ use crate::secret_store::{
     hydrate_or_create_integrity_key, inspect_existing_mcp_audit_keys, inspect_integrity_key_access,
     stage_config_secrets, IntegrityKeyInspection, KeyringSecretStore,
     McpAuditKeyHydrationInspection, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
-    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
+    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX,
+    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
-    app_data_dir, load_mcp_audit_keyring_from_path, mcp_audit_keyring_path, privacy_policy_path,
-    save_mcp_audit_keyring_to_path, save_privacy_policy_to_path, McpAuditKeyringLoad,
+    app_data_dir, load_mcp_audit_keyring_from_path, mcp_audit_keyring_bytes,
+    mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
+    save_privacy_policy_to_path, McpAuditKeyringBytes, McpAuditKeyringLoad,
 };
 use crate::AppState;
 use crate::{life_model_write_gateway, memory_gateway};
@@ -86,6 +92,54 @@ struct CredentialRecoveryActivityGuard;
 impl Drop for CredentialRecoveryActivityGuard {
     fn drop(&mut self) {
         CREDENTIAL_RECOVERY_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+struct CredentialRecoveryProcessLock(File);
+
+impl CredentialRecoveryProcessLock {
+    fn acquire(data_dir: &Path) -> Result<Self, AppError> {
+        let file = File::open(data_dir).map_err(|error| {
+            AppError::permission(format!(
+                "credential initialization cannot open its process-lock owner: {error}"
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            // SAFETY: `file` owns this live descriptor for the full lifetime of
+            // the guard. The lock is advisory and scoped to the data directory,
+            // so parallel OpenLife processes serialize the entire
+            // reinspection-write-compensation transaction without creating a
+            // second durable authority file.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                return Err(AppError::permission(format!(
+                    "credential initialization is already active in another OpenLife process: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            Ok(Self(file))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Err(AppError::permission(
+                "credential initialization cross-process locking is unavailable on this platform",
+            ))
+        }
+    }
+}
+
+impl Drop for CredentialRecoveryProcessLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: the guard still owns the descriptor and drops it
+            // immediately after releasing the advisory lock.
+            unsafe {
+                libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
     }
 }
 
@@ -270,18 +324,39 @@ fn set_recovery_item_status(report: &mut CredentialRecoveryReport, purpose: &str
     }
 }
 
+struct CreatedCredential {
+    purpose: &'static str,
+    secret_ref: &'static str,
+    exact_encoded_value: String,
+}
+
+fn delete_exact_created_credential(
+    store: &dyn SecretStore,
+    secret_ref: &str,
+    exact_encoded_value: &str,
+) -> bool {
+    match store.get(secret_ref) {
+        Ok(Some(current)) if current == exact_encoded_value => store.delete(secret_ref).is_ok(),
+        _ => false,
+    }
+}
+
 fn rollback_created_credentials(
     store: &dyn SecretStore,
-    created: &[(&'static str, &'static str)],
+    created: &[CreatedCredential],
     report: &mut CredentialRecoveryReport,
 ) -> bool {
     let mut complete = true;
-    for (purpose, secret_ref) in created.iter().rev() {
-        if store.delete(secret_ref).is_ok() {
-            set_recovery_item_status(report, purpose, "compensated");
+    for credential in created.iter().rev() {
+        if delete_exact_created_credential(
+            store,
+            credential.secret_ref,
+            &credential.exact_encoded_value,
+        ) {
+            set_recovery_item_status(report, credential.purpose, "compensated");
         } else {
             complete = false;
-            set_recovery_item_status(report, purpose, "cleanup_unknown");
+            set_recovery_item_status(report, credential.purpose, "cleanup_unknown");
         }
     }
     complete
@@ -292,24 +367,21 @@ fn initialize_mcp_audit_credential(
     store: &dyn SecretStore,
 ) -> Result<(), (String, bool)> {
     let path = data_dir.join("mcp_audit_keys.json");
-    let prior_bytes = match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err((
-                format!("read prior MCP key-reference bytes: {error}"),
-                false,
-            ))
-        }
-    };
+    let prior_bytes = mcp_audit_keyring_bytes(&path);
     let mut configs = match &prior_bytes {
-        Some(bytes) => serde_json::from_slice(bytes).map_err(|error| {
+        McpAuditKeyringBytes::Present(bytes) => serde_json::from_slice(bytes).map_err(|error| {
             (
                 format!("parse prior MCP key-reference bytes: {error}"),
                 false,
             )
         })?,
-        None => Vec::new(),
+        McpAuditKeyringBytes::Absent => Vec::new(),
+        McpAuditKeyringBytes::Unreadable(error) => {
+            return Err((
+                format!("read prior MCP key-reference bytes: {error}"),
+                false,
+            ));
+        }
     };
     let previous_epoch = configs
         .last()
@@ -320,14 +392,22 @@ fn initialize_mcp_audit_credential(
         .checked_add(1)
         .map(|next| next.max(chrono::Utc::now().timestamp().max(0) as u64))
         .ok_or_else(|| ("MCP audit key epoch is exhausted".into(), false))?;
-    let material = create_mcp_audit_key_material(next_epoch, store)
-        .map_err(|error| (format!("create MCP audit credential: {error}"), false))?;
+    let expected_secret_ref = format!("{MCP_AUDIT_KEY_REF_PREFIX}{next_epoch}");
+    let material = create_mcp_audit_key_material(next_epoch, store).map_err(|error| {
+        let cleanup_unknown = !matches!(store.get(&expected_secret_ref), Ok(None));
+        (
+            format!("create MCP audit credential: {error}"),
+            cleanup_unknown,
+        )
+    })?;
     let secret_ref = material.config.key_ref.clone().unwrap_or_default();
+    let exact_encoded_value = general_purpose::STANDARD.encode(material.key);
     configs.push(material.config);
     let intended_bytes = match serde_json::to_vec_pretty(&configs) {
         Ok(bytes) => bytes,
         Err(error) => {
-            let cleanup_unknown = store.delete(&secret_ref).is_err();
+            let cleanup_unknown =
+                !delete_exact_created_credential(store, &secret_ref, &exact_encoded_value);
             return Err((
                 format!("serialize MCP key-reference bytes: {error}"),
                 cleanup_unknown,
@@ -335,15 +415,16 @@ fn initialize_mcp_audit_credential(
         }
     };
     if let Err(error) = save_mcp_audit_keyring_to_path(&path, &configs) {
-        let final_bytes = std::fs::read(&path).ok();
+        let final_bytes = mcp_audit_keyring_bytes(&path);
         if final_bytes == prior_bytes {
-            let delete_failed = store.delete(&secret_ref).is_err();
+            let delete_failed =
+                !delete_exact_created_credential(store, &secret_ref, &exact_encoded_value);
             return Err((
                 format!("save MCP key reference failed before authority changed: {error}"),
                 delete_failed,
             ));
         }
-        if final_bytes.as_deref() == Some(intended_bytes.as_slice()) {
+        if final_bytes == McpAuditKeyringBytes::Present(intended_bytes.clone()) {
             return Err((
                 format!(
                     "save MCP key reference reported an ambiguous error after intended authority became observable: {error}"
@@ -356,12 +437,13 @@ fn initialize_mcp_audit_credential(
             true,
         ));
     }
-    let final_bytes = std::fs::read(&path).ok();
-    if final_bytes.as_deref() == Some(intended_bytes.as_slice()) {
+    let final_bytes = mcp_audit_keyring_bytes(&path);
+    if final_bytes == McpAuditKeyringBytes::Present(intended_bytes) {
         return Ok(());
     }
     if final_bytes == prior_bytes {
-        let cleanup_unknown = store.delete(&secret_ref).is_err();
+        let cleanup_unknown =
+            !delete_exact_created_credential(store, &secret_ref, &exact_encoded_value);
         return Err((
             "MCP key-reference save returned success without changing authority".into(),
             cleanup_unknown,
@@ -378,6 +460,7 @@ fn initialize_required_credentials_after_confirmation(
     store: &dyn SecretStore,
     expected_snapshot: &CredentialBootstrapSnapshot,
 ) -> Result<CredentialRecoveryReport, AppError> {
+    let _process_lock = CredentialRecoveryProcessLock::acquire(data_dir)?;
     let current_snapshot = inspect_required_credential_snapshot(data_dir, store);
     if current_snapshot != *expected_snapshot {
         return Err(AppError::permission(
@@ -392,7 +475,7 @@ fn initialize_required_credentials_after_confirmation(
     }
 
     let mut report = recovery_report_from_snapshot(&current_snapshot);
-    let mut created = Vec::<(&'static str, &'static str)>::new();
+    let mut created = Vec::<CreatedCredential>::new();
     for (purpose, secret_ref) in [
         ("agent_run_receipts", AGENT_RUN_RECEIPT_KEY_REF),
         ("main_chat_events", MAIN_CHAT_EVENT_INTEGRITY_KEY_REF),
@@ -401,6 +484,18 @@ fn initialize_required_credentials_after_confirmation(
     ] {
         if !eligible.iter().any(|eligible| eligible == purpose) {
             continue;
+        }
+        if !matches!(store.get(secret_ref), Ok(None)) {
+            set_recovery_item_status(&mut report, purpose, "cleanup_unknown");
+            let cleanup_complete = rollback_created_credentials(store, &created, &mut report);
+            report.cleanup_status = "unknown".into();
+            report.blocked_reason = Some(format!(
+                "{purpose} credential ownership changed after the locked snapshot; cleanup was not attempted"
+            ));
+            if !cleanup_complete {
+                report.cleanup_status = "unknown".into();
+            }
+            return Ok(report);
         }
         let result = if purpose == "task_store" {
             hydrate_or_create_canonical_store_integrity_key(
@@ -411,19 +506,48 @@ fn initialize_required_credentials_after_confirmation(
         } else {
             hydrate_or_create_integrity_key(secret_ref, store)
         };
-        if let Err(error) = result {
-            set_recovery_item_status(&mut report, purpose, "unavailable");
-            let cleanup_complete = rollback_created_credentials(store, &created, &mut report);
-            report.cleanup_status = if cleanup_complete {
-                "compensated"
-            } else {
-                "unknown"
+        let key = match result {
+            Ok(key) => key,
+            Err(error) => {
+                let ambiguous = !matches!(store.get(secret_ref), Ok(None));
+                set_recovery_item_status(
+                    &mut report,
+                    purpose,
+                    if ambiguous {
+                        "cleanup_unknown"
+                    } else {
+                        "unavailable"
+                    },
+                );
+                let cleanup_complete = rollback_created_credentials(store, &created, &mut report);
+                report.cleanup_status = if ambiguous || !cleanup_complete {
+                    "unknown"
+                } else {
+                    "compensated"
+                }
+                .into();
+                report.blocked_reason = Some(format!("{purpose} initialization failed: {error}"));
+                return Ok(report);
             }
-            .into();
-            report.blocked_reason = Some(format!("{purpose} initialization failed: {error}"));
+        };
+        let exact_encoded_value = general_purpose::STANDARD.encode(key);
+        if !matches!(store.get(secret_ref), Ok(Some(current)) if current == exact_encoded_value) {
+            set_recovery_item_status(&mut report, purpose, "cleanup_unknown");
+            let cleanup_complete = rollback_created_credentials(store, &created, &mut report);
+            report.cleanup_status = "unknown".into();
+            report.blocked_reason = Some(format!(
+                "{purpose} initialization did not produce an exact owned credential receipt"
+            ));
+            if !cleanup_complete {
+                report.cleanup_status = "unknown".into();
+            }
             return Ok(report);
         }
-        created.push((purpose, secret_ref));
+        created.push(CreatedCredential {
+            purpose,
+            secret_ref,
+            exact_encoded_value,
+        });
         set_recovery_item_status(&mut report, purpose, "created");
     }
 
@@ -1463,6 +1587,26 @@ async fn replace_runtime_provider_config(state: &Arc<AppState>, config: AppConfi
     state.replace_provider_runtime_config(config).await;
 }
 
+fn credential_initialization_native_request<'a>(
+    eligible_purposes: &'a [String],
+    confirmation_arguments: &'a serde_json::Value,
+) -> NativeDangerActionRequest<'a> {
+    NativeDangerActionRequest {
+        action_type: "credential_store_initialization",
+        target_ids_for_new_challenge: eligible_purposes,
+        // The native authority consumes one target as the batch anchor, while
+        // the challenge itself and the arguments remain bound to the complete
+        // sorted purpose set and matching affected count.
+        requested_target: eligible_purposes.first().map(String::as_str),
+        affected_count: eligible_purposes.len(),
+        arguments: confirmation_arguments,
+        arguments_summary:
+            "仅初始化后端启动快照明确标记为 initialization_required 的系统凭据；完成后必须重启。",
+        scope_summary: "后端快照列出的 OpenLife 内部系统凭据",
+        challenge_id: None,
+    }
+}
+
 /// User-initiated recovery for OS credential ACL changes after an application
 /// update or development re-sign. Startup intentionally stays non-interactive
 /// and bounded; this command is the only product path that may let the OS show
@@ -1509,16 +1653,10 @@ pub async fn recover_required_credential_access(
     });
     require_native_danger_action_confirmation(
         &window,
-        NativeDangerActionRequest {
-            action_type: "credential_store_initialization",
-            target_ids_for_new_challenge: &expected_eligible_purposes,
-            requested_target: None,
-            affected_count: expected_eligible_purposes.len(),
-            arguments: &confirmation_arguments,
-            arguments_summary: "仅初始化后端启动快照明确标记为 initialization_required 的系统凭据；完成后必须重启。",
-            scope_summary: "后端快照列出的 OpenLife 内部系统凭据",
-            challenge_id: None,
-        },
+        credential_initialization_native_request(
+            &expected_eligible_purposes,
+            &confirmation_arguments,
+        ),
     )
     .await?;
     let snapshot_for_worker = expected_snapshot.clone();
@@ -4522,6 +4660,7 @@ mod tests {
         writes: Mutex<usize>,
         deletes: Mutex<usize>,
         fail_set_at: Mutex<Option<usize>>,
+        fail_after_set_at: Mutex<Option<usize>>,
     }
 
     impl SecretStore for RecoverySecretStore {
@@ -4539,6 +4678,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(secret_ref.into(), value.into());
+            if *self.fail_after_set_at.lock().unwrap() == Some(*writes) {
+                anyhow::bail!("injected credential post-write failure");
+            }
             Ok(())
         }
 
@@ -4584,7 +4726,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_native_cancellation_performs_zero_sets_and_zero_deletes_at_command_boundary() {
+    fn nkr_s2_rejected_confirmation_result_performs_zero_sets_and_zero_deletes() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
@@ -4633,6 +4775,37 @@ mod tests {
         assert!(!confirmation_precedes_write_owner(
             "initialize_required_credentials_with_confirmation_result(); require_native_danger_action_confirmation();"
         ));
+    }
+
+    #[test]
+    fn nkr_s2_native_request_binds_exact_sorted_purpose_scope_and_batch_anchor() {
+        let purposes = vec![
+            "action_queue".to_string(),
+            "agent_run_receipts".to_string(),
+            "main_chat_events".to_string(),
+        ];
+        let arguments = serde_json::json!({
+            "eligiblePurposeIds": purposes,
+            "affectedCount": purposes.len(),
+            "bootstrapSnapshotVersion": "credential_bootstrap_v1",
+            "bootstrapSnapshotDigest": "a".repeat(64),
+        });
+
+        let request = credential_initialization_native_request(&purposes, &arguments);
+
+        assert_eq!(request.target_ids_for_new_challenge, purposes);
+        assert_eq!(request.requested_target, Some("action_queue"));
+        assert!(request
+            .target_ids_for_new_challenge
+            .iter()
+            .any(|purpose| Some(purpose.as_str()) == request.requested_target));
+        assert_eq!(request.affected_count, purposes.len());
+        assert_eq!(
+            request.arguments["eligiblePurposeIds"],
+            arguments["eligiblePurposeIds"]
+        );
+        assert_eq!(request.arguments["affectedCount"], purposes.len());
+        assert_eq!(request.arguments["bootstrapSnapshotDigest"], "a".repeat(64));
     }
 
     #[test]
@@ -4738,6 +4911,43 @@ mod tests {
     }
 
     #[test]
+    fn nkr_s2_fixed_post_write_error_retains_ambiguous_secret_and_never_deletes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+        *store.fail_after_set_at.lock().unwrap() = Some(3);
+        let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
+
+        let report =
+            initialize_required_credentials_after_confirmation(directory.path(), &store, &snapshot)
+                .unwrap();
+
+        assert_eq!(report.cleanup_status, "unknown");
+        assert_eq!(*store.writes.lock().unwrap(), 3);
+        assert_eq!(*store.deletes.lock().unwrap(), 2);
+        assert_eq!(store.values.lock().unwrap().len(), 1);
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .find(|item| item.purpose == "action_queue")
+                .unwrap()
+                .status,
+            "cleanup_unknown"
+        );
+    }
+
+    #[test]
+    fn nkr_s2_process_lock_rejects_a_parallel_initialization_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = CredentialRecoveryProcessLock::acquire(directory.path()).unwrap();
+        let second = CredentialRecoveryProcessLock::acquire(directory.path());
+
+        assert!(second.is_err());
+        drop(first);
+        assert!(CredentialRecoveryProcessLock::acquire(directory.path()).is_ok());
+    }
+
+    #[test]
     fn nkr_s2_mcp_pre_write_save_failure_restores_prior_absence() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
@@ -4754,6 +4964,75 @@ mod tests {
         assert_eq!(*store.writes.lock().unwrap(), 5);
         assert_eq!(*store.deletes.lock().unwrap(), 5);
         assert!(store.values.lock().unwrap().is_empty());
+        assert!(!directory.path().join("mcp_audit_keys.json").exists());
+    }
+
+    #[test]
+    fn nkr_s2_mcp_pre_write_save_failure_preserves_exact_prior_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mcp_audit_keys.json");
+        let prior = vec![openlife_core::mcp_audit::AuditKeyConfig {
+            mode: openlife_core::mcp_audit::KeyMode::Derived,
+            epoch: 7,
+            created_at: "2026-07-29T00:00:00Z".into(),
+            ..Default::default()
+        }];
+        crate::storage::save_mcp_audit_keyring_to_path(&path, &prior).unwrap();
+        let exact_prior_bytes = std::fs::read(&path).unwrap();
+        crate::storage::fail_next_mcp_audit_keyring_save_for_test(&path);
+        let store = RecoverySecretStore::default();
+
+        let result = initialize_mcp_audit_credential(directory.path(), &store);
+
+        assert!(matches!(result, Err((_, false))));
+        assert_eq!(std::fs::read(&path).unwrap(), exact_prior_bytes);
+        assert_eq!(*store.writes.lock().unwrap(), 1);
+        assert_eq!(*store.deletes.lock().unwrap(), 1);
+        assert!(store.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nkr_s2_mcp_unreadable_final_state_is_cleanup_unknown_and_retains_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mcp_audit_keys.json");
+        let store = RecoverySecretStore::default();
+        crate::storage::fail_next_mcp_audit_keyring_save_with_unreadable_result_for_test(&path);
+
+        let result = initialize_mcp_audit_credential(directory.path(), &store);
+
+        assert!(matches!(result, Err((_, true))));
+        assert_eq!(*store.writes.lock().unwrap(), 1);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
+        assert_eq!(store.values.lock().unwrap().len(), 1);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn nkr_s2_mcp_unreadable_prior_state_never_writes_or_deletes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mcp_audit_keys.json");
+        crate::storage::fail_next_mcp_audit_keyring_read_for_test(&path);
+        let store = RecoverySecretStore::default();
+
+        let result = initialize_mcp_audit_credential(directory.path(), &store);
+
+        assert!(matches!(result, Err((_, false))));
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn nkr_s2_mcp_post_write_set_error_retains_ambiguous_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+        *store.fail_after_set_at.lock().unwrap() = Some(1);
+
+        let result = initialize_mcp_audit_credential(directory.path(), &store);
+
+        assert!(matches!(result, Err((_, true))));
+        assert_eq!(*store.writes.lock().unwrap(), 1);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
+        assert_eq!(store.values.lock().unwrap().len(), 1);
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
     }
 

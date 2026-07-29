@@ -46,15 +46,13 @@ describe("Tauri settings privacy data source", () => {
     expect(snapshot.config).toEqual(config);
     expect(snapshot.boundaryEnvelope).toMatchObject({ status: "error", data: null });
     expect(snapshot.safeMode).toEqual({ active: false, reason: "", sourceRefs: [] });
+    expect(snapshot.credentialBootstrap).toBeNull();
     expect(tauriMocks.recoverRequiredCredentialAccess).not.toHaveBeenCalled();
     expect(snapshot.diagnostics).toContainEqual({
       id: "provider_privacy_boundary",
       status: "failed",
       message: "boundary unavailable",
     });
-  });
-
-  it("invokes the sole backend credential initializer only from an explicit action", async () => {
     const report = {
       items: [],
       initializationCompletedForRestart: true,

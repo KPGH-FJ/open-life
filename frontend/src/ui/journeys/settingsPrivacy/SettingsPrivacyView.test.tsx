@@ -24,7 +24,9 @@ function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
   );
 }
 
-function credentialSettingsSource(status: CredentialBootstrapStatus): SettingsPrivacyDataSource {
+function credentialSettingsSource(
+  status: CredentialBootstrapStatus | null
+): SettingsPrivacyDataSource {
   return {
     loadSettingsPrivacy: vi.fn().mockResolvedValue({
       config: {
@@ -48,17 +50,20 @@ function credentialSettingsSource(status: CredentialBootstrapStatus): SettingsPr
         actions: { primary: [], review: [], debugOnly: [] },
       },
       safeMode: { active: false, reason: "", sourceRefs: [] },
-      credentialBootstrap: {
-        version: "credential_bootstrap_v1",
-        digest: "a".repeat(64),
-        purposes: [
-          { purpose: "agent_run_receipts", status },
-          { purpose: "main_chat_events", status },
-          { purpose: "action_queue", status },
-          { purpose: "task_store", status },
-          { purpose: "mcp_audit", status },
-        ],
-      },
+      credentialBootstrap:
+        status === null
+          ? null
+          : {
+              version: "credential_bootstrap_v1",
+              digest: "a".repeat(64),
+              purposes: [
+                { purpose: "agent_run_receipts", status },
+                { purpose: "main_chat_events", status },
+                { purpose: "action_queue", status },
+                { purpose: "task_store", status },
+                { purpose: "mcp_audit", status },
+              ],
+            },
       diagnostics: [
         { id: "sanitized_config", status: "loaded" },
         { id: "provider_privacy_boundary", status: "loaded" },
@@ -115,11 +120,21 @@ describe("SettingsPrivacyView", () => {
       saveSettings: vi.fn(),
     };
 
-    render(<SafeModeSettings source={source} />);
+    const rendered = render(<SafeModeSettings source={source} />);
 
     expect(await screen.findByRole("heading", { name: "模型与传输边界" })).toBeInTheDocument();
     expect(screen.getByLabelText("API 凭据")).toHaveValue("");
     expect(screen.getByText(/后端返回遮罩凭据/)).toBeInTheDocument();
+
+    rendered.unmount();
+    const initializationSource = credentialSettingsSource("initialization_required");
+    render(<SafeModeSettings source={initializationSource} />);
+    const action = await screen.findByRole("button", { name: "初始化系统凭据" });
+    expect(initializationSource.initializeRequiredCredentials).not.toHaveBeenCalled();
+    fireEvent.click(action);
+    expect(initializationSource.initializeRequiredCredentials).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("初始化完成，需要重启")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
   });
 
   it("does not infer credential recovery eligibility from generic Safe Mode", async () => {
@@ -152,12 +167,29 @@ describe("SettingsPrivacyView", () => {
       saveSettings: vi.fn(),
     };
 
-    render(<SafeModeSettings source={source} />);
+    const rendered = render(<SafeModeSettings source={source} />);
 
     expect(await screen.findByText("安全模式保持生效")).toBeInTheDocument();
     expect(screen.getByText("设置暂不可用")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "检查系统凭据" })).not.toBeInTheDocument();
     expect(screen.getByText(/不会从自由文本原因推导/)).toBeInTheDocument();
+
+    rendered.unmount();
+    for (const status of [
+      "available",
+      "missing_existing_data",
+      "invalid",
+      "unavailable",
+      "unknown",
+      null,
+    ] satisfies Array<CredentialBootstrapStatus | null>) {
+      const blockedSource = credentialSettingsSource(status);
+      const blocked = render(<SafeModeSettings source={blockedSource} />);
+      expect(await screen.findByRole("heading", { name: "模型与传输边界" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "初始化系统凭据" })).not.toBeInTheDocument();
+      expect(blockedSource.initializeRequiredCredentials).not.toHaveBeenCalled();
+      blocked.unmount();
+    }
   });
 
   it("shows unknown protection and closes actions when LifeStateProjection is unavailable", async () => {
@@ -216,34 +248,5 @@ describe("SettingsPrivacyView", () => {
     expect(screen.getByText("是否外传未知")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "测试连接" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "保存设置" })).toBeDisabled();
-  });
-
-  it.each<CredentialBootstrapStatus>([
-    "available",
-    "missing_existing_data",
-    "invalid",
-    "unavailable",
-    "unknown",
-  ])("does not expose initialization for backend state %s", async status => {
-    const source = credentialSettingsSource(status);
-
-    render(<SafeModeSettings source={source} />);
-
-    expect(await screen.findByRole("heading", { name: "模型与传输边界" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "初始化系统凭据" })).not.toBeInTheDocument();
-    expect(source.initializeRequiredCredentials).not.toHaveBeenCalled();
-  });
-
-  it("invokes credential initialization only after the explicit Settings action", async () => {
-    const source = credentialSettingsSource("initialization_required");
-    render(<SafeModeSettings source={source} />);
-    const action = await screen.findByRole("button", { name: "初始化系统凭据" });
-    expect(source.initializeRequiredCredentials).not.toHaveBeenCalled();
-
-    fireEvent.click(action);
-
-    expect(source.initializeRequiredCredentials).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("初始化完成，需要重启")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
   });
 });
