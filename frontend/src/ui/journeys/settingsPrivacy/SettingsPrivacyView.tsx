@@ -55,6 +55,7 @@ export function SettingsPrivacyView({
     return (
       <div className={`ol-settings-page${safeModeActive ? "" : " ol-settings-page--centered"}`}>
         <SafeModeNotice controller={controller} />
+        <CredentialInitializationPanel controller={controller} />
         <FoundationNotice title="设置暂不可用" tone="error">
           <p>后端没有返回可编辑配置。页面不会用默认 Provider、地址或隐私结论代替。</p>
         </FoundationNotice>
@@ -82,6 +83,7 @@ export function SettingsPrivacyView({
       data-settings-phase={controller.state.phase}
     >
       <SafeModeNotice controller={controller} />
+      <CredentialInitializationPanel controller={controller} />
 
       <section className="ol-settings-boundary" aria-labelledby="ol-settings-boundary-title">
         <div className="ol-settings-section-heading">
@@ -417,6 +419,65 @@ function SafeModeNotice({ controller }: { controller: SettingsPrivacyJourneyCont
           : "LifeStateProjection 没有提供可核对的保护状态；连接测试、设置保存和本地确定态全部保持关闭。"}
       </p>
     </FoundationNotice>
+  );
+}
+
+function CredentialInitializationPanel({
+  controller,
+}: {
+  controller: SettingsPrivacyJourneyController;
+}) {
+  const phase = controller.credentialInitialization.phase;
+  const eligibleCount = controller.eligibleCredentialPurposes.length;
+  if (eligibleCount === 0 && phase === "idle") return null;
+
+  const report = controller.credentialInitialization.report;
+  const running = phase === "running";
+  const restartRequired = phase === "restart_required";
+  const cleanupUnknown = report?.cleanupStatus === "unknown";
+  return (
+    <section className="ol-settings-section" aria-labelledby="ol-settings-credential-title">
+      <div className="ol-settings-section-heading">
+        <span>后端启动快照</span>
+        <h2 id="ol-settings-credential-title">系统凭据初始化</h2>
+      </div>
+      {restartRequired ? (
+        <FoundationNotice title="初始化完成，需要重启" live>
+          <p>当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取系统凭据。</p>
+        </FoundationNotice>
+      ) : phase === "blocked" ? (
+        <FoundationNotice title="初始化未完成" tone="error" live>
+          <p>
+            {report?.blockedReason ??
+              "后端没有证明全部初始化步骤和补偿步骤完成；当前继续保持阻塞。"}
+          </p>
+        </FoundationNotice>
+      ) : phase === "failed" ? (
+        <FoundationNotice title="初始化已取消或失败" tone="protection" live>
+          <p>没有获得成功证明；当前进程和后端快照都不会被标记为可用。</p>
+        </FoundationNotice>
+      ) : (
+        <p>
+          后端确认有 {eligibleCount} 类系统凭据可以首次初始化。点击后仍需在 macOS
+          原生系统对话框中确认。
+        </p>
+      )}
+      <FoundationActionButton
+        label={restartRequired ? "等待重启" : "初始化系统凭据"}
+        icon={<Check size={18} strokeWidth={1.75} aria-hidden="true" />}
+        loading={running}
+        loadingLabel="等待系统确认"
+        disabled={restartRequired || cleanupUnknown}
+        disabledReason={
+          restartRequired
+            ? "初始化已完成；必须重启后重新读取状态。"
+            : cleanupUnknown
+              ? "后端无法证明补偿完成；必须先重启并重新检查状态。"
+              : undefined
+        }
+        onClick={controller.initializeRequiredCredentials}
+      />
+    </section>
   );
 }
 

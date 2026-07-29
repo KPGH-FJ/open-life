@@ -722,7 +722,8 @@ fn backend_remediation_phase0_release_package_owns_no_a2a_binary_target() {
 #[test]
 fn backend_remediation_phase0_startup_keyring_is_bounded_and_noninteractive() {
     let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
-    assert!(bootstrap.contains("let secret_store = StartupKeyringSecretStore::default();"));
+    assert!(bootstrap
+        .contains("bootstrap_with_secret_store(data_dir, &StartupKeyringSecretStore::default())"));
     assert!(!bootstrap.contains("bootstrap_with_secret_store(data_dir, &KeyringSecretStore)"));
 
     let secret_store = read_repo_file("src-tauri/src/secret_store.rs");

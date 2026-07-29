@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { CredentialBootstrapStatus } from "@/tauri";
 import type {
   SettingsPrivacyDataSource,
   SettingsPrivacySnapshot,
@@ -21,6 +22,60 @@ function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
       onOpenInspector={vi.fn()}
     />
   );
+}
+
+function credentialSettingsSource(status: CredentialBootstrapStatus): SettingsPrivacyDataSource {
+  return {
+    loadSettingsPrivacy: vi.fn().mockResolvedValue({
+      config: {
+        llm: {
+          provider: "custom",
+          openai_base: "http://127.0.0.1:11434/v1",
+          openai_key: "***",
+          embedding_model: "local",
+          chat_model: "local",
+        },
+        prefer_local_model: true,
+        local_model: "local",
+      },
+      boundaryEnvelope: {
+        data: null,
+        status: "empty",
+        lastUpdatedAt: null,
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
+      },
+      safeMode: { active: false, reason: "", sourceRefs: [] },
+      credentialBootstrap: {
+        version: "credential_bootstrap_v1",
+        digest: "a".repeat(64),
+        purposes: [
+          { purpose: "agent_run_receipts", status },
+          { purpose: "main_chat_events", status },
+          { purpose: "action_queue", status },
+          { purpose: "task_store", status },
+          { purpose: "mcp_audit", status },
+        ],
+      },
+      diagnostics: [
+        { id: "sanitized_config", status: "loaded" },
+        { id: "provider_privacy_boundary", status: "loaded" },
+        { id: "life_state_projection", status: "loaded" },
+        { id: "review_item_resolution", status: "not_requested" },
+      ],
+    }),
+    initializeRequiredCredentials: vi.fn().mockResolvedValue({
+      items: [],
+      initializationCompletedForRestart: true,
+      restartRequired: true,
+      cleanupStatus: "not_required",
+      bootstrapSnapshotDigest: "a".repeat(64),
+    }),
+    testProviderConnection: vi.fn(),
+    saveSettings: vi.fn(),
+  };
 }
 
 describe("SettingsPrivacyView", () => {
@@ -161,5 +216,34 @@ describe("SettingsPrivacyView", () => {
     expect(screen.getByText("是否外传未知")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "测试连接" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "保存设置" })).toBeDisabled();
+  });
+
+  it.each<CredentialBootstrapStatus>([
+    "available",
+    "missing_existing_data",
+    "invalid",
+    "unavailable",
+    "unknown",
+  ])("does not expose initialization for backend state %s", async status => {
+    const source = credentialSettingsSource(status);
+
+    render(<SafeModeSettings source={source} />);
+
+    expect(await screen.findByRole("heading", { name: "模型与传输边界" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "初始化系统凭据" })).not.toBeInTheDocument();
+    expect(source.initializeRequiredCredentials).not.toHaveBeenCalled();
+  });
+
+  it("invokes credential initialization only after the explicit Settings action", async () => {
+    const source = credentialSettingsSource("initialization_required");
+    render(<SafeModeSettings source={source} />);
+    const action = await screen.findByRole("button", { name: "初始化系统凭据" });
+    expect(source.initializeRequiredCredentials).not.toHaveBeenCalled();
+
+    fireEvent.click(action);
+
+    expect(source.initializeRequiredCredentials).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("初始化完成，需要重启")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
   });
 });

@@ -4,7 +4,12 @@ import {
   settingsOrchestrationReducer,
   type SettingsOrchestrationState,
 } from "@/contracts/settingsOrchestrationContract";
-import type { AppConfig, ProviderPrivacyBoundarySummary, ViewModelEnvelope } from "@/tauri";
+import type {
+  AppConfig,
+  CredentialRecoveryReport,
+  ProviderPrivacyBoundarySummary,
+  ViewModelEnvelope,
+} from "@/tauri";
 import { journeyErrorCode as errorCode } from "@/ui/journeys/journeyError";
 import {
   buildSettingsPrivacyErrorSnapshot,
@@ -53,12 +58,19 @@ export type SettingsPrivacyJourneyController = {
   actions: ReturnType<typeof settingsProductActions>;
   effectiveBoundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
   testConfirmationOpen: boolean;
+  credentialInitialization: {
+    phase: "idle" | "running" | "restart_required" | "blocked" | "failed";
+    report: CredentialRecoveryReport | null;
+    error: string | null;
+  };
+  eligibleCredentialPurposes: string[];
   load: (announceResult?: boolean) => Promise<SettingsPrivacySnapshot>;
   ensureLoaded: () => Promise<SettingsEnsureLoadedResult>;
   edit: (edit: SettingsDraftEdit) => void;
   requestTest: () => void;
   confirmTest: () => void;
   cancelTest: () => void;
+  initializeRequiredCredentials: () => void;
   save: () => void;
   retryBoundaryRefresh: () => void;
 };
@@ -70,7 +82,7 @@ export type SettingsEnsureLoadedResult = {
 };
 
 type SettingsOperationToken = {
-  kind: "test" | "save" | "boundary_refresh";
+  kind: "test" | "save" | "boundary_refresh" | "credential_initialization";
   sourceGeneration: number;
   sequence: number;
 };
@@ -159,6 +171,11 @@ export function useSettingsPrivacyJourney(
     null
   );
   const [testConfirmationOpen, setTestConfirmationOpen] = useState(false);
+  const [credentialInitialization, setCredentialInitialization] = useState<{
+    phase: "idle" | "running" | "restart_required" | "blocked" | "failed";
+    report: CredentialRecoveryReport | null;
+    error: string | null;
+  }>({ phase: "idle", report: null, error: null });
   const requestRef = useRef(0);
   const sourceGenerationRef = useRef(0);
   const operationSequenceRef = useRef(0);
@@ -186,6 +203,7 @@ export function useSettingsPrivacyJourney(
     setLoading(false);
     setLastTestOutcome(null);
     setTestConfirmationOpen(false);
+    setCredentialInitialization({ phase: "idle", report: null, error: null });
     dispatch({ type: "reset" });
     return () => {
       sourceGenerationRef.current += 1;
@@ -304,6 +322,16 @@ export function useSettingsPrivacyJourney(
   );
 
   const validation = useMemo(() => validateSettingsDraft(draft), [draft]);
+  const eligibleCredentialPurposes = useMemo(
+    () =>
+      dataSource?.initializeRequiredCredentials
+        ? (snapshot?.credentialBootstrap?.purposes ?? [])
+            .filter(purpose => purpose.status === "initialization_required")
+            .map(purpose => purpose.purpose)
+            .sort()
+        : [],
+    [dataSource, snapshot?.credentialBootstrap]
+  );
   const protectionState = protectionStateForSnapshot(snapshot, loading);
   const actions = useMemo(() => {
     const base = settingsProductActions(state, validation);
@@ -538,6 +566,53 @@ export function useSettingsPrivacyJourney(
     })();
   }, [announce, dataSource, state]);
 
+  const initializeRequiredCredentials = useCallback(() => {
+    if (
+      !dataSource?.initializeRequiredCredentials ||
+      operationRef.current ||
+      eligibleCredentialPurposes.length === 0 ||
+      credentialInitialization.phase === "restart_required"
+    ) {
+      announce("当前后端快照没有可执行的系统凭据初始化操作。");
+      return;
+    }
+    const operationToken: SettingsOperationToken = {
+      kind: "credential_initialization",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    setCredentialInitialization({ phase: "running", report: null, error: null });
+    announce("正在等待系统原生确认；取消不会写入或删除任何凭据。");
+    void dataSource
+      .initializeRequiredCredentials()
+      .then(report => {
+        if (operationRef.current !== operationToken) return;
+        setCredentialInitialization({
+          phase: report.initializationCompletedForRestart ? "restart_required" : "blocked",
+          report,
+          error: report.blockedReason ?? null,
+        });
+        announce(
+          report.initializationCompletedForRestart
+            ? "系统凭据初始化已经完成；必须完全重启 OpenLife 后才能重新判断可用状态。"
+            : "系统凭据初始化未完成；当前继续保持阻塞。"
+        );
+      })
+      .catch(error => {
+        if (operationRef.current !== operationToken) return;
+        setCredentialInitialization({
+          phase: "failed",
+          report: null,
+          error: errorCode(error),
+        });
+        announce("系统凭据初始化被取消或失败；当前状态没有被标记为可用。");
+      })
+      .finally(() => {
+        if (operationRef.current === operationToken) operationRef.current = null;
+      });
+  }, [announce, credentialInitialization.phase, dataSource, eligibleCredentialPurposes.length]);
+
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
   const effectiveBoundaryEnvelope = useMemo(() => {
     if (!snapshot) return loadingBoundaryEnvelope();
@@ -586,12 +661,15 @@ export function useSettingsPrivacyJourney(
     actions,
     effectiveBoundaryEnvelope,
     testConfirmationOpen,
+    credentialInitialization,
+    eligibleCredentialPurposes,
     load,
     ensureLoaded,
     edit,
     requestTest,
     confirmTest,
     cancelTest,
+    initializeRequiredCredentials,
     save,
     retryBoundaryRefresh,
   };
