@@ -25,7 +25,8 @@ function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
 }
 
 function credentialSettingsSource(
-  status: CredentialBootstrapStatus | null
+  status: CredentialBootstrapStatus | null,
+  safeModeActive = false
 ): SettingsPrivacyDataSource {
   return {
     loadSettingsPrivacy: vi.fn().mockResolvedValue({
@@ -49,7 +50,11 @@ function credentialSettingsSource(
         warnings: [],
         actions: { primary: [], review: [], debugOnly: [] },
       },
-      safeMode: { active: false, reason: "", sourceRefs: [] },
+      safeMode: {
+        active: safeModeActive,
+        reason: safeModeActive ? "credential_initialization_required" : "",
+        sourceRefs: [],
+      },
       credentialBootstrap:
         status === null
           ? null
@@ -190,6 +195,16 @@ describe("SettingsPrivacyView", () => {
       expect(blockedSource.initializeRequiredCredentials).not.toHaveBeenCalled();
       blocked.unmount();
     }
+  });
+
+  it("does not contradict an explicit credential initialization eligibility", async () => {
+    const source = credentialSettingsSource("initialization_required", true);
+    render(<SafeModeSettings source={source} />);
+
+    expect(await screen.findByText("安全模式保持生效")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "初始化系统凭据" })).toBeEnabled();
+    expect(screen.getByText(/下方只开放后端启动快照明确列出的/)).toBeInTheDocument();
+    expect(screen.queryByText(/当前读模型没有提供凭据恢复资格/)).not.toBeInTheDocument();
   });
 
   it("shows unknown protection and closes actions when LifeStateProjection is unavailable", async () => {
