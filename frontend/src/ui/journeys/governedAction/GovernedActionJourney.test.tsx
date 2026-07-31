@@ -241,6 +241,52 @@ describe("Workbench governed action journey", () => {
     expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
   });
 
+  it("allows the first conversation when the backend workspace is truthfully empty", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        return {
+          ...snapshot,
+          workspaceEnvelope: {
+            ...snapshot.workspaceEnvelope,
+            status: "empty" as const,
+            data: {
+              ...snapshot.workspaceEnvelope.data!,
+              activeTask: undefined,
+              recentTaskRefs: [],
+              pendingReviewItems: [],
+              activity: [],
+              providerPrivacyBoundarySummary: {
+                ...snapshot.workspaceEnvelope.data!.providerPrivacyBoundarySummary,
+                routeType: "unknown" as const,
+                externalTransmission: "unknown" as const,
+                blockedReason:
+                  "Network consent is required before provider dispatch (decision_id=fixture).",
+              },
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "新对话" }));
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "Start the first task");
+
+    expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
+  });
+
   it("keeps durable approval separate from refreshed application", async () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = await fixture.load();

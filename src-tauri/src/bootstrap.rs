@@ -2104,10 +2104,9 @@ fn bootstrap_with_secret_store(
                         )
                             })?,
                         CollaborationGuidanceCutoverStatus::ShadowEvidencePending => {
-                            startup_warnings.borrow_mut().push(
-                        "collaboration guidance remains LifeModel YAML-owned until a real product runtime receipt is observed; LM-C promotion is fail-closed"
-                            .into(),
-                    );
+                            log::info!(
+                                "collaboration guidance remains LifeModel YAML-owned until a real product runtime receipt is observed; LM-C promotion is fail-closed"
+                            );
                         }
                     }
                     Ok(())
@@ -4063,6 +4062,12 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let result =
             bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
+
+        assert!(
+            result.state.startup_warnings.is_empty(),
+            "an initialized fresh profile must not enter global safe mode for informational authority state: {:?}",
+            result.state.startup_warnings
+        );
 
         result
             .state

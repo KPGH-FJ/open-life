@@ -1506,8 +1506,10 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         };
         let durable_event_count = execution.durable_events.len();
         let done_payload = emit_stream_send_message_result(
-            &operation_id,
-            &execution.session_id,
+            StreamEmissionIdentity {
+                operation_id: &operation_id,
+                session_id: &execution.session_id,
+            },
             execution.result,
             Some(execution.kernel_event_count),
             execution.durable_events,
@@ -7562,9 +7564,14 @@ fn durable_provider_invocation_observed(
     })
 }
 
+#[derive(Clone, Copy)]
+struct StreamEmissionIdentity<'a> {
+    operation_id: &'a str,
+    session_id: &'a str,
+}
+
 fn emit_stream_send_message_result(
-    operation_id: &str,
-    session_id: &str,
+    identity: StreamEmissionIdentity<'_>,
     result: SendMessageResult,
     kernel_event_count: Option<usize>,
     durable_events: Vec<MainChatAgentDurableEvent>,
@@ -7572,6 +7579,10 @@ fn emit_stream_send_message_result(
     recovered_from_durable_final: bool,
     emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
 ) -> Result<serde_json::Value, String> {
+    let StreamEmissionIdentity {
+        operation_id,
+        session_id,
+    } = identity;
     let run_id = result
         .run_id
         .clone()
@@ -11034,7 +11045,8 @@ mod turn_admission_tests {
 mod product_receipt_ipc_tests {
     use super::{
         emit_stream_send_message_result, CanonicalFinalDeliveryView, CanonicalObservationSummary,
-        OpenLifeTurnTerminal, ProviderInvocationState, OPENLIFE_TURN_RUNTIME_OWNER,
+        OpenLifeTurnTerminal, ProviderInvocationState, StreamEmissionIdentity,
+        OPENLIFE_TURN_RUNTIME_OWNER,
     };
     use crate::{SendMessageResult, ToolCallResult, ToolCallStatus};
 
@@ -11289,8 +11301,10 @@ mod product_receipt_ipc_tests {
         let (stream_call, _stream_store) = actual_product_tool_call(&run_id).await;
         let mut emitted = Vec::new();
         let done = emit_stream_send_message_result(
-            "operation-product-receipt-ipc",
-            "session-product-receipt-ipc",
+            StreamEmissionIdentity {
+                operation_id: "operation-product-receipt-ipc",
+                session_id: "session-product-receipt-ipc",
+            },
             send_result(&run_id, &task_id, stream_call),
             Some(0),
             Vec::new(),

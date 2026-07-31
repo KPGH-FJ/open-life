@@ -520,8 +520,12 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
     }
 
     assert!(
-        conversation.contains("sendMessageV2"),
-        "production Workspace conversation must enter the shared buffered TurnRuntime command"
+        conversation.contains("startStreamMessage"),
+        "production Workspace conversation must enter the shipped streaming TurnRuntime command"
+    );
+    assert!(
+        frontend_bridge.contains("\"start_stream_message\""),
+        "frontend streaming bridge must invoke the shipped TurnRuntime command"
     );
     assert!(
         policy.contains("TransientStateCommand"),

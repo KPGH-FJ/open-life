@@ -4410,7 +4410,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
         Ok(LlmConnectionTestResult {
             ok: true,
             provider: label,
-            message: format!("连接成功，云端模型可用。{}", model_note),
+            message: format!("连接成功，当前供应商模型可用。{}", model_note),
             validation_status: "validated".into(),
             network_policy_decision_id: Some(original_network_policy_decision_id),
             effective_network_policy_decision_id: Some(
@@ -5186,6 +5186,8 @@ mod tests {
         server.await.unwrap();
         assert!(result.ok);
         assert_eq!(result.validation_status, "validated");
+        assert!(result.message.contains("当前供应商模型可用"));
+        assert!(!result.message.contains("云端模型可用"));
         let receipt = result.provider_invocation_receipt.unwrap();
         assert_eq!(receipt.status, ProviderInvocationStatus::Completed);
         assert_eq!(receipt.provider, "openai");

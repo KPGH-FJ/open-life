@@ -456,9 +456,10 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 
 ## 7. 当前阶段
 
-当前阶段：**第二阶段——真正可用的产品黄金路径**
+当前阶段：**第二阶段——真正可用的产品黄金路径（已完成）**
 
-状态：**进行中——正在建立当前源码与原生产品事实基线**
+状态：**第二阶段退出标准已由当前源码、全量门禁和隔离原生试用共同验证；
+第三阶段尚未开始，必须等待用户明确批准。**
 
 第一阶段实际完成：
 
@@ -477,8 +478,22 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 Keychain round-trip 只创建并清理了随机隔离测试项；browser、mock 和本地
 Keychain 证据均不作为 external-live 证明。
 
-第二阶段已由用户明确授权进入。第三至第六阶段均未开始；在第二阶段退出
-标准没有基于当前提交完成检查前，不得把工作计入后续阶段。
+第二阶段实际完成：
+
+- Workspace 对话已接入 shipped streaming TurnRuntime，按精确 session、operation
+  和 task identity 接收事件，并支持真实流式显示与精确取消；
+- 全新隔离 QA profile 已完成系统凭据初始化、同一签名 App 重启、Provider
+  配置、显式连接测试、保存、首次对话、取消、同会话重试、重命名、历史恢复
+  和确认删除；
+- Provider 的 configured、validated、failed、stale 和 unknown 边界继续由后端
+  读模型区分；连接测试成功不再被描述成必然云端可用；
+- Review Center 的一次性网络许可在真实请求前消费；批准请求与实际完成继续
+  分离，LifeModel proposal 的 approved-not-applied 状态由产品测试保持；
+- 全量 Rust、前端、coverage、production build、browser smoke 和最终原生重启
+  门禁通过，没有以测试 fixture 或旧签名 QA profile 代替当前源码结论。
+
+本阶段使用的真实生成来自本机 Ollama，不能计为 external-live Provider 证据。
+第三至第六阶段均未开始；进入第三阶段前必须重新确认具体能力切片和验收边界。
 
 ## 8. 进度记录规则
 

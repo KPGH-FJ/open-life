@@ -276,39 +276,67 @@ fn keyring_entry_for_service(service: &str, secret_ref: &str) -> Result<keyring:
 
 #[cfg(target_os = "macos")]
 fn read_startup_keyring_secret(service: &str, secret_ref: &str) -> Result<Option<String>> {
-    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
-    use security_framework_sys::base::errSecItemNotFound;
+    use core_foundation::base::{TCFType, ToVoid};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFMutableDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFTypeRef};
+    use core_foundation_sys::string::CFStringRef;
+    use security_framework_sys::base::{errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::item::{
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData,
+        kSecUseAuthenticationUI,
+    };
+    use security_framework_sys::keychain_item::SecItemCopyMatching;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        static kSecUseAuthenticationUIFail: CFStringRef;
+    }
 
     let account = keyring_account_for_secret_ref(secret_ref)?;
-    let mut options = ItemSearchOptions::new();
-    options
-        .class(ItemClass::generic_password())
-        .service(service)
-        .account(&account)
-        .load_data(true)
-        // Startup has no useful authentication UI. This per-request policy
-        // prevents a detached, timed-out worker from presenting UI later,
-        // without changing process-wide Keychain interaction state.
-        .skip_authenticated_items(true);
-
-    let mut results = match options.search() {
-        Ok(results) => results,
-        Err(error) if error.code() == errSecItemNotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).context("read secret from noninteractive macOS Keychain query")
-        }
-    };
-    if results.len() != 1 {
-        anyhow::bail!(
-            "noninteractive macOS Keychain query returned {} matching items",
-            results.len()
+    let service = CFString::new(service);
+    let account = CFString::new(&account);
+    let mut query = CFMutableDictionary::new();
+    unsafe {
+        query.add(&kSecClass.to_void(), &kSecClassGenericPassword.to_void());
+        query.add(&kSecAttrService.to_void(), &service.to_void());
+        query.add(&kSecAttrAccount.to_void(), &account.to_void());
+        query.add(
+            &kSecReturnData.to_void(),
+            &CFBoolean::true_value().to_void(),
         );
-    }
-    match results.pop() {
-        Some(SearchResult::Data(bytes)) => String::from_utf8(bytes)
+        // `Skip` removes every item that macOS classifies as authenticated,
+        // including credentials OpenLife just created after explicit user
+        // confirmation. `Fail` still forbids UI, but permits an already
+        // authorized item to be returned on the next startup.
+        query.add(
+            &kSecUseAuthenticationUI.to_void(),
+            &kSecUseAuthenticationUIFail.to_void(),
+        );
+
+        let mut result: CFTypeRef = std::ptr::null();
+        let status = SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result);
+        if status == errSecItemNotFound {
+            return Ok(None);
+        }
+        if status != errSecSuccess {
+            anyhow::bail!("noninteractive macOS Keychain query failed with status {status}");
+        }
+        if result.is_null() {
+            anyhow::bail!("noninteractive macOS Keychain query returned no data");
+        }
+        if CFGetTypeID(result) != CFData::type_id() {
+            CFRelease(result);
+            anyhow::bail!("noninteractive macOS Keychain query returned an unexpected result");
+        }
+        let bytes = CFData::wrap_under_create_rule(result.cast())
+            .bytes()
+            .to_vec();
+        String::from_utf8(bytes)
             .map(Some)
-            .context("decode password from noninteractive macOS Keychain query"),
-        _ => anyhow::bail!("noninteractive macOS Keychain query returned an unexpected result"),
+            .context("decode password from noninteractive macOS Keychain query")
     }
 }
 
@@ -1719,6 +1747,16 @@ mod tests {
     #[ignore = "writes and deletes one random credential in the real OS keychain"]
     fn real_os_keychain_round_trip_uses_only_a_secret_reference() {
         let store = KeyringSecretStore;
+        let service = selected_keyring_service().expect("select isolated OS keychain service");
+        if let Ok(secret_ref) = std::env::var("OPENLIFE_KEYCHAIN_RESTART_CHILD_SECRET_REF") {
+            assert!(
+                read_startup_keyring_secret(&service, &secret_ref)
+                    .expect("read isolated OS keychain credential after process restart")
+                    .is_some(),
+                "the same executable must be able to read its isolated credential in a new process"
+            );
+            return;
+        }
         let epoch = chrono::Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_default()
@@ -1738,10 +1776,26 @@ mod tests {
         );
         #[cfg(target_os = "macos")]
         assert_eq!(
-            read_startup_keyring_secret(SERVICE, &secret_ref)
+            read_startup_keyring_secret(&service, &secret_ref)
                 .expect("read OS keychain through noninteractive startup path")
                 .as_deref(),
             Some(secret.as_str())
+        );
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "secret_store::tests::real_os_keychain_round_trip_uses_only_a_secret_reference",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("OPENLIFE_KEYCHAIN_RESTART_CHILD_SECRET_REF", &secret_ref)
+            .output()
+            .expect("run isolated OS keychain restart reader");
+        assert!(
+            child.status.success(),
+            "isolated OS keychain restart reader failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
         );
         store.delete(&secret_ref).expect("delete OS keychain");
         assert_eq!(store.get(&secret_ref).expect("confirm deletion"), None);
