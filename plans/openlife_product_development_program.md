@@ -473,8 +473,9 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 - 打包后的真实 `OpenLife.app` 可以启动并进入 `/settings`，没有崩溃或
   非预期凭据弹窗。
 
-第一阶段没有调用外部 Provider、没有批准真实持久写入，也没有把 browser、
-mock 或本地 Keychain 证据描述成 external-live 证明。
+第一阶段没有调用外部 Provider，也没有写入产品数据或既有凭据。原生
+Keychain round-trip 只创建并清理了随机隔离测试项；browser、mock 和本地
+Keychain 证据均不作为 external-live 证明。
 
 第二至第六阶段均为尚未开始。在前一阶段退出标准没有基于当前提交完成
 检查前，不得把工作计入后续阶段。
