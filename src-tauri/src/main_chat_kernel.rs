@@ -549,6 +549,7 @@ impl MainChatEventSink for BufferedMainChatEventSink {
 
 pub struct StreamingMainChatEventSink<'a> {
     emit_stream_event: &'a mut (dyn FnMut(&str, serde_json::Value) + Send),
+    operation_id: String,
     events: Vec<MainChatKernelEvent>,
     provider_token_count: usize,
     task_session_id: Option<String>,
@@ -556,12 +557,13 @@ pub struct StreamingMainChatEventSink<'a> {
 }
 
 impl<'a> StreamingMainChatEventSink<'a> {
-    pub fn new<F>(emit_stream_event: &'a mut F) -> Self
+    pub fn new<F>(operation_id: &str, emit_stream_event: &'a mut F) -> Self
     where
         F: FnMut(&str, serde_json::Value) + Send + 'a,
     {
         Self {
             emit_stream_event,
+            operation_id: operation_id.to_string(),
             events: Vec::new(),
             provider_token_count: 0,
             task_session_id: None,
@@ -591,6 +593,7 @@ impl MainChatEventSink for StreamingMainChatEventSink<'_> {
             "stream-message-start",
             serde_json::json!({
                 "session_id": session_id,
+                "operation_id": self.operation_id,
                 "task_session_id": task_session_id,
                 "run_id": run_id,
                 "runtime_owner": crate::main_chat_turn_runtime::OPENLIFE_TURN_RUNTIME_OWNER,
@@ -619,6 +622,7 @@ impl MainChatEventSink for StreamingMainChatEventSink<'_> {
                 "stream-message-chunk",
                 serde_json::json!({
                     "session_id": session_id,
+                    "operation_id": self.operation_id,
                     "request_id": request_id,
                     "chunk": chunk,
                     "task_session_id": task_session_id,
@@ -634,6 +638,7 @@ impl MainChatEventSink for StreamingMainChatEventSink<'_> {
             })
         });
         if let Some(object) = payload.as_object_mut() {
+            object.insert("operation_id".into(), serde_json::json!(self.operation_id));
             object.insert("task_session_id".into(), serde_json::json!(task_session_id));
             object.insert("run_id".into(), serde_json::json!(run_id));
         }

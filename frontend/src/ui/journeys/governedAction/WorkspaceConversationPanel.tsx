@@ -1,5 +1,6 @@
-import { MessageSquarePlus, RefreshCw, Send } from "lucide-react";
-import { FoundationActionButton, FoundationNotice } from "@/ui/foundation";
+import { MessageSquarePlus, Pencil, RefreshCw, Send, Square, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
 
 function turnFeedback(controller: WorkspaceConversationController) {
@@ -8,6 +9,13 @@ function turnFeedback(controller: WorkspaceConversationController) {
     return (
       <FoundationNotice title="会话状态未确认" tone="error" live>
         <p>{state.reason}</p>
+      </FoundationNotice>
+    );
+  }
+  if (state.phase === "streaming" && state.cancelError) {
+    return (
+      <FoundationNotice title="取消请求失败" tone="error" live>
+        <p>{state.cancelError}；任务仍按运行中处理，可以再次请求取消。</p>
       </FoundationNotice>
     );
   }
@@ -58,8 +66,17 @@ export function WorkspaceConversationPanel({
   controller: WorkspaceConversationController;
   disabledReason?: string;
 }) {
+  const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const action = controller.sendAction(disabledReason);
   const visibleMessages = controller.messages.filter(message => message.role !== "system");
+  const selectedSession = controller.sessions.find(
+    session => session.session_id === controller.selectedSessionId
+  );
+  const sessionMutationBusy = ["renaming", "deleting"].includes(controller.sessionMutation.phase);
+  const sessionMutationDisabledReason = sessionMutationBusy
+    ? "会话操作正在等待后端保存并重新读取。"
+    : undefined;
 
   return (
     <section className="ol-workspace-conversation" aria-labelledby="workspace-conversation-title">
@@ -95,6 +112,31 @@ export function WorkspaceConversationPanel({
             <MessageSquarePlus size={16} aria-hidden="true" />
             新对话
           </button>
+          {selectedSession && (
+            <>
+              <button
+                type="button"
+                className="ol-workspace-conversation__new"
+                disabled={controller.busy}
+                onClick={() => {
+                  setRenameDraft(selectedSession.title);
+                  setSessionDialog("rename");
+                }}
+              >
+                <Pencil size={15} aria-hidden="true" />
+                重命名
+              </button>
+              <button
+                type="button"
+                className="ol-workspace-conversation__new ol-workspace-conversation__delete"
+                disabled={controller.busy}
+                onClick={() => setSessionDialog("delete")}
+              >
+                <Trash2 size={15} aria-hidden="true" />
+                删除
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -121,6 +163,12 @@ export function WorkspaceConversationPanel({
               <p>{message.content}</p>
             </li>
           ))}
+          {controller.streamingReply && (
+            <li data-role="assistant" data-streaming="true" aria-live="polite">
+              <span>OpenLife</span>
+              <p>{controller.streamingReply}</p>
+            </li>
+          )}
         </ol>
       ) : (
         <div className="ol-workspace-conversation__empty">
@@ -130,6 +178,12 @@ export function WorkspaceConversationPanel({
       )}
 
       {turnFeedback(controller)}
+
+      {controller.sessionMutation.phase === "failed" && (
+        <FoundationNotice title="会话操作未完成" tone="error" live>
+          <p>{controller.sessionMutation.reason}</p>
+        </FoundationNotice>
+      )}
 
       <form
         className="ol-workspace-composer"
@@ -160,28 +214,138 @@ export function WorkspaceConversationPanel({
             className="ol-workspace-composer__status"
             role="status"
           >
-            {action.enabled
-              ? "Enter 发送，Shift + Enter 换行"
-              : (action.disabledReason ?? "当前不能发送")}
+            {controller.turnState.phase === "streaming"
+              ? "正在接收回复；可取消当前任务"
+              : controller.turnState.phase === "cancelling"
+                ? "正在等待后端确认取消终态"
+                : action.enabled
+                  ? "Enter 发送，Shift + Enter 换行"
+                  : (action.disabledReason ?? "当前不能发送")}
           </span>
-          <FoundationActionButton
-            label={action.label}
-            icon={<Send size={17} aria-hidden="true" />}
-            variant="primary"
-            loading={controller.busy}
-            loadingLabel={controller.turnState.phase === "refreshing" ? "正在核对" : "正在发送"}
-            disabled={!action.enabled}
-            disabledReason={action.disabledReason}
-            data-action-category="product"
-            data-action-id={action.id}
-            data-action-kind={action.kind}
-            data-action-enabled={String(action.enabled)}
-            data-action-disabled-reason={action.disabledReason ?? ""}
-            data-action-target-ref={action.targetRef}
-            type="submit"
-          />
+          <div className="ol-workspace-composer__actions">
+            {(controller.turnState.phase === "streaming" ||
+              controller.turnState.phase === "cancelling") && (
+              <FoundationActionButton
+                label="取消任务"
+                icon={<Square size={16} aria-hidden="true" />}
+                loading={controller.turnState.phase === "cancelling"}
+                loadingLabel="正在取消"
+                disabled={controller.turnState.phase === "cancelling"}
+                disabledReason={
+                  controller.turnState.phase === "cancelling"
+                    ? "取消请求已发送；正在等待真实终态。"
+                    : undefined
+                }
+                data-action-category="product"
+                data-action-id={`workspace.cancel:${controller.activeTaskSessionId ?? "unknown"}`}
+                data-action-kind="cancel"
+                data-action-enabled={String(controller.turnState.phase === "streaming")}
+                data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
+                type="button"
+                onClick={() => void controller.cancel()}
+              />
+            )}
+            {controller.turnState.phase !== "streaming" &&
+              controller.turnState.phase !== "cancelling" && (
+                <FoundationActionButton
+                  label={action.label}
+                  icon={<Send size={17} aria-hidden="true" />}
+                  variant="primary"
+                  loading={controller.busy}
+                  loadingLabel={
+                    controller.turnState.phase === "refreshing" ? "正在核对" : "正在发送"
+                  }
+                  disabled={!action.enabled}
+                  disabledReason={action.disabledReason}
+                  data-action-category="product"
+                  data-action-id={action.id}
+                  data-action-kind={action.kind}
+                  data-action-enabled={String(action.enabled)}
+                  data-action-disabled-reason={action.disabledReason ?? ""}
+                  data-action-target-ref={action.targetRef}
+                  type="submit"
+                />
+              )}
+          </div>
         </div>
       </form>
+
+      <FoundationDialog
+        open={sessionDialog === "rename"}
+        title="重命名这段对话"
+        description="新名称只有在后端保存并重新读取成功后才会显示为已确认。"
+        busy={sessionMutationBusy}
+        onClose={() => setSessionDialog(null)}
+        footer={
+          <>
+            <FoundationActionButton
+              label="取消"
+              variant="quiet"
+              disabled={sessionMutationBusy}
+              disabledReason={sessionMutationDisabledReason}
+              onClick={() => setSessionDialog(null)}
+            />
+            <FoundationActionButton
+              label="保存名称"
+              variant="primary"
+              loading={controller.sessionMutation.phase === "renaming"}
+              loadingLabel="正在保存"
+              disabled={!renameDraft.trim() || sessionMutationBusy}
+              disabledReason={
+                !renameDraft.trim() ? "对话名称不能为空。" : sessionMutationDisabledReason
+              }
+              onClick={() => {
+                void controller.renameSelected(renameDraft).then(saved => {
+                  if (saved) setSessionDialog(null);
+                });
+              }}
+            />
+          </>
+        }
+      >
+        <label className="ol-workspace-session-dialog__field">
+          <span>对话名称</span>
+          <input
+            value={renameDraft}
+            maxLength={120}
+            disabled={sessionMutationBusy}
+            onChange={event => setRenameDraft(event.target.value)}
+          />
+        </label>
+      </FoundationDialog>
+
+      <FoundationDialog
+        open={sessionDialog === "delete"}
+        title="删除这段对话？"
+        description="这会删除当前会话并写入删除记录。只有点击下方确认按钮才会执行。"
+        busy={sessionMutationBusy}
+        onClose={() => setSessionDialog(null)}
+        footer={
+          <>
+            <FoundationActionButton
+              label="保留对话"
+              variant="quiet"
+              disabled={sessionMutationBusy}
+              disabledReason={sessionMutationDisabledReason}
+              onClick={() => setSessionDialog(null)}
+            />
+            <FoundationActionButton
+              label="确认删除"
+              loading={controller.sessionMutation.phase === "deleting"}
+              loadingLabel="正在删除"
+              disabled={sessionMutationBusy}
+              disabledReason={sessionMutationDisabledReason}
+              onClick={() => {
+                void controller.deleteSelected().then(deleted => {
+                  if (deleted) setSessionDialog(null);
+                });
+              }}
+            />
+          </>
+        }
+      >
+        <p>{selectedSession?.title ?? "当前对话"}</p>
+      </FoundationDialog>
     </section>
   );
 }

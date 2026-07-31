@@ -278,4 +278,29 @@ describe("Workbench governed action journey", () => {
       )
     ).toMatchObject({ title: "变更已应用" });
   });
+
+  it("does not delete a conversation until the explicit confirmation action", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const deleteSession = vi.spyOn(dataSource, "deleteSession");
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByRole("button", { name: "删除" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    const dialog = screen.getByRole("dialog", { name: "删除这段对话？" });
+    expect(deleteSession).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "删除这段对话？" })).not.toBeInTheDocument();
+  });
 });

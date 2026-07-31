@@ -849,18 +849,62 @@ export function workbenchJourneyFixtureDataSource(
       ];
       histories.set(sessionId, []);
     },
-    async sendTurn(sessionId, messages) {
+    async renameSession(sessionId, title) {
+      const current = sessions.find(session => session.session_id === sessionId);
+      if (!current) throw new Error("fixture_conversation_session_missing");
+      sessions = sessions.map(session =>
+        session.session_id === sessionId ? { ...session, title } : session
+      );
+    },
+    async deleteSession(sessionId) {
+      if (!histories.has(sessionId)) throw new Error("fixture_conversation_session_missing");
+      sessions = sessions.filter(session => session.session_id !== sessionId);
+      histories.delete(sessionId);
+    },
+    async streamTurn(sessionId, messages, options, events) {
       if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
       if (!histories.has(sessionId)) throw new Error("fixture_conversation_session_missing");
       const reply = "我会先把目标拆成可核对的步骤；需要访问或写入时会单独请求你的决定。";
+      events.onStart({
+        session_id: sessionId,
+        operation_id: options.operationId,
+        task_session_id: options.operationId,
+        run_id: options.operationId,
+        reasoning_trace: {},
+        tool_calls: [],
+      });
+      events.onChunk({
+        session_id: sessionId,
+        operation_id: options.operationId,
+        task_session_id: options.operationId,
+        run_id: options.operationId,
+        chunk: reply,
+      });
       histories.set(sessionId, [...messages, { role: "assistant", content: reply }]);
       return {
+        session_id: sessionId,
+        operation_id: options.operationId,
+        task_session_id: options.operationId,
+        run_id: options.operationId,
         reply,
         status: "completed",
         blockers: [],
-        reasoning_trace: { steps: [] },
+        reasoning_trace: {},
         tool_calls: [],
-      } as Awaited<ReturnType<WorkspaceConversationDataSource["sendTurn"]>>;
+      } as Awaited<ReturnType<WorkspaceConversationDataSource["streamTurn"]>>;
+    },
+    async cancelTask() {
+      return {
+        session: null,
+        actions: [],
+        transcript: [],
+        pendingApprovalCount: 0,
+        activeToolCount: 0,
+        canResume: false,
+        canCancel: false,
+        canRetry: false,
+        cancellationPending: true,
+      };
     },
     async dispatchReviewAction(reviewAction) {
       const builderSignalId = [...builderReviewStates.keys()].find(

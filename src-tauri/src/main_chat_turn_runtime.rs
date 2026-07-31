@@ -1493,8 +1493,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
     ) -> Result<OpenLifeTurnOutput, String> {
         debug_assert_eq!(input.stream_mode, MainChatTurnStreamMode::Streaming);
+        let operation_id = input.operation_id.clone();
         let (execution, provider_token_count) = {
-            let mut event_sink = StreamingMainChatEventSink::new(emit_stream_event);
+            let mut event_sink = StreamingMainChatEventSink::new(&operation_id, emit_stream_event);
             let execution = Box::pin(self.run_with_event_sink(
                 input,
                 &mut event_sink,
@@ -1505,6 +1506,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         };
         let durable_event_count = execution.durable_events.len();
         let done_payload = emit_stream_send_message_result(
+            &operation_id,
             &execution.session_id,
             execution.result,
             Some(execution.kernel_event_count),
@@ -7561,6 +7563,7 @@ fn durable_provider_invocation_observed(
 }
 
 fn emit_stream_send_message_result(
+    operation_id: &str,
     session_id: &str,
     result: SendMessageResult,
     kernel_event_count: Option<usize>,
@@ -7586,6 +7589,7 @@ fn emit_stream_send_message_result(
             "stream-message-chunk",
             serde_json::json!({
                 "session_id": session_id,
+                "operation_id": operation_id,
                 "task_session_id": task_session_id,
                 "run_id": run_id,
                 "chunk": result.reply.clone(),
@@ -7601,6 +7605,7 @@ fn emit_stream_send_message_result(
         crate::product_agent_dto::project_execution_transcript(result.execution_transcript);
     let mut done_payload = serde_json::json!({
         "session_id": session_id,
+        "operation_id": operation_id,
         "task_session_id": task_session_id,
         "run_id": run_id,
         "reply": result.reply,
@@ -9131,6 +9136,7 @@ mod turn_admission_tests {
         .expect("streaming transport uses the sole TurnRuntime");
 
         assert_eq!(done["run_id"], operation_id);
+        assert_eq!(done["operation_id"], operation_id);
         assert_eq!(done["task_session_id"], operation_id);
         assert_eq!(done["agent_ingress"]["requestId"], operation_id);
         assert_eq!(done["agent_ingress"]["agentTaskSessionId"], operation_id);
@@ -9141,6 +9147,15 @@ mod turn_admission_tests {
                 .count(),
             1
         );
+        assert!(emitted
+            .iter()
+            .filter(|(event, _)| event.starts_with("stream-message-"))
+            .all(|(_, payload)| {
+                payload
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(operation_id.as_str())
+            }));
     }
 
     #[tokio::test]
@@ -11274,6 +11289,7 @@ mod product_receipt_ipc_tests {
         let (stream_call, _stream_store) = actual_product_tool_call(&run_id).await;
         let mut emitted = Vec::new();
         let done = emit_stream_send_message_result(
+            "operation-product-receipt-ipc",
             "session-product-receipt-ipc",
             send_result(&run_id, &task_id, stream_call),
             Some(0),

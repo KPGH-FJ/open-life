@@ -691,6 +691,8 @@ export interface ProductFinalDeliveryView {
 
 export interface StreamMessageStartPayload {
   session_id: string;
+  operation_id: string;
+  task_session_id: string;
   run_id: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
@@ -704,8 +706,19 @@ export interface StreamMessageStartPayload {
   tool_invoked?: boolean;
 }
 
+export interface StreamMessageChunkPayload {
+  session_id: string;
+  operation_id: string;
+  task_session_id: string;
+  run_id: string;
+  request_id?: string;
+  chunk: string;
+}
+
 export interface StreamMessageDonePayload {
   session_id: string;
+  operation_id: string;
+  task_session_id: string;
   run_id: string;
   reply: string;
   status?: MainChatTurnStatus;

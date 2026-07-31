@@ -255,6 +255,10 @@
   cursor: default;
 }
 
+.ol-workspace-conversation__delete:not(:disabled) {
+  color: var(--ol-danger, #b42318);
+}
+
 .ol-workspace-transcript {
   display: grid;
   align-content: start;
@@ -293,6 +297,16 @@
 
 .ol-workspace-transcript li[data-role="user"] p {
   color: var(--ol-ink);
+}
+
+.ol-workspace-transcript li[data-streaming="true"] p::after {
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: var(--ol-space-1);
+  background: var(--ol-focus);
+  content: "";
+  vertical-align: -0.12em;
 }
 
 .ol-workspace-conversation__empty {
@@ -378,6 +392,32 @@
   justify-content: space-between;
   padding-top: var(--ol-space-2);
   border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-workspace-composer__actions {
+  display: flex;
+  gap: var(--ol-space-2);
+  align-items: center;
+}
+
+.ol-workspace-session-dialog__field {
+  display: grid;
+  gap: var(--ol-space-2);
+}
+
+.ol-workspace-session-dialog__field span {
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+  font-weight: 650;
+}
+
+.ol-workspace-session-dialog__field input {
+  min-height: var(--ol-control-height);
+  padding: 0 var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-2);
+  color: var(--ol-ink);
+  font: inherit;
 }
 
 .ol-workspace-composer__status {
