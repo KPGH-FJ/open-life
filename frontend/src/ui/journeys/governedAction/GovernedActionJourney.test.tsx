@@ -241,6 +241,52 @@ describe("Workbench governed action journey", () => {
     expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
   });
 
+  it("allows the first conversation when the backend workspace is truthfully empty", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        return {
+          ...snapshot,
+          workspaceEnvelope: {
+            ...snapshot.workspaceEnvelope,
+            status: "empty" as const,
+            data: {
+              ...snapshot.workspaceEnvelope.data!,
+              activeTask: undefined,
+              recentTaskRefs: [],
+              pendingReviewItems: [],
+              activity: [],
+              providerPrivacyBoundarySummary: {
+                ...snapshot.workspaceEnvelope.data!.providerPrivacyBoundarySummary,
+                routeType: "unknown" as const,
+                externalTransmission: "unknown" as const,
+                blockedReason:
+                  "Network consent is required before provider dispatch (decision_id=fixture).",
+              },
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "新对话" }));
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "Start the first task");
+
+    expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
+  });
+
   it("keeps durable approval separate from refreshed application", async () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = await fixture.load();
@@ -277,5 +323,30 @@ describe("Workbench governed action journey", () => {
         item
       )
     ).toMatchObject({ title: "变更已应用" });
+  });
+
+  it("does not delete a conversation until the explicit confirmation action", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const deleteSession = vi.spyOn(dataSource, "deleteSession");
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByRole("button", { name: "删除" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    const dialog = screen.getByRole("dialog", { name: "删除这段对话？" });
+    expect(deleteSession).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "删除这段对话？" })).not.toBeInTheDocument();
   });
 });

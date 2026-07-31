@@ -1493,8 +1493,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
     ) -> Result<OpenLifeTurnOutput, String> {
         debug_assert_eq!(input.stream_mode, MainChatTurnStreamMode::Streaming);
+        let operation_id = input.operation_id.clone();
         let (execution, provider_token_count) = {
-            let mut event_sink = StreamingMainChatEventSink::new(emit_stream_event);
+            let mut event_sink = StreamingMainChatEventSink::new(&operation_id, emit_stream_event);
             let execution = Box::pin(self.run_with_event_sink(
                 input,
                 &mut event_sink,
@@ -1505,7 +1506,10 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         };
         let durable_event_count = execution.durable_events.len();
         let done_payload = emit_stream_send_message_result(
-            &execution.session_id,
+            StreamEmissionIdentity {
+                operation_id: &operation_id,
+                session_id: &execution.session_id,
+            },
             execution.result,
             Some(execution.kernel_event_count),
             execution.durable_events,
@@ -7560,8 +7564,14 @@ fn durable_provider_invocation_observed(
     })
 }
 
+#[derive(Clone, Copy)]
+struct StreamEmissionIdentity<'a> {
+    operation_id: &'a str,
+    session_id: &'a str,
+}
+
 fn emit_stream_send_message_result(
-    session_id: &str,
+    identity: StreamEmissionIdentity<'_>,
     result: SendMessageResult,
     kernel_event_count: Option<usize>,
     durable_events: Vec<MainChatAgentDurableEvent>,
@@ -7569,6 +7579,10 @@ fn emit_stream_send_message_result(
     recovered_from_durable_final: bool,
     emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
 ) -> Result<serde_json::Value, String> {
+    let StreamEmissionIdentity {
+        operation_id,
+        session_id,
+    } = identity;
     let run_id = result
         .run_id
         .clone()
@@ -7586,6 +7600,7 @@ fn emit_stream_send_message_result(
             "stream-message-chunk",
             serde_json::json!({
                 "session_id": session_id,
+                "operation_id": operation_id,
                 "task_session_id": task_session_id,
                 "run_id": run_id,
                 "chunk": result.reply.clone(),
@@ -7601,6 +7616,7 @@ fn emit_stream_send_message_result(
         crate::product_agent_dto::project_execution_transcript(result.execution_transcript);
     let mut done_payload = serde_json::json!({
         "session_id": session_id,
+        "operation_id": operation_id,
         "task_session_id": task_session_id,
         "run_id": run_id,
         "reply": result.reply,
@@ -9131,6 +9147,7 @@ mod turn_admission_tests {
         .expect("streaming transport uses the sole TurnRuntime");
 
         assert_eq!(done["run_id"], operation_id);
+        assert_eq!(done["operation_id"], operation_id);
         assert_eq!(done["task_session_id"], operation_id);
         assert_eq!(done["agent_ingress"]["requestId"], operation_id);
         assert_eq!(done["agent_ingress"]["agentTaskSessionId"], operation_id);
@@ -9141,6 +9158,15 @@ mod turn_admission_tests {
                 .count(),
             1
         );
+        assert!(emitted
+            .iter()
+            .filter(|(event, _)| event.starts_with("stream-message-"))
+            .all(|(_, payload)| {
+                payload
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(operation_id.as_str())
+            }));
     }
 
     #[tokio::test]
@@ -11019,7 +11045,8 @@ mod turn_admission_tests {
 mod product_receipt_ipc_tests {
     use super::{
         emit_stream_send_message_result, CanonicalFinalDeliveryView, CanonicalObservationSummary,
-        OpenLifeTurnTerminal, ProviderInvocationState, OPENLIFE_TURN_RUNTIME_OWNER,
+        OpenLifeTurnTerminal, ProviderInvocationState, StreamEmissionIdentity,
+        OPENLIFE_TURN_RUNTIME_OWNER,
     };
     use crate::{SendMessageResult, ToolCallResult, ToolCallStatus};
 
@@ -11274,7 +11301,10 @@ mod product_receipt_ipc_tests {
         let (stream_call, _stream_store) = actual_product_tool_call(&run_id).await;
         let mut emitted = Vec::new();
         let done = emit_stream_send_message_result(
-            "session-product-receipt-ipc",
+            StreamEmissionIdentity {
+                operation_id: "operation-product-receipt-ipc",
+                session_id: "session-product-receipt-ipc",
+            },
             send_result(&run_id, &task_id, stream_call),
             Some(0),
             Vec::new(),

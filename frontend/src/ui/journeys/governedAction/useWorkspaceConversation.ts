@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatSession, MainChatTurnStatus, ProductAction } from "@/tauri";
+import type {
+  ChatSession,
+  MainChatTurnStatus,
+  ProductAction,
+  StreamMessageChunkPayload,
+  StreamMessageStartPayload,
+} from "@/tauri";
 import type { ChatMessage } from "@/types";
 import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import type { WorkspaceConversationDataSource } from "./workspaceConversationDataSource";
@@ -7,11 +13,18 @@ import type { WorkspaceConversationDataSource } from "./workspaceConversationDat
 type Announce = (message: string) => void;
 
 export type WorkspaceConversationLoadStatus = "idle" | "loading" | "ready" | "error";
+export type WorkspaceSessionMutationState =
+  | { phase: "idle" }
+  | { phase: "renaming"; sessionId: string }
+  | { phase: "deleting"; sessionId: string }
+  | { phase: "failed"; action: "rename" | "delete"; reason: string };
 
 export type WorkspaceTurnState =
   | { phase: "idle" }
   | { phase: "creating_session" }
   | { phase: "sending"; sessionId: string }
+  | { phase: "streaming"; sessionId: string; taskSessionId: string; cancelError?: string }
+  | { phase: "cancelling"; sessionId: string; taskSessionId: string }
   | { phase: "refreshing"; sessionId: string; status: MainChatTurnStatus }
   | {
       phase: "resolved";
@@ -57,14 +70,20 @@ export type WorkspaceConversationController = {
   loadStatus: WorkspaceConversationLoadStatus;
   loadError: string | null;
   turnState: WorkspaceTurnState;
+  streamingReply: string;
+  activeTaskSessionId: string | null;
+  sessionMutation: WorkspaceSessionMutationState;
   busy: boolean;
   ensureLoaded: () => void;
-  reload: () => Promise<void>;
+  reload: () => Promise<boolean>;
   selectSession: (sessionId: string) => void;
   startNewConversation: () => void;
   setDraft: (value: string) => void;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
+  cancel: () => Promise<void>;
+  renameSelected: (title: string) => Promise<boolean>;
+  deleteSelected: () => Promise<boolean>;
 };
 
 export function useWorkspaceConversation(
@@ -79,6 +98,11 @@ export function useWorkspaceConversation(
   const [loadStatus, setLoadStatus] = useState<WorkspaceConversationLoadStatus>("idle");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [turnState, setTurnState] = useState<WorkspaceTurnState>({ phase: "idle" });
+  const [streamingReply, setStreamingReply] = useState("");
+  const [activeTaskSessionId, setActiveTaskSessionId] = useState<string | null>(null);
+  const [sessionMutation, setSessionMutation] = useState<WorkspaceSessionMutationState>({
+    phase: "idle",
+  });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
   const loadedRef = useRef(false);
@@ -94,6 +118,14 @@ export function useWorkspaceConversation(
     setLoadStatus("idle");
     setLoadError(null);
     setTurnState({ phase: "idle" });
+    setStreamingReply("");
+    setActiveTaskSessionId(null);
+    setSessionMutation({ phase: "idle" });
+    return () => {
+      requestRef.current += 1;
+      operationRef.current += 1;
+      loadedRef.current = false;
+    };
   }, [dataSource]);
 
   const loadHistory = useCallback(
@@ -107,14 +139,14 @@ export function useWorkspaceConversation(
     [dataSource]
   );
 
-  const reload = useCallback(async (): Promise<void> => {
+  const reload = useCallback(async (): Promise<boolean> => {
     const requestId = ++requestRef.current;
     setLoadStatus("loading");
     setLoadError(null);
     try {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
       const nextSessions = await dataSource.listSessions();
-      if (requestId !== requestRef.current) return;
+      if (requestId !== requestRef.current) return false;
       setSessions(nextSessions);
       const currentStillExists =
         selectedSessionId && nextSessions.some(item => item.session_id === selectedSessionId);
@@ -127,15 +159,17 @@ export function useWorkspaceConversation(
         setSelectedSessionId(null);
         setMessages([]);
       }
-      if (requestId !== requestRef.current) return;
+      if (requestId !== requestRef.current) return false;
       loadedRef.current = true;
       setLoadStatus("ready");
+      return true;
     } catch (error) {
-      if (requestId !== requestRef.current) return;
+      if (requestId !== requestRef.current) return false;
       loadedRef.current = false;
       setLoadStatus("error");
       setLoadError(errorText(error));
       setMessages([]);
+      return false;
     }
   }, [dataSource, loadHistory, selectedSessionId]);
 
@@ -144,13 +178,20 @@ export function useWorkspaceConversation(
     void reload();
   }, [loadStatus, reload]);
 
+  const busy =
+    ["creating_session", "sending", "streaming", "cancelling", "refreshing"].includes(
+      turnState.phase
+    ) || ["renaming", "deleting"].includes(sessionMutation.phase);
+
   const selectSession = useCallback(
     (sessionId: string) => {
-      if (!sessionId || sessionId === selectedSessionId || turnState.phase === "sending") return;
+      if (!sessionId || sessionId === selectedSessionId || busy) return;
       const requestId = ++requestRef.current;
       setLoadStatus("loading");
       setLoadError(null);
       setTurnState({ phase: "idle" });
+      setStreamingReply("");
+      setActiveTaskSessionId(null);
       void loadHistory(sessionId, requestId)
         .then(() => {
           if (requestId === requestRef.current) setLoadStatus("ready");
@@ -162,11 +203,11 @@ export function useWorkspaceConversation(
           setMessages([]);
         });
     },
-    [loadHistory, selectedSessionId, turnState.phase]
+    [busy, loadHistory, selectedSessionId]
   );
 
   const startNewConversation = useCallback(() => {
-    if (["creating_session", "sending", "refreshing"].includes(turnState.phase)) return;
+    if (busy) return;
     requestRef.current += 1;
     setSelectedSessionId(null);
     setMessages([]);
@@ -174,10 +215,10 @@ export function useWorkspaceConversation(
     setLoadError(null);
     setLoadStatus("ready");
     setTurnState({ phase: "idle" });
+    setStreamingReply("");
+    setActiveTaskSessionId(null);
     announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
-  }, [announce, turnState.phase]);
-
-  const busy = ["creating_session", "sending", "refreshing"].includes(turnState.phase);
+  }, [announce, busy]);
 
   const sendAction = useCallback(
     (disabledReason?: string): ProductAction => {
@@ -240,16 +281,38 @@ export function useWorkspaceConversation(
 
         const userMessage: ChatMessage = { role: "user", content: text };
         const requestMessages = [...messages, userMessage];
+        const turnSessionId = sessionId;
         setMessages(requestMessages);
         setDraft("");
         setTurnState({ phase: "sending", sessionId });
+        setStreamingReply("");
+        setActiveTaskSessionId(null);
         announce("正在发送；命令返回后仍会重新读取会话和工作区状态。");
 
-        const result = await dataSource.sendTurn(sessionId, requestMessages, {
-          operationId: crypto.randomUUID(),
-        });
+        const result = await dataSource.streamTurn(
+          turnSessionId,
+          requestMessages,
+          { operationId: crypto.randomUUID() },
+          {
+            onStart: (payload: StreamMessageStartPayload) => {
+              if (operationId !== operationRef.current) return;
+              setActiveTaskSessionId(payload.task_session_id);
+              setTurnState({
+                phase: "streaming",
+                sessionId: turnSessionId,
+                taskSessionId: payload.task_session_id,
+              });
+              announce("OpenLife 正在回复；现在可以取消这一项任务。");
+            },
+            onChunk: (payload: StreamMessageChunkPayload) => {
+              if (operationId !== operationRef.current) return;
+              setStreamingReply(current => current + payload.chunk);
+            },
+          }
+        );
         if (operationId !== operationRef.current) return;
         const status = resolvedTurnStatus(result.status ?? result.turn_terminal?.status);
+        setActiveTaskSessionId(result.task_session_id);
         setTurnState({ phase: "refreshing", sessionId, status });
 
         let refreshedHistory: ChatMessage[];
@@ -264,6 +327,8 @@ export function useWorkspaceConversation(
         }
         if (operationId !== operationRef.current) return;
         setMessages(refreshedHistory);
+        setStreamingReply("");
+        setActiveTaskSessionId(null);
         setTurnState({
           phase: "resolved",
           sessionId,
@@ -297,6 +362,74 @@ export function useWorkspaceConversation(
     [announce, dataSource, draft, messages, onAfterTurn, selectedSessionId, sendAction]
   );
 
+  const cancel = useCallback(async (): Promise<void> => {
+    if (!dataSource || turnState.phase !== "streaming" || !turnState.taskSessionId.trim()) {
+      announce("当前没有可以取消的运行中任务。");
+      return;
+    }
+    const { sessionId, taskSessionId } = turnState;
+    setTurnState({ phase: "cancelling", sessionId, taskSessionId });
+    announce("正在请求取消；只有后端终态返回后才会显示已取消。");
+    try {
+      await dataSource.cancelTask(taskSessionId);
+    } catch (error) {
+      setTurnState({
+        phase: "streaming",
+        sessionId,
+        taskSessionId,
+        cancelError: errorText(error),
+      });
+      announce("取消请求失败；当前不会把任务显示为已取消。");
+    }
+  }, [announce, dataSource, turnState]);
+
+  const renameSelected = useCallback(
+    async (title: string): Promise<boolean> => {
+      const normalizedTitle = title.replace(/\s+/g, " ").trim();
+      if (!dataSource || !selectedSessionId || busy || !normalizedTitle) {
+        announce("当前不能重命名这段对话。");
+        return false;
+      }
+      setSessionMutation({ phase: "renaming", sessionId: selectedSessionId });
+      try {
+        await dataSource.renameSession(selectedSessionId, normalizedTitle);
+        if (!(await reload())) {
+          throw new Error("conversation_refresh_failed_after_rename");
+        }
+        setSessionMutation({ phase: "idle" });
+        announce("对话名称已从后端重新读取并确认。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "rename", reason: errorText(error) });
+        announce("对话重命名失败；当前名称未被解释为已保存。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload, selectedSessionId]
+  );
+
+  const deleteSelected = useCallback(async (): Promise<boolean> => {
+    if (!dataSource || !selectedSessionId || busy) {
+      announce("当前不能删除这段对话。");
+      return false;
+    }
+    const targetSessionId = selectedSessionId;
+    setSessionMutation({ phase: "deleting", sessionId: targetSessionId });
+    try {
+      await dataSource.deleteSession(targetSessionId);
+      if (!(await reload())) {
+        throw new Error("conversation_refresh_failed_after_delete");
+      }
+      setSessionMutation({ phase: "idle" });
+      announce("对话删除已由后端重新读取确认。");
+      return true;
+    } catch (error) {
+      setSessionMutation({ phase: "failed", action: "delete", reason: errorText(error) });
+      announce("对话删除失败；当前仍按未删除处理。");
+      return false;
+    }
+  }, [announce, busy, dataSource, reload, selectedSessionId]);
+
   return useMemo(
     () => ({
       sessions,
@@ -306,6 +439,9 @@ export function useWorkspaceConversation(
       loadStatus,
       loadError,
       turnState,
+      streamingReply,
+      activeTaskSessionId,
+      sessionMutation,
       busy,
       ensureLoaded,
       reload,
@@ -314,21 +450,30 @@ export function useWorkspaceConversation(
       setDraft,
       sendAction,
       send,
+      cancel,
+      renameSelected,
+      deleteSelected,
     }),
     [
       busy,
+      cancel,
+      deleteSelected,
       draft,
       ensureLoaded,
       loadError,
       loadStatus,
       messages,
+      renameSelected,
       reload,
       selectSession,
       selectedSessionId,
+      sessionMutation,
       send,
       sendAction,
       sessions,
       startNewConversation,
+      streamingReply,
+      activeTaskSessionId,
       turnState,
     ]
   );

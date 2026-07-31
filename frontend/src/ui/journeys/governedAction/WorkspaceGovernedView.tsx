@@ -96,6 +96,8 @@ export function WorkspaceGovernedView({
   const envelope = snapshot?.workspaceEnvelope;
   const model =
     envelope && (envelope.status === "ready" || envelope.status === "stale") ? envelope.data : null;
+  const conversationModel =
+    envelope && (envelope.status === "ready" || envelope.status === "empty") ? envelope.data : null;
   const task = model?.activeTask;
   const permissionItem = model?.pendingReviewItems.find(item => item.type === "tool_permission");
   const resumeControl = snapshot ? findExactResumeControl(snapshot) : null;
@@ -108,14 +110,21 @@ export function WorkspaceGovernedView({
       : null;
   const conversationDisabledReason = (() => {
     if (!conversation) return undefined;
-    if (envelope?.status !== "ready") return "工作区读模型不是可用状态；请先重新读取。";
-    if (!model) return "工作区读模型没有提供可用 payload。";
-    const boundary = model.providerPrivacyBoundarySummary;
-    if (boundary.blockedReason) return boundary.blockedReason;
-    if (boundary.routeType === "unknown" || boundary.externalTransmission === "unknown") {
-      return "模型与传输边界未知；完成核对前不能发送。";
+    if (envelope?.status !== "ready" && envelope?.status !== "empty") {
+      return "工作区读模型不是可用状态；请先重新读取。";
     }
-    if (boundary.localOnlyRequired && boundary.routeType !== "local") {
+    if (!conversationModel) return "工作区读模型没有提供可用 payload。";
+    const boundary = conversationModel.providerPrivacyBoundarySummary;
+    // This summary describes evidence observed before the next turn. It is not
+    // dispatch authority: the runtime must receive the turn to choose a route,
+    // stop before HTTP when consent is required, and create the exact review
+    // item. Blocking on pre-dispatch unknown/ask state makes both first-use and
+    // permission recovery impossible.
+    if (
+      boundary.localOnlyRequired &&
+      boundary.routeType !== "local" &&
+      boundary.routeType !== "unknown"
+    ) {
       return "当前要求仅本机处理，但后端没有确认本地路由。";
     }
     if (

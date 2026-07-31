@@ -410,12 +410,15 @@ function SafeModeNotice({ controller }: { controller: SettingsPrivacyJourneyCont
   }
 
   const active = controller.protectionState === "active";
+  const recoveryEligible = controller.eligibleCredentialPurposes.length > 0;
 
   return (
     <FoundationNotice title={active ? "安全模式保持生效" : "保护状态未知"} tone="protection" live>
       <p>
         {active
-          ? "后端报告了保护状态；连接测试与设置保存继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。"
+          ? recoveryEligible
+            ? "后端报告了保护状态；连接测试与设置保存继续关闭。下方只开放后端启动快照明确列出的系统凭据初始化，且仍需原生确认。"
+            : "后端报告了保护状态；连接测试与设置保存继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。"
           : "LifeStateProjection 没有提供可核对的保护状态；连接测试、设置保存和本地确定态全部保持关闭。"}
       </p>
     </FoundationNotice>
