@@ -215,13 +215,6 @@ export async function getLifeModelCurrentView(): Promise<LifeModelCurrentView> {
   return safeInvoke<LifeModelCurrentView>("get_life_model_current_view");
 }
 
-const MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST = {
-  purpose: "manual_lifemodel_editor_save",
-  explicitUserIntent: true,
-  riskAcknowledged: true,
-  createPreChangeSnapshot: true,
-} as const;
-
 const MANUAL_SNAPSHOT_RESTORE_REQUEST = {
   purpose: "manual_restore",
   explicitUserIntent: true,
@@ -236,14 +229,6 @@ function manualDataImportRequest(operationId: string) {
     createPreChangeSnapshot: true,
     importTargets: ["life_model", "messages", "vectors", "state_store"],
   } as const;
-}
-
-export async function saveLifeModel(model: LifeModel): Promise<void> {
-  return safeInvoke("save_life_model", {
-    lifeModel: model,
-    manualOverrideRequest: MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST,
-    manual_override_request: MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST,
-  });
 }
 
 export type AgentRuntimeMode = "local_first_default" | "capability_first";
@@ -1284,36 +1269,6 @@ export interface ProductRunEvidenceView {
   redactionState: string;
 }
 
-export interface MainChatRuntimeStatus {
-  statusVersion: 2;
-  authoritativeRuntime: "main_chat_kernel";
-  defaultSendPath: "main_chat_kernel";
-  startStreamPath: "main_chat_kernel";
-  sourceOfTruth: "main_chat_turn_pipeline";
-  kernelEvidence: {
-    kernelBackedDefault: boolean;
-    finalGateEvidencePresent: boolean;
-    finalGateReady: boolean;
-    latestKernelRouteObserved: boolean;
-  };
-  latestRouteEvidence: {
-    status: "observed" | "not_observed";
-    directAnswerObserved: boolean;
-    governedBlockerObserved: boolean;
-    agentLoopObserved: boolean;
-    kernelBackedDefaultObserved: boolean;
-    lastKernelEventCount?: number;
-    lastRouteReasonCode?: string | null;
-    lastKernelSupportDisposition?: string | null;
-  };
-  finalGateReadiness: {
-    authority: "main_chat_final_acceptance_gate";
-    status: "ready" | "blocked" | "not_run";
-    blockers: string[];
-    lastReportRunId?: string | null;
-  };
-}
-
 export interface MainChatSkillSummary {
   skillId: string;
   name: string;
@@ -1599,10 +1554,6 @@ export async function skipPlanExecuteStep(
   input: SkipPlanExecuteStepInput
 ): Promise<SkipPlanExecuteStepOutput> {
   return safeInvoke<SkipPlanExecuteStepOutput>("skip_plan_execute_step", { input });
-}
-
-export async function getMainChatRuntimeStatus(): Promise<MainChatRuntimeStatus> {
-  return safeInvoke<MainChatRuntimeStatus>("get_main_chat_runtime_status");
 }
 
 export async function startStreamMessage(
@@ -2712,10 +2663,6 @@ export async function getRuntimeBuildInfo(): Promise<RuntimeBuildInfo> {
   return safeInvoke<RuntimeBuildInfo>("get_runtime_build_info");
 }
 
-export async function getSchedulerConfig(): Promise<{ localModel: string; preferLocal: boolean }> {
-  return safeInvoke<{ localModel: string; preferLocal: boolean }>("get_scheduler_config");
-}
-
 export async function setSchedulerConfig(localModel: string, preferLocal: boolean): Promise<void> {
   return safeInvoke("set_scheduler_config", {
     localModel,
@@ -2912,17 +2859,6 @@ export async function getFeedbackSummary(): Promise<{
   return safeInvoke("get_feedback_summary");
 }
 
-export interface FeedbackEvolutionLegacyDirectApplyResult {
-  success: boolean;
-  legacy: boolean;
-  warning: string;
-  applied: boolean;
-  applied_change_count: number;
-  durable_lifemodel_write: boolean;
-  message: string;
-  metadata_safe: boolean;
-}
-
 export interface FeedbackEvolutionReportResult {
   success: boolean;
   read_only: boolean;
@@ -2938,30 +2874,8 @@ export interface FeedbackEvolutionReportResult {
   summary: string;
 }
 
-export async function applyFeedbackEvolution(): Promise<FeedbackEvolutionLegacyDirectApplyResult> {
-  return safeInvoke<FeedbackEvolutionLegacyDirectApplyResult>("apply_feedback_evolution");
-}
-
 export async function generateEvolutionReport(): Promise<FeedbackEvolutionReportResult> {
   return safeInvoke<FeedbackEvolutionReportResult>("generate_evolution_report");
-}
-
-export async function runMicroEvolution(): Promise<{
-  success?: boolean;
-  legacy?: boolean;
-  applied: boolean;
-  message: string;
-  warning?: string;
-  change_count?: number;
-  snapshot_version?: string | null;
-  signal_counts?: {
-    feedback_terms: number;
-    behavior_events: number;
-    inference_items: number;
-  };
-  metadata_safe?: boolean;
-}> {
-  return safeInvoke("run_micro_evolution");
 }
 
 export async function generateCalibrationReport(periodDays: number): Promise<{
@@ -3021,26 +2935,6 @@ export async function generateMicroEvolutionChanges(): Promise<{
   signal_summary: EvolutionSignalSummary;
 }> {
   return safeInvoke("generate_micro_evolution_changes");
-}
-
-export async function applyCalibration(
-  changes: EvolutionChange[],
-  mode: "direct" | "proposal" = "proposal"
-): Promise<{
-  success: boolean;
-  legacy?: boolean;
-  warning?: string;
-  snapshot_version?: string;
-  applied_count?: number;
-  metadata_safe?: boolean;
-  created_count?: number;
-  created_ids?: string[];
-  run_id?: string;
-  error_count?: number;
-  errors?: string[];
-  message: string;
-}> {
-  return safeInvoke("apply_calibration", { changes, mode });
 }
 
 export async function calibrationCreateProposals(changes: EvolutionChange[]): Promise<{
@@ -4562,52 +4456,6 @@ export interface MemoryProposalDraftEditReport {
   afterDigest: string;
 }
 
-export interface ManagedKnowledgeValidation {
-  allowed: boolean;
-  targetKind: string;
-  blocker?: string;
-}
-
-export interface ManagedKnowledgeContextReloadProof {
-  loaded: boolean;
-  digest: string;
-  source: string;
-  reason: string;
-}
-
-export interface ManagedKnowledgeWriteDraft {
-  proposalId: string;
-  targetPath: string;
-  sourceProvenanceProposalId: string;
-  linkedMemoryIds: string[];
-  beforeDigest: string;
-  afterDigest: string;
-  previewDiff: string;
-  validation: ManagedKnowledgeValidation;
-  fileWrittenBeforeConfirmation: boolean;
-}
-
-export interface ManagedKnowledgeWriteApplyReport {
-  proposalId: string;
-  targetPath: string;
-  versionId: string;
-  auditId: string;
-  rollbackSnapshotId: string;
-  beforeDigest: string;
-  afterDigest: string;
-  contextReload: ManagedKnowledgeContextReloadProof;
-}
-
-export interface ManagedKnowledgeWriteRollbackReport {
-  proposalId: string;
-  targetPath: string;
-  restoredVersionId: string;
-  rolledBackVersionId: string;
-  auditId: string;
-  restoredDigest: string;
-  contextReload: ManagedKnowledgeContextReloadProof;
-}
-
 export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
   return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
 }
@@ -4712,42 +4560,6 @@ export async function draftEditMemoryProposal(
     proposal_id: proposalId,
     newAfter,
     new_after: newAfter,
-  });
-}
-
-export async function createManagedKnowledgeWriteDraft(
-  targetPath: string,
-  afterContent: string,
-  sourceProposalId?: string,
-  linkedMemoryIds: string[] = []
-): Promise<ManagedKnowledgeWriteDraft> {
-  return safeInvoke("create_managed_knowledge_write_draft", {
-    targetPath,
-    target_path: targetPath,
-    afterContent,
-    after_content: afterContent,
-    sourceProposalId,
-    source_proposal_id: sourceProposalId,
-    linkedMemoryIds,
-    linked_memory_ids: linkedMemoryIds,
-  });
-}
-
-export async function confirmManagedKnowledgeWrite(
-  proposalId: string
-): Promise<ManagedKnowledgeWriteApplyReport> {
-  return safeInvoke("confirm_managed_knowledge_write", {
-    proposalId,
-    proposal_id: proposalId,
-  });
-}
-
-export async function rollbackManagedKnowledgeWrite(
-  versionId: string
-): Promise<ManagedKnowledgeWriteRollbackReport> {
-  return safeInvoke("rollback_managed_knowledge_write", {
-    versionId,
-    version_id: versionId,
   });
 }
 

@@ -214,11 +214,6 @@ impl StartupKeyringSecretStore {
             );
         }
 
-        // Keep the platform interaction guard on the caller. Even if the OS
-        // worker outlives the bounded deadline, returning from this function
-        // restores normal Keychain UI for later user-initiated Settings work.
-        #[cfg(target_os = "macos")]
-        let _interaction_guard = disable_startup_keyring_interaction()?;
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name(format!("openlife-startup-secret-{operation_name}"))
@@ -253,16 +248,9 @@ pub(crate) fn selected_keyring_service_classification() -> Result<&'static str> 
     })
 }
 
-#[cfg(target_os = "macos")]
-fn disable_startup_keyring_interaction(
-) -> Result<security_framework::os::macos::keychain::KeychainUserInteractionLock> {
-    security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
-        .context("disable interactive macOS Keychain UI during startup")
-}
-
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-fn keyring_entry_for_service(service: &str, secret_ref: &str) -> Result<keyring::Entry> {
-    let account = match secret_ref {
+fn keyring_account_for_secret_ref(secret_ref: &str) -> Result<String> {
+    Ok(match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
         MAIN_CHAT_EVENT_INTEGRITY_KEY_REF => MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT.to_string(),
@@ -277,8 +265,60 @@ fn keyring_entry_for_service(service: &str, secret_ref: &str) -> Result<keyring:
             format!("{MCP_AUDIT_ACCOUNT_PREFIX}{epoch}")
         }
         _ => anyhow::bail!("unsupported OpenLife secret reference"),
-    };
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn keyring_entry_for_service(service: &str, secret_ref: &str) -> Result<keyring::Entry> {
+    let account = keyring_account_for_secret_ref(secret_ref)?;
     keyring::Entry::new(service, &account).context("initialize OS credential entry")
+}
+
+#[cfg(target_os = "macos")]
+fn read_startup_keyring_secret(service: &str, secret_ref: &str) -> Result<Option<String>> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+    use security_framework_sys::base::errSecItemNotFound;
+
+    let account = keyring_account_for_secret_ref(secret_ref)?;
+    let mut options = ItemSearchOptions::new();
+    options
+        .class(ItemClass::generic_password())
+        .service(service)
+        .account(&account)
+        .load_data(true)
+        // Startup has no useful authentication UI. This per-request policy
+        // prevents a detached, timed-out worker from presenting UI later,
+        // without changing process-wide Keychain interaction state.
+        .skip_authenticated_items(true);
+
+    let mut results = match options.search() {
+        Ok(results) => results,
+        Err(error) if error.code() == errSecItemNotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("read secret from noninteractive macOS Keychain query")
+        }
+    };
+    if results.len() != 1 {
+        anyhow::bail!(
+            "noninteractive macOS Keychain query returned {} matching items",
+            results.len()
+        );
+    }
+    match results.pop() {
+        Some(SearchResult::Data(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .context("decode password from noninteractive macOS Keychain query"),
+        _ => anyhow::bail!("noninteractive macOS Keychain query returned an unexpected result"),
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn read_startup_keyring_secret(service: &str, secret_ref: &str) -> Result<Option<String>> {
+    match keyring_entry_for_service(service, secret_ref)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(error).context("read secret from OS credential store"),
+    }
 }
 
 #[cfg(all(feature = "dev-extensions", debug_assertions))]
@@ -571,11 +611,7 @@ impl SecretReader for StartupKeyringSecretStore {
         let secret_ref = secret_ref.to_string();
         let service = self.service_name()?.to_string();
         self.run("read", move || {
-            match keyring_entry_for_service(&service, &secret_ref)?.get_password() {
-                Ok(value) => Ok(Some(value)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(error) => Err(error).context("read secret from OS credential store"),
-            }
+            read_startup_keyring_secret(&service, &secret_ref)
         })
     }
 }
@@ -1478,6 +1514,46 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(50));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn startup_secret_reads_do_not_change_process_wide_keychain_interaction() {
+        use security_framework::os::macos::keychain::SecKeychain;
+
+        assert!(SecKeychain::user_interaction_allowed().unwrap());
+        let (observed_sender, observed_receiver) = std::sync::mpsc::sync_channel(1);
+        let store = StartupKeyringSecretStore::default();
+
+        let result = store.run_with_timeout(
+            "interaction-policy-test",
+            Duration::from_millis(20),
+            move || {
+                observed_sender
+                    .send(SecKeychain::user_interaction_allowed().unwrap())
+                    .unwrap();
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(
+            observed_receiver.recv().unwrap(),
+            "startup reads must use a per-request noninteractive policy instead of disabling Keychain UI process-wide"
+        );
+        assert!(SecKeychain::user_interaction_allowed().unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn noninteractive_startup_keychain_query_maps_missing_item_to_none() {
+        let service = format!("com.openlife.test.missing.{}", uuid::Uuid::new_v4());
+
+        assert_eq!(
+            read_startup_keyring_secret(&service, PROVIDER_KEY_REF).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn integrity_keys_are_stable_and_purpose_isolated() {
         let store = MemorySecretStore::default();
@@ -1658,6 +1734,13 @@ mod tests {
         store.set(&secret_ref, &secret).expect("write OS keychain");
         assert_eq!(
             store.get(&secret_ref).expect("read OS keychain").as_deref(),
+            Some(secret.as_str())
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            read_startup_keyring_secret(SERVICE, &secret_ref)
+                .expect("read OS keychain through noninteractive startup path")
+                .as_deref(),
             Some(secret.as_str())
         );
         store.delete(&secret_ref).expect("delete OS keychain");

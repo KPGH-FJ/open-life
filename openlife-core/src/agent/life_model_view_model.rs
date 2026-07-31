@@ -901,7 +901,7 @@ fn build_manual_override_state(source_refs: &[EvidenceRef]) -> LifeModelManualOv
     LifeModelManualOverrideState {
         active: false,
         blocked_reason: Some(
-            "Manual LifeModel saves require save_life_model with an explicit governed manual override request; this read model does not authorize direct writes.".into(),
+            "Whole-model manual saves are not exposed by the product. LifeModel changes must use the proposal-first review flow.".into(),
         ),
         draft_ref: None,
         save_action: Some(ProductAction {
@@ -910,7 +910,8 @@ fn build_manual_override_state(source_refs: &[EvidenceRef]) -> LifeModelManualOv
             kind: ProductActionKind::Configure,
             enabled: false,
             disabled_reason: Some(
-                "Manual override is governed separately from the proposal-first review flow.".into(),
+                "No native-confirmed whole-model editor exists; use reviewable proposals instead."
+                    .into(),
             ),
             target_ref: Some(LIFE_MODEL_TARGET_REF.into()),
         }),
@@ -1488,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_override_state_is_governed_and_separate() {
+    fn whole_model_manual_save_is_unavailable_and_points_to_proposals() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
             life_model: Some(model_with_content()),
             now: Some("2026-07-09T00:00:00Z".into()),
@@ -1501,7 +1502,9 @@ mod tests {
             .expect("manual state");
 
         assert!(!manual.active);
-        assert!(manual.blocked_reason.unwrap().contains("governed"));
+        let blocked_reason = manual.blocked_reason.unwrap();
+        assert!(blocked_reason.contains("not exposed"));
+        assert!(blocked_reason.contains("proposal-first"));
         assert!(!manual.save_action.expect("save action").enabled);
     }
 }

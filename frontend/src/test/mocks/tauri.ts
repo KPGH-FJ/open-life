@@ -293,7 +293,8 @@ export function createMockLifeModelViewModelEnvelope(
       materializedChanges: [],
       manualOverrideState: {
         active: false,
-        blockedReason: "Manual override is governed separately.",
+        blockedReason:
+          "Whole-model manual saves are unavailable; use the proposal-first review flow.",
         draftRef: null,
         saveAction: null,
         reviewItemRefs: [],
@@ -2904,51 +2905,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           },
         ],
       } as T);
-    case "create_managed_knowledge_write_draft":
-      return Promise.resolve({
-        proposalId: "proposal-managed-knowledge-1",
-        targetPath: _args?.targetPath ?? _args?.target_path ?? "USER.md",
-        sourceProvenanceProposalId: "proposal-managed-knowledge-1",
-        linkedMemoryIds: _args?.linkedMemoryIds ?? _args?.linked_memory_ids ?? [],
-        beforeDigest: "before-digest",
-        afterDigest: "after-digest",
-        previewDiff: `--- ${_args?.targetPath ?? _args?.target_path ?? "USER.md"}\n+++ ${
-          _args?.targetPath ?? _args?.target_path ?? "USER.md"
-        }\n+mock`,
-        validation: { allowed: true, targetKind: "user_profile_projection" },
-        fileWrittenBeforeConfirmation: false,
-      } as T);
-    case "confirm_managed_knowledge_write":
-      return Promise.resolve({
-        proposalId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-managed-knowledge-1",
-        targetPath: "USER.md",
-        versionId: "knowledge_version:1",
-        auditId: "knowledge_audit:1",
-        rollbackSnapshotId: "snapshot:1",
-        beforeDigest: "before-digest",
-        afterDigest: "after-digest",
-        contextReload: {
-          loaded: true,
-          digest: "after-digest",
-          source: "/mock:USER.md",
-          reason: "bounded user profile context surface",
-        },
-      } as T);
-    case "rollback_managed_knowledge_write":
-      return Promise.resolve({
-        proposalId: "proposal-managed-knowledge-1",
-        targetPath: "USER.md",
-        restoredVersionId: "knowledge_version:2",
-        rolledBackVersionId: _args?.versionId ?? _args?.version_id ?? "knowledge_version:1",
-        auditId: "knowledge_rollback_audit:1",
-        restoredDigest: "before-digest",
-        contextReload: {
-          loaded: true,
-          digest: "before-digest",
-          source: "/mock:USER.md",
-          reason: "bounded user profile context surface",
-        },
-      } as T);
     case "list_tool_permissions":
       return Promise.resolve([
         {
@@ -2963,13 +2919,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       ] as T);
     case "revoke_tool_permission":
       return Promise.resolve(true as T);
-    case "check_tool_permission":
-      return Promise.resolve({
-        allowed: true,
-        requiresConfirmation: false,
-        decision: "allow",
-        reason: "mock allow",
-      } as T);
     case "list_plugins":
     case "reload_plugins":
       return Promise.resolve([
@@ -3239,8 +3188,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           "config:safe_paths",
         ],
       } as T);
-    case "get_scheduler_config":
-      return Promise.resolve({ localModel: "llama3", preferLocal: true } as T);
     case "save_chat_message":
       return Promise.resolve(undefined as T);
     case "register_mcp_server":
@@ -3375,13 +3322,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "a2a_restart_sidecar":
     case "a2a_stop_sidecar":
       return Promise.resolve(undefined as T);
-    case "run_micro_evolution":
-      return Promise.resolve({
-        changes: [],
-        applied: false,
-        message: "近7天暂无足够信号来微调模型权重",
-        snapshot_version: null,
-      } as T);
     case "generate_micro_evolution_changes":
       return Promise.resolve({
         changes: [
@@ -3412,13 +3352,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           top_behavior: [{ name: "value_focus:健康", score: 0.02, source: "behavior" }],
           top_inference: [{ name: "identity.values:健康", score: 0.01, source: "inference" }],
         },
-      } as T);
-    case "apply_calibration":
-      return Promise.resolve({
-        success: true,
-        snapshot_version: "v1-test",
-        applied_count: 2,
-        message: "已应用校准",
       } as T);
     case "calibration_create_proposals":
       return Promise.resolve({

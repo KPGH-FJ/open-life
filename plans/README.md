@@ -14,8 +14,17 @@ working tree.
 - Do not build ledgers, task-packet systems, approval chains, append-only
   registries, or validators for the planning process itself.
 
-There is intentionally no active product-development plan during repository
-cleanup. The next plan will be written after the clean baseline is reviewed.
+## Active Product Development Program
+
+[`openlife_product_development_program.md`](openlife_product_development_program.md)
+is the single active development program. It fixes the six-phase product path,
+phase exit criteria, and the method used to investigate and implement each
+phase.
+
+The current phase pointer in that file is authoritative for development order.
+Phase details may adapt to current source and product evidence, but Agents must
+not add, replace, reorder, or rename Program phases without explicit user
+approval.
 
 ## Accepted Decisions
 
