@@ -1426,11 +1426,11 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 || metadata
                     .get("sourceLabel")
                     .and_then(serde_json::Value::as_str)
-                    .map_or(true, str::is_empty)
+                    .is_none_or(str::is_empty)
                 || metadata
                     .get("preview")
                     .and_then(serde_json::Value::as_str)
-                    .map_or(true, str::is_empty)
+                    .is_none_or(str::is_empty)
             {
                 return Err(
                     "file read observation must expose source metadata for the control plane"
@@ -1531,7 +1531,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 || metadata
                     .get("preview")
                     .and_then(serde_json::Value::as_str)
-                    .map_or(true, str::is_empty)
+                    .is_none_or(str::is_empty)
             {
                 return Err(
                     "session search observation must expose source metadata for the control plane"
@@ -2011,7 +2011,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 || metadata
                     .get("preview")
                     .and_then(serde_json::Value::as_str)
-                    .map_or(true, str::is_empty)
+                    .is_none_or(str::is_empty)
             {
                 return Err(
                     "web AgentLoop observation must expose source metadata for the control plane"
@@ -2212,11 +2212,11 @@ fn assert_mcp_read_success_action(
         || metadata
             .get("sourceLabel")
             .and_then(serde_json::Value::as_str)
-            .map_or(true, str::is_empty)
+            .is_none_or(str::is_empty)
         || metadata
             .get("preview")
             .and_then(serde_json::Value::as_str)
-            .map_or(true, str::is_empty)
+            .is_none_or(str::is_empty)
     {
         return Err(
             "registered MCP read observation must expose source metadata for the control plane"

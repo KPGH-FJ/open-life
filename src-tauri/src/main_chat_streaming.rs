@@ -48,7 +48,7 @@ pub(crate) fn start_stream_message_with_operation_state<'a>(
                 durable_event_count,
                 done_payload,
             } => {
-                debug_assert!(run_id.as_deref().map_or(true, |id| !id.trim().is_empty()));
+                debug_assert!(run_id.as_deref().is_none_or(|id| !id.trim().is_empty()));
                 let _ = (
                     legacy_fallback_used,
                     kernel_event_count,

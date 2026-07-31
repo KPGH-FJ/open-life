@@ -4365,8 +4365,7 @@ const IDENTITY_UPDATE_GUARD: &str = "guard_main_chat_event_identity_update_v1";
 const IDENTITY_DELETE_GUARD: &str = "guard_main_chat_event_identity_delete_v1";
 
 fn validate_immutable_identity_domain(conn: &Connection) -> Result<()> {
-    let placeholders = std::iter::repeat("?")
-        .take(VERSIONED_EVENT_TYPES.len())
+    let placeholders = std::iter::repeat_n("?", VERSIONED_EVENT_TYPES.len())
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -5885,7 +5884,7 @@ fn validate_tool_lifecycle_transition(
                     dispatch_kind,
                     Some("local" | "network" | "mcp_stdio" | "a2a" | "simulated")
                 )
-                || !dispatch_attempt_count.is_some_and(|count| count > 0)
+                || dispatch_attempt_count.is_none_or(|count| count == 0)
                 || !draft
                     .payload
                     .get("dispatchedAt")
@@ -6548,7 +6547,7 @@ pub(crate) fn provider_remote_unknown_has_runtime_cancel_contract(
             .payload
             .get("cancellationId")
             .and_then(Value::as_str)
-            .map_or(true, |value| value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
         || event
             .payload
             .get("localWaitAborted")
@@ -6605,7 +6604,7 @@ pub(crate) fn provider_remote_unknown_has_runtime_kernel_failure_contract(
             .payload
             .get("kernelFailureReceiptId")
             .and_then(Value::as_str)
-            .map_or(true, |value| value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
         || event
             .payload
             .get("localKernelFutureDropped")
@@ -6715,7 +6714,7 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
             .payload
             .get(field)
             .and_then(Value::as_str)
-            .map_or(true, |value| value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
         {
             return Err(persisted_provider_lifecycle_unverified(
                 &format!("{field}_missing"),
@@ -8748,9 +8747,9 @@ fn normalize_metadata_string_array_or_redacted(
     let values = value.as_array()?;
     if values.len() > MAX_METADATA_ARRAY_ITEMS
         || values.iter().any(|value| {
-            value.as_str().map_or(true, |value| {
-                value.chars().count() > MAX_REDACTED_STRING_CHARS
-            })
+            value
+                .as_str()
+                .is_none_or(|value| value.chars().count() > MAX_REDACTED_STRING_CHARS)
         })
     {
         return None;
@@ -9045,7 +9044,7 @@ fn is_legacy_unkeyed_redacted_event_value(value: &Value, expected_type: Option<&
         && object
             .get("valueType")
             .and_then(Value::as_str)
-            .is_some_and(|actual| expected_type.map_or(true, |expected| actual == expected))
+            .is_some_and(|actual| expected_type.is_none_or(|expected| actual == expected))
         && object
             .get("byteCount")
             .and_then(Value::as_u64)

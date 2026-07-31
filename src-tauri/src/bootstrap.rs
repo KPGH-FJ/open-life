@@ -941,13 +941,12 @@ where
                 };
             }
             ephemeral_init()
-                .map(|store| {
+                .inspect(|_| {
                     persistence.register_ephemeral_development(
                         name,
                         "dev_ephemeral_store_fallback",
                         &e,
                     );
-                    store
                 })
                 .map_err(|e| {
                     let msg = format!(

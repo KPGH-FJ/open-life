@@ -1984,7 +1984,7 @@ fn parse_reviewed_scheduled_provider_route(
     if after
         .get("description")
         .and_then(Value::as_str)
-        .map_or(true, |value| value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
         return Err("ScheduledTask 云路由必须绑定非空 description。".into());
     }

@@ -29,7 +29,7 @@ See [PRODUCT.md](PRODUCT.md) for product scope and
 
 Requirements:
 
-- Rust 1.88+
+- Rust 1.89+
 - Node.js 18+
 - Corepack with pnpm 9.1.x
 - Tauri 2 system dependencies
