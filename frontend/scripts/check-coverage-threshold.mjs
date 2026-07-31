@@ -17,11 +17,11 @@ export function validateCoverageSummary(summary) {
     !Number.isFinite(percent)
   ) {
     throw new Error(
-      "W0-COV-NONNUMERIC: total.lines total, covered, skipped and pct must be numeric"
+      "COVERAGE-NONNUMERIC: total.lines total, covered, skipped and pct must be numeric"
     );
   }
   if (total <= 0) {
-    throw new Error("W0-COV-ZERO-COLLECTION: total.lines.total must be greater than zero");
+    throw new Error("COVERAGE-ZERO-COLLECTION: total.lines.total must be greater than zero");
   }
   const expectedPercent = Math.floor((covered / total) * 10_000) / 100;
   if (
@@ -34,12 +34,12 @@ export function validateCoverageSummary(summary) {
     percent !== expectedPercent
   ) {
     throw new Error(
-      `W0-COV-INCONSISTENT: total.lines fields disagree (${covered}/${total}, skipped ${skipped}, pct ${percent})`
+      `COVERAGE-INCONSISTENT: total.lines fields disagree (${covered}/${total}, skipped ${skipped}, pct ${percent})`
     );
   }
   if (percent < COVERAGE_THRESHOLD) {
     throw new Error(
-      `W0-COV-BELOW-THRESHOLD: line coverage ${percent}% is below ${COVERAGE_THRESHOLD}%`
+      `COVERAGE-BELOW-THRESHOLD: line coverage ${percent}% is below ${COVERAGE_THRESHOLD}%`
     );
   }
 
@@ -51,14 +51,14 @@ export function checkCoverageFile(path) {
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    throw new Error(`W0-COV-MISSING: coverage summary is missing at ${path}`);
+    throw new Error(`COVERAGE-MISSING: coverage summary is missing at ${path}`);
   }
 
   let summary;
   try {
     summary = JSON.parse(raw);
   } catch {
-    throw new Error(`W0-COV-NONNUMERIC: coverage summary is not valid JSON at ${path}`);
+    throw new Error(`COVERAGE-NONNUMERIC: coverage summary is not valid JSON at ${path}`);
   }
   return validateCoverageSummary(summary);
 }

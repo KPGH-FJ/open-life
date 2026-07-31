@@ -2,20 +2,17 @@
 
 ## Status
 
-Stage3-A source-backed explainer. This document describes current Memory store,
-gateway, lifecycle, retrieval, and Main Chat memory-candidate surfaces. It is
-not a claim that Memory is canonical LifeModel truth.
+Source-backed description of current Memory storage, gateway, lifecycle,
+retrieval, and Main Chat memory-candidate surfaces.
 
 ## Authority
 
-Authority remains with `AGENTS.md`, `plans/README.md`,
-`plans/openlife_single_system_deletion_manifest.md`, and the LifeModel-HS source
-of truth ADR. This page explains current implementation surfaces beneath those
-documents.
+Authority remains with `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and current
+source.
 
 ## Last verified
 
-2026-07-07 during Stage3-A source-map reading.
+2026-07-31 during repository cleanup source tracing.
 
 ## Source map
 
@@ -33,8 +30,8 @@ documents.
 ## Inherited blocker
 
 Memory context and Memory proposals are governed support surfaces. They do not
-close Phase7, do not replace external live provider evidence, and do not allow
-ordinary chat to silently write canonical LifeModel truth.
+replace external-live evidence and do not allow ordinary chat to silently write
+canonical LifeModel truth.
 
 ## Storage Surfaces
 

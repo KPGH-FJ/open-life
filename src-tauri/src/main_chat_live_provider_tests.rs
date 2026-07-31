@@ -1035,29 +1035,23 @@ async fn roadshow_rc02_rc03_external_live_resources_use_both_source_classes() {
             "比较这两份文件的核心主张、分歧和风险，并给出逐条引用。",
             vec![
                 openlife_core::resource_gateway::ResourceImportSource {
-                    filename: "roadshow_compare.pdf".into(),
+                    filename: "comparison.pdf".into(),
                     declared_mime: "application/pdf".into(),
-                    bytes: include_bytes!(
-                        "../../plans/fixtures/openlife_roadshow_core/roadshow_compare.pdf"
-                    )
-                    .to_vec(),
+                    bytes: include_bytes!("../../test-fixtures/resources/comparison.pdf").to_vec(),
                 },
                 openlife_core::resource_gateway::ResourceImportSource {
-                    filename: "roadshow_compare.docx".into(),
+                    filename: "comparison.docx".into(),
                     declared_mime:
                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             .into(),
-                    bytes: include_bytes!(
-                        "../../plans/fixtures/openlife_roadshow_core/roadshow_compare.docx"
-                    )
-                    .to_vec(),
+                    bytes: include_bytes!("../../test-fixtures/resources/comparison.docx").to_vec(),
                 },
             ],
         )
         .await;
     assert!(rc02_reply.contains("来源（OpenLife 已核验）"));
-    assert!(rc02_reply.contains("roadshow\\_compare\\.pdf"));
-    assert!(rc02_reply.contains("roadshow\\_compare\\.docx"));
+    assert!(rc02_reply.contains("comparison\\.pdf"));
+    assert!(rc02_reply.contains("comparison\\.docx"));
     assert!(rc02_reply.contains("page "));
     assert!(rc02_reply.contains("paragraphs "));
 
@@ -1066,28 +1060,22 @@ async fn roadshow_rc02_rc03_external_live_resources_use_both_source_classes() {
         "分析这两份表格的趋势、异常和可能的数据质量问题，并引用对应工作表和单元格范围。",
         vec![
             openlife_core::resource_gateway::ResourceImportSource {
-                filename: "roadshow_metrics.csv".into(),
+                filename: "metrics.csv".into(),
                 declared_mime: "text/csv".into(),
-                bytes: include_bytes!(
-                    "../../plans/fixtures/openlife_roadshow_core/roadshow_metrics.csv"
-                )
-                .to_vec(),
+                bytes: include_bytes!("../../test-fixtures/resources/metrics.csv").to_vec(),
             },
             openlife_core::resource_gateway::ResourceImportSource {
-                filename: "roadshow_metrics.xlsx".into(),
+                filename: "metrics.xlsx".into(),
                 declared_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     .into(),
-                bytes: include_bytes!(
-                    "../../plans/fixtures/openlife_roadshow_core/roadshow_metrics.xlsx"
-                )
-                .to_vec(),
+                bytes: include_bytes!("../../test-fixtures/resources/metrics.xlsx").to_vec(),
             },
         ],
     )
     .await;
     assert!(rc03_reply.contains("来源（OpenLife 已核验）"));
-    assert!(rc03_reply.contains("roadshow\\_metrics\\.csv"));
-    assert!(rc03_reply.contains("roadshow\\_metrics\\.xlsx"));
+    assert!(rc03_reply.contains("metrics\\.csv"));
+    assert!(rc03_reply.contains("metrics\\.xlsx"));
     assert!(rc03_reply.contains("range "));
     assert!(rc03_reply.contains("sheet roadshow_metrics"));
 }
@@ -1476,12 +1464,9 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
         &state,
         &operation_id,
         vec![openlife_core::resource_gateway::ResourceImportSource {
-            filename: "roadshow_combined_report.pdf".into(),
+            filename: "combined-report.pdf".into(),
             declared_mime: "application/pdf".into(),
-            bytes: include_bytes!(
-                "../../plans/fixtures/openlife_roadshow_core/roadshow_combined_report.pdf"
-            )
-            .to_vec(),
+            bytes: include_bytes!("../../test-fixtures/resources/combined-report.pdf").to_vec(),
         }],
     );
 
@@ -1694,7 +1679,7 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
     assert!(materialized.contains("webref_"));
     assert!(materialized.contains("来源（OpenLife 已核验）"));
     assert!(materialized.contains("来源（OpenLife 引用已绑定，内容未背书）"));
-    assert!(materialized.contains("roadshow\\_combined\\_report\\.pdf"));
+    assert!(materialized.contains("combined\\-report\\.pdf"));
     assert!(materialized.contains("http://") || materialized.contains("https://"));
 
     let completed_task = state
@@ -1818,10 +1803,9 @@ async fn roadshow_rc08_external_live_provider_cancel_remote_unknown_then_retry_n
         &state,
         &first_operation_id,
         vec![openlife_core::resource_gateway::ResourceImportSource {
-            filename: "roadshow_cancel.md".into(),
+            filename: "cancellation-note.md".into(),
             declared_mime: "text/markdown".into(),
-            bytes: include_bytes!("../../plans/fixtures/openlife_roadshow_core/roadshow_cancel.md")
-                .to_vec(),
+            bytes: include_bytes!("../../test-fixtures/resources/cancellation-note.md").to_vec(),
         }],
     );
 
@@ -1990,10 +1974,9 @@ async fn roadshow_rc08_external_live_provider_cancel_remote_unknown_then_retry_n
         &state,
         &second_operation_id,
         vec![openlife_core::resource_gateway::ResourceImportSource {
-            filename: "roadshow_cancel.md".into(),
+            filename: "cancellation-note.md".into(),
             declared_mime: "text/markdown".into(),
-            bytes: include_bytes!("../../plans/fixtures/openlife_roadshow_core/roadshow_cancel.md")
-                .to_vec(),
+            bytes: include_bytes!("../../test-fixtures/resources/cancellation-note.md").to_vec(),
         }],
     );
 
@@ -2050,7 +2033,7 @@ async fn roadshow_rc08_external_live_provider_cancel_remote_unknown_then_retry_n
     let reply = retry["reply"].as_str().expect("RC08 external retry reply");
     assert!(reply.contains("来源（OpenLife 已核验）"));
     assert!(reply.contains("来源（OpenLife 引用已绑定，内容未背书）"));
-    assert!(reply.contains("roadshow\\_cancel\\.md"));
+    assert!(reply.contains("cancellation\\-note\\.md"));
     assert!(reply.contains("http://") || reply.contains("https://"));
     assert_eq!(
         retry_events
@@ -2318,8 +2301,7 @@ async fn roadshow_rc04_external_live_resource_web_and_provider_complete_with_bou
         .resource_runtime = Some(Arc::new(resource_runtime));
     configure_live_provider_eval_state(&state).await;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let fixture =
-        include_bytes!("../../plans/fixtures/openlife_roadshow_core/roadshow_web_context.md");
+    let fixture = include_bytes!("../../test-fixtures/resources/web-context.md");
     let line_count = fixture.split(|byte| *byte == b'\n').count().max(1) as u32;
     state
         .resource_runtime
@@ -2332,7 +2314,7 @@ async fn roadshow_rc04_external_live_resource_web_and_provider_complete_with_bou
             message_id: operation_id.clone(),
             resources: vec![openlife_core::resource::ResourceImportCandidate {
                 resource_id: uuid::Uuid::new_v4().to_string(),
-                filename: "roadshow_web_context.md".into(),
+                filename: "web-context.md".into(),
                 declared_mime: "text/markdown".into(),
                 detected_mime: "text/markdown".into(),
                 format: openlife_core::resource::ResourceFormat::Markdown,

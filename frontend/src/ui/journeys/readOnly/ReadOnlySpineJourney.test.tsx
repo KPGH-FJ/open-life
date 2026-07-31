@@ -2,15 +2,15 @@ import { StrictMode } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { phase4dFixtureDataSource } from "@/dev/phase4d/phase4d-fixtures";
-import { createPhase4dSettingsFixture } from "@/dev/phase4d/phase4d-settings-fixtures";
+import { readOnlyFixtureDataSource } from "@/test/fixtures/workbench/readOnly";
+import { createSettingsPrivacyFixture } from "@/test/fixtures/workbench/settingsPrivacy";
 import type { ReadOnlySpineDataSource } from "./readOnlySpineDataSource";
 import { ReadOnlySpineJourney } from "./ReadOnlySpineJourney";
 
-describe("Phase 4D desktop read-only journey", () => {
+describe("Workbench desktop read-only journey", () => {
   it("opens review as unavailable without converting view into an approval", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-ready")} />);
+    render(<ReadOnlySpineJourney dataSource={readOnlyFixtureDataSource("fixture-ready")} />);
 
     expect(
       await screen.findByRole("heading", {
@@ -36,7 +36,7 @@ describe("Phase 4D desktop read-only journey", () => {
   it("supports real local search/filter and uses task selection only as Inspector context", async () => {
     const user = userEvent.setup();
     const { container } = render(
-      <ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-ready")} />
+      <ReadOnlySpineJourney dataSource={readOnlyFixtureDataSource("fixture-ready")} />
     );
 
     await user.click(screen.getByRole("button", { name: /^任务\s+队列与连续性/ }));
@@ -71,7 +71,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("fails stale state closed and exposes complete product action attributes", async () => {
     const { container } = render(
-      <ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-stale")} />
+      <ReadOnlySpineJourney dataSource={readOnlyFixtureDataSource("fixture-stale")} />
     );
 
     expect(await screen.findByText("当前计划已陈旧，只读且不执行")).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("does not present a failed Tasks read as a confirmed empty list", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-error")} />);
+    render(<ReadOnlySpineJourney dataSource={readOnlyFixtureDataSource("fixture-error")} />);
 
     await user.click(screen.getByRole("button", { name: /^任务\s+队列与连续性/ }));
 
@@ -109,7 +109,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("replaces the live-region route message instead of retaining the Today loading message", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-ready")} />);
+    render(<ReadOnlySpineJourney dataSource={readOnlyFixtureDataSource("fixture-ready")} />);
     await screen.findByText("整理下周客户访谈要验证的三个问题");
 
     await user.click(screen.getByRole("button", { name: /^任务\s+队列与连续性/ }));
@@ -122,7 +122,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("treats an error envelope as authoritative even when it carries old payload data", async () => {
     const user = userEvent.setup();
-    const fixture = phase4dFixtureDataSource("fixture-ready");
+    const fixture = readOnlyFixtureDataSource("fixture-ready");
     const dataSource: ReadOnlySpineDataSource = {
       loadToday: async () => {
         const snapshot = await fixture.loadToday();
@@ -159,7 +159,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("uses a separate settings context and restores focus when returning", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlySpineJourney dataSource={phase4dFixtureDataSource("fixture-ready")} />);
+    render(<ReadOnlySpineJourney dataSource={readOnlyFixtureDataSource("fixture-ready")} />);
     await screen.findByText("整理下周客户访谈要验证的三个问题");
 
     await user.click(screen.getByRole("button", { name: "设置" }));
@@ -181,12 +181,12 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("loads the real settings journey when settings is the initial canonical route", async () => {
     const user = userEvent.setup();
-    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const settingsFixture = createSettingsPrivacyFixture("fixture-ready");
     const loadSettingsPrivacy = vi.fn(settingsFixture.dataSource.loadSettingsPrivacy);
     const { container } = render(
       <StrictMode>
         <ReadOnlySpineJourney
-          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          dataSource={readOnlyFixtureDataSource("fixture-ready")}
           settingsPrivacyDataSource={{
             ...settingsFixture.dataSource,
             loadSettingsPrivacy,
@@ -219,7 +219,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("does not let a slow settings load overwrite the announcement after returning", async () => {
     const user = userEvent.setup();
-    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const settingsFixture = createSettingsPrivacyFixture("fixture-ready");
     const loadedSnapshot = await settingsFixture.dataSource.loadSettingsPrivacy();
     let finishLoad: (value: typeof loadedSnapshot) => void = () => undefined;
     const delayedSnapshot = new Promise<typeof loadedSnapshot>(resolve => {
@@ -229,7 +229,7 @@ describe("Phase 4D desktop read-only journey", () => {
     const { container } = render(
       <StrictMode>
         <ReadOnlySpineJourney
-          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          dataSource={readOnlyFixtureDataSource("fixture-ready")}
           settingsPrivacyDataSource={{
             ...settingsFixture.dataSource,
             loadSettingsPrivacy,
@@ -254,12 +254,12 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("preserves an unsaved settings draft when leaving and returning", async () => {
     const user = userEvent.setup();
-    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const settingsFixture = createSettingsPrivacyFixture("fixture-ready");
     const loadSettingsPrivacy = vi.fn(settingsFixture.dataSource.loadSettingsPrivacy);
     const { container } = render(
       <StrictMode>
         <ReadOnlySpineJourney
-          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          dataSource={readOnlyFixtureDataSource("fixture-ready")}
           settingsPrivacyDataSource={{
             ...settingsFixture.dataSource,
             loadSettingsPrivacy,
@@ -286,7 +286,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("awaits an explicit settings reload after re-entry instead of announcing old data", async () => {
     const user = userEvent.setup();
-    const settingsFixture = createPhase4dSettingsFixture("fixture-ready");
+    const settingsFixture = createSettingsPrivacyFixture("fixture-ready");
     const loadedSnapshot = await settingsFixture.dataSource.loadSettingsPrivacy();
     const unavailableSnapshot = {
       ...loadedSnapshot,
@@ -309,7 +309,7 @@ describe("Phase 4D desktop read-only journey", () => {
     const { container } = render(
       <StrictMode>
         <ReadOnlySpineJourney
-          dataSource={phase4dFixtureDataSource("fixture-ready")}
+          dataSource={readOnlyFixtureDataSource("fixture-ready")}
           settingsPrivacyDataSource={{
             ...settingsFixture.dataSource,
             loadSettingsPrivacy,
@@ -338,7 +338,7 @@ describe("Phase 4D desktop read-only journey", () => {
 
   it("refreshes through the supplied source and restores Inspector trigger focus", async () => {
     const user = userEvent.setup();
-    const fixture = phase4dFixtureDataSource("fixture-ready");
+    const fixture = readOnlyFixtureDataSource("fixture-ready");
     const dataSource: ReadOnlySpineDataSource = {
       loadToday: vi.fn(fixture.loadToday),
       loadTasks: vi.fn(fixture.loadTasks),

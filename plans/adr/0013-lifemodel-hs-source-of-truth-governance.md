@@ -23,10 +23,11 @@ to a maintainable profile file than a dynamic model:
   policies, regression, compression, forgetting, or conflict resolution.
 - Legacy evolution paths still coexist with proposal-first governance.
 
-The next LifeModel phase should turn LifeModel into a user-governed Personal
+The current LifeModel direction should turn LifeModel into a user-governed Personal
 Heuristic System (LifeModel-HS): a softwareized model system maintained through
-Heuristic Learning over user-owned local data. The design baseline is documented
-in `plans/lifemodel_hs_architecture_plan.md`.
+Heuristic Learning over user-owned local data. The current product boundary is
+documented in `PRODUCT.md`; the source-backed subsystem map is in
+`docs/architecture/life-model.md`.
 
 This ADR establishes the source-of-truth, governance, automatic update,
 retention, deletion, policy/heuristic boundary, materialized-view, maintenance,

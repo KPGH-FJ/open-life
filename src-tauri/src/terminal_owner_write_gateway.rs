@@ -2934,83 +2934,6 @@ pub(crate) async fn complete_claimed_action_replay_with_commit_admission(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// "After" names the precise durable crash boundary used by recovery tests.
-#[expect(
-    clippy::enum_variant_names,
-    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
-)]
-pub(crate) enum TerminalOwnerCrashPoint {
-    AfterClaimPersistedBeforeEffect,
-    AfterMemoryCommittedBeforeTaskOwner,
-    AfterTaskOwnerReceiptBeforeProposalCheckpoint,
-    AfterProposalCheckpointBeforeSuccessor,
-    AfterSuccessorBeforeProposalProjection,
-}
-
-impl TerminalOwnerCrashPoint {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::AfterClaimPersistedBeforeEffect => "after_claim_persisted_before_effect",
-            Self::AfterMemoryCommittedBeforeTaskOwner => "after_memory_committed_before_task_owner",
-            Self::AfterTaskOwnerReceiptBeforeProposalCheckpoint => {
-                "after_task_owner_receipt_before_proposal_checkpoint"
-            }
-            Self::AfterProposalCheckpointBeforeSuccessor => {
-                "after_proposal_checkpoint_before_successor"
-            }
-            Self::AfterSuccessorBeforeProposalProjection => {
-                "after_successor_before_proposal_projection"
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TerminalOwnerExecutionCapture {
-    counts: Arc<Mutex<HashMap<(String, &'static str), usize>>>,
-}
-
-impl TerminalOwnerExecutionCapture {
-    fn record(&self, proposal_id: &str, stage: &'static str) {
-        let mut counts = self
-            .counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *counts.entry((proposal_id.to_string(), stage)).or_default() += 1;
-    }
-
-    #[cfg(test)]
-    fn count(&self, proposal_id: &str, stage: &'static str) -> usize {
-        self.counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&(proposal_id.to_string(), stage))
-            .copied()
-            .unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn memory_effect_invocations(&self, proposal_id: &str) -> usize {
-        self.count(proposal_id, "memory_effect")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn task_owner_transition_invocations(&self, proposal_id: &str) -> usize {
-        self.count(proposal_id, "task_owner_transition")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn successor_confirmation_invocations(&self, proposal_id: &str) -> usize {
-        self.count(proposal_id, "successor_confirmation")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn proposal_projection_invocations(&self, proposal_id: &str) -> usize {
-        self.count(proposal_id, "proposal_projection")
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalOwnerReviewTransition {
     pub(crate) before_owner_revision: u64,
@@ -3037,8 +2960,6 @@ pub(crate) struct TerminalOwnerWriteGateway {
     proposal_store: ProposalStore,
     memory_store: MemoryLifecycleStore,
     action_queue_store: Option<Arc<tokio::sync::Mutex<ActionQueueStore>>>,
-    execution_capture: TerminalOwnerExecutionCapture,
-    crash_points: Mutex<HashMap<String, TerminalOwnerCrashPoint>>,
 }
 
 impl TerminalOwnerWriteGateway {
@@ -3090,8 +3011,6 @@ impl TerminalOwnerWriteGateway {
             proposal_store: proposal_store.clone(),
             memory_store: memory_store.clone(),
             action_queue_store: None,
-            execution_capture: TerminalOwnerExecutionCapture::default(),
-            crash_points: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3101,45 +3020,6 @@ impl TerminalOwnerWriteGateway {
     ) -> Self {
         self.action_queue_store = Some(action_queue_store);
         self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_execution_capture_for_test(
-        mut self,
-        capture: TerminalOwnerExecutionCapture,
-    ) -> Self {
-        self.execution_capture = capture;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_crash_point_for_test(
-        &self,
-        proposal_id: &str,
-        crash_point: TerminalOwnerCrashPoint,
-    ) -> anyhow::Result<()> {
-        self.crash_points
-            .lock()
-            .map_err(|error| anyhow::anyhow!("terminal crash point mutex: {error}"))?
-            .insert(proposal_id.to_string(), crash_point);
-        Ok(())
-    }
-
-    fn crash_if_selected(
-        &self,
-        proposal_id: &str,
-        crash_point: TerminalOwnerCrashPoint,
-    ) -> anyhow::Result<()> {
-        let selected = self
-            .crash_points
-            .lock()
-            .map_err(|error| anyhow::anyhow!("terminal crash point mutex: {error}"))?
-            .get(proposal_id)
-            .copied();
-        if selected == Some(crash_point) {
-            anyhow::bail!("injected_terminal_owner_crash:{}", crash_point.as_str());
-        }
-        Ok(())
     }
 
     async fn complete_when_unblocked(&self, task_session_id: &str) -> anyhow::Result<bool> {
@@ -3216,8 +3096,6 @@ impl TerminalOwnerWriteGateway {
         let receipt = if let Some(receipt) = existing_receipt {
             receipt
         } else {
-            self.execution_capture
-                .record(proposal_id, "task_owner_transition");
             let complete_when_unblocked = self
                 .complete_when_unblocked(origin.task_session_id())
                 .await?;
@@ -3230,11 +3108,6 @@ impl TerminalOwnerWriteGateway {
                 complete_when_unblocked,
             )?
         };
-        self.crash_if_selected(
-            proposal_id,
-            TerminalOwnerCrashPoint::AfterTaskOwnerReceiptBeforeProposalCheckpoint,
-        )?;
-
         let dispatch_state = self
             .proposal_store
             .dispatch_state(proposal_id)?
@@ -3246,32 +3119,11 @@ impl TerminalOwnerWriteGateway {
         {
             anyhow::bail!("terminal_owner_proposal_checkpoint_cas_lost");
         }
-        self.crash_if_selected(
-            proposal_id,
-            TerminalOwnerCrashPoint::AfterProposalCheckpointBeforeSuccessor,
-        )?;
-
-        let successor_existed = self
-            .event_store
-            .get_immutable_event(
-                origin.task_session_id(),
-                "terminal_owner.successor_confirmed",
-                &format!("successor:{proposal_id}"),
-            )?
-            .is_some();
         let successor = self.event_store.append_terminal_owner_successor(
             origin.task_session_id(),
             origin.run_id(),
             proposal_id,
             &receipt,
-        )?;
-        if !successor_existed {
-            self.execution_capture
-                .record(proposal_id, "successor_confirmation");
-        }
-        self.crash_if_selected(
-            proposal_id,
-            TerminalOwnerCrashPoint::AfterSuccessorBeforeProposalProjection,
         )?;
         Ok(transition_from_receipt(receipt, successor))
     }
@@ -3287,10 +3139,6 @@ impl TerminalOwnerWriteGateway {
             .proposal_store
             .dispatch_claim_id(&proposal_id)?
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_dispatch_claim_missing"))?;
-        self.crash_if_selected(
-            &proposal_id,
-            TerminalOwnerCrashPoint::AfterClaimPersistedBeforeEffect,
-        )?;
         let origin = acceptance
             .terminal_owner_origin()
             .cloned()
@@ -3310,7 +3158,6 @@ impl TerminalOwnerWriteGateway {
                 .get_record_by_proposal_id(&proposal_id)?
                 .is_none()
             {
-                self.execution_capture.record(&proposal_id, "memory_effect");
                 let content = proposal
                     .after
                     .get("content")
@@ -3327,10 +3174,6 @@ impl TerminalOwnerWriteGateway {
                     )?;
                 self.memory_store.accept_memory_proposal(input)?;
             }
-            self.crash_if_selected(
-                &proposal_id,
-                TerminalOwnerCrashPoint::AfterMemoryCommittedBeforeTaskOwner,
-            )?;
         } else if dispatch_state != "confirmed_projection_pending" {
             anyhow::bail!("terminal_owner_non_memory_effect_not_materialized");
         }
@@ -3343,8 +3186,6 @@ impl TerminalOwnerWriteGateway {
         {
             let mut accepted = proposal;
             accepted.accept();
-            self.execution_capture
-                .record(&proposal_id, "proposal_projection");
             if !self
                 .proposal_store
                 .project_confirmed_effect(&accepted, &claim_id)?
@@ -3394,10 +3235,6 @@ impl TerminalOwnerWriteGateway {
             .proposal_store
             .dispatch_claim_id(&proposal_id)?
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_dispatch_claim_missing"))?;
-        self.crash_if_selected(
-            &proposal_id,
-            TerminalOwnerCrashPoint::AfterClaimPersistedBeforeEffect,
-        )?;
         let mut dispatch_state = self
             .proposal_store
             .dispatch_state(&proposal_id)?
@@ -3413,7 +3250,6 @@ impl TerminalOwnerWriteGateway {
                 .get_record_by_proposal_id(&proposal_id)?
                 .is_none()
             {
-                self.execution_capture.record(&proposal_id, "memory_effect");
                 let content = proposal
                     .after
                     .get("content")
@@ -3430,10 +3266,6 @@ impl TerminalOwnerWriteGateway {
                     )?;
                 self.memory_store.accept_memory_proposal(input)?;
             }
-            self.crash_if_selected(
-                &proposal_id,
-                TerminalOwnerCrashPoint::AfterMemoryCommittedBeforeTaskOwner,
-            )?;
             if dispatch_state == "claimed" {
                 if !self
                     .proposal_store
@@ -3449,8 +3281,6 @@ impl TerminalOwnerWriteGateway {
         if dispatch_state == "confirmed_projection_pending" {
             let mut accepted = proposal;
             accepted.accept();
-            self.execution_capture
-                .record(&proposal_id, "proposal_projection");
             if !self
                 .proposal_store
                 .project_confirmed_effect(&accepted, &claim_id)?

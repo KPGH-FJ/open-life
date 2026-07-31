@@ -83,18 +83,7 @@ function sourceFiles(directory) {
   });
 }
 
-const forbiddenSourceMarkers = [
-  "src/dev/phase4b",
-  "OPENLIFE_PHASE4B_DEV_HARNESS",
-  "src/dev/phase4c",
-  "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
-  "src/dev/phase4d",
-  "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
-  "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
-  "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
-  "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
-  "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
-];
+const forbiddenSourceMarkers = ["src/dev/"];
 
 for (const filePath of sourceFiles(sourceRoot)) {
   if (!/\.(?:ts|tsx|css)$/.test(filePath) || /\.test\.(?:ts|tsx)$/.test(filePath)) continue;
@@ -116,17 +105,8 @@ function releaseFiles(directory) {
 const forbiddenBundleMarkers = [
   "/today-v2-preview",
   "TodayV2PreviewPage",
-  "OPENLIFE_PHASE4B_DEV_HARNESS",
   "LAYOUT_FIXTURE",
-  "dev/phase4b/index.html",
-  "OPENLIFE_PHASE4C_DESKTOP_SHELL_HARNESS",
-  "dev/phase4c/index.html",
-  "OPENLIFE_PHASE4D_READ_ONLY_SPINE_HARNESS",
-  "OPENLIFE_PHASE4D_GOVERNED_ACTION_HARNESS",
-  "OPENLIFE_PHASE4D_DURABLE_TRUTH_HARNESS",
-  "OPENLIFE_PHASE4D_PRIVACY_CONFIGURATION_HARNESS",
-  "OPENLIFE_PHASE4D_REAL_TAURI_PROBE",
-  "dev/phase4d/index.html",
+  "src/dev/",
 ];
 let workbenchCssPresent = false;
 
@@ -146,5 +126,5 @@ if (!workbenchCssPresent) {
 }
 
 console.log(
-  "Production authority guard passed: Workbench journeys are shipped; old shell/pages, compatibility redirects, and Phase 4 dev harnesses are absent."
+  "Production authority guard passed: Workbench journeys are shipped; old shell/pages, compatibility redirects, and dev harnesses are absent."
 );

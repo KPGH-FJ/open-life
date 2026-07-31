@@ -25,7 +25,6 @@ pub mod persistence_outbox;
 pub mod plugins;
 pub mod privacy;
 pub mod proactive;
-pub mod reflex_engine;
 pub mod resource;
 pub mod resource_gateway;
 pub mod resource_parser;

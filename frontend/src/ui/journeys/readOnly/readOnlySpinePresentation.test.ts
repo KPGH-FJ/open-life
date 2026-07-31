@@ -63,7 +63,7 @@ function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
   };
 }
 
-describe("Phase 4D read-only presentation invariants", () => {
+describe("Workbench read-only presentation invariants", () => {
   it("renders verified local only when route, transmission, risk, and evidence are all known", () => {
     expect(boundaryPresentation(boundaryEnvelope(localBoundary()))).toMatchObject({
       status: "success",

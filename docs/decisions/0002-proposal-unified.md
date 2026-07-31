@@ -1,9 +1,7 @@
 # ADR 0002: Proposal 统一层
 
-> Historical ADR retained for Proposal-layer intent. Current Proposal semantics,
-> LifeModel-HS governance, direct-write convergence, and tool permission/replay
-> constraints are governed by `AGENTS.md`, `plans/README.md`, ADR 0013, and
-> W90-W123 progress docs.
+> Historical ADR retained for Proposal-layer intent. Current semantics are
+> governed by `AGENTS.md`, ADR 0013, and current source.
 
 ## 状态
 

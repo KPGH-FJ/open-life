@@ -66,7 +66,7 @@ function tasksEnvelope(): ViewModelEnvelope<TasksViewModel> {
   };
 }
 
-describe("Phase 4D Tauri read-only data source", () => {
+describe("Workbench Tauri read-only data source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     tauriMocks.getLifeStateProjection.mockResolvedValue(makeLifeStateProjection());

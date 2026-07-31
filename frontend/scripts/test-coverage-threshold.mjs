@@ -21,41 +21,41 @@ function runCase(name, summary, expectedCode, expectedExit) {
 }
 
 try {
-  runCase("missing", null, "W0-COV-MISSING", 1);
+  runCase("missing", null, "COVERAGE-MISSING", 1);
   runCase(
     "nonnumeric",
     { total: { lines: { total: 100, covered: 100, skipped: 0, pct: "unknown" } } },
-    "W0-COV-NONNUMERIC",
+    "COVERAGE-NONNUMERIC",
     1
   );
   runCase(
     "nonnumeric-total",
     { total: { lines: { total: "100", covered: 100, skipped: 0, pct: 100 } } },
-    "W0-COV-NONNUMERIC",
+    "COVERAGE-NONNUMERIC",
     1
   );
   runCase(
     "zero",
     { total: { lines: { total: 0, covered: 0, skipped: 0, pct: 100 } } },
-    "W0-COV-ZERO-COLLECTION",
+    "COVERAGE-ZERO-COLLECTION",
     1
   );
   runCase(
     "inconsistent",
     { total: { lines: { total: 100, covered: 0, skipped: 0, pct: 100 } } },
-    "W0-COV-INCONSISTENT",
+    "COVERAGE-INCONSISTENT",
     1
   );
   runCase(
     "skipped",
     { total: { lines: { total: 100, covered: 100, skipped: 1, pct: 100 } } },
-    "W0-COV-INCONSISTENT",
+    "COVERAGE-INCONSISTENT",
     1
   );
   runCase(
     "below",
     { total: { lines: { total: 1000, covered: 599, skipped: 0, pct: 59.9 } } },
-    "W0-COV-BELOW-THRESHOLD",
+    "COVERAGE-BELOW-THRESHOLD",
     1
   );
   runCase(

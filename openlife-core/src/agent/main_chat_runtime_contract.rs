@@ -342,10 +342,10 @@ pub fn main_chat_agent_product_scenarios() -> Vec<MainChatAgentProductScenario> 
         &[
             (
                 "FR-01",
-                "读取 `plans/openlife_agent_product_capability_matrix_v1.md`，告诉我 L1 是什么。",
+                "读取 `PRODUCT.md`，告诉我 OpenLife 的核心产品边界是什么。",
             ),
-            ("FR-02", "找一下 plans 里有没有 product eval 文档。"),
-            ("FR-05", "打开矩阵文档并引用相关段落，不要改文件。"),
+            ("FR-02", "找一下仓库里有没有产品定义文档。"),
+            ("FR-05", "打开产品定义并引用相关段落，不要改文件。"),
         ],
         &["planning", "executing", "observing", "completed"],
         &["task_id", "action_id", "observation_id", "final_delivery"],

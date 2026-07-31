@@ -299,12 +299,12 @@ setup_env() {
 
     # 创建 .env 文件（如果不存在）
     if [ ! -f "$ENV_FILE" ]; then
-        if [ -f "$REPO_ROOT/.env.template" ]; then
-            cp "$REPO_ROOT/.env.template" "$ENV_FILE"
+        if [ -f "$REPO_ROOT/.env.example" ]; then
+            cp "$REPO_ROOT/.env.example" "$ENV_FILE"
             log_success "从模板创建 .env 文件"
             log_info "请编辑 .env 文件配置你的 API Key"
         else
-            log_warn ".env.template 不存在，创建空 .env"
+            log_warn ".env.example 不存在，创建空 .env"
             touch "$ENV_FILE"
         fi
     else

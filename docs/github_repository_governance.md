@@ -1,193 +1,28 @@
 # GitHub Repository Governance
 
-> Last updated: 2026-07-23
-> Status: main-only long-term branch governance for the Phase7 restart baseline
+## Branch Model
 
-This document defines the GitHub operating model for OpenLife.
+- `main` is the only long-lived branch.
+- Work happens on short-lived branches and returns through a pull request.
+- Do not keep feature branches as historical archives; Git commits and tags
+  provide recovery.
+- Do not create extra OpenLife worktrees or sibling development checkouts.
 
-Document publication and local-only planning rules are governed by
-`docs/repository_document_governance.md`. Use that document before committing
-new Markdown/HTML plans, PRDs, Agent notes, or architecture drafts.
+## Pull Requests
 
-Current Agent development order and document precedence are governed by
-`AGENTS.md`, `plans/README.md`,
-`plans/openlife_single_system_deletion_manifest.md`, and
-`plans/openlife_single_system_development_preparation.md`. The
-machine-readable facts for the restart cleanup are in
-`plans/openlife_restart_baseline_cleanup.json`. GitHub issues, PRs, V4,
-roadshow, Stage, Step6, and old planning files must not override those entry
-points.
+Each PR should state:
 
-The default mode is **solo developer + Agent**. GitHub should provide
-checkpoints, CI, and a durable project memory. It should not become the daily
-driver for every local edit.
+- product or infrastructure outcome;
+- files and behavior in scope;
+- checks run;
+- privacy, durable-write, provider, and migration risks;
+- known limitations.
 
-Issues are optional in this mode. Do not backfill an issue just because a task
-already happened locally or because a document has a task id.
+CI and source review are required in proportion to risk. A solo maintainer may
+merge their own PR after reviewing the exact diff and passing required checks;
+the repository must not fake independent approval.
 
-## Default Flow
+## Documents
 
-Use this flow for normal OpenLife development:
-
-```text
-pick one concrete outcome
--> work locally with Codex
--> run focused checks
--> commit
--> open a PR only when the change is worth a checkpoint
--> merge after CI and a quick human sanity check
-```
-
-Small fixes, wording changes, focused refactors, and one-file maintenance work
-do not need a GitHub issue first.
-
-## Optional Issues
-
-Open an issue when at least one of these is true:
-
-- the task will take more than one focused session,
-- the task crosses module boundaries,
-- the task needs a product or architecture decision,
-- the task should be easy to resume weeks later,
-- the task affects LifeModel, memory, privacy, permissions, tools, proposals,
-  audit, model routing, or runtime authority.
-
-Use `Optional Quick Task` only for ordinary bounded work that needs a durable
-GitHub checkpoint. Use the ADR template only when a decision really affects a
-high-risk boundary. The old LifeModel-HS epic/task and engineering task forms
-are archived as `.disabled` files so they do not appear in the active GitHub
-issue picker during solo-mode development.
-
-## When To Open A PR
-
-Open a PR when the change is a meaningful checkpoint:
-
-- it should run GitHub CI before landing,
-- it changes shared runtime behavior,
-- it edits repository infrastructure,
-- it records a finished slice of a larger plan,
-- it is useful future context for a human or Agent.
-
-Do not treat a PR as a ceremony. A good solo PR can be short:
-
-- what changed,
-- why it changed,
-- what was intentionally left out,
-- what was checked.
-
-## High-Risk Governance Mode
-
-Use heavier issue and PR checks only for changes that touch:
-
-- LifeModel source-of-truth semantics,
-- memory or evidence persistence,
-- privacy, redaction, LocalOnly policy, or cloud routing,
-- tool execution, external writes, permissions, or replay,
-- proposal apply/reject/edit semantics,
-- audit, regression, or AgentRun trace records,
-- long-term LifeModel-HS architecture.
-
-For those changes, keep these invariants:
-
-- Documentation authority must remain synchronized: update `AGENTS.md`,
-  `plans/README.md`, and any affected active authority or evidence document in
-  the same PR when tool/runtime/proposal/model-routing status changes.
-- Current YAML LifeModel remains a compatibility materialized view until a
-  dedicated migration is accepted.
-- Risky LifeModel-HS mutation remains Proposal-first.
-- Privacy is hard Policy and cannot be relaxed by heuristics.
-- High-risk identity, values, mission, long-term goals, sensitive
-  relationships, and privacy boundaries require explicit user confirmation.
-- Runtime, audit, and regression records stay metadata-safe by default.
-
-## Branches
-
-- The only long-term local and remote product branch is `main`.
-- Normal Agent branches use the `codex/` prefix, are short-lived PR branches,
-  and must be deleted after merge.
-- All writable work happens in `/Users/tw/Desktop/open-life`. Do not create a
-  second OpenLife worktree, roadshow checkout, D0xx checkout, or sibling
-  `open-life-*` development directory.
-- There is no long-lived `dev` or feature integration branch.
-- Archive tags and the verified bundle preserve classified history. They are
-  recovery evidence, not branches or alternate development entrypoints.
-- Dependabot branches may exist only as generated, short-lived maintenance
-  inputs and do not become product authority.
-
-For solo development, switch a short-lived `codex/...` branch in the one
-checkout for each coherent checkpoint, then return to updated `main` after the
-reviewed PR is merged.
-
-## Branch Protection
-
-Required restart-baseline protection for `main`:
-
-- Require pull requests for meaningful changes.
-- Require status checks:
-  - `Rust Check`
-  - `Frontend Check`
-  - `Frontend Coverage`
-  - `Rust Check (macOS)`
-  - `Rust Check (Windows)`
-  - `Rust Coverage`
-  - `Security Audit`
-  - `Compile and Unit Contract Checks`
-  - `Workbench Browser Shell Smoke`
-- Disallow force pushes.
-- Disallow deletions.
-- Do not require an approving review while the repository is maintained by one
-  human; the owner cannot productively review their own PR through GitHub.
-- Still perform the quick human sanity review in the Default Flow before
-  merging a cleanup or other meaningful checkpoint.
-
-Recommended team-mode additions, when there is a real second reviewer:
-
-- Require at least one approving review.
-- Require CODEOWNERS review.
-
-The two final status names have deliberately different evidence levels:
-
-- `Compile and Unit Contract Checks` proves compile, unit, contract, and static
-  checks only.
-- `Workbench Browser Shell Smoke` proves the Vite/Chromium Workbench shell only.
-
-Neither status is a native-Tauri, migration, durable-write, or external-live
-provider check. Default CI push and pull-request triggers target `main` only.
-Retired Stage1 and Step6 workflows are manual historical runners and must not
-become required default checks.
-
-## Dependabot Policy
-
-Dependabot should reduce maintenance work, not create a wall of tiny PRs.
-
-- GitHub Actions updates are grouped into one PR.
-- Frontend minor and patch updates are grouped.
-- Rust patch updates are grouped.
-- Rust minor and major updates remain separate because many Rust `0.x` minor
-  bumps can be breaking in practice.
-
-When Dependabot opens a noisy or risky major update, either convert it into a
-planned engineering task or close it with a note.
-
-## Repository Files
-
-- Active issue templates: `.github/ISSUE_TEMPLATE/00_0_quick_task.yml`,
-  `.github/ISSUE_TEMPLATE/03_bug_report.yml`, and
-  `.github/ISSUE_TEMPLATE/04_adr_proposal.yml`
-- Archived issue-heavy templates: `.github/ISSUE_TEMPLATE/*.disabled`
-- PR template: `.github/PULL_REQUEST_TEMPLATE.md`
-- Label source of truth: `.github/labels.yml`
-- Code ownership: `.github/CODEOWNERS`
-- CI workflow: `.github/workflows/ci.yml`
-- Dependabot config: `.github/dependabot.yml`
-
-## Current Cleanup Rule
-
-If GitHub feels confusing, first ask:
-
-```text
-Is this work ordinary implementation, or does it touch a high-risk boundary?
-```
-
-For ordinary work, use the lightweight flow. For high-risk boundary work, use
-the heavier governance templates on purpose.
+Keep current product, architecture, decisions, and one active plan in the
+working tree. Superseded execution records remain in Git history.

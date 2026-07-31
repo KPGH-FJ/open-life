@@ -299,14 +299,14 @@ function Set-Environment {
 
     # 创建 .env 文件（如果不存在）
     if (-not (Test-Path $EnvFile)) {
-        $templateFile = Join-Path $RepoRoot ".env.template"
+        $templateFile = Join-Path $RepoRoot ".env.example"
         if (Test-Path $templateFile) {
             Copy-Item $templateFile $EnvFile
             Write-Success "从模板创建 .env 文件"
             Write-Info "请编辑 .env 文件配置你的 API Key"
         }
         else {
-            Write-Warn ".env.template 不存在，创建空 .env"
+            Write-Warn ".env.example 不存在，创建空 .env"
             New-Item -ItemType File -Path $EnvFile | Out-Null
         }
     }

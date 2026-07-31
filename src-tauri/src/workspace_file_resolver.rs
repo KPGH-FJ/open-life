@@ -41,8 +41,8 @@ fn select_workspace_file_relative_path(user_text: &str) -> String {
     let lower = user_text.to_ascii_lowercase();
     if lower.contains("cargo.toml") {
         "Cargo.toml".into()
-    } else if lower.contains("main_chat_agent_migration_v1_goal_spec") {
-        "plans/main_chat_agent_migration_v1_goal_spec.md".into()
+    } else if lower.contains("product") {
+        "PRODUCT.md".into()
     } else if lower.contains("readme") {
         "README.md".into()
     } else {

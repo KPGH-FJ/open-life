@@ -2,9 +2,8 @@
 
 ## Status
 
-Stage3-A source-backed explainer. This document describes the current repository
-implementation surface only. It is not an authority promotion, not a route
-cutover, and not a completion claim for Phase7 or Main Chat Agent Execution v1.
+Source-backed description of the current runtime. It is not a product-readiness
+claim.
 
 The current ordinary Main Chat entrypoints are implemented through
 `send_message_with_state` and `start_stream_message_with_state`, which delegate
@@ -13,25 +12,15 @@ inputs, but they do not count as external live provider completion.
 
 ## Authority
 
-Authority remains with `AGENTS.md`, `plans/README.md`,
-`plans/openlife_single_system_deletion_manifest.md`, and
-`plans/openlife_single_system_development_preparation.md`. This page is a
-repository knowledge explainer beneath those sources.
-
-Historical Goal, Stage, Beta, and migration documents can explain background
-intent only. They do not override the Phase7 single-system contract.
+Product boundaries come from `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and
+current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-07-07 during Stage3-A source-map reading. Validation results are recorded in
-`plans/openlife_repository_knowledge_architecture_cleanup_preparation.md` when
-the Stage3-A command set is run.
+2026-07-31 during repository cleanup source tracing.
 
 ## Source map
 
-- `plans/README.md`
-- `plans/openlife_single_system_deletion_manifest.md`
-- `plans/openlife_single_system_development_preparation.md`
 - `src-tauri/src/main_chat_send.rs`
 - `src-tauri/src/main_chat_streaming.rs`
 - `src-tauri/src/main_chat_turn_runtime.rs`
@@ -47,26 +36,15 @@ the Stage3-A command set is run.
 - `src-tauri/src/main_chat_final_gate.rs`
 - `src-tauri/src/main_chat_live_provider_harness.rs`
 - `src-tauri/src/main_chat_runtime_module_tests.rs`
-- `src-tauri/src/single_system_authority_tests.rs`
 - `src-tauri/src/main_chat_command_surface_tests.rs`
 - `src-tauri/src/main_chat_live_provider_tests.rs`
 - `openlife-core/src/agent/main_chat_agent_v1.rs`
 - `openlife-core/src/agent/model_router.rs`
 
-## Stage5B Current Guard Status
+## Evidence Boundary
 
-Stage5A repaired the inherited `main_chat_runtime_module` guard to check the
-current Phase7 ownership model: reusable final-gate aggregation and
-live-provider report builders live in `src-tauri/src/main_chat_final_gate.rs`,
-live-provider harness contract tests live in
-`src-tauri/src/main_chat_live_provider_tests.rs`, and the retired final
-acceptance command/test owner stay absent. The current run of
-`cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture` passes.
-
-This does not change the final readiness boundary. External live provider
-evidence is still incomplete, the final readiness aggregation still fails
-closed, Phase7 is not complete, and Main Chat Agent Execution v1 is not
-complete.
+Runtime tests and live-provider report builders are local evidence. External
+provider behavior remains unproven until an explicitly authorized live run.
 
 ## Current Entry Flow
 

@@ -1,11 +1,11 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { phase4dJourneyFixtureDataSource } from "@/dev/phase4d/phase4d-governed-fixtures";
+import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
 
-function renderJourney(fixtureId: Parameters<typeof phase4dJourneyFixtureDataSource>[0]) {
-  const dataSource = phase4dJourneyFixtureDataSource(fixtureId);
+function renderJourney(fixtureId: Parameters<typeof workbenchJourneyFixtureDataSource>[0]) {
+  const dataSource = workbenchJourneyFixtureDataSource(fixtureId);
   render(
     <ReadOnlySpineJourney
       dataSource={dataSource}
@@ -18,7 +18,7 @@ function renderJourney(fixtureId: Parameters<typeof phase4dJourneyFixtureDataSou
   return dataSource;
 }
 
-describe("Phase 4D durable truth journey", () => {
+describe("Workbench durable truth journey", () => {
   it("opens the exact review without deciding and returns approved-not-applied after refresh", async () => {
     const user = userEvent.setup();
     const dataSource = renderJourney("fixture-ready");
@@ -65,7 +65,7 @@ describe("Phase 4D durable truth journey", () => {
   it("renders verified applied only for the exact refreshed proof", async () => {
     const { container } = render(
       (() => {
-        const dataSource = phase4dJourneyFixtureDataSource("fixture-durable-applied");
+        const dataSource = workbenchJourneyFixtureDataSource("fixture-durable-applied");
         return (
           <ReadOnlySpineJourney
             dataSource={dataSource}
@@ -86,7 +86,7 @@ describe("Phase 4D durable truth journey", () => {
   it("fails stale durable state closed and keeps decision actions out of the page", async () => {
     const { container } = render(
       (() => {
-        const dataSource = phase4dJourneyFixtureDataSource("fixture-stale");
+        const dataSource = workbenchJourneyFixtureDataSource("fixture-stale");
         return (
           <ReadOnlySpineJourney
             dataSource={dataSource}

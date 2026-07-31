@@ -642,14 +642,14 @@ mod tests {
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../plans/fixtures/openlife_roadshow_core")
+                .join("../test-fixtures/resources")
                 .join(name),
         )
         .unwrap()
     }
 
     fn docx_with_external_relationship() -> Vec<u8> {
-        let source = fixture("roadshow_compare.docx");
+        let source = fixture("comparison.docx");
         let mut archive = zip::ZipArchive::new(Cursor::new(source)).unwrap();
         let output = Cursor::new(Vec::new());
         let mut writer = zip::ZipWriter::new(output);
@@ -684,7 +684,7 @@ mod tests {
     }
 
     fn encrypted_pdf() -> Vec<u8> {
-        let mut document = lopdf::Document::load_mem(&fixture("roadshow_compare.pdf")).unwrap();
+        let mut document = lopdf::Document::load_mem(&fixture("comparison.pdf")).unwrap();
         document.trailer.set(
             "ID",
             lopdf::Object::Array(vec![
@@ -709,9 +709,9 @@ mod tests {
     #[test]
     fn frozen_pdf_and_docx_preserve_page_and_paragraph_provenance() {
         let pdf = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.pdf".to_string(),
+            filename: "comparison.pdf".to_string(),
             declared_mime: "application/pdf".to_string(),
-            bytes: fixture("roadshow_compare.pdf"),
+            bytes: fixture("comparison.pdf"),
         })
         .unwrap();
         assert!(pdf
@@ -724,11 +724,11 @@ mod tests {
             .any(|chunk| matches!(chunk.provenance, ResourceProvenance::Pdf { page: 2 })));
 
         let docx = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.docx".to_string(),
+            filename: "comparison.docx".to_string(),
             declared_mime:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     .to_string(),
-            bytes: fixture("roadshow_compare.docx"),
+            bytes: fixture("comparison.docx"),
         })
         .unwrap();
         assert!(docx.chunks.len() >= 2);
@@ -741,9 +741,9 @@ mod tests {
     #[test]
     fn frozen_csv_and_xlsx_preserve_range_and_sheet_provenance() {
         let csv = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_metrics.csv".to_string(),
+            filename: "metrics.csv".to_string(),
             declared_mime: "text/csv".to_string(),
-            bytes: fixture("roadshow_metrics.csv"),
+            bytes: fixture("metrics.csv"),
         })
         .unwrap();
         assert!(csv.chunks.iter().any(|chunk| matches!(
@@ -752,10 +752,10 @@ mod tests {
         )));
 
         let xlsx = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_metrics.xlsx".to_string(),
+            filename: "metrics.xlsx".to_string(),
             declared_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 .to_string(),
-            bytes: fixture("roadshow_metrics.xlsx"),
+            bytes: fixture("metrics.xlsx"),
         })
         .unwrap();
         assert!(xlsx.chunks.iter().any(|chunk| matches!(
@@ -776,9 +776,9 @@ mod tests {
     #[test]
     fn wrong_mime_and_corrupt_ooxml_fail_closed() {
         let wrong_mime = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.pdf".to_string(),
+            filename: "comparison.pdf".to_string(),
             declared_mime: "text/plain".to_string(),
-            bytes: fixture("roadshow_compare.pdf"),
+            bytes: fixture("comparison.pdf"),
         })
         .unwrap_err();
         assert!(wrong_mime.to_string().contains("declared_mime_mismatch"));
@@ -792,7 +792,7 @@ mod tests {
         assert!(unsafe_filename.to_string().contains("filename_invalid"));
 
         let corrupt = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.docx".to_string(),
+            filename: "comparison.docx".to_string(),
             declared_mime:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     .to_string(),
@@ -802,7 +802,7 @@ mod tests {
         assert!(corrupt.to_string().contains("corrupt_zip"));
 
         let external_relationship = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.docx".to_string(),
+            filename: "comparison.docx".to_string(),
             declared_mime:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     .to_string(),
@@ -814,7 +814,7 @@ mod tests {
             .contains("external_relationship_rejected"));
 
         let expansion = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.docx".to_string(),
+            filename: "comparison.docx".to_string(),
             declared_mime:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     .to_string(),
@@ -824,7 +824,7 @@ mod tests {
         assert!(expansion.to_string().contains("expansion_ratio_exceeded"));
 
         let encrypted = extract_resource(ResourceExtractionRequest {
-            filename: "roadshow_compare.pdf".to_string(),
+            filename: "comparison.pdf".to_string(),
             declared_mime: "application/pdf".to_string(),
             bytes: encrypted_pdf(),
         })

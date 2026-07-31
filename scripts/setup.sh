@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
 ENV_FILE="$REPO_ROOT/.env"
-ENV_TEMPLATE="$REPO_ROOT/.env.template"
+ENV_TEMPLATE="$REPO_ROOT/.env.example"
 
 # =============================================================================
 # 工具函数
@@ -207,9 +207,9 @@ step_setup_env() {
 
     if [ -f "$ENV_TEMPLATE" ]; then
         cp "$ENV_TEMPLATE" "$ENV_FILE"
-        log_success "从 .env.template 创建 .env"
+        log_success "从 .env.example 创建 .env"
     else
-        log_warn ".env.template 不存在，创建空 .env"
+        log_warn ".env.example 不存在，创建空 .env"
         touch "$ENV_FILE"
     fi
 

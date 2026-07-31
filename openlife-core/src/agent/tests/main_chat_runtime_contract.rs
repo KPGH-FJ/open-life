@@ -449,11 +449,8 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
     let action = action_queue
         .enqueue(
             &session.id,
-            ExecutionAction::new("file.read", "plans/main_chat_runtime_contract_goal_spec.md"),
-            policy.classify(&ExecutionAction::new(
-                "file.read",
-                "plans/main_chat_runtime_contract_goal_spec.md",
-            )),
+            ExecutionAction::new("file.read", "PRODUCT.md"),
+            policy.classify(&ExecutionAction::new("file.read", "PRODUCT.md")),
         )
         .expect("enqueue action");
     session_store
@@ -468,14 +465,14 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
             ExecutionQueueStatus::Observed,
             Some(serde_json::json!({
                 "sourceKind": "file",
-                "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
+                "sourceLabel": "PRODUCT.md",
                 "preview": "Main Chat Agent Productization v1 requires runtime-backed UI evidence.",
                 "structuredResult": {
                     "readExecutionEvidence": {
                         "kind": "file_system_read",
                         "sourceKind": "file",
-                        "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
-                        "target": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "sourceLabel": "PRODUCT.md",
+                        "target": "PRODUCT.md",
                         "realReadOnlyExecution": true,
                         "fixtureBacked": false,
                         "networkReadAttempted": false,
@@ -516,14 +513,14 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
             metadata: serde_json::json!({
                 "actionId": completed_action.id,
                 "sourceKind": "file",
-                "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
+                "sourceLabel": "PRODUCT.md",
                 "preview": "Runtime payload/snapshot/event/evidence-gap gate is required.",
                 "structuredResult": {
                     "readExecutionEvidence": {
                         "kind": "file_system_read",
                         "sourceKind": "file",
-                        "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
-                        "target": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "sourceLabel": "PRODUCT.md",
+                        "target": "PRODUCT.md",
                         "realReadOnlyExecution": true,
                         "fixtureBacked": false,
                         "networkReadAttempted": false,
@@ -673,7 +670,7 @@ fn main_chat_runtime_contract_fails_closed_when_observation_lacks_action_evidenc
             metadata: serde_json::json!({
                 "actionId": "missing-action",
                 "sourceKind": "file",
-                "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md"
+                "sourceLabel": "PRODUCT.md"
             }),
         })
         .expect("fake observation transcript");

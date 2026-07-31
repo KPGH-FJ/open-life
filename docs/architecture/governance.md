@@ -2,17 +2,13 @@
 
 ## Status
 
-Stage3-A source-backed explainer. This document describes current governance
-surfaces for privacy, model routing, tool manifests, MCP, proposals, and task
-controls. It does not promote docs, tests, or local proofs into runtime
-readiness.
+Source-backed description of current privacy, routing, tool, proposal, and task
+control boundaries.
 
 ## Authority
 
-Authority remains with `AGENTS.md`, `plans/README.md`,
-`plans/openlife_single_system_deletion_manifest.md`,
-`plans/openlife_single_system_development_preparation.md`, and
-`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`.
+Authority remains with `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and current
+source.
 
 `docs/repository_document_governance.md` governs which repository documents are
 public, historical, active, or local-only. This page follows that public
@@ -20,7 +16,7 @@ document rule set.
 
 ## Last verified
 
-2026-07-11 during Phase7 Proposal-authority deletion review.
+2026-07-31 during repository cleanup source tracing.
 
 ## Source map
 
@@ -42,11 +38,10 @@ document rule set.
 - `src-tauri/src/commands/memory.rs`
 - `src-tauri/src/commands/proposal.rs`
 
-## Inherited blocker
+## Evidence Boundary
 
-Governance docs cannot close the runtime-module blocker, complete external live
-provider evidence, or authorize retired routes. They can only explain existing
-source-backed guardrails.
+This document explains guardrails. It does not prove a provider invocation,
+durable write, or product-readiness state.
 
 ## Document Governance
 
@@ -57,9 +52,8 @@ and excludes raw LifeModel, raw memory, sensitive chat, credentials, private
 provider endpoints, and unpublished private strategy from public docs by
 default.
 
-For Stage3-A, that means these architecture pages are public explanatory docs.
-They are not the current plan authority and do not carry proof artifacts beyond
-their source map and validation record.
+These architecture pages are explanatory documents, not execution plans or
+proof artifacts.
 
 ## Privacy And Model Route Governance
 

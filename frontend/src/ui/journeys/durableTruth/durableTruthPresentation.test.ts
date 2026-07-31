@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDurableFixtureSnapshot,
   durableReviewItem,
-} from "@/dev/phase4d/phase4d-durable-fixtures";
+} from "@/test/fixtures/workbench/durableTruth";
 import { durableLifecyclePresentation } from "./durableTruthPresentation";
 
 describe("durable truth lifecycle presentation", () => {

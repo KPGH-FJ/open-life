@@ -792,7 +792,7 @@ mod tests {
 
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Phase4AContractGolden {
+    struct ReviewItemContractGolden {
         schema_version: String,
         review_item: ReviewItem,
         workspace_activity: WorkspaceActivityItem,
@@ -819,10 +819,10 @@ mod tests {
     }
 
     #[test]
-    fn phase4a_contract_golden_round_trips_and_preserves_action_invariants() {
-        let raw = include_str!("../../../frontend/src/test/fixtures/phase4a-contract-golden.json");
+    fn review_item_contract_golden_round_trips_and_preserves_action_invariants() {
+        let raw = include_str!("../../../test-fixtures/contracts/review-item-contract-golden.json");
         let parsed: serde_json::Value = serde_json::from_str(raw).expect("parse golden JSON");
-        let golden: Phase4AContractGolden =
+        let golden: ReviewItemContractGolden =
             serde_json::from_value(parsed.clone()).expect("deserialize Rust contract");
 
         assert_eq!(golden.schema_version, "openlife.phase4a-contract.v1");
