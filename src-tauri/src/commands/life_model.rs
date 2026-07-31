@@ -3,11 +3,14 @@ use crate::commands::proposal::{
     COMMUNICATION_STYLE_CANONICAL_PATH,
 };
 use crate::errors::AppError;
+#[cfg(test)]
 use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
-use crate::{life_model_write_gateway, AppState};
+#[cfg(test)]
+use crate::life_model_write_gateway;
+use crate::AppState;
 use openlife_core::agent::{AgentProposal, ProposalStatus};
 use openlife_core::life_model::patch::{LifeModelPatch, PatchStatus};
 use openlife_core::life_model::LifeModel;
@@ -16,9 +19,13 @@ use serde_json::Value;
 use std::sync::Arc;
 use tauri::State;
 
+#[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT: &str = "manual_lifemodel_override_audit";
+#[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_SOURCE: &str = "manual_lifemodel_editor";
+#[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_COMMAND: &str = "save_life_model";
+#[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS: &str = "GovernedManualOverride";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,15 +63,16 @@ pub struct LifeModelCurrentView {
     pub change: Option<LifeModelChangeView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GovernedManualLifeModelOverrideRequest {
-    pub purpose: String,
-    pub explicit_user_intent: bool,
-    pub risk_acknowledged: bool,
-    pub create_pre_change_snapshot: bool,
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GovernedManualLifeModelOverrideRequest {
+    purpose: String,
+    explicit_user_intent: bool,
+    risk_acknowledged: bool,
+    create_pre_change_snapshot: bool,
 }
 
+#[cfg(test)]
 impl GovernedManualLifeModelOverrideRequest {
     #[cfg(test)]
     fn editor_save() -> Self {
@@ -84,6 +92,7 @@ impl GovernedManualLifeModelOverrideRequest {
     }
 }
 
+#[cfg(test)]
 fn require_governed_manual_lifemodel_override_request(
     request: Option<&GovernedManualLifeModelOverrideRequest>,
 ) -> Result<&GovernedManualLifeModelOverrideRequest, AppError> {
@@ -250,6 +259,7 @@ async fn accepted_communication_style_proposal(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManualLifeModelOverrideAuditReport {
     pub source: String,
@@ -378,6 +388,7 @@ pub async fn get_life_model_current_view(
     get_life_model_current_view_with_state(&state.inner().clone()).await
 }
 
+#[cfg(test)]
 pub(crate) async fn save_life_model_with_state(
     life_model: LifeModel,
     state: &Arc<AppState>,
@@ -425,15 +436,7 @@ pub(crate) async fn save_life_model_with_state(
     .await
 }
 
-#[tauri::command]
-pub async fn save_life_model(
-    life_model: LifeModel,
-    manual_override_request: Option<GovernedManualLifeModelOverrideRequest>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<ManualLifeModelOverrideAuditReport, AppError> {
-    save_life_model_with_state(life_model, &state.inner().clone(), manual_override_request).await
-}
-
+#[cfg(test)]
 pub(crate) async fn record_manual_lifemodel_override_audit_with_state(
     state: &Arc<AppState>,
     before: &LifeModel,
@@ -458,6 +461,7 @@ pub(crate) async fn record_manual_lifemodel_override_audit_with_state(
     Ok(report)
 }
 
+#[cfg(test)]
 pub(crate) fn evaluate_manual_lifemodel_override_audit(
     before: &LifeModel,
     after: &LifeModel,
@@ -512,10 +516,12 @@ pub(crate) fn evaluate_manual_lifemodel_override_audit(
     })
 }
 
+#[cfg(test)]
 fn hash_life_model(model: &LifeModel) -> Result<String, AppError> {
     life_model_write_gateway::hash_life_model(model).map_err(AppError::from)
 }
 
+#[cfg(test)]
 fn changed_life_model_sections(
     before: &LifeModel,
     after: &LifeModel,

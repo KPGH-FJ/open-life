@@ -54,6 +54,7 @@ openlife-core = { path = "../openlife-core" }
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
 security-framework = "3.7.0"
+security-framework-sys = "2.17.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }

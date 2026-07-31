@@ -122,7 +122,7 @@ use commands::a2a::{
 };
 use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
-    list_provider_transmission_history, restore_agent_run,
+    list_provider_transmission_history,
 };
 use commands::agent_runtime::{
     cancel_plan_execute_session, clear_main_chat_skill, create_plan_execute_session,
@@ -139,30 +139,28 @@ use commands::builder::{
     identity_goal_alignment_report,
 };
 use commands::calibration::{
-    apply_calibration, calibration_create_proposals, generate_calibration_report,
-    generate_micro_evolution_changes, mark_calibration_shown, run_micro_evolution,
-    should_show_calibration,
+    calibration_create_proposals, generate_calibration_report, generate_micro_evolution_changes,
+    mark_calibration_shown, should_show_calibration,
 };
 use commands::chat::{
     create_chat_session, delete_chat_session, get_chat_history, list_chat_sessions,
     rename_chat_session, save_chat_message,
 };
 use commands::diagnostics::{
-    check_ollama_status, get_policy_router_status, get_runtime_build_info, get_scheduler_config,
-    get_system_diagnostics, set_scheduler_config,
+    check_ollama_status, get_policy_router_status, get_runtime_build_info, get_system_diagnostics,
+    set_scheduler_config,
 };
-use commands::execution::{check_tool_permission, list_tool_permissions, revoke_tool_permission};
 #[cfg(feature = "dev-extensions")]
 use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
+use commands::execution::{list_tool_permissions, revoke_tool_permission};
 use commands::feedback::{
-    apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
-    save_feedback,
+    generate_evolution_report, get_feedback_summary, log_analytics_event, save_feedback,
 };
 pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
-use commands::life_model::{get_life_model, get_life_model_current_view, save_life_model};
+use commands::life_model::{get_life_model, get_life_model_current_view};
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
 use commands::mcp::{
@@ -170,17 +168,15 @@ use commands::mcp::{
     list_mcp_tools, recommend_mcp_manifests, register_mcp_server, unregister_mcp_server,
 };
 use commands::memory::{
-    archive_low_access_memories, cancel_memory_index_rebuild, count_memory_chunks,
-    create_knowledge_note, get_hot_cache, get_memory_index_rebuild_progress, get_memory_tier_stats,
-    list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
-    run_memory_tier_maintenance, search_memory, undo_explicit_memory,
+    archive_low_access_memories, count_memory_chunks, create_knowledge_note, get_hot_cache,
+    get_memory_tier_stats, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
+    run_memory_tier_maintenance, search_memory,
 };
-use commands::metrics::{get_rollout_errors, get_rollout_metrics, get_rollout_summary};
 use commands::proactive::get_proactive_suggestions;
 use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
-    get_memory_lifecycle_events, get_pending_proposals, list_memory_assets, list_proposals,
-    postpone_proposal, rebuild_memory_materialized_view, reject_proposal, rollback_memory_asset,
+    get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
+    rollback_memory_asset,
 };
 use commands::router::get_model_router_status;
 use commands::settings::{
@@ -196,7 +192,6 @@ use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_memory_proposals::draft_edit_memory_proposal;
-use main_chat_runtime_status::get_main_chat_runtime_status;
 use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
@@ -930,7 +925,6 @@ pub fn run() {
             get_provider_privacy_boundary_summary,
             get_tasks_view_model,
             get_workspace_view_model,
-            save_life_model,
             get_config,
             save_config,
             recover_required_credential_access,
@@ -939,8 +933,6 @@ pub fn run() {
             list_provider_transmission_history,
             list_agent_runs_for_session,
             delete_agent_run,
-            restore_agent_run,
-            get_main_chat_runtime_status,
             list_main_chat_skills,
             get_main_chat_skill_detail,
             select_main_chat_skill,
@@ -966,8 +958,6 @@ pub fn run() {
             rollback_memory_asset,
             list_memory_assets,
             get_memory_asset,
-            get_memory_lifecycle_events,
-            rebuild_memory_materialized_view,
             send_message,
             start_stream_message,
             pick_and_import_resources,
@@ -1011,7 +1001,6 @@ pub fn run() {
             check_ollama_status,
             get_policy_router_status,
             get_model_router_status,
-            get_scheduler_config,
             set_scheduler_config,
             create_snapshot,
             list_snapshots,
@@ -1019,14 +1008,12 @@ pub fn run() {
             diff_snapshots,
             save_feedback,
             get_feedback_summary,
-            apply_feedback_evolution,
             generate_evolution_report,
             run_memory_tier_maintenance,
             count_memory_chunks,
             log_analytics_event,
             create_knowledge_note,
             search_memory,
-            undo_explicit_memory,
             #[cfg(feature = "dev-extensions")]
             a2a_discover_agent,
             #[cfg(feature = "dev-extensions")]
@@ -1066,10 +1053,8 @@ pub fn run() {
             get_state_history,
             get_state_alerts,
             get_daily_goals,
-            run_micro_evolution,
             generate_calibration_report,
             generate_micro_evolution_changes,
-            apply_calibration,
             calibration_create_proposals,
             should_show_calibration,
             mark_calibration_shown,
@@ -1079,8 +1064,6 @@ pub fn run() {
             list_archived_chunks,
             get_memory_tier_stats,
             rebuild_memory_index,
-            get_memory_index_rebuild_progress,
-            cancel_memory_index_rebuild,
             #[cfg(feature = "dev-extensions")]
             export_mcp_audit_logs,
             #[cfg(feature = "dev-extensions")]
@@ -1089,13 +1072,9 @@ pub fn run() {
             rotate_mcp_audit_key,
             get_privacy_policy,
             set_privacy_policy,
-            get_rollout_metrics,
-            get_rollout_summary,
-            get_rollout_errors,
             get_proactive_suggestions,
             list_tool_permissions,
             revoke_tool_permission,
-            check_tool_permission,
             #[cfg(feature = "dev-extensions")]
             list_plugins,
             #[cfg(feature = "dev-extensions")]

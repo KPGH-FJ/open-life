@@ -18,7 +18,7 @@ export default defineConfig({
     coverage: {
       reporter: ["text", "json", "json-summary", "html"],
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**/*", "src/dev/**/*", "src/tauriDev.ts"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**/*", "src/dev/**/*"],
       thresholds: {
         lines: 60,
         functions: 40,
