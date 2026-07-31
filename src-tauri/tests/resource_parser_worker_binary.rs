@@ -32,14 +32,14 @@ fn invoke_worker(filename: &str, declared_mime: &str, bytes: &[u8]) -> Output {
 }
 
 fn frozen_xlsx() -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../plans/fixtures/openlife_roadshow_core/roadshow_metrics.xlsx");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/resources/metrics.xlsx");
     std::fs::read(path).expect("read frozen RC-03 XLSX fixture")
 }
 
 #[test]
 fn rc03_real_binary_worker_preserves_xlsx_sheet_range_and_untrusted_formula_data() {
-    let output = invoke_worker("roadshow_metrics.xlsx", XLSX_MIME, &frozen_xlsx());
+    let output = invoke_worker("metrics.xlsx", XLSX_MIME, &frozen_xlsx());
     assert!(
         output.status.success(),
         "worker process failed: status={:?} stderr={}",
@@ -87,7 +87,7 @@ fn rc03_real_binary_worker_preserves_xlsx_sheet_range_and_untrusted_formula_data
 #[test]
 fn real_binary_worker_returns_typed_failure_for_corrupt_xlsx_without_echoing_bytes() {
     let corrupt = b"PK\x03\x04RC03_PRIVATE_CORRUPT_XLSX_BODY";
-    let output = invoke_worker("roadshow_metrics.xlsx", XLSX_MIME, corrupt);
+    let output = invoke_worker("metrics.xlsx", XLSX_MIME, corrupt);
     assert!(
         output.status.success(),
         "typed parser failures use a successful protocol exit"

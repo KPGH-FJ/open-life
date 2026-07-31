@@ -2,9 +2,8 @@
 
 ## Status
 
-Stage3-A source-backed explainer. This document describes the current
-LifeModel-HS implementation and write governance. It is not a declaration that
-the canonical LifeModel-HS migration is finished.
+Source-backed description of the current LifeModel implementation and write
+governance. It is not a claim that all intended HS assets are canonical.
 
 The current repository still contains a YAML compatibility model and a governed
 proposal/write-gateway path. Canonical truth promotion remains proposal-first and
@@ -12,17 +11,15 @@ gateway-bound.
 
 ## Authority
 
-Authority remains with `AGENTS.md`, `plans/README.md`,
-`plans/openlife_single_system_deletion_manifest.md`, and
-`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`. This page is a
-readable map of source-backed behavior beneath those documents.
+Authority remains with `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and current
+source.
 
 Historical backend completion and maturation plans are background only. They do
 not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-07-12 during the Phase7 single-system deletion review.
+2026-07-31 during repository cleanup source tracing.
 
 ## Source map
 

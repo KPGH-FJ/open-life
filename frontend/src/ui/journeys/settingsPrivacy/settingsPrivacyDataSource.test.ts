@@ -6,6 +6,7 @@ const tauriMocks = vi.hoisted(() => ({
   getLifeStateProjection: vi.fn(),
   getProviderPrivacyBoundarySummary: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
+  recoverRequiredCredentialAccess: vi.fn(),
   saveConfig: vi.fn(),
   testLlmConnection: vi.fn(),
 }));
@@ -45,11 +46,26 @@ describe("Tauri settings privacy data source", () => {
     expect(snapshot.config).toEqual(config);
     expect(snapshot.boundaryEnvelope).toMatchObject({ status: "error", data: null });
     expect(snapshot.safeMode).toEqual({ active: false, reason: "", sourceRefs: [] });
+    expect(snapshot.credentialBootstrap).toBeNull();
+    expect(tauriMocks.recoverRequiredCredentialAccess).not.toHaveBeenCalled();
     expect(snapshot.diagnostics).toContainEqual({
       id: "provider_privacy_boundary",
       status: "failed",
       message: "boundary unavailable",
     });
+    const report = {
+      items: [],
+      initializationCompletedForRestart: true,
+      restartRequired: true,
+      cleanupStatus: "not_required",
+      bootstrapSnapshotDigest: "a".repeat(64),
+    };
+    tauriMocks.recoverRequiredCredentialAccess.mockResolvedValue(report);
+
+    await expect(tauriSettingsPrivacyDataSource.initializeRequiredCredentials?.()).resolves.toEqual(
+      report
+    );
+    expect(tauriMocks.recoverRequiredCredentialAccess).toHaveBeenCalledTimes(1);
   });
 
   it("keeps Safe Mode unknown when LifeStateProjection cannot be read", async () => {

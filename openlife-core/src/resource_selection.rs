@@ -549,7 +549,7 @@ mod tests {
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../plans/fixtures/openlife_roadshow_core")
+                .join("../test-fixtures/resources")
                 .join(name),
         )
         .unwrap()
@@ -606,9 +606,9 @@ mod tests {
             &store,
             "message-compare",
             &[
-                ("roadshow_compare.pdf", "application/pdf"),
+                ("comparison.pdf", "application/pdf"),
                 (
-                    "roadshow_compare.docx",
+                    "comparison.docx",
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 ),
             ],
@@ -631,8 +631,8 @@ mod tests {
             .into_iter()
             .map(|citation| citation.filename)
             .collect::<BTreeSet<_>>();
-        assert!(filenames.contains("roadshow_compare.pdf"));
-        assert!(filenames.contains("roadshow_compare.docx"));
+        assert!(filenames.contains("comparison.pdf"));
+        assert!(filenames.contains("comparison.docx"));
         selected
             .context_manifest
             .validate_context_truth(&selected.context_blocks)
@@ -666,7 +666,7 @@ mod tests {
             )
             .unwrap();
         assert!(rendered.contains("来源（OpenLife 已核验）"));
-        assert!(rendered.contains("roadshow\\_compare"));
+        assert!(rendered.contains("comparison"));
         assert!(selected
             .citation_set
             .validate_and_render_model_output(
@@ -696,8 +696,8 @@ mod tests {
             .into_iter()
             .map(|citation| citation.filename)
             .collect::<BTreeSet<_>>();
-        assert!(summary_filenames.contains("roadshow_compare.pdf"));
-        assert!(summary_filenames.contains("roadshow_compare.docx"));
+        assert!(summary_filenames.contains("comparison.pdf"));
+        assert!(summary_filenames.contains("comparison.docx"));
 
         let unrelated_message = select(&store, "message-not-bound", "请总结附件");
         assert!(unrelated_message.context_blocks.is_empty());
@@ -728,9 +728,9 @@ mod tests {
             &store,
             "message-table",
             &[
-                ("roadshow_metrics.csv", "text/csv"),
+                ("metrics.csv", "text/csv"),
                 (
-                    "roadshow_metrics.xlsx",
+                    "metrics.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 ),
             ],
@@ -746,8 +746,8 @@ mod tests {
             .into_iter()
             .map(|citation| citation.filename)
             .collect::<BTreeSet<_>>();
-        assert!(filenames.contains("roadshow_metrics.csv"));
-        assert!(filenames.contains("roadshow_metrics.xlsx"));
+        assert!(filenames.contains("metrics.csv"));
+        assert!(filenames.contains("metrics.xlsx"));
         assert!(selected
             .context_blocks
             .iter()

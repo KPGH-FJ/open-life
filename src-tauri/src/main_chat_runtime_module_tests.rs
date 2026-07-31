@@ -720,7 +720,7 @@ fn main_chat_final_gate_aggregation_is_not_hidden_in_test_module() {
     assert!(
         !command_source.contains("run_main_chat_agent_execution_v1_final_acceptance_gate")
             && !command_source.contains("build_main_chat_agent_execution_v1_final_gate_report("),
-        "Phase7 command surface must not restore the retired final acceptance runner"
+        "the command surface must not restore the retired final acceptance runner"
     );
 }
 
@@ -816,7 +816,7 @@ fn main_chat_live_provider_completed_report_builder_is_not_hidden_in_test_module
     );
     assert!(
         !retired_final_acceptance_test_path.exists(),
-        "retired final acceptance test owner must remain expected-absent under Phase7"
+        "retired final acceptance test owner must remain absent"
     );
 }
 

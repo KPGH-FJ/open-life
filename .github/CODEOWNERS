@@ -5,6 +5,5 @@
 
 * @KPGH-FJ
 
-# LifeModel-HS governance artifacts
-/plans/lifemodel_hs_* @KPGH-FJ
+# LifeModel-HS source-of-truth decision
 /plans/adr/0013-lifemodel-hs-source-of-truth-governance.md @KPGH-FJ

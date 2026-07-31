@@ -316,14 +316,17 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 }
 
 export interface CredentialRecoveryItem {
-  purpose: "agent_run_receipts" | "main_chat_events" | "action_queue" | "task_store";
-  status: "available" | "created" | "missing_existing_data" | "invalid" | "unavailable";
+  purpose: "agent_run_receipts" | "main_chat_events" | "action_queue" | "task_store" | "mcp_audit";
+  status: CredentialBootstrapStatus | "created" | "compensated" | "cleanup_unknown";
 }
 
 export interface CredentialRecoveryReport {
   items: CredentialRecoveryItem[];
-  allRequiredCredentialsReady: boolean;
+  initializationCompletedForRestart: boolean;
   restartRequired: boolean;
+  cleanupStatus: "not_required" | "compensated" | "unknown";
+  blockedReason?: string | null;
+  bootstrapSnapshotDigest: string;
 }
 
 export async function recoverRequiredCredentialAccess(): Promise<CredentialRecoveryReport> {
@@ -2028,6 +2031,28 @@ export interface LifeSurfaceProjection {
   activeToolPermissionCount: number;
 }
 
+export type CredentialBootstrapStatus =
+  | "available"
+  | "initialization_required"
+  | "missing_existing_data"
+  | "invalid"
+  | "unavailable"
+  | "unknown";
+
+export interface CredentialBootstrapSnapshot {
+  version: string;
+  digest: string;
+  purposes: Array<{
+    purpose:
+      | "agent_run_receipts"
+      | "main_chat_events"
+      | "action_queue"
+      | "task_store"
+      | "mcp_audit";
+    status: CredentialBootstrapStatus;
+  }>;
+}
+
 export interface LifeStateProjection {
   version: string;
   generatedAt: string;
@@ -2036,6 +2061,7 @@ export interface LifeStateProjection {
   readiness: LifeReadinessProjection;
   taskState: LifeTaskStateProjection;
   safeMode: LifeSafeModeProjection;
+  credentialBootstrap?: CredentialBootstrapSnapshot;
   toolPermissions: LifeToolPermissionProjection;
   safePaths: string[];
   surfaces: LifeSurfaceProjection[];

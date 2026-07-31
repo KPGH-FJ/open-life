@@ -3,9 +3,9 @@ contact_links:
   - name: Solo + Agent GitHub Flow
     url: https://github.com/KPGH-FJ/open-life/blob/main/docs/github_repository_governance.md
     about: Ordinary solo work should stay local; use issues only for high-risk, multi-day, or resumable checkpoints.
-  - name: LifeModel-HS MVP Specs
-    url: https://github.com/KPGH-FJ/open-life/blob/main/plans/lifemodel_hs_mvp_task_specs.md
-    about: Use the specs directly for Codex work; heavy LMHS issue forms are archived in solo mode.
+  - name: Product definition
+    url: https://github.com/KPGH-FJ/open-life/blob/main/PRODUCT.md
+    about: Read the current product scope before proposing feature or architecture work.
   - name: ADR 0013
     url: https://github.com/KPGH-FJ/open-life/blob/main/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
     about: Governance baseline for LifeModel-HS source of truth, policy, proposals, and MVP boundaries.

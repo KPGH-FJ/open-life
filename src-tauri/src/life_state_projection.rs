@@ -18,6 +18,7 @@ pub struct LifeStateProjection {
     pub readiness: LifeReadinessProjection,
     pub task_state: LifeTaskStateProjection,
     pub safe_mode: LifeSafeModeProjection,
+    pub credential_bootstrap: crate::state::CredentialBootstrapSnapshot,
     pub tool_permissions: LifeToolPermissionProjection,
     pub safe_paths: Vec<String>,
     pub surfaces: Vec<LifeSurfaceProjection>,
@@ -151,6 +152,7 @@ pub(crate) async fn get_life_state_projection_with_state(
         readiness,
         task_state,
         safe_mode,
+        credential_bootstrap: state.credential_bootstrap_snapshot.clone(),
         tool_permissions,
         safe_paths,
         surfaces,
@@ -160,6 +162,7 @@ pub(crate) async fn get_life_state_projection_with_state(
             "main_chat_agent_session_store".into(),
             "tool_permission_store".into(),
             "config:safe_paths".into(),
+            "bootstrap:credential_snapshot".into(),
         ],
     })
 }

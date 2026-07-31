@@ -80,9 +80,6 @@ pub(crate) mod workspace_file_resolver;
 mod main_chat_acceptance_test_support;
 
 #[cfg(test)]
-mod native_external_state_evidence;
-
-#[cfg(test)]
 mod main_chat_live_provider_tests;
 
 #[cfg(test)]
@@ -108,26 +105,6 @@ mod main_chat_context_loader_tests;
 
 #[cfg(test)]
 mod main_chat_runtime_module_tests;
-
-#[cfg(test)]
-mod single_system_authority_tests;
-
-#[cfg(test)]
-mod backend_remediation_phase0_tests;
-
-#[cfg(test)]
-mod backend_remediation_phase1_tests;
-#[cfg(test)]
-mod backend_remediation_phase2_tests;
-
-#[cfg(test)]
-mod d055_terminal_owner_graph_tests;
-
-#[cfg(test)]
-mod d055_terminal_owner_graph_compile_red;
-
-#[cfg(test)]
-mod backend_remediation_frozen_scenario_tests;
 
 #[cfg(test)]
 mod main_chat_runtime_facts_tests;

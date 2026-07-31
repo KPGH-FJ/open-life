@@ -5,9 +5,16 @@ use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAud
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const SERVICE: &str = "com.openlife.desktop";
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+const NATIVE_ISOLATION_TRIAL_ENV: &str = "OPENLIFE_NATIVE_TAURI_ISOLATION_TRIAL";
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+const KEYCHAIN_SERVICE_OVERRIDE_ENV: &str = "OPENLIFE_KEYCHAIN_SERVICE_OVERRIDE";
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+const TRIAL_KEYCHAIN_SERVICE_PREFIX: &str = "com.openlife.desktop.trial.";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
 const SEARCH_ACCOUNT: &str = "search-provider-api-key";
 const MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT: &str = "main-chat-event-integrity-key-v1";
@@ -16,6 +23,7 @@ const TASK_STORE_AUTHORITY_ACCOUNT: &str = "task-store-authority-key-v1";
 const AGENT_RUN_RECEIPT_ACCOUNT: &str = "agent-run-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
 const PROVIDER_SECRET_ENVELOPE_VERSION: &str = "openlife_provider_secret_v1";
+static SELECTED_KEYRING_SERVICE: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 
 pub(crate) const PROVIDER_KEY_REF: &str = "keychain://com.openlife.desktop/provider-api-key";
 pub(crate) const SEARCH_KEY_REF: &str = "keychain://com.openlife.desktop/search-provider-api-key";
@@ -122,9 +130,29 @@ pub(crate) trait SecretStore {
     fn delete(&self, secret_ref: &str) -> Result<()>;
 }
 
+/// The only credential capability available during bootstrap. Keeping this
+/// separate from `SecretStore` makes startup writes a compile-time error.
+pub(crate) trait SecretReader {
+    fn read_secret(&self, secret_ref: &str) -> Result<Option<String>>;
+}
+
+impl<T: SecretStore + ?Sized> SecretReader for T {
+    fn read_secret(&self, secret_ref: &str) -> Result<Option<String>> {
+        SecretStore::get(self, secret_ref)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IntegrityKeyInspection {
     Available,
+    Missing,
+    Invalid,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntegrityKeyHydration {
+    Available([u8; 32]),
     Missing,
     Invalid,
     Unavailable,
@@ -140,12 +168,28 @@ const STARTUP_SECRET_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// affected capabilities instead of preventing the product window from ever
 /// appearing. Settings keeps using `KeyringSecretStore` directly so explicit
 /// user-initiated credential changes may still use the platform UI.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct StartupKeyringSecretStore {
     timed_out: AtomicBool,
+    service: std::result::Result<String, String>,
+}
+
+impl Default for StartupKeyringSecretStore {
+    fn default() -> Self {
+        Self {
+            timed_out: AtomicBool::new(false),
+            service: selected_keyring_service().map_err(|error| error.to_string()),
+        }
+    }
 }
 
 impl StartupKeyringSecretStore {
+    pub(crate) fn service_name(&self) -> Result<&str> {
+        self.service
+            .as_deref()
+            .map_err(|error| anyhow::anyhow!(error.clone()))
+    }
+
     fn run<T, F>(&self, operation_name: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -199,6 +243,16 @@ impl StartupKeyringSecretStore {
     }
 }
 
+pub(crate) fn selected_keyring_service_classification() -> Result<&'static str> {
+    selected_keyring_service().map(|service| {
+        if service == SERVICE {
+            "default"
+        } else {
+            "isolated_trial"
+        }
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn disable_startup_keyring_interaction(
 ) -> Result<security_framework::os::macos::keychain::KeychainUserInteractionLock> {
@@ -207,7 +261,7 @@ fn disable_startup_keyring_interaction(
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
+fn keyring_entry_for_service(service: &str, secret_ref: &str) -> Result<keyring::Entry> {
     let account = match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
@@ -224,7 +278,89 @@ fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
         }
         _ => anyhow::bail!("unsupported OpenLife secret reference"),
     };
-    keyring::Entry::new(SERVICE, &account).context("initialize OS credential entry")
+    keyring::Entry::new(service, &account).context("initialize OS credential entry")
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn validate_trial_keychain_service(service: &str) -> Result<()> {
+    let suffix = service
+        .strip_prefix(TRIAL_KEYCHAIN_SERVICE_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("trial Keychain service has an invalid prefix"))?;
+    if suffix.len() < 32
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("trial Keychain service suffix must be at least 32 lowercase hex characters");
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn optional_utf8_env_value(
+    name: &str,
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("{name} must contain valid UTF-8"))
+        })
+        .transpose()
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn selected_keyring_service_from_values(
+    trial_marker: Option<&str>,
+    service_override: Option<&str>,
+) -> Result<String> {
+    match (trial_marker, service_override) {
+        (None, None) => Ok(SERVICE.to_string()),
+        (Some("1"), Some(service)) => {
+            validate_trial_keychain_service(service)?;
+            eprintln!("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE_CLASS=isolated_trial");
+            Ok(service.to_string())
+        }
+        (Some("1"), None) => {
+            anyhow::bail!("native isolation trial requires an explicit Keychain service")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("Keychain service override requires the native isolation trial marker")
+        }
+        (Some(_), _) => anyhow::bail!("native isolation trial marker must equal 1"),
+    }
+}
+
+#[cfg(all(feature = "dev-extensions", debug_assertions))]
+fn compute_selected_keyring_service() -> Result<String> {
+    let trial_marker = optional_utf8_env_value(
+        NATIVE_ISOLATION_TRIAL_ENV,
+        std::env::var_os(NATIVE_ISOLATION_TRIAL_ENV),
+    )?;
+    let service_override = optional_utf8_env_value(
+        KEYCHAIN_SERVICE_OVERRIDE_ENV,
+        std::env::var_os(KEYCHAIN_SERVICE_OVERRIDE_ENV),
+    )?;
+    selected_keyring_service_from_values(trial_marker.as_deref(), service_override.as_deref())
+}
+
+#[cfg(not(all(feature = "dev-extensions", debug_assertions)))]
+fn compute_selected_keyring_service() -> Result<String> {
+    Ok(SERVICE.to_string())
+}
+
+pub(crate) fn selected_keyring_service() -> Result<String> {
+    SELECTED_KEYRING_SERVICE
+        .get_or_init(|| compute_selected_keyring_service().map_err(|error| error.to_string()))
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
+    let service = selected_keyring_service()?;
+    keyring_entry_for_service(&service, secret_ref)
 }
 
 /// Hydrate one purpose-isolated 256-bit integrity key. Missing material is
@@ -259,14 +395,13 @@ pub(crate) fn hydrate_or_create_integrity_key(
     create_random_integrity_key(secret_ref, store)
 }
 
-/// Inspect one internal integrity-key reference without creating, rotating, or
-/// returning key material. Product recovery may use this with the interactive
-/// credential store so macOS can re-authorize an updated signed application,
-/// while the frontend receives only this bounded state.
-pub(crate) fn inspect_integrity_key_access(
+/// Hydrate one existing purpose-isolated 256-bit integrity key. Missing
+/// material is a typed recovery state owned by bootstrap; this function never
+/// creates or rotates credentials.
+pub(crate) fn inspect_and_hydrate_integrity_key<R: SecretReader + ?Sized>(
     secret_ref: &'static str,
-    store: &dyn SecretStore,
-) -> IntegrityKeyInspection {
+    store: &R,
+) -> IntegrityKeyHydration {
     if !matches!(
         secret_ref,
         MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
@@ -274,24 +409,39 @@ pub(crate) fn inspect_integrity_key_access(
             | TASK_STORE_AUTHORITY_KEY_REF
             | AGENT_RUN_RECEIPT_KEY_REF
     ) {
-        return IntegrityKeyInspection::Invalid;
+        return IntegrityKeyHydration::Invalid;
     }
-
-    let encoded = match store.get(secret_ref) {
+    let encoded = match store.read_secret(secret_ref) {
         Ok(Some(encoded)) => encoded,
-        Ok(None) => return IntegrityKeyInspection::Missing,
-        Err(_) => return IntegrityKeyInspection::Unavailable,
+        Ok(None) => return IntegrityKeyHydration::Missing,
+        Err(_) => return IntegrityKeyHydration::Unavailable,
     };
     let Ok(decoded) = general_purpose::STANDARD.decode(encoded) else {
-        return IntegrityKeyInspection::Invalid;
+        return IntegrityKeyHydration::Invalid;
     };
     let Ok(key) = <Vec<u8> as TryInto<[u8; 32]>>::try_into(decoded) else {
-        return IntegrityKeyInspection::Invalid;
+        return IntegrityKeyHydration::Invalid;
     };
     if key.iter().all(|byte| *byte == 0) {
-        return IntegrityKeyInspection::Invalid;
+        return IntegrityKeyHydration::Invalid;
     }
-    IntegrityKeyInspection::Available
+    IntegrityKeyHydration::Available(key)
+}
+
+/// Inspect one internal integrity-key reference without creating, rotating, or
+/// returning key material. Product recovery may use this with the interactive
+/// credential store so macOS can re-authorize an updated signed application,
+/// while the frontend receives only this bounded state.
+pub(crate) fn inspect_integrity_key_access<R: SecretReader + ?Sized>(
+    secret_ref: &'static str,
+    store: &R,
+) -> IntegrityKeyInspection {
+    match inspect_and_hydrate_integrity_key(secret_ref, store) {
+        IntegrityKeyHydration::Available(_) => IntegrityKeyInspection::Available,
+        IntegrityKeyHydration::Missing => IntegrityKeyInspection::Missing,
+        IntegrityKeyHydration::Invalid => IntegrityKeyInspection::Invalid,
+        IntegrityKeyHydration::Unavailable => IntegrityKeyInspection::Unavailable,
+    }
 }
 
 fn create_random_integrity_key(
@@ -415,21 +565,25 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
-impl SecretStore for StartupKeyringSecretStore {
-    fn get(&self, secret_ref: &str) -> Result<Option<String>> {
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+impl SecretReader for StartupKeyringSecretStore {
+    fn read_secret(&self, secret_ref: &str) -> Result<Option<String>> {
         let secret_ref = secret_ref.to_string();
-        self.run("read", move || KeyringSecretStore.get(&secret_ref))
+        let service = self.service_name()?.to_string();
+        self.run("read", move || {
+            match keyring_entry_for_service(&service, &secret_ref)?.get_password() {
+                Ok(value) => Ok(Some(value)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(error).context("read secret from OS credential store"),
+            }
+        })
     }
+}
 
-    fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
-        let secret_ref = secret_ref.to_string();
-        let value = value.to_string();
-        self.run("write", move || KeyringSecretStore.set(&secret_ref, &value))
-    }
-
-    fn delete(&self, secret_ref: &str) -> Result<()> {
-        let secret_ref = secret_ref.to_string();
-        self.run("delete", move || KeyringSecretStore.delete(&secret_ref))
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+impl SecretReader for StartupKeyringSecretStore {
+    fn read_secret(&self, _secret_ref: &str) -> Result<Option<String>> {
+        anyhow::bail!("OS credential storage is unsupported on this platform")
     }
 }
 
@@ -460,6 +614,7 @@ pub(crate) struct SecretHydrationOutcome {
 
 /// Hydrate runtime-only secrets and migrate legacy plaintext without deleting the
 /// old file unless every legacy secret has first been copied successfully.
+#[cfg(test)]
 pub(crate) fn hydrate_config_secrets(
     config: &mut AppConfig,
     store: &dyn SecretStore,
@@ -488,7 +643,7 @@ pub(crate) fn hydrate_config_secrets(
             }
         }
     } else if config.llm.openai_key_ref.as_deref() == Some(PROVIDER_KEY_REF) {
-        match store.get(PROVIDER_KEY_REF) {
+        match store.read_secret(PROVIDER_KEY_REF) {
             Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
                 Ok(secret) => config.llm.openai_key = secret,
                 Err(_) => {
@@ -539,7 +694,7 @@ pub(crate) fn hydrate_config_secrets(
             }
         }
     } else if config.system.search_provider_key_ref.as_deref() == Some(SEARCH_KEY_REF) {
-        match store.get(SEARCH_KEY_REF) {
+        match store.read_secret(SEARCH_KEY_REF) {
             Ok(Some(secret)) => config.system.search_provider_key = secret,
             Ok(None) => {
                 outcome
@@ -562,6 +717,97 @@ pub(crate) fn hydrate_config_secrets(
 
     outcome.rewrite_config_without_plaintext =
         ((legacy_provider || legacy_search) && !migration_failed) || rejected_provider_reference;
+    outcome
+}
+
+/// Hydrate referenced provider/search credentials without migrating legacy
+/// plaintext or mutating the OS credential store. Legacy plaintext remains a
+/// Settings-time migration concern and is disabled for this startup.
+pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
+    config: &mut AppConfig,
+    store: &R,
+) -> SecretHydrationOutcome {
+    let legacy_provider = !config.llm.openai_key.trim().is_empty();
+    let legacy_search = !config.system.search_provider_key.trim().is_empty();
+    let mut outcome = SecretHydrationOutcome::default();
+
+    if legacy_provider {
+        config.llm.openai_key.clear();
+        config.llm.openai_key_ref = None;
+        outcome
+            .fail_closed_capabilities
+            .push("provider_credential".into());
+        outcome.warnings.push(
+            "legacy provider plaintext requires an explicit Settings save; startup did not migrate it"
+                .into(),
+        );
+    } else if config.llm.openai_key_ref.as_deref() == Some(PROVIDER_KEY_REF) {
+        match store.read_secret(PROVIDER_KEY_REF) {
+            Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
+                Ok(secret) => config.llm.openai_key = secret,
+                Err(_) => {
+                    config.llm.openai_key.clear();
+                    config.llm.openai_key_ref = None;
+                    outcome
+                        .fail_closed_capabilities
+                        .push("provider_credential".into());
+                    outcome.warnings.push(
+                        "provider key reference is unbound or belongs to another provider endpoint; reconfigure the credential"
+                            .into(),
+                    );
+                }
+            },
+            Ok(None) => {
+                outcome
+                    .fail_closed_capabilities
+                    .push("provider_credential".into());
+                outcome
+                    .warnings
+                    .push("provider key reference has no credential".into());
+            }
+            Err(error) => {
+                outcome
+                    .fail_closed_capabilities
+                    .push("provider_credential".into());
+                outcome
+                    .warnings
+                    .push(format!("provider key hydration failed: {error}"));
+            }
+        }
+    }
+
+    if legacy_search {
+        config.system.search_provider_key.clear();
+        config.system.search_provider_key_ref = None;
+        outcome
+            .fail_closed_capabilities
+            .push("search_provider_credential".into());
+        outcome.warnings.push(
+            "legacy search plaintext requires an explicit Settings save; startup did not migrate it"
+                .into(),
+        );
+    } else if config.system.search_provider_key_ref.as_deref() == Some(SEARCH_KEY_REF) {
+        match store.read_secret(SEARCH_KEY_REF) {
+            Ok(Some(secret)) => config.system.search_provider_key = secret,
+            Ok(None) => {
+                outcome
+                    .fail_closed_capabilities
+                    .push("search_provider_credential".into());
+                outcome
+                    .warnings
+                    .push("search key reference has no credential".into());
+            }
+            Err(error) => {
+                outcome
+                    .fail_closed_capabilities
+                    .push("search_provider_credential".into());
+                outcome
+                    .warnings
+                    .push(format!("search key hydration failed: {error}"));
+            }
+        }
+    }
+
     outcome
 }
 
@@ -641,10 +887,20 @@ pub(crate) fn stage_config_secrets(
 pub(crate) struct McpAuditKeyHydration {
     pub(crate) configs: Vec<AuditKeyConfig>,
     pub(crate) materials: Vec<AuditKeyMaterial>,
+    #[cfg(test)]
     pub(crate) config_changed: bool,
+    #[cfg(test)]
     staged_secret_ref: Option<String>,
 }
 
+pub(crate) enum McpAuditKeyHydrationInspection {
+    Available(McpAuditKeyHydration),
+    MissingExistingData,
+    Invalid,
+    Unavailable,
+}
+
+#[cfg(test)]
 impl McpAuditKeyHydration {
     pub(crate) fn ensure_write_epoch(&mut self, store: &dyn SecretStore) -> Result<()> {
         let needs_keychain_epoch = match self.configs.last() {
@@ -672,45 +928,71 @@ impl McpAuditKeyHydration {
     }
 }
 
-pub(crate) fn hydrate_existing_mcp_audit_keys(
+pub(crate) fn inspect_existing_mcp_audit_keys<R: SecretReader + ?Sized>(
     configs: Vec<AuditKeyConfig>,
-    store: &dyn SecretStore,
-) -> Result<McpAuditKeyHydration> {
-    validate_mcp_audit_key_configs(&configs)?;
+    store: &R,
+) -> McpAuditKeyHydrationInspection {
+    if validate_mcp_audit_key_configs(&configs).is_err() {
+        return McpAuditKeyHydrationInspection::Invalid;
+    }
     let mut materials = Vec::new();
     for config in &configs {
         if config.mode == KeyMode::Keychain {
-            let secret_ref = config.key_ref.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("MCP audit keychain config has no secret reference")
-            })?;
-            let encoded = store
-                .get(secret_ref)?
-                .ok_or_else(|| anyhow::anyhow!("MCP audit keychain reference has no credential"))?;
-            let decoded = general_purpose::STANDARD
-                .decode(encoded)
-                .context("decode MCP audit key material")?;
-            let key: [u8; 32] = decoded
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("MCP audit key must contain exactly 32 bytes"))?;
+            let Some(secret_ref) = config.key_ref.as_deref() else {
+                return McpAuditKeyHydrationInspection::Invalid;
+            };
+            let encoded = match store.read_secret(secret_ref) {
+                Ok(Some(encoded)) => encoded,
+                Ok(None) => return McpAuditKeyHydrationInspection::MissingExistingData,
+                Err(_) => return McpAuditKeyHydrationInspection::Unavailable,
+            };
+            let Ok(decoded) = general_purpose::STANDARD.decode(encoded) else {
+                return McpAuditKeyHydrationInspection::Invalid;
+            };
+            let Ok(key) = <Vec<u8> as TryInto<[u8; 32]>>::try_into(decoded) else {
+                return McpAuditKeyHydrationInspection::Invalid;
+            };
             if key.iter().all(|byte| *byte == 0) {
-                anyhow::bail!("MCP audit key must not be all-zero");
+                return McpAuditKeyHydrationInspection::Invalid;
             }
             materials.push(AuditKeyMaterial {
                 config: config.clone(),
                 key,
             });
         } else {
-            materials.push(McpAuditStore::legacy_read_only_key_material(
-                config.clone(),
-            )?);
+            let Ok(material) = McpAuditStore::legacy_read_only_key_material(config.clone()) else {
+                return McpAuditKeyHydrationInspection::Invalid;
+            };
+            materials.push(material);
         }
     }
-    Ok(McpAuditKeyHydration {
+    McpAuditKeyHydrationInspection::Available(McpAuditKeyHydration {
         configs,
         materials,
+        #[cfg(test)]
         config_changed: false,
+        #[cfg(test)]
         staged_secret_ref: None,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn hydrate_existing_mcp_audit_keys<R: SecretReader + ?Sized>(
+    configs: Vec<AuditKeyConfig>,
+    store: &R,
+) -> Result<McpAuditKeyHydration> {
+    match inspect_existing_mcp_audit_keys(configs, store) {
+        McpAuditKeyHydrationInspection::Available(hydration) => Ok(hydration),
+        McpAuditKeyHydrationInspection::MissingExistingData => {
+            anyhow::bail!("MCP audit keychain reference has no credential")
+        }
+        McpAuditKeyHydrationInspection::Invalid => {
+            anyhow::bail!("MCP audit key material is invalid")
+        }
+        McpAuditKeyHydrationInspection::Unavailable => {
+            anyhow::bail!("MCP audit key material is unavailable")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -789,6 +1071,7 @@ pub(crate) fn create_mcp_audit_key_material(
     })
 }
 
+#[cfg(test)]
 fn next_audit_epoch(previous: u64) -> Result<u64> {
     let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
     let next = timestamp.max(
@@ -805,6 +1088,70 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    #[cfg(all(feature = "dev-extensions", debug_assertions))]
+    #[test]
+    fn trial_keychain_service_accepts_only_long_lowercase_hex_suffixes() {
+        for valid in [
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef00",
+        ] {
+            assert!(validate_trial_keychain_service(valid).is_ok());
+        }
+
+        for invalid in [
+            "com.openlife.desktop",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcde",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdeF",
+            "com.openlife.desktop.trial.0123456789abcdef0123456789abcdeg",
+            "com.openlife.desktop.trial.0123456789abcdef-123456789abcdef",
+        ] {
+            assert!(
+                validate_trial_keychain_service(invalid).is_err(),
+                "accepted invalid trial service: {invalid}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "dev-extensions", debug_assertions))]
+    #[test]
+    fn trial_keychain_service_selection_requires_both_exact_opt_ins() {
+        let valid = "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            selected_keyring_service_from_values(None, None).unwrap(),
+            SERVICE
+        );
+        assert_eq!(
+            selected_keyring_service_from_values(Some("1"), Some(valid)).unwrap(),
+            valid
+        );
+        assert!(selected_keyring_service_from_values(Some("1"), None).is_err());
+        assert!(selected_keyring_service_from_values(None, Some(valid)).is_err());
+        assert!(selected_keyring_service_from_values(Some("true"), Some(valid)).is_err());
+        assert!(selected_keyring_service_from_values(
+            Some("1"),
+            Some("com.openlife.desktop.trial.not-hex")
+        )
+        .is_err());
+    }
+
+    #[cfg(all(feature = "dev-extensions", debug_assertions, unix))]
+    #[test]
+    fn trial_keychain_service_rejects_non_utf8_environment_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        assert!(optional_utf8_env_value(
+            KEYCHAIN_SERVICE_OVERRIDE_ENV,
+            Some(std::ffi::OsString::from_vec(vec![0xff]))
+        )
+        .is_err());
+    }
+
+    #[cfg(not(all(feature = "dev-extensions", debug_assertions)))]
+    #[test]
+    fn release_keychain_service_is_fixed_to_product_default() {
+        assert_eq!(selected_keyring_service().unwrap(), SERVICE);
+    }
 
     struct KeychainCleanup<'a> {
         store: &'a dyn SecretStore,
@@ -916,6 +1263,27 @@ mod tests {
             config.system.search_provider_key_ref.as_deref(),
             Some(SEARCH_KEY_REF)
         );
+    }
+
+    #[test]
+    fn nkr_s1_credential_startup_hydration_never_migrates_legacy_plaintext() {
+        let store = MemorySecretStore::default();
+        let mut config = AppConfig::default();
+        config.llm.openai_key = "sk-provider-secret".into();
+        config.system.search_provider_key = "sk-search-secret".into();
+
+        let outcome = hydrate_config_secrets_read_only(&mut config, &store);
+
+        assert!(config.llm.openai_key.is_empty());
+        assert!(config.system.search_provider_key.is_empty());
+        assert!(config.llm.openai_key_ref.is_none());
+        assert!(config.system.search_provider_key_ref.is_none());
+        assert!(!outcome.rewrite_config_without_plaintext);
+        assert_eq!(outcome.fail_closed_capabilities.len(), 2);
+        assert!(SecretStore::get(&store, PROVIDER_KEY_REF)
+            .unwrap()
+            .is_none());
+        assert!(SecretStore::get(&store, SEARCH_KEY_REF).unwrap().is_none());
     }
 
     #[test]

@@ -35,7 +35,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $FrontendDir = Join-Path $RepoRoot "frontend"
 $EnvFile = Join-Path $RepoRoot ".env"
-$EnvTemplate = Join-Path $RepoRoot ".env.template"
+$EnvTemplate = Join-Path $RepoRoot ".env.example"
 
 # 工具函数
 function Write-Info($msg)    { Write-Host "[INFO]  $msg" -ForegroundColor Blue }
@@ -149,10 +149,10 @@ if (Test-Path $EnvFile) {
     Write-Success ".env 文件已存在，跳过创建"
 } elseif (Test-Path $EnvTemplate) {
     Copy-Item $EnvTemplate $EnvFile
-    Write-Success "从 .env.template 创建 .env"
+    Write-Success "从 .env.example 创建 .env"
 } else {
     New-Item -ItemType File -Path $EnvFile | Out-Null
-    Write-Warn ".env.template 不存在，创建空 .env"
+    Write-Warn ".env.example 不存在，创建空 .env"
 }
 Write-Warn "⚠  请编辑 .env 文件，填入你的 API Key 以启用对话功能"
 Write-Info "  - OPENROUTER_API_KEY (推荐): https://openrouter.ai/keys"

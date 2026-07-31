@@ -6,7 +6,7 @@ function read(path: string): string {
   return readFileSync(join(process.cwd(), path), "utf8");
 }
 
-describe("Phase 4B token and isolation contract", () => {
+describe("foundation token contract", () => {
   it("keeps the approved fixed visual values in the single token authority", () => {
     const tokens = read("src/ui/foundation/openlife.tokens.css");
     for (const expected of [
@@ -32,10 +32,7 @@ describe("Phase 4B token and isolation contract", () => {
   });
 
   it("keeps literal colors and sub-12px type out of foundation consumers", () => {
-    for (const path of [
-      "src/ui/foundation/openlife.foundation.css",
-      "src/dev/phase4b/phase4b-harness.css",
-    ]) {
+    for (const path of ["src/ui/foundation/openlife.foundation.css"]) {
       const source = read(path);
       expect(source, path).not.toMatch(/#[0-9a-f]{3,8}|(?:rgb|hsl)a?\(/i);
       for (const match of source.matchAll(/font-size:\s*([0-9.]+)px/g)) {
@@ -45,10 +42,7 @@ describe("Phase 4B token and isolation contract", () => {
   });
 
   it("keeps hard-coded colors and arbitrary Tailwind values out of V2 React source", () => {
-    for (const path of [
-      "src/ui/foundation/foundation.tsx",
-      "src/dev/phase4b/FoundationHarness.tsx",
-    ]) {
+    for (const path of ["src/ui/foundation/foundation.tsx"]) {
       const source = read(path);
       expect(source, path).not.toMatch(/#[0-9a-f]{3,8}/i);
       expect(source, path).not.toMatch(/(?:bg|text|border|p|m|gap|w|h)-\[[^\]]+\]/);
@@ -64,15 +58,9 @@ describe("Phase 4B token and isolation contract", () => {
     expect(tailwind).toContain('"ol-2": "var(--ol-radius-2)"');
   });
 
-  it("keeps the dev entry compile-time false in the production Vite config", () => {
-    const productVite = read("vite.config.ts");
-    const harnessVite = read("vite.phase4b.config.ts");
+  it("keeps retired preview routes out of the production app", () => {
     const app = read("src/App.tsx");
 
-    expect(productVite).toContain("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(false)");
-    expect(harnessVite).toContain("__OPENLIFE_PHASE4B_HARNESS__: JSON.stringify(true)");
-    expect(harnessVite).toContain('appType: "mpa"');
-    expect(harnessVite).toContain('name: "phase4b-entry-boundary"');
-    expect(app).not.toMatch(/TodayV2PreviewPage|\/today-v2-preview|src\/dev\/phase4b/);
+    expect(app).not.toMatch(/TodayV2PreviewPage|\/today-v2-preview|src\/dev\//);
   });
 });

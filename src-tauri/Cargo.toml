@@ -6,7 +6,7 @@ authors = ["OpenLife Team"]
 license = "MIT"
 repository = ""
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.89"
 default-run = "openlife-tauri"
 
 [features]

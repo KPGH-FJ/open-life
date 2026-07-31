@@ -1,7 +1,7 @@
 # ADR 0015: TurnRuntime-owned transient state command lane
 
 Date: 2026-07-12
-Status: accepted for backend remediation
+Status: accepted
 Relationship: applies ADR 0013 transient `StateAsset` governance; does not
 relax ADR 0014 or LifeModel-HS proposal requirements
 

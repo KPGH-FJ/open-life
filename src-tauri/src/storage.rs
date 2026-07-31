@@ -4,7 +4,7 @@ use once_cell::sync::Lazy as LazyLock;
 use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
 #[cfg(test)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
@@ -75,6 +75,31 @@ pub(crate) enum McpAuditKeyringLoad {
     Unreadable { error: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum McpAuditKeyringBytes {
+    Absent,
+    Present(Vec<u8>),
+    Unreadable(String),
+}
+
+pub(crate) fn mcp_audit_keyring_bytes(path: &std::path::Path) -> McpAuditKeyringBytes {
+    #[cfg(test)]
+    if MCP_AUDIT_KEYRING_READ_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+    {
+        return McpAuditKeyringBytes::Unreadable(
+            "injected MCP audit key-reference read failure".into(),
+        );
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => McpAuditKeyringBytes::Present(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => McpAuditKeyringBytes::Absent,
+        Err(error) => McpAuditKeyringBytes::Unreadable(error.to_string()),
+    }
+}
+
 pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> McpAuditKeyringLoad {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -116,7 +141,19 @@ pub(crate) fn save_mcp_audit_keyring_to_path(
     let text = serde_json::to_string_pretty(configs).map_err(AppError::from)?;
     openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)?;
     #[cfg(test)]
-    if injected_failure == Some(McpAuditKeyringSaveFailure::AfterWrite) {
+    if matches!(
+        injected_failure,
+        Some(
+            McpAuditKeyringSaveFailure::AfterWrite
+                | McpAuditKeyringSaveFailure::AfterWriteUnreadable
+        )
+    ) {
+        if injected_failure == Some(McpAuditKeyringSaveFailure::AfterWriteUnreadable) {
+            MCP_AUDIT_KEYRING_READ_FAILURES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(path.to_path_buf());
+        }
         return Err(AppError::db(
             "injected MCP audit key-reference post-rename durability failure",
         ));
@@ -129,12 +166,16 @@ pub(crate) fn save_mcp_audit_keyring_to_path(
 enum McpAuditKeyringSaveFailure {
     BeforeWrite,
     AfterWrite,
+    AfterWriteUnreadable,
 }
 
 #[cfg(test)]
 static MCP_AUDIT_KEYRING_SAVE_FAILURES: LazyLock<
     Mutex<HashMap<PathBuf, McpAuditKeyringSaveFailure>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
+#[cfg(test)]
+static MCP_AUDIT_KEYRING_READ_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[cfg(test)]
 pub(crate) fn fail_next_mcp_audit_keyring_save_for_test(path: impl Into<PathBuf>) {
@@ -150,6 +191,27 @@ pub(crate) fn fail_next_mcp_audit_keyring_save_after_write_for_test(path: impl I
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(path.into(), McpAuditKeyringSaveFailure::AfterWrite);
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_mcp_audit_keyring_read_for_test(path: impl Into<PathBuf>) {
+    MCP_AUDIT_KEYRING_READ_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.into());
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_mcp_audit_keyring_save_with_unreadable_result_for_test(
+    path: impl Into<PathBuf>,
+) {
+    MCP_AUDIT_KEYRING_SAVE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            path.into(),
+            McpAuditKeyringSaveFailure::AfterWriteUnreadable,
+        );
 }
 
 #[cfg(test)]

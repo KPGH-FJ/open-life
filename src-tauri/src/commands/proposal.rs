@@ -1984,7 +1984,7 @@ fn parse_reviewed_scheduled_provider_route(
     if after
         .get("description")
         .and_then(Value::as_str)
-        .map_or(true, |value| value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
         return Err("ScheduledTask 云路由必须绑定非空 description。".into());
     }
@@ -4139,6 +4139,7 @@ mod tests {
             ))),
             hot_cache,
             startup_warnings: vec![],
+            credential_bootstrap_snapshot: Default::default(),
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_store: Arc::new(
                 openlife_core::tasks::TaskStore::new_in_memory().unwrap(),

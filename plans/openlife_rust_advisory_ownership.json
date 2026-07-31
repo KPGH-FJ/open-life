@@ -115,16 +115,6 @@
       "remediation": "Track the Tauri migration away from the unmaintained GTK3 binding generation."
     },
     {
-      "id": "RUSTSEC-2024-0436",
-      "kind": "unmaintained",
-      "package": "paste",
-      "version": "1.0.15",
-      "owner": "backend-platform",
-      "expires_on": "2026-10-01",
-      "reachability": "Cross-platform compile-time transitive dependency through tokenizers and tract-onnx.",
-      "remediation": "Upgrade or replace the upstream tokenizers/tract dependency chain when it removes paste."
-    },
-    {
       "id": "RUSTSEC-2024-0370",
       "kind": "unmaintained",
       "package": "proc-macro-error",

@@ -1,15 +1,15 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { phase4dJourneyFixtureDataSource } from "@/dev/phase4d/phase4d-governed-fixtures";
+import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
 import type { ReviewAction, ReviewItem } from "@/tauri";
 import { reviewDecisionFeedback } from "./ReviewGovernedView";
 
-describe("Phase 4D governed action journey", () => {
+describe("Workbench governed action journey", () => {
   it("keeps view, approval, refresh, resume, and completion as separate states", async () => {
     const user = userEvent.setup();
-    const dataSource = phase4dJourneyFixtureDataSource("fixture-ready");
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
     const resumeTask = vi.spyOn(dataSource, "resumeTask");
 
@@ -62,7 +62,7 @@ describe("Phase 4D governed action journey", () => {
 
   it("keeps approval disabled when the backend permission scope is incomplete", async () => {
     const user = userEvent.setup();
-    const dataSource = phase4dJourneyFixtureDataSource("fixture-incomplete-permission");
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-incomplete-permission");
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
     render(
@@ -83,7 +83,7 @@ describe("Phase 4D governed action journey", () => {
 
   it("fails stale governed state closed while preserving evidence access", async () => {
     const user = userEvent.setup();
-    const dataSource = phase4dJourneyFixtureDataSource("fixture-stale");
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-stale");
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
     render(
@@ -105,7 +105,7 @@ describe("Phase 4D governed action journey", () => {
 
   it("keeps review pending when the refreshed read model has not confirmed the command", async () => {
     const user = userEvent.setup();
-    const fixture = phase4dJourneyFixtureDataSource("fixture-ready");
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
       dispatchReviewAction: vi.fn(async (_action: ReviewAction) => undefined),
@@ -135,7 +135,7 @@ describe("Phase 4D governed action journey", () => {
 
   it("keeps resume pending when the refreshed exact task is still waiting", async () => {
     const user = userEvent.setup();
-    const fixture = phase4dJourneyFixtureDataSource("fixture-ready");
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const initial = await fixture.load();
     const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
       action => action.kind === "approve"
@@ -171,7 +171,7 @@ describe("Phase 4D governed action journey", () => {
 
   it("dispatches a Tasks surface control and treats the refreshed task as the only result", async () => {
     const user = userEvent.setup();
-    const dataSource = phase4dJourneyFixtureDataSource("fixture-ready");
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const initial = await dataSource.load();
     const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
       action => action.kind === "approve"
@@ -213,7 +213,7 @@ describe("Phase 4D governed action journey", () => {
 
   it("ignores old task and review payloads when their envelopes are empty", async () => {
     const user = userEvent.setup();
-    const fixture = phase4dJourneyFixtureDataSource("fixture-ready");
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
       load: async () => {
@@ -242,7 +242,7 @@ describe("Phase 4D governed action journey", () => {
   });
 
   it("keeps durable approval separate from refreshed application", async () => {
-    const fixture = phase4dJourneyFixtureDataSource("fixture-ready");
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = await fixture.load();
     const permissionItem = snapshot.reviewEnvelope.data!.items[0];
     const item: ReviewItem = { ...permissionItem, type: "memory_write" };

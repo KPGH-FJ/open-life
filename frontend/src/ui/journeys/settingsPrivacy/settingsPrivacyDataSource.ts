@@ -3,9 +3,12 @@ import {
   getLifeStateProjection,
   getProviderPrivacyBoundarySummary,
   getReviewCenterViewModel,
+  recoverRequiredCredentialAccess,
   saveConfig,
   testLlmConnection,
   type AppConfig,
+  type CredentialBootstrapSnapshot,
+  type CredentialRecoveryReport,
   type LifeSafeModeProjection,
   type LlmConnectionTestResult,
   type ProviderPrivacyBoundarySummary,
@@ -29,6 +32,7 @@ export type SettingsPrivacySnapshot = {
   config: AppConfig | null;
   boundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
   safeMode: LifeSafeModeProjection | null;
+  credentialBootstrap?: CredentialBootstrapSnapshot | null;
   diagnostics: SettingsPrivacyDiagnostic[];
 };
 
@@ -41,6 +45,7 @@ export type SettingsConnectionTestOutcome = {
 
 export interface SettingsPrivacyDataSource {
   loadSettingsPrivacy(): Promise<SettingsPrivacySnapshot>;
+  initializeRequiredCredentials?(): Promise<CredentialRecoveryReport>;
   testProviderConnection(config: AppConfig): Promise<SettingsConnectionTestOutcome>;
   saveSettings(config: AppConfig): Promise<void>;
 }
@@ -59,6 +64,7 @@ export function buildSettingsPrivacyErrorSnapshot(error: unknown): SettingsPriva
     config: null,
     boundaryEnvelope: boundaryErrorEnvelope(message),
     safeMode: null,
+    credentialBootstrap: null,
     diagnostics: [
       { id: "sanitized_config", status: "failed", message },
       { id: "provider_privacy_boundary", status: "failed", message },
@@ -87,6 +93,10 @@ async function loadSettingsPrivacy(): Promise<SettingsPrivacySnapshot> {
         ? boundaryResult.value
         : boundaryErrorEnvelope(boundaryError ?? "unknown_error"),
     safeMode: projectionResult.status === "fulfilled" ? projectionResult.value.safeMode : null,
+    credentialBootstrap:
+      projectionResult.status === "fulfilled"
+        ? (projectionResult.value.credentialBootstrap ?? null)
+        : null,
     diagnostics: [
       configError
         ? { id: "sanitized_config", status: "failed", message: configError }
@@ -155,6 +165,7 @@ async function testProviderConnection(config: AppConfig): Promise<SettingsConnec
 
 export const tauriSettingsPrivacyDataSource: SettingsPrivacyDataSource = {
   loadSettingsPrivacy,
+  initializeRequiredCredentials: recoverRequiredCredentialAccess,
   testProviderConnection,
   saveSettings: saveConfig,
 };
