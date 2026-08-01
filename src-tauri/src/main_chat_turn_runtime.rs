@@ -129,6 +129,22 @@ mod provider_consent_continuation_tests {
                 .and_then(serde_json::Value::as_str),
             Some("confirmed")
         );
+        let accepted_detail =
+            crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+                &operation_id,
+                &state,
+            )
+            .await
+            .expect("load accepted provider-consent task detail");
+        assert!(
+            accepted_detail
+                .allowed_controls
+                .iter()
+                .any(|control| control == "resume"),
+            "accepted provider consent must expose the product resume control: {:?}",
+            accepted_detail.allowed_controls
+        );
+        assert_eq!(accepted_detail.next_recommended_control, "resume");
 
         let request_count = Arc::new(AtomicUsize::new(0));
         let server_count = Arc::clone(&request_count);
