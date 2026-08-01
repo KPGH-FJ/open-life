@@ -75,11 +75,27 @@ fn runtime_proposal_store_error(state: &Arc<AppState>, error: impl ToString) -> 
 pub struct AcceptProposalResponse {
     pub success: bool,
     #[serde(alias = "patch_result")]
-    pub patch_result: openlife_core::life_model::patch::PatchApplyResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_result: Option<openlife_core::life_model::patch::PatchApplyResult>,
     #[serde(alias = "effect_status")]
-    pub effect_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_status: Option<String>,
     #[serde(alias = "proposal_projection_status")]
-    pub proposal_projection_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_projection_status: Option<String>,
+    #[serde(alias = "proposal_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_owner_transition: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable_write_executed: Option<bool>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -126,8 +142,61 @@ pub struct MemoryPersistenceResponse {
 }
 
 fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse, String> {
-    serde_json::from_value(value)
-        .map_err(|error| format!("accept Proposal response contract mismatch: {error}"))
+    let response: AcceptProposalResponse = serde_json::from_value(value)
+        .map_err(|error| format!("accept Proposal response contract mismatch: {error}"))?;
+    if response.success {
+        if response.effect_status.as_deref() != Some("confirmed")
+            || !matches!(
+                response.proposal_projection_status.as_deref(),
+                Some("confirmed" | "reconciliation_required")
+            )
+        {
+            return Err(
+                "accept Proposal confirmed response is missing confirmed effect/projection truth"
+                    .into(),
+            );
+        }
+        if response.patch_result.is_none() && response.proposal_id.is_none() {
+            return Err(
+                "accept Proposal confirmed response is missing both patch and terminal-owner identity"
+                    .into(),
+            );
+        }
+        if response.status.is_some()
+            || response.reason_code.is_some()
+            || response.dispatch_state.is_some()
+            || response.durable_write_executed.is_some()
+        {
+            return Err(
+                "accept Proposal confirmed response contains deferred-only truth fields".into(),
+            );
+        }
+    } else if response.status.as_deref() != Some("deferred")
+        || response.reason_code.as_deref().is_none()
+        || response.proposal_id.as_deref().is_none()
+        || response.dispatch_state.as_deref().is_none()
+        || response.durable_write_executed != Some(false)
+    {
+        return Err(
+            "accept Proposal non-success response is not a complete deferred result".into(),
+        );
+    } else if response.patch_result.is_some()
+        || response.effect_status.is_some()
+        || response.proposal_projection_status.is_some()
+        || response.terminal_owner_transition.is_some()
+        || response.memory_gateway.is_some()
+        || response.memory_lifecycle.is_some()
+        || response.memory_persistence.is_some()
+        || response.artifact_materialization.is_some()
+        || response.blocked_action.is_some()
+        || response.can_continue.is_some()
+        || !response.main_chat_task_sync.is_empty()
+    {
+        return Err(
+            "accept Proposal deferred response contains confirmed-effect truth fields".into(),
+        );
+    }
+    Ok(response)
 }
 
 pub(crate) fn canonical_lifemodel_path(path: &str) -> String {
@@ -4503,6 +4572,77 @@ mod tests {
             serialized["artifactMaterialization"]["contentDigest"],
             serialized["artifactMaterialization"]["observedContentDigest"]
         );
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_models_terminal_owner_memory_confirmation() {
+        let typed = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "effect_status": "confirmed",
+            "proposal_projection_status": "confirmed",
+            "proposalId": "proposal-memory-terminal-owner",
+            "terminalOwnerTransition": {
+                "beforeOwnerRevision": 4,
+                "afterOwnerRevision": 5,
+                "successorEventId": "successor-1"
+            }
+        }))
+        .expect("terminal-owner Memory acceptance must satisfy the shipped IPC contract");
+        let serialized = serde_json::to_value(typed).unwrap();
+        assert_eq!(serialized["proposalId"], "proposal-memory-terminal-owner");
+        assert_eq!(serialized["effectStatus"], "confirmed");
+        assert_eq!(
+            serialized["terminalOwnerTransition"]["afterOwnerRevision"],
+            5
+        );
+        assert!(serialized.get("patchResult").is_none());
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_models_deferred_terminal_owner_response() {
+        let typed = typed_accept_proposal_response(serde_json::json!({
+            "success": false,
+            "status": "deferred",
+            "reasonCode": "origin_turn_open",
+            "proposalId": "proposal-deferred",
+            "dispatchState": "unclaimed",
+            "durableWriteExecuted": false
+        }))
+        .expect("a safely deferred acceptance must satisfy the shipped IPC contract");
+        let serialized = serde_json::to_value(typed).unwrap();
+        assert_eq!(serialized["status"], "deferred");
+        assert_eq!(serialized["reasonCode"], "origin_turn_open");
+        assert_eq!(serialized["durableWriteExecuted"], false);
+        assert!(serialized.get("effectStatus").is_none());
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_rejects_mixed_confirmed_and_deferred_truth() {
+        let confirmed_error = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "effectStatus": "confirmed",
+            "proposalProjectionStatus": "confirmed",
+            "proposalId": "proposal-confirmed",
+            "status": "deferred",
+            "reasonCode": "origin_turn_open",
+            "dispatchState": "unclaimed",
+            "durableWriteExecuted": false
+        }))
+        .expect_err("confirmed responses must not carry deferred-only truth");
+        assert!(confirmed_error.contains("deferred-only truth fields"));
+
+        let deferred_error = typed_accept_proposal_response(serde_json::json!({
+            "success": false,
+            "status": "deferred",
+            "reasonCode": "origin_turn_open",
+            "proposalId": "proposal-deferred",
+            "dispatchState": "unclaimed",
+            "durableWriteExecuted": false,
+            "effectStatus": "confirmed",
+            "proposalProjectionStatus": "confirmed"
+        }))
+        .expect_err("deferred responses must not carry confirmed-effect truth");
+        assert!(deferred_error.contains("confirmed-effect truth fields"));
     }
 
     #[test]

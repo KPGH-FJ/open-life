@@ -231,6 +231,63 @@ describe("workspace conversation journey", () => {
     );
   });
 
+  it("does not let a late cancel failure overwrite the stream terminal state", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    let rejectCancel!: (reason: Error) => void;
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        _options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: "operation-race",
+          task_session_id: "task-race",
+          run_id: "run-race",
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const cancelTask = vi.fn(
+      () =>
+        new Promise<MainChatAgentTaskState>((_resolve, reject) => {
+          rejectCancel = reject;
+        })
+    );
+    const announce = vi.fn();
+    const dataSource = source({ streamTurn, cancelTask });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("继续"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.activeTaskSessionId).toBe("task-race"));
+
+    let cancelPromise!: Promise<void>;
+    act(() => {
+      cancelPromise = result.current.cancel();
+    });
+    await waitFor(() => expect(result.current.turnState.phase).toBe("cancelling"));
+
+    await act(async () => finishTurn(turnResult("completed")));
+    await waitFor(() =>
+      expect(result.current.turnState).toMatchObject({ phase: "resolved", status: "completed" })
+    );
+
+    await act(async () => rejectCancel(new Error("late_cancel_failure")));
+    await act(async () => cancelPromise);
+
+    expect(result.current.turnState).toMatchObject({ phase: "resolved", status: "completed" });
+    expect(announce).not.toHaveBeenCalledWith("取消请求失败；当前不会把任务显示为已取消。");
+  });
+
   it("renames the exact selected conversation and confirms it through a reload", async () => {
     const renamedSession = {
       session_id: "conversation-1",

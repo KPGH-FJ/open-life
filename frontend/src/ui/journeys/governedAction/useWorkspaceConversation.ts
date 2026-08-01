@@ -105,11 +105,13 @@ export function useWorkspaceConversation(
   });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
+  const cancelRequestRef = useRef(0);
   const loadedRef = useRef(false);
 
   useEffect(() => {
     requestRef.current += 1;
     operationRef.current += 1;
+    cancelRequestRef.current += 1;
     loadedRef.current = false;
     setSessions([]);
     setSelectedSessionId(null);
@@ -124,6 +126,7 @@ export function useWorkspaceConversation(
     return () => {
       requestRef.current += 1;
       operationRef.current += 1;
+      cancelRequestRef.current += 1;
       loadedRef.current = false;
     };
   }, [dataSource]);
@@ -257,6 +260,7 @@ export function useWorkspaceConversation(
       }
       const text = draft.trim();
       const operationId = ++operationRef.current;
+      cancelRequestRef.current += 1;
       let sessionId = selectedSessionId;
       let sessionCreated = false;
       try {
@@ -311,6 +315,7 @@ export function useWorkspaceConversation(
           }
         );
         if (operationId !== operationRef.current) return;
+        cancelRequestRef.current += 1;
         const status = resolvedTurnStatus(result.status ?? result.turn_terminal?.status);
         setActiveTaskSessionId(result.task_session_id);
         setTurnState({ phase: "refreshing", sessionId, status });
@@ -339,6 +344,7 @@ export function useWorkspaceConversation(
         announce(turnAnnouncement(status));
       } catch (error) {
         if (operationId !== operationRef.current) return;
+        cancelRequestRef.current += 1;
         setTurnState({
           phase: "failed",
           stage: sessionCreated || selectedSessionId ? "send" : "create",
@@ -368,11 +374,13 @@ export function useWorkspaceConversation(
       return;
     }
     const { sessionId, taskSessionId } = turnState;
+    const cancelRequestId = ++cancelRequestRef.current;
     setTurnState({ phase: "cancelling", sessionId, taskSessionId });
     announce("正在请求取消；只有后端终态返回后才会显示已取消。");
     try {
       await dataSource.cancelTask(taskSessionId);
     } catch (error) {
+      if (cancelRequestId !== cancelRequestRef.current) return;
       setTurnState({
         phase: "streaming",
         sessionId,

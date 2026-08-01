@@ -4493,11 +4493,13 @@ export interface ArtifactMaterializationReceipt {
   status: "confirmed";
 }
 
-export interface AcceptProposalResult {
-  success: boolean;
-  patchResult: PatchApplyResult;
+export interface ConfirmedAcceptProposalResult {
+  success: true;
+  patchResult?: PatchApplyResult;
   effectStatus: "confirmed";
   proposalProjectionStatus: "confirmed" | "reconciliation_required";
+  proposalId?: string;
+  terminalOwnerTransition?: unknown;
   warnings: string[];
   mainChatTaskSync?: unknown[];
   memoryGateway?: unknown;
@@ -4516,6 +4518,18 @@ export interface AcceptProposalResult {
   blockedAction?: unknown;
   canContinue?: boolean;
 }
+
+export interface DeferredAcceptProposalResult {
+  success: false;
+  status: "deferred";
+  reasonCode: string;
+  proposalId: string;
+  dispatchState: string;
+  durableWriteExecuted: false;
+  warnings: string[];
+}
+
+export type AcceptProposalResult = ConfirmedAcceptProposalResult | DeferredAcceptProposalResult;
 
 export async function acceptProposal(proposalId: string): Promise<AcceptProposalResult> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });

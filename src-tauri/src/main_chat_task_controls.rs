@@ -644,11 +644,16 @@ async fn build_main_chat_agent_task_detail(
     .await?;
     let projected_retry_target_action_id =
         retry_target_action_id_for_task(state, &session, &actions, &continuity_diagnostics).await;
+    let provider_consent_ready_for_resume =
+        main_chat_provider_consent_ready_for_resume(state, &session)
+            .await?
+            .is_some();
     let projected_allowed_controls = allowed_controls_for_task(
         &session,
         &actions,
         &continuity_diagnostics,
         projected_retry_target_action_id.as_deref(),
+        provider_consent_ready_for_resume,
     );
     let projected_next_recommended_control = next_recommended_control_for_task(
         &session,
@@ -1886,6 +1891,7 @@ fn allowed_controls_for_task(
     actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
     diagnostics: &ContinuityDiagnostics,
     retry_target_action_id: Option<&str>,
+    provider_consent_ready_for_resume: bool,
 ) -> Vec<String> {
     let mut controls = vec!["open_trace".to_string(), "refresh_context".to_string()];
     if diagnostics.terminal_no_resume {
@@ -1913,7 +1919,8 @@ fn allowed_controls_for_task(
         ) && actions.iter().any(|action| {
             action.status
                 == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-        }) {
+        }) || provider_consent_ready_for_resume
+        {
             controls.push("resume".into());
         }
     }
@@ -1946,7 +1953,11 @@ fn next_recommended_control_for_task(
         session.status,
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
     ) {
-        return "review_permission".into();
+        return if allowed_controls.iter().any(|control| control == "resume") {
+            "resume".into()
+        } else {
+            "review_permission".into()
+        };
     }
     if matches!(
         session.status,
