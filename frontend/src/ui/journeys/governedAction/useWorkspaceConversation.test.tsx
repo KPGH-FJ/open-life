@@ -38,6 +38,36 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
     createSession: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
+    pickResources: vi.fn(async (importOperationId: string, turnOperationId: string) => ({
+      cancelled: false,
+      receipt: {
+        operationId: importOperationId,
+        messageId: turnOperationId,
+        resources: [
+          {
+            resourceId: "4a006c47-67ee-4421-9f84-736f37926090",
+            bindingId: "binding-1",
+            filename: "notes.md",
+            digest: "resource-digest",
+            byteCount: 1024,
+            chunkCount: 1,
+            reusedExisting: false,
+          },
+        ],
+        committedAt: "2026-08-01T00:00:00Z",
+      },
+    })),
+    detachResource: vi.fn(
+      async (operationId: string, turnOperationId: string, resourceId: string) => ({
+        operationId,
+        messageId: turnOperationId,
+        resourceId,
+        bindingRemoved: true,
+        resourceDeleted: true,
+        eventId: "detach-event-1",
+        committedAt: "2026-08-01T00:00:00Z",
+      })
+    ),
     streamTurn: vi.fn().mockResolvedValue(turnResult("completed")),
     cancelTask: vi.fn().mockResolvedValue({} as MainChatAgentTaskState),
     ...overrides,
@@ -46,6 +76,296 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
 }
 
 describe("workspace conversation journey", () => {
+  it("binds selected resources and the streamed turn to one exact operation", async () => {
+    const pickResources = vi.fn(async (importOperationId: string, turnOperationId: string) => ({
+      cancelled: false,
+      receipt: {
+        operationId: importOperationId,
+        messageId: turnOperationId,
+        resources: [
+          {
+            resourceId: "c4edfb29-972c-46d2-aea7-abf0ea75a40b",
+            bindingId: "binding-exact-turn",
+            filename: "research.md",
+            digest: "digest-exact-turn",
+            byteCount: 4096,
+            chunkCount: 2,
+            reusedExisting: false,
+          },
+        ],
+        committedAt: "2026-08-01T00:00:00Z",
+      },
+    }));
+    const streamTurn = vi.fn(
+      async (
+        sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: options.operationId,
+          run_id: options.operationId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return {
+          ...turnResult("completed"),
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: options.operationId,
+          run_id: options.operationId,
+        };
+      }
+    );
+    const dataSource = source({ pickResources, streamTurn });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () => expect(await result.current.attachResources()).toBe(true));
+    const exactTurnOperationId = result.current.pendingResourceTurnOperationId;
+    expect(exactTurnOperationId).toEqual(expect.any(String));
+    expect(result.current.pendingResources).toHaveLength(1);
+    expect(pickResources).toHaveBeenCalledWith(expect.any(String), exactTurnOperationId);
+
+    act(() => result.current.setDraft("请总结附件并给出来源"));
+    await act(async () => result.current.send());
+
+    expect(streamTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      expect.any(Array),
+      { operationId: exactTurnOperationId },
+      expect.any(Object)
+    );
+    expect(result.current.pendingResources).toEqual([]);
+    expect(result.current.pendingResourceTurnOperationId).toBeNull();
+  });
+
+  it("rejects an import receipt bound to a different turn", async () => {
+    const dataSource = source({
+      pickResources: vi.fn(async (importOperationId: string) => ({
+        cancelled: false,
+        receipt: {
+          operationId: importOperationId,
+          messageId: "foreign-turn",
+          resources: [
+            {
+              resourceId: "227d17ec-6eb8-4a92-bc8c-77093578f77d",
+              bindingId: "foreign-binding",
+              filename: "wrong.md",
+              digest: "foreign-digest",
+              byteCount: 128,
+              chunkCount: 1,
+              reusedExisting: false,
+            },
+          ],
+          committedAt: "2026-08-01T00:00:00Z",
+        },
+      })),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () => expect(await result.current.attachResources()).toBe(false));
+
+    expect(result.current.pendingResources).toEqual([]);
+    expect(result.current.resourceMutation).toMatchObject({
+      phase: "failed",
+      action: "import",
+      reason: "resource_import_identity_mismatch",
+    });
+  });
+
+  it("keeps a resource bound when detach is not confirmed by the backend", async () => {
+    const detachResource = vi.fn(async () => ({
+      operationId: "wrong-operation",
+      messageId: "wrong-turn",
+      resourceId: "wrong-resource",
+      bindingRemoved: false,
+      resourceDeleted: false,
+      eventId: "wrong-event",
+      committedAt: "2026-08-01T00:00:00Z",
+    }));
+    const dataSource = source({ detachResource });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+    const resourceId = result.current.pendingResources[0].resourceId;
+
+    await act(async () => expect(await result.current.detachResource(resourceId)).toBe(false));
+
+    expect(result.current.pendingResources).toHaveLength(1);
+    expect(result.current.resourceMutation).toMatchObject({
+      phase: "failed",
+      action: "detach",
+      reason: "resource_detach_identity_mismatch",
+    });
+  });
+
+  it("retains the selected resource and draft when streaming fails before task start", async () => {
+    const dataSource = source({
+      streamTurn: vi.fn().mockRejectedValue(new Error("stream_start_failed")),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+    act(() => result.current.setDraft("请读取这个文件"));
+
+    await act(async () => result.current.send());
+
+    expect(result.current.turnState).toMatchObject({
+      phase: "failed",
+      stage: "send",
+      reason: "stream_start_failed",
+    });
+    expect(result.current.draft).toBe("请读取这个文件");
+    expect(result.current.pendingResources).toHaveLength(1);
+  });
+
+  it("fails closed when an attachment turn returns a foreign terminal identity", async () => {
+    const dataSource = source({
+      streamTurn: vi.fn().mockResolvedValue({
+        ...turnResult("completed"),
+        session_id: "conversation-1",
+        operation_id: "foreign-operation",
+        task_session_id: "foreign-task",
+      }),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+    act(() => result.current.setDraft("请读取这个文件"));
+
+    await act(async () => result.current.send());
+
+    expect(result.current.turnState).toMatchObject({
+      phase: "failed",
+      stage: "send",
+      reason: "resource_turn_terminal_identity_mismatch",
+    });
+    expect(result.current.pendingResources).toHaveLength(1);
+  });
+
+  it("fails closed when an attachment stream starts with a foreign task identity", async () => {
+    const streamTurn = vi.fn(
+      async (
+        sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: "foreign-task",
+          run_id: "foreign-run",
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return {
+          ...turnResult("completed"),
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: options.operationId,
+          run_id: options.operationId,
+        };
+      }
+    );
+    const dataSource = source({ streamTurn });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+    act(() => result.current.setDraft("请读取这个文件"));
+
+    await act(async () => result.current.send());
+
+    expect(result.current.turnState).toMatchObject({
+      phase: "failed",
+      stage: "send",
+      reason: "resource_turn_terminal_identity_mismatch",
+    });
+    expect(result.current.pendingResources).toHaveLength(1);
+  });
+
+  it("ignores a foreign attachment chunk and fails the turn closed", async () => {
+    const streamTurn = vi.fn(
+      async (
+        sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: options.operationId,
+          run_id: options.operationId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        events.onChunk({
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: "foreign-task",
+          run_id: "foreign-run",
+          chunk: "不应显示的内容",
+        });
+        return {
+          ...turnResult("completed"),
+          session_id: sessionId,
+          operation_id: options.operationId,
+          task_session_id: options.operationId,
+          run_id: options.operationId,
+        };
+      }
+    );
+    const dataSource = source({ streamTurn });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+    act(() => result.current.setDraft("请读取这个文件"));
+
+    await act(async () => result.current.send());
+
+    expect(result.current.streamingReply).toBe("");
+    expect(result.current.turnState).toMatchObject({
+      phase: "failed",
+      stage: "send",
+      reason: "resource_turn_terminal_identity_mismatch",
+    });
+  });
+
+  it("does not switch conversations while a resource is bound to the pending turn", async () => {
+    const announce = vi.fn();
+    const dataSource = source();
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+
+    act(() => result.current.startNewConversation());
+
+    expect(result.current.selectedSessionId).toBe("conversation-1");
+    expect(announce).toHaveBeenCalledWith("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
+  });
+
   it("loads the exact selected session and its persisted history", async () => {
     const dataSource = source();
     const { result } = renderHook(() =>
@@ -312,6 +632,21 @@ describe("workspace conversation journey", () => {
     expect(dataSource.renameSession).toHaveBeenCalledWith("conversation-1", "新的 名称");
     expect(listSessions).toHaveBeenCalledTimes(2);
     expect(result.current.sessionMutation.phase).toBe("idle");
+  });
+
+  it("does not rename or delete a conversation while a resource is bound to the pending turn", async () => {
+    const dataSource = source();
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await act(async () => result.current.attachResources());
+
+    await act(async () => expect(await result.current.renameSelected("新名称")).toBe(false));
+    await act(async () => expect(await result.current.deleteSelected()).toBe(false));
+
+    expect(dataSource.renameSession).not.toHaveBeenCalled();
+    expect(dataSource.deleteSession).not.toHaveBeenCalled();
   });
 
   it("deletes only after the explicit controller action and re-reads the remaining sessions", async () => {

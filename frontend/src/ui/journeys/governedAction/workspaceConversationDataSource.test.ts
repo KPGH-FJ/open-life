@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   unlisten: vi.fn(),
   startStreamMessage: vi.fn(),
+  pickAndImportResources: vi.fn(),
+  detachResourceFromTurn: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -22,6 +24,8 @@ vi.mock("@/tauri", () => ({
   listChatSessions: vi.fn(),
   renameChatSession: vi.fn(),
   startStreamMessage: mocks.startStreamMessage,
+  pickAndImportResources: mocks.pickAndImportResources,
+  detachResourceFromTurn: mocks.detachResourceFromTurn,
 }));
 
 import { tauriWorkspaceConversationDataSource } from "./workspaceConversationDataSource";
@@ -31,6 +35,19 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.listeners.clear();
     mocks.unlisten.mockClear();
     mocks.startStreamMessage.mockReset();
+    mocks.pickAndImportResources.mockReset();
+    mocks.detachResourceFromTurn.mockReset();
+  });
+
+  it("forwards resource import and detach through the exact Tauri bridge", async () => {
+    mocks.pickAndImportResources.mockResolvedValue({ cancelled: true, receipt: null });
+    mocks.detachResourceFromTurn.mockResolvedValue({ bindingRemoved: true });
+
+    await tauriWorkspaceConversationDataSource.pickResources("import-1", "turn-1");
+    await tauriWorkspaceConversationDataSource.detachResource("detach-1", "turn-1", "resource-1");
+
+    expect(mocks.pickAndImportResources).toHaveBeenCalledWith("import-1", "turn-1");
+    expect(mocks.detachResourceFromTurn).toHaveBeenCalledWith("detach-1", "turn-1", "resource-1");
   });
 
   it("forwards only events bound to the exact conversation and operation", async () => {

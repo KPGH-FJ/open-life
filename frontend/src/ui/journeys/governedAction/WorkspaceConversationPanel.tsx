@@ -1,4 +1,13 @@
-import { MessageSquarePlus, Pencil, RefreshCw, Send, Square, Trash2 } from "lucide-react";
+import {
+  FilePlus2,
+  MessageSquarePlus,
+  Pencil,
+  RefreshCw,
+  Send,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useState } from "react";
 import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
@@ -59,6 +68,27 @@ function turnFeedback(controller: WorkspaceConversationController) {
   ) : null;
 }
 
+function resourceFailureText(code: string): string {
+  if (code.includes("file_count_exceeded")) return "本轮最多只能读取 5 个文件。";
+  if (code.includes("bytes_exceeded")) return "所选文件超过了当前允许的大小。";
+  if (code.includes("symlink") || code.includes("not_regular_file")) {
+    return "只能读取你直接选择的普通文件，不能读取符号链接或目录。";
+  }
+  if (
+    code.includes("unsupported") ||
+    code.includes("mime") ||
+    code.includes("corrupt") ||
+    code.includes("extension")
+  ) {
+    return "文件格式不受支持、内容损坏，或内容与扩展名不一致。";
+  }
+  if (code.includes("identity_mismatch") || code.includes("duplicate_receipt")) {
+    return "后端返回的文件凭据与当前回合不一致；为避免引用错文件，本轮没有接受该结果。";
+  }
+  if (code.includes("cancel")) return "文件读取已取消，没有把它显示为成功。";
+  return `文件处理失败（${code}）。`;
+}
+
 export function WorkspaceConversationPanel({
   controller,
   disabledReason,
@@ -74,6 +104,11 @@ export function WorkspaceConversationPanel({
     session => session.session_id === controller.selectedSessionId
   );
   const sessionMutationBusy = ["renaming", "deleting"].includes(controller.sessionMutation.phase);
+  const resourceMutationBusy = ["importing", "detaching"].includes(
+    controller.resourceMutation.phase
+  );
+  const pendingResourceCount = controller.pendingResources.length;
+  const conversationSwitchLocked = controller.busy || pendingResourceCount > 0;
   const sessionMutationDisabledReason = sessionMutationBusy
     ? "会话操作正在等待后端保存并重新读取。"
     : undefined;
@@ -91,7 +126,7 @@ export function WorkspaceConversationPanel({
               <span className="ol-visually-hidden">选择对话</span>
               <select
                 value={controller.selectedSessionId ?? ""}
-                disabled={controller.busy}
+                disabled={conversationSwitchLocked}
                 onChange={event => controller.selectSession(event.target.value)}
               >
                 {!controller.selectedSessionId && <option value="">新对话</option>}
@@ -106,7 +141,7 @@ export function WorkspaceConversationPanel({
           <button
             type="button"
             className="ol-workspace-conversation__new"
-            disabled={controller.busy}
+            disabled={conversationSwitchLocked}
             onClick={controller.startNewConversation}
           >
             <MessageSquarePlus size={16} aria-hidden="true" />
@@ -117,7 +152,7 @@ export function WorkspaceConversationPanel({
               <button
                 type="button"
                 className="ol-workspace-conversation__new"
-                disabled={controller.busy}
+                disabled={conversationSwitchLocked}
                 onClick={() => {
                   setRenameDraft(selectedSession.title);
                   setSessionDialog("rename");
@@ -129,7 +164,7 @@ export function WorkspaceConversationPanel({
               <button
                 type="button"
                 className="ol-workspace-conversation__new ol-workspace-conversation__delete"
-                disabled={controller.busy}
+                disabled={conversationSwitchLocked}
                 onClick={() => setSessionDialog("delete")}
               >
                 <Trash2 size={15} aria-hidden="true" />
@@ -185,6 +220,12 @@ export function WorkspaceConversationPanel({
         </FoundationNotice>
       )}
 
+      {controller.resourceMutation.phase === "failed" && (
+        <FoundationNotice title="文件没有完成变更" tone="error" live>
+          <p>{resourceFailureText(controller.resourceMutation.reason)}</p>
+        </FoundationNotice>
+      )}
+
       <form
         className="ol-workspace-composer"
         onSubmit={event => {
@@ -192,6 +233,55 @@ export function WorkspaceConversationPanel({
           void controller.send(disabledReason);
         }}
       >
+        <div className="ol-workspace-resources" aria-labelledby="workspace-resources-title">
+          <div className="ol-workspace-resources__header">
+            <div>
+              <strong id="workspace-resources-title">本轮文件</strong>
+              <span>
+                {pendingResourceCount > 0 ? `已添加 ${pendingResourceCount}/5` : "未添加"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="ol-workspace-resources__add"
+              disabled={
+                controller.loadStatus !== "ready" ||
+                controller.busy ||
+                resourceMutationBusy ||
+                pendingResourceCount >= 5
+              }
+              onClick={() => void controller.attachResources()}
+            >
+              <FilePlus2 size={16} aria-hidden="true" />
+              {controller.resourceMutation.phase === "importing" ? "正在读取" : "添加文件"}
+            </button>
+          </div>
+          {pendingResourceCount > 0 ? (
+            <ul className="ol-workspace-resources__list" aria-label="下一次发送包含的文件">
+              {controller.pendingResources.map(resource => (
+                <li key={resource.resourceId}>
+                  <div>
+                    <strong>{resource.filename}</strong>
+                    <span>{Math.max(1, Math.ceil(resource.byteCount / 1024))} KB</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`移除 ${resource.filename}`}
+                    disabled={controller.busy || resourceMutationBusy}
+                    onClick={() => void controller.detachResource(resource.resourceId)}
+                  >
+                    <X size={15} aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>
+              只读取你通过原生选择器明确选中的文件；内容按当前 Provider
+              和已生效隐私许可处理，未授权外传不会执行。
+            </p>
+          )}
+        </div>
         <label htmlFor="workspace-composer-input">消息</label>
         <textarea
           id="workspace-composer-input"

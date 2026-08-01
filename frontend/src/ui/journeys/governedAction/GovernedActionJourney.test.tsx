@@ -287,6 +287,39 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
+  it("shows only backend-confirmed resources and removes them through the exact binding", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const pickResources = vi.spyOn(dataSource, "pickResources");
+    const detachResource = vi.spyOn(dataSource, "detachResource");
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "添加文件" }));
+
+    expect(await screen.findByText("访谈记录.md")).toBeInTheDocument();
+    expect(screen.getByText("已添加 1/5")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新对话" })).toBeDisabled();
+    expect(pickResources).toHaveBeenCalledWith(expect.any(String), expect.any(String));
+
+    await user.click(screen.getByRole("button", { name: "移除 访谈记录.md" }));
+
+    await waitFor(() => expect(screen.queryByText("访谈记录.md")).not.toBeInTheDocument());
+    expect(detachResource).toHaveBeenCalledWith(
+      expect.any(String),
+      pickResources.mock.calls[0][1],
+      "4a006c47-67ee-4421-9f84-736f37926090"
+    );
+    expect(screen.getByText("未添加")).toBeInTheDocument();
+  });
+
   it("keeps durable approval separate from refreshed application", async () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = await fixture.load();

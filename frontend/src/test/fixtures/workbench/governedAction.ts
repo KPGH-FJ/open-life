@@ -861,6 +861,39 @@ export function workbenchJourneyFixtureDataSource(
       sessions = sessions.filter(session => session.session_id !== sessionId);
       histories.delete(sessionId);
     },
+    async pickResources(importOperationId, turnOperationId) {
+      return {
+        cancelled: false,
+        receipt: {
+          operationId: importOperationId,
+          messageId: turnOperationId,
+          resources: [
+            {
+              resourceId: "4a006c47-67ee-4421-9f84-736f37926090",
+              bindingId: "fixture-resource-binding",
+              filename: "访谈记录.md",
+              digest: "fixture-resource-digest",
+              byteCount: 2048,
+              chunkCount: 1,
+              reusedExisting: false,
+              eventId: "fixture-resource-event",
+            },
+          ],
+          committedAt: generatedAt,
+        },
+      };
+    },
+    async detachResource(operationId, turnOperationId, resourceId) {
+      return {
+        operationId,
+        messageId: turnOperationId,
+        resourceId,
+        bindingRemoved: true,
+        resourceDeleted: true,
+        eventId: "fixture-resource-detach-event",
+        committedAt: generatedAt,
+      };
+    },
     async streamTurn(sessionId, messages, options, events) {
       if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
       if (!histories.has(sessionId)) throw new Error("fixture_conversation_session_missing");

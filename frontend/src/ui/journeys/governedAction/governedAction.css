@@ -350,6 +350,109 @@
   background: var(--ol-surface);
 }
 
+.ol-workspace-resources {
+  display: grid;
+  gap: var(--ol-space-2);
+  padding-bottom: var(--ol-space-2);
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-workspace-resources__header,
+.ol-workspace-resources__header > div,
+.ol-workspace-resources__list li,
+.ol-workspace-resources__list li > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.ol-workspace-resources__header {
+  justify-content: space-between;
+  gap: var(--ol-space-3);
+}
+
+.ol-workspace-resources__header > div,
+.ol-workspace-resources__list li > div {
+  gap: var(--ol-space-2);
+}
+
+.ol-workspace-resources__header strong,
+.ol-workspace-resources__list strong {
+  overflow: hidden;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ol-workspace-resources__header span,
+.ol-workspace-resources__list span,
+.ol-workspace-resources > p {
+  margin: 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-workspace-resources__add,
+.ol-workspace-resources__list button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ol-space-2);
+  padding: 0 var(--ol-space-2);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface);
+  color: var(--ol-ink-secondary);
+  font: inherit;
+  font-size: var(--ol-type-caption);
+  cursor: pointer;
+}
+
+.ol-workspace-resources__add:not(:disabled):hover,
+.ol-workspace-resources__list button:not(:disabled):hover {
+  border-color: var(--ol-focus);
+  color: var(--ol-ink);
+}
+
+.ol-workspace-resources__add:disabled,
+.ol-workspace-resources__list button:disabled {
+  color: var(--ol-control-boundary);
+  cursor: default;
+}
+
+.ol-workspace-resources__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ol-workspace-resources__list li {
+  max-width: min(100%, 340px);
+  gap: var(--ol-space-2);
+  padding: var(--ol-space-1) var(--ol-space-1) var(--ol-space-1) var(--ol-space-2);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface-subtle);
+}
+
+.ol-workspace-resources__list li > div {
+  overflow: hidden;
+}
+
+.ol-workspace-resources__list button {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .ol-workspace-composer > label {
   color: var(--ol-ink-muted);
   font-size: var(--ol-type-caption);
