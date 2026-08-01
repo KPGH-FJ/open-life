@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatSession,
+  ImportedResourceReceipt,
   MainChatTurnStatus,
   ProductAction,
   StreamMessageChunkPayload,
@@ -18,6 +19,12 @@ export type WorkspaceSessionMutationState =
   | { phase: "renaming"; sessionId: string }
   | { phase: "deleting"; sessionId: string }
   | { phase: "failed"; action: "rename" | "delete"; reason: string };
+
+export type WorkspaceResourceMutationState =
+  | { phase: "idle" }
+  | { phase: "importing"; importOperationId: string; turnOperationId: string }
+  | { phase: "detaching"; resourceId: string; turnOperationId: string }
+  | { phase: "failed"; action: "import" | "detach"; reason: string };
 
 export type WorkspaceTurnState =
   | { phase: "idle" }
@@ -73,12 +80,17 @@ export type WorkspaceConversationController = {
   streamingReply: string;
   activeTaskSessionId: string | null;
   sessionMutation: WorkspaceSessionMutationState;
+  pendingResources: ImportedResourceReceipt[];
+  pendingResourceTurnOperationId: string | null;
+  resourceMutation: WorkspaceResourceMutationState;
   busy: boolean;
   ensureLoaded: () => void;
   reload: () => Promise<boolean>;
   selectSession: (sessionId: string) => void;
   startNewConversation: () => void;
   setDraft: (value: string) => void;
+  attachResources: () => Promise<boolean>;
+  detachResource: (resourceId: string) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
   cancel: () => Promise<void>;
@@ -103,6 +115,13 @@ export function useWorkspaceConversation(
   const [sessionMutation, setSessionMutation] = useState<WorkspaceSessionMutationState>({
     phase: "idle",
   });
+  const [pendingResources, setPendingResources] = useState<ImportedResourceReceipt[]>([]);
+  const [pendingResourceTurnOperationId, setPendingResourceTurnOperationId] = useState<
+    string | null
+  >(null);
+  const [resourceMutation, setResourceMutation] = useState<WorkspaceResourceMutationState>({
+    phase: "idle",
+  });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
   const cancelRequestRef = useRef(0);
@@ -123,6 +142,9 @@ export function useWorkspaceConversation(
     setStreamingReply("");
     setActiveTaskSessionId(null);
     setSessionMutation({ phase: "idle" });
+    setPendingResources([]);
+    setPendingResourceTurnOperationId(null);
+    setResourceMutation({ phase: "idle" });
     return () => {
       requestRef.current += 1;
       operationRef.current += 1;
@@ -184,11 +206,17 @@ export function useWorkspaceConversation(
   const busy =
     ["creating_session", "sending", "streaming", "cancelling", "refreshing"].includes(
       turnState.phase
-    ) || ["renaming", "deleting"].includes(sessionMutation.phase);
+    ) ||
+    ["renaming", "deleting"].includes(sessionMutation.phase) ||
+    ["importing", "detaching"].includes(resourceMutation.phase);
 
   const selectSession = useCallback(
     (sessionId: string) => {
       if (!sessionId || sessionId === selectedSessionId || busy) return;
+      if (pendingResources.length > 0) {
+        announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
+        return;
+      }
       const requestId = ++requestRef.current;
       setLoadStatus("loading");
       setLoadError(null);
@@ -206,11 +234,15 @@ export function useWorkspaceConversation(
           setMessages([]);
         });
     },
-    [busy, loadHistory, selectedSessionId]
+    [announce, busy, loadHistory, pendingResources.length, selectedSessionId]
   );
 
   const startNewConversation = useCallback(() => {
     if (busy) return;
+    if (pendingResources.length > 0) {
+      announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
+      return;
+    }
     requestRef.current += 1;
     setSelectedSessionId(null);
     setMessages([]);
@@ -221,7 +253,89 @@ export function useWorkspaceConversation(
     setStreamingReply("");
     setActiveTaskSessionId(null);
     announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
-  }, [announce, busy]);
+  }, [announce, busy, pendingResources.length]);
+
+  const attachResources = useCallback(async (): Promise<boolean> => {
+    if (!dataSource || loadStatus !== "ready" || busy) {
+      announce("当前不能添加文件；请等待会话和正在进行的操作完成。");
+      return false;
+    }
+    if (pendingResources.length >= 5) {
+      announce("本轮最多添加 5 个文件。");
+      return false;
+    }
+
+    const turnOperationId = pendingResourceTurnOperationId ?? crypto.randomUUID();
+    const importOperationId = crypto.randomUUID();
+    setPendingResourceTurnOperationId(turnOperationId);
+    setResourceMutation({ phase: "importing", importOperationId, turnOperationId });
+    try {
+      const result = await dataSource.pickResources(importOperationId, turnOperationId);
+      if (result.cancelled) {
+        if (pendingResources.length === 0) setPendingResourceTurnOperationId(null);
+        setResourceMutation({ phase: "idle" });
+        announce("没有选择文件；当前回合没有新增资源。");
+        return false;
+      }
+      const receipt = result.receipt;
+      if (
+        !receipt ||
+        receipt.operationId !== importOperationId ||
+        receipt.messageId !== turnOperationId ||
+        receipt.resources.length === 0
+      ) {
+        throw new Error("resource_import_identity_mismatch");
+      }
+      const ids = new Set(pendingResources.map(resource => resource.resourceId));
+      if (receipt.resources.some(resource => ids.has(resource.resourceId))) {
+        throw new Error("resource_import_duplicate_receipt");
+      }
+      setPendingResources(current => [...current, ...receipt.resources]);
+      setResourceMutation({ phase: "idle" });
+      announce(`已添加 ${receipt.resources.length} 个文件；它们只绑定到下一次发送。`);
+      return true;
+    } catch (error) {
+      if (pendingResources.length === 0) setPendingResourceTurnOperationId(null);
+      setResourceMutation({ phase: "failed", action: "import", reason: errorText(error) });
+      announce("文件没有完成导入；当前不会把它显示为已添加。");
+      return false;
+    }
+  }, [announce, busy, dataSource, loadStatus, pendingResourceTurnOperationId, pendingResources]);
+
+  const detachResource = useCallback(
+    async (resourceId: string): Promise<boolean> => {
+      const resource = pendingResources.find(item => item.resourceId === resourceId);
+      if (!dataSource || !resource || !pendingResourceTurnOperationId || busy) {
+        announce("当前不能移除这个文件。");
+        return false;
+      }
+      const operationId = crypto.randomUUID();
+      const turnOperationId = pendingResourceTurnOperationId;
+      setResourceMutation({ phase: "detaching", resourceId, turnOperationId });
+      try {
+        const receipt = await dataSource.detachResource(operationId, turnOperationId, resourceId);
+        if (
+          receipt.operationId !== operationId ||
+          receipt.messageId !== turnOperationId ||
+          receipt.resourceId !== resourceId ||
+          !receipt.bindingRemoved
+        ) {
+          throw new Error("resource_detach_identity_mismatch");
+        }
+        const remaining = pendingResources.filter(item => item.resourceId !== resourceId);
+        setPendingResources(remaining);
+        if (remaining.length === 0) setPendingResourceTurnOperationId(null);
+        setResourceMutation({ phase: "idle" });
+        announce(`已移除 ${resource.filename}；下一次发送不会包含它。`);
+        return true;
+      } catch (error) {
+        setResourceMutation({ phase: "failed", action: "detach", reason: errorText(error) });
+        announce("文件移除没有得到后端确认；当前仍按已绑定处理。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, pendingResourceTurnOperationId, pendingResources]
+  );
 
   const sendAction = useCallback(
     (disabledReason?: string): ProductAction => {
@@ -260,9 +374,17 @@ export function useWorkspaceConversation(
       }
       const text = draft.trim();
       const operationId = ++operationRef.current;
+      const turnOperationId =
+        pendingResources.length > 0 ? pendingResourceTurnOperationId : crypto.randomUUID();
+      if (!turnOperationId) {
+        announce("文件已经显示为待发送，但缺少精确回合标识；当前不会发送。");
+        return;
+      }
       cancelRequestRef.current += 1;
       let sessionId = selectedSessionId;
       let sessionCreated = false;
+      let streamStarted = false;
+      let resourceStreamIdentityMismatch = false;
       try {
         if (!sessionId) {
           setTurnState({ phase: "creating_session" });
@@ -296,10 +418,25 @@ export function useWorkspaceConversation(
         const result = await dataSource.streamTurn(
           turnSessionId,
           requestMessages,
-          { operationId: crypto.randomUUID() },
+          { operationId: turnOperationId },
           {
             onStart: (payload: StreamMessageStartPayload) => {
               if (operationId !== operationRef.current) return;
+              if (
+                pendingResources.length > 0 &&
+                (payload.session_id !== turnSessionId ||
+                  payload.operation_id !== turnOperationId ||
+                  payload.task_session_id !== turnOperationId)
+              ) {
+                resourceStreamIdentityMismatch = true;
+                return;
+              }
+              streamStarted = true;
+              if (pendingResources.length > 0) {
+                setPendingResources([]);
+                setPendingResourceTurnOperationId(null);
+                setResourceMutation({ phase: "idle" });
+              }
               setActiveTaskSessionId(payload.task_session_id);
               setTurnState({
                 phase: "streaming",
@@ -310,11 +447,34 @@ export function useWorkspaceConversation(
             },
             onChunk: (payload: StreamMessageChunkPayload) => {
               if (operationId !== operationRef.current) return;
+              if (
+                pendingResources.length > 0 &&
+                (payload.session_id !== turnSessionId ||
+                  payload.operation_id !== turnOperationId ||
+                  payload.task_session_id !== turnOperationId)
+              ) {
+                resourceStreamIdentityMismatch = true;
+                return;
+              }
               setStreamingReply(current => current + payload.chunk);
             },
           }
         );
         if (operationId !== operationRef.current) return;
+        if (
+          pendingResources.length > 0 &&
+          (resourceStreamIdentityMismatch ||
+            result.session_id !== turnSessionId ||
+            result.operation_id !== turnOperationId ||
+            result.task_session_id !== turnOperationId)
+        ) {
+          throw new Error("resource_turn_terminal_identity_mismatch");
+        }
+        if (pendingResources.length > 0) {
+          setPendingResources([]);
+          setPendingResourceTurnOperationId(null);
+          setResourceMutation({ phase: "idle" });
+        }
         cancelRequestRef.current += 1;
         const status = resolvedTurnStatus(result.status ?? result.turn_terminal?.status);
         setActiveTaskSessionId(result.task_session_id);
@@ -345,6 +505,7 @@ export function useWorkspaceConversation(
       } catch (error) {
         if (operationId !== operationRef.current) return;
         cancelRequestRef.current += 1;
+        if (!streamStarted) setDraft(text);
         setTurnState({
           phase: "failed",
           stage: sessionCreated || selectedSessionId ? "send" : "create",
@@ -365,7 +526,17 @@ export function useWorkspaceConversation(
         }
       }
     },
-    [announce, dataSource, draft, messages, onAfterTurn, selectedSessionId, sendAction]
+    [
+      announce,
+      dataSource,
+      draft,
+      messages,
+      onAfterTurn,
+      pendingResourceTurnOperationId,
+      pendingResources,
+      selectedSessionId,
+      sendAction,
+    ]
   );
 
   const cancel = useCallback(async (): Promise<void> => {
@@ -394,7 +565,13 @@ export function useWorkspaceConversation(
   const renameSelected = useCallback(
     async (title: string): Promise<boolean> => {
       const normalizedTitle = title.replace(/\s+/g, " ").trim();
-      if (!dataSource || !selectedSessionId || busy || !normalizedTitle) {
+      if (
+        !dataSource ||
+        !selectedSessionId ||
+        busy ||
+        pendingResources.length > 0 ||
+        !normalizedTitle
+      ) {
         announce("当前不能重命名这段对话。");
         return false;
       }
@@ -413,11 +590,11 @@ export function useWorkspaceConversation(
         return false;
       }
     },
-    [announce, busy, dataSource, reload, selectedSessionId]
+    [announce, busy, dataSource, pendingResources.length, reload, selectedSessionId]
   );
 
   const deleteSelected = useCallback(async (): Promise<boolean> => {
-    if (!dataSource || !selectedSessionId || busy) {
+    if (!dataSource || !selectedSessionId || busy || pendingResources.length > 0) {
       announce("当前不能删除这段对话。");
       return false;
     }
@@ -436,7 +613,7 @@ export function useWorkspaceConversation(
       announce("对话删除失败；当前仍按未删除处理。");
       return false;
     }
-  }, [announce, busy, dataSource, reload, selectedSessionId]);
+  }, [announce, busy, dataSource, pendingResources.length, reload, selectedSessionId]);
 
   return useMemo(
     () => ({
@@ -450,12 +627,17 @@ export function useWorkspaceConversation(
       streamingReply,
       activeTaskSessionId,
       sessionMutation,
+      pendingResources,
+      pendingResourceTurnOperationId,
+      resourceMutation,
       busy,
       ensureLoaded,
       reload,
       selectSession,
       startNewConversation,
       setDraft,
+      attachResources,
+      detachResource,
       sendAction,
       send,
       cancel,
@@ -466,13 +648,18 @@ export function useWorkspaceConversation(
       busy,
       cancel,
       deleteSelected,
+      detachResource,
       draft,
       ensureLoaded,
+      attachResources,
       loadError,
       loadStatus,
       messages,
+      pendingResources,
+      pendingResourceTurnOperationId,
       renameSelected,
       reload,
+      resourceMutation,
       selectSession,
       selectedSessionId,
       sessionMutation,

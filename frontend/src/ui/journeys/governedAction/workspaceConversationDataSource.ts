@@ -3,11 +3,15 @@ import {
   cancelMainChatAgentTask,
   createChatSession,
   deleteChatSession,
+  detachResourceFromTurn,
   getChatHistory,
   listChatSessions,
+  pickAndImportResources,
   renameChatSession,
   startStreamMessage,
   type ChatSession,
+  type ResourceDetachReceipt,
+  type ResourceImportSelectionResult,
   type MainChatAgentTaskState,
   type MainChatMessageOptions,
   type StreamMessageChunkPayload,
@@ -27,6 +31,15 @@ export interface WorkspaceConversationDataSource {
   createSession(sessionId: string, title: string): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
+  pickResources(
+    importOperationId: string,
+    turnOperationId: string
+  ): Promise<ResourceImportSelectionResult>;
+  detachResource(
+    operationId: string,
+    turnOperationId: string,
+    resourceId: string
+  ): Promise<ResourceDetachReceipt>;
   streamTurn(
     sessionId: string,
     messages: ChatMessage[],
@@ -78,6 +91,8 @@ export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSour
   createSession: createChatSession,
   renameSession: renameChatSession,
   deleteSession: deleteChatSession,
+  pickResources: pickAndImportResources,
+  detachResource: detachResourceFromTurn,
   streamTurn,
   cancelTask: cancelMainChatAgentTask,
 };
