@@ -1,9 +1,6 @@
 use std::sync::Arc;
 use tauri::State;
 
-use crate::main_chat_react_tool_selection::{
-    build_main_chat_react_action_plan, resolve_main_chat_mcp_read_target,
-};
 use crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope;
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, finalize_main_chat_task_failure_after_durable_receipt,
@@ -648,12 +645,32 @@ async fn build_main_chat_agent_task_detail(
         main_chat_provider_consent_ready_for_resume(state, &session)
             .await?
             .is_some();
+    let mut tool_permission_ready_for_resume = false;
+    for action in actions.iter().filter(|action| {
+        action.status
+            == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+    }) {
+        let action_permission =
+            main_chat_pending_action_permission_ready_for_resume(state, &session, action).await?;
+        if action_permission.is_none() {
+            continue;
+        }
+        let has_network_consent = main_chat_action_network_consent_proposal_id(action).is_some();
+        if !has_network_consent
+            || main_chat_tool_network_consent_ready_for_resume(state, &session, action)
+                .await?
+                .is_some()
+        {
+            tool_permission_ready_for_resume = true;
+            break;
+        }
+    }
     let projected_allowed_controls = allowed_controls_for_task(
         &session,
-        &actions,
         &continuity_diagnostics,
         projected_retry_target_action_id.as_deref(),
         provider_consent_ready_for_resume,
+        tool_permission_ready_for_resume,
     );
     let projected_next_recommended_control = next_recommended_control_for_task(
         &session,
@@ -1888,10 +1905,10 @@ fn stale_state_for_detail(detail: &TaskDetail) -> String {
 
 fn allowed_controls_for_task(
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
-    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
     diagnostics: &ContinuityDiagnostics,
     retry_target_action_id: Option<&str>,
     provider_consent_ready_for_resume: bool,
+    tool_permission_ready_for_resume: bool,
 ) -> Vec<String> {
     let mut controls = vec!["open_trace".to_string(), "refresh_context".to_string()];
     if diagnostics.terminal_no_resume {
@@ -1916,10 +1933,8 @@ fn allowed_controls_for_task(
             openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
                 | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
                 | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
-        ) && actions.iter().any(|action| {
-            action.status
-                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-        }) || provider_consent_ready_for_resume
+        ) && tool_permission_ready_for_resume
+            || provider_consent_ready_for_resume
         {
             controls.push("resume".into());
         }
@@ -2918,17 +2933,41 @@ pub(crate) async fn resume_main_chat_agent_task_with_state(
                     )
                     .await?
                 {
-                    let runtime =
-                        crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(state);
-                    Box::pin(runtime.run_replay(
+                    if main_chat_action_network_consent_proposal_id(action_ref).is_some() {
+                        if let Some(network_consent_proposal_id) =
+                            main_chat_tool_network_consent_ready_for_resume(
+                                state,
+                                session_ref,
+                                action_ref,
+                            )
+                            .await?
+                        {
+                            let runtime =
+                                crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(state);
+                            Box::pin(runtime.run_replay(
+                                crate::main_chat_turn_runtime::OpenLifeReplayInput::resume_after_network_consent(
+                                    task_session_id,
+                                    &action_ref.id,
+                                    action_bound_permission,
+                                    network_consent_proposal_id,
+                                ),
+                            ))
+                            .await?;
+                            return load_main_chat_agent_task_state(task_session_id, state).await;
+                        }
+                    } else {
+                        let runtime =
+                            crate::main_chat_turn_runtime::OpenLifeTurnRuntime::new(state);
+                        Box::pin(runtime.run_replay(
                             crate::main_chat_turn_runtime::OpenLifeReplayInput::resume_after_permission(
                                 task_session_id,
                                 &action_ref.id,
                                 action_bound_permission,
                             ),
                         ))
-                    .await?;
-                    return load_main_chat_agent_task_state(task_session_id, state).await;
+                        .await?;
+                        return load_main_chat_agent_task_state(task_session_id, state).await;
+                    }
                 }
             }
             if let Some(proposal_id) =
@@ -2981,6 +3020,138 @@ pub(crate) async fn resume_main_chat_agent_task_with_state(
     )
     .await;
     Err("resume Main Chat task rejected: resume_checkpoint_execution_unavailable".into())
+}
+
+fn main_chat_action_network_consent_proposal_id(
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+) -> Option<String> {
+    action
+        .observation_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("networkConsentProposalId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+async fn main_chat_tool_network_consent_ready_for_resume(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+) -> Result<Option<String>, String> {
+    use openlife_core::agent::{ProposalSource, ProposalStatus, ProposalType};
+
+    let Some(proposal_id) = main_chat_action_network_consent_proposal_id(action) else {
+        return Ok(None);
+    };
+    let Some(envelope) =
+        crate::main_chat_turn_runtime::canonical_openlife_replay_envelope(session, action)
+    else {
+        return Ok(None);
+    };
+    let (proposal, origin, relation_kind, dispatch_state) = {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let Some(proposal) = proposal_store
+            .get_proposal(&proposal_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let Some(origin) = proposal_store
+            .terminal_owner_origin_binding(&proposal_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let relation_kind = proposal_store
+            .terminal_relation_projection_proof(&proposal_id)
+            .map_err(|error| error.to_string())?
+            .map(|proof| proof.relation_kind());
+        let dispatch_state = proposal_store
+            .dispatch_state(&proposal_id)
+            .map_err(|error| error.to_string())?;
+        (proposal, origin, relation_kind, dispatch_state)
+    };
+    let canonical_scope = proposal.after.get("canonical_scope");
+    let scope_string = |key: &str| {
+        canonical_scope
+            .and_then(|scope| scope.get(key))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| proposal.after.get(key).and_then(serde_json::Value::as_str))
+    };
+    let blocked_action = proposal.after.get("blocked_action");
+    let blocked_string = |key: &str| {
+        blocked_action
+            .and_then(|blocked| blocked.get(key))
+            .and_then(serde_json::Value::as_str)
+    };
+    let Some(permission_scope) = scope_string("tool_name") else {
+        return Ok(None);
+    };
+    if proposal.status != ProposalStatus::Accepted
+        || proposal.proposal_type != ProposalType::ToolPermission
+        || proposal.source != ProposalSource::ChatConversation
+        || dispatch_state.as_deref() != Some("confirmed")
+        || relation_kind
+            != Some(openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite)
+        || proposal
+            .after
+            .get("permission_scope_kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("network_policy")
+        || proposal
+            .after
+            .get("permission")
+            .and_then(serde_json::Value::as_str)
+            != Some("allow_once")
+        || scope_string("source") != Some("network_policy")
+        || scope_string("risk_level") != Some("medium")
+        || scope_string("action_type") != Some("network")
+        || scope_string("network_capability") != Some(envelope.requested_target.as_str())
+        || blocked_string("target") != Some(envelope.requested_target.as_str())
+        || origin.task_session_id() != session.id
+        || origin.run_id() != envelope.run_id
+    {
+        return Ok(None);
+    }
+    let epoch_matches = {
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+            .lock()
+            .await;
+        event_store
+            .terminal_owner_epoch(&session.id)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|epoch| {
+                epoch.state() == crate::main_chat_event_stream::TerminalOwnerSealState::Sealed
+                    && epoch.epoch_id() == origin.epoch_id()
+                    && epoch.generation() == origin.epoch_generation()
+                    && epoch.run_id() == origin.run_id()
+            })
+    };
+    if !epoch_matches {
+        return Ok(None);
+    }
+    let available = state
+        .tool_permission_store
+        .lock()
+        .await
+        .reviewed_network_once_available_for_proposal(
+            &proposal_id,
+            permission_scope,
+            "network_policy",
+            "medium",
+            "network",
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(available.then_some(proposal_id))
 }
 
 async fn main_chat_provider_consent_ready_for_resume(
@@ -3055,6 +3226,37 @@ async fn main_chat_provider_consent_ready_for_resume(
     }
 }
 
+fn current_manifest_scope_for_replay_envelope(
+    registry: &openlife_core::mcp::McpRegistry,
+    envelope: &DurableMainChatReplayExecutionEnvelope,
+) -> Option<(String, String, String, String)> {
+    // The durable replay envelope is the reviewed action authority. Replanning
+    // from the whole user turn is both weaker and incorrect for multi-tool
+    // turns because a single-action planner may select a different sibling
+    // action. Registry drift is still checked against the exact frozen manifest
+    // identity before any replay can be admitted.
+    let manifests = registry
+        .list_manifests()
+        .into_iter()
+        .filter(|manifest| {
+            manifest.id == envelope.manifest_id
+                && manifest.name == envelope.manifest_name
+                && manifest.name == envelope.resolved_target
+                && manifest.source.to_string() == envelope.manifest_source
+                && manifest.execution_contract_digest() == envelope.manifest_contract_digest
+        })
+        .collect::<Vec<_>>();
+    let [manifest] = manifests.as_slice() else {
+        return None;
+    };
+    Some((
+        manifest.name.clone(),
+        openlife_core::agent::action_executor::helpers::canonical_tool_source(manifest),
+        manifest.risk_level.clone(),
+        manifest.action_type.clone(),
+    ))
+}
+
 async fn main_chat_pending_action_permission_ready_for_resume(
     state: &Arc<AppState>,
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
@@ -3086,32 +3288,12 @@ async fn main_chat_pending_action_permission_ready_for_resume(
         | AcceptedToolPermissionScopeLookup::AcceptedInvalid => return Ok(None),
     };
 
-    let plan = match build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)
-    {
-        Ok(plan) if plan.queue_action_type == action.action.action_type => plan,
-        Err(_) => return Ok(None),
-        _ => return Ok(None),
-    };
-
     let (tool_name, source, risk_level, action_type) = {
         let registry = state.mcp_registry.lock().await;
-        let resolution = resolve_main_chat_mcp_read_target(&registry, &plan);
-        if resolution.blocker_reason.is_some() {
-            return Ok(None);
-        }
-        let Some(manifest) = registry.list_manifests().into_iter().find(|manifest| {
-            manifest.id == envelope.manifest_id
-                && manifest.name == resolution.target
-                && manifest.execution_contract_digest() == envelope.manifest_contract_digest
-        }) else {
+        let Some(scope) = current_manifest_scope_for_replay_envelope(&registry, &envelope) else {
             return Ok(None);
         };
-        (
-            manifest.name.clone(),
-            openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest),
-            manifest.risk_level.clone(),
-            manifest.action_type.clone(),
-        )
+        scope
     };
     let scope = &accepted_scope.scope;
     if scope.tool_name != tool_name
@@ -3186,31 +3368,12 @@ pub(crate) async fn main_chat_pending_action_permission_diagnostic_for_test(
         }
         AcceptedToolPermissionScopeLookup::AcceptedValid(scope) => scope,
     };
-    let plan = match build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)
-    {
-        Ok(plan) if plan.queue_action_type == action.action.action_type => plan,
-        Ok(_) => return Ok("current_plan_action_type_mismatch"),
-        Err(_) => return Ok("current_plan_unavailable"),
-    };
     let (tool_name, source, risk_level, action_type) = {
         let registry = state.mcp_registry.lock().await;
-        let resolution = resolve_main_chat_mcp_read_target(&registry, &plan);
-        if resolution.blocker_reason.is_some() {
-            return Ok("current_target_resolution_blocked");
-        }
-        let Some(manifest) = registry.list_manifests().into_iter().find(|manifest| {
-            manifest.id == envelope.manifest_id
-                && manifest.name == resolution.target
-                && manifest.execution_contract_digest() == envelope.manifest_contract_digest
-        }) else {
+        let Some(scope) = current_manifest_scope_for_replay_envelope(&registry, &envelope) else {
             return Ok("current_manifest_identity_mismatch");
         };
-        (
-            manifest.name.clone(),
-            openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest),
-            manifest.risk_level.clone(),
-            manifest.action_type.clone(),
-        )
+        scope
     };
     let scope = &accepted_scope.scope;
     if scope.tool_name != tool_name {

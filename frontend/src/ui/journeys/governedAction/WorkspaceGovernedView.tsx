@@ -99,6 +99,14 @@ export function WorkspaceGovernedView({
   const conversationModel =
     envelope && (envelope.status === "ready" || envelope.status === "empty") ? envelope.data : null;
   const task = model?.activeTask;
+  const taskMatchesSelectedConversation =
+    Boolean(task?.conversationId) &&
+    Boolean(conversation?.selectedSessionId) &&
+    task?.conversationId === conversation?.selectedSessionId;
+  const taskBelongsToAnotherConversation =
+    Boolean(task?.conversationId) &&
+    Boolean(conversation?.selectedSessionId) &&
+    task?.conversationId !== conversation?.selectedSessionId;
   const permissionItem = model?.pendingReviewItems.find(item => item.type === "tool_permission");
   const resumeControl = snapshot ? findExactResumeControl(snapshot) : null;
   const lifecycle = task ? taskLifecyclePresentation(task) : null;
@@ -212,7 +220,9 @@ export function WorkspaceGovernedView({
     <article className="ol-governed-page" data-workspace-task-id={task.canonicalTaskId}>
       <header className="ol-workspace-task-header">
         <div>
-          <span className="ol-governed-kicker">当前任务</span>
+          <span className="ol-governed-kicker">
+            {taskMatchesSelectedConversation ? "当前对话任务" : "全局活动任务"}
+          </span>
           <h2>{task.title}</h2>
         </div>
         {lifecycle && (
@@ -227,6 +237,12 @@ export function WorkspaceGovernedView({
       {envelope.status === "stale" && (
         <FoundationNotice title="工作区状态已陈旧" tone="protection" live>
           <p>刷新成功前，审核与任务恢复都保持关闭。</p>
+        </FoundationNotice>
+      )}
+
+      {taskBelongsToAnotherConversation && (
+        <FoundationNotice title="任务与当前对话不同" tone="neutral">
+          <p>这项活动任务属于另一段对话；下方消息和发送操作仍以当前选中的对话为准。</p>
         </FoundationNotice>
       )}
 

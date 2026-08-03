@@ -719,6 +719,78 @@ fn main_chat_runtime_contract_fails_closed_when_observation_lacks_action_evidenc
 }
 
 #[test]
+fn main_chat_runtime_contract_versions_session_blocker_identity_when_fact_changes() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-blocker-identity-version".into(),
+            user_goal: "Resume a governed tool action, then request provider consent.".into(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: None,
+            context_snapshot_refs: vec![],
+        })
+        .expect("create session");
+
+    let first_session = session_store
+        .set_pending_blockers(
+            &session.id,
+            vec!["provider_network_consent_required".into()],
+        )
+        .expect("record first blocker fact");
+    let first = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session: first_session.clone(),
+        run_identity: None,
+        run: None,
+        provider: None,
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("assemble first blocker state");
+    let repeated = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session: first_session,
+        run_identity: None,
+        run: None,
+        provider: None,
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("repeat unchanged blocker state");
+
+    let second_session = session_store
+        .set_pending_blockers(
+            &session.id,
+            vec!["proposal:00000000-0000-4000-8000-000000000001".into()],
+        )
+        .expect("record successor blocker fact");
+    let second = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session: second_session,
+        run_identity: None,
+        run: None,
+        provider: None,
+        transcript: Vec::new(),
+        actions: Vec::new(),
+        proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("assemble successor blocker state");
+
+    assert_eq!(first.blockers.len(), 1);
+    assert_eq!(second.blockers.len(), 1);
+    assert_eq!(
+        first.blockers[0].blocker_id, repeated.blockers[0].blocker_id,
+        "re-reading one unchanged blocker fact must remain idempotent"
+    );
+    assert_ne!(
+        first.blockers[0].blocker_id, second.blockers[0].blocker_id,
+        "a successor blocker fact must not reuse an immutable blocker.created identity"
+    );
+}
+
+#[test]
 fn main_chat_runtime_contract_does_not_promote_assistant_text_to_runtime_objects() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let session = session_store

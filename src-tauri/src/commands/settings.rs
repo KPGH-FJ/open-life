@@ -42,12 +42,12 @@ use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_mcp_audit_key_material, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, inspect_existing_mcp_audit_keys, inspect_integrity_key_access,
-    stage_config_secrets, IntegrityKeyInspection, KeyringSecretStore,
-    McpAuditKeyHydrationInspection, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
-    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX,
-    TASK_STORE_AUTHORITY_KEY_REF,
+    create_mcp_audit_key_material, hydrate_bound_provider_secret,
+    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
+    inspect_existing_mcp_audit_keys, inspect_integrity_key_access, stage_config_secrets,
+    IntegrityKeyInspection, KeyringSecretStore, McpAuditKeyHydrationInspection, SecretStore,
+    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+    MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
@@ -287,11 +287,48 @@ fn inspect_required_credential_snapshot(
     ])
 }
 
+fn inspect_provider_credential_status(
+    config: &AppConfig,
+    store: &dyn SecretStore,
+) -> CredentialBootstrapStatus {
+    if config.llm.openai_key_ref.as_deref() != Some(PROVIDER_KEY_REF) {
+        return CredentialBootstrapStatus::MissingExistingData;
+    }
+    match store.get(PROVIDER_KEY_REF) {
+        Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
+            Ok(_) => CredentialBootstrapStatus::Available,
+            Err(_) => CredentialBootstrapStatus::Invalid,
+        },
+        Ok(None) => CredentialBootstrapStatus::MissingExistingData,
+        Err(_) => CredentialBootstrapStatus::Unavailable,
+    }
+}
+
+fn inspect_current_credential_snapshot(
+    data_dir: &Path,
+    config: &AppConfig,
+    store: &dyn SecretStore,
+) -> CredentialBootstrapSnapshot {
+    inspect_required_credential_snapshot(data_dir, store)
+        .with_provider_status(inspect_provider_credential_status(config, store))
+}
+
 fn eligible_credential_purposes(snapshot: &CredentialBootstrapSnapshot) -> Vec<String> {
     let mut purposes = snapshot
         .purposes
         .iter()
         .filter(|item| item.status == CredentialBootstrapStatus::InitializationRequired)
+        .map(|item| item.purpose.clone())
+        .collect::<Vec<_>>();
+    purposes.sort();
+    purposes
+}
+
+fn recoverable_credential_access_purposes(snapshot: &CredentialBootstrapSnapshot) -> Vec<String> {
+    let mut purposes = snapshot
+        .purposes
+        .iter()
+        .filter(|item| item.status == CredentialBootstrapStatus::Unavailable)
         .map(|item| item.purpose.clone())
         .collect::<Vec<_>>();
     purposes.sort();
@@ -461,7 +498,14 @@ fn initialize_required_credentials_after_confirmation(
     expected_snapshot: &CredentialBootstrapSnapshot,
 ) -> Result<CredentialRecoveryReport, AppError> {
     let _process_lock = CredentialRecoveryProcessLock::acquire(data_dir)?;
-    let current_snapshot = inspect_required_credential_snapshot(data_dir, store);
+    let expected_provider_status = expected_snapshot
+        .purposes
+        .iter()
+        .find(|item| item.purpose == "provider_api_key")
+        .map(|item| item.status)
+        .unwrap_or(CredentialBootstrapStatus::Unknown);
+    let current_snapshot = inspect_required_credential_snapshot(data_dir, store)
+        .with_provider_status(expected_provider_status);
     if current_snapshot != *expected_snapshot {
         return Err(AppError::permission(
             "credential bootstrap snapshot changed after native confirmation; restart and retry",
@@ -592,6 +636,62 @@ fn initialize_required_credentials_with_confirmation_result(
         ));
     }
     initialize_required_credentials_after_confirmation(data_dir, store, expected_snapshot)
+}
+
+fn recover_unavailable_credential_access_after_confirmation(
+    native_confirmed: bool,
+    data_dir: &Path,
+    config: &AppConfig,
+    store: &dyn SecretStore,
+    expected_snapshot: &CredentialBootstrapSnapshot,
+) -> Result<CredentialRecoveryReport, AppError> {
+    if !native_confirmed {
+        return Err(AppError::permission(
+            "credential access recovery was not confirmed in the native system dialog",
+        ));
+    }
+    let _process_lock = CredentialRecoveryProcessLock::acquire(data_dir)?;
+    let recoverable = recoverable_credential_access_purposes(expected_snapshot);
+    if recoverable.is_empty() {
+        return Err(AppError::permission(
+            "no required credential is explicitly eligible for access recovery",
+        ));
+    }
+
+    // This is the deliberately interactive read. It runs only after the
+    // product-native confirmation and may let the OS present its own Keychain
+    // authorization UI. Secret bytes stay inside the Rust process.
+    let observed = inspect_current_credential_snapshot(data_dir, config, store);
+    let mut report = recovery_report_from_snapshot(expected_snapshot);
+    let mut unresolved = Vec::new();
+    for purpose in &recoverable {
+        let status = observed
+            .purposes
+            .iter()
+            .find(|item| item.purpose == *purpose)
+            .map(|item| item.status)
+            .unwrap_or(CredentialBootstrapStatus::Unknown);
+        if status == CredentialBootstrapStatus::Available {
+            set_recovery_item_status(&mut report, purpose, "access_restored");
+        } else {
+            set_recovery_item_status(&mut report, purpose, status.as_str());
+            unresolved.push(format!("{purpose}={}", status.as_str()));
+        }
+    }
+
+    if unresolved.is_empty() {
+        // Keep the legacy field true for the existing frontend contract: the
+        // recovery operation is complete for this process, but ordinary
+        // effects remain closed until a clean restart rehydrates every owner.
+        report.initialization_completed_for_restart = true;
+        report.restart_required = true;
+    } else {
+        report.blocked_reason = Some(format!(
+            "credential access recovery remains unresolved: {}",
+            unresolved.join(", ")
+        ));
+    }
+    Ok(report)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1607,6 +1707,23 @@ fn credential_initialization_native_request<'a>(
     }
 }
 
+fn credential_access_recovery_native_request<'a>(
+    eligible_purposes: &'a [String],
+    confirmation_arguments: &'a serde_json::Value,
+) -> NativeDangerActionRequest<'a> {
+    NativeDangerActionRequest {
+        action_type: "credential_access_recovery",
+        target_ids_for_new_challenge: eligible_purposes,
+        requested_target: eligible_purposes.first().map(String::as_str),
+        affected_count: eligible_purposes.len(),
+        arguments: confirmation_arguments,
+        arguments_summary:
+            "仅重新请求后端启动快照明确标记为 unavailable 的既有凭据访问；不创建、不覆盖、不返回密钥。",
+        scope_summary: "后端快照列出的 OpenLife 既有系统与 Provider 凭据",
+        challenge_id: None,
+    }
+}
+
 /// User-initiated recovery for OS credential ACL changes after an application
 /// update or development re-sign. Startup intentionally stays non-interactive
 /// and bounded; this command is the only product path that may let the OS show
@@ -1623,15 +1740,58 @@ pub async fn recover_required_credential_access(
     let _activity_guard = CredentialRecoveryActivityGuard;
     let expected_snapshot = state.credential_bootstrap_snapshot.clone();
     let expected_eligible_purposes = eligible_credential_purposes(&expected_snapshot);
-    if expected_eligible_purposes.is_empty() {
+    let expected_access_recovery_purposes =
+        recoverable_credential_access_purposes(&expected_snapshot);
+    if expected_eligible_purposes.is_empty() && expected_access_recovery_purposes.is_empty() {
         return Err(AppError::permission(
-            "LifeStateProjection reports no credential eligible for initialization",
+            "LifeStateProjection reports no credential eligible for initialization or access recovery",
         ));
     }
     let data_dir = app_data_dir();
+
+    if !expected_access_recovery_purposes.is_empty() {
+        let confirmation_arguments = serde_json::json!({
+            "operation": "recover_unavailable_credential_access",
+            "eligiblePurposeIds": expected_access_recovery_purposes.clone(),
+            "affectedCount": expected_access_recovery_purposes.len(),
+            "bootstrapSnapshotVersion": expected_snapshot.version.clone(),
+            "bootstrapSnapshotDigest": expected_snapshot.digest.clone(),
+            "createsCredentials": false,
+            "returnsSecretMaterial": false,
+        });
+        require_native_danger_action_confirmation(
+            &window,
+            credential_access_recovery_native_request(
+                &expected_access_recovery_purposes,
+                &confirmation_arguments,
+            ),
+        )
+        .await?;
+        let config = state.config.lock().await.clone();
+        let snapshot_for_worker = expected_snapshot.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            recover_unavailable_credential_access_after_confirmation(
+                true,
+                &data_dir,
+                &config,
+                &KeyringSecretStore,
+                &snapshot_for_worker,
+            )
+        })
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("credential access recovery worker failed: {error}"))
+        })?;
+    }
+
     let pre_confirmation_data_dir = data_dir.clone();
+    let pre_confirmation_config = state.config.lock().await.clone();
     let pre_confirmation_snapshot = tauri::async_runtime::spawn_blocking(move || {
-        inspect_required_credential_snapshot(&pre_confirmation_data_dir, &KeyringSecretStore)
+        inspect_current_credential_snapshot(
+            &pre_confirmation_data_dir,
+            &pre_confirmation_config,
+            &KeyringSecretStore,
+        )
     })
     .await
     .map_err(|error| {
@@ -4714,7 +4874,14 @@ mod tests {
                 .iter()
                 .map(|item| item.status.as_str())
                 .collect::<Vec<_>>(),
-            vec!["created", "created", "created", "created", "created"]
+            vec![
+                "created",
+                "created",
+                "created",
+                "created",
+                "created",
+                "missing_existing_data",
+            ]
         );
         assert_eq!(*store.writes.lock().unwrap(), 5);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
@@ -4723,6 +4890,79 @@ mod tests {
         for value in store.values.lock().unwrap().values() {
             assert!(!serialized.contains(value));
         }
+    }
+
+    #[test]
+    fn credential_access_recovery_restores_existing_keys_without_writes_or_secret_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+        for (index, secret_ref) in [
+            AGENT_RUN_RECEIPT_KEY_REF,
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            ACTION_QUEUE_AUTHORITY_KEY_REF,
+            TASK_STORE_AUTHORITY_KEY_REF,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .set(
+                    secret_ref,
+                    &general_purpose::STANDARD.encode([index as u8 + 1; 32]),
+                )
+                .unwrap();
+        }
+        let mut config = AppConfig::default();
+        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        store
+            .set(
+                PROVIDER_KEY_REF,
+                &crate::secret_store::encode_provider_secret(&config, "sk-recovery-test").unwrap(),
+            )
+            .unwrap();
+        *store.writes.lock().unwrap() = 0;
+
+        let expected = CredentialBootstrapSnapshot::from_statuses([
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::InitializationRequired,
+        ])
+        .with_provider_status(CredentialBootstrapStatus::Unavailable);
+        let report = recover_unavailable_credential_access_after_confirmation(
+            true,
+            directory.path(),
+            &config,
+            &store,
+            &expected,
+        )
+        .unwrap();
+
+        assert!(report.restart_required);
+        assert!(report.initialization_completed_for_restart);
+        for purpose in [
+            "agent_run_receipts",
+            "main_chat_events",
+            "action_queue",
+            "task_store",
+            "provider_api_key",
+        ] {
+            assert_eq!(
+                report
+                    .items
+                    .iter()
+                    .find(|item| item.purpose == purpose)
+                    .unwrap()
+                    .status,
+                "access_restored"
+            );
+        }
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("sk-recovery-test"));
+        assert!(!serialized.contains("keychain://"));
     }
 
     #[test]

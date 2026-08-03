@@ -1886,10 +1886,10 @@ pub(crate) fn validate_proposal_payload(
             match scope_kind {
                 ToolPermissionScopeKind::ActionBound => {
                     if manifest_action_type == "network" {
-                        return Err(
-                            "action_bound ToolPermission 不能声明 network manifest action。"
-                                .to_string(),
-                        );
+                        // This grants one exact Main Chat tool invocation, not destination
+                        // access. The executor evaluates network_policy independently before
+                        // dispatch and does not consume this grant when that policy blocks.
+                        validate_main_chat_action_bound_network_payload(after)?;
                     }
                     if policy != openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce {
                         return Err("Action-bound ToolPermission 必须使用 allow_once。".to_string());
@@ -1994,6 +1994,20 @@ pub(crate) fn validate_proposal_payload(
 
 fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), String> {
     validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    if proposal.proposal_type == ProposalType::ToolPermission
+        && tool_permission_scope_kind(&proposal.after)? == ToolPermissionScopeKind::ActionBound
+        && tool_permission_scope_field(&proposal.after, "action_type") == Some("network")
+    {
+        let scope = action_bound_tool_permission_scope(&proposal.after)?;
+        if proposal.source != ProposalSource::ChatConversation
+            || proposal.affected_path
+                != format!("tool_permission.{}.{}", scope.source, scope.tool_name)
+        {
+            return Err(
+                "action-bound network ToolPermission 必须来自 Main Chat 的精确产品路径。".into(),
+            );
+        }
+    }
     if proposal.proposal_type == ProposalType::MemoryWrite {
         let content = memory_content(&proposal.after)?;
         openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
@@ -2167,6 +2181,86 @@ fn action_bound_tool_permission_scope(
 ) -> Result<openlife_core::tool_permissions::ActionBoundToolPermissionScope, String> {
     openlife_core::tool_permissions::ActionBoundToolPermissionScope::from_proposal_after(after)
         .map_err(|error| error.to_string())
+}
+
+fn validate_main_chat_action_bound_network_payload(after: &Value) -> Result<(), String> {
+    let scope = action_bound_tool_permission_scope(after)?;
+    if !matches!(scope.tool_name.as_str(), "web.fetch" | "web.search")
+        || scope.source != "builtin"
+        || !after
+            .get("capabilities")
+            .or_else(|| {
+                after
+                    .get("canonical_scope")
+                    .and_then(|canonical| canonical.get("capabilities"))
+            })
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| capabilities.iter().any(|value| value == "network"))
+    {
+        return Err(
+            "action-bound network ToolPermission 仅允许内置 web.fetch/web.search 的精确 Main Chat 动作。"
+                .into(),
+        );
+    }
+    for (field, expected) in [
+        ("auto_generated", true),
+        ("mainChatAgentV1", true),
+        ("strictManifestIdentity", true),
+        ("fuzzyNameMatchingUsed", false),
+        ("directWritesExecuted", false),
+    ] {
+        if after.get(field).and_then(Value::as_bool) != Some(expected) {
+            return Err(format!(
+                "action-bound network ToolPermission 缺少严格 Main Chat 标记 after.{field}。"
+            ));
+        }
+    }
+    let identity = after
+        .get("pending_action_identity")
+        .or_else(|| after.get("pendingActionIdentity"))
+        .ok_or_else(|| {
+            "action-bound network ToolPermission 缺少 pending_action_identity。".to_string()
+        })?;
+    let identity_string = |field: &str| {
+        identity
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    for field in [
+        "taskSessionId",
+        "runId",
+        "queueActionId",
+        "executorActionId",
+        "manifestContractDigest",
+    ] {
+        if identity_string(field).is_none() {
+            return Err(format!(
+                "action-bound network ToolPermission 缺少精确 pending_action_identity.{field}。"
+            ));
+        }
+    }
+    if identity_string("queueActionType") != Some(scope.queue_action_type.as_str())
+        || identity_string("executorActionType") != Some("mcp_tool")
+        || identity_string("requestedTarget") != Some(scope.requested_target.as_str())
+        || identity_string("resolvedTarget") != Some(scope.resolved_target.as_str())
+        || identity_string("manifestId") != Some(scope.tool_name.as_str())
+        || identity_string("manifestName") != Some(scope.tool_name.as_str())
+        || identity_string("manifestSource") != Some(scope.source.as_str())
+        || identity_string("inputHash") != Some(scope.input_hash.as_str())
+        || identity.get("inputLengthBytes").and_then(Value::as_u64)
+            != Some(scope.input_length_bytes)
+        || identity
+            .get("directWritesExecuted")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "action-bound network ToolPermission 的 pending action identity 与精确执行作用域不一致。"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 async fn apply_proposal_to_state(
@@ -3524,17 +3618,80 @@ async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     })]
 }
 
+async fn sync_main_chat_task_after_action_permission_reject(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<bool, String> {
+    let (origin, relation_kind) = {
+        let Some(proposal_store) = state.proposal_store.as_ref() else {
+            return Ok(false);
+        };
+        let proposal_store = proposal_store.lock().await;
+        (
+            proposal_store
+                .terminal_owner_origin_binding(&proposal.id)
+                .map_err(|error| error.to_string())?,
+            proposal_store
+                .terminal_relation_projection_proof(&proposal.id)
+                .map_err(|error| error.to_string())?
+                .map(|proof| proof.relation_kind()),
+        )
+    };
+    if relation_kind
+        != Some(openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite)
+    {
+        return Ok(false);
+    }
+    let Some(origin) = origin else {
+        return Err("action-resume rejection is missing its terminal-owner origin".into());
+    };
+    terminal_owner_write_gateway_from_state(state)
+        .await?
+        .apply_action_resume_review_rejection(&proposal.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let cancelled = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+        .lock()
+        .await
+        .load_session(origin.task_session_id())
+        .map_err(|error| error.to_string())?;
+    if cancelled.is_none_or(|session| {
+        session.status
+            != openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled
+    }) {
+        return Err("action-resume rejection cancellation is not yet confirmed".into());
+    }
+    Ok(true)
+}
+
 pub(crate) async fn reject_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
+    if proposal.status == ProposalStatus::Rejected
+        && sync_main_chat_task_after_action_permission_reject(state, &proposal).await?
+    {
+        if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
+            log::warn!(
+                "[proposal] AgentRun rejection replay reconciliation pending for {}: {}",
+                proposal.id,
+                error
+            );
+        }
+        return Ok(());
+    }
     ensure_pending_or_postponed(&proposal)?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     let expected_status = proposal.status;
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    let _task_cancelled =
+        sync_main_chat_task_after_action_permission_reject(state, &proposal).await?;
     if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         log::warn!(
             "[proposal] AgentRun rejection reconciliation pending for {}: {}",
@@ -4193,7 +4350,6 @@ mod tests {
                     .unwrap(),
             ))),
             main_chat_agent_event_store: None,
-            main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
             main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
             patch_store: Some(Arc::new(Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
@@ -6324,6 +6480,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_action_bound_web_fetch_permission_stays_exact_and_non_reusable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.builtin.web.fetch",
+            serde_json::json!({
+                "permission_scope_kind": "action_bound",
+                "tool_name": "web.fetch",
+                "source": "builtin",
+                "risk_level": "medium",
+                "action_type": "network",
+                "capabilities": ["network"],
+                "permission": "allow_once",
+                "policy": "allow_once",
+                "canonical_scope": {
+                    "tool_name": "web.fetch",
+                    "source": "builtin",
+                    "risk_level": "medium",
+                    "action_type": "network",
+                    "capabilities": ["network"],
+                    "input_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "input_length_bytes": 42
+                },
+                "blocked_action": {
+                    "action_type": "web.fetch",
+                    "target": "web.fetch",
+                    "resolved_target": "web.fetch",
+                    "input_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "input_length_bytes": 42
+                },
+                "pending_action_identity": {
+                    "taskSessionId": "task-web-fetch",
+                    "runId": "run-web-fetch",
+                    "queueActionId": "queue-web-fetch",
+                    "executorActionId": "executor-web-fetch",
+                    "queueActionType": "web.fetch",
+                    "executorActionType": "mcp_tool",
+                    "requestedTarget": "web.fetch",
+                    "resolvedTarget": "web.fetch",
+                    "manifestId": "web.fetch",
+                    "manifestName": "web.fetch",
+                    "manifestSource": "builtin",
+                    "manifestContractDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "inputHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "inputLengthBytes": 42,
+                    "directWritesExecuted": false
+                },
+                "auto_generated": true,
+                "mainChatAgentV1": true,
+                "strictManifestIdentity": true,
+                "fuzzyNameMatchingUsed": false,
+                "directWritesExecuted": false
+            }),
+            "Allow exactly this pending Main Chat web fetch once.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        let mut forged_manual = proposal.clone();
+        forged_manual.source = ProposalSource::Manual;
+        let forged_error = validate_proposal_for_acceptance(&forged_manual)
+            .expect_err("manual proposal must not impersonate a Main Chat network action");
+        assert!(forged_error.contains("Main Chat 的精确产品路径"));
+
+        let mut drifted_identity = proposal.clone();
+        drifted_identity.after["pending_action_identity"]["inputHash"] = serde_json::json!(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        );
+        let drift_error = validate_proposal_for_acceptance(&drifted_identity)
+            .expect_err("changed request identity must not authorize the reviewed web action");
+        assert!(drift_error.contains("执行作用域不一致"));
+
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .expect("exact action-bound network tool permission should be accepted");
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+
+        let scope = action_bound_tool_permission_scope(&proposal.after).unwrap();
+        let permission_store = state.tool_permission_store.lock().await;
+        assert!(
+            permission_store.list().unwrap().is_empty(),
+            "web action review must not create a reusable manifest or network-policy grant"
+        );
+        assert_eq!(permission_store.action_bound_permission_count().unwrap(), 1);
+        assert!(permission_store
+            .peek_action_bound(&id, &scope)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn accept_invalid_life_model_path_keeps_proposal_pending() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -7181,6 +7449,295 @@ mod tests {
             .create_run(&run)
             .unwrap();
         run_id
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_accepts_sealed_action_resume_without_successor_event() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .main_chat_agent_event_store = Some(Arc::new(Mutex::new(
+            crate::main_chat_event_stream::MainChatAgentEventStore::new_in_memory().unwrap(),
+        )));
+
+        let task_session_id = uuid::Uuid::new_v4().to_string();
+        let chat_session_id = uuid::Uuid::new_v4().to_string();
+        let user_goal = "read one governed endpoint";
+        let session = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_session_with_id(
+                task_session_id.clone(),
+                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                    chat_session_id: chat_session_id.clone(),
+                    user_goal: user_goal.into(),
+                    selected_strategy:
+                        openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let run_id = task_session_id.clone();
+        let canonical_message = state
+            .memory_store
+            .lock()
+            .await
+            .save_message_idempotent_with_proof(
+                &chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: user_goal.into(),
+                },
+                &run_id,
+            )
+            .unwrap();
+        {
+            let memory_store = state.memory_store.lock().await;
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .bind_canonical_memory_store(&memory_store)
+                .unwrap();
+            let task_store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            task_store
+                .bind_canonical_memory_store(&memory_store)
+                .unwrap();
+            task_store
+                .bind_session_canonical_user_message(
+                    &task_session_id,
+                    &canonical_message.receipt().canonical_ref,
+                    user_goal,
+                )
+                .unwrap();
+        }
+        let mut run = AgentRun::new_chat_run(&chat_session_id, user_goal);
+        run.id = run_id.clone();
+        run.task_id = task_session_id.clone();
+        run.input_ref = Some(canonical_message.receipt().canonical_ref.clone());
+        crate::terminal_owner_write_gateway::create_conversation_bound_agent_run(
+            &state,
+            &run,
+            &canonical_message,
+        )
+        .await
+        .unwrap();
+
+        let admission = {
+            let task_store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            task_store
+                .issue_terminal_owner_epoch_admission(&task_session_id, &run_id, canonical_message)
+                .unwrap()
+        };
+        let epoch = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .open_terminal_owner_epoch_from_admission(admission)
+            .unwrap();
+
+        let proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.network_policy.example_com",
+            serde_json::json!({
+                "permission": "allow_once",
+                "tool_name": "web_fetch",
+                "source": "network_policy",
+                "risk_level": "medium",
+                "action_type": "network",
+            }),
+            "Exact endpoint approval is required before governed replay.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        let execution_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let execution_registration = execution_registry.register(&task_session_id);
+        let execution_epoch = execution_registration.execution_epoch();
+        let submission =
+            crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+                &state,
+                epoch.review_origin_proof().unwrap(),
+                openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite,
+                openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                    openlife_core::agent::DurableWriteSource::MainChat,
+                    openlife_core::agent::DurableWriteSubject::ToolPermission,
+                    proposal,
+                    "Await exact endpoint approval.",
+                )
+                .with_idempotency_key(format!("startup-action-resume:{task_session_id}")),
+                &execution_epoch,
+            )
+            .await
+            .unwrap();
+        let proposal_id = submission.review().proposal_id().to_string();
+
+        {
+            let task_store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            task_store
+                .set_pending_blockers(&task_session_id, vec![format!("proposal:{proposal_id}")])
+                .unwrap();
+            task_store
+                .mark_waiting_permission(&task_session_id)
+                .unwrap();
+        }
+
+        let owner = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&session.id)
+            .unwrap()
+            .unwrap();
+        {
+            let event_store = state
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            event_store
+                .begin_terminal_owner_seal(&task_session_id, &run_id, epoch.generation())
+                .unwrap();
+            event_store
+                .append_terminal_final_and_seal(
+                    crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                        task_session_id: task_session_id.clone(),
+                        run_id: run_id.clone(),
+                        epoch_generation: epoch.generation(),
+                        delivery_id: format!("delivery:{task_session_id}"),
+                        expected_task_owner_revision: owner.revision(),
+                        expected_task_owner_digest: owner.digest().to_string(),
+                        status: "waiting_permission".into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let claim_id = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal_id)
+            .unwrap()
+            .unwrap();
+        let acceptance = {
+            let proposal_store = state.proposal_store.as_ref().unwrap().lock().await;
+            proposal_store
+                .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
+                .unwrap();
+            openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+                .claimed_acceptance_snapshot(&proposal_id, &claim_id)
+                .unwrap()
+        };
+        terminal_owner_write_gateway_from_state(&state)
+            .await
+            .unwrap()
+            .apply_claimed_review_without_task_transition(acceptance)
+            .await
+            .unwrap();
+
+        assert!(state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_immutable_event(
+                &task_session_id,
+                "terminal_owner.successor_confirmed",
+                &format!("successor:{proposal_id}"),
+            )
+            .unwrap()
+            .is_none());
+
+        crate::terminal_owner_write_gateway::update_agent_run_after_review_reconciliation(
+            &state,
+            &proposal_id,
+            &run_id,
+        )
+        .await
+        .expect("foreground action-resume acceptance remains resumable");
+        {
+            let reconciled_run = state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(reconciled_run.status, AgentRunStatus::WaitingPermission);
+            assert!(reconciled_run.finished_at.is_none());
+        }
+
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            let mut misprojected_run = store.get_run(&run_id).unwrap().unwrap();
+            misprojected_run.status = AgentRunStatus::Completed;
+            misprojected_run.finished_at = Some(chrono::Utc::now());
+            store
+                .update_run(&misprojected_run)
+                .expect("persist pre-fix completed projection for startup recovery");
+        }
+
+        let startup_coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            startup_coordinator.register_read_write(*store);
+        }
+        Arc::get_mut(&mut state).unwrap().persistence_coordinator = Arc::new(startup_coordinator);
+
+        crate::terminal_owner_write_gateway::update_agent_run_after_startup_review_reconciliation(
+            &state,
+            &proposal_id,
+            &run_id,
+        )
+        .await
+        .expect("typed action-resume acceptance does not require a terminal successor event");
+
+        let reconciled_run = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled_run.status, AgentRunStatus::WaitingPermission);
+        assert!(reconciled_run.finished_at.is_none());
     }
 
     #[tokio::test]

@@ -405,7 +405,7 @@ async fn run_main_chat_command_surface_state_eval_case(
         selected_skill_id.map(str::to_string),
         main_chat_command_surface_eval_selected_skill_loaded(
             &transcript,
-            "skills/phase_e_review/SKILL.md",
+            "skills/evidence_review/SKILL.md",
         ),
         main_chat_command_surface_eval_selected_skill_loaded(
             &transcript,
@@ -932,7 +932,7 @@ pub(crate) fn main_chat_command_surface_eval_selected_skill_id(
     scenario: MainChatCommandSurfaceEvalScenario,
 ) -> Option<&'static str> {
     match scenario {
-        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => Some("phase_e_review"),
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => Some("evidence_review"),
         _ => None,
     }
 }

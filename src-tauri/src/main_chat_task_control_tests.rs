@@ -118,15 +118,44 @@ async fn replay_execution_envelope_for_test(
     queued: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
     run_id: &str,
 ) -> crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope {
+    replay_execution_envelope_for_governed_input_test(state, session, queued, run_id, None).await
+}
+
+async fn replay_execution_envelope_for_governed_input_test(
+    state: &std::sync::Arc<crate::AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    queued: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+    run_id: &str,
+    governed_input: Option<&serde_json::Value>,
+) -> crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope {
     let plan = crate::main_chat_react_tool_selection::build_main_chat_react_action_plan(
         &session.chat_session_id,
         &session.user_goal,
     )
     .expect("build replay fixture plan");
+    replay_execution_envelope_for_explicit_plan_test(
+        state,
+        session,
+        queued,
+        run_id,
+        &plan,
+        governed_input,
+    )
+    .await
+}
+
+async fn replay_execution_envelope_for_explicit_plan_test(
+    state: &std::sync::Arc<crate::AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    queued: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+    run_id: &str,
+    plan: &crate::main_chat_react_tool_selection::MainChatReactActionPlan,
+    governed_input: Option<&serde_json::Value>,
+) -> crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope {
     let (resolution, manifest) = {
         let registry = state.mcp_registry.lock().await;
         let resolution = crate::main_chat_react_tool_selection::resolve_main_chat_mcp_read_target(
-            &registry, &plan,
+            &registry, plan,
         );
         assert!(
             resolution.blocker_reason.is_none(),
@@ -157,7 +186,7 @@ async fn replay_execution_envelope_for_test(
             requested_target: &plan.target,
             resolved_target: &resolution.target,
             manifest: &manifest,
-            input: &resolution.arguments,
+            input: governed_input.unwrap_or(&resolution.arguments),
         },
     )
     .expect("build replay fixture durable envelope")
@@ -4854,6 +4883,145 @@ fn resume_main_chat_task_preserves_pending_permission_blocker_instead_of_state_o
 }
 
 #[tokio::test]
+async fn rejecting_action_resume_permission_cancels_the_blocked_task_and_queued_action() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy,
+        ExecutionQueueStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{
+        AgentProposal, AgentRunStatus, ProposalSource, ProposalType, RiskLevel,
+    };
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "reject-action-resume-permission".into(),
+                user_goal: "Use mcp builtin_echo read-only now.".into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: Some("Waiting for one exact read permission.".into()),
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create blocked task")
+    };
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
+        &state,
+        &session.id,
+        &session.chat_session_id,
+        &session.user_goal,
+        AgentRunStatus::WaitingPermission,
+    )
+    .await;
+    let proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        "tool_permission.builtin.builtin_echo",
+        serde_json::json!({
+            "permission_scope_kind": "action_bound",
+            "tool_name": "builtin_echo",
+            "source": "builtin",
+            "risk_level": "low",
+            "action_type": "read",
+            "permission": "allow_once",
+            "directWritesExecuted": false,
+        }),
+        "Allow one exact read-only MCP action.",
+        1.0,
+        RiskLevel::Low,
+        ProposalSource::ChatConversation,
+    );
+    let (proposal_id, terminal_epoch) =
+        submit_tool_permission_terminal_relation_for_test(&state, &proposal, &session, &run_id)
+            .await;
+    let queued = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("main chat action queue")
+            .lock()
+            .await;
+        queue
+            .enqueue(
+                &session.id,
+                ExecutionAction::new("mcp.read_only", "Read-only action awaiting permission."),
+                ExecutionPolicy.classify(&ExecutionAction::new(
+                    "mcp.read_only",
+                    "Read-only action awaiting permission.",
+                )),
+            )
+            .expect("enqueue blocked action")
+    };
+    {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .record_action_queue_id(&session.id, &queued.id)
+            .expect("link queued action");
+        store
+            .set_pending_blockers(
+                &session.id,
+                vec![
+                    "permission_request_recorded".into(),
+                    "web_search_observation_invalid".into(),
+                ],
+            )
+            .expect("set product runtime permission blockers");
+        store
+            .mark_waiting_permission(&session.id)
+            .expect("mark task waiting permission");
+    }
+    seal_tool_permission_terminal_relation_for_test(&state, &session, &run_id, &terminal_epoch)
+        .await;
+
+    crate::commands::proposal::reject_proposal_with_state(proposal_id.clone(), &state)
+        .await
+        .expect("reject exact action-resume permission");
+    crate::commands::proposal::reject_proposal_with_state(proposal_id, &state)
+        .await
+        .expect("exact rejected action-resume decision converges idempotently");
+
+    let task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .load_session(&session.id)
+        .expect("load rejected task")
+        .expect("rejected task exists");
+    assert_eq!(task.status, AgentTaskSessionStatus::Cancelled);
+    let action = state
+        .main_chat_action_queue_store
+        .as_ref()
+        .expect("main chat action queue")
+        .lock()
+        .await
+        .load(&queued.id)
+        .expect("load rejected action")
+        .expect("rejected action exists");
+    assert_eq!(action.status, ExecutionQueueStatus::Cancelled);
+    let run = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .get_run(&run_id)
+        .expect("load rejected run")
+        .expect("rejected run exists");
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acceptance() {
     use openlife_core::agent::main_chat_agent_v1::{
         AgentTaskSessionDraft, AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy,
@@ -5611,7 +5779,7 @@ async fn manifest_drift_after_snapshot_before_live_dispatch_fence_has_zero_dispa
 }
 
 #[tokio::test]
-async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_scope() {
+async fn resume_main_chat_task_reaches_executor_for_mixed_web_tool_permission_scope() {
     use openlife_core::agent::main_chat_agent_v1::{
         AgentTaskSessionDraft, AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy,
         ExecutionQueueStatus, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
@@ -5626,48 +5794,60 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
         .expect("build mock tauri app");
 
     let user_goal =
-        "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。";
-    let plan = crate::main_chat_react_tool_selection::build_main_chat_react_action_plan(
-        "resume-native-web-permission-chat",
-        user_goal,
-    )
-    .expect("build web.search action plan");
-    assert_eq!(plan.queue_action_type, "web.search");
-    assert_eq!(plan.executor_action_type, "mcp_tool");
+        "Fetch https://example.com/ and use mcp builtin_echo read-only, then summarize both observations.";
+    let plan = crate::main_chat_react_tool_selection::MainChatReactActionPlan {
+        queue_action_type: "web.fetch".into(),
+        executor_action_type: "mcp_tool".into(),
+        target: "web.fetch".into(),
+        arguments: serde_json::json!({
+            "url": "https://example.com/",
+            "summarize": true,
+        }),
+        description: "Fetch the exact URL selected by the multi-read Kernel plan.".into(),
+        requires_network: true,
+        uses_ephemeral_file_permission: false,
+        uses_ephemeral_mcp_wrapper_permission: false,
+        tool_candidates: Vec::new(),
+    };
     let native_governed_input = serde_json::json!({
-        "governedInputSource": "kernel_external_fact_query_from_governance_intent",
-        "query": user_goal,
-        "max_results": 5,
+        "governedInputSource": "kernel_web_fetch_url_from_user_text",
+        "url": "https://example.com/",
+        "summarize": true,
     });
     let (input_length_bytes, input_hash) = metadata_safe_value_digest(&native_governed_input);
 
     let mut proposal = AgentProposal::new(
         ProposalType::ToolPermission,
-        "tool_permission.builtin.web.search",
+        "tool_permission.builtin.web.fetch",
         serde_json::json!({
-            "tool_name": "web.search",
+            "tool_name": "web.fetch",
             "source": "builtin",
             "risk_level": "medium",
+            "action_type": "network",
+            "capabilities": ["network"],
             "permission_action": "grant",
             "policy": "allow_once",
             "canonical_scope": {
-                "tool_name": "web.search",
+                "tool_name": "web.fetch",
                 "source": "builtin",
                 "risk_level": "medium",
-                "action_type": "read",
+                "action_type": "network",
+                "capabilities": ["network"],
                 "input_hash": input_hash,
                 "input_length_bytes": input_length_bytes
             },
             "blocked_action": {
-                "action_type": "mcp_tool",
-                "target": "web.search",
-                "resolved_target": "web.search"
+                "action_type": "web.fetch",
+                "target": "web.fetch",
+                "resolved_target": "web.fetch"
             },
             "auto_generated": true,
             "mainChatAgentV1": true,
+            "strictManifestIdentity": true,
+            "fuzzyNameMatchingUsed": false,
             "directWritesExecuted": false
         }),
-        "Allow the pending Main Chat web.search read action to continue.",
+        "Allow the pending Main Chat web.fetch read action to continue.",
         0.7,
         RiskLevel::Medium,
         ProposalSource::ChatConversation,
@@ -5685,7 +5865,7 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
                 user_goal: user_goal.into(),
                 selected_strategy: MainChatAgentStrategy::ReActToolExecution,
                 current_plan_summary: Some(
-                    "Waiting for native ToolPermission acceptance before replaying web.search."
+                    "Waiting for native ToolPermission acceptance before replaying web.fetch."
                         .into(),
                 ),
                 context_snapshot_refs: vec!["resume-native-web-permission-context".into()],
@@ -5720,7 +5900,15 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
             )
             .expect("enqueue pending web action")
     };
-    let envelope = replay_execution_envelope_for_test(&state, &session, &queued, &run_id).await;
+    let envelope = replay_execution_envelope_for_explicit_plan_test(
+        &state,
+        &session,
+        &queued,
+        &run_id,
+        &plan,
+        Some(&native_governed_input),
+    )
+    .await;
     bind_tool_permission_proposal_to_replay_for_test(&mut proposal, &session, &envelope);
     let (proposal_id, terminal_epoch) =
         submit_tool_permission_terminal_relation_for_test(&state, &proposal, &session, &run_id)
@@ -5739,13 +5927,13 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
             metadata_with_replay_envelope(
                 serde_json::json!({
                     "proposalId": proposal_id,
-                    "toolName": "web.search",
+                    "toolName": "web.fetch",
                     "governedInput": native_governed_input,
                     "governedInputDigest": [input_length_bytes, input_hash],
-                    "queueActionType": "web.search",
+                    "queueActionType": "web.fetch",
                     "executorActionType": "mcp_tool",
-                    "selectedCandidateTarget": "web.search",
-                    "target": "web.search",
+                    "selectedCandidateTarget": "web.fetch",
+                    "target": "web.fetch",
                     "directWritesExecuted": false,
                 }),
                 &envelope,
@@ -5897,7 +6085,49 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
         metadata["automaticReplayNeedsPermission"],
         serde_json::json!(true)
     );
+    assert_eq!(metadata["governedInput"], native_governed_input);
+    assert_eq!(
+        metadata["replayExecutionEnvelope"]["inputHash"],
+        serde_json::json!(input_hash)
+    );
+    let network_consent_proposal_id = metadata
+        .get("networkConsentProposalId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .expect("web replay must stage an exact network-policy consent proposal");
+    let network_consent_proposal = state
+        .proposal_store
+        .as_ref()
+        .expect("proposal store")
+        .lock()
+        .await
+        .get_proposal(network_consent_proposal_id)
+        .expect("load network consent proposal")
+        .expect("network consent proposal exists");
+    assert_eq!(
+        network_consent_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    assert_eq!(
+        network_consent_proposal.source,
+        openlife_core::agent::ProposalSource::ChatConversation
+    );
+    assert_eq!(
+        network_consent_proposal.after["permission_scope_kind"],
+        serde_json::json!("network_policy")
+    );
+    assert_eq!(
+        network_consent_proposal.after["blocked_action"]["target"],
+        serde_json::json!("web.fetch")
+    );
     assert_eq!(metadata["directWritesExecuted"], serde_json::json!(false));
+    assert!(
+        !post_resume_detail
+            .allowed_controls
+            .iter()
+            .any(|control| control == "resume"),
+        "a pending network consent proposal must not expose a looping resume control"
+    );
     assert!(
         state
             .tool_permission_store
@@ -5920,6 +6150,71 @@ async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_s
         entry.kind == ExecutionTranscriptEntryKind::PermissionRequest
             && entry.summary == "permission_request_recorded"
     }));
+
+    crate::commands::proposal::accept_proposal_with_state(
+        network_consent_proposal_id.to_string(),
+        &state,
+    )
+    .await
+    .expect("accept exact web network consent proposal");
+    let accepted_network_detail =
+        crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+            &session.id,
+            &state,
+        )
+        .await
+        .expect("load accepted network consent task detail");
+    assert!(
+        accepted_network_detail
+            .allowed_controls
+            .iter()
+            .any(|control| control == "resume"),
+        "only the accepted exact network consent should reopen resume: {:?}",
+        accepted_network_detail.allowed_controls
+    );
+    let accepted_action_authorization = state
+        .tool_permission_store
+        .lock()
+        .await
+        .peek_action_bound(&proposal_id, &accepted_scope)
+        .expect("peek accepted action permission before network replay")
+        .expect("action permission remains available for network replay");
+    let accepted_session = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .load_session(&session.id)
+        .expect("load accepted network session")
+        .expect("accepted network session exists");
+    let accepted_action = state
+        .main_chat_action_queue_store
+        .as_ref()
+        .expect("action queue")
+        .lock()
+        .await
+        .load(&queued.id)
+        .expect("load accepted network action")
+        .expect("accepted network action exists");
+    let network_replay_admission =
+        crate::main_chat_turn_runtime::issue_terminal_owner_tool_network_epoch_admission_for_test(
+            &state,
+            &accepted_session,
+            &accepted_action,
+            &accepted_action_authorization,
+            network_consent_proposal_id,
+        )
+        .await
+        .expect("issue exact accepted tool network replay admission");
+    assert_eq!(
+        network_replay_admission.cause(),
+        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolNetworkConsent
+    );
+    assert_eq!(
+        network_replay_admission.cause_ref(),
+        network_consent_proposal_id
+    );
 }
 
 #[tokio::test]

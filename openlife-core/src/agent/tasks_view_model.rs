@@ -446,6 +446,7 @@ pub struct TaskViewModelTaskInput {
     pub final_delivery_status: Option<String>,
     pub pending_blockers: Vec<String>,
     pub pending_review_item_refs: Vec<BackendEntityRef>,
+    pub review_projection_authoritative: bool,
     pub allowed_control_ids: Vec<String>,
     pub retry_action_id: Option<String>,
     pub next_recommended_control: Option<String>,
@@ -743,11 +744,6 @@ fn lifecycle_status_for_task(input: &TaskViewModelTaskInput) -> TaskLifecycleSta
             TaskLifecycleStatus::Completed
         }
         Some(AgentTaskSessionStatus::Completed)
-            if final_delivery_status_is_completed_with_pending_items(input) =>
-        {
-            TaskLifecycleStatus::CompletedWithPendingReview
-        }
-        Some(AgentTaskSessionStatus::Completed)
             if input.final_delivery_status.as_deref() == Some("blocked") =>
         {
             TaskLifecycleStatus::Blocked
@@ -797,13 +793,13 @@ fn final_delivery_status_is_complete(input: &TaskViewModelTaskInput) -> bool {
         && input
             .final_delivery_status
             .as_deref()
-            .map(|status| matches!(status, "completed" | "delivered"))
+            .map(|status| {
+                matches!(status, "completed" | "delivered")
+                    || (status == "completed_with_pending_items"
+                        && input.review_projection_authoritative
+                        && input.pending_review_item_refs.is_empty())
+            })
             .unwrap_or(false)
-}
-
-fn final_delivery_status_is_completed_with_pending_items(input: &TaskViewModelTaskInput) -> bool {
-    input.final_delivery_present
-        && input.final_delivery_status.as_deref() == Some("completed_with_pending_items")
 }
 
 fn lifecycle_status_for_run(status: AgentRunStatus) -> TaskLifecycleStatus {
@@ -1153,14 +1149,40 @@ mod tests {
     }
 
     #[test]
-    fn completed_task_with_completed_with_pending_items_is_not_plain_completed() {
+    fn completed_task_with_resolved_pending_delivery_is_delivered() {
         let model = build_tasks_view_model(TasksViewModelBuildInput {
             task_inputs: vec![TaskViewModelTaskInput {
                 task_session_id: "task-pending-delivery".into(),
-                title: "Pending delivery".into(),
+                title: "Resolved delivery".into(),
                 session_status: Some(AgentTaskSessionStatus::Completed),
                 final_delivery_present: true,
                 final_delivery_status: Some("completed_with_pending_items".into()),
+                review_projection_authoritative: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let item = &model.items[0];
+        assert_eq!(item.lifecycle_status, TaskLifecycleStatus::Completed);
+        assert_eq!(
+            item.terminal_delivery_status,
+            TaskTerminalDeliveryStatus::Delivered
+        );
+        assert_eq!(model.summary.completed_count, 1);
+        assert_eq!(model.summary.completed_needs_evidence_count, 0);
+    }
+
+    #[test]
+    fn completed_task_does_not_resolve_pending_delivery_when_review_projection_is_unknown() {
+        let model = build_tasks_view_model(TasksViewModelBuildInput {
+            task_inputs: vec![TaskViewModelTaskInput {
+                task_session_id: "task-review-unknown".into(),
+                title: "Unknown review projection".into(),
+                session_status: Some(AgentTaskSessionStatus::Completed),
+                final_delivery_present: true,
+                final_delivery_status: Some("completed_with_pending_items".into()),
+                review_projection_authoritative: false,
                 ..Default::default()
             }],
             ..Default::default()
@@ -1169,14 +1191,12 @@ mod tests {
         let item = &model.items[0];
         assert_eq!(
             item.lifecycle_status,
-            TaskLifecycleStatus::CompletedWithPendingReview
+            TaskLifecycleStatus::CompletedNeedsEvidence
         );
         assert_eq!(
             item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::CompletedWithPendingReview
+            TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
         );
-        assert_eq!(model.summary.completed_count, 0);
-        assert_eq!(model.summary.completed_needs_evidence_count, 1);
     }
 
     #[test]
@@ -1187,6 +1207,7 @@ mod tests {
                 title: "Pending review".into(),
                 session_status: Some(AgentTaskSessionStatus::Completed),
                 final_delivery_present: true,
+                final_delivery_status: Some("completed_with_pending_items".into()),
                 pending_review_item_refs: vec![BackendEntityRef {
                     id: "review-1".into(),
                     kind: BackendEntityKind::ReviewItem,

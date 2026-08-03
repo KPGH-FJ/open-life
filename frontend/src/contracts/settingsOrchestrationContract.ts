@@ -49,6 +49,19 @@ export const initialSettingsOrchestrationState: SettingsOrchestrationState = {
   errorCode: null,
 };
 
+function savedPhaseAfterTest(
+  state: SettingsOrchestrationState
+): Extract<SettingsOrchestrationState["phase"], "idle" | "ready" | "unknown"> {
+  if (!state.boundaryAppliesToSavedRevision) return "idle";
+  const boundary = state.providerBoundary;
+  const boundaryKnown =
+    boundary !== null &&
+    boundary.routeType !== "unknown" &&
+    boundary.externalTransmission !== "unknown" &&
+    boundary.risk !== "unknown";
+  return boundaryKnown ? "ready" : "unknown";
+}
+
 export function settingsOrchestrationReducer(
   state: SettingsOrchestrationState,
   event: SettingsOrchestrationEvent
@@ -71,7 +84,12 @@ export function settingsOrchestrationReducer(
     return { ...state, phase: "testing", testResult: null, failureStage: null, errorCode: null };
   }
   if (state.phase === "testing" && event.type === "test_succeeded") {
-    return { ...state, phase: "tested", testResult: event.result };
+    const draftIsSaved = state.savedRevision === state.draftRevision;
+    return {
+      ...state,
+      phase: draftIsSaved ? savedPhaseAfterTest(state) : "tested",
+      testResult: event.result,
+    };
   }
   if (state.phase === "testing" && event.type === "test_failed") {
     return {

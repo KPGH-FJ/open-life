@@ -323,6 +323,36 @@ impl crate::agent::main_chat_agent_v1::TerminalOwnerEpochAdmission {
             authority: TerminalOwnerReviewOriginAuthority::BoundToVerifiedEpochAdmission,
         })
     }
+
+    /// Bind the canonical TaskSession admission to an already verified replay
+    /// admission id. The event store persists that replay admission id before
+    /// this proof can be used, and ReviewWorkflow revalidates the complete
+    /// current OPEN epoch tuple before accepting a relation.
+    pub fn into_opened_replay_epoch_review_origin(
+        self,
+        replay_admission_id: String,
+        epoch_id: String,
+        epoch_generation: u64,
+    ) -> Result<TerminalOwnerReviewOriginProof> {
+        self.validate()?;
+        if replay_admission_id.trim().is_empty()
+            || epoch_id.trim().is_empty()
+            || epoch_generation == 0
+        {
+            anyhow::bail!("terminal owner replay epoch origin is invalid");
+        }
+        Ok(TerminalOwnerReviewOriginProof {
+            task_session_id: self.task_session_id().to_string(),
+            run_id: self.run_id().to_string(),
+            epoch_id,
+            epoch_generation,
+            admission_id: replay_admission_id,
+            canonical_user_message_ref: self.canonical_user_message_ref().to_string(),
+            canonical_user_message_digest: self.canonical_user_message_digest().to_string(),
+            canonical_store_identity: self.canonical_store_identity().to_string(),
+            authority: TerminalOwnerReviewOriginAuthority::BoundToVerifiedEpochAdmission,
+        })
+    }
 }
 
 impl TerminalOwnerReviewOriginProof {

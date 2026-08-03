@@ -17,7 +17,6 @@ use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -71,7 +70,7 @@ impl CredentialBootstrapSnapshot {
             "task_store",
             "mcp_audit",
         ];
-        let purposes = purpose_names
+        let mut purposes = purpose_names
             .into_iter()
             .zip(statuses)
             .map(|(purpose, status)| CredentialPurposeBootstrapState {
@@ -79,6 +78,25 @@ impl CredentialBootstrapSnapshot {
                 status,
             })
             .collect::<Vec<_>>();
+        purposes.push(CredentialPurposeBootstrapState {
+            purpose: "provider_api_key".into(),
+            status: CredentialBootstrapStatus::MissingExistingData,
+        });
+        Self::from_purposes(purposes)
+    }
+
+    pub(crate) fn with_provider_status(mut self, status: CredentialBootstrapStatus) -> Self {
+        if let Some(provider) = self
+            .purposes
+            .iter_mut()
+            .find(|item| item.purpose == "provider_api_key")
+        {
+            provider.status = status;
+        }
+        Self::from_purposes(self.purposes)
+    }
+
+    fn from_purposes(purposes: Vec<CredentialPurposeBootstrapState>) -> Self {
         let digest_material = purposes.iter().fold(
             CREDENTIAL_BOOTSTRAP_SNAPSHOT_VERSION.to_string(),
             |mut material, item| {
@@ -256,7 +274,6 @@ pub struct AppState {
         Option<Arc<Mutex<openlife_core::agent::main_chat_agent_v1::ActionQueueStore>>>,
     pub main_chat_agent_event_store:
         Option<Arc<Mutex<crate::main_chat_event_stream::MainChatAgentEventStore>>>,
-    pub main_chat_selected_skill_ids: Arc<Mutex<HashMap<String, String>>>,
     pub main_chat_runtime_state: Arc<Mutex<MainChatRuntimeState>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,

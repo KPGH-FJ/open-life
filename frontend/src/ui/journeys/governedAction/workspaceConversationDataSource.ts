@@ -6,14 +6,21 @@ import {
   detachResourceFromTurn,
   getChatHistory,
   listChatSessions,
+  listMainChatSkills,
+  listMainChatToolCandidates,
   pickAndImportResources,
   renameChatSession,
+  selectMainChatSkill,
+  clearMainChatSkill,
   startStreamMessage,
   type ChatSession,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
   type MainChatAgentTaskState,
   type MainChatMessageOptions,
+  type MainChatSelectedSkill,
+  type MainChatSkillSummary,
+  type MainChatToolCandidateList,
   type StreamMessageChunkPayload,
   type StreamMessageDonePayload,
   type StreamMessageStartPayload,
@@ -47,6 +54,10 @@ export interface WorkspaceConversationDataSource {
     events: WorkspaceStreamEvents
   ): Promise<StreamMessageDonePayload>;
   cancelTask(taskSessionId: string): Promise<MainChatAgentTaskState>;
+  listSkills?(sessionId?: string): Promise<MainChatSkillSummary[]>;
+  selectSkill?(sessionId: string, skillId: string): Promise<MainChatSelectedSkill>;
+  clearSkill?(sessionId: string): Promise<MainChatSelectedSkill>;
+  listToolCandidates?(taskSessionId?: string): Promise<MainChatToolCandidateList>;
 }
 
 function matchesActiveStream(
@@ -95,4 +106,8 @@ export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSour
   detachResource: detachResourceFromTurn,
   streamTurn,
   cancelTask: cancelMainChatAgentTask,
+  listSkills: listMainChatSkills,
+  selectSkill: selectMainChatSkill,
+  clearSkill: clearMainChatSkill,
+  listToolCandidates: listMainChatToolCandidates,
 };

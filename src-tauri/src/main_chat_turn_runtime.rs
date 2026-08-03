@@ -13,8 +13,9 @@ use crate::main_chat_kernel::{
     main_chat_live_provider_eval_requires_provider_backed_react,
     main_chat_react_turn_requires_governed_agent_loop_candidate_selection,
     observed_provider_lifecycle_from_kernel_events, run_main_chat_kernel_direct_answer_with_state,
-    BufferedMainChatEventSink, MainChatKernelExecutionInput, MainChatKernelSupportDisposition,
-    MainChatObservedProviderLifecycle, MainChatProviderStartEvidence, StreamingMainChatEventSink,
+    BufferedMainChatEventSink, MainChatEventSink, MainChatKernelExecutionInput,
+    MainChatKernelSupportDisposition, MainChatObservedProviderLifecycle,
+    MainChatProviderStartEvidence, MainChatReplayedReadObservation, StreamingMainChatEventSink,
 };
 use crate::main_chat_react_execution::execute_main_chat_react_action_with_tool_gateway;
 use crate::main_chat_react_tool_selection::{
@@ -913,6 +914,7 @@ fn validate_openlife_turn_admission(
 pub(crate) enum OpenLifeReplayKind {
     Retry,
     ResumeAfterPermission,
+    ResumeAfterNetworkConsent,
 }
 
 pub(crate) struct OpenLifeReplayInput {
@@ -921,6 +923,7 @@ pub(crate) struct OpenLifeReplayInput {
     pub(crate) kind: OpenLifeReplayKind,
     pub(crate) action_bound_permission:
         Option<openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization>,
+    pub(crate) network_consent_proposal_id: Option<String>,
 }
 
 impl OpenLifeReplayInput {
@@ -930,6 +933,7 @@ impl OpenLifeReplayInput {
             action_id: action_id.into(),
             kind: OpenLifeReplayKind::Retry,
             action_bound_permission: None,
+            network_consent_proposal_id: None,
         }
     }
 
@@ -943,12 +947,29 @@ impl OpenLifeReplayInput {
             action_id: action_id.into(),
             kind: OpenLifeReplayKind::ResumeAfterPermission,
             action_bound_permission: Some(authorization),
+            network_consent_proposal_id: None,
+        }
+    }
+
+    pub(crate) fn resume_after_network_consent(
+        task_session_id: impl Into<String>,
+        action_id: impl Into<String>,
+        authorization: openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization,
+        network_consent_proposal_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            task_session_id: task_session_id.into(),
+            action_id: action_id.into(),
+            kind: OpenLifeReplayKind::ResumeAfterNetworkConsent,
+            action_bound_permission: Some(authorization),
+            network_consent_proposal_id: Some(network_consent_proposal_id.into()),
         }
     }
 }
 
 pub(crate) struct OpenLifeReplayOutput {
     pub(crate) action_completed: bool,
+    replay_receipt_kind: OpenLifeReplayReceiptKind,
 }
 
 pub(crate) struct OpenLifeTurnOutput {
@@ -1559,6 +1580,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             action_id,
             kind,
             action_bound_permission,
+            network_consent_proposal_id,
         } = input;
         {
             let event_store_arc = self
@@ -1592,6 +1614,45 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 .cancellation_registry
                 .clone()
         };
+        let canonical_user_message_record = self
+            .state
+            .memory_store
+            .lock()
+            .await
+            .load_active_conversation_message_by_operation(&task_session_id)
+            .map_err(|error| format!("tool_replay_owner_load_failed:{error}"))?
+            .ok_or_else(|| "tool_replay_user_message_missing".to_string())?;
+        if canonical_user_message_record.receipt.session_id != session.chat_session_id
+            || canonical_user_message_record.receipt.operation_id != session.id
+            || canonical_user_message_record.message.role != "user"
+            || canonical_user_message_record.message.content != session.user_goal
+        {
+            return Err("tool_replay_user_message_drift".into());
+        }
+        let canonical_user_message =
+            crate::memory_gateway::save_turn_user_message_idempotent_with_state(
+                &session.chat_session_id,
+                &canonical_user_message_record.message,
+                &task_session_id,
+                self.state,
+            )
+            .await?;
+        let original_admission = {
+            let store = self
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+                .lock()
+                .await;
+            store
+                .issue_terminal_owner_epoch_admission(
+                    &task_session_id,
+                    &canonical_run_id,
+                    canonical_user_message.clone(),
+                )
+                .map_err(|error| format!("issue tool replay review admission failed: {error}"))?
+        };
         let registration = cancellation_registry
             .try_register(&task_session_id)
             .map_err(|error| {
@@ -1606,6 +1667,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             OpenLifeReplayKind::ResumeAfterPermission => {
                 crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission
             }
+            OpenLifeReplayKind::ResumeAfterNetworkConsent => {
+                crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolNetworkConsent
+            }
         };
         let replay_admission =
             crate::terminal_owner_write_gateway::issue_terminal_owner_replay_epoch_admission(
@@ -1614,10 +1678,14 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 &action,
                 &envelope,
                 replay_cause,
-                action_bound_permission.as_ref(),
+                crate::terminal_owner_write_gateway::TerminalOwnerReplayPermissionAuthorities {
+                    action_bound: action_bound_permission.as_ref(),
+                    network_consent_proposal_id: network_consent_proposal_id.as_deref(),
+                },
                 retry_proof,
             )
             .await?;
+        let replay_admission_id = replay_admission.admission_id().to_string();
         let replay_epoch = self
             .state
             .main_chat_agent_event_store
@@ -1627,6 +1695,16 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             .await
             .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
             .map_err(|error| format!("open terminal owner replay epoch failed: {error}"))?;
+        let terminal_review_origin = original_admission
+            .into_opened_replay_epoch_review_origin(
+                replay_admission_id,
+                replay_epoch.epoch_id().to_string(),
+                replay_epoch.generation(),
+            )
+            .map_err(|error| format!("issue tool replay Review origin failed: {error}"))?;
+        registration
+            .execution_epoch()
+            .bind_terminal_owner_generation(replay_epoch.generation())?;
         if registration.token.is_cancelled() {
             let cancellation_result = finalize_openlife_replay_cancellation(
                 self.state,
@@ -1758,6 +1836,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 OpenLifeReplayKind::ResumeAfterPermission => {
                     "OpenLifeTurnRuntime is resuming an action after accepted ToolPermission."
                 }
+                OpenLifeReplayKind::ResumeAfterNetworkConsent => {
+                    "OpenLifeTurnRuntime is resuming a web action after accepted network consent."
+                }
             },
             serde_json::json!({
                 "actionId": action_id,
@@ -1765,6 +1846,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 "replayKind": match kind {
                     OpenLifeReplayKind::Retry => "retry",
                     OpenLifeReplayKind::ResumeAfterPermission => "resume_after_permission",
+                    OpenLifeReplayKind::ResumeAfterNetworkConsent => "resume_after_network_consent",
                 },
                 "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
                 "directWritesExecuted": false,
@@ -1780,12 +1862,15 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             let replay_future = execute_openlife_replay(
                 self.state,
                 &session,
+                &canonical_user_message,
                 &replay_action,
                 &replay_claim,
                 action_plan,
                 &canonical_run_id,
                 &registration,
                 action_bound_permission.as_ref(),
+                network_consent_proposal_id.as_deref(),
+                &terminal_review_origin,
             );
             tokio::pin!(replay_future);
             tokio::select! {
@@ -1838,13 +1923,17 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 }
             }
         };
+        let replay_receipt_kind = result
+            .as_ref()
+            .map(|output| output.replay_receipt_kind)
+            .unwrap_or(OpenLifeReplayReceiptKind::Tool);
         let seal_result = persist_openlife_replay_final_receipt(
             self.state,
             &session,
             &canonical_run_id,
             replay_epoch.generation(),
             registration.execution_id(),
-            OpenLifeReplayReceiptKind::Tool,
+            replay_receipt_kind,
             result.as_ref().err().map(String::as_str),
         )
         .await;
@@ -2391,6 +2480,19 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             };
             let kernel_future = async {
                 record_main_chat_kernel_first_poll_for_test(&session_id);
+                let replayed_read_observations = if matches!(
+                    execution_mode,
+                    OpenLifeTurnExecutionMode::ProviderConsentContinuation { .. }
+                ) {
+                    load_openlife_replay_synthesis_observations(
+                        self.state,
+                        &task_session_id,
+                        &canonical_run_id,
+                    )
+                    .await?
+                } else {
+                    Vec::new()
+                };
                 run_main_chat_kernel_direct_answer_with_state(
                     MainChatKernelExecutionInput {
                         session_id: &session_id,
@@ -2405,6 +2507,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                         terminal_owner_review_origin: &terminal_review_origin,
                         required_network_consent_proposal_id: execution_mode
                             .required_network_consent_proposal_id(),
+                        replayed_read_observations,
                         event_sink_label: stream_mode.as_str(),
                     },
                     &mut cancellation_sink,
@@ -2970,6 +3073,64 @@ async fn canonical_openlife_replay_run_id(
     Ok(run.id)
 }
 
+fn canonical_openlife_replay_governed_input(
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+    envelope: &DurableMainChatReplayExecutionEnvelope,
+    reconstructed_input: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let matches_authority = |input: &serde_json::Value| {
+        let (input_length_bytes, input_hash) =
+            openlife_core::agent::metadata_safe::metadata_safe_value_digest(input);
+        envelope.input_hash == input_hash
+            && envelope.input_length_bytes == input_length_bytes as u64
+    };
+    if let Some(governed_input) = action
+        .observation_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("governedInput"))
+        .filter(|input| matches_authority(input))
+    {
+        return Ok(governed_input.clone());
+    }
+    if let Some(reconstructed_input) = reconstructed_input.filter(|input| matches_authority(input))
+    {
+        return Ok(reconstructed_input.clone());
+    }
+    Err("retry_replay_governed_input_drift".into())
+}
+
+fn canonical_openlife_replay_action_plan(
+    envelope: &DurableMainChatReplayExecutionEnvelope,
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+    governed_input: serde_json::Value,
+) -> crate::main_chat_react_tool_selection::MainChatReactActionPlan {
+    let arguments = if envelope.requested_target == "mcp.call_tool" {
+        serde_json::json!({
+            "tool_name": envelope.resolved_target,
+            "arguments": governed_input,
+        })
+    } else {
+        governed_input
+    };
+    crate::main_chat_react_tool_selection::MainChatReactActionPlan {
+        queue_action_type: envelope.queue_action_type.clone(),
+        executor_action_type: envelope.executor_action_type.clone(),
+        target: envelope.requested_target.clone(),
+        arguments,
+        description: "Replay the exact durable Main Chat tool action.".into(),
+        requires_network: manifest.action_type == "network"
+            || manifest
+                .capabilities
+                .iter()
+                .any(|capability| capability == "network"),
+        uses_ephemeral_file_permission: envelope.requested_target == "file.read"
+            && envelope.resolved_target == "file.read"
+            && manifest.source.to_string() == "builtin",
+        uses_ephemeral_mcp_wrapper_permission: envelope.requested_target == "mcp.call_tool",
+        tool_candidates: Vec::new(),
+    }
+}
+
 async fn prepare_openlife_replay(
     state: &Arc<AppState>,
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
@@ -2986,21 +3147,12 @@ async fn prepare_openlife_replay(
     }
     let envelope = canonical_openlife_replay_envelope(session, action)
         .ok_or_else(|| "retry_replay_execution_envelope_mismatch".to_string())?;
-    let action_plan =
-        build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)?;
-    if action_plan.queue_action_type != action.action.action_type {
-        return Err("retry_replay_plan_mismatch".into());
-    }
     let canonical_run_id = canonical_openlife_replay_run_id(state, &session.id).await?;
     if envelope.run_id != canonical_run_id {
         return Err("retry_replay_canonical_run_mismatch".into());
     }
-    let retry_proof = {
+    let (action_plan, retry_proof) = {
         let registry = state.mcp_registry.lock().await;
-        let resolution = resolve_main_chat_mcp_read_target(&registry, &action_plan);
-        if resolution.blocker_reason.is_some() {
-            return Err("retry_replay_target_resolution_blocked".into());
-        }
         let manifests = registry
             .list_manifests()
             .into_iter()
@@ -3009,6 +3161,35 @@ async fn prepare_openlife_replay(
         let [manifest] = manifests.as_slice() else {
             return Err("retry_replay_manifest_identity_not_unique".into());
         };
+        let reconstructed_plan =
+            build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal).ok();
+        let reconstructed_input = reconstructed_plan
+            .as_ref()
+            .filter(|plan| {
+                plan.queue_action_type == envelope.queue_action_type
+                    && plan.executor_action_type == envelope.executor_action_type
+                    && plan.target == envelope.requested_target
+            })
+            .and_then(|plan| {
+                let resolution = resolve_main_chat_mcp_read_target(&registry, plan);
+                (resolution.blocker_reason.is_none()
+                    && resolution.target == envelope.resolved_target)
+                    .then_some(resolution.arguments)
+            });
+        // The durable action's exact governed input is the replay authority.
+        // Re-planning the whole user goal is only a compatibility fallback for
+        // older single-action rows; it cannot override a mixed-action envelope.
+        let governed_input = canonical_openlife_replay_governed_input(
+            action,
+            &envelope,
+            reconstructed_input.as_ref(),
+        )?;
+        let action_plan =
+            canonical_openlife_replay_action_plan(&envelope, manifest, governed_input.clone());
+        let resolution = resolve_main_chat_mcp_read_target(&registry, &action_plan);
+        if resolution.blocker_reason.is_some() {
+            return Err("retry_replay_target_resolution_blocked".into());
+        }
         if !envelope.matches_current_execution(
             &session.id,
             &canonical_run_id,
@@ -3018,7 +3199,7 @@ async fn prepare_openlife_replay(
             &action_plan.target,
             &resolution.target,
             manifest,
-            &resolution.arguments,
+            &governed_input,
         ) {
             return Err("retry_replay_execution_envelope_drift".into());
         }
@@ -3026,7 +3207,7 @@ async fn prepare_openlife_replay(
             .replay_authority
             .as_ref()
             .ok_or_else(|| "retry_replay_canonical_authority_missing".to_string())?;
-        openlife_core::agent::ToolGateway::mint_automatic_retry_proof(
+        let retry_proof = openlife_core::agent::ToolGateway::mint_automatic_retry_proof(
             openlife_core::agent::tool_gateway::ToolAutomaticRetryAuthorizationInput {
                 authority,
                 action_id: &action.id,
@@ -3037,12 +3218,13 @@ async fn prepare_openlife_replay(
                 requested_target: &action_plan.target,
                 resolved_target: &resolution.target,
                 manifest,
-                input: &resolution.arguments,
+                input: &governed_input,
                 expected_action_status: action.status.as_str(),
                 expected_action_revision: action.revision,
             },
         )
-        .map_err(|reason| format!("retry_replay_gateway_authorization_failed:{reason}"))?
+        .map_err(|reason| format!("retry_replay_gateway_authorization_failed:{reason}"))?;
+        (action_plan, retry_proof)
     };
     Ok(PreparedOpenLifeReplay {
         action_plan,
@@ -3069,7 +3251,38 @@ pub(crate) async fn issue_terminal_owner_retry_epoch_admission_for_test(
         action,
         &envelope,
         crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry,
-        None,
+        crate::terminal_owner_write_gateway::TerminalOwnerReplayPermissionAuthorities {
+            action_bound: None,
+            network_consent_proposal_id: None,
+        },
+        retry_proof,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn issue_terminal_owner_tool_network_epoch_admission_for_test(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+    action_bound_permission: &openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization,
+    network_consent_proposal_id: &str,
+) -> Result<crate::terminal_owner_write_gateway::TerminalOwnerReplayEpochAdmission, String> {
+    let PreparedOpenLifeReplay {
+        retry_proof,
+        envelope,
+        ..
+    } = prepare_openlife_replay(state, session, action).await?;
+    crate::terminal_owner_write_gateway::issue_terminal_owner_replay_epoch_admission(
+        state,
+        session,
+        action,
+        &envelope,
+        crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolNetworkConsent,
+        crate::terminal_owner_write_gateway::TerminalOwnerReplayPermissionAuthorities {
+            action_bound: Some(action_bound_permission),
+            network_consent_proposal_id: Some(network_consent_proposal_id),
+        },
         retry_proof,
     )
     .await
@@ -3629,22 +3842,29 @@ impl StartupProviderReplayObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenLifeReplayReceiptKind {
     Tool,
+    ToolSynthesis {
+        provider: StartupProviderReplayObservation,
+        body_stored: bool,
+        requires_provider: bool,
+    },
     ProviderConsent(StartupProviderReplayObservation),
     Unknown,
 }
 
 impl OpenLifeReplayReceiptKind {
     fn tool_invoked(self) -> bool {
-        self == Self::Tool
+        matches!(self, Self::Tool | Self::ToolSynthesis { .. })
     }
 
     fn model_invoked(self) -> bool {
         matches!(self, Self::ProviderConsent(observation) if observation.model_invoked())
+            || matches!(self, Self::ToolSynthesis { provider, .. } if provider.model_invoked())
     }
 
     fn provider_invocation_status(self) -> &'static str {
         match self {
             Self::ProviderConsent(observation) => observation.provider_invocation_status(),
+            Self::ToolSynthesis { provider, .. } => provider.provider_invocation_status(),
             Self::Tool | Self::Unknown => "not_attempted",
         }
     }
@@ -3652,6 +3872,7 @@ impl OpenLifeReplayReceiptKind {
     fn route_path(self) -> &'static str {
         match self {
             Self::Tool => "openlife_turn_runtime_replay",
+            Self::ToolSynthesis { .. } => "openlife_turn_runtime_replay_synthesis",
             Self::ProviderConsent(_) => "openlife_turn_runtime_provider_consent_continuation",
             Self::Unknown => "openlife_turn_runtime_unknown_replay_recovery",
         }
@@ -3663,13 +3884,16 @@ impl OpenLifeReplayReceiptKind {
     ) -> &str {
         match self {
             Self::ProviderConsent(_) => "direct_answer",
-            Self::Tool | Self::Unknown => session.selected_strategy.as_str(),
+            Self::Tool | Self::ToolSynthesis { .. } | Self::Unknown => {
+                session.selected_strategy.as_str()
+            }
         }
     }
 
     fn route_reason_code(self) -> &'static str {
         match self {
             Self::Tool => "governed_replay_successor",
+            Self::ToolSynthesis { .. } => "governed_replay_synthesis",
             Self::ProviderConsent(_) => "provider_consent_continuation",
             Self::Unknown => "unknown_replay_failed_closed",
         }
@@ -3677,10 +3901,27 @@ impl OpenLifeReplayReceiptKind {
 
     fn requires_provider(self) -> bool {
         matches!(self, Self::ProviderConsent(_))
+            || matches!(
+                self,
+                Self::ToolSynthesis {
+                    requires_provider: true,
+                    ..
+                }
+            )
     }
 
     fn requires_tool_loop(self) -> bool {
-        self == Self::Tool
+        matches!(self, Self::Tool | Self::ToolSynthesis { .. })
+    }
+
+    fn body_stored(self) -> bool {
+        matches!(
+            self,
+            Self::ToolSynthesis {
+                body_stored: true,
+                ..
+            }
+        )
     }
 }
 
@@ -3830,7 +4071,7 @@ async fn persist_openlife_replay_final_receipt(
         "pendingUserActionCount": blocker_refs.len(),
         "transcriptCount": transcripts.len(),
         "directWritesExecuted": false,
-        "bodyStored": false,
+        "bodyStored": replay_kind.body_stored(),
         "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
         "taskOwnerStatus": task_owner.status.as_str(),
         "taskOwnerDigestVersion": task_owner_receipt.version(),
@@ -3955,7 +4196,9 @@ impl StartupReplayKind {
             .get("replayCause")
             .and_then(serde_json::Value::as_str)
         {
-            Some("automatic_retry" | "accepted_tool_permission") => Self::Tool,
+            Some(
+                "automatic_retry" | "accepted_tool_permission" | "accepted_tool_network_consent",
+            ) => Self::Tool,
             Some("accepted_provider_network_consent") => Self::ProviderConsent,
             Some(_) => Self::Unknown,
             None => match event
@@ -4326,6 +4569,128 @@ struct OpenLifeReplayAggregateProjection {
     blockers: Vec<String>,
 }
 
+async fn load_openlife_replay_synthesis_observations(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    canonical_run_id: &str,
+) -> Result<Vec<MainChatReplayedReadObservation>, String> {
+    use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
+
+    let actions = {
+        let queue_arc = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_action_queue_store_unavailable".to_string())?;
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("load replay synthesis actions failed: {error}"))?
+    };
+    if actions.is_empty() {
+        return Ok(Vec::new());
+    }
+    if actions
+        .iter()
+        .any(|action| action.status != ExecutionQueueStatus::Completed)
+    {
+        return Err("replay_synthesis_actions_not_complete".into());
+    }
+    actions
+        .into_iter()
+        .map(|action| {
+            let metadata = action
+                .observation_metadata
+                .clone()
+                .ok_or_else(|| "replay_synthesis_action_metadata_missing".to_string())?;
+            let synthesis = metadata
+                .get("replaySynthesisObservation")
+                .ok_or_else(|| "replay_synthesis_observation_missing".to_string())?;
+            if synthesis.get("schemaVersion").and_then(Value::as_str)
+                != Some("openlife_replay_synthesis_observation_v1")
+            {
+                return Err("replay_synthesis_observation_schema_invalid".into());
+            }
+            let (tool_name, observation_content) = match synthesis
+                .get("kind")
+                .and_then(Value::as_str)
+            {
+                Some("web") => {
+                    let observation =
+                        serde_json::from_value::<openlife_core::web_search::WebSearchObservation>(
+                            synthesis.get("observation").cloned().ok_or_else(|| {
+                                "replay_synthesis_web_observation_missing".to_string()
+                            })?,
+                        )
+                        .map_err(|_| "replay_synthesis_web_observation_invalid".to_string())?;
+                    observation
+                        .validate()
+                        .map_err(|_| "replay_synthesis_web_observation_invalid".to_string())?;
+                    (
+                        "web.search".to_string(),
+                        serde_json::to_string(&observation)
+                            .map_err(|_| "replay_synthesis_web_observation_invalid".to_string())?,
+                    )
+                }
+                Some("read") => (
+                    metadata
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("governed.read")
+                        .to_string(),
+                    synthesis
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| "replay_synthesis_read_observation_empty".to_string())?
+                        .to_string(),
+                ),
+                _ => return Err("replay_synthesis_observation_kind_invalid".into()),
+            };
+            let execution_receipt = serde_json::from_value::<
+                openlife_core::tool_execution_receipt::ToolExecutionReceipt,
+            >(
+                metadata
+                    .get("toolExecutionReceipt")
+                    .cloned()
+                    .ok_or_else(|| "replay_synthesis_tool_receipt_missing".to_string())?,
+            )
+            .map_err(|_| "replay_synthesis_tool_receipt_invalid".to_string())?;
+            execution_receipt
+                .mechanically_valid_terminal()
+                .map_err(|_| "replay_synthesis_tool_receipt_invalid".to_string())?;
+            if execution_receipt.source_run_id.as_deref() != Some(canonical_run_id) {
+                return Err("replay_synthesis_tool_receipt_run_mismatch".into());
+            }
+            let required_string = |key: &str| {
+                metadata
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("replay_synthesis_{key}_missing"))
+            };
+            Ok(MainChatReplayedReadObservation {
+                queue_action_id: action.id,
+                tool_name,
+                queue_action_type: required_string("queueActionType")
+                    .or_else(|_| required_string("actionType"))?,
+                executor_action_type: required_string("executorActionType")?,
+                requested_target: required_string("requestedTarget")?,
+                target: required_string("target")?,
+                governed_input: metadata
+                    .get("governedInput")
+                    .cloned()
+                    .ok_or_else(|| "replay_synthesis_governed_input_missing".to_string())?,
+                observation_content,
+                output_preview: required_string("preview")?,
+                observation_metadata: metadata,
+                execution_receipt,
+            })
+        })
+        .collect()
+}
+
 async fn project_openlife_replay_success_aggregate(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -4380,11 +4745,26 @@ async fn project_openlife_replay_success_aggregate(
     blockers.sort();
     blockers.dedup();
 
-    let transition = if task_completed {
-        crate::terminal_owner_write_gateway::TaskSessionTransition::Complete(
-            "All governed replay actions completed.".into(),
+    if task_completed {
+        // Tool completion is not answer completion. Keep Task and AgentRun
+        // active until the existing kernel has synthesized and persisted the
+        // requested answer (or staged a provider-consent blocker).
+        crate::terminal_owner_write_gateway::write_task_session_with_commit_admission(
+            state,
+            task_session_id,
+            crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockers(Vec::new()),
+            execution_epoch,
         )
-    } else if has_pending_permission {
+        .await
+        .map_err(|error| format!("clear resolved replay blockers failed: {error}"))?;
+        return Ok(OpenLifeReplayAggregateProjection {
+            task_completed,
+            remaining_action_count: 0,
+            blockers,
+        });
+    }
+
+    let transition = if has_pending_permission {
         crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission
     } else if has_failed {
         crate::terminal_owner_write_gateway::TaskSessionTransition::Fail(
@@ -4406,9 +4786,7 @@ async fn project_openlife_replay_success_aggregate(
     )
     .await
     .map_err(|error| format!("aggregate replay projection failed: {error}"))?;
-    let run_projection = if task_completed {
-        crate::terminal_owner_write_gateway::AgentRunReplayProjection::CompletedAllActions
-    } else if has_pending_permission {
+    let run_projection = if has_pending_permission {
         crate::terminal_owner_write_gateway::AgentRunReplayProjection::WaitingForAnotherAction
     } else {
         crate::terminal_owner_write_gateway::AgentRunReplayProjection::FailedUnresolvedAction
@@ -4449,6 +4827,243 @@ fn replay_receipt_crossed_adapter_edge(
             != openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
 }
 
+fn merge_openlife_replay_metadata(
+    previous: Option<&serde_json::Value>,
+    latest: serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = previous
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(latest) = latest.as_object() {
+        for (key, value) in latest {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
+struct OpenLifeReplayNetworkAuthorization {
+    effective_policy: Option<openlife_core::config::NetworkPolicy>,
+    pending_proposal_id: Option<String>,
+}
+
+async fn authorize_openlife_replay_network_edge(
+    state: &Arc<AppState>,
+    plan: &crate::main_chat_react_tool_selection::MainChatReactActionPlan,
+    task_session_id: &str,
+    review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    required_proposal_id: Option<&str>,
+) -> Result<OpenLifeReplayNetworkAuthorization, String> {
+    use openlife_core::network_client::{
+        resolve_network_policy_decision, NetworkPolicyDisposition,
+    };
+
+    if !matches!(plan.target.as_str(), "web.fetch" | "web.search") {
+        if required_proposal_id.is_some() {
+            return Err("tool_network_consent_replay_target_not_web".into());
+        }
+        return Ok(OpenLifeReplayNetworkAuthorization {
+            effective_policy: None,
+            pending_proposal_id: None,
+        });
+    }
+    let (network_policy, search_provider) = {
+        let config = state.config.lock().await;
+        (
+            config.system.network_policy.clone(),
+            openlife_core::agent::action_executor::helpers::SearchProviderConfig::from_system_config(
+                &config.system,
+            ),
+        )
+    };
+    let endpoint = if plan.target == "web.fetch" {
+        plan.arguments
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| "tool_network_consent_web_fetch_url_missing".to_string())?
+            .to_string()
+    } else {
+        openlife_core::agent::action_executor::helpers::configured_web_search_endpoint(
+            &search_provider,
+        )
+        .map_err(str::to_string)?
+    };
+    let decision = resolve_network_policy_decision(&network_policy, &endpoint, &plan.target)
+        .map_err(|error| format!("tool_network_policy_evaluation_failed:{error:#}"))?;
+    if required_proposal_id.is_some() && decision.disposition != NetworkPolicyDisposition::Ask {
+        return Err("tool_network_consent_replay_policy_decision_drift".into());
+    }
+    let authorization = crate::provider_network_consent::authorize_external_network_dispatch(
+        state,
+        &network_policy,
+        &decision,
+        &endpoint,
+        &plan.target,
+        crate::provider_network_consent::NetworkConsentSubject {
+            permission_source: "network_policy",
+            risk_level: "medium",
+            capabilities: &["network", "external_side_effect"],
+            target: &plan.target,
+            affected_path_prefix: "tool_permission.network_policy",
+            blocked_action_type: "web_tool_dispatch",
+            proposal_summary:
+                "Allow this exact web endpoint once after explicit Review Center approval.",
+        },
+        Some(task_session_id),
+        crate::provider_network_consent::NetworkConsentSubmissionScope::MainChatTurn {
+            origin: review_origin,
+            admission: execution_epoch,
+            required_proposal_id,
+        },
+    )
+    .await
+    .map_err(|error| format!("tool_network_consent_authorization_failed:{error}"))?;
+    match authorization {
+        crate::provider_network_consent::ProviderNetworkAuthorization::Authorized {
+            network_policy,
+            ..
+        } => Ok(OpenLifeReplayNetworkAuthorization {
+            effective_policy: Some(*network_policy),
+            pending_proposal_id: None,
+        }),
+        crate::provider_network_consent::ProviderNetworkAuthorization::ConsentRequired {
+            proposal_id,
+        } => Ok(OpenLifeReplayNetworkAuthorization {
+            effective_policy: None,
+            pending_proposal_id: Some(proposal_id),
+        }),
+        crate::provider_network_consent::ProviderNetworkAuthorization::Denied { .. } => {
+            Ok(OpenLifeReplayNetworkAuthorization {
+                effective_policy: None,
+                pending_proposal_id: None,
+            })
+        }
+    }
+}
+
+async fn run_openlife_replay_synthesis(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    canonical_user_message: &openlife_core::memory::CanonicalConversationMessageCommit,
+    canonical_run_id: &str,
+    terminal_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<OpenLifeReplayReceiptKind, String> {
+    let replayed_read_observations =
+        load_openlife_replay_synthesis_observations(state, &session.id, canonical_run_id).await?;
+    if replayed_read_observations.is_empty() {
+        return Err("replay_synthesis_observation_missing".into());
+    }
+    let requires_provider = replayed_read_observations.iter().any(|observation| {
+        matches!(
+            observation.queue_action_type.as_str(),
+            "web.search" | "web.fetch"
+        )
+    });
+    let messages = crate::memory_gateway::load_turn_context_through_operation_with_state(
+        &session.id,
+        64,
+        state,
+    )
+    .await?;
+    let current_user_message = messages
+        .last()
+        .filter(|message| message.role == "user")
+        .ok_or_else(|| "replay_synthesis_user_message_missing".to_string())?;
+    if canonical_user_message.receipt().session_id != session.chat_session_id
+        || canonical_user_message.receipt().operation_id != session.id
+        || current_user_message.content != session.user_goal
+    {
+        return Err("replay_synthesis_user_message_drift".into());
+    }
+    let mut decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+        .decide_with_canonical_user_message(
+            &session.id,
+            canonical_user_message,
+            &session.user_goal,
+            &messages,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        )
+        .map_err(|error| format!("replay synthesis policy admission failed: {error}"))?;
+    if decision.request_id != session.id
+        || decision.agent_task_session_id.as_deref() != Some(session.id.as_str())
+        || decision.selected_strategy != session.selected_strategy
+    {
+        return Err("replay_synthesis_policy_or_owner_drift".into());
+    }
+    decision.agent_task_session_id = Some(session.id.clone());
+    let main_chat_agent_turn = crate::main_chat_runtime_support::MainChatAgentTurn {
+        decision,
+        transcript_entries: Vec::new(),
+    };
+    let mut provider_runtime = state.provider_runtime_snapshot().await;
+    if !provider_runtime.coherent && requires_provider {
+        return Err("provider_runtime_generation_incoherent".into());
+    }
+    provider_runtime.scheduler = provider_runtime
+        .scheduler
+        .clone()
+        .with_provider_receipt_collector(
+            openlife_core::scheduler::ProviderReceiptCollector::default(),
+        );
+    let provider_durability_scope =
+        MainChatProviderDurabilityScope::issue(&session.id, canonical_run_id)?;
+    let mut event_sink = BufferedMainChatEventSink::default();
+    event_sink.bind_execution_identity(&session.id, canonical_run_id);
+    let command_result = run_main_chat_kernel_direct_answer_with_state(
+        MainChatKernelExecutionInput {
+            session_id: &session.chat_session_id,
+            messages,
+            selected_skill_id: None,
+            state,
+            provider_runtime: &provider_runtime,
+            main_chat_agent_turn: &main_chat_agent_turn,
+            canonical_run_id,
+            provider_durability_scope: &provider_durability_scope,
+            execution_epoch,
+            terminal_owner_review_origin: terminal_review_origin,
+            required_network_consent_proposal_id: None,
+            replayed_read_observations,
+            event_sink_label: "replay_synthesis",
+        },
+        &mut event_sink,
+    )
+    .await?;
+    let provider = command_result
+        .kernel_events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            crate::main_chat_kernel::MainChatKernelEvent::ProviderCompleted { .. } => {
+                Some(StartupProviderReplayObservation::CompletedWithoutDelivery)
+            }
+            crate::main_chat_kernel::MainChatKernelEvent::ProviderFailed { .. } => {
+                Some(StartupProviderReplayObservation::Failed)
+            }
+            crate::main_chat_kernel::MainChatKernelEvent::ProviderRemoteUnknown { .. }
+            | crate::main_chat_kernel::MainChatKernelEvent::ProviderStarted { .. } => {
+                Some(StartupProviderReplayObservation::RemoteUnknown)
+            }
+            _ => None,
+        })
+        .unwrap_or(StartupProviderReplayObservation::NotAttempted);
+    let task = load_openlife_replay_session(state, &session.id).await?;
+    let body_stored = task.status == AgentTaskSessionStatus::Completed
+        && !command_result.reply.trim().is_empty()
+        && command_result.agent_state.as_ref().is_some_and(|state| {
+            state.task.status
+                == openlife_core::agent::main_chat_runtime_contract::MainChatAgentProductTaskStatus::Completed
+        });
+    Ok(OpenLifeReplayReceiptKind::ToolSynthesis {
+        provider,
+        body_stored,
+        requires_provider,
+    })
+}
+
 // Runtime replay keeps the canonical session/action, permission scope,
 // cancellation epoch, and stream callback explicit at the sole execution edge.
 #[expect(
@@ -4458,6 +5073,7 @@ fn replay_receipt_crossed_adapter_edge(
 async fn execute_openlife_replay(
     state: &Arc<AppState>,
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    canonical_user_message: &openlife_core::memory::CanonicalConversationMessageCommit,
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
     replay_claim: &openlife_core::agent::main_chat_agent_v1::ActionReplayClaim,
     action_plan: crate::main_chat_react_tool_selection::MainChatReactActionPlan,
@@ -4466,6 +5082,8 @@ async fn execute_openlife_replay(
     action_bound_permission: Option<
         &openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization,
     >,
+    required_network_consent_proposal_id: Option<&str>,
+    terminal_review_origin: &openlife_core::agent::TerminalOwnerReviewOriginProof,
 ) -> Result<OpenLifeReplayOutput, String> {
     use openlife_core::agent::main_chat_agent_v1::{
         ActionReplayEffectCertainty, AgentIngress, AgentTaskSessionStatus, ExecutionQueueStatus,
@@ -4475,6 +5093,18 @@ async fn execute_openlife_replay(
     let action_id = action.id.as_str();
     ensure_openlife_replay_not_cancelled(registration, "before_execution_transition")?;
 
+    let executing_metadata = merge_openlife_replay_metadata(
+        action.observation_metadata.as_ref(),
+        serde_json::json!({
+            "retryRequested": true,
+            "automaticExecution": true,
+            "automaticReplayStarted": true,
+            "replayClaimId": replay_claim.claim_id,
+            "sourceRunId": canonical_run_id,
+            "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
+            "directWritesExecuted": false,
+        }),
+    );
     let executing = transition_claimed_openlife_replay(
         state,
         task_session_id,
@@ -4483,15 +5113,7 @@ async fn execute_openlife_replay(
         action.status,
         action.revision,
         ExecutionQueueStatus::Executing,
-        Some(serde_json::json!({
-            "retryRequested": true,
-            "automaticExecution": true,
-            "automaticReplayStarted": true,
-            "replayClaimId": replay_claim.claim_id,
-            "sourceRunId": canonical_run_id,
-            "runtimeOwner": OPENLIFE_TURN_RUNTIME_OWNER,
-            "directWritesExecuted": false,
-        })),
+        Some(executing_metadata),
     )
     .await?;
 
@@ -4544,6 +5166,7 @@ async fn execute_openlife_replay(
         .local_only_required;
     let envelope = canonical_openlife_replay_envelope(session, action)
         .ok_or_else(|| "retry_replay_execution_envelope_mismatch".to_string())?;
+    let replay_executor_action_id = envelope.executor_action_id.clone();
     let lifecycle_observer = MainChatReplayLifecycleObserver {
         state: Arc::clone(state),
         task_session_id: task_session_id.to_string(),
@@ -4565,6 +5188,15 @@ async fn execute_openlife_replay(
         )?,
     };
     let execution_epoch = registration.execution_epoch();
+    let network_authorization = authorize_openlife_replay_network_edge(
+        state,
+        &action_plan,
+        task_session_id,
+        terminal_review_origin,
+        &execution_epoch,
+        required_network_consent_proposal_id,
+    )
+    .await?;
     let observation = execute_main_chat_react_action_with_tool_gateway(
         state,
         &action_plan,
@@ -4575,6 +5207,7 @@ async fn execute_openlife_replay(
         Some(&registration.token),
         Some(&execution_epoch),
         action_bound_permission,
+        network_authorization.effective_policy.as_ref(),
     )
     .await;
     if registration.token.is_cancelled() {
@@ -4646,6 +5279,7 @@ async fn execute_openlife_replay(
             .await;
             return Ok(OpenLifeReplayOutput {
                 action_completed: false,
+                replay_receipt_kind: OpenLifeReplayReceiptKind::Tool,
             });
         }
     };
@@ -4688,8 +5322,44 @@ async fn execute_openlife_replay(
     {
         return Err("replay_dispatch_preflight_claim_not_owned".into());
     }
-    let mut retry_metadata = observation.metadata.clone();
+    let mut retry_metadata = merge_openlife_replay_metadata(
+        action.observation_metadata.as_ref(),
+        observation.metadata.clone(),
+    );
     if let Some(object) = retry_metadata.as_object_mut() {
+        let governed_input = if action_plan.target == "mcp.call_tool" {
+            action_plan
+                .arguments
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| action_plan.arguments.clone())
+        } else {
+            action_plan.arguments.clone()
+        };
+        let resolved_target = action_plan
+            .arguments
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or(action_plan.target.as_str());
+        object.insert("governedInput".into(), governed_input);
+        object.insert(
+            "queueActionType".into(),
+            serde_json::json!(action_plan.queue_action_type),
+        );
+        object.insert(
+            "executorActionType".into(),
+            serde_json::json!(action_plan.executor_action_type),
+        );
+        object.insert(
+            "executorActionId".into(),
+            serde_json::json!(replay_executor_action_id),
+        );
+        object.insert(
+            "requestedTarget".into(),
+            serde_json::json!(action_plan.target),
+        );
+        object.insert("target".into(), serde_json::json!(resolved_target));
+        object.insert("toolName".into(), serde_json::json!(resolved_target));
         object.insert("retryRequested".into(), serde_json::json!(true));
         object.insert("automaticExecution".into(), serde_json::json!(true));
         object.insert(
@@ -4705,6 +5375,12 @@ async fn execute_openlife_replay(
             "adapterEdgeCrossed".into(),
             serde_json::json!(receipt_crossed_edge),
         );
+        if let Some(proposal_id) = network_authorization.pending_proposal_id.as_deref() {
+            object.insert(
+                "networkConsentProposalId".into(),
+                serde_json::json!(proposal_id),
+            );
+        }
     }
 
     match observation.executor_status {
@@ -4740,6 +5416,19 @@ async fn execute_openlife_replay(
                 &execution_epoch,
             )
             .await?;
+            let replay_receipt_kind = if aggregate.task_completed {
+                run_openlife_replay_synthesis(
+                    state,
+                    session,
+                    canonical_user_message,
+                    canonical_run_id,
+                    terminal_review_origin,
+                    &execution_epoch,
+                )
+                .await?
+            } else {
+                OpenLifeReplayReceiptKind::Tool
+            };
             if let Some(object) = retry_metadata.as_object_mut() {
                 object.insert(
                     "taskCompleted".into(),
@@ -4759,7 +5448,7 @@ async fn execute_openlife_replay(
                 Some(task_session_id),
                 ExecutionTranscriptEntryKind::Observation,
                 if aggregate.task_completed {
-                    "Automatic replay completed the final required action."
+                    "Automatic replay completed the final required action and advanced the existing kernel synthesis path."
                 } else {
                     "Automatic replay completed one action; other required actions remain."
                 },
@@ -4768,6 +5457,7 @@ async fn execute_openlife_replay(
             .await;
             Ok(OpenLifeReplayOutput {
                 action_completed: true,
+                replay_receipt_kind,
             })
         }
         openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
@@ -4796,23 +5486,29 @@ async fn execute_openlife_replay(
                 .blocker_reason
                 .clone()
                 .unwrap_or_else(|| "tool_permission_required".into());
+            let mut blockers = vec![blocker.clone()];
+            if let Some(proposal_id) = network_authorization.pending_proposal_id.as_deref() {
+                blockers.insert(0, format!("proposal:{proposal_id}"));
+            }
             crate::terminal_owner_write_gateway::write_task_session(
                 state,
                 task_session_id,
                 crate::terminal_owner_write_gateway::TaskSessionWrite::SetPendingBlockersAndTransition {
-                    blockers: vec![blocker.clone()],
+                    blockers,
                     transition: crate::terminal_owner_write_gateway::TaskSessionTransition::WaitingPermission,
                 },
             )
             .await
             .map_err(|error| format!("project replay permission task state failed: {error}"))?;
-            set_canonical_openlife_replay_run_status(
-                state,
-                task_session_id,
-                canonical_run_id,
-                crate::terminal_owner_write_gateway::AgentRunReplayProjection::WaitingForPermission,
-            )
-            .await?;
+            if network_authorization.pending_proposal_id.is_none() {
+                set_canonical_openlife_replay_run_status(
+                    state,
+                    task_session_id,
+                    canonical_run_id,
+                    crate::terminal_owner_write_gateway::AgentRunReplayProjection::WaitingForPermission,
+                )
+                .await?;
+            }
             append_main_chat_agent_transcript(
                 state,
                 Some(task_session_id),
@@ -4823,6 +5519,7 @@ async fn execute_openlife_replay(
             .await;
             Ok(OpenLifeReplayOutput {
                 action_completed: false,
+                replay_receipt_kind: OpenLifeReplayReceiptKind::Tool,
             })
         }
         openlife_core::agent::ActionExecutionStatus::Blocked
@@ -4879,6 +5576,7 @@ async fn execute_openlife_replay(
             .await;
             Ok(OpenLifeReplayOutput {
                 action_completed: false,
+                replay_receipt_kind: OpenLifeReplayReceiptKind::Tool,
             })
         }
     }
@@ -7483,10 +8181,12 @@ pub(crate) fn finalize_openlife_turn_result(
         "interrupted"
     } else if result.status == "failed" {
         "failed"
-    } else if !blockers.is_empty() || pending_blocker_count > 0 || pending_permission {
+    } else if !blockers.is_empty() {
         "blocked"
     } else if !proposals.is_empty() {
         "completed_with_pending_items"
+    } else if pending_blocker_count > 0 || pending_permission {
+        "blocked"
     } else {
         "completed"
     }

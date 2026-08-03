@@ -783,6 +783,24 @@ fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> 
     Ok(())
 }
 
+fn validated_external_https_source(url: &str) -> Result<tauri::Url, String> {
+    let parsed = tauri::Url::parse(url).map_err(|_| "external_source_url_invalid".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("external_source_url_not_https".into());
+    }
+    Ok(parsed)
+}
+
+#[tauri::command]
+fn open_external_https_source(url: String) -> Result<(), String> {
+    let parsed = validated_external_https_source(&url)?;
+    open::that(parsed.as_str()).map_err(|_| "external_source_open_failed".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = app_data_dir();
@@ -938,6 +956,7 @@ pub fn run() {
             select_main_chat_skill,
             clear_main_chat_skill,
             list_main_chat_tool_candidates,
+            open_external_https_source,
             create_plan_execute_session,
             get_plan_execute_session,
             list_plan_execute_sessions,
@@ -1124,4 +1143,26 @@ fn main_chat_stream_command_surface_test_handler<R: tauri::Runtime>(
 fn main_chat_get_agent_run_command_surface_test_handler<R: tauri::Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![get_agent_run]
+}
+
+#[cfg(test)]
+mod external_source_tests {
+    use super::validated_external_https_source;
+
+    #[test]
+    fn external_source_requires_credential_free_https_url() {
+        assert!(validated_external_https_source("https://example.com/source").is_ok());
+        for rejected in [
+            "http://example.com/source",
+            "javascript:alert(1)",
+            "file:///tmp/source",
+            "https://user:secret@example.com/source",
+            "not-a-url",
+        ] {
+            assert!(
+                validated_external_https_source(rejected).is_err(),
+                "URL should be rejected: {rejected}"
+            );
+        }
+    }
 }

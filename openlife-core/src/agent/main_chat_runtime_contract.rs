@@ -2046,23 +2046,38 @@ fn blockers_from_evidence(
         .pending_blockers
         .iter()
         .enumerate()
-        .map(|(index, reason)| BlockerEvidence {
-            blocker_id: format!("blocker:{}:{index}", session.id),
-            reason_code: reason.clone(),
-            title: blocker_title(reason),
-            detail: reason.clone(),
-            affected_action_id: actions
+        .map(|(index, reason)| {
+            let affected_action_id = actions
                 .iter()
                 .find(|action| {
                     action.status == ExecutionQueueStatus::Failed
                         || action.status == ExecutionQueueStatus::PendingPermission
                 })
-                .map(|action| action.id.clone()),
-            recoverable: !matches!(
+                .map(|action| action.id.clone());
+            let affected_identity = affected_action_id.as_deref().unwrap_or("task");
+            let recoverable = !matches!(
                 session.status,
                 AgentTaskSessionStatus::Cancelled | AgentTaskSessionStatus::Completed
-            ),
-            controls: blocker_controls(reason),
+            );
+            BlockerEvidence {
+                // `blocker.created` is immutable. A task can legitimately replace
+                // one pending blocker with a successor at the same list position,
+                // so the list index alone is not an event identity. Bind the id to
+                // the TaskSession state generation and current affected action;
+                // unchanged snapshot reads stay idempotent while successor facts
+                // cannot overwrite an earlier blocker event.
+                blocker_id: format!(
+                    "blocker:{}:state:{}:{index}:{affected_identity}",
+                    session.id,
+                    session.updated_at.timestamp_micros()
+                ),
+                reason_code: reason.clone(),
+                title: blocker_title(reason),
+                detail: reason.clone(),
+                affected_action_id,
+                recoverable,
+                controls: blocker_controls(reason),
+            }
         })
         .collect::<Vec<_>>();
 

@@ -956,7 +956,8 @@ impl MainChatAgentEventStore {
                     "selectedStrategy": match admission.cause() {
                         crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => "direct_answer",
                         crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AutomaticRetry
-                        | crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission => "react_tool_execution",
+                        | crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolPermission
+                        | crate::terminal_owner_write_gateway::TerminalOwnerReplayCause::AcceptedToolNetworkConsent => "react_tool_execution",
                     },
                     "replayCause": admission.cause().as_str(),
                     "replayCauseRef": admission.cause_ref(),
@@ -1238,8 +1239,15 @@ impl MainChatAgentEventStore {
         task_session_id: &str,
         run_id: &str,
         proposal_id: &str,
+        cause_kind: &str,
         receipt: &openlife_core::agent::main_chat_agent_v1::VerifiedTerminalOwnerTransitionReceipt,
     ) -> Result<MainChatAgentDurableEvent> {
+        if !matches!(
+            cause_kind,
+            "proposal_review_acceptance" | "proposal_review_rejection"
+        ) {
+            anyhow::bail!("terminal_owner_successor_cause_kind_invalid");
+        }
         if receipt.owner_kind() != "agent_task_session"
             || receipt.owner_id() != task_session_id
             || receipt.proposal_id() != proposal_id
@@ -1285,6 +1293,7 @@ impl MainChatAgentEventStore {
                     != Some("agent_task_session")
                 || existing.payload.get("ownerId").and_then(Value::as_str) != Some(task_session_id)
                 || existing.payload.get("causeRef").and_then(Value::as_str) != Some(proposal_id)
+                || existing.payload.get("causeKind").and_then(Value::as_str) != Some(cause_kind)
                 || existing.payload.get("finalEventId").and_then(Value::as_str)
                     != Some(final_event_id)
                 || existing
@@ -1338,7 +1347,7 @@ impl MainChatAgentEventStore {
                 created_at: Utc::now(),
                 source: "terminal_owner_write_gateway.review_successor".into(),
                 payload: json!({
-                    "causeKind": "proposal_review_acceptance",
+                    "causeKind": cause_kind,
                     "causeRef": proposal_id,
                     "finalEventId": final_event_id,
                     "ownerKind": receipt.owner_kind(),

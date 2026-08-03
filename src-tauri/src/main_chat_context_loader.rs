@@ -87,6 +87,7 @@ pub(crate) async fn compile_main_chat_context(
     let (current_context, configured_context) = tokio::join!(current_context, configured_context);
     candidates.extend(current_context.unwrap_or_default());
     candidates.extend(configured_context.unwrap_or_default());
+    ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id.as_deref());
     candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
     let sessions = {
         let store = state.memory_store.lock().await;
@@ -172,6 +173,40 @@ pub(crate) fn sanitize_main_chat_selected_skill_id(
     } else {
         None
     }
+}
+
+/// Add the packaged instruction only when no selected skill file was loaded.
+/// This keeps configured workspace skills authoritative while making built-in
+/// product skills independent from the process working directory.
+pub(crate) fn ensure_bundled_selected_skill_context_candidate(
+    candidates: &mut Vec<ContextSourceCandidate>,
+    selected_skill_id: Option<&str>,
+) {
+    let Some(skill_id) = sanitize_main_chat_selected_skill_id(selected_skill_id) else {
+        return;
+    };
+    if candidates.iter().any(|candidate| {
+        candidate.source_kind == ContextSourceKind::SkillInstruction
+            && candidate.selected_skill_id.as_deref() == Some(skill_id.as_str())
+    }) {
+        return;
+    }
+    let Some(instruction) =
+        openlife_core::skills::SkillRegistry::built_in_runtime_instruction(&skill_id)
+    else {
+        return;
+    };
+    candidates.push(
+        ContextSourceCandidate::new(
+            ContextSourceKind::SkillInstruction,
+            format!("bundled:skills/{skill_id}/SKILL.md"),
+            instruction,
+            "packaged selected skill instruction; repository working directory not required",
+            "internal",
+            18,
+        )
+        .for_skill(skill_id),
+    );
 }
 
 // Bounded knowledge-format surfaces: AGENTS.md, SOUL.md, USER.md, MEMORY.md,
@@ -547,6 +582,45 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.source_kind == ContextSourceKind::SkillInstruction));
+    }
+
+    #[test]
+    fn packaged_evidence_review_does_not_require_a_workspace_file() {
+        let mut candidates = Vec::new();
+        ensure_bundled_selected_skill_context_candidate(&mut candidates, Some("evidence_review"));
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.source_kind, ContextSourceKind::SkillInstruction);
+        assert_eq!(
+            candidate.source_id,
+            "bundled:skills/evidence_review/SKILL.md"
+        );
+        assert_eq!(
+            candidate.selected_skill_id.as_deref(),
+            Some("evidence_review")
+        );
+        assert!(candidate.content.contains("Review only evidence supplied"));
+    }
+
+    #[test]
+    fn workspace_skill_instruction_wins_over_packaged_fallback() {
+        let mut candidates = vec![ContextSourceCandidate::new(
+            ContextSourceKind::SkillInstruction,
+            "skills/evidence_review/SKILL.md",
+            "workspace-owned selected instruction",
+            "selected skill instruction",
+            "internal",
+            18,
+        )
+        .for_skill("evidence_review")];
+        ensure_bundled_selected_skill_context_candidate(&mut candidates, Some("evidence_review"));
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].content,
+            "workspace-owned selected instruction"
+        );
     }
 
     #[test]

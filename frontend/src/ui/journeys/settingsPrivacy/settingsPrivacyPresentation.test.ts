@@ -181,4 +181,59 @@ describe("settings privacy presentation", () => {
       )
     ).toBe(false);
   });
+
+  it("attests the backend-owned DeepSeek embedding normalization after a provider switch", () => {
+    const previous = config({
+      provider: "openai",
+      openai_base: "https://api.openai.com/v1",
+      openai_key: "***",
+      chat_model: "gpt-4.1-mini",
+      embedding_enabled: true,
+      credential_version: 0,
+    });
+    const submitted = config({
+      openai_key: "replacement-secret",
+      embedding_enabled: true,
+      credential_version: 0,
+    });
+    const refreshed = config({
+      openai_key: "***",
+      embedding_enabled: false,
+      credential_version: 1,
+    });
+
+    expect(settingsConfigMatchesSavedDraft(previous, submitted, refreshed)).toBe(true);
+    expect(
+      settingsConfigMatchesSavedDraft(
+        previous,
+        submitted,
+        config({
+          openai_key: "***",
+          chat_model: "unexpected-model",
+          embedding_enabled: false,
+          credential_version: 1,
+        })
+      )
+    ).toBe(false);
+
+    const openAiSubmitted = config({
+      provider: "openai",
+      openai_base: "https://api.openai.com/v1",
+      openai_key: "replacement-secret",
+      chat_model: "gpt-4.1-mini",
+      embedding_enabled: true,
+      credential_version: 0,
+    });
+    expect(
+      settingsConfigMatchesSavedDraft(previous, openAiSubmitted, {
+        ...openAiSubmitted,
+        llm: {
+          ...openAiSubmitted.llm,
+          openai_key: "***",
+          embedding_enabled: false,
+          credential_version: 1,
+        },
+      })
+    ).toBe(false);
+  });
 });

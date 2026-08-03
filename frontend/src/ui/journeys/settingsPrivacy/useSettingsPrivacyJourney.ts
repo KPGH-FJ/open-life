@@ -326,11 +326,21 @@ export function useSettingsPrivacyJourney(
     () =>
       dataSource?.initializeRequiredCredentials
         ? (snapshot?.credentialBootstrap?.purposes ?? [])
-            .filter(purpose => purpose.status === "initialization_required")
+            .filter(
+              purpose =>
+                purpose.status === "initialization_required" || purpose.status === "unavailable"
+            )
             .map(purpose => purpose.purpose)
             .sort()
         : [],
     [dataSource, snapshot?.credentialBootstrap]
+  );
+  const credentialAccessRecoveryRequired = useMemo(
+    () =>
+      (snapshot?.credentialBootstrap?.purposes ?? []).some(
+        purpose => purpose.status === "unavailable"
+      ),
+    [snapshot?.credentialBootstrap]
   );
   const protectionState = protectionStateForSnapshot(snapshot, loading);
   const actions = useMemo(() => {
@@ -350,6 +360,7 @@ export function useSettingsPrivacyJourney(
 
   const executeTest = useCallback(async () => {
     if (!dataSource || !draft || operationRef.current || !actions.test.enabled) return;
+    const draftIsAlreadySaved = state.savedRevision === state.draftRevision;
     const operationToken: SettingsOperationToken = {
       kind: "test",
       sourceGeneration: sourceGenerationRef.current,
@@ -378,7 +389,11 @@ export function useSettingsPrivacyJourney(
           type: "test_succeeded",
           result: { ok: true, message: result.message },
         });
-        announce("本次连接验证已有可信回执；设置仍未保存。");
+        announce(
+          draftIsAlreadySaved
+            ? "本次连接验证已有可信回执；当前已保存设置未被测试改变。"
+            : "本次连接验证已有可信回执；设置仍未保存。"
+        );
       } else {
         dispatch({
           type: "test_failed",
@@ -401,7 +416,7 @@ export function useSettingsPrivacyJourney(
     } finally {
       if (operationIsCurrent()) operationRef.current = null;
     }
-  }, [actions.test.enabled, announce, dataSource, draft]);
+  }, [actions.test.enabled, announce, dataSource, draft, state.draftRevision, state.savedRevision]);
 
   const requestTest = useCallback(() => {
     if (!actions.test.enabled) {
@@ -573,7 +588,7 @@ export function useSettingsPrivacyJourney(
       eligibleCredentialPurposes.length === 0 ||
       credentialInitialization.phase === "restart_required"
     ) {
-      announce("当前后端快照没有可执行的系统凭据初始化操作。");
+      announce("当前后端快照没有可执行的凭据初始化或访问恢复操作。");
       return;
     }
     const operationToken: SettingsOperationToken = {
@@ -583,20 +598,26 @@ export function useSettingsPrivacyJourney(
     };
     operationRef.current = operationToken;
     setCredentialInitialization({ phase: "running", report: null, error: null });
-    announce("正在等待系统原生确认；取消不会写入或删除任何凭据。");
+    announce(
+      credentialAccessRecoveryRequired
+        ? "正在等待系统原生确认；恢复只读取既有凭据，不会创建、覆盖或返回密钥。"
+        : "正在等待系统原生确认；取消不会写入或删除任何凭据。"
+    );
     void dataSource
       .initializeRequiredCredentials()
       .then(report => {
         if (operationRef.current !== operationToken) return;
         setCredentialInitialization({
-          phase: report.initializationCompletedForRestart ? "restart_required" : "blocked",
+          phase: report.restartRequired ? "restart_required" : "blocked",
           report,
           error: report.blockedReason ?? null,
         });
         announce(
-          report.initializationCompletedForRestart
-            ? "系统凭据初始化已经完成；必须完全重启 OpenLife 后才能重新判断可用状态。"
-            : "系统凭据初始化未完成；当前继续保持阻塞。"
+          report.restartRequired
+            ? credentialAccessRecoveryRequired
+              ? "既有凭据访问已经恢复；必须完全重启 OpenLife 后才能重新判断可用状态。"
+              : "系统凭据初始化已经完成；必须完全重启 OpenLife 后才能重新判断可用状态。"
+            : "凭据恢复未完成；当前继续保持阻塞。"
         );
       })
       .catch(error => {
@@ -606,12 +627,18 @@ export function useSettingsPrivacyJourney(
           report: null,
           error: errorCode(error),
         });
-        announce("系统凭据初始化被取消或失败；当前状态没有被标记为可用。");
+        announce("凭据初始化或访问恢复被取消或失败；当前状态没有被标记为可用。");
       })
       .finally(() => {
         if (operationRef.current === operationToken) operationRef.current = null;
       });
-  }, [announce, credentialInitialization.phase, dataSource, eligibleCredentialPurposes.length]);
+  }, [
+    announce,
+    credentialAccessRecoveryRequired,
+    credentialInitialization.phase,
+    dataSource,
+    eligibleCredentialPurposes.length,
+  ]);
 
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
   const effectiveBoundaryEnvelope = useMemo(() => {

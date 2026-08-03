@@ -60,7 +60,7 @@ impl Default for SearchProviderConfig {
 /// able to evaluate policy before it emits a dispatch fact. Keep this selector
 /// beside the execution selector below so the preflight and transport cannot
 /// silently choose different providers.
-pub(crate) fn configured_web_search_endpoint(
+pub fn configured_web_search_endpoint(
     cfg: &SearchProviderConfig,
 ) -> std::result::Result<String, &'static str> {
     match cfg.provider.trim().to_ascii_lowercase().as_str() {

@@ -417,7 +417,7 @@ function SafeModeNotice({ controller }: { controller: SettingsPrivacyJourneyCont
       <p>
         {active
           ? recoveryEligible
-            ? "后端报告了保护状态；连接测试与设置保存继续关闭。下方只开放后端启动快照明确列出的系统凭据初始化，且仍需原生确认。"
+            ? "后端报告了保护状态；连接测试与设置保存继续关闭。下方只开放后端启动快照明确列出的凭据初始化或访问恢复，且仍需原生确认。"
             : "后端报告了保护状态；连接测试与设置保存继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。"
           : "LifeStateProjection 没有提供可核对的保护状态；连接测试、设置保存和本地确定态全部保持关闭。"}
       </p>
@@ -438,15 +438,23 @@ function CredentialInitializationPanel({
   const running = phase === "running";
   const restartRequired = phase === "restart_required";
   const cleanupUnknown = report?.cleanupStatus === "unknown";
+  const accessRecovery = (controller.snapshot?.credentialBootstrap?.purposes ?? []).some(
+    purpose => purpose.status === "unavailable"
+  );
   return (
     <section className="ol-settings-section" aria-labelledby="ol-settings-credential-title">
       <div className="ol-settings-section-heading">
         <span>后端启动快照</span>
-        <h2 id="ol-settings-credential-title">系统凭据初始化</h2>
+        <h2 id="ol-settings-credential-title">
+          {accessRecovery ? "凭据访问恢复" : "系统凭据初始化"}
+        </h2>
       </div>
       {restartRequired ? (
-        <FoundationNotice title="初始化完成，需要重启" live>
-          <p>当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取系统凭据。</p>
+        <FoundationNotice
+          title={accessRecovery ? "访问恢复完成，需要重启" : "初始化完成，需要重启"}
+          live
+        >
+          <p>当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取这些凭据。</p>
         </FoundationNotice>
       ) : phase === "blocked" ? (
         <FoundationNotice title="初始化未完成" tone="error" live>
@@ -461,12 +469,14 @@ function CredentialInitializationPanel({
         </FoundationNotice>
       ) : (
         <p>
-          后端确认有 {eligibleCount} 类系统凭据可以首次初始化。点击后仍需在 macOS
-          原生系统对话框中确认。
+          {accessRecovery
+            ? `后端确认有 ${eligibleCount} 类既有凭据需要恢复访问。此操作不创建、不覆盖且不返回密钥。`
+            : `后端确认有 ${eligibleCount} 类系统凭据可以首次初始化。`}
+          点击后仍需在 macOS 原生系统对话框中确认。
         </p>
       )}
       <FoundationActionButton
-        label={restartRequired ? "等待重启" : "初始化系统凭据"}
+        label={restartRequired ? "等待重启" : accessRecovery ? "恢复凭据访问" : "初始化系统凭据"}
         icon={<Check size={18} strokeWidth={1.75} aria-hidden="true" />}
         loading={running}
         loadingLabel="等待系统确认"

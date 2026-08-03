@@ -2916,11 +2916,24 @@ impl InferenceScheduler {
         }
 
         if request.provider_target == "ollama" {
+            let receipt_evidence = request.policy_receipt_evidence();
+            let structured_json_output = receipt_evidence.payload_purpose
+                == Some(ProviderPayloadPurpose::MainChatArtifactDraft);
+            let deterministic_output = structured_json_output
+                || request
+                    .context_manifest
+                    .included_context_categories
+                    .iter()
+                    .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY);
             return crate::ollama::chat_with_ollama_raw_at_endpoint_with_start_observer(
                 execution_binding.endpoint(),
                 &request.model_target,
                 request.messages,
                 system_prompt.as_deref(),
+                crate::ollama::OllamaOutputContract {
+                    structured_json: structured_json_output,
+                    deterministic: deterministic_output,
+                },
                 Some(&request_id),
                 on_started,
             )

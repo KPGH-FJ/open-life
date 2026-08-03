@@ -644,6 +644,7 @@ where
         model,
         messages,
         system_prompt,
+        OllamaOutputContract::default(),
         request_id,
         on_started,
     )
@@ -652,11 +653,18 @@ where
 
 /// Dispatch to the exact loopback endpoint selected during preparation.
 /// This function deliberately has no environment/cache/discovery fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct OllamaOutputContract {
+    pub(crate) structured_json: bool,
+    pub(crate) deterministic: bool,
+}
+
 pub(crate) async fn chat_with_ollama_raw_at_endpoint_with_start_observer<F>(
     endpoint: &str,
     model: &str,
     messages: Vec<ChatMessage>,
     system_prompt: Option<&str>,
+    output_contract: OllamaOutputContract,
     request_id: Option<&str>,
     on_started: F,
 ) -> Result<String>
@@ -679,15 +687,12 @@ where
         }));
     }
 
-    let body = json!({
-        "model": model,
-        "messages": req_messages,
-        "stream": false,
-        "options": {
-            "temperature": 0.7,
-            "num_predict": 2048,
-        }
-    });
+    let body = ollama_chat_request_body(
+        model,
+        req_messages,
+        output_contract.structured_json,
+        output_contract.deterministic,
+    );
 
     let client = ollama_http_client(OLLAMA_CHAT_TIMEOUT)?;
     let mut request = client.post(endpoint).json(&body);
@@ -728,6 +733,27 @@ where
         ));
     }
     Ok(content)
+}
+
+fn ollama_chat_request_body(
+    model: &str,
+    req_messages: Vec<serde_json::Value>,
+    structured_json_output: bool,
+    deterministic_output: bool,
+) -> serde_json::Value {
+    let mut body = json!({
+        "model": model,
+        "messages": req_messages,
+        "stream": false,
+        "options": {
+            "temperature": if structured_json_output || deterministic_output { 0.0 } else { 0.7 },
+            "num_predict": 2048,
+        }
+    });
+    if structured_json_output {
+        body["format"] = serde_json::Value::String("json".into());
+    }
+    body
 }
 
 /// Stream chat with a local Ollama model using a raw system prompt.
@@ -1529,6 +1555,46 @@ mod tests {
         assert!(dot(&one) > 0.99);
         assert!(dot(&two) > 0.99);
         assert_ne!(one, two);
+    }
+
+    #[test]
+    fn artifact_request_uses_json_mode_and_deterministic_temperature() {
+        let body = ollama_chat_request_body(
+            "llama3.1:latest",
+            vec![json!({"role": "user", "content": "draft artifacts"})],
+            true,
+            true,
+        );
+
+        assert_eq!(body["format"], "json");
+        assert_eq!(body["options"]["temperature"], 0.0);
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn ordinary_chat_request_does_not_force_json_mode() {
+        let body = ollama_chat_request_body(
+            "llama3.1:latest",
+            vec![json!({"role": "user", "content": "hello"})],
+            false,
+            false,
+        );
+
+        assert!(body.get("format").is_none());
+        assert_eq!(body["options"]["temperature"], 0.7);
+    }
+
+    #[test]
+    fn evidence_grounded_request_is_deterministic_without_forcing_json_mode() {
+        let body = ollama_chat_request_body(
+            "llama3.1:latest",
+            vec![json!({"role": "user", "content": "summarize Web evidence"})],
+            false,
+            true,
+        );
+
+        assert!(body.get("format").is_none());
+        assert_eq!(body["options"]["temperature"], 0.0);
     }
 
     #[expect(

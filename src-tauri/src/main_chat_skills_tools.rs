@@ -17,6 +17,7 @@ use std::sync::Arc;
 const MAX_SKILL_PREVIEW_CHARS: usize = 900;
 const MAX_SKILL_SUMMARY_CHARS: usize = 220;
 const SKILL_SURFACE_SCOPE: &str = "session";
+const PRODUCT_SKILL_MARKER: &str = "<!-- openlife-product-skill -->";
 
 fn manifest_product_available(manifest: &SkillManifest) -> bool {
     manifest.source_kind == SkillSourceKind::BuiltIn
@@ -146,7 +147,7 @@ pub(crate) async fn list_main_chat_skills_with_state(
     state: &Arc<AppState>,
     session_id: Option<&str>,
 ) -> Result<Vec<MainChatSkillSummary>, String> {
-    let selected_skill_id = selected_skill_id_for_session(state, session_id).await;
+    let selected_skill_id = selected_skill_id_for_session(state, session_id).await?;
     let mut summaries = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -271,10 +272,16 @@ pub(crate) async fn select_main_chat_skill_with_state(
     if !available {
         return Err("skill_not_available_for_main_chat_context".into());
     }
-    {
-        let mut selected = state.main_chat_selected_skill_ids.lock().await;
-        selected.insert(session_id.clone(), detail.skill_id.clone());
-    }
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| error.to_string())?;
+    state
+        .memory_store
+        .lock()
+        .await
+        .set_chat_session_selected_skill(&session_id, Some(&detail.skill_id))
+        .map_err(|error| error.to_string())?;
     Ok(selection_from_detail(
         &session_id,
         Some(&detail),
@@ -289,10 +296,16 @@ pub(crate) async fn clear_main_chat_skill_with_state(
 ) -> Result<MainChatSelectedSkill, String> {
     let session_id =
         sanitize_session_id(session_id).ok_or_else(|| "invalid_session_id".to_string())?;
-    {
-        let mut selected = state.main_chat_selected_skill_ids.lock().await;
-        selected.remove(&session_id);
-    }
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| error.to_string())?;
+    state
+        .memory_store
+        .lock()
+        .await
+        .set_chat_session_selected_skill(&session_id, None)
+        .map_err(|error| error.to_string())?;
     Ok(MainChatSelectedSkill {
         session_id,
         selected_skill_id: None,
@@ -469,6 +482,12 @@ fn local_skill_record_from_path(
         return None;
     }
     let content = std::fs::read_to_string(&canonical).ok()?;
+    if !content
+        .lines()
+        .any(|line| line.trim() == PRODUCT_SKILL_MARKER)
+    {
+        return None;
+    }
     let (preview, redaction_summary) = bounded_redacted_preview(&content);
     let digest = digest_label(content.as_bytes());
     let metadata = std::fs::metadata(&canonical).ok();
@@ -615,10 +634,20 @@ fn selection_from_detail(
 async fn selected_skill_id_for_session(
     state: &Arc<AppState>,
     session_id: Option<&str>,
-) -> Option<String> {
-    let session_id = session_id?;
-    let selected = state.main_chat_selected_skill_ids.lock().await;
-    selected.get(session_id).cloned()
+) -> Result<Option<String>, String> {
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    state
+        .persistence_coordinator
+        .require_trusted_read("MemoryStore")
+        .map_err(|error| error.to_string())?;
+    state
+        .memory_store
+        .lock()
+        .await
+        .chat_session_selected_skill(session_id)
+        .map_err(|error| error.to_string())
 }
 
 fn blocked_tool_from_manifest(manifest: ToolManifest) -> Option<MainChatBlockedTool> {
@@ -759,7 +788,7 @@ fn skill_description_from_content(content: &str) -> String {
     content
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("<!--"))
         .unwrap_or("Local Main Chat skill instructions.")
         .to_string()
 }
@@ -829,6 +858,12 @@ mod tests {
     #[tokio::test]
     async fn registry_skill_without_turn_runtime_native_contract_is_not_selectable() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session("skill-truth", "Skill truth")
+            .unwrap();
         let skills = list_main_chat_skills_with_state(&state, Some("skill-truth"))
             .await
             .unwrap();
@@ -842,11 +877,84 @@ mod tests {
             .await
             .expect_err("a skill with no TurnRuntime-native context path must fail closed");
         assert_eq!(error, "skill_not_available_for_main_chat_context");
-        assert!(state
-            .main_chat_selected_skill_ids
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .chat_session_selected_skill("skill-truth")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn product_skill_catalog_excludes_unmarked_repository_fixtures() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        state
+            .memory_store
             .lock()
             .await
-            .get("skill-truth")
-            .is_none());
+            .create_chat_session("skill-catalog", "Skill catalog")
+            .unwrap();
+        let skills = list_main_chat_skills_with_state(&state, Some("skill-catalog"))
+            .await
+            .unwrap();
+        assert!(skills
+            .iter()
+            .any(|skill| skill.skill_id == "evidence_review" && skill.available));
+        for fixture_only in [
+            "planning_review",
+            "unselected_context",
+            "unselected_sensitive",
+        ] {
+            assert!(
+                skills.iter().all(|skill| skill.skill_id != fixture_only),
+                "unmarked repository fixture must not enter the product catalog: {fixture_only}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn product_skill_selection_uses_the_conversation_store_as_owner() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session("skill-persisted", "Skill persisted")
+            .unwrap();
+
+        let selected =
+            select_main_chat_skill_with_state(&state, "skill-persisted", "evidence_review")
+                .await
+                .expect("select product skill");
+        assert_eq!(
+            selected.selected_skill_id.as_deref(),
+            Some("evidence_review")
+        );
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .chat_session_selected_skill("skill-persisted")
+                .unwrap()
+                .as_deref(),
+            Some("evidence_review")
+        );
+
+        clear_main_chat_skill_with_state(&state, "skill-persisted")
+            .await
+            .expect("clear product skill");
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .chat_session_selected_skill("skill-persisted")
+                .unwrap(),
+            None
+        );
     }
 }

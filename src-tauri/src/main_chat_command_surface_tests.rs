@@ -3733,7 +3733,17 @@ async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_
         let mut config = state.config.lock().await;
         config.system.safe_paths = vec![safe_workspace.display().to_string()];
     }
-    let provider_response = serde_json::json!({"markdown": MARKDOWN, "csv": CSV}).to_string();
+    let provider_response = serde_json::json!({
+        "markdown": MARKDOWN,
+        "csv": {
+            "headers": ["risk", "severity", "mitigation"],
+            "rows": [
+                ["provider outage", "high", "fail closed"],
+                ["disk full", "medium", "show degraded state"]
+            ]
+        }
+    })
+    .to_string();
     let provider_fixture = configure_command_surface_sequenced_local_http_provider(
         &state,
         vec!["unused ranking response".into(), provider_response],
@@ -3862,6 +3872,110 @@ async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_
     let encoded_run = serde_json::to_string(&stored_run).expect("encode artifact AgentRun");
     assert!(!encoded_run.contains("provider outage"));
     assert!(!encoded_run.contains("可靠的个人智能助理"));
+}
+
+#[tokio::test]
+async fn streamed_generated_artifacts_converge_after_each_review_decision() {
+    const MARKDOWN: &str = "# Streamed artifact\n\nGenerated before review.";
+    const CSV: &str = "risk,severity\nprovider outage,high";
+    let workspace = tempfile::tempdir().expect("streamed artifact workspace");
+    let safe_workspace = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical streamed artifact workspace");
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    state.config.lock().await.system.safe_paths = vec![safe_workspace.display().to_string()];
+    configure_command_surface_sequenced_local_http_provider(
+        &state,
+        vec![
+            "unused ranking response".into(),
+            serde_json::json!({
+                "markdown": MARKDOWN,
+                "csv": {
+                    "headers": ["risk", "severity"],
+                    "rows": [["provider outage", "high"]]
+                }
+            })
+            .to_string(),
+        ],
+    )
+    .await;
+
+    let response = invoke_start_stream_message_for_kernel_goal_3(
+        state.clone(),
+        "streamed-generated-artifacts",
+        "Create a Markdown summary and a CSV risk list, and save them only after I confirm.",
+    )
+    .await;
+    assert_eq!(
+        response["status"], "completed_with_pending_items",
+        "reviewable proposals are pending user actions, not a failed/blocked terminal"
+    );
+    let task_session_id = task_session_id_from_response(&response);
+    let mut proposals = list_command_surface_proposals_for_task(&state, &task_session_id)
+        .await
+        .into_iter()
+        .filter(|proposal| {
+            proposal.proposal_type == openlife_core::agent::ProposalType::ExternalWriteAction
+        })
+        .collect::<Vec<_>>();
+    proposals.sort_by(|left, right| left.affected_path.cmp(&right.affected_path));
+    assert_eq!(proposals.len(), 2);
+    let generated_run = state
+        .agent_run_store
+        .as_ref()
+        .expect("AgentRun store")
+        .lock()
+        .await
+        .get_run(&task_session_id)
+        .expect("load streamed generated-artifact run")
+        .expect("streamed generated-artifact run exists");
+    assert_eq!(
+        generated_run.status,
+        openlife_core::agent::AgentRunStatus::WaitingPermission,
+        "a sealed multi-artifact turn must remain reviewable before any decision: {:?}",
+        generated_run.error
+    );
+
+    for (index, proposal) in proposals.iter().enumerate() {
+        let accepted =
+            crate::commands::proposal::accept_proposal_with_state(proposal.id.clone(), &state)
+                .await
+                .expect("accept streamed generated artifact");
+        assert_eq!(accepted["artifactMaterialization"]["status"], "confirmed");
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .expect("proposal store")
+                .lock()
+                .await
+                .get_proposal(&proposal.id)
+                .expect("load streamed proposal")
+                .expect("streamed proposal exists")
+                .status,
+            openlife_core::agent::ProposalStatus::Accepted
+        );
+        let expected_status = if index + 1 == proposals.len() {
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+        } else {
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        };
+        assert_eq!(
+            load_command_surface_session(&state, &task_session_id)
+                .await
+                .status,
+            expected_status
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(safe_workspace.join("summary.md")).unwrap(),
+        MARKDOWN
+    );
+    assert_eq!(
+        std::fs::read_to_string(safe_workspace.join("items.csv")).unwrap(),
+        CSV
+    );
 }
 
 #[tokio::test]
@@ -4179,7 +4293,17 @@ fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
                             &state,
                             vec![
                                 "unused ranking response".into(),
-                                serde_json::json!({"markdown": MARKDOWN, "csv": CSV}).to_string(),
+                                serde_json::json!({
+                                    "markdown": MARKDOWN,
+                                    "csv": {
+                                        "headers": ["risk", "severity", "mitigation"],
+                                        "rows": [
+                                            ["provider outage", "high", "fail closed"],
+                                            ["disk full", "medium", "show degraded state"]
+                                        ]
+                                    }
+                                })
+                                .to_string(),
                             ],
                         )
                         .await;
@@ -4190,7 +4314,11 @@ fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
                         operation_id.clone(),
                     )
                     .await;
-                    assert_eq!(response["status"], "blocked", "RC07 seed: {response}");
+                    assert_eq!(
+                        response["status"],
+                        "completed_with_pending_items",
+                        "RC07 seed must distinguish reviewable pending items from a terminal blocker: {response}"
+                    );
                     assert_eq!(response["legacy_fallback_used"], false);
                     assert_eq!(response["model_invoked"], true);
                     assert_eq!(response["tool_invoked"], false);
@@ -4397,6 +4525,15 @@ fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
                             .filter(|event| event.event_type == "final_delivery.created")
                             .count(),
                         1
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .find(|event| event.event_type == "final_delivery.created")
+                            .and_then(|event| event.payload.get("status"))
+                            .and_then(serde_json::Value::as_str),
+                        Some("completed_with_pending_items"),
+                        "a restart must recover the sealed turn as reviewable rather than blocked"
                     );
                     assert_eq!(
                         state
@@ -4889,7 +5026,7 @@ async fn repeated_explicit_memory_review_reuses_without_rebinding_terminal_owner
         .as_str()
         .expect("first explicit Memory proposal id")
         .to_string();
-    assert_eq!(first["status"], "blocked");
+    assert_eq!(first["status"], "completed_with_pending_items");
 
     let first_origin = {
         let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
@@ -6079,7 +6216,7 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
         proposals[0].status,
         openlife_core::agent::ProposalStatus::Pending
     );
-    let report_path = safe_workspace.join("roadshow-summary.md");
+    let report_path = safe_workspace.join("summary.md");
     assert!(
         !report_path.exists(),
         "Review pending is not file completion"
@@ -6200,9 +6337,15 @@ async fn roadshow_cc01_forged_web_citation_blocks_artifact_proposal_after_verifi
     let requests = captured_requests
         .lock()
         .expect("captured CC01 forged-citation request");
-    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests.len(),
+        2,
+        "citation-only recovery retries synthesis once without repeating web.search"
+    );
     assert!(requests[0].contains("cite_"));
     assert!(requests[0].contains("webref_"));
+    assert!(!requests[0].contains("TRUSTED OPENLIFE ONE-SHOT CITATION RETRY"));
+    assert!(requests[1].contains("TRUSTED OPENLIFE ONE-SHOT CITATION RETRY"));
 }
 
 #[tokio::test]
@@ -9572,11 +9715,14 @@ async fn openlife_turn_runtime_terminal_models_blocker_and_proposal_without_fall
         .turn_terminal
         .as_ref()
         .expect("proposal terminal");
-    assert_eq!(proposal_result.status, "blocked");
+    assert_eq!(proposal_result.status, "completed_with_pending_items");
     assert_eq!(proposal_terminal.runtime_owner, "OpenLifeTurnRuntime");
-    assert_eq!(proposal_terminal.status, "blocked");
+    assert_eq!(proposal_terminal.status, "completed_with_pending_items");
     assert_eq!(proposal_terminal.state, "WriteOutcome");
-    assert_eq!(proposal_terminal.final_delivery.status, "blocked");
+    assert_eq!(
+        proposal_terminal.final_delivery.status,
+        "completed_with_pending_items"
+    );
     assert!(!proposal_terminal.proposals.is_empty());
     assert_ne!(proposal_terminal.final_delivery.status, "completed");
     assert!(proposal_terminal.final_delivery.proposal_count > 0);

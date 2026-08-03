@@ -730,6 +730,7 @@ impl MemoryStore {
             "CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at DESC)",
             [],
         )?;
+        Self::ensure_column_exists(&conn, "chat_sessions", "selected_skill_id", "TEXT")?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS state_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -859,7 +860,7 @@ impl MemoryStore {
             "DELETE FROM memories WHERE content_type = 'chat_message'",
             [],
         )?;
-        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 6)?;
+        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 7)?;
         Ok(())
     }
 
@@ -2247,6 +2248,64 @@ impl MemoryStore {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list chat sessions")
+    }
+
+    /// Persist the user's explicit skill choice with its canonical conversation.
+    /// This intentionally does not update `updated_at`: changing bounded turn
+    /// context must not reorder the conversation history.
+    pub fn set_chat_session_selected_skill(
+        &self,
+        session_id: &str,
+        selected_skill_id: Option<&str>,
+    ) -> Result<()> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() || session_id.len() > 256 {
+            anyhow::bail!("invalid conversation session id for skill selection");
+        }
+        if selected_skill_id.is_some_and(|skill_id| {
+            skill_id.is_empty()
+                || skill_id.len() > 256
+                || !skill_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        }) {
+            anyhow::bail!("invalid selected skill id");
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        ensure_conversation_write_allowed(&tx, session_id)?;
+        let changed = tx.execute(
+            "UPDATE chat_sessions SET selected_skill_id = ?1 WHERE session_id = ?2",
+            params![selected_skill_id, session_id],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation session not found for skill selection");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn chat_session_selected_skill(&self, session_id: &str) -> Result<Option<String>> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() || session_id.len() > 256 {
+            anyhow::bail!("invalid conversation session id for skill selection");
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.query_row(
+            "SELECT selected_skill_id FROM chat_sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .context("failed to load chat session selected skill")
     }
 
     pub fn rename_chat_session(&self, session_id: &str, title: &str) -> Result<()> {
@@ -4986,6 +5045,46 @@ mod tests {
         store.delete_chat_session("sess1").unwrap();
         let sessions = store.list_chat_sessions(10).unwrap();
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn chat_session_skill_selection_survives_store_restart_and_can_be_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        {
+            let store = MemoryStore::new(&path).unwrap();
+            store
+                .create_chat_session("skill-session", "Skill Session")
+                .unwrap();
+            store
+                .set_chat_session_selected_skill("skill-session", Some("evidence_review"))
+                .unwrap();
+            assert_eq!(
+                store
+                    .chat_session_selected_skill("skill-session")
+                    .unwrap()
+                    .as_deref(),
+                Some("evidence_review")
+            );
+        }
+
+        let reopened = MemoryStore::new(&path).unwrap();
+        assert_eq!(
+            reopened
+                .chat_session_selected_skill("skill-session")
+                .unwrap()
+                .as_deref(),
+            Some("evidence_review")
+        );
+        reopened
+            .set_chat_session_selected_skill("skill-session", None)
+            .unwrap();
+        assert_eq!(
+            reopened
+                .chat_session_selected_skill("skill-session")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -2996,6 +2996,7 @@ dependencies = [
  "openlife-core",
  "rand 0.8.6",
  "reqwest 0.12.28",
+ "rfd",
  "ring",
  "rusqlite",
  "security-framework 3.7.0",

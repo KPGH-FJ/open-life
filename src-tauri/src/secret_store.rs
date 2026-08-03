@@ -102,7 +102,7 @@ fn provider_secret_binding(config: &AppConfig, api_key: &str) -> Result<Provider
     })
 }
 
-fn encode_provider_secret(config: &AppConfig, api_key: &str) -> Result<String> {
+pub(crate) fn encode_provider_secret(config: &AppConfig, api_key: &str) -> Result<String> {
     serde_json::to_string(&ProviderSecretEnvelope {
         version: PROVIDER_SECRET_ENVELOPE_VERSION.into(),
         api_key: api_key.to_string(),
@@ -111,7 +111,7 @@ fn encode_provider_secret(config: &AppConfig, api_key: &str) -> Result<String> {
     .context("serialize provider credential envelope")
 }
 
-fn hydrate_bound_provider_secret(config: &AppConfig, encoded: &str) -> Result<String> {
+pub(crate) fn hydrate_bound_provider_secret(config: &AppConfig, encoded: &str) -> Result<String> {
     let envelope: ProviderSecretEnvelope =
         serde_json::from_str(encoded).context("provider credential reference is unbound")?;
     if envelope.version != PROVIDER_SECRET_ENVELOPE_VERSION || envelope.api_key.trim().is_empty() {
@@ -666,6 +666,16 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ProviderCredentialHydrationStatus {
+    #[default]
+    NotReferenced,
+    Available,
+    Missing,
+    Invalid,
+    Unavailable,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct SecretHydrationOutcome {
     pub(crate) rewrite_config_without_plaintext: bool,
@@ -674,6 +684,7 @@ pub(crate) struct SecretHydrationOutcome {
     /// plaintext field is cleared before provider/tool construction.
     pub(crate) fail_closed_capabilities: Vec<String>,
     pub(crate) warnings: Vec<String>,
+    pub(crate) provider_credential_status: ProviderCredentialHydrationStatus,
 }
 
 /// Hydrate runtime-only secrets and migrate legacy plaintext without deleting the
@@ -693,7 +704,10 @@ pub(crate) fn hydrate_config_secrets(
         let encoded = encode_provider_secret(config, &config.llm.openai_key)
             .and_then(|encoded| store.set(PROVIDER_KEY_REF, &encoded));
         match encoded {
-            Ok(()) => config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into()),
+            Ok(()) => {
+                config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Available;
+            }
             Err(error) => {
                 migration_failed = true;
                 config.llm.openai_key.clear();
@@ -704,12 +718,17 @@ pub(crate) fn hydrate_config_secrets(
                 outcome
                     .warnings
                     .push(format!("provider key migration failed: {error}"));
+                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Unavailable;
             }
         }
     } else if config.llm.openai_key_ref.as_deref() == Some(PROVIDER_KEY_REF) {
         match store.read_secret(PROVIDER_KEY_REF) {
             Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
-                Ok(secret) => config.llm.openai_key = secret,
+                Ok(secret) => {
+                    config.llm.openai_key = secret;
+                    outcome.provider_credential_status =
+                        ProviderCredentialHydrationStatus::Available;
+                }
                 Err(_) => {
                     config.llm.openai_key.clear();
                     config.llm.openai_key_ref = None;
@@ -721,6 +740,7 @@ pub(crate) fn hydrate_config_secrets(
                         "provider key reference is unbound or belongs to another provider endpoint; reconfigure the credential"
                             .into(),
                     );
+                    outcome.provider_credential_status = ProviderCredentialHydrationStatus::Invalid;
                 }
             },
             Ok(None) => {
@@ -730,6 +750,7 @@ pub(crate) fn hydrate_config_secrets(
                 outcome
                     .warnings
                     .push("provider key reference has no credential".into());
+                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Missing;
             }
             Err(error) => {
                 outcome
@@ -738,6 +759,7 @@ pub(crate) fn hydrate_config_secrets(
                 outcome
                     .warnings
                     .push(format!("provider key hydration failed: {error}"));
+                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Unavailable;
             }
         }
     }
@@ -805,10 +827,15 @@ pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
             "legacy provider plaintext requires an explicit Settings save; startup did not migrate it"
                 .into(),
         );
+        outcome.provider_credential_status = ProviderCredentialHydrationStatus::Invalid;
     } else if config.llm.openai_key_ref.as_deref() == Some(PROVIDER_KEY_REF) {
         match store.read_secret(PROVIDER_KEY_REF) {
             Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
-                Ok(secret) => config.llm.openai_key = secret,
+                Ok(secret) => {
+                    config.llm.openai_key = secret;
+                    outcome.provider_credential_status =
+                        ProviderCredentialHydrationStatus::Available;
+                }
                 Err(_) => {
                     config.llm.openai_key.clear();
                     config.llm.openai_key_ref = None;
@@ -819,6 +846,7 @@ pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
                         "provider key reference is unbound or belongs to another provider endpoint; reconfigure the credential"
                             .into(),
                     );
+                    outcome.provider_credential_status = ProviderCredentialHydrationStatus::Invalid;
                 }
             },
             Ok(None) => {
@@ -828,6 +856,7 @@ pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
                 outcome
                     .warnings
                     .push("provider key reference has no credential".into());
+                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Missing;
             }
             Err(error) => {
                 outcome
@@ -836,6 +865,7 @@ pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
                 outcome
                     .warnings
                     .push(format!("provider key hydration failed: {error}"));
+                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Unavailable;
             }
         }
     }

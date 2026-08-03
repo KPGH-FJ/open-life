@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
 import type { ReviewAction, ReviewItem } from "@/tauri";
-import { reviewDecisionFeedback } from "./ReviewGovernedView";
+import { reviewDecisionFeedback, reviewItemStatus } from "./ReviewGovernedView";
 
 describe("Workbench governed action journey", () => {
   it("keeps view, approval, refresh, resume, and completion as separate states", async () => {
@@ -287,6 +287,43 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
+  it("labels a global active task that belongs to another selected conversation", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        return {
+          ...snapshot,
+          workspaceEnvelope: {
+            ...snapshot.workspaceEnvelope,
+            data: {
+              ...snapshot.workspaceEnvelope.data!,
+              activeTask: {
+                ...snapshot.workspaceEnvelope.data!.activeTask!,
+                conversationId: "another-conversation",
+              },
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByText("全局活动任务")).toBeInTheDocument();
+    expect(
+      screen.getByText("这项活动任务属于另一段对话；下方消息和发送操作仍以当前选中的对话为准。")
+    ).toBeInTheDocument();
+  });
+
   it("shows only backend-confirmed resources and removes them through the exact binding", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
@@ -356,6 +393,70 @@ describe("Workbench governed action journey", () => {
         item
       )
     ).toMatchObject({ title: "变更已应用" });
+  });
+
+  it("credits an artifact write only when refreshed backend digests match", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const base = snapshot.reviewEnvelope.data!.items[0];
+    const action = base.allowedActions.find(candidate => candidate.kind === "approve")!;
+    const artifact: ReviewItem = {
+      ...base,
+      type: "external_write_action",
+      artifactEvidence: {
+        state: "confirmed",
+        targetReferenceDigest: "sha256:target",
+        contentDigest: "sha256:content",
+        observedContentDigest: "sha256:content",
+        byteSize: 12,
+        mediaType: "text/markdown; charset=utf-8",
+      },
+    };
+
+    expect(
+      reviewDecisionFeedback(
+        {
+          phase: "resolved",
+          action,
+          refreshed: {
+            reviewItemId: artifact.id,
+            status: "approved",
+            materializationStatus: "applied",
+          },
+        },
+        artifact
+      )
+    ).toMatchObject({ title: "文件写入已核验" });
+
+    expect(
+      reviewDecisionFeedback(
+        {
+          phase: "resolved",
+          action,
+          refreshed: {
+            reviewItemId: artifact.id,
+            status: "approved",
+            materializationStatus: "unknown",
+          },
+        },
+        {
+          ...artifact,
+          artifactEvidence: {
+            ...artifact.artifactEvidence!,
+            observedContentDigest: "sha256:other",
+          },
+        }
+      )
+    ).toMatchObject({ title: "文件结果尚未确认" });
+    expect(
+      reviewItemStatus({
+        ...artifact,
+        artifactEvidence: {
+          ...artifact.artifactEvidence!,
+          observedContentDigest: "sha256:other",
+        },
+      })
+    ).toEqual({ label: "文件状态未知", status: "unknown" });
   });
 
   it("does not delete a conversation until the explicit confirmation action", async () => {

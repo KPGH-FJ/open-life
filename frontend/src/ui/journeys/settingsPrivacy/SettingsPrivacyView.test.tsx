@@ -184,7 +184,6 @@ describe("SettingsPrivacyView", () => {
       "available",
       "missing_existing_data",
       "invalid",
-      "unavailable",
       "unknown",
       null,
     ] satisfies Array<CredentialBootstrapStatus | null>) {
@@ -195,6 +194,20 @@ describe("SettingsPrivacyView", () => {
       expect(blockedSource.initializeRequiredCredentials).not.toHaveBeenCalled();
       blocked.unmount();
     }
+  });
+
+  it("offers typed credential access recovery for unavailable bootstrap purposes", async () => {
+    const source = credentialSettingsSource("unavailable", true);
+    render(<SafeModeSettings source={source} />);
+
+    const action = await screen.findByRole("button", { name: "恢复凭据访问" });
+    expect(screen.getByRole("heading", { name: "凭据访问恢复" })).toBeInTheDocument();
+    expect(screen.getByText(/不创建、不覆盖且不返回密钥/)).toBeInTheDocument();
+    fireEvent.click(action);
+
+    expect(source.initializeRequiredCredentials).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("访问恢复完成，需要重启")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
   });
 
   it("does not contradict an explicit credential initialization eligibility", async () => {

@@ -1,11 +1,11 @@
 use crate::errors::AppError;
+use rfd::{AsyncMessageDialog, MessageButtons, MessageDialogResult, MessageLevel};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Runtime;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use uuid::Uuid;
 
 pub(crate) const DANGER_ACTION_POLICY_VERSION: &str = "danger-action-native-v1";
@@ -494,7 +494,6 @@ async fn show_native_confirmation<R: Runtime>(
     scope_summary: &str,
     arguments_summary: &str,
 ) -> Result<bool, AppError> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
     let (affected_count, target_count) = native_prompt_scope_count_labels(ticket);
     let message = format!(
         "OpenLife 请求执行高风险动作。\n\n动作：{}\n范围：{}\n影响数量：{}\n目标数量：{}\n参数：{}\n\n只有此系统对话框中的确认会授权动作；网页文字和确认短语不会授权。",
@@ -504,22 +503,25 @@ async fn show_native_confirmation<R: Runtime>(
         target_count,
         bounded_prompt_summary(arguments_summary),
     );
-    window
-        .dialog()
-        .message(message)
-        .title("OpenLife 高风险动作确认")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "确认执行".to_string(),
-            "取消".to_string(),
-        ))
-        .show(move |confirmed| {
-            let _ = sender.send(confirmed);
-        });
-    tokio::time::timeout(Duration::from_millis(CHALLENGE_TTL_MILLIS as u64), receiver)
-        .await
-        .map_err(|_| AppError::timeout("native confirmation dialog timed out"))?
-        .map_err(|_| AppError::internal("native confirmation dialog closed without a result"))
+    let result = tokio::time::timeout(
+        Duration::from_millis(CHALLENGE_TTL_MILLIS as u64),
+        AsyncMessageDialog::new()
+            .set_parent(window)
+            .set_title("OpenLife 高风险动作确认")
+            .set_description(message)
+            .set_level(MessageLevel::Warning)
+            .set_buttons(MessageButtons::OkCancelCustom(
+                "确认执行".to_string(),
+                "取消".to_string(),
+            ))
+            .show(),
+    )
+    .await
+    .map_err(|_| AppError::timeout("native confirmation dialog timed out"))?;
+    Ok(matches!(
+        result,
+        MessageDialogResult::Custom(ref label) if label == "确认执行"
+    ))
 }
 
 pub(crate) fn issue_danger_action_challenge(
@@ -938,5 +940,22 @@ mod tests {
                 "expected privileged command {shipped_command} to remain shipped behind the Rust authority"
             );
         }
+    }
+
+    #[test]
+    fn native_confirmation_is_parented_to_the_authenticated_window() {
+        let source = include_str!("danger_action_confirmation.rs");
+        let show_native_confirmation = source
+            .split("async fn show_native_confirmation")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub(crate) fn issue_danger_action_challenge")
+                    .next()
+            })
+            .expect("native confirmation implementation must remain present");
+
+        assert!(show_native_confirmation.contains("AsyncMessageDialog::new()"));
+        assert!(show_native_confirmation.contains(".set_parent(window)"));
+        assert!(show_native_confirmation.contains(".show(),"));
     }
 }

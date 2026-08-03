@@ -145,6 +145,10 @@ export function settingsConfigMatchesSavedDraft(
 
   const attestableConfig = (config: AppConfig) => {
     const llm = { ...config.llm };
+    // `save_config` canonicalizes DeepSeek to chat-only because the provider
+    // does not use OpenAI's embedding endpoint. Apply that exact backend-owned
+    // rule before attestation so a successful save is not reported as unknown.
+    if (llm.provider === "deepseek") llm.embedding_enabled = false;
     delete llm.openai_key;
     delete llm.openai_key_ref;
     delete llm.credential_version;

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatSession,
   ImportedResourceReceipt,
+  MainChatSkillSummary,
+  MainChatToolCandidateList,
   MainChatTurnStatus,
   ProductAction,
   StreamMessageChunkPayload,
@@ -25,6 +27,13 @@ export type WorkspaceResourceMutationState =
   | { phase: "importing"; importOperationId: string; turnOperationId: string }
   | { phase: "detaching"; resourceId: string; turnOperationId: string }
   | { phase: "failed"; action: "import" | "detach"; reason: string };
+
+export type WorkspaceCapabilityState =
+  | { phase: "idle" }
+  | { phase: "loading" }
+  | { phase: "ready" }
+  | { phase: "selecting"; skillId: string | null }
+  | { phase: "failed"; reason: string };
 
 export type WorkspaceTurnState =
   | { phase: "idle" }
@@ -83,6 +92,10 @@ export type WorkspaceConversationController = {
   pendingResources: ImportedResourceReceipt[];
   pendingResourceTurnOperationId: string | null;
   resourceMutation: WorkspaceResourceMutationState;
+  skills: MainChatSkillSummary[];
+  selectedSkillId: string | null;
+  toolCandidates: MainChatToolCandidateList | null;
+  capabilityState: WorkspaceCapabilityState;
   busy: boolean;
   ensureLoaded: () => void;
   reload: () => Promise<boolean>;
@@ -91,6 +104,7 @@ export type WorkspaceConversationController = {
   setDraft: (value: string) => void;
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
+  selectSkill: (skillId: string | null) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
   cancel: () => Promise<void>;
@@ -122,6 +136,12 @@ export function useWorkspaceConversation(
   const [resourceMutation, setResourceMutation] = useState<WorkspaceResourceMutationState>({
     phase: "idle",
   });
+  const [skills, setSkills] = useState<MainChatSkillSummary[]>([]);
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [toolCandidates, setToolCandidates] = useState<MainChatToolCandidateList | null>(null);
+  const [capabilityState, setCapabilityState] = useState<WorkspaceCapabilityState>({
+    phase: "idle",
+  });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
   const cancelRequestRef = useRef(0);
@@ -145,6 +165,10 @@ export function useWorkspaceConversation(
     setPendingResources([]);
     setPendingResourceTurnOperationId(null);
     setResourceMutation({ phase: "idle" });
+    setSkills([]);
+    setSelectedSkillId(null);
+    setToolCandidates(null);
+    setCapabilityState({ phase: "idle" });
     return () => {
       requestRef.current += 1;
       operationRef.current += 1;
@@ -152,6 +176,43 @@ export function useWorkspaceConversation(
       loadedRef.current = false;
     };
   }, [dataSource]);
+
+  useEffect(() => {
+    let active = true;
+    if (!dataSource?.listSkills || !dataSource.listToolCandidates || loadStatus !== "ready") {
+      setSkills([]);
+      setSelectedSkillId(null);
+      setToolCandidates(null);
+      setCapabilityState({ phase: "idle" });
+      return () => {
+        active = false;
+      };
+    }
+
+    setCapabilityState({ phase: "loading" });
+    void Promise.all([
+      dataSource.listSkills(selectedSessionId ?? undefined),
+      dataSource.listToolCandidates(activeTaskSessionId ?? undefined),
+    ])
+      .then(([nextSkills, nextTools]) => {
+        if (!active) return;
+        setSkills(nextSkills);
+        setSelectedSkillId(nextSkills.find(skill => skill.selected)?.skillId ?? null);
+        setToolCandidates(nextTools);
+        setCapabilityState({ phase: "ready" });
+      })
+      .catch(error => {
+        if (!active) return;
+        setSkills([]);
+        setSelectedSkillId(null);
+        setToolCandidates(null);
+        setCapabilityState({ phase: "failed", reason: errorText(error) });
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeTaskSessionId, dataSource, loadStatus, selectedSessionId]);
 
   const loadHistory = useCallback(
     async (sessionId: string, requestId: number): Promise<void> => {
@@ -208,7 +269,51 @@ export function useWorkspaceConversation(
       turnState.phase
     ) ||
     ["renaming", "deleting"].includes(sessionMutation.phase) ||
-    ["importing", "detaching"].includes(resourceMutation.phase);
+    ["importing", "detaching"].includes(resourceMutation.phase) ||
+    capabilityState.phase === "selecting";
+
+  const selectSkill = useCallback(
+    async (skillId: string | null): Promise<boolean> => {
+      if (
+        !dataSource ||
+        !selectedSessionId ||
+        busy ||
+        (skillId && !dataSource.selectSkill) ||
+        (!skillId && !dataSource.clearSkill)
+      ) {
+        announce("当前不能改变技能；请先进入一段已保存且空闲的对话。");
+        return false;
+      }
+      setCapabilityState({ phase: "selecting", skillId });
+      try {
+        const result = skillId
+          ? await dataSource.selectSkill!(selectedSessionId, skillId)
+          : await dataSource.clearSkill!(selectedSessionId);
+        if (
+          result.sessionId !== selectedSessionId ||
+          (result.selectedSkillId ?? null) !== skillId
+        ) {
+          throw new Error("main_chat_skill_selection_identity_mismatch");
+        }
+        setSelectedSkillId(result.selectedSkillId ?? null);
+        setSkills(current =>
+          current.map(skill => ({ ...skill, selected: skill.skillId === result.selectedSkillId }))
+        );
+        setCapabilityState({ phase: "ready" });
+        announce(
+          result.selectedSkillId
+            ? "技能已绑定到当前对话；它只作为有界上下文，不会提升权限。"
+            : "当前对话已取消技能绑定；未选择的技能不会注入上下文。"
+        );
+        return true;
+      } catch (error) {
+        setCapabilityState({ phase: "failed", reason: errorText(error) });
+        announce("技能选择没有得到后端确认；本轮不会使用新的技能。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, selectedSessionId]
+  );
 
   const selectSession = useCallback(
     (sessionId: string) => {
@@ -418,7 +523,7 @@ export function useWorkspaceConversation(
         const result = await dataSource.streamTurn(
           turnSessionId,
           requestMessages,
-          { operationId: turnOperationId },
+          { operationId: turnOperationId, selectedSkillId: selectedSkillId ?? undefined },
           {
             onStart: (payload: StreamMessageStartPayload) => {
               if (operationId !== operationRef.current) return;
@@ -535,6 +640,7 @@ export function useWorkspaceConversation(
       pendingResourceTurnOperationId,
       pendingResources,
       selectedSessionId,
+      selectedSkillId,
       sendAction,
     ]
   );
@@ -630,6 +736,10 @@ export function useWorkspaceConversation(
       pendingResources,
       pendingResourceTurnOperationId,
       resourceMutation,
+      skills,
+      selectedSkillId,
+      toolCandidates,
+      capabilityState,
       busy,
       ensureLoaded,
       reload,
@@ -638,6 +748,7 @@ export function useWorkspaceConversation(
       setDraft,
       attachResources,
       detachResource,
+      selectSkill,
       sendAction,
       send,
       cancel,
@@ -647,6 +758,7 @@ export function useWorkspaceConversation(
     [
       busy,
       cancel,
+      capabilityState,
       deleteSelected,
       detachResource,
       draft,
@@ -660,16 +772,20 @@ export function useWorkspaceConversation(
       renameSelected,
       reload,
       resourceMutation,
+      selectSkill,
       selectSession,
       selectedSessionId,
+      selectedSkillId,
       sessionMutation,
       send,
       sendAction,
       sessions,
+      skills,
       startNewConversation,
       streamingReply,
       activeTaskSessionId,
       turnState,
+      toolCandidates,
     ]
   );
 }

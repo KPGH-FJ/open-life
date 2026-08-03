@@ -48,8 +48,15 @@ async fn load_tasks_read_model_snapshot(
     state: &Arc<AppState>,
 ) -> Result<TasksReadModelSnapshot, String> {
     let mut warnings = Vec::new();
-    let review_items = load_review_items(state, &mut warnings).await;
-    let loaded_tasks = load_task_inputs(state, &review_items, &mut warnings).await;
+    let (review_items, review_projection_authoritative) =
+        load_review_items(state, &mut warnings).await;
+    let loaded_tasks = load_task_inputs(
+        state,
+        &review_items,
+        review_projection_authoritative,
+        &mut warnings,
+    )
+    .await;
     let run_inputs = load_run_inputs(state, &mut warnings).await;
     let model = build_tasks_view_model(TasksViewModelBuildInput {
         task_inputs: loaded_tasks.task_inputs,
@@ -124,6 +131,7 @@ pub(crate) async fn get_workspace_view_model_with_state(
         contract_limitations: vec![
             "Task controls and review actions are requests only; completion requires a refreshed backend read model.".into(),
             "Workspace activity is metadata-only. Resource, Web, and artifact bodies remain behind their typed evidence owners.".into(),
+            "activeTask is the global active task and can belong to a conversation other than the one currently selected in the Workspace.".into(),
         ],
     });
     let status = workspace_composition_status(
@@ -174,6 +182,7 @@ struct LoadedTaskInputs {
 async fn load_task_inputs(
     state: &Arc<AppState>,
     review_items: &[ReviewItem],
+    review_projection_authoritative: bool,
     warnings: &mut Vec<ViewModelWarning>,
 ) -> LoadedTaskInputs {
     let summaries = match list_main_chat_agent_tasks_with_state(
@@ -244,6 +253,7 @@ async fn load_task_inputs(
             final_delivery_status,
             pending_blockers,
             pending_review_item_refs,
+            review_projection_authoritative,
             allowed_control_ids: detail.allowed_controls,
             retry_action_id,
             next_recommended_control: Some(detail.next_recommended_control),
@@ -331,15 +341,41 @@ async fn load_run_inputs(
 async fn load_review_items(
     state: &Arc<AppState>,
     warnings: &mut Vec<ViewModelWarning>,
-) -> Vec<ReviewItem> {
+) -> (Vec<ReviewItem>, bool) {
     match get_review_center_view_model_with_state(state).await {
-        Ok(envelope) => envelope.data.map(|model| model.items).unwrap_or_default(),
+        Ok(envelope)
+            if matches!(
+                envelope.status,
+                ViewModelStatus::Ready | ViewModelStatus::Empty
+            ) =>
+        {
+            match envelope.data {
+                Some(model) => (model.items, true),
+                None => {
+                    warnings.push(warning(
+                        "review_center_view_model_data_missing",
+                        "TasksViewModel could not prove review-item absence because ReviewCenterViewModel returned no data.",
+                    ));
+                    (Vec::new(), false)
+                }
+            }
+        }
+        Ok(envelope) => {
+            warnings.push(warning(
+                "review_center_view_model_not_authoritative",
+                format!(
+                    "TasksViewModel could not prove review-item absence because ReviewCenterViewModel status is {:?}.",
+                    envelope.status
+                ),
+            ));
+            (Vec::new(), false)
+        }
         Err(err) => {
             warnings.push(warning(
                 "review_center_view_model_unavailable",
                 format!("TasksViewModel could not load ReviewCenterViewModel: {err}"),
             ));
-            Vec::new()
+            (Vec::new(), false)
         }
     }
 }

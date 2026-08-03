@@ -301,8 +301,19 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 }
 
 export interface CredentialRecoveryItem {
-  purpose: "agent_run_receipts" | "main_chat_events" | "action_queue" | "task_store" | "mcp_audit";
-  status: CredentialBootstrapStatus | "created" | "compensated" | "cleanup_unknown";
+  purpose:
+    | "agent_run_receipts"
+    | "main_chat_events"
+    | "action_queue"
+    | "task_store"
+    | "mcp_audit"
+    | "provider_api_key";
+  status:
+    | CredentialBootstrapStatus
+    | "created"
+    | "access_restored"
+    | "compensated"
+    | "cleanup_unknown";
 }
 
 export interface CredentialRecoveryReport {
@@ -1400,6 +1411,10 @@ export async function listMainChatToolCandidates(
   });
 }
 
+export async function openExternalHttpsSource(url: string): Promise<void> {
+  return safeInvoke("open_external_https_source", { url });
+}
+
 export async function sendMessageV2(
   sessionId: string,
   messages: ChatMessage[],
@@ -2012,7 +2027,8 @@ export interface CredentialBootstrapSnapshot {
       | "main_chat_events"
       | "action_queue"
       | "task_store"
-      | "mcp_audit";
+      | "mcp_audit"
+      | "provider_api_key";
     status: CredentialBootstrapStatus;
   }>;
 }
@@ -2287,6 +2303,15 @@ export type ReviewItem = {
   evidenceRefs: EvidenceRef[];
   targetRefs: BackendEntityRef[];
   taskResumeRelation?: ReviewItemTaskResumeRelation;
+  artifactEvidence?: {
+    state: "prepared" | "staged" | "confirmed" | "failed_before_effect" | "unknown" | string;
+    targetReferenceDigest: string;
+    contentDigest: string;
+    observedContentDigest?: string;
+    byteSize: number;
+    mediaType: string;
+    errorCode?: string;
+  };
 };
 
 export type ReviewCenterSummary = {

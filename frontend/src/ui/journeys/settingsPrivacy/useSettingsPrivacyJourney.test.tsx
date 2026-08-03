@@ -417,6 +417,32 @@ describe("settings privacy journey", () => {
     });
   });
 
+  it("does not describe an already-saved config as unsaved after a successful test", async () => {
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(config(), boundary())),
+      testProviderConnection: vi.fn().mockResolvedValue({
+        result: verifiedResult,
+        reviewItem: null,
+        reviewResolution: "not_requested",
+      }),
+      saveSettings: vi.fn(),
+    };
+    const announce = vi.fn();
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, announce));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.requestTest());
+    act(() => result.current.confirmTest());
+    await waitFor(() => expect(result.current.testPresentation?.verified).toBe(true));
+
+    expect(result.current.state.phase).toBe("idle");
+    expect(announce).toHaveBeenLastCalledWith(
+      "本次连接验证已有可信回执；当前已保存设置未被测试改变。"
+    );
+  });
+
   it("keeps save unknown until the post-save boundary read succeeds", async () => {
     const original = config();
     const edited = { ...original, llm: { ...original.llm, chat_model: "deepseek-chat-v2" } };

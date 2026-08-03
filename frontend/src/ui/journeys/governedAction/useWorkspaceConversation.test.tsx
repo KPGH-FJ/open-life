@@ -649,6 +649,64 @@ describe("workspace conversation journey", () => {
     expect(dataSource.deleteSession).not.toHaveBeenCalled();
   });
 
+  it("binds a backend-confirmed skill to the exact session and next turn", async () => {
+    const selectSkill = vi.fn().mockResolvedValue({
+      sessionId: "conversation-1",
+      selectedSkillId: "research",
+      selectedSkillDigest: "sha256:skill",
+      selectionReason: "user_selected_local_skill",
+      boundedInstructionsPreview: "Research with evidence.",
+      evidenceDigest: "sha256:evidence",
+      policyNotes: [],
+      includedAsBoundedContextOnly: true,
+      unselectedSkillsInjected: false,
+      controls: ["clear_skill"],
+    });
+    const streamTurn = vi.fn().mockResolvedValue(turnResult("completed"));
+    const dataSource = source({
+      listSkills: vi.fn().mockResolvedValue([
+        {
+          skillId: "research",
+          name: "Research",
+          source: "bundled:research",
+          scope: "session",
+          description: "Evidence-backed research",
+          riskLevel: "low",
+          available: true,
+          selected: false,
+          instructionDigest: "sha256:skill",
+          sourceKind: "bundled",
+        },
+      ]),
+      listToolCandidates: vi.fn().mockResolvedValue({
+        candidates: [],
+        blockedTools: [],
+        evidenceDigest: "sha256:tools",
+        controls: [],
+      }),
+      selectSkill,
+      clearSkill: vi.fn(),
+      streamTurn,
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await waitFor(() => expect(result.current.capabilityState.phase).toBe("ready"));
+
+    await act(async () => expect(await result.current.selectSkill("research")).toBe(true));
+    act(() => result.current.setDraft("请研究这个问题"));
+    await act(async () => result.current.send());
+
+    expect(selectSkill).toHaveBeenCalledWith("conversation-1", "research");
+    expect(streamTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      expect.any(Array),
+      expect.objectContaining({ selectedSkillId: "research" }),
+      expect.any(Object)
+    );
+  });
+
   it("deletes only after the explicit controller action and re-reads the remaining sessions", async () => {
     const listSessions = vi
       .fn()

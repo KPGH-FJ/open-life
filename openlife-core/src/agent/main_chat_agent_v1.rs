@@ -3575,6 +3575,12 @@ pub struct AgentTaskSessionStore {
     canonical_memory_store: Arc<Mutex<Option<crate::memory::MemoryStore>>>,
 }
 
+#[derive(Clone, Copy)]
+enum TerminalOwnerReviewDecision {
+    Accepted { complete_when_unblocked: bool },
+    Rejected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskSessionCanonicalOwnerReceipt {
     version: u64,
@@ -4813,8 +4819,46 @@ impl AgentTaskSessionStore {
         expected_digest: &str,
         complete_when_unblocked: bool,
     ) -> Result<VerifiedTerminalOwnerTransitionReceipt> {
+        self.apply_terminal_owner_review_decision_transition(
+            proposal_id,
+            dispatch_claim_id,
+            task_session_id,
+            expected_revision,
+            expected_digest,
+            TerminalOwnerReviewDecision::Accepted {
+                complete_when_unblocked,
+            },
+        )
+    }
+
+    pub fn apply_terminal_owner_review_rejection_transition(
+        &self,
+        proposal_id: &str,
+        task_session_id: &str,
+        expected_revision: u64,
+        expected_digest: &str,
+    ) -> Result<VerifiedTerminalOwnerTransitionReceipt> {
+        self.apply_terminal_owner_review_decision_transition(
+            proposal_id,
+            "review-rejected",
+            task_session_id,
+            expected_revision,
+            expected_digest,
+            TerminalOwnerReviewDecision::Rejected,
+        )
+    }
+
+    fn apply_terminal_owner_review_decision_transition(
+        &self,
+        proposal_id: &str,
+        decision_ref: &str,
+        task_session_id: &str,
+        expected_revision: u64,
+        expected_digest: &str,
+        decision: TerminalOwnerReviewDecision,
+    ) -> Result<VerifiedTerminalOwnerTransitionReceipt> {
         if let Some(existing) =
-            self.terminal_owner_transition_receipt_for_claim(proposal_id, dispatch_claim_id)?
+            self.terminal_owner_transition_receipt_for_claim(proposal_id, decision_ref)?
         {
             if existing.owner_id != task_session_id
                 || existing.before_revision != expected_revision
@@ -4860,22 +4904,38 @@ impl AgentTaskSessionStore {
         let proposal_blocker = format!("proposal:{proposal_id}");
         let before_len = blockers.len();
         blockers.retain(|blocker| blocker != &proposal_blocker);
-        if blockers.len() == before_len {
+        let rejected = matches!(decision, TerminalOwnerReviewDecision::Rejected);
+        if !rejected && blockers.len() == before_len {
             anyhow::bail!("terminal_owner_proposal_blocker_missing");
         }
-        const FINAL_SUMMARY: &str = "Accepted Review proposal resolved the Main Chat task blocker.";
-        let should_complete = blockers.is_empty() && complete_when_unblocked;
-        let next_status = if should_complete {
+        let final_summary = if rejected {
+            "User rejected the permission required to resume this action; no tool effect was executed."
+        } else {
+            "Accepted Review proposal resolved the Main Chat task blocker."
+        };
+        if rejected {
+            blockers.clear();
+        }
+        let complete_when_unblocked = match decision {
+            TerminalOwnerReviewDecision::Accepted {
+                complete_when_unblocked,
+            } => complete_when_unblocked,
+            TerminalOwnerReviewDecision::Rejected => false,
+        };
+        let should_complete = !rejected && blockers.is_empty() && complete_when_unblocked;
+        let next_status = if rejected {
+            AgentTaskSessionStatus::Cancelled.as_str()
+        } else if should_complete {
             AgentTaskSessionStatus::Completed.as_str()
         } else {
             AgentTaskSessionStatus::WaitingPermission.as_str()
         };
-        let final_summary_receipt = should_complete.then(|| {
+        let final_summary_receipt = (rejected || should_complete).then(|| {
             session_body_receipt(
                 self.receipt_key.as_ref(),
                 task_session_id,
                 "final_summary",
-                FINAL_SUMMARY,
+                final_summary,
             )
         });
         let changed = tx.execute(
@@ -4914,9 +4974,9 @@ impl AgentTaskSessionStore {
         if after_receipt.digest == before_receipt.digest {
             anyhow::bail!("terminal_owner_task_digest_unchanged");
         }
-        let receipt_ref = format!("terminal-transition:{proposal_id}:{dispatch_claim_id}");
+        let receipt_ref = format!("terminal-transition:{proposal_id}:{decision_ref}");
         let receipt_material = format!(
-            "proposal\0{proposal_id}\0claim\0{dispatch_claim_id}\0owner\0{task_session_id}\0before\0{before_revision}\0{}\0after\0{after_revision}\0{}",
+            "proposal\0{proposal_id}\0claim\0{decision_ref}\0owner\0{task_session_id}\0before\0{before_revision}\0{}\0after\0{after_revision}\0{}",
             before_receipt.digest, after_receipt.digest
         );
         let receipt_digest = self
@@ -4933,7 +4993,7 @@ impl AgentTaskSessionStore {
                 receipt_ref,
                 receipt_digest,
                 proposal_id,
-                dispatch_claim_id,
+                decision_ref,
                 task_session_id,
                 i64::try_from(before_revision)?,
                 i64::try_from(after_revision)?,
@@ -4952,7 +5012,8 @@ impl AgentTaskSessionStore {
             .entry(task_session_id.to_string())
             .or_default();
         transient_session.pending_blockers = blockers;
-        transient_session.final_summary = should_complete.then(|| FINAL_SUMMARY.into());
+        transient_session.final_summary =
+            (rejected || should_complete).then(|| final_summary.into());
         drop(transient_content);
 
         self.verify_terminal_owner_transition_receipt_value(
@@ -4960,7 +5021,7 @@ impl AgentTaskSessionStore {
                 receipt_ref,
                 receipt_digest,
                 proposal_id: proposal_id.to_string(),
-                dispatch_claim_id: dispatch_claim_id.to_string(),
+                dispatch_claim_id: decision_ref.to_string(),
                 owner_kind: "agent_task_session".into(),
                 owner_id: task_session_id.to_string(),
                 before_revision,
