@@ -60,7 +60,7 @@ impl Default for SearchProviderConfig {
 /// able to evaluate policy before it emits a dispatch fact. Keep this selector
 /// beside the execution selector below so the preflight and transport cannot
 /// silently choose different providers.
-pub(crate) fn configured_web_search_endpoint(
+pub fn configured_web_search_endpoint(
     cfg: &SearchProviderConfig,
 ) -> std::result::Result<String, &'static str> {
     match cfg.provider.trim().to_ascii_lowercase().as_str() {
@@ -993,6 +993,9 @@ fn deepseek_search_request_body(query: &str) -> serde_json::Value {
     serde_json::json!({
         "model": DEEPSEEK_SEARCH_MODEL,
         "max_tokens": 512,
+        "thinking": {
+            "type": "disabled",
+        },
         "messages": [{
             "role": "user",
             "content": format!(
@@ -1846,6 +1849,7 @@ mod web_content_observation_tests {
     fn deepseek_search_request_forces_the_policy_required_single_search_tool() {
         let query = format!("{}TRUNCATED", "q".repeat(WEB_SEARCH_QUERY_MAX_CHARS));
         let body = deepseek_search_request_body(&query);
+        assert_eq!(body["thinking"]["type"], "disabled");
         assert_eq!(body["tools"][0]["type"], "web_search_20250305");
         assert_eq!(body["tools"][0]["name"], "web_search");
         assert_eq!(body["tools"][0]["max_uses"], 1);

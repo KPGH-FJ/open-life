@@ -417,6 +417,32 @@ describe("settings privacy journey", () => {
     });
   });
 
+  it("does not describe an already-saved config as unsaved after a successful test", async () => {
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(config(), boundary())),
+      testProviderConnection: vi.fn().mockResolvedValue({
+        result: verifiedResult,
+        reviewItem: null,
+        reviewResolution: "not_requested",
+      }),
+      saveSettings: vi.fn(),
+    };
+    const announce = vi.fn();
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, announce));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.requestTest());
+    act(() => result.current.confirmTest());
+    await waitFor(() => expect(result.current.testPresentation?.verified).toBe(true));
+
+    expect(result.current.state.phase).toBe("idle");
+    expect(announce).toHaveBeenLastCalledWith(
+      "本次连接验证已有可信回执；当前已保存设置未被测试改变。"
+    );
+  });
+
   it("keeps save unknown until the post-save boundary read succeeds", async () => {
     const original = config();
     const edited = { ...original, llm: { ...original.llm, chat_model: "deepseek-chat-v2" } };
@@ -657,5 +683,61 @@ describe("settings privacy journey", () => {
     expect(result.current.draft?.llm.openai_key).toBe("");
     act(() => result.current.edit({ field: "provider", value: "deepseek" }));
     expect(result.current.draft?.llm.openai_key).toBe("***");
+  });
+
+  it("does not carry a stored search credential to a different search provider", async () => {
+    const current = {
+      ...config(),
+      system: {
+        search_provider: "deepseek" as const,
+        search_provider_key: "***",
+        search_provider_key_ref: "keychain://com.openlife.desktop/search-provider-api-key",
+      },
+    };
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(current, boundary())),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.edit({ field: "search_provider", value: "brave" }));
+    expect(result.current.draft?.system?.search_provider_key).toBe("");
+    expect(result.current.draft?.system?.search_provider_key_ref).toBeUndefined();
+
+    act(() => result.current.edit({ field: "search_provider", value: "deepseek" }));
+    expect(result.current.draft?.system?.search_provider_key).toBe("***");
+  });
+
+  it("reloads backend-owned artifact output state after native folder selection", async () => {
+    const initial = { ...config(), system: { safe_paths: [] } };
+    const refreshed = { ...config(), system: { safe_paths: ["/tmp/openlife-artifacts"] } };
+    const loadSettingsPrivacy = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot(initial, boundary()))
+      .mockResolvedValueOnce(snapshot(refreshed, boundary()));
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy,
+      selectArtifactOutputDirectory: vi.fn().mockResolvedValue({
+        cancelled: false,
+        selectedPath: "/tmp/openlife-artifacts",
+      }),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.selectArtifactOutputDirectory());
+    await waitFor(() =>
+      expect(result.current.draft?.system?.safe_paths).toEqual(["/tmp/openlife-artifacts"])
+    );
+    expect(source.selectArtifactOutputDirectory).toHaveBeenCalledTimes(1);
+    expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2);
   });
 });

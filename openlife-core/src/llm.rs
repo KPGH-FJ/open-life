@@ -1702,6 +1702,10 @@ pub(crate) struct OpenAiCompatibleAdapterRequest<'a> {
     pub(crate) endpoint: &'a str,
     pub(crate) api_key: &'a str,
     pub(crate) model: &'a str,
+    /// Derived from the policy-bound provider payload purpose. The adapter may
+    /// use a provider-native JSON mode, but callers cannot infer this from
+    /// prompt text or relax downstream schema validation.
+    pub(crate) structured_json_output: bool,
     pub(crate) network_policy: &'a NetworkPolicy,
     pub(crate) network_policy_decision: &'a NetworkPolicyDecision,
     pub(crate) request_id: Option<&'a str>,
@@ -1721,6 +1725,7 @@ where
         endpoint,
         api_key: configured_api_key,
         model,
+        structured_json_output,
         network_policy,
         network_policy_decision,
         request_id,
@@ -1753,12 +1758,15 @@ where
         }));
     }
 
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": req_messages,
         "temperature": 0.7,
         "max_tokens": 2048,
     });
+    if structured_json_output && provider == "deepseek" {
+        body["response_format"] = json!({ "type": "json_object" });
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, "application/json".parse()?);
@@ -1852,6 +1860,7 @@ where
         endpoint,
         api_key: configured_api_key,
         model,
+        structured_json_output: _,
         network_policy,
         network_policy_decision,
         request_id,
@@ -2150,6 +2159,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: key,
                 model,
+                structured_json_output: false,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2177,6 +2187,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: key,
                 model,
+                structured_json_output: false,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2193,6 +2204,46 @@ mod tests {
             default_base_for_provider("deepseek"),
             "https://api.deepseek.com"
         );
+    }
+
+    #[tokio::test]
+    async fn deepseek_structured_artifact_request_uses_official_json_output_mode() {
+        let (listener, base) = local_provider_base().await;
+        let server = tokio::spawn(serve_provider_response(
+            listener,
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"{\"markdown\":\"ok\"}"}}]}"#.to_vec(),
+            None,
+        ));
+        let (policy, decision) = allow_provider_network("deepseek", &base);
+        let endpoint = super::chat_completions_url("deepseek", &base);
+
+        let result = super::chat_with_openrouter_raw_with_start_observer(
+            super::OpenAiCompatibleAdapterRequest {
+                messages: vec![super::ChatMessage {
+                    role: "user".into(),
+                    content: "Return JSON.".into(),
+                }],
+                system_prompt: Some("Return only one JSON object."),
+                provider: "deepseek",
+                endpoint: &endpoint,
+                api_key: "sk-test",
+                model: "deepseek-v4-flash",
+                structured_json_output: true,
+                network_policy: &policy,
+                network_policy_decision: &decision,
+                request_id: None,
+            },
+            || Ok(()),
+        )
+        .await
+        .expect("structured provider response");
+        assert_eq!(result, r#"{"markdown":"ok"}"#);
+
+        let request = server.await.unwrap();
+        let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
+        assert_eq!(body["response_format"]["type"], "json_object");
     }
 
     #[test]
@@ -2383,6 +2434,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "gpt-test",
+                structured_json_output: false,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2669,6 +2721,7 @@ mod tests {
         for request in [buffered_request, stream_request] {
             assert!(request.contains("\"model\":\"deepseek-reasoner\""));
             assert!(!request.contains("\"model\":\"deepseek-chat\""));
+            assert!(!request.contains("\"response_format\""));
         }
     }
 

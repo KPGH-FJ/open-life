@@ -274,6 +274,7 @@ pub(crate) async fn submit_main_chat_terminal_review_relation(
 pub(crate) enum TerminalOwnerReplayCause {
     AutomaticRetry,
     AcceptedToolPermission,
+    AcceptedToolNetworkConsent,
     AcceptedProviderNetworkConsent,
 }
 
@@ -282,6 +283,7 @@ impl TerminalOwnerReplayCause {
         match self {
             Self::AutomaticRetry => "automatic_retry",
             Self::AcceptedToolPermission => "accepted_tool_permission",
+            Self::AcceptedToolNetworkConsent => "accepted_tool_network_consent",
             Self::AcceptedProviderNetworkConsent => "accepted_provider_network_consent",
         }
     }
@@ -413,17 +415,23 @@ fn successor_owner_head(successor: &MainChatAgentDurableEvent) -> Result<(u64, S
     Ok((revision, digest.to_string()))
 }
 
+pub(crate) struct TerminalOwnerReplayPermissionAuthorities<'a> {
+    pub(crate) action_bound:
+        Option<&'a openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization>,
+    pub(crate) network_consent_proposal_id: Option<&'a str>,
+}
+
 pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
     state: &Arc<AppState>,
     session: &AgentTaskSession,
     action: &QueuedExecutionAction,
     envelope: &DurableMainChatReplayExecutionEnvelope,
     cause: TerminalOwnerReplayCause,
-    action_bound_permission: Option<
-        &openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization,
-    >,
+    permission_authorities: TerminalOwnerReplayPermissionAuthorities<'_>,
     retry_proof: openlife_core::agent::tool_gateway::ToolAutomaticRetryProof,
 ) -> Result<TerminalOwnerReplayEpochAdmission, String> {
+    let action_bound_permission = permission_authorities.action_bound;
+    let network_consent_proposal_id = permission_authorities.network_consent_proposal_id;
     let _fence = acquire_terminal_owner_task_fence(&session.id).await;
     let authority = action
         .replay_authority
@@ -476,12 +484,15 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
 
     let expected_owner = match cause {
         TerminalOwnerReplayCause::AutomaticRetry => {
-            if action_bound_permission.is_some() {
+            if action_bound_permission.is_some() || network_consent_proposal_id.is_some() {
                 return Err("terminal_owner_retry_unexpected_permission_authority".into());
             }
             final_owner_head(&final_event)?
         }
         TerminalOwnerReplayCause::AcceptedToolPermission => {
+            if network_consent_proposal_id.is_some() {
+                return Err("terminal_owner_permission_replay_unexpected_network_authority".into());
+            }
             let authorization = action_bound_permission.ok_or_else(|| {
                 "terminal_owner_permission_replay_authorization_missing".to_string()
             })?;
@@ -570,6 +581,186 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
                 successor_owner_head(&successor)?
             }
         }
+        TerminalOwnerReplayCause::AcceptedToolNetworkConsent => {
+            let authorization = action_bound_permission.ok_or_else(|| {
+                "terminal_owner_tool_network_replay_action_authorization_missing".to_string()
+            })?;
+            let network_proposal_id = network_consent_proposal_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "terminal_owner_tool_network_replay_proposal_missing".to_string())?;
+            if authorization.proposal_id.trim().is_empty()
+                || authorization.scope.binding_digest() != authorization.scope_digest
+                || authorization.scope.queue_action_type != envelope.queue_action_type
+                || authorization.scope.requested_target != envelope.requested_target
+                || authorization.scope.resolved_target != envelope.resolved_target
+                || authorization.scope.tool_name != envelope.manifest_name
+                || authorization.scope.source != envelope.manifest_source
+                || authorization.scope.input_hash != envelope.input_hash
+                || authorization.scope.input_length_bytes != envelope.input_length_bytes
+            {
+                return Err("terminal_owner_tool_network_replay_action_scope_mismatch".into());
+            }
+            let (
+                action_proposal,
+                action_origin,
+                action_relation,
+                action_dispatch,
+                network_proposal,
+                network_origin,
+                network_relation,
+                network_dispatch,
+            ) = {
+                let proposal_store = state
+                    .proposal_store
+                    .as_ref()
+                    .ok_or_else(|| "proposal_store_unavailable".to_string())?
+                    .lock()
+                    .await;
+                let action_proposal = proposal_store
+                    .get_proposal(&authorization.proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "terminal_owner_tool_network_replay_action_proposal_missing".to_string()
+                    })?;
+                let action_origin = proposal_store
+                    .terminal_owner_origin_binding(&authorization.proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "terminal_owner_tool_network_replay_action_origin_missing".to_string()
+                    })?;
+                let action_relation = proposal_store
+                    .terminal_relation_projection_proof(&authorization.proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .map(|proof| proof.relation_kind());
+                let action_dispatch = proposal_store
+                    .dispatch_state(&authorization.proposal_id)
+                    .map_err(|error| error.to_string())?;
+                let network_proposal = proposal_store
+                    .get_proposal(network_proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "terminal_owner_tool_network_replay_network_proposal_missing".to_string()
+                    })?;
+                let network_origin = proposal_store
+                    .terminal_owner_origin_binding(network_proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| {
+                        "terminal_owner_tool_network_replay_network_origin_missing".to_string()
+                    })?;
+                let network_relation = proposal_store
+                    .terminal_relation_projection_proof(network_proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .map(|proof| proof.relation_kind());
+                let network_dispatch = proposal_store
+                    .dispatch_state(network_proposal_id)
+                    .map_err(|error| error.to_string())?;
+                (
+                    action_proposal,
+                    action_origin,
+                    action_relation,
+                    action_dispatch,
+                    network_proposal,
+                    network_origin,
+                    network_relation,
+                    network_dispatch,
+                )
+            };
+            let action_origin_matches = action_origin.task_session_id() == session.id
+                && action_origin.run_id() == envelope.run_id
+                && action_origin.epoch_generation() < epoch.generation()
+                && action_origin.canonical_user_message_ref() == epoch.canonical_user_message_ref()
+                && action_origin.canonical_user_message_digest()
+                    == epoch.canonical_user_message_digest();
+            if action_proposal.status != openlife_core::agent::ProposalStatus::Accepted
+                || action_proposal.proposal_type != ProposalType::ToolPermission
+                || action_dispatch.as_deref() != Some("confirmed")
+                || action_relation
+                    != Some(openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite)
+                || !action_origin_matches
+            {
+                return Err("terminal_owner_tool_network_replay_action_origin_mismatch".into());
+            }
+            let after_string = |key: &str| {
+                network_proposal
+                    .after
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+            };
+            let canonical_scope = network_proposal.after.get("canonical_scope");
+            let scope_string = |key: &str| {
+                canonical_scope
+                    .and_then(|scope| scope.get(key))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| after_string(key))
+            };
+            let permission_scope = scope_string("tool_name")
+                .ok_or_else(|| "terminal_owner_tool_network_replay_scope_missing".to_string())?;
+            let blocked_action = network_proposal.after.get("blocked_action");
+            let blocked_string = |key: &str| {
+                blocked_action
+                    .and_then(|blocked| blocked.get(key))
+                    .and_then(serde_json::Value::as_str)
+            };
+            if network_proposal.status != openlife_core::agent::ProposalStatus::Accepted
+                || network_proposal.proposal_type != ProposalType::ToolPermission
+                || !matches!(
+                    network_proposal.source,
+                    openlife_core::agent::ProposalSource::ChatConversation
+                )
+                || network_dispatch.as_deref() != Some("confirmed")
+                || network_relation
+                    != Some(openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite)
+                || after_string("permission_scope_kind") != Some("network_policy")
+                || after_string("permission") != Some("allow_once")
+                || scope_string("source") != Some("network_policy")
+                || scope_string("risk_level") != Some("medium")
+                || scope_string("action_type") != Some("network")
+                || scope_string("network_capability") != Some(envelope.requested_target.as_str())
+                || blocked_string("target") != Some(envelope.requested_target.as_str())
+                || blocked_string("resolved_target") != Some(envelope.requested_target.as_str())
+                || !network_proposal
+                    .affected_path
+                    .starts_with("tool_permission.network_policy.")
+            {
+                return Err("terminal_owner_tool_network_replay_proposal_contract_mismatch".into());
+            }
+            if network_origin.task_session_id() != session.id
+                || network_origin.run_id() != epoch.run_id()
+                || network_origin.epoch_id() != epoch.epoch_id()
+                || network_origin.epoch_generation() != epoch.generation()
+                || network_origin.canonical_user_message_ref() != epoch.canonical_user_message_ref()
+                || network_origin.canonical_user_message_digest()
+                    != epoch.canonical_user_message_digest()
+            {
+                return Err("terminal_owner_tool_network_replay_network_origin_mismatch".into());
+            }
+            let action_permission_available = state
+                .tool_permission_store
+                .lock()
+                .await
+                .peek_action_bound(&authorization.proposal_id, &authorization.scope)
+                .map_err(|error| error.to_string())?
+                .is_some();
+            if !action_permission_available {
+                return Err("terminal_owner_tool_network_replay_action_grant_missing".into());
+            }
+            let network_permission_available = state
+                .tool_permission_store
+                .lock()
+                .await
+                .reviewed_network_once_available_for_proposal(
+                    network_proposal_id,
+                    permission_scope,
+                    "network_policy",
+                    "medium",
+                    "network",
+                )
+                .map_err(|error| error.to_string())?;
+            if !network_permission_available {
+                return Err("terminal_owner_tool_network_replay_network_grant_missing".into());
+            }
+            final_owner_head(&final_event)?
+        }
         TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => {
             return Err("provider consent requires provider replay admission issuer".into());
         }
@@ -593,6 +784,9 @@ pub(crate) async fn issue_terminal_owner_replay_epoch_admission(
             .expect("permission replay checked above")
             .proposal_id
             .clone(),
+        TerminalOwnerReplayCause::AcceptedToolNetworkConsent => network_consent_proposal_id
+            .expect("tool network replay checked above")
+            .to_string(),
         TerminalOwnerReplayCause::AcceptedProviderNetworkConsent => {
             unreachable!("provider consent is rejected by the tool replay admission issuer")
         }
@@ -786,7 +980,6 @@ pub(crate) enum TaskSessionWrite {
 }
 
 pub(crate) enum TaskSessionTransition {
-    Complete(String),
     Block(String),
     Fail(String),
     WaitingPermission,
@@ -806,9 +999,6 @@ fn apply_task_session_write(
             transition,
         } => match store.set_pending_blockers(task_session_id, blockers) {
             Ok(_) => match transition {
-                TaskSessionTransition::Complete(summary) => {
-                    store.complete_session(task_session_id, &summary)
-                }
                 TaskSessionTransition::Block(summary) => {
                     store.block_session(task_session_id, &summary)
                 }
@@ -971,7 +1161,6 @@ impl AgentRunMainChatFailureKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentRunReplayProjection {
-    CompletedAllActions,
     WaitingForAnotherAction,
     WaitingForPermission,
     FailedUnresolvedAction,
@@ -1011,6 +1200,7 @@ pub(crate) struct MainChatBlockedProjection {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CanonicalAgentRunReviewCounts {
     confirmed: usize,
+    confirmed_action_resume: usize,
     rejected: usize,
     expired: usize,
     waiting: usize,
@@ -1477,6 +1667,7 @@ pub(crate) async fn project_main_chat_kernel_evidence(
     execution_epoch: &MainChatExecutionEpoch,
     projection: MainChatBlockedProjection,
 ) -> Result<(), String> {
+    let terminal_owner_generation = execution_epoch.terminal_owner_generation()?;
     project_main_chat_agent_run_from_typed_delta(
         state,
         run_id,
@@ -1490,7 +1681,28 @@ pub(crate) async fn project_main_chat_kernel_evidence(
                 projection.observations,
             )?;
             run.reasoning_strategy = projection.reasoning_strategy;
-            run.reasoning_trace = Some(projection.reasoning_trace);
+            if terminal_owner_generation == 1 {
+                run.reasoning_trace = Some(projection.reasoning_trace);
+            } else {
+                // The first generation owns the immutable reasoning-trace
+                // digest. Continuations project their ordered tool/blocker
+                // evidence without rewriting that historical trace.
+                run.status_updates.push(AgentLoopStatusUpdate {
+                    phase: if projection.disposition
+                        == MainChatBlockedDisposition::WaitingPermission
+                    {
+                        AgentLoopPhase::WaitingPermission
+                    } else {
+                        AgentLoopPhase::Failed
+                    },
+                    message: format!(
+                        "Kernel continuation generation {terminal_owner_generation} projected blocker evidence under OpenLifeTurnRuntime."
+                    ),
+                    step_index: projection.step_count,
+                    tool_call_index: Some(projection.tool_call_count),
+                    timestamp: chrono::Utc::now(),
+                });
+            }
             run.tool_call_count = projection.tool_call_count;
             run.step_count = projection.step_count;
             if projection.disposition == MainChatBlockedDisposition::WaitingPermission {
@@ -1547,11 +1759,6 @@ pub(crate) async fn project_main_chat_agent_run_replay(
             ));
         }
         let (status, phase, message) = match projection {
-            AgentRunReplayProjection::CompletedAllActions => (
-                AgentRunStatus::Completed,
-                AgentLoopPhase::Completed,
-                "All governed replay actions completed.",
-            ),
             AgentRunReplayProjection::WaitingForAnotherAction => (
                 AgentRunStatus::WaitingPermission,
                 AgentLoopPhase::WaitingPermission,
@@ -2071,6 +2278,17 @@ async fn canonical_agent_run_review_counts(
             }
             Some("confirmed") if proposal.status == ProposalStatus::Accepted => {
                 counts.confirmed = counts.confirmed.saturating_add(1);
+                if proposal_store
+                    .terminal_relation_projection_proof(proposal_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|proof| {
+                        proof.relation_kind()
+                            == ProposalTerminalRelationKind::ActionResumePrerequisite
+                    })
+                {
+                    counts.confirmed_action_resume =
+                        counts.confirmed_action_resume.saturating_add(1);
+                }
                 let resolved_at = proposal.resolved_at.ok_or_else(|| {
                     "agent_run_review_projection_resolution_time_missing".to_string()
                 })?;
@@ -2120,6 +2338,22 @@ async fn unresolved_agent_run_action_count(
         .into_iter()
         .filter(|action| action.status != ExecutionQueueStatus::Completed)
         .count())
+}
+
+async fn canonical_task_waiting_for_action_resume(
+    state: &Arc<AppState>,
+    task_id: &str,
+) -> Result<bool, String> {
+    let task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+        .lock()
+        .await
+        .load_session(task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("canonical_task_session_missing:{task_id}"))?;
+    Ok(task.status == AgentTaskSessionStatus::WaitingPermission)
 }
 
 fn terminal_review_projection_time(
@@ -2191,6 +2425,11 @@ async fn project_canonical_review_lifecycle_with_plan(
 ) -> Result<(), String> {
     let counts = canonical_agent_run_review_counts(state, &run.generated_proposals).await?;
     let unresolved_action_count = unresolved_agent_run_action_count(state, &run.task_id).await?;
+    let task_waiting_for_action_resume = if counts.confirmed_action_resume > 0 {
+        canonical_task_waiting_for_action_resume(state, &run.task_id).await?
+    } else {
+        false
+    };
     let staging_failed = run
         .error
         .as_ref()
@@ -2338,6 +2577,17 @@ async fn project_canonical_review_lifecycle_with_plan(
                 run.finished_at = None;
                 clear_review_owned_error(run);
             }
+            _ if task_waiting_for_action_resume => {
+                // An accepted ActionResumePrerequisite grants only the exact
+                // continuation capability. The explicit replay owner below
+                // is responsible for moving this run back to Running; Review
+                // projection must not pre-emptively mark it Completed. The
+                // canonical TaskSession is used so startup reconciliation can
+                // also repair a previously misprojected Completed AgentRun.
+                run.status = AgentRunStatus::WaitingPermission;
+                run.finished_at = None;
+                clear_review_owned_error(run);
+            }
             _ if unresolved_action_count > 0 => {
                 run.status = AgentRunStatus::WaitingPermission;
                 run.finished_at = None;
@@ -2438,25 +2688,48 @@ async fn update_agent_run_after_review_reconciliation_inner(
             let dispatch_state = proposal_store
                 .dispatch_state(proposal_id)
                 .map_err(|error| error.to_string())?;
+            let relation = proposal_store
+                .terminal_relation_projection_proof(proposal_id)
+                .map_err(|error| error.to_string())?;
+            if relation.as_ref().is_some_and(|relation| {
+                relation.task_session_id() != origin.task_session_id()
+                    || relation.run_id() != origin.run_id()
+            }) {
+                return Err("terminal_owner_agent_run_projection_relation_origin_mismatch".into());
+            }
+            let relation_kind = relation.map(|relation| relation.relation_kind());
             drop(proposal_store);
             if proposal.status == openlife_core::agent::ProposalStatus::Accepted {
                 if dispatch_state.as_deref() != Some("confirmed") {
                     return Err("terminal_owner_agent_run_projection_effect_not_confirmed".into());
                 }
-                let successor = state
-                    .main_chat_agent_event_store
-                    .as_ref()
-                    .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
-                    .lock()
-                    .await
-                    .get_immutable_event(
-                        &run.task_id,
-                        "terminal_owner.successor_confirmed",
-                        &format!("successor:{proposal_id}"),
-                    )
-                    .map_err(|error| error.to_string())?;
-                if successor.is_none() {
-                    return Err("terminal_owner_agent_run_projection_successor_missing".into());
+                match relation_kind {
+                    Some(
+                        ProposalTerminalRelationKind::NonBlockingSuccessor
+                        | ProposalTerminalRelationKind::ActionResumePrerequisite,
+                    ) => {}
+                    Some(ProposalTerminalRelationKind::EffectBlockingPrerequisite) | None => {
+                        let successor = state
+                            .main_chat_agent_event_store
+                            .as_ref()
+                            .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?
+                            .lock()
+                            .await
+                            .get_immutable_event(
+                                &run.task_id,
+                                "terminal_owner.successor_confirmed",
+                                &format!("successor:{proposal_id}"),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        if successor.is_none() {
+                            return Err(
+                                "terminal_owner_agent_run_projection_successor_missing".into()
+                            );
+                        }
+                    }
+                    Some(ProposalTerminalRelationKind::LegacyUnclassified) => {
+                        return Err("terminal_owner_agent_run_projection_relation_unproven".into());
+                    }
                 }
             } else if !matches!(
                 proposal.status,
@@ -3063,11 +3336,7 @@ impl TerminalOwnerWriteGateway {
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
         let final_event = self
             .event_store
-            .get_immutable_event(
-                origin.task_session_id(),
-                "final_delivery.created",
-                &format!("delivery:{}:{}", origin.task_session_id(), origin.run_id()),
-            )?
+            .terminal_owner_final_event(origin.task_session_id())?
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
         if final_event.event_id != final_event_id {
             anyhow::bail!("terminal_owner_final_event_identity_mismatch");
@@ -3123,6 +3392,99 @@ impl TerminalOwnerWriteGateway {
             origin.task_session_id(),
             origin.run_id(),
             proposal_id,
+            "proposal_review_acceptance",
+            &receipt,
+        )?;
+        Ok(transition_from_receipt(receipt, successor))
+    }
+
+    pub(crate) async fn apply_action_resume_review_rejection(
+        &self,
+        proposal_id: &str,
+    ) -> anyhow::Result<TerminalOwnerReviewTransition> {
+        let proposal = self
+            .proposal_store
+            .get_proposal(proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_rejected_proposal_missing"))?;
+        if proposal.status != openlife_core::agent::ProposalStatus::Rejected {
+            anyhow::bail!("terminal_owner_review_rejection_not_canonical");
+        }
+        let projection = self
+            .proposal_store
+            .terminal_relation_projection_proof(proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("typed_terminal_owner_relation_missing"))?;
+        if projection.relation_kind()
+            != openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+        {
+            anyhow::bail!("terminal_owner_review_rejection_relation_mismatch");
+        }
+        let origin = self
+            .proposal_store
+            .terminal_owner_origin_binding(proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_origin_binding_missing"))?;
+        if projection.task_session_id() != origin.task_session_id()
+            || projection.run_id() != origin.run_id()
+        {
+            anyhow::bail!("terminal_owner_review_rejection_origin_mismatch");
+        }
+        let epoch = self
+            .event_store
+            .terminal_owner_epoch(origin.task_session_id())?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_epoch_missing"))?;
+        if epoch.run_id() != origin.run_id() || epoch.state() != TerminalOwnerSealState::Sealed {
+            anyhow::bail!("terminal_owner_review_rejection_requires_sealed_epoch");
+        }
+        let final_event_id = epoch
+            .final_event_id()
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
+        let final_event = self
+            .event_store
+            .terminal_owner_final_event(origin.task_session_id())?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
+        if final_event.event_id != final_event_id {
+            anyhow::bail!("terminal_owner_final_event_identity_mismatch");
+        }
+        const REJECTION_DECISION_REF: &str = "review-rejected";
+        let existing_receipt = self
+            .task_store
+            .terminal_owner_transition_receipt_for_claim(proposal_id, REJECTION_DECISION_REF)?;
+        let receipt = if let Some(receipt) = existing_receipt {
+            receipt
+        } else {
+            let event_head = self
+                .event_store
+                .terminal_owner_successor_head(origin.task_session_id())?;
+            let task_head = self
+                .task_store
+                .canonical_owner_head(origin.task_session_id())?
+                .ok_or_else(|| anyhow::anyhow!("terminal_owner_task_head_missing"))?;
+            if task_head.revision() != event_head.0 || task_head.digest() != event_head.1.as_str() {
+                anyhow::bail!("terminal_owner_task_head_unproven_drift");
+            }
+            if let Some(action_queue_store) = self.action_queue_store.as_ref() {
+                action_queue_store.lock().await.cancel_session_nonterminal(
+                    origin.task_session_id(),
+                    Some(serde_json::json!({
+                        "proposalRejected": true,
+                        "proposalId": proposal_id,
+                        "taskSessionId": origin.task_session_id(),
+                        "directWritesExecuted": false,
+                    })),
+                )?;
+            }
+            self.task_store
+                .apply_terminal_owner_review_rejection_transition(
+                    proposal_id,
+                    origin.task_session_id(),
+                    event_head.0,
+                    &event_head.1,
+                )?
+        };
+        let successor = self.event_store.append_terminal_owner_successor(
+            origin.task_session_id(),
+            origin.run_id(),
+            proposal_id,
+            "proposal_review_rejection",
             &receipt,
         )?;
         Ok(transition_from_receipt(receipt, successor))

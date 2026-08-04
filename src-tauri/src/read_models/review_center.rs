@@ -1,8 +1,9 @@
 use crate::state::AppState;
 use openlife_core::agent::{
     build_review_center_view_model, MemoryLifecycleStatus, MemoryMaterializationStatus,
-    ReviewCenterBuildInput, ReviewCenterViewModel, ReviewItemMaterializationStatus,
-    ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
+    ReviewCenterBuildInput, ReviewCenterViewModel, ReviewItemArtifactEvidence,
+    ReviewItemMaterializationStatus, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
+    ViewModelWarningSeverity,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -45,6 +46,31 @@ pub(crate) async fn get_review_center_view_model_with_state(
         })
         .collect::<Result<BTreeMap<_, _>, _>>()
         .map_err(|err| format!("failed to load canonical review origins: {err}"))?;
+    let artifact_evidence = proposals
+        .iter()
+        .map(|proposal| {
+            proposal_store.artifact_effect(&proposal.id).map(|record| {
+                record.map(|record| {
+                    (
+                        proposal.id.clone(),
+                        ReviewItemArtifactEvidence {
+                            state: record.state.as_str().into(),
+                            target_reference_digest: record.target_reference_digest,
+                            content_digest: record.content_digest,
+                            observed_content_digest: record.observed_content_digest,
+                            byte_size: record.byte_size,
+                            media_type: record.media_type,
+                            error_code: record.error_code,
+                        },
+                    )
+                })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("failed to load artifact materialization evidence: {err}"))?
+        .into_iter()
+        .flatten()
+        .collect::<BTreeMap<_, _>>();
     drop(proposal_store);
     let config = state.config.lock().await;
     let safe_paths = config.system.safe_paths.clone();
@@ -67,6 +93,7 @@ pub(crate) async fn get_review_center_view_model_with_state(
         safe_paths,
         materialization_overrides,
         terminal_owner_task_session_ids,
+        artifact_evidence,
     });
 
     let status = if model.items.is_empty() {

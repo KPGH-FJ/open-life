@@ -38,6 +38,8 @@ pub(crate) enum ExplicitProviderProbeAuthorization {
 #[derive(Clone, Copy)]
 pub(crate) struct NetworkConsentSubject<'a> {
     pub permission_source: &'a str,
+    pub risk_level: &'a str,
+    pub capabilities: &'a [&'a str],
     pub target: &'a str,
     pub affected_path_prefix: &'a str,
     pub blocked_action_type: &'a str,
@@ -48,6 +50,7 @@ impl<'a> NetworkConsentSubject<'a> {
     fn validate(self) -> Result<Self, AppError> {
         if [
             self.permission_source,
+            self.risk_level,
             self.target,
             self.affected_path_prefix,
             self.blocked_action_type,
@@ -55,6 +58,12 @@ impl<'a> NetworkConsentSubject<'a> {
         ]
         .iter()
         .any(|value| value.trim().is_empty())
+            || !matches!(self.risk_level, "low" | "medium" | "high" | "critical")
+            || self.capabilities.is_empty()
+            || self
+                .capabilities
+                .iter()
+                .any(|capability| capability.trim().is_empty())
         {
             return Err(AppError::internal(
                 "network consent subject contains an empty authority field",
@@ -106,6 +115,26 @@ fn provider_network_permission_scope(
     )
 }
 
+fn bind_reviewed_host_to_ephemeral_policy(
+    policy: &mut openlife_core::config::NetworkPolicy,
+    decision: &NetworkPolicyDecision,
+) -> Result<(), AppError> {
+    let host = decision.host.trim().trim_end_matches('.');
+    if host.is_empty() {
+        return Err(AppError::permission(
+            "accepted network consent did not retain an exact endpoint host",
+        ));
+    }
+    if !policy
+        .domain_allowlist
+        .iter()
+        .any(|rule| rule.trim().trim_end_matches('.').eq_ignore_ascii_case(host))
+    {
+        policy.domain_allowlist.push(host.to_ascii_lowercase());
+    }
+    Ok(())
+}
+
 // Consent staging binds endpoint, capability, subject, origin, and exact
 // review scope independently so a proposal cannot authorize a broader edge.
 #[expect(
@@ -128,6 +157,13 @@ async fn stage_network_consent(
     };
 
     let subject = subject.validate()?;
+    let proposal_risk_level = match subject.risk_level {
+        "low" => RiskLevel::Low,
+        "medium" => RiskLevel::Medium,
+        "high" => RiskLevel::High,
+        "critical" => RiskLevel::Critical,
+        _ => unreachable!("validated network consent risk level"),
+    };
     let permission_scope = provider_network_permission_scope(capability, decision, endpoint_digest);
     let after = serde_json::json!({
         "permission_action": "grant",
@@ -135,13 +171,13 @@ async fn stage_network_consent(
         "permission": "allow_once",
         "tool_name": permission_scope,
         "source": subject.permission_source,
-        "risk_level": "high",
+        "risk_level": subject.risk_level,
         "action_type": "network",
-        "capabilities": ["network", "external_transmission"],
+        "capabilities": subject.capabilities,
         "canonical_scope": {
             "tool_name": permission_scope,
             "source": subject.permission_source,
-            "risk_level": "high",
+            "risk_level": subject.risk_level,
             "action_type": "network",
             "network_capability": capability,
             "network_policy_decision_id": decision.decision_id,
@@ -182,14 +218,14 @@ async fn stage_network_consent(
         after,
         subject.proposal_summary,
         1.0,
-        RiskLevel::High,
+        proposal_risk_level,
         proposal_source,
     );
     proposal.source_detail = Some(format!(
         "{}_network_consent:{}",
         subject.permission_source, decision.decision_id
     ));
-    let request = DurableWriteRequest::from_agent_proposal(
+    let mut request = DurableWriteRequest::from_agent_proposal(
         durable_source,
         DurableWriteSubject::ToolPermission,
         proposal,
@@ -199,6 +235,19 @@ async fn stage_network_consent(
         format!("network_policy_decision:{}", decision.decision_id),
         format!("network_endpoint:{endpoint_digest}"),
     ]);
+    // A pending AllowOnce blocks and resumes one exact Main Chat task. Two
+    // independent tasks targeting the same endpoint therefore need distinct
+    // Review items; reusing the first task's proposal would either bind the
+    // wrong terminal owner or fail the second turn closed as a foreign
+    // blocking collision. Exact retries within one task retain the same key.
+    if let NetworkConsentSubmissionScope::MainChatTurn { origin, .. } = submission_scope {
+        let base_idempotency_key = request.idempotency_key.clone();
+        request = request.with_idempotency_key(format!(
+            "main_chat_network_consent:{}:{}",
+            origin.task_session_id(),
+            base_idempotency_key
+        ));
+    }
     match submission_scope {
         NetworkConsentSubmissionScope::MainChatTurn {
             origin, admission, ..
@@ -254,6 +303,8 @@ pub(crate) async fn authorize_provider_network_dispatch(
         capability,
         NetworkConsentSubject {
             permission_source: "provider",
+            risk_level: "high",
+            capabilities: &["network", "external_transmission"],
             target: provider,
             affected_path_prefix: "tool_permission.provider",
             blocked_action_type: "provider_dispatch",
@@ -378,14 +429,14 @@ pub(crate) async fn authorize_external_network_dispatch(
                         proposal_id,
                         &permission_scope,
                         subject.permission_source,
-                        "high",
+                        subject.risk_level,
                         "network",
                     )
                 } else {
                     store.consume_reviewed_network_once(
                         &permission_scope,
                         subject.permission_source,
-                        "high",
+                        subject.risk_level,
                         "network",
                     )
                 };
@@ -420,6 +471,12 @@ pub(crate) async fn authorize_external_network_dispatch(
             effective_policy
                 .tool_overrides
                 .insert(capability.to_string(), "allow".into());
+            // This policy exists only for the exact, proposal-bound retry. Bind
+            // its reviewed hostname so macOS RFC 2544 fake-IP DNS can use the
+            // already-configured loopback system proxy without weakening the
+            // default private/reserved-address block or persisting a global
+            // domain allowlist entry.
+            bind_reviewed_host_to_ephemeral_policy(&mut effective_policy, decision)?;
             let effective_decision =
                 resolve_network_policy_decision(&effective_policy, url, capability).map_err(
                     |error| {
@@ -471,5 +528,49 @@ mod tests {
         assert!(!second_scope.contains(second_url));
         assert!(first_scope.contains(&first_digest));
         assert!(second_scope.contains(&second_digest));
+    }
+
+    #[test]
+    fn reviewed_host_is_bound_only_to_the_ephemeral_policy() {
+        let original = openlife_core::config::NetworkPolicy {
+            enabled: true,
+            default_decision: "ask".into(),
+            ..Default::default()
+        };
+        let decision = NetworkPolicyDecision {
+            decision_id: "network-policy:test".into(),
+            disposition: NetworkPolicyDisposition::Ask,
+            reason_code: "network_policy_consent_required".into(),
+            capability: "web.fetch".into(),
+            host: "Example.COM.".into(),
+            endpoint_digest: format!("sha256:{}", "0".repeat(64)),
+        };
+        let mut effective = original.clone();
+
+        bind_reviewed_host_to_ephemeral_policy(&mut effective, &decision).unwrap();
+        bind_reviewed_host_to_ephemeral_policy(&mut effective, &decision).unwrap();
+
+        assert!(original.domain_allowlist.is_empty());
+        assert_eq!(effective.domain_allowlist, ["example.com"]);
+    }
+
+    #[test]
+    fn reviewed_host_binding_fails_closed_when_decision_lost_its_host() {
+        let mut policy = openlife_core::config::NetworkPolicy::default();
+        let decision = NetworkPolicyDecision {
+            decision_id: "network-policy:test".into(),
+            disposition: NetworkPolicyDisposition::Ask,
+            reason_code: "network_policy_consent_required".into(),
+            capability: "web.fetch".into(),
+            host: "  ".into(),
+            endpoint_digest: format!("sha256:{}", "0".repeat(64)),
+        };
+
+        let error = bind_reviewed_host_to_ephemeral_policy(&mut policy, &decision).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("did not retain an exact endpoint host"));
+        assert!(policy.domain_allowlist.is_empty());
     }
 }

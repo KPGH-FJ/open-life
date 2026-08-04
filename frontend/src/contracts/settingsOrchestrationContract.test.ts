@@ -39,6 +39,31 @@ describe("settings orchestration contract", () => {
     expect(tested.boundaryAppliesToSavedRevision).toBe(false);
   });
 
+  it("keeps an already-saved unknown boundary after a successful connection test", () => {
+    const savedUnknown = {
+      ...initialSettingsOrchestrationState,
+      phase: "unknown" as const,
+      draftRevision: 2,
+      savedRevision: 2,
+      providerBoundary: boundary({
+        routeType: "unknown",
+        externalTransmission: "unknown",
+        risk: "unknown",
+      }),
+      boundaryAppliesToSavedRevision: true,
+    };
+    const testing = settingsOrchestrationReducer(savedUnknown, { type: "test_requested" });
+    const tested = settingsOrchestrationReducer(testing, {
+      type: "test_succeeded",
+      result: { ok: true, message: "verified" },
+    });
+
+    expect(tested.phase).toBe("unknown");
+    expect(tested.testResult).toEqual({ ok: true, message: "verified" });
+    expect(tested.savedRevision).toBe(tested.draftRevision);
+    expect(tested.boundaryAppliesToSavedRevision).toBe(true);
+  });
+
   it("requires a boundary refresh after save before reporting ready", () => {
     const dirty = settingsOrchestrationReducer(initialSettingsOrchestrationState, {
       type: "edit",

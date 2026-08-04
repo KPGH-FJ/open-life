@@ -120,6 +120,20 @@ pub struct ReviewItemTaskResumeRelation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReviewItemArtifactEvidence {
+    pub state: String,
+    pub target_reference_digest: String,
+    pub content_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_content_digest: Option<String>,
+    pub byte_size: u64,
+    pub media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewItem {
     pub id: String,
     #[serde(rename = "type")]
@@ -138,6 +152,8 @@ pub struct ReviewItem {
     pub target_refs: Vec<BackendEntityRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_resume_relation: Option<ReviewItemTaskResumeRelation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_evidence: Option<ReviewItemArtifactEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -211,6 +227,7 @@ pub struct ReviewCenterBuildInput {
     pub safe_paths: Vec<String>,
     pub materialization_overrides: BTreeMap<String, ReviewItemMaterializationStatus>,
     pub terminal_owner_task_session_ids: BTreeMap<String, String>,
+    pub artifact_evidence: BTreeMap<String, ReviewItemArtifactEvidence>,
 }
 
 pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCenterViewModel {
@@ -361,6 +378,7 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
         evidence_refs,
         target_refs,
         task_resume_relation,
+        artifact_evidence: input.artifact_evidence.get(&proposal.id).cloned(),
     }
 }
 
@@ -608,6 +626,20 @@ fn materialization_status_for(
 ) -> ReviewItemMaterializationStatus {
     if let Some(status) = input.materialization_overrides.get(&proposal.id) {
         return *status;
+    }
+    if let Some(evidence) = input.artifact_evidence.get(&proposal.id) {
+        return match evidence.state.as_str() {
+            "prepared" | "staged" => ReviewItemMaterializationStatus::Applying,
+            "confirmed"
+                if evidence.observed_content_digest.as_deref()
+                    == Some(evidence.content_digest.as_str()) =>
+            {
+                ReviewItemMaterializationStatus::Applied
+            }
+            "failed_before_effect" => ReviewItemMaterializationStatus::Failed,
+            "unknown" | "confirmed" => ReviewItemMaterializationStatus::Unknown,
+            _ => ReviewItemMaterializationStatus::Unknown,
+        };
     }
     match proposal.status {
         ProposalStatus::Accepted => ReviewItemMaterializationStatus::Unknown,
@@ -868,6 +900,50 @@ mod tests {
         assert!(!edit.enabled);
         assert!(reject.enabled);
         assert_eq!(model.summary.blocked_action_count, 2);
+    }
+
+    #[test]
+    fn artifact_receipt_projects_applied_only_when_observed_digest_matches() {
+        let mut proposal = proposal(ProposalType::ExternalWriteAction);
+        proposal.affected_path = "/safe/report.md".into();
+        proposal.after = json!({ "path": "/safe/report.md", "content": "report" });
+        let evidence = ReviewItemArtifactEvidence {
+            state: "confirmed".into(),
+            target_reference_digest: "sha256:target".into(),
+            content_digest: "sha256:content".into(),
+            observed_content_digest: Some("sha256:content".into()),
+            byte_size: 6,
+            media_type: "text/markdown; charset=utf-8".into(),
+            error_code: None,
+        };
+        let input = ReviewCenterBuildInput {
+            proposals: vec![proposal.clone()],
+            safe_paths: vec!["/safe".into()],
+            artifact_evidence: BTreeMap::from([(proposal.id.clone(), evidence.clone())]),
+            ..Default::default()
+        };
+
+        let item = build_review_item(&proposal, &input);
+        assert_eq!(
+            item.materialization_status,
+            ReviewItemMaterializationStatus::Applied
+        );
+        assert_eq!(item.artifact_evidence, Some(evidence));
+
+        let mismatched = ReviewCenterBuildInput {
+            artifact_evidence: BTreeMap::from([(
+                proposal.id.clone(),
+                ReviewItemArtifactEvidence {
+                    observed_content_digest: Some("sha256:other".into()),
+                    ..item.artifact_evidence.unwrap()
+                },
+            )]),
+            ..input
+        };
+        assert_eq!(
+            build_review_item(&proposal, &mismatched).materialization_status,
+            ReviewItemMaterializationStatus::Unknown
+        );
     }
 
     #[test]

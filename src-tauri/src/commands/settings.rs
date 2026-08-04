@@ -19,12 +19,13 @@ use std::collections::HashMap;
 use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
-use tauri::State;
+use tauri::{Runtime, State};
+use tauri_plugin_dialog::DialogExt;
 use uuid::{Uuid, Version};
 
 use crate::danger_action_confirmation::{
@@ -42,12 +43,12 @@ use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_mcp_audit_key_material, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, inspect_existing_mcp_audit_keys, inspect_integrity_key_access,
-    stage_config_secrets, IntegrityKeyInspection, KeyringSecretStore,
-    McpAuditKeyHydrationInspection, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
-    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX,
-    TASK_STORE_AUTHORITY_KEY_REF,
+    create_mcp_audit_key_material, hydrate_bound_provider_secret,
+    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
+    inspect_existing_mcp_audit_keys, inspect_integrity_key_access, stage_config_secrets,
+    IntegrityKeyInspection, KeyringSecretStore, McpAuditKeyHydrationInspection, SecretStore,
+    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+    MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
@@ -287,11 +288,48 @@ fn inspect_required_credential_snapshot(
     ])
 }
 
+fn inspect_provider_credential_status(
+    config: &AppConfig,
+    store: &dyn SecretStore,
+) -> CredentialBootstrapStatus {
+    if config.llm.openai_key_ref.as_deref() != Some(PROVIDER_KEY_REF) {
+        return CredentialBootstrapStatus::MissingExistingData;
+    }
+    match store.get(PROVIDER_KEY_REF) {
+        Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
+            Ok(_) => CredentialBootstrapStatus::Available,
+            Err(_) => CredentialBootstrapStatus::Invalid,
+        },
+        Ok(None) => CredentialBootstrapStatus::MissingExistingData,
+        Err(_) => CredentialBootstrapStatus::Unavailable,
+    }
+}
+
+fn inspect_current_credential_snapshot(
+    data_dir: &Path,
+    config: &AppConfig,
+    store: &dyn SecretStore,
+) -> CredentialBootstrapSnapshot {
+    inspect_required_credential_snapshot(data_dir, store)
+        .with_provider_status(inspect_provider_credential_status(config, store))
+}
+
 fn eligible_credential_purposes(snapshot: &CredentialBootstrapSnapshot) -> Vec<String> {
     let mut purposes = snapshot
         .purposes
         .iter()
         .filter(|item| item.status == CredentialBootstrapStatus::InitializationRequired)
+        .map(|item| item.purpose.clone())
+        .collect::<Vec<_>>();
+    purposes.sort();
+    purposes
+}
+
+fn recoverable_credential_access_purposes(snapshot: &CredentialBootstrapSnapshot) -> Vec<String> {
+    let mut purposes = snapshot
+        .purposes
+        .iter()
+        .filter(|item| item.status == CredentialBootstrapStatus::Unavailable)
         .map(|item| item.purpose.clone())
         .collect::<Vec<_>>();
     purposes.sort();
@@ -461,7 +499,14 @@ fn initialize_required_credentials_after_confirmation(
     expected_snapshot: &CredentialBootstrapSnapshot,
 ) -> Result<CredentialRecoveryReport, AppError> {
     let _process_lock = CredentialRecoveryProcessLock::acquire(data_dir)?;
-    let current_snapshot = inspect_required_credential_snapshot(data_dir, store);
+    let expected_provider_status = expected_snapshot
+        .purposes
+        .iter()
+        .find(|item| item.purpose == "provider_api_key")
+        .map(|item| item.status)
+        .unwrap_or(CredentialBootstrapStatus::Unknown);
+    let current_snapshot = inspect_required_credential_snapshot(data_dir, store)
+        .with_provider_status(expected_provider_status);
     if current_snapshot != *expected_snapshot {
         return Err(AppError::permission(
             "credential bootstrap snapshot changed after native confirmation; restart and retry",
@@ -592,6 +637,62 @@ fn initialize_required_credentials_with_confirmation_result(
         ));
     }
     initialize_required_credentials_after_confirmation(data_dir, store, expected_snapshot)
+}
+
+fn recover_unavailable_credential_access_after_confirmation(
+    native_confirmed: bool,
+    data_dir: &Path,
+    config: &AppConfig,
+    store: &dyn SecretStore,
+    expected_snapshot: &CredentialBootstrapSnapshot,
+) -> Result<CredentialRecoveryReport, AppError> {
+    if !native_confirmed {
+        return Err(AppError::permission(
+            "credential access recovery was not confirmed in the native system dialog",
+        ));
+    }
+    let _process_lock = CredentialRecoveryProcessLock::acquire(data_dir)?;
+    let recoverable = recoverable_credential_access_purposes(expected_snapshot);
+    if recoverable.is_empty() {
+        return Err(AppError::permission(
+            "no required credential is explicitly eligible for access recovery",
+        ));
+    }
+
+    // This is the deliberately interactive read. It runs only after the
+    // product-native confirmation and may let the OS present its own Keychain
+    // authorization UI. Secret bytes stay inside the Rust process.
+    let observed = inspect_current_credential_snapshot(data_dir, config, store);
+    let mut report = recovery_report_from_snapshot(expected_snapshot);
+    let mut unresolved = Vec::new();
+    for purpose in &recoverable {
+        let status = observed
+            .purposes
+            .iter()
+            .find(|item| item.purpose == *purpose)
+            .map(|item| item.status)
+            .unwrap_or(CredentialBootstrapStatus::Unknown);
+        if status == CredentialBootstrapStatus::Available {
+            set_recovery_item_status(&mut report, purpose, "access_restored");
+        } else {
+            set_recovery_item_status(&mut report, purpose, status.as_str());
+            unresolved.push(format!("{purpose}={}", status.as_str()));
+        }
+    }
+
+    if unresolved.is_empty() {
+        // Keep the legacy field true for the existing frontend contract: the
+        // recovery operation is complete for this process, but ordinary
+        // effects remain closed until a clean restart rehydrates every owner.
+        report.initialization_completed_for_restart = true;
+        report.restart_required = true;
+    } else {
+        report.blocked_reason = Some(format!(
+            "credential access recovery remains unresolved: {}",
+            unresolved.join(", ")
+        ));
+    }
+    Ok(report)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1514,14 +1615,6 @@ pub async fn get_last_model_error(
 /// Mask for sensitive API keys sent to the frontend.
 const KEY_MASK: &str = "***";
 
-fn resolve_masked_api_key(submitted_key: &str, current_key: &str) -> String {
-    if submitted_key.trim().is_empty() || submitted_key == KEY_MASK {
-        current_key.to_string()
-    } else {
-        submitted_key.to_string()
-    }
-}
-
 fn provider_endpoint_identity(config: &AppConfig) -> Option<String> {
     let provider = config.llm.provider.trim().to_ascii_lowercase();
     if provider.is_empty() {
@@ -1569,6 +1662,42 @@ fn resolve_submitted_provider_api_key(submitted: &AppConfig, current: &AppConfig
     }
 }
 
+fn search_provider_identity(config: &AppConfig) -> Option<String> {
+    let provider = config.system.search_provider.trim().to_ascii_lowercase();
+    match provider.as_str() {
+        "duckduckgo" | "brave" | "deepseek" => Some(provider),
+        "searxng" => {
+            let parsed = reqwest::Url::parse(config.system.searxng_url.trim()).ok()?;
+            if !matches!(parsed.scheme(), "http" | "https")
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return None;
+            }
+            Some(format!("searxng|{}", parsed.as_str().trim_end_matches('/')))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_submitted_search_provider_api_key(submitted: &AppConfig, current: &AppConfig) -> String {
+    let submitted_key = submitted.system.search_provider_key.trim();
+    if !submitted_key.is_empty() && submitted_key != KEY_MASK {
+        return submitted.system.search_provider_key.clone();
+    }
+    let identity_unchanged = search_provider_identity(submitted).is_some_and(|identity| {
+        search_provider_identity(current).as_deref() == Some(identity.as_str())
+    });
+    if identity_unchanged {
+        current.system.search_provider_key.clone()
+    } else {
+        String::new()
+    }
+}
+
 fn resolved_provider_credential_version(submitted: &AppConfig, current: &AppConfig) -> u64 {
     let identity_changed =
         provider_endpoint_identity(submitted) != provider_endpoint_identity(current);
@@ -1607,6 +1736,23 @@ fn credential_initialization_native_request<'a>(
     }
 }
 
+fn credential_access_recovery_native_request<'a>(
+    eligible_purposes: &'a [String],
+    confirmation_arguments: &'a serde_json::Value,
+) -> NativeDangerActionRequest<'a> {
+    NativeDangerActionRequest {
+        action_type: "credential_access_recovery",
+        target_ids_for_new_challenge: eligible_purposes,
+        requested_target: eligible_purposes.first().map(String::as_str),
+        affected_count: eligible_purposes.len(),
+        arguments: confirmation_arguments,
+        arguments_summary:
+            "仅重新请求后端启动快照明确标记为 unavailable 的既有凭据访问；不创建、不覆盖、不返回密钥。",
+        scope_summary: "后端快照列出的 OpenLife 既有系统与 Provider 凭据",
+        challenge_id: None,
+    }
+}
+
 /// User-initiated recovery for OS credential ACL changes after an application
 /// update or development re-sign. Startup intentionally stays non-interactive
 /// and bounded; this command is the only product path that may let the OS show
@@ -1623,15 +1769,58 @@ pub async fn recover_required_credential_access(
     let _activity_guard = CredentialRecoveryActivityGuard;
     let expected_snapshot = state.credential_bootstrap_snapshot.clone();
     let expected_eligible_purposes = eligible_credential_purposes(&expected_snapshot);
-    if expected_eligible_purposes.is_empty() {
+    let expected_access_recovery_purposes =
+        recoverable_credential_access_purposes(&expected_snapshot);
+    if expected_eligible_purposes.is_empty() && expected_access_recovery_purposes.is_empty() {
         return Err(AppError::permission(
-            "LifeStateProjection reports no credential eligible for initialization",
+            "LifeStateProjection reports no credential eligible for initialization or access recovery",
         ));
     }
     let data_dir = app_data_dir();
+
+    if !expected_access_recovery_purposes.is_empty() {
+        let confirmation_arguments = serde_json::json!({
+            "operation": "recover_unavailable_credential_access",
+            "eligiblePurposeIds": expected_access_recovery_purposes.clone(),
+            "affectedCount": expected_access_recovery_purposes.len(),
+            "bootstrapSnapshotVersion": expected_snapshot.version.clone(),
+            "bootstrapSnapshotDigest": expected_snapshot.digest.clone(),
+            "createsCredentials": false,
+            "returnsSecretMaterial": false,
+        });
+        require_native_danger_action_confirmation(
+            &window,
+            credential_access_recovery_native_request(
+                &expected_access_recovery_purposes,
+                &confirmation_arguments,
+            ),
+        )
+        .await?;
+        let config = state.config.lock().await.clone();
+        let snapshot_for_worker = expected_snapshot.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            recover_unavailable_credential_access_after_confirmation(
+                true,
+                &data_dir,
+                &config,
+                &KeyringSecretStore,
+                &snapshot_for_worker,
+            )
+        })
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("credential access recovery worker failed: {error}"))
+        })?;
+    }
+
     let pre_confirmation_data_dir = data_dir.clone();
+    let pre_confirmation_config = state.config.lock().await.clone();
     let pre_confirmation_snapshot = tauri::async_runtime::spawn_blocking(move || {
-        inspect_required_credential_snapshot(&pre_confirmation_data_dir, &KeyringSecretStore)
+        inspect_current_credential_snapshot(
+            &pre_confirmation_data_dir,
+            &pre_confirmation_config,
+            &KeyringSecretStore,
+        )
     })
     .await
     .map_err(|error| {
@@ -1689,6 +1878,105 @@ pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, Ap
     Ok(cfg)
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactOutputDirectorySelection {
+    pub cancelled: bool,
+    pub selected_path: Option<String>,
+}
+
+fn validate_artifact_output_directory(path: &Path) -> Result<PathBuf, AppError> {
+    let metadata = path.symlink_metadata().map_err(|error| {
+        AppError::permission(format!(
+            "artifact output directory cannot be inspected: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AppError::permission(
+            "artifact output selection must be a real directory",
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|error| {
+        AppError::permission(format!(
+            "artifact output directory cannot be canonicalized: {error}"
+        ))
+    })?;
+    if canonical.parent().is_none() {
+        return Err(AppError::permission(
+            "filesystem root cannot be used as an artifact output directory",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn reference_only_config_for_first_persist(mut config: AppConfig) -> AppConfig {
+    config.llm.openai_key.clear();
+    config.system.search_provider_key.clear();
+    config
+}
+
+async fn persist_artifact_output_directory(
+    state: &Arc<AppState>,
+    selected_path: &Path,
+) -> Result<PathBuf, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let canonical = validate_artifact_output_directory(selected_path)?;
+    let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
+    let config_path = app_data_dir().join("config.yaml");
+    let mut persisted = if config_path.exists() {
+        AppConfig::load(&config_path).map_err(|error| {
+            AppError::db_with_hint(
+                format!("artifact output directory config load failed: {error}"),
+                "canonical_state_unknown",
+            )
+        })?
+    } else {
+        // The runtime configuration may contain hydrated credentials. A first-run
+        // path selection may create config.yaml, but it must never serialize them.
+        reference_only_config_for_first_persist(state.config.lock().await.clone())
+    };
+    persisted.system.safe_paths = vec![canonical.to_string_lossy().into_owned()];
+    persisted.save(&config_path).map_err(AppError::from)?;
+
+    let mut runtime_config = state.config.lock().await;
+    runtime_config.system.safe_paths = persisted.system.safe_paths.clone();
+    Ok(canonical)
+}
+
+pub async fn select_artifact_output_directory<R: Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+) -> Result<ArtifactOutputDirectorySelection, AppError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app_handle
+        .dialog()
+        .file()
+        .set_title("选择 OpenLife artifact 输出文件夹")
+        .pick_folder(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = receiver.await.map_err(|_| {
+        AppError::internal("artifact output directory picker closed without a result")
+    })?;
+    let Some(selected) = selected else {
+        return Ok(ArtifactOutputDirectorySelection {
+            cancelled: true,
+            selected_path: None,
+        });
+    };
+    let selected = selected.into_path().map_err(|_| {
+        AppError::permission("artifact output directory picker returned an invalid path")
+    })?;
+    let canonical = persist_artifact_output_directory(state, &selected).await?;
+    Ok(ArtifactOutputDirectorySelection {
+        cancelled: false,
+        selected_path: Some(canonical.to_string_lossy().into_owned()),
+    })
+}
+
 #[tauri::command]
 pub async fn save_config(
     mut config: AppConfig,
@@ -1713,10 +2001,12 @@ pub async fn save_config(
     });
     config.llm.credential_version = resolved_provider_credential_version(&config, &current_config);
     config.llm.openai_key = resolve_submitted_provider_api_key(&config, &current_config);
-    config.system.search_provider_key = resolve_masked_api_key(
-        &config.system.search_provider_key,
-        &current_config.system.search_provider_key,
-    );
+    let search_provider_identity_unchanged =
+        search_provider_identity(&config).is_some_and(|identity| {
+            search_provider_identity(&current_config).as_deref() == Some(identity.as_str())
+        });
+    config.system.search_provider_key =
+        resolve_submitted_search_provider_api_key(&config, &current_config);
     if !provider_identity_unchanged {
         // A secret reference is bound to the provider plus canonical endpoint. A masked
         // frontend value cannot carry an old credential to a different destination.
@@ -1724,7 +2014,9 @@ pub async fn save_config(
     } else if config.llm.openai_key_ref.is_none() {
         config.llm.openai_key_ref = current_config.llm.openai_key_ref;
     }
-    if config.system.search_provider_key_ref.is_none() {
+    if !search_provider_identity_unchanged {
+        config.system.search_provider_key_ref = None;
+    } else if config.system.search_provider_key_ref.is_none() {
         config.system.search_provider_key_ref = current_config.system.search_provider_key_ref;
     }
 
@@ -4609,6 +4901,44 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    #[test]
+    fn artifact_output_directory_validation_accepts_a_real_non_root_directory() {
+        let directory = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            validate_artifact_output_directory(directory.path()).unwrap(),
+            directory.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn artifact_output_directory_validation_rejects_files_and_filesystem_root() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        assert!(validate_artifact_output_directory(file.path()).is_err());
+        assert!(validate_artifact_output_directory(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn first_artifact_path_persist_never_serializes_runtime_credentials() {
+        let mut runtime = AppConfig::default();
+        runtime.llm.openai_key = "provider-secret".into();
+        runtime.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        runtime.system.search_provider_key = "search-secret".into();
+        runtime.system.search_provider_key_ref =
+            Some("keychain://com.openlife.desktop/search-provider-api-key".into());
+
+        let persisted = reference_only_config_for_first_persist(runtime);
+
+        assert!(persisted.llm.openai_key.is_empty());
+        assert!(persisted.system.search_provider_key.is_empty());
+        assert_eq!(
+            persisted.llm.openai_key_ref.as_deref(),
+            Some(PROVIDER_KEY_REF)
+        );
+        assert!(persisted.system.search_provider_key_ref.is_some());
+    }
+
     const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
     const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
     const W84_IMPORT_CURRENT_MESSAGE_SECRET: &str = "W84_IMPORT_CURRENT_MESSAGE_SECRET";
@@ -4714,7 +5044,14 @@ mod tests {
                 .iter()
                 .map(|item| item.status.as_str())
                 .collect::<Vec<_>>(),
-            vec!["created", "created", "created", "created", "created"]
+            vec![
+                "created",
+                "created",
+                "created",
+                "created",
+                "created",
+                "missing_existing_data",
+            ]
         );
         assert_eq!(*store.writes.lock().unwrap(), 5);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
@@ -4723,6 +5060,79 @@ mod tests {
         for value in store.values.lock().unwrap().values() {
             assert!(!serialized.contains(value));
         }
+    }
+
+    #[test]
+    fn credential_access_recovery_restores_existing_keys_without_writes_or_secret_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoverySecretStore::default();
+        for (index, secret_ref) in [
+            AGENT_RUN_RECEIPT_KEY_REF,
+            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+            ACTION_QUEUE_AUTHORITY_KEY_REF,
+            TASK_STORE_AUTHORITY_KEY_REF,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .set(
+                    secret_ref,
+                    &general_purpose::STANDARD.encode([index as u8 + 1; 32]),
+                )
+                .unwrap();
+        }
+        let mut config = AppConfig::default();
+        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        store
+            .set(
+                PROVIDER_KEY_REF,
+                &crate::secret_store::encode_provider_secret(&config, "sk-recovery-test").unwrap(),
+            )
+            .unwrap();
+        *store.writes.lock().unwrap() = 0;
+
+        let expected = CredentialBootstrapSnapshot::from_statuses([
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::InitializationRequired,
+        ])
+        .with_provider_status(CredentialBootstrapStatus::Unavailable);
+        let report = recover_unavailable_credential_access_after_confirmation(
+            true,
+            directory.path(),
+            &config,
+            &store,
+            &expected,
+        )
+        .unwrap();
+
+        assert!(report.restart_required);
+        assert!(report.initialization_completed_for_restart);
+        for purpose in [
+            "agent_run_receipts",
+            "main_chat_events",
+            "action_queue",
+            "task_store",
+            "provider_api_key",
+        ] {
+            assert_eq!(
+                report
+                    .items
+                    .iter()
+                    .find(|item| item.purpose == purpose)
+                    .unwrap()
+                    .status,
+                "access_restored"
+            );
+        }
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("sk-recovery-test"));
+        assert!(!serialized.contains("keychain://"));
     }
 
     #[test]
@@ -5066,19 +5476,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {
-        assert_eq!(resolve_masked_api_key(KEY_MASK, "sk-current"), "sk-current");
-        assert_eq!(resolve_masked_api_key("", "sk-current"), "sk-current");
-        assert_eq!(resolve_masked_api_key("   ", "sk-current"), "sk-current");
-        assert_eq!(resolve_masked_api_key(KEY_MASK, ""), "");
-    }
-
-    #[test]
-    fn resolve_masked_api_key_uses_submitted_new_key() {
-        assert_eq!(resolve_masked_api_key("sk-new", "sk-current"), "sk-new");
-    }
-
-    #[test]
     fn masked_provider_key_is_bound_to_the_same_provider_endpoint_identity() {
         let mut current = AppConfig::default();
         current.llm.provider = "openai".into();
@@ -5100,6 +5497,32 @@ mod tests {
         let mut changed_endpoint = same;
         changed_endpoint.llm.openai_base = "https://capture.example/v1".into();
         assert!(resolve_submitted_provider_api_key(&changed_endpoint, &current).is_empty());
+    }
+
+    #[test]
+    fn masked_search_key_is_bound_to_the_same_search_provider_identity() {
+        let mut current = AppConfig::default();
+        current.system.search_provider = "deepseek".into();
+        current.system.search_provider_key = "sk-current-search".into();
+
+        let mut same = current.clone();
+        same.system.search_provider_key = KEY_MASK.into();
+        assert_eq!(
+            resolve_submitted_search_provider_api_key(&same, &current),
+            "sk-current-search"
+        );
+
+        let mut changed_provider = same.clone();
+        changed_provider.system.search_provider = "brave".into();
+        assert!(resolve_submitted_search_provider_api_key(&changed_provider, &current).is_empty());
+
+        let mut changed_endpoint = current.clone();
+        changed_endpoint.system.search_provider = "searxng".into();
+        changed_endpoint.system.searxng_url = "https://search.example/".into();
+        changed_endpoint.system.search_provider_key = KEY_MASK.into();
+        current.system.search_provider = "searxng".into();
+        current.system.searxng_url = "https://old-search.example".into();
+        assert!(resolve_submitted_search_provider_api_key(&changed_endpoint, &current).is_empty());
     }
 
     #[test]

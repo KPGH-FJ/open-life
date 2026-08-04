@@ -2910,17 +2910,29 @@ impl InferenceScheduler {
     {
         let system_prompt = request.system_prompt();
         let request_id = request.context_manifest.request_id.clone();
+        let structured_json_output = request.policy_receipt_evidence().payload_purpose
+            == Some(ProviderPayloadPurpose::MainChatArtifactDraft);
 
         if let Some(ref response) = self.scripted_generation_response {
             return Ok(response.clone());
         }
 
         if request.provider_target == "ollama" {
+            let deterministic_output = structured_json_output
+                || request
+                    .context_manifest
+                    .included_context_categories
+                    .iter()
+                    .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY);
             return crate::ollama::chat_with_ollama_raw_at_endpoint_with_start_observer(
                 execution_binding.endpoint(),
                 &request.model_target,
                 request.messages,
                 system_prompt.as_deref(),
+                crate::ollama::OllamaOutputContract {
+                    structured_json: structured_json_output,
+                    deterministic: deterministic_output,
+                },
                 Some(&request_id),
                 on_started,
             )
@@ -2939,6 +2951,7 @@ impl InferenceScheduler {
                 endpoint: execution_binding.endpoint(),
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
+                structured_json_output,
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -3370,6 +3383,8 @@ impl InferenceScheduler {
                 endpoint: execution_binding.endpoint(),
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
+                structured_json_output: policy_evidence.payload_purpose
+                    == Some(ProviderPayloadPurpose::MainChatArtifactDraft),
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),

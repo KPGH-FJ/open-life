@@ -23,6 +23,8 @@ import {
   credentialState,
   endpointHost,
   providerIdentity,
+  searchCredentialState,
+  searchProviderIdentity,
   settingsConfigMatchesSavedDraft,
   settingsProductActions,
   unknownDraftBoundaryEnvelope,
@@ -44,7 +46,13 @@ export type SettingsDraftEdit =
   | { field: "prefer_local"; value: boolean }
   | { field: "local_model"; value: string }
   | { field: "network_enabled"; value: boolean }
-  | { field: "network_default"; value: "ask" | "allow" | "deny" };
+  | { field: "network_default"; value: "ask" | "allow" | "deny" }
+  | {
+      field: "search_provider";
+      value: NonNullable<NonNullable<AppConfig["system"]>["search_provider"]>;
+    }
+  | { field: "search_credential"; value: string }
+  | { field: "searxng_url"; value: string };
 
 export type SettingsPrivacyJourneyController = {
   snapshot: SettingsPrivacySnapshot | null;
@@ -64,6 +72,7 @@ export type SettingsPrivacyJourneyController = {
     error: string | null;
   };
   eligibleCredentialPurposes: string[];
+  artifactDirectorySelection: { phase: "idle" | "selecting" | "failed"; error: string | null };
   load: (announceResult?: boolean) => Promise<SettingsPrivacySnapshot>;
   ensureLoaded: () => Promise<SettingsEnsureLoadedResult>;
   edit: (edit: SettingsDraftEdit) => void;
@@ -73,6 +82,7 @@ export type SettingsPrivacyJourneyController = {
   initializeRequiredCredentials: () => void;
   save: () => void;
   retryBoundaryRefresh: () => void;
+  selectArtifactOutputDirectory: () => void;
 };
 
 export type SettingsEnsureLoadedResult = {
@@ -82,7 +92,7 @@ export type SettingsEnsureLoadedResult = {
 };
 
 type SettingsOperationToken = {
-  kind: "test" | "save" | "boundary_refresh" | "credential_initialization";
+  kind: "test" | "save" | "boundary_refresh" | "credential_initialization" | "artifact_directory";
   sourceGeneration: number;
   sequence: number;
 };
@@ -132,6 +142,15 @@ function applyDraftEdit(config: AppConfig, edit: SettingsDraftEdit): AppConfig {
         network_policy: { ...next.system?.network_policy, default_decision: edit.value },
       };
       return next;
+    case "search_provider":
+      next.system = { ...next.system, search_provider: edit.value };
+      return next;
+    case "search_credential":
+      next.system = { ...next.system, search_provider_key: edit.value };
+      return next;
+    case "searxng_url":
+      next.system = { ...next.system, searxng_url: edit.value };
+      return next;
   }
 }
 
@@ -176,6 +195,10 @@ export function useSettingsPrivacyJourney(
     report: CredentialRecoveryReport | null;
     error: string | null;
   }>({ phase: "idle", report: null, error: null });
+  const [artifactDirectorySelection, setArtifactDirectorySelection] = useState<{
+    phase: "idle" | "selecting" | "failed";
+    error: string | null;
+  }>({ phase: "idle", error: null });
   const requestRef = useRef(0);
   const sourceGenerationRef = useRef(0);
   const operationSequenceRef = useRef(0);
@@ -204,6 +227,7 @@ export function useSettingsPrivacyJourney(
     setLastTestOutcome(null);
     setTestConfirmationOpen(false);
     setCredentialInitialization({ phase: "idle", report: null, error: null });
+    setArtifactDirectorySelection({ phase: "idle", error: null });
     dispatch({ type: "reset" });
     return () => {
       sourceGenerationRef.current += 1;
@@ -286,8 +310,10 @@ export function useSettingsPrivacyJourney(
         return;
       }
       const previousIdentity = providerIdentity(draft);
+      const previousSearchIdentity = searchProviderIdentity(draft);
       const next = applyDraftEdit(draft, change);
       const identityChanged = providerIdentity(next) !== previousIdentity;
+      const searchIdentityChanged = searchProviderIdentity(next) !== previousSearchIdentity;
       const matchesStoredIdentity =
         snapshot?.config !== null &&
         snapshot?.config !== undefined &&
@@ -304,6 +330,28 @@ export function useSettingsPrivacyJourney(
         next.llm.openai_key = snapshot?.config?.llm.openai_key === "***" ? "***" : "";
         next.llm.openai_key_ref = snapshot?.config?.llm.openai_key_ref;
       }
+      const matchesStoredSearchIdentity =
+        snapshot?.config !== null &&
+        snapshot?.config !== undefined &&
+        searchCredentialState(snapshot.config) === "stored" &&
+        searchProviderIdentity(next) === searchProviderIdentity(snapshot.config);
+      const restoreStoredSearchCredential =
+        matchesStoredSearchIdentity &&
+        (searchIdentityChanged || (change.field === "search_credential" && !change.value.trim()));
+      if (searchIdentityChanged) {
+        next.system = {
+          ...next.system,
+          search_provider_key: "",
+          search_provider_key_ref: undefined,
+        };
+      }
+      if (restoreStoredSearchCredential) {
+        next.system = {
+          ...next.system,
+          search_provider_key: snapshot?.config?.system?.search_provider_key === "***" ? "***" : "",
+          search_provider_key_ref: snapshot?.config?.system?.search_provider_key_ref,
+        };
+      }
       setDraft(next);
       setLastTestOutcome(null);
       pendingSaveAttestationRef.current = null;
@@ -313,6 +361,12 @@ export function useSettingsPrivacyJourney(
           restoreStoredCredential
             ? "已返回原始供应商目标；同一目标继续使用后端保存的凭据，传输边界仍等待保存后确认。"
             : "供应商目标已更改；旧凭据已清除，当前传输边界等待后端重新确认。"
+        );
+      } else if (searchIdentityChanged) {
+        announce(
+          restoreStoredSearchCredential
+            ? "已返回原始网页搜索目标；同一目标继续使用后端保存的独立搜索凭据。"
+            : "网页搜索目标已更改；旧搜索凭据已清除，不会带到新的搜索服务。"
         );
       } else {
         announce("设置草稿已更改；保存并刷新边界前，不把草稿解释为当前产品状态。");
@@ -326,11 +380,21 @@ export function useSettingsPrivacyJourney(
     () =>
       dataSource?.initializeRequiredCredentials
         ? (snapshot?.credentialBootstrap?.purposes ?? [])
-            .filter(purpose => purpose.status === "initialization_required")
+            .filter(
+              purpose =>
+                purpose.status === "initialization_required" || purpose.status === "unavailable"
+            )
             .map(purpose => purpose.purpose)
             .sort()
         : [],
     [dataSource, snapshot?.credentialBootstrap]
+  );
+  const credentialAccessRecoveryRequired = useMemo(
+    () =>
+      (snapshot?.credentialBootstrap?.purposes ?? []).some(
+        purpose => purpose.status === "unavailable"
+      ),
+    [snapshot?.credentialBootstrap]
   );
   const protectionState = protectionStateForSnapshot(snapshot, loading);
   const actions = useMemo(() => {
@@ -350,6 +414,7 @@ export function useSettingsPrivacyJourney(
 
   const executeTest = useCallback(async () => {
     if (!dataSource || !draft || operationRef.current || !actions.test.enabled) return;
+    const draftIsAlreadySaved = state.savedRevision === state.draftRevision;
     const operationToken: SettingsOperationToken = {
       kind: "test",
       sourceGeneration: sourceGenerationRef.current,
@@ -378,7 +443,11 @@ export function useSettingsPrivacyJourney(
           type: "test_succeeded",
           result: { ok: true, message: result.message },
         });
-        announce("本次连接验证已有可信回执；设置仍未保存。");
+        announce(
+          draftIsAlreadySaved
+            ? "本次连接验证已有可信回执；当前已保存设置未被测试改变。"
+            : "本次连接验证已有可信回执；设置仍未保存。"
+        );
       } else {
         dispatch({
           type: "test_failed",
@@ -401,7 +470,7 @@ export function useSettingsPrivacyJourney(
     } finally {
       if (operationIsCurrent()) operationRef.current = null;
     }
-  }, [actions.test.enabled, announce, dataSource, draft]);
+  }, [actions.test.enabled, announce, dataSource, draft, state.draftRevision, state.savedRevision]);
 
   const requestTest = useCallback(() => {
     if (!actions.test.enabled) {
@@ -573,7 +642,7 @@ export function useSettingsPrivacyJourney(
       eligibleCredentialPurposes.length === 0 ||
       credentialInitialization.phase === "restart_required"
     ) {
-      announce("当前后端快照没有可执行的系统凭据初始化操作。");
+      announce("当前后端快照没有可执行的凭据初始化或访问恢复操作。");
       return;
     }
     const operationToken: SettingsOperationToken = {
@@ -583,20 +652,26 @@ export function useSettingsPrivacyJourney(
     };
     operationRef.current = operationToken;
     setCredentialInitialization({ phase: "running", report: null, error: null });
-    announce("正在等待系统原生确认；取消不会写入或删除任何凭据。");
+    announce(
+      credentialAccessRecoveryRequired
+        ? "正在等待系统原生确认；恢复只读取既有凭据，不会创建、覆盖或返回密钥。"
+        : "正在等待系统原生确认；取消不会写入或删除任何凭据。"
+    );
     void dataSource
       .initializeRequiredCredentials()
       .then(report => {
         if (operationRef.current !== operationToken) return;
         setCredentialInitialization({
-          phase: report.initializationCompletedForRestart ? "restart_required" : "blocked",
+          phase: report.restartRequired ? "restart_required" : "blocked",
           report,
           error: report.blockedReason ?? null,
         });
         announce(
-          report.initializationCompletedForRestart
-            ? "系统凭据初始化已经完成；必须完全重启 OpenLife 后才能重新判断可用状态。"
-            : "系统凭据初始化未完成；当前继续保持阻塞。"
+          report.restartRequired
+            ? credentialAccessRecoveryRequired
+              ? "既有凭据访问已经恢复；必须完全重启 OpenLife 后才能重新判断可用状态。"
+              : "系统凭据初始化已经完成；必须完全重启 OpenLife 后才能重新判断可用状态。"
+            : "凭据恢复未完成；当前继续保持阻塞。"
         );
       })
       .catch(error => {
@@ -606,12 +681,64 @@ export function useSettingsPrivacyJourney(
           report: null,
           error: errorCode(error),
         });
-        announce("系统凭据初始化被取消或失败；当前状态没有被标记为可用。");
+        announce("凭据初始化或访问恢复被取消或失败；当前状态没有被标记为可用。");
       })
       .finally(() => {
         if (operationRef.current === operationToken) operationRef.current = null;
       });
-  }, [announce, credentialInitialization.phase, dataSource, eligibleCredentialPurposes.length]);
+  }, [
+    announce,
+    credentialAccessRecoveryRequired,
+    credentialInitialization.phase,
+    dataSource,
+    eligibleCredentialPurposes.length,
+  ]);
+
+  const selectArtifactOutputDirectory = useCallback(() => {
+    if (!dataSource?.selectArtifactOutputDirectory || operationRef.current) {
+      announce("当前不能选择 artifact 输出目录；请等待后端或当前操作结束。");
+      return;
+    }
+    if (protectionState !== "normal") {
+      announce("当前保护状态不允许修改 artifact 输出目录。");
+      return;
+    }
+    if (state.draftRevision !== state.savedRevision) {
+      announce("请先保存或撤销当前设置草稿，再选择 artifact 输出目录。");
+      return;
+    }
+    const operationToken: SettingsOperationToken = {
+      kind: "artifact_directory",
+      sourceGeneration: sourceGenerationRef.current,
+      sequence: ++operationSequenceRef.current,
+    };
+    operationRef.current = operationToken;
+    setArtifactDirectorySelection({ phase: "selecting", error: null });
+    announce("正在打开系统文件夹选择器；尚未选择时不会保存路径。");
+    void dataSource
+      .selectArtifactOutputDirectory()
+      .then(async result => {
+        if (operationRef.current !== operationToken) return;
+        if (result.cancelled) {
+          setArtifactDirectorySelection({ phase: "idle", error: null });
+          announce("已取消文件夹选择；artifact 输出目录没有改变。");
+          return;
+        }
+        await load(false);
+        if (operationRef.current !== operationToken) return;
+        setArtifactDirectorySelection({ phase: "idle", error: null });
+        announce("artifact 输出目录已由后端保存并重新读取。");
+      })
+      .catch(error => {
+        if (operationRef.current !== operationToken) return;
+        const code = errorCode(error);
+        setArtifactDirectorySelection({ phase: "failed", error: code });
+        announce("artifact 输出目录没有保存；现有路径保持不变。");
+      })
+      .finally(() => {
+        if (operationRef.current === operationToken) operationRef.current = null;
+      });
+  }, [announce, dataSource, load, protectionState, state.draftRevision, state.savedRevision]);
 
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
   const effectiveBoundaryEnvelope = useMemo(() => {
@@ -663,6 +790,7 @@ export function useSettingsPrivacyJourney(
     testConfirmationOpen,
     credentialInitialization,
     eligibleCredentialPurposes,
+    artifactDirectorySelection,
     load,
     ensureLoaded,
     edit,
@@ -672,6 +800,7 @@ export function useSettingsPrivacyJourney(
     initializeRequiredCredentials,
     save,
     retryBoundaryRefresh,
+    selectArtifactOutputDirectory,
   };
 }
 

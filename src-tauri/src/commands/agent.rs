@@ -301,9 +301,18 @@ mod tests {
     fn detached_test_execution_epoch(
         task_session_id: &str,
     ) -> crate::main_chat_cancellation::MainChatExecutionEpoch {
+        detached_test_execution_epoch_with_generation(task_session_id, 1)
+    }
+
+    fn detached_test_execution_epoch_with_generation(
+        task_session_id: &str,
+        generation: u64,
+    ) -> crate::main_chat_cancellation::MainChatExecutionEpoch {
         let registry = crate::main_chat_cancellation::MainChatCancellationRegistry::default();
         let registration = registry.register(task_session_id);
-        registration.execution_epoch()
+        let epoch = registration.execution_epoch();
+        epoch.bind_terminal_owner_generation(generation).unwrap();
+        epoch
     }
 
     #[test]
@@ -2227,6 +2236,100 @@ mod tests {
             .generated_proposals
             .iter()
             .any(|proposal_id| proposal_id == "preexisting-proposal-link"));
+    }
+
+    #[tokio::test]
+    async fn typed_blocked_continuation_preserves_first_generation_reasoning_trace() {
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let run = AgentRun::new_chat_run(
+            "typed-blocked-continuation",
+            "metadata safe continuation input",
+        );
+        let run_id = run.id.clone();
+        let task_id = run.task_id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        install_release_like_persistence_coordinator(&mut state);
+
+        crate::terminal_owner_write_gateway::project_main_chat_kernel_evidence(
+            &state,
+            &run_id,
+            &task_id,
+            &detached_test_execution_epoch_with_generation(&task_id, 1),
+            crate::terminal_owner_write_gateway::MainChatBlockedProjection {
+                reasoning_strategy: Some("react".into()),
+                reasoning_trace: openlife_core::agent::ReasoningTrace {
+                    generation_result: Some(serde_json::json!({"blocked": "first"})),
+                    ..Default::default()
+                },
+                actions: Vec::new(),
+                observations: Vec::new(),
+                step_count: 1,
+                tool_call_count: 1,
+                disposition:
+                    crate::terminal_owner_write_gateway::MainChatBlockedDisposition::WaitingPermission,
+            },
+        )
+        .await
+        .unwrap();
+        let first_digest = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap()
+            .reasoning_trace_digest
+            .unwrap();
+
+        crate::terminal_owner_write_gateway::project_main_chat_kernel_evidence(
+            &state,
+            &run_id,
+            &task_id,
+            &detached_test_execution_epoch_with_generation(&task_id, 2),
+            crate::terminal_owner_write_gateway::MainChatBlockedProjection {
+                reasoning_strategy: Some("react".into()),
+                reasoning_trace: openlife_core::agent::ReasoningTrace {
+                    generation_result: Some(serde_json::json!({"blocked": "continuation"})),
+                    ..Default::default()
+                },
+                actions: Vec::new(),
+                observations: Vec::new(),
+                step_count: 2,
+                tool_call_count: 1,
+                disposition:
+                    crate::terminal_owner_write_gateway::MainChatBlockedDisposition::WaitingPermission,
+            },
+        )
+        .await
+        .unwrap();
+
+        let canonical = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            canonical.reasoning_trace_digest.as_deref(),
+            Some(first_digest.as_str())
+        );
+        assert_eq!(
+            canonical.status,
+            openlife_core::agent::AgentRunStatus::WaitingPermission
+        );
+        assert!(canonical.finished_at.is_none());
     }
 
     #[tokio::test]

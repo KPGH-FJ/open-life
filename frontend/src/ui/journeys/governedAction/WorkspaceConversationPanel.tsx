@@ -4,13 +4,16 @@ import {
   Pencil,
   RefreshCw,
   Send,
+  Sparkles,
   Square,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import { useState } from "react";
 import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
+import { WorkspaceMessageContent } from "./WorkspaceMessageContent";
 
 function turnFeedback(controller: WorkspaceConversationController) {
   const state = controller.turnState;
@@ -195,7 +198,10 @@ export function WorkspaceConversationPanel({
           {visibleMessages.map((message, index) => (
             <li key={`${message.role}:${index}`} data-role={message.role}>
               <span>{message.role === "user" ? "你" : "OpenLife"}</span>
-              <p>{message.content}</p>
+              <WorkspaceMessageContent
+                content={message.content}
+                allowBackendSources={message.role === "assistant"}
+              />
             </li>
           ))}
           {controller.streamingReply && (
@@ -280,6 +286,79 @@ export function WorkspaceConversationPanel({
               只读取你通过原生选择器明确选中的文件；内容按当前 Provider
               和已生效隐私许可处理，未授权外传不会执行。
             </p>
+          )}
+        </div>
+        <div className="ol-workspace-capabilities" aria-labelledby="workspace-capabilities-title">
+          <div className="ol-workspace-capabilities__header">
+            <div>
+              <strong id="workspace-capabilities-title">技能与只读工具</strong>
+              <span>
+                {controller.capabilityState.phase === "loading"
+                  ? "正在核对"
+                  : controller.selectedSkillId
+                    ? "当前对话已选择技能"
+                    : "未选择技能"}
+              </span>
+            </div>
+          </div>
+          <div className="ol-workspace-capabilities__grid">
+            <label>
+              <span>
+                <Sparkles size={15} aria-hidden="true" />
+                当前技能
+              </span>
+              <select
+                value={controller.selectedSkillId ?? ""}
+                disabled={
+                  !controller.selectedSessionId ||
+                  controller.busy ||
+                  controller.capabilityState.phase === "loading" ||
+                  controller.capabilityState.phase === "selecting"
+                }
+                onChange={event => void controller.selectSkill(event.target.value || null)}
+              >
+                <option value="">不使用技能</option>
+                {controller.skills
+                  .filter(skill => skill.available)
+                  .map(skill => (
+                    <option key={skill.skillId} value={skill.skillId}>
+                      {skill.name}
+                    </option>
+                  ))}
+              </select>
+              <small>
+                {controller.selectedSessionId
+                  ? "技能只提供有界指令，不会扩大模型、网络、工具或写入权限。"
+                  : "先发送第一条消息建立对话，再为后续回合选择技能。"}
+              </small>
+            </label>
+            <div className="ol-workspace-capabilities__tools">
+              <span>
+                <Wrench size={15} aria-hidden="true" />
+                已注册只读工具
+              </span>
+              {controller.toolCandidates?.candidates.length ? (
+                <ul>
+                  {controller.toolCandidates.candidates.slice(0, 4).map(candidate => (
+                    <li key={candidate.candidateId}>
+                      <strong>{candidate.toolName}</strong>
+                      <small>{candidate.capabilityLabels.join(" · ") || "read"}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <small>当前没有后端确认可用的 MCP 只读工具。</small>
+              )}
+              {Boolean(controller.toolCandidates?.blockedTools.length) && (
+                <small>
+                  另有 {controller.toolCandidates!.blockedTools.length} 个工具因写入、风险或
+                  manifest 状态被后端阻断。
+                </small>
+              )}
+            </div>
+          </div>
+          {controller.capabilityState.phase === "failed" && (
+            <small role="status">技能或工具状态不可用：{controller.capabilityState.reason}</small>
           )}
         </div>
         <label htmlFor="workspace-composer-input">消息</label>

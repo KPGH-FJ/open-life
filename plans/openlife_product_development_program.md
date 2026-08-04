@@ -456,15 +456,50 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 
 ## 7. 当前阶段
 
-当前阶段：**第三阶段——一线 Agent 基础能力（进行中）**
+当前阶段：**第三阶段——一线 Agent 基础能力已完成；第四阶段尚未开始，等待用户
+明确批准。**
 
-已完成切片：**3A——本地文件和资源读取。**
+第三阶段完成的产品切片：
 
-验收结论：用户通过原生选择器明确选择文件；资源与下一回合的精确 operation
-identity 绑定；本机 Ollama 真实回答使用了后端实际选中的资源内容并保留规范来源；
-导入、移除、失败和来源在产品中可见；重启后对话和引用仍可恢复；未读取、绑错
-回合或伪造引用不能显示为成功。该证据不属于 external-live Provider 信用。
-3B 网页研究及以后切片尚未批准实施。
+1. **3A——本地文件和资源读取**：用户通过原生选择器明确选择资源；资源与
+   精确 operation identity 绑定；来源、移除、失败和重启恢复在产品中可见。
+2. **3B——live web 研究和引用**：自然语言请求进入真实受治理网页读取；
+   一次性工具许可和精确端点许可分别审核；外部内容保持未背书并绑定引用。
+3. **3C——文件和 artifact 生成**：有界内容先形成 proposal，Review Center
+   批准后才由后端安全路径物化；产品区分批准与真实落盘。
+4. **3D——已注册 MCP 读取**：只暴露后端当前注册并分类为只读的工具；调用、
+   MCP 审计、来源、失败和超时保持可核验，manifest 文本不授予权限。
+5. **3E——混合能力多步骤任务**：同一任务组合 Web、MCP 和 external-live
+   Provider；暂停、逐层授权、恢复和最终合成绑定精确 task/action identity。
+
+最终原生验收（2026-08-03）使用隔离 final19 profile。原始任务暴露了两处真实
+恢复缺陷：ActionResume proposal 被通用 Review 投影提前标记为完成，以及启动
+修复 AgentRun 时无条件重写正确 TaskSession、破坏 owner revision。两者均先以
+失败反例复现，再修正为由 canonical TaskSession 和幂等启动投影保持真实状态；
+旧任务保留失败证据，没有被改写或计为成功。
+
+修正版替代任务 `21c05c3d-1299-4f77-ae9d-779414fc736c` 通过 shipped
+`OpenLife.app` 完成真实混合路径：`https://example.com/` 网络读取和
+`builtin_echo` MCP 读取各 dispatch 一次并形成成功回执；DeepSeek
+`deepseek-v4-flash` 形成 `provider.started` 和 `provider.completed`；最终交付
+同时证明 `modelInvoked=true`、`providerInvocationStatus=completed`、
+`bodyStored=true`、`toolInvoked=true`、`blockerCount=0`。持久回答分别总结了
+Example Domain 与 MCP 观察，并保留未背书 Web 引用。mock、fixture、本地
+Ollama 和旧 final11 失败试用均未替代这次 external-live 信用。
+
+第三阶段没有新增平行编排平台、计划 JSON、能力 ledger 或自进化系统。进入
+第四阶段必须由用户在本次统一交付后另行明确批准；不得因本段更新自动开工。
+
+短收口完成（2026-08-04）：CSV spreadsheet formula injection 已在生成阶段
+fail-closed；会话技能选择已从进程内状态迁移到现有 `MemoryStore` 会话所有者，
+并验证跨重启恢复；工作区会明确区分当前对话任务和属于其他对话的全局活动任务。
+签名原生构建 `18bd829d148639b9a1c81f247ce179f6295e251e37a334d28ca4121c43a1a0d3`
+在隔离 QA 中完成凭据恢复、真实 DeepSeek Web 搜索、Provider 生成和
+proposal-first artifact 落盘。原生证据同时发现 terminal-owner 在 Provider replay
+后使用旧 final-event identity 的缺陷；修复后，重启 reconciliation 将同一任务收敛
+为 completed，且 artifact 的 SHA-256、inode、mtime 和大小均未改变，因此没有把
+重复网络调用或重复写入计为成功。LifeModel mutation journal 与 memory 表保持为
+零。全量 Rust、前端、production build 和 browser smoke 门禁均通过。
 
 第一阶段实际完成：
 
@@ -505,7 +540,8 @@ Keychain 证据均不作为 external-live 证明。
   门禁通过，没有以测试 fixture 或旧签名 QA profile 代替当前源码结论。
 
 本阶段使用的真实生成来自本机 Ollama，不能计为 external-live Provider 证据。
-第三阶段已获准从 3A 本地文件和资源读取开始；第四至第六阶段尚未开始。
+第三阶段后续已经使用隔离 DeepSeek 配置补足 external-live Provider 证据；第四至
+第六阶段尚未开始。
 
 ## 8. 进度记录规则
 

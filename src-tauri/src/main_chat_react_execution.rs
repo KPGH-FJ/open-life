@@ -3,7 +3,8 @@ use std::task::Poll;
 
 use crate::main_chat_generation_support::preview_text;
 use crate::main_chat_react_runtime::{
-    attach_main_chat_read_observation_metadata, blocked_main_chat_observation, MainChatObservation,
+    attach_main_chat_read_observation_metadata, attach_main_chat_replay_synthesis_observation,
+    blocked_main_chat_observation, MainChatObservation,
 };
 use crate::main_chat_react_tool_selection::{
     resolve_main_chat_mcp_read_target, MainChatReactActionPlan,
@@ -120,6 +121,7 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
     action_bound_permission: Option<
         &openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization,
     >,
+    network_policy_override: Option<&openlife_core::config::NetworkPolicy>,
 ) -> Result<MainChatObservation, String> {
     if local_only_required && plan.requires_network {
         return Err(
@@ -132,7 +134,7 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
             state,
         )
         .await?;
-    let (safe_paths, calendar_ics_paths, network_policy) = {
+    let (safe_paths, calendar_ics_paths, mut network_policy) = {
         let governed = &resources.governed;
         let mut safe_paths = governed.shared.safe_paths.clone();
         if let Ok(workspace) =
@@ -153,6 +155,9 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
             governed.network_policy.clone(),
         )
     };
+    if let Some(override_policy) = network_policy_override {
+        network_policy = override_policy.clone();
+    }
     let web_search_fixture_output = state.web_search_fixture_output.lock().await.clone();
     let local_permission_store = if plan.uses_ephemeral_file_permission {
         let store = openlife_core::tool_permissions::ToolPermissionStore::new_in_memory()
@@ -354,6 +359,13 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
         web_search_fixture_output.is_some() && plan.queue_action_type == "web.search",
         executor_status == openlife_core::agent::ActionExecutionStatus::Succeeded,
     );
+    if executor_status == openlife_core::agent::ActionExecutionStatus::Succeeded {
+        attach_main_chat_replay_synthesis_observation(
+            &mut metadata,
+            &plan.queue_action_type,
+            &result.observation.content,
+        );
+    }
     if let Some(ref proposal_id) = proposal_id {
         if let Some(object) = metadata.as_object_mut() {
             object.insert("proposalId".into(), serde_json::json!(proposal_id));
@@ -362,6 +374,7 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
 
     Ok(MainChatObservation {
         metadata,
+        observation_content: result.observation.content,
         executor_status,
         blocker_reason,
         tool_execution_receipt: Some(tool_execution_receipt),

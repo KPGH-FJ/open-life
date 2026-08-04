@@ -724,8 +724,13 @@ impl ToolPermissionStore {
                 .map(|(decision_id, endpoint_digest)| {
                     format!("@{decision_id}#endpoint:{endpoint_digest}")
                 });
+        let expected_proposal_risk = match risk_level {
+            "medium" => Some(crate::agent::RiskLevel::Medium),
+            "high" => Some(crate::agent::RiskLevel::High),
+            _ => None,
+        };
         if proposal.proposal_type != crate::agent::ProposalType::ToolPermission
-            || proposal.risk_level != crate::agent::RiskLevel::High
+            || expected_proposal_risk != Some(proposal.risk_level)
             || scope_kind != Some("network_policy")
             || permission != Some("allow_once")
             || scope_field(&["tool_name", "toolName", "name"]) != Some(tool_name)
@@ -745,7 +750,6 @@ impl ToolPermissionStore {
             })
             || tool_name.trim().is_empty()
             || source.trim().is_empty()
-            || risk_level != "high"
             || action_type != "network"
         {
             anyhow::bail!("reviewed network permission scope is invalid");
@@ -2070,6 +2074,71 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("direct_allow_missing"));
         assert!(!arbitrary.id.is_empty());
+    }
+
+    #[test]
+    fn reviewed_web_network_permission_accepts_exact_medium_scope() {
+        let store = ToolPermissionStore::new_in_memory().unwrap();
+        let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+        let endpoint_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let scope = format!("web.fetch@network-policy:web#endpoint:{endpoint_digest}");
+        let proposal = crate::agent::AgentProposal::new(
+            crate::agent::ProposalType::ToolPermission,
+            "tool_permission.network_policy.web.fetch",
+            serde_json::json!({
+                "permission_scope_kind": "network_policy",
+                "permission": "allow_once",
+                "tool_name": scope,
+                "source": "network_policy",
+                "risk_level": "medium",
+                "action_type": "network",
+                "canonical_scope": {
+                    "tool_name": scope,
+                    "source": "network_policy",
+                    "risk_level": "medium",
+                    "action_type": "network",
+                    "network_policy_decision_id": "network-policy:web",
+                    "endpoint_digest": endpoint_digest,
+                },
+            }),
+            "review exact web endpoint",
+            1.0,
+            crate::agent::RiskLevel::Medium,
+            crate::agent::ProposalSource::ChatConversation,
+        );
+        proposal_store.create_proposal(&proposal).unwrap();
+        let claim_id = proposal_store
+            .claim_dispatch(&proposal.id)
+            .unwrap()
+            .unwrap();
+        let acceptance = crate::agent::ReviewWorkflow::new(&proposal_store)
+            .claimed_acceptance_snapshot(&proposal.id, &claim_id)
+            .unwrap();
+
+        store
+            .grant_reviewed_network_once(&acceptance, &scope, "network_policy", "medium", "network")
+            .unwrap();
+        assert!(store
+            .reviewed_network_once_available_for_proposal(
+                &proposal.id,
+                &scope,
+                "network_policy",
+                "medium",
+                "network",
+            )
+            .unwrap());
+        let consumed = store
+            .consume_reviewed_network_once_for_proposal(
+                &proposal.id,
+                &scope,
+                "network_policy",
+                "medium",
+                "network",
+            )
+            .unwrap()
+            .expect("exact reviewed web network permission remains consumable");
+        assert_eq!(consumed.proposal_id, proposal.id);
     }
 
     #[test]

@@ -1015,9 +1015,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "list_main_chat_skills":
       return Promise.resolve([
         {
-          skillId: "phase_e_review",
+          skillId: "evidence_review",
           name: "Phase E Review",
-          source: "workspace:skills/phase_e_review/SKILL.md",
+          source: "workspace:skills/evidence_review/SKILL.md",
           scope: "session",
           description: "Review Main Chat Skill/Tool evidence.",
           riskLevel: "low",
@@ -1031,10 +1031,10 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       ] as T);
     case "get_main_chat_skill_detail":
       return Promise.resolve({
-        skillId: _args?.skillId ?? _args?.skill_id ?? "phase_e_review",
+        skillId: _args?.skillId ?? _args?.skill_id ?? "evidence_review",
         manifest: {
           name: "Phase E Review",
-          source: "workspace:skills/phase_e_review/SKILL.md",
+          source: "workspace:skills/evidence_review/SKILL.md",
           sourceKind: "workspace",
           available: true,
         },
@@ -1051,7 +1051,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "select_main_chat_skill":
       return Promise.resolve({
         sessionId: _args?.sessionId ?? _args?.session_id ?? "session-1",
-        selectedSkillId: _args?.skillId ?? _args?.skill_id ?? "phase_e_review",
+        selectedSkillId: _args?.skillId ?? _args?.skill_id ?? "evidence_review",
         selectedSkillDigest:
           "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         selectionReason: "user_selected_local_skill",
@@ -1687,7 +1687,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
             passed: true,
             expectedBlocker: false,
             runtimeObjectCount: 3,
-            selectedSkillIds: ["phase_e_review"],
+            selectedSkillIds: ["evidence_review"],
             candidateIds: ["project_status.read"],
             blockerIds: [],
             actionIds: [],

@@ -254,8 +254,8 @@ pub use review_decision_context::{
 pub use review_item::{
     build_review_center_view_model, build_review_item, ReviewBatch, ReviewBatchDomain,
     ReviewCenterBuildInput, ReviewCenterSummary, ReviewCenterViewModel, ReviewItem,
-    ReviewItemDecisionStatus, ReviewItemSource, ReviewItemSourceKind, ReviewItemTaskResumeRelation,
-    ReviewItemType,
+    ReviewItemArtifactEvidence, ReviewItemDecisionStatus, ReviewItemSource, ReviewItemSourceKind,
+    ReviewItemTaskResumeRelation, ReviewItemType,
 };
 pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,

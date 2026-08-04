@@ -9,9 +9,9 @@ use crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX;
 use crate::secret_store::{
     hydrate_config_secrets_read_only, inspect_and_hydrate_integrity_key,
     inspect_existing_mcp_audit_keys, selected_keyring_service_classification,
-    IntegrityKeyHydration, McpAuditKeyHydrationInspection, SecretReader, StartupKeyringSecretStore,
-    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-    TASK_STORE_AUTHORITY_KEY_REF,
+    IntegrityKeyHydration, McpAuditKeyHydrationInspection, ProviderCredentialHydrationStatus,
+    SecretReader, StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
+    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
@@ -710,6 +710,25 @@ async fn project_startup_final_delivery_receipt(
     crate::terminal_owner_write_gateway::project_agent_run_from_startup_durable_event(state, event)
         .await
         .map_err(|error| format!("project startup final AgentRun failed: {error}"))?;
+    let expected_task_status = match status {
+        "completed" => openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed,
+        "completed_with_pending_items" => {
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        }
+        "blocked" => openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked,
+        "failed" | "interrupted" => {
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        }
+        "cancelled" => openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled,
+        _ => unreachable!("validated final delivery status"),
+    };
+    if task.status == expected_task_status {
+        // Startup reconciliation may need to repair only AgentRun. Rewriting
+        // an already-canonical TaskSession would advance its owner revision
+        // past the sealed final-delivery head and invalidate a legitimate
+        // ActionResumePrerequisite replay admission.
+        return Ok(());
+    }
     let store_arc = state
         .main_chat_agent_session_store
         .as_ref()
@@ -1747,6 +1766,7 @@ fn bootstrap_with_secret_store(
         persistence.register_read_write("ConfigStore");
     }
     let secret_hydration = hydrate_config_secrets_read_only(&mut config, secret_store);
+    let provider_credential_hydration_status = secret_hydration.provider_credential_status;
     for capability in &secret_hydration.fail_closed_capabilities {
         let owner = match capability.as_str() {
             "provider_credential" => "ProviderCredentialStore",
@@ -2920,13 +2940,23 @@ fn bootstrap_with_secret_store(
         }
     };
 
+    let provider_credential_status = match provider_credential_hydration_status {
+        ProviderCredentialHydrationStatus::NotReferenced
+        | ProviderCredentialHydrationStatus::Missing => {
+            CredentialBootstrapStatus::MissingExistingData
+        }
+        ProviderCredentialHydrationStatus::Available => CredentialBootstrapStatus::Available,
+        ProviderCredentialHydrationStatus::Invalid => CredentialBootstrapStatus::Invalid,
+        ProviderCredentialHydrationStatus::Unavailable => CredentialBootstrapStatus::Unavailable,
+    };
     let credential_bootstrap_snapshot = CredentialBootstrapSnapshot::from_statuses([
         agent_run_credential_status,
         main_chat_event_credential_status,
         action_queue_credential_status,
         task_store_credential_status,
         mcp_audit_credential_status,
-    ]);
+    ])
+    .with_provider_status(provider_credential_status);
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
         governed_data_import_journal,
@@ -2962,7 +2992,6 @@ fn bootstrap_with_secret_store(
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_agent_event_store: main_chat_agent_event_store
             .map(|store| Arc::new(Mutex::new(store))),
-        main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
         main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
         patch_store: patch_store.map(|store| Arc::new(Mutex::new(store))),
         rollout_metrics_store,
@@ -3402,13 +3431,18 @@ mod tests {
         assert_eq!(secrets.operation_counts(), (0, 0));
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
         assert!(!directory.path().join("mcp_audit.db").exists());
-        assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 5);
-        assert!(result
-            .state
-            .credential_bootstrap_snapshot
-            .purposes
+        assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 6);
+        assert!(result.state.credential_bootstrap_snapshot.purposes[..5]
             .iter()
             .all(|purpose| purpose.status == CredentialBootstrapStatus::InitializationRequired));
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[5].purpose,
+            "provider_api_key"
+        );
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[5].status,
+            CredentialBootstrapStatus::MissingExistingData
+        );
         assert_eq!(result.state.credential_bootstrap_snapshot.digest.len(), 64);
     }
 
@@ -4766,6 +4800,212 @@ mod tests {
         assert_eq!(
             restart_failure.payload["remoteProviderState"],
             "not_attempted"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_pending_final_agent_run_repair_preserves_task_owner_head() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let result =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let chat_session_id = format!("restart-pending-final:{operation_id}");
+        let user_goal = "Resume one accepted provider consent without replaying prior tools.";
+        result
+            .state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session(&chat_session_id, "Pending restart fixture")
+            .unwrap();
+        let task = result
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_session_with_id(
+                operation_id.clone(),
+                AgentTaskSessionDraft {
+                    chat_session_id: chat_session_id.clone(),
+                    user_goal: user_goal.into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                },
+            )
+            .unwrap();
+        let canonical_message = result
+            .state
+            .memory_store
+            .lock()
+            .await
+            .save_message_idempotent_with_proof(
+                &chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: user_goal.into(),
+                },
+                &operation_id,
+            )
+            .unwrap();
+        let admission = {
+            let store = result
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .bind_session_canonical_user_message(
+                    &task.id,
+                    &canonical_message.receipt().canonical_ref,
+                    user_goal,
+                )
+                .unwrap();
+            store
+                .issue_terminal_owner_epoch_admission(&task.id, &operation_id, canonical_message)
+                .unwrap()
+        };
+        let mut run = openlife_core::agent::AgentRun::new_chat_run(&chat_session_id, user_goal);
+        run.id = operation_id.clone();
+        run.task_id = task.id.clone();
+        result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        let epoch = result
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .open_terminal_owner_epoch_from_admission(admission)
+            .unwrap();
+        let task_before_projection = {
+            let store = result
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .set_pending_blockers(&task.id, vec!["proposal:provider-consent".into()])
+                .unwrap();
+            store.mark_waiting_permission(&task.id).unwrap()
+        };
+        assert_eq!(
+            task_before_projection.status,
+            AgentTaskSessionStatus::WaitingPermission
+        );
+        let owner_before_projection = result
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&task.id)
+            .unwrap()
+            .unwrap();
+        let final_event = {
+            let event_store = result
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            event_store
+                .begin_terminal_owner_seal(&task.id, &run.id, epoch.generation())
+                .unwrap();
+            event_store
+                .append_terminal_final_and_seal(
+                    crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                        task_session_id: task.id.clone(),
+                        run_id: run.id.clone(),
+                        epoch_generation: epoch.generation(),
+                        delivery_id: format!("pending-final:{}", run.id),
+                        expected_task_owner_revision: owner_before_projection.revision(),
+                        expected_task_owner_digest: owner_before_projection.digest().to_string(),
+                        status: "completed_with_pending_items".into(),
+                    },
+                )
+                .unwrap()
+        };
+        {
+            let store = result.state.agent_run_store.as_ref().unwrap().lock().await;
+            let mut pre_fix_projection = store.get_run(&run.id).unwrap().unwrap();
+            pre_fix_projection.status = openlife_core::agent::AgentRunStatus::Completed;
+            pre_fix_projection.finished_at = Some(chrono::Utc::now());
+            store.update_run(&pre_fix_projection).unwrap();
+        }
+        let run_before_repair = result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+
+        project_startup_final_delivery_receipt(
+            &result.state,
+            &run_before_repair,
+            &task_before_projection,
+            &final_event,
+        )
+        .await
+        .expect("repair only the stale AgentRun projection");
+
+        let repaired_run = result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired_run.status,
+            openlife_core::agent::AgentRunStatus::WaitingPermission
+        );
+        assert!(repaired_run.finished_at.is_none());
+        let owner_after_projection = result
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&task.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            owner_after_projection.revision(),
+            owner_before_projection.revision()
+        );
+        assert_eq!(
+            owner_after_projection.digest(),
+            owner_before_projection.digest()
         );
     }
 

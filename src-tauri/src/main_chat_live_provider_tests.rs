@@ -1498,8 +1498,8 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
     .expect("CC01 external live structured terminal");
 
     assert_eq!(
-        result["status"], "blocked",
-        "a cited report waiting for review is not a completed file effect"
+        result["status"], "completed_with_pending_items",
+        "a cited report waiting for review is an actionable pending item, not a completed file effect or a terminal blocker"
     );
     assert_eq!(result["model_invoked"], true);
     assert_eq!(result["tool_invoked"], true);
@@ -1588,7 +1588,7 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
     );
     assert_eq!(proposals[0].after["providerMaySelectPath"], false);
     assert_eq!(proposals[0].after["generatedByProvider"], true);
-    let report_path = safe_workspace.join("roadshow-summary.md");
+    let report_path = safe_workspace.join("summary.md");
     assert_eq!(
         proposals[0].after["path"].as_str(),
         Some(report_path.to_string_lossy().as_ref())

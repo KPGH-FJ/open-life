@@ -45,6 +45,8 @@ async fn authorize_a2a_edge(
         capability,
         NetworkConsentSubject {
             permission_source: "a2a",
+            risk_level: "high",
+            capabilities: &["network", "external_transmission"],
             target: &decision.host,
             affected_path_prefix: "tool_permission.a2a",
             blocked_action_type,

@@ -7,6 +7,10 @@ const mocks = vi.hoisted(() => ({
   startStreamMessage: vi.fn(),
   pickAndImportResources: vi.fn(),
   detachResourceFromTurn: vi.fn(),
+  listMainChatSkills: vi.fn(),
+  selectMainChatSkill: vi.fn(),
+  clearMainChatSkill: vi.fn(),
+  listMainChatToolCandidates: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -26,6 +30,10 @@ vi.mock("@/tauri", () => ({
   startStreamMessage: mocks.startStreamMessage,
   pickAndImportResources: mocks.pickAndImportResources,
   detachResourceFromTurn: mocks.detachResourceFromTurn,
+  listMainChatSkills: mocks.listMainChatSkills,
+  selectMainChatSkill: mocks.selectMainChatSkill,
+  clearMainChatSkill: mocks.clearMainChatSkill,
+  listMainChatToolCandidates: mocks.listMainChatToolCandidates,
 }));
 
 import { tauriWorkspaceConversationDataSource } from "./workspaceConversationDataSource";
@@ -37,6 +45,27 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.startStreamMessage.mockReset();
     mocks.pickAndImportResources.mockReset();
     mocks.detachResourceFromTurn.mockReset();
+    mocks.listMainChatSkills.mockReset();
+    mocks.selectMainChatSkill.mockReset();
+    mocks.clearMainChatSkill.mockReset();
+    mocks.listMainChatToolCandidates.mockReset();
+  });
+
+  it("forwards skill selection and tool discovery through backend-owned bridges", async () => {
+    mocks.listMainChatSkills.mockResolvedValue([]);
+    mocks.selectMainChatSkill.mockResolvedValue({ sessionId: "conversation-1", skillId: "review" });
+    mocks.clearMainChatSkill.mockResolvedValue({ sessionId: "conversation-1", skillId: null });
+    mocks.listMainChatToolCandidates.mockResolvedValue({ candidates: [], blockedCount: 0 });
+
+    await tauriWorkspaceConversationDataSource.listSkills?.("conversation-1");
+    await tauriWorkspaceConversationDataSource.selectSkill?.("conversation-1", "review");
+    await tauriWorkspaceConversationDataSource.clearSkill?.("conversation-1");
+    await tauriWorkspaceConversationDataSource.listToolCandidates?.("task-1");
+
+    expect(mocks.listMainChatSkills).toHaveBeenCalledWith("conversation-1");
+    expect(mocks.selectMainChatSkill).toHaveBeenCalledWith("conversation-1", "review");
+    expect(mocks.clearMainChatSkill).toHaveBeenCalledWith("conversation-1");
+    expect(mocks.listMainChatToolCandidates).toHaveBeenCalledWith("task-1");
   });
 
   it("forwards resource import and detach through the exact Tauri bridge", async () => {

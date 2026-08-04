@@ -9,11 +9,29 @@ import {
 import type { ReviewDispatchState } from "@/contracts/reviewDispatchContract";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 
-function reviewItemStatus(item: ReviewItem): {
+export function reviewItemStatus(item: ReviewItem): {
   label: string;
   status: "neutral" | "waiting" | "unknown" | "error" | "success";
   verified?: boolean;
 } {
+  if (item.type === "external_write_action" && item.artifactEvidence) {
+    if (
+      item.artifactEvidence.state === "confirmed" &&
+      item.artifactEvidence.observedContentDigest === item.artifactEvidence.contentDigest
+    ) {
+      return { label: "文件已写入", status: "success", verified: true };
+    }
+    if (item.artifactEvidence.state === "failed_before_effect") {
+      return { label: "写入前失败", status: "error" };
+    }
+    if (item.artifactEvidence.state === "unknown") {
+      return { label: "文件状态未知", status: "unknown" };
+    }
+    if (item.artifactEvidence.state === "confirmed") {
+      return { label: "文件状态未知", status: "unknown" };
+    }
+    return { label: "正在核对文件", status: "waiting" };
+  }
   if (["pending", "edited", "deferred"].includes(item.status)) {
     return { label: item.status === "deferred" ? "稍后处理" : "等待决定", status: "waiting" };
   }
@@ -36,6 +54,7 @@ function reviewItemStatus(item: ReviewItem): {
 
 function actionLabel(action: ReviewAction, item: ReviewItem): string {
   if (action.kind === "approve") {
+    if (item.type === "external_write_action") return "批准并写入文件";
     return item.type === "tool_permission" ? "仅允许本次" : "批准变更";
   }
   const labels: Partial<Record<ReviewAction["kind"], string>> = {
@@ -90,6 +109,21 @@ export function reviewDecisionFeedback(
         };
       }
       if (state.action.kind === "approve") {
+        if (item.type === "external_write_action") {
+          const evidence = item.artifactEvidence;
+          return evidence?.state === "confirmed" &&
+            evidence.observedContentDigest === evidence.contentDigest
+            ? {
+                title: "文件写入已核验",
+                body: "刷新后的同一审核项包含目标、内容和落盘观察摘要；这不是从按钮回调推断的完成。",
+                tone: "neutral",
+              }
+            : {
+                title: "文件结果尚未确认",
+                body: "批准请求已经返回，但后端读模型没有提供匹配的确认收据；当前保持未完成或未知。",
+                tone: "protection",
+              };
+        }
         return state.refreshed.materializationStatus === "applied"
           ? {
               title: "变更已应用",
@@ -394,6 +428,47 @@ export function ReviewGovernedView({
               </dl>
             </section>
 
+            {selectedItem.type === "external_write_action" && (
+              <section className="ol-review-rationale" aria-labelledby="artifact-evidence-title">
+                <div className="ol-governed-section-heading">
+                  <span>文件交付</span>
+                  <h3 id="artifact-evidence-title">后端物化证据</h3>
+                </div>
+                {selectedItem.artifactEvidence ? (
+                  <dl>
+                    <div>
+                      <dt>状态</dt>
+                      <dd>{selectedItem.artifactEvidence.state}</dd>
+                    </div>
+                    <div>
+                      <dt>大小</dt>
+                      <dd>{selectedItem.artifactEvidence.byteSize} bytes</dd>
+                    </div>
+                    <div>
+                      <dt>类型</dt>
+                      <dd>{selectedItem.artifactEvidence.mediaType}</dd>
+                    </div>
+                    <div>
+                      <dt>内容摘要</dt>
+                      <dd>{selectedItem.artifactEvidence.contentDigest}</dd>
+                    </div>
+                    <div>
+                      <dt>落盘观察</dt>
+                      <dd>{selectedItem.artifactEvidence.observedContentDigest ?? "尚未确认"}</dd>
+                    </div>
+                    <div>
+                      <dt>目标摘要</dt>
+                      <dd>{selectedItem.artifactEvidence.targetReferenceDigest}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <FoundationNotice title="尚无文件写入收据" tone="protection" live>
+                    <p>批准前这是正常状态；批准后若仍无收据，页面不会显示文件已写入。</p>
+                  </FoundationNotice>
+                )}
+              </section>
+            )}
+
             {feedback && (
               <FoundationNotice title={feedback.title} tone={feedback.tone} live>
                 <p>{feedback.body}</p>
@@ -507,15 +582,31 @@ export function ReviewGovernedView({
 
       <FoundationDialog
         open={Boolean(confirmingAction && selectedItem)}
-        title={selectedItem?.type === "tool_permission" ? "仅允许这一次？" : "确认批准变更？"}
-        description="确认只记录审核决定；任务恢复、应用结果和完成状态都需要后续刷新证明。"
+        title={
+          selectedItem?.type === "tool_permission"
+            ? "仅允许这一次？"
+            : selectedItem?.type === "external_write_action"
+              ? "批准并写入这个文件？"
+              : "确认批准变更？"
+        }
+        description={
+          selectedItem?.type === "external_write_action"
+            ? "确认会请求后端按提案中的精确路径与内容执行一次原子写入；只有刷新后的匹配收据才能证明完成。"
+            : "确认只记录审核决定；任务恢复、应用结果和完成状态都需要后续刷新证明。"
+        }
         busy={false}
         onClose={onCancelConfirmation}
         footer={
           <>
             <FoundationActionButton label="取消" variant="quiet" onClick={onCancelConfirmation} />
             <FoundationActionButton
-              label={selectedItem?.type === "tool_permission" ? "确认仅允许本次" : "确认批准"}
+              label={
+                selectedItem?.type === "tool_permission"
+                  ? "确认仅允许本次"
+                  : selectedItem?.type === "external_write_action"
+                    ? "确认写入文件"
+                    : "确认批准"
+              }
               variant="primary"
               icon={<ShieldCheck size={17} aria-hidden="true" />}
               onClick={onConfirmAction}
