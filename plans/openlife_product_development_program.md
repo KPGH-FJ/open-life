@@ -456,8 +456,8 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 
 ## 7. 当前阶段
 
-当前阶段：**第三阶段——一线 Agent 基础能力（功能切片完成，短收口进行中）；
-第四阶段尚未开始。**
+当前阶段：**第三阶段——一线 Agent 基础能力已完成；第四阶段尚未开始，等待用户
+明确批准。**
 
 第三阶段完成的产品切片：
 
@@ -490,12 +490,16 @@ Ollama 和旧 final11 失败试用均未替代这次 external-live 信用。
 第三阶段没有新增平行编排平台、计划 JSON、能力 ledger 或自进化系统。进入
 第四阶段必须由用户在本次统一交付后另行明确批准；不得因本段更新自动开工。
 
-短收口状态（2026-08-03）：CSV spreadsheet formula injection 已改为生成阶段
+短收口完成（2026-08-04）：CSV spreadsheet formula injection 已在生成阶段
 fail-closed；会话技能选择已从进程内状态迁移到现有 `MemoryStore` 会话所有者，
 并验证跨重启恢复；工作区会明确区分当前对话任务和属于其他对话的全局活动任务。
-当前源码的自动门禁已通过。当前精确原生构建仍待完成一次新增系统凭据初始化、
-重启后的 `web.search` 与 artifact 真实验证；在该证据完成前，本段不把短收口写成
-最终完成，也不授权第四阶段。
+签名原生构建 `18bd829d148639b9a1c81f247ce179f6295e251e37a334d28ca4121c43a1a0d3`
+在隔离 QA 中完成凭据恢复、真实 DeepSeek Web 搜索、Provider 生成和
+proposal-first artifact 落盘。原生证据同时发现 terminal-owner 在 Provider replay
+后使用旧 final-event identity 的缺陷；修复后，重启 reconciliation 将同一任务收敛
+为 completed，且 artifact 的 SHA-256、inode、mtime 和大小均未改变，因此没有把
+重复网络调用或重复写入计为成功。LifeModel mutation journal 与 memory 表保持为
+零。全量 Rust、前端、production build 和 browser smoke 门禁均通过。
 
 第一阶段实际完成：
 
@@ -536,7 +540,8 @@ Keychain 证据均不作为 external-live 证明。
   门禁通过，没有以测试 fixture 或旧签名 QA profile 代替当前源码结论。
 
 本阶段使用的真实生成来自本机 Ollama，不能计为 external-live Provider 证据。
-第三阶段已获准从 3A 本地文件和资源读取开始；第四至第六阶段尚未开始。
+第三阶段后续已经使用隔离 DeepSeek 配置补足 external-live Provider 证据；第四至
+第六阶段尚未开始。
 
 ## 8. 进度记录规则
 

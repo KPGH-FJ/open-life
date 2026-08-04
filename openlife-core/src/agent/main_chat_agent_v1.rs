@@ -60,6 +60,15 @@ impl MainChatAgentStrategy {
         }
     }
 
+    /// Whether this strategy may pause before an exact governed read and later
+    /// replay that same durable action after the required permission is
+    /// accepted. Artifact generation is a compound route: it remains a
+    /// proposal-only write strategy, while its evidence-gathering prefix uses
+    /// the same bounded read replay contract as an ordinary ReAct turn.
+    pub fn supports_governed_read_replay(self) -> bool {
+        matches!(self, Self::ReActToolExecution | Self::FileWriteProposal)
+    }
+
     fn creates_or_resumes_task_session(self) -> bool {
         true
     }
@@ -2365,19 +2374,20 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     if lower.contains("mcp") {
         capabilities.push(AllowedCapability::McpReadOnly);
     }
-    if contains_any(
-        &lower,
-        &[
-            "file.read",
-            "read file",
-            "read agents",
-            "agents.md",
-            "cargo.toml",
-            "读取工作区",
-            "读取 ../",
-            "读取 ../../",
-        ],
-    ) || looks_like_workspace_file_read_intent(&lower)
+    if !is_negated_workspace_file_read_intent(&lower)
+        && (contains_any(
+            &lower,
+            &[
+                "file.read",
+                "read file",
+                "read agents",
+                "agents.md",
+                "cargo.toml",
+                "读取工作区",
+                "读取 ../",
+                "读取 ../../",
+            ],
+        ) || looks_like_workspace_file_read_intent(&lower))
     {
         capabilities.push(AllowedCapability::WorkspaceFileRead);
     }
@@ -15747,25 +15757,35 @@ fn main_chat_privacy_risk_from_intent(intent: &IntentFrame) -> MainChatPrivacyRi
 }
 
 fn is_advice_only_request(lower: &str) -> bool {
-    contains_any(
+    let explicit_reviewed_file_request = is_governed_file_write_intent(lower)
+        && contains_any(
+            lower,
+            &[
+                "确认后保存",
+                "等待我确认后保存",
+                "在我确认后保存",
+                "save after i confirm",
+                "save after confirmation",
+            ],
+        );
+    let unscoped_advice_only = contains_any(
         lower,
         &[
             "只给建议",
             "先只给建议",
-            "不要修改",
             "不要执行",
             "只生成草稿",
             "不要发送",
             "advice only",
             "only give advice",
-            "do not modify",
-            "don't modify",
             "do not execute",
             "don't execute",
             "draft only",
             "do not send",
         ],
-    )
+    );
+    let no_modification = contains_any(lower, &["不要修改", "do not modify", "don't modify"]);
+    unscoped_advice_only || (no_modification && !explicit_reviewed_file_request)
 }
 
 fn is_explicit_clarification_request(lower: &str) -> bool {
@@ -16402,25 +16422,30 @@ fn is_current_external_read_intent(lower: &str) -> bool {
         ],
     ) && !is_pure_offline_planning_expression(lower);
     let explicit_public_web_evidence =
-        (contains_any(
-            lower,
-            &[
-                "公开网页中",
-                "公开网页上",
-                "公开网络中",
-                "网上公开",
-                "public web",
-                "public webpage",
-                "public web page",
-                "online sources",
-            ],
-        ) && contains_any(
-            lower,
-            &[
-                "结合", "根据", "查", "搜索", "检索", "读取", "引用", "来源", "evidence", "search",
-                "read", "look up", "cite", "from",
-            ],
-        )) || contains_any(lower, &["检索网页", "搜索网页", "查询网页"]);
+        contains_any(lower, &["web.search", "web search", "search web"])
+            || (contains_any(
+                lower,
+                &[
+                    "公开网页中",
+                    "公开网页上",
+                    "公开网络中",
+                    "网上公开",
+                    "公开信息",
+                    "公开资料",
+                    "public web",
+                    "public webpage",
+                    "public web page",
+                    "public information",
+                    "online sources",
+                ],
+            ) && contains_any(
+                lower,
+                &[
+                    "结合", "根据", "查", "搜索", "检索", "读取", "引用", "来源", "evidence",
+                    "search", "read", "look up", "cite", "from",
+                ],
+            ))
+            || contains_any(lower, &["检索网页", "搜索网页", "查询网页"]);
     known_current_external_fact || explicit_public_web_evidence
 }
 
@@ -16502,6 +16527,9 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
 }
 
 fn looks_like_workspace_file_read_intent(lower: &str) -> bool {
+    if is_negated_workspace_file_read_intent(lower) {
+        return false;
+    }
     let has_read_verb = lower.contains("read ") || lower.contains("读取") || lower.contains("查看");
     has_read_verb
         && (contains_any(
@@ -16510,6 +16538,24 @@ fn looks_like_workspace_file_read_intent(lower: &str) -> bool {
                 ".md", ".toml", ".json", ".rs", ".ts", ".tsx", ".yaml", ".yml",
             ],
         ) || workspace_path_token_follows_read_verb(lower))
+}
+
+fn is_negated_workspace_file_read_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "不要读取",
+            "不读取",
+            "无需读取",
+            "不用读取",
+            "do not read",
+            "don't read",
+            "without reading",
+        ],
+    ) && contains_any(
+        lower,
+        &["本地文件", "工作区", "workspace", "local file", "file.read"],
+    )
 }
 
 fn workspace_path_token_follows_read_verb(lower: &str) -> bool {
@@ -17111,6 +17157,7 @@ mod generated_artifact_policy_tests {
     const RC07_PROMPT: &str = "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。";
     const CC01_PROMPT: &str =
         "读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。";
+    const PHASE3_WEB_REPORT_PROMPT: &str = "使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 phase3-web-search-evidence.md，并在我确认后保存。不要读取本地文件，不要修改 LifeModel。";
 
     #[test]
     fn current_user_artifact_request_gets_generation_and_proposal_capabilities() {
@@ -17172,6 +17219,67 @@ mod generated_artifact_policy_tests {
         assert!(!decision
             .policy_decision
             .allows(AllowedCapability::ReversibleMemoryCommit));
+    }
+
+    #[test]
+    fn explicit_web_report_with_negative_local_boundaries_keeps_compound_route() {
+        let decision = AgentIngress::default().decide(
+            "phase3-web-report-policy",
+            PHASE3_WEB_REPORT_PROMPT,
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(
+            decision.intent_frame.requires_external_read,
+            "{:?}",
+            decision.intent_frame
+        );
+        assert!(
+            decision.intent_frame.requests_file_change,
+            "{:?}",
+            decision.intent_frame
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::FileWriteProposal
+        );
+        assert!(decision.selected_strategy.supports_governed_read_replay());
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::WebSearch));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::WorkspaceFileRead));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::LifeModelProposal));
+    }
+
+    #[test]
+    fn unscoped_no_modification_request_remains_advice_only() {
+        let decision = AgentIngress::default().decide(
+            "advice-only-no-modification",
+            "分析当前实现，只给建议，不要修改文件。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.intent_frame.execution_disposition,
+            IntentExecutionDisposition::AdviceOnly
+        );
+        assert!(!decision.intent_frame.requests_file_change);
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
     }
 
     #[test]

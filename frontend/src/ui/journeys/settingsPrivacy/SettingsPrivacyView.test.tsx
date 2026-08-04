@@ -9,7 +9,13 @@ import type {
 import { SettingsPrivacyView } from "./SettingsPrivacyView";
 import { useSettingsPrivacyJourney } from "./useSettingsPrivacyJourney";
 
-function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
+function SafeModeSettings({
+  source,
+  surface = "model-provider",
+}: {
+  source: SettingsPrivacyDataSource;
+  surface?: "model-provider" | "privacy-network";
+}) {
   const controller = useSettingsPrivacyJourney(source, vi.fn());
   useEffect(() => {
     void controller.ensureLoaded();
@@ -17,7 +23,7 @@ function SafeModeSettings({ source }: { source: SettingsPrivacyDataSource }) {
   return (
     <SettingsPrivacyView
       controller={controller}
-      surface="model-provider"
+      surface={surface}
       onOpenReview={vi.fn()}
       onOpenInspector={vi.fn()}
     />
@@ -89,6 +95,37 @@ function credentialSettingsSource(
 }
 
 describe("SettingsPrivacyView", () => {
+  it("shows explicit Search Provider controls and fail-closed artifact output state", async () => {
+    const source = credentialSettingsSource(null);
+    source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
+      ...(await source.loadSettingsPrivacy()),
+      config: {
+        ...((await source.loadSettingsPrivacy()).config ?? {}),
+        llm: {
+          provider: "deepseek",
+          openai_base: "https://api.deepseek.com",
+          openai_key: "***",
+          embedding_model: "local",
+          chat_model: "deepseek-chat",
+        },
+        prefer_local_model: false,
+        local_model: "local",
+        system: { search_provider: "duckduckgo", safe_paths: [] },
+      },
+    });
+
+    const model = render(<SafeModeSettings source={source} />);
+    expect(await screen.findByRole("heading", { name: "网页搜索" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Search Provider")).toHaveValue("duckduckgo");
+    expect(screen.getByText(/不保证可用/)).toBeInTheDocument();
+    model.unmount();
+
+    render(<SafeModeSettings source={source} surface="privacy-network" />);
+    expect(await screen.findByRole("heading", { name: "Artifact 输出目录" })).toBeInTheDocument();
+    expect(screen.getByText(/生成 artifact 时会被后端明确阻止/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "选择输出文件夹" })).toBeEnabled();
+  });
+
   it("renders the sanitized native config shape when the secret field is omitted", async () => {
     const snapshot: SettingsPrivacySnapshot = {
       config: {

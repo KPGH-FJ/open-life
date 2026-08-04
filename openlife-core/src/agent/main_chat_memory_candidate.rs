@@ -238,6 +238,9 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
             continue;
         }
         let lower = compact.to_ascii_lowercase();
+        if is_negated_memory_or_lifemodel_write(&lower) {
+            continue;
+        }
         let span_id = source_span_id(index, &compact);
         let explicit_memory = has_explicit_memory_marker(&lower);
         let future_rule = is_future_rule(&lower);
@@ -692,6 +695,29 @@ fn looks_like_instruction_fragment(value: &str) -> bool {
             "不允许",
         ],
     )
+}
+
+fn is_negated_memory_or_lifemodel_write(lower: &str) -> bool {
+    let negated = contains_any(
+        lower,
+        &["不要", "不需要", "无需", "do not", "don't", "never"],
+    );
+    let write_like = contains_any(
+        lower,
+        &[
+            "修改", "更新", "写入", "保存", "记住", "记录", "modify", "update", "write", "save",
+            "remember", "record",
+        ],
+    );
+    let governed_target = contains_any(
+        lower,
+        &["life model", "lifemodel", "memory", "生命模型", "记忆"],
+    );
+    let positive_reminder = contains_any(
+        lower,
+        &["不要忘记", "别忘了", "do not forget", "don't forget"],
+    );
+    negated && write_like && governed_target && !positive_reminder
 }
 
 fn has_explicit_memory_marker(lower: &str) -> bool {
@@ -1267,6 +1293,14 @@ mod tests {
             routed("帮我把今天上午的工作分成三个专注时段，但先只给建议，不要修改任何任务。");
 
         assert!(result.life_event_candidate_ids.is_empty());
+        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn explicit_negative_lifemodel_boundary_is_not_a_write_candidate() {
+        let result = routed("使用 web.search 生成一份报告。不要修改 LifeModel。");
+
         assert!(result.memory_proposal_candidate_ids.is_empty());
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
     }

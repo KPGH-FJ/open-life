@@ -3263,9 +3263,9 @@ async fn main_chat_pending_action_permission_ready_for_resume(
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
 ) -> Result<Option<openlife_core::tool_permissions::ActionBoundToolPermissionAuthorization>, String>
 {
-    use openlife_core::agent::main_chat_agent_v1::{ExecutionQueueStatus, MainChatAgentStrategy};
+    use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
 
-    if session.selected_strategy != MainChatAgentStrategy::ReActToolExecution
+    if !session.selected_strategy.supports_governed_read_replay()
         || action.status != ExecutionQueueStatus::PendingPermission
         || !openlife_core::agent::main_chat_agent_v1::typed_tool_receipt_allows_automatic_retry(
             action,
@@ -3318,9 +3318,9 @@ pub(crate) async fn main_chat_pending_action_permission_diagnostic_for_test(
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
 ) -> Result<&'static str, String> {
-    use openlife_core::agent::main_chat_agent_v1::{ExecutionQueueStatus, MainChatAgentStrategy};
+    use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
 
-    if session.selected_strategy != MainChatAgentStrategy::ReActToolExecution {
+    if !session.selected_strategy.supports_governed_read_replay() {
         return Ok("strategy_not_react");
     }
     if action.status != ExecutionQueueStatus::PendingPermission {

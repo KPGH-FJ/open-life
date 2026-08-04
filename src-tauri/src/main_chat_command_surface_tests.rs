@@ -4584,8 +4584,13 @@ fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
 }
 
 #[tokio::test]
-async fn generated_artifact_without_safe_workspace_returns_structured_blocker_not_ipc_failure() {
+async fn generated_artifact_with_invalid_configured_workspace_returns_structured_blocker() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let missing_workspace = std::env::temp_dir().join(format!(
+        "openlife-missing-artifact-workspace-{}",
+        uuid::Uuid::new_v4()
+    ));
+    state.config.lock().await.system.safe_paths = vec![missing_workspace.display().to_string()];
     let provider_fixture = configure_command_surface_sequenced_local_http_provider(
         &state,
         vec![
@@ -4618,6 +4623,44 @@ async fn generated_artifact_without_safe_workspace_returns_structured_blocker_no
         .is_some_and(|blockers| blockers
             .iter()
             .any(|blocker| { blocker.as_str() == Some("artifact_safe_path_unavailable") })));
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+}
+
+#[tokio::test]
+async fn generated_artifact_without_configured_safe_paths_fails_closed() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    assert!(state.config.lock().await.system.safe_paths.is_empty());
+    let file_name = format!("openlife-artifact-{}.md", uuid::Uuid::new_v4());
+    let provider_fixture = configure_command_surface_sequenced_local_http_provider(
+        &state,
+        vec![
+            "unused ranking response".into(),
+            serde_json::json!({
+                "markdown": "# OpenLife evidence\n\nDrafted for explicit review."
+            })
+            .to_string(),
+        ],
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "artifact-default-workspace-proposal",
+        &format!("生成一份 Markdown 报告 {file_name}，并在我确认后保存。"),
+    )
+    .await;
+
+    assert_eq!(
+        provider_fixture
+            .request_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(response["blockers"]
+        .as_array()
+        .is_some_and(|blockers| blockers
+            .iter()
+            .any(|blocker| blocker.as_str() == Some("artifact_safe_path_unavailable"))));
     assert!(list_command_surface_proposals(&state).await.is_empty());
 }
 

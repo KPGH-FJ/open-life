@@ -19,12 +19,13 @@ use std::collections::HashMap;
 use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
-use tauri::State;
+use tauri::{Runtime, State};
+use tauri_plugin_dialog::DialogExt;
 use uuid::{Uuid, Version};
 
 use crate::danger_action_confirmation::{
@@ -1614,14 +1615,6 @@ pub async fn get_last_model_error(
 /// Mask for sensitive API keys sent to the frontend.
 const KEY_MASK: &str = "***";
 
-fn resolve_masked_api_key(submitted_key: &str, current_key: &str) -> String {
-    if submitted_key.trim().is_empty() || submitted_key == KEY_MASK {
-        current_key.to_string()
-    } else {
-        submitted_key.to_string()
-    }
-}
-
 fn provider_endpoint_identity(config: &AppConfig) -> Option<String> {
     let provider = config.llm.provider.trim().to_ascii_lowercase();
     if provider.is_empty() {
@@ -1664,6 +1657,42 @@ fn resolve_submitted_provider_api_key(submitted: &AppConfig, current: &AppConfig
     });
     if identity_unchanged {
         current.llm.openai_key.clone()
+    } else {
+        String::new()
+    }
+}
+
+fn search_provider_identity(config: &AppConfig) -> Option<String> {
+    let provider = config.system.search_provider.trim().to_ascii_lowercase();
+    match provider.as_str() {
+        "duckduckgo" | "brave" | "deepseek" => Some(provider),
+        "searxng" => {
+            let parsed = reqwest::Url::parse(config.system.searxng_url.trim()).ok()?;
+            if !matches!(parsed.scheme(), "http" | "https")
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return None;
+            }
+            Some(format!("searxng|{}", parsed.as_str().trim_end_matches('/')))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_submitted_search_provider_api_key(submitted: &AppConfig, current: &AppConfig) -> String {
+    let submitted_key = submitted.system.search_provider_key.trim();
+    if !submitted_key.is_empty() && submitted_key != KEY_MASK {
+        return submitted.system.search_provider_key.clone();
+    }
+    let identity_unchanged = search_provider_identity(submitted).is_some_and(|identity| {
+        search_provider_identity(current).as_deref() == Some(identity.as_str())
+    });
+    if identity_unchanged {
+        current.system.search_provider_key.clone()
     } else {
         String::new()
     }
@@ -1849,6 +1878,105 @@ pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, Ap
     Ok(cfg)
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactOutputDirectorySelection {
+    pub cancelled: bool,
+    pub selected_path: Option<String>,
+}
+
+fn validate_artifact_output_directory(path: &Path) -> Result<PathBuf, AppError> {
+    let metadata = path.symlink_metadata().map_err(|error| {
+        AppError::permission(format!(
+            "artifact output directory cannot be inspected: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AppError::permission(
+            "artifact output selection must be a real directory",
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|error| {
+        AppError::permission(format!(
+            "artifact output directory cannot be canonicalized: {error}"
+        ))
+    })?;
+    if canonical.parent().is_none() {
+        return Err(AppError::permission(
+            "filesystem root cannot be used as an artifact output directory",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn reference_only_config_for_first_persist(mut config: AppConfig) -> AppConfig {
+    config.llm.openai_key.clear();
+    config.system.search_provider_key.clear();
+    config
+}
+
+async fn persist_artifact_output_directory(
+    state: &Arc<AppState>,
+    selected_path: &Path,
+) -> Result<PathBuf, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let canonical = validate_artifact_output_directory(selected_path)?;
+    let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
+    let config_path = app_data_dir().join("config.yaml");
+    let mut persisted = if config_path.exists() {
+        AppConfig::load(&config_path).map_err(|error| {
+            AppError::db_with_hint(
+                format!("artifact output directory config load failed: {error}"),
+                "canonical_state_unknown",
+            )
+        })?
+    } else {
+        // The runtime configuration may contain hydrated credentials. A first-run
+        // path selection may create config.yaml, but it must never serialize them.
+        reference_only_config_for_first_persist(state.config.lock().await.clone())
+    };
+    persisted.system.safe_paths = vec![canonical.to_string_lossy().into_owned()];
+    persisted.save(&config_path).map_err(AppError::from)?;
+
+    let mut runtime_config = state.config.lock().await;
+    runtime_config.system.safe_paths = persisted.system.safe_paths.clone();
+    Ok(canonical)
+}
+
+pub async fn select_artifact_output_directory<R: Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+) -> Result<ArtifactOutputDirectorySelection, AppError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app_handle
+        .dialog()
+        .file()
+        .set_title("选择 OpenLife artifact 输出文件夹")
+        .pick_folder(move |path| {
+            let _ = sender.send(path);
+        });
+    let selected = receiver.await.map_err(|_| {
+        AppError::internal("artifact output directory picker closed without a result")
+    })?;
+    let Some(selected) = selected else {
+        return Ok(ArtifactOutputDirectorySelection {
+            cancelled: true,
+            selected_path: None,
+        });
+    };
+    let selected = selected.into_path().map_err(|_| {
+        AppError::permission("artifact output directory picker returned an invalid path")
+    })?;
+    let canonical = persist_artifact_output_directory(state, &selected).await?;
+    Ok(ArtifactOutputDirectorySelection {
+        cancelled: false,
+        selected_path: Some(canonical.to_string_lossy().into_owned()),
+    })
+}
+
 #[tauri::command]
 pub async fn save_config(
     mut config: AppConfig,
@@ -1873,10 +2001,12 @@ pub async fn save_config(
     });
     config.llm.credential_version = resolved_provider_credential_version(&config, &current_config);
     config.llm.openai_key = resolve_submitted_provider_api_key(&config, &current_config);
-    config.system.search_provider_key = resolve_masked_api_key(
-        &config.system.search_provider_key,
-        &current_config.system.search_provider_key,
-    );
+    let search_provider_identity_unchanged =
+        search_provider_identity(&config).is_some_and(|identity| {
+            search_provider_identity(&current_config).as_deref() == Some(identity.as_str())
+        });
+    config.system.search_provider_key =
+        resolve_submitted_search_provider_api_key(&config, &current_config);
     if !provider_identity_unchanged {
         // A secret reference is bound to the provider plus canonical endpoint. A masked
         // frontend value cannot carry an old credential to a different destination.
@@ -1884,7 +2014,9 @@ pub async fn save_config(
     } else if config.llm.openai_key_ref.is_none() {
         config.llm.openai_key_ref = current_config.llm.openai_key_ref;
     }
-    if config.system.search_provider_key_ref.is_none() {
+    if !search_provider_identity_unchanged {
+        config.system.search_provider_key_ref = None;
+    } else if config.system.search_provider_key_ref.is_none() {
         config.system.search_provider_key_ref = current_config.system.search_provider_key_ref;
     }
 
@@ -4769,6 +4901,44 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    #[test]
+    fn artifact_output_directory_validation_accepts_a_real_non_root_directory() {
+        let directory = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            validate_artifact_output_directory(directory.path()).unwrap(),
+            directory.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn artifact_output_directory_validation_rejects_files_and_filesystem_root() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        assert!(validate_artifact_output_directory(file.path()).is_err());
+        assert!(validate_artifact_output_directory(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn first_artifact_path_persist_never_serializes_runtime_credentials() {
+        let mut runtime = AppConfig::default();
+        runtime.llm.openai_key = "provider-secret".into();
+        runtime.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        runtime.system.search_provider_key = "search-secret".into();
+        runtime.system.search_provider_key_ref =
+            Some("keychain://com.openlife.desktop/search-provider-api-key".into());
+
+        let persisted = reference_only_config_for_first_persist(runtime);
+
+        assert!(persisted.llm.openai_key.is_empty());
+        assert!(persisted.system.search_provider_key.is_empty());
+        assert_eq!(
+            persisted.llm.openai_key_ref.as_deref(),
+            Some(PROVIDER_KEY_REF)
+        );
+        assert!(persisted.system.search_provider_key_ref.is_some());
+    }
+
     const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
     const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
     const W84_IMPORT_CURRENT_MESSAGE_SECRET: &str = "W84_IMPORT_CURRENT_MESSAGE_SECRET";
@@ -5306,19 +5476,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {
-        assert_eq!(resolve_masked_api_key(KEY_MASK, "sk-current"), "sk-current");
-        assert_eq!(resolve_masked_api_key("", "sk-current"), "sk-current");
-        assert_eq!(resolve_masked_api_key("   ", "sk-current"), "sk-current");
-        assert_eq!(resolve_masked_api_key(KEY_MASK, ""), "");
-    }
-
-    #[test]
-    fn resolve_masked_api_key_uses_submitted_new_key() {
-        assert_eq!(resolve_masked_api_key("sk-new", "sk-current"), "sk-new");
-    }
-
-    #[test]
     fn masked_provider_key_is_bound_to_the_same_provider_endpoint_identity() {
         let mut current = AppConfig::default();
         current.llm.provider = "openai".into();
@@ -5340,6 +5497,32 @@ mod tests {
         let mut changed_endpoint = same;
         changed_endpoint.llm.openai_base = "https://capture.example/v1".into();
         assert!(resolve_submitted_provider_api_key(&changed_endpoint, &current).is_empty());
+    }
+
+    #[test]
+    fn masked_search_key_is_bound_to_the_same_search_provider_identity() {
+        let mut current = AppConfig::default();
+        current.system.search_provider = "deepseek".into();
+        current.system.search_provider_key = "sk-current-search".into();
+
+        let mut same = current.clone();
+        same.system.search_provider_key = KEY_MASK.into();
+        assert_eq!(
+            resolve_submitted_search_provider_api_key(&same, &current),
+            "sk-current-search"
+        );
+
+        let mut changed_provider = same.clone();
+        changed_provider.system.search_provider = "brave".into();
+        assert!(resolve_submitted_search_provider_api_key(&changed_provider, &current).is_empty());
+
+        let mut changed_endpoint = current.clone();
+        changed_endpoint.system.search_provider = "searxng".into();
+        changed_endpoint.system.searxng_url = "https://search.example/".into();
+        changed_endpoint.system.search_provider_key = KEY_MASK.into();
+        current.system.search_provider = "searxng".into();
+        current.system.searxng_url = "https://old-search.example".into();
+        assert!(resolve_submitted_search_provider_api_key(&changed_endpoint, &current).is_empty());
     }
 
     #[test]

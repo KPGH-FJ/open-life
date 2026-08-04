@@ -5401,19 +5401,6 @@ where
             );
         }
 
-        if !replayed_read_observations.is_empty() {
-            return self
-                .run_read_tool_turn(
-                    input,
-                    system_prompt,
-                    context_metadata,
-                    route_metadata,
-                    MainChatKernelReadExecutionSource::Replayed(replayed_read_observations),
-                    event_sink,
-                )
-                .await;
-        }
-
         if let Some(outcome) = write_outcome.clone().filter(|outcome| {
             outcome.kind == MainChatKernelWriteOutcomeKind::FileWriteProposal
                 && outcome
@@ -5429,7 +5416,24 @@ where
                     context_metadata,
                     route_metadata,
                     outcome,
-                    read_tool_decisions,
+                    if replayed_read_observations.is_empty() {
+                        MainChatKernelReadExecutionSource::Live(read_tool_decisions)
+                    } else {
+                        MainChatKernelReadExecutionSource::Replayed(replayed_read_observations)
+                    },
+                    event_sink,
+                )
+                .await;
+        }
+
+        if !replayed_read_observations.is_empty() {
+            return self
+                .run_read_tool_turn(
+                    input,
+                    system_prompt,
+                    context_metadata,
+                    route_metadata,
+                    MainChatKernelReadExecutionSource::Replayed(replayed_read_observations),
                     event_sink,
                 )
                 .await;
@@ -6303,7 +6307,7 @@ where
         context_metadata: MainChatKernelContextMetadata,
         mut route_metadata: MainChatRouteMetadata,
         mut outcome: MainChatKernelWriteOutcome,
-        read_tool_decisions: Vec<MainChatKernelReadToolDecision>,
+        read_execution_source: MainChatKernelReadExecutionSource,
         event_sink: &mut S,
     ) -> MainChatTurnResult
     where
@@ -6334,14 +6338,20 @@ where
                 event_sink,
             );
         };
+        let batch = match read_execution_source {
+            MainChatKernelReadExecutionSource::Live(decisions) => {
+                self.execute_kernel_read_tools(decisions, event_sink).await
+            }
+            MainChatKernelReadExecutionSource::Replayed(observations) => {
+                replayed_read_execution_batch(observations)
+            }
+        };
         let MainChatKernelReadExecutionBatch {
             executions,
             tool_calls,
             blockers,
             canonical_tool_graphs,
-        } = self
-            .execute_kernel_read_tools(read_tool_decisions, event_sink)
-            .await;
+        } = batch;
         if !blockers.is_empty() {
             for code in &blockers {
                 event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
@@ -8078,20 +8088,7 @@ async fn expand_generated_artifact_outcomes(
         return Err("artifact_bundle_cardinality_invalid".into());
     }
     let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
-    let safe_root = safe_paths
-        .iter()
-        .filter_map(|path| {
-            let path = std::path::Path::new(path);
-            if path
-                .symlink_metadata()
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                return None;
-            }
-            path.canonicalize().ok()
-        })
-        .next()
-        .ok_or_else(|| "artifact_safe_path_unavailable".to_string())?;
+    let safe_root = resolve_generated_artifact_safe_root(&safe_paths)?;
     let bundle_digest = openlife_core::agent::metadata_safe_value_digest(&outcome.governed_input).1;
     let mut expanded = Vec::with_capacity(artifacts.len());
     let mut seen_names = std::collections::HashSet::new();
@@ -8155,6 +8152,21 @@ async fn expand_generated_artifact_outcomes(
         expanded.push(expanded_outcome);
     }
     Ok(expanded)
+}
+
+fn resolve_generated_artifact_safe_root(
+    safe_paths: &[String],
+) -> Result<std::path::PathBuf, String> {
+    let configured = safe_paths.iter().find_map(|path| {
+        let path = std::path::Path::new(path);
+        let metadata = path.symlink_metadata().ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return None;
+        }
+        let canonical = path.canonicalize().ok()?;
+        canonical.parent().is_some().then_some(canonical)
+    });
+    configured.ok_or_else(|| "artifact_safe_path_unavailable".to_string())
 }
 
 async fn active_canonical_memory_owner(
@@ -11587,6 +11599,55 @@ fn kernel_web_search_read_tool_decision(
     }
 }
 
+fn explicit_kernel_web_search_subject(user_text: &str) -> Option<String> {
+    let lower = user_text.to_ascii_lowercase();
+    let subject_start = [
+        "web.search 搜索",
+        "web search 搜索",
+        "web.search search",
+        "web search search",
+        "search web for",
+        "search for",
+        "搜索",
+    ]
+    .iter()
+    .find_map(|prefix| lower.find(prefix).map(|index| index + prefix.len()))?;
+    let remainder = user_text
+        .get(subject_start..)?
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ':' | '：' | '"' | '\'' | '`')
+        });
+    if remainder.is_empty() {
+        return None;
+    }
+    let lower_remainder = remainder.to_ascii_lowercase();
+    let subject_end = [
+        " 的公开信息",
+        "的公开信息",
+        "，",
+        ",",
+        "；",
+        ";",
+        "。",
+        " and ",
+        " then ",
+    ]
+    .iter()
+    .filter_map(|delimiter| lower_remainder.find(delimiter))
+    .min()
+    .unwrap_or(remainder.len());
+    let subject = remainder
+        .get(..subject_end)?
+        .trim()
+        .trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ':' | '：' | '"' | '\'' | '`')
+        });
+    if subject.is_empty() {
+        return None;
+    }
+    Some(bounded_text(subject, MAX_TOOL_QUERY_CHARS))
+}
+
 fn kernel_web_fetch_read_tool_decision(
     user_text: &str,
     model_arguments_ignored: bool,
@@ -11713,11 +11774,13 @@ fn plan_kernel_read_tool(
             "network unavailable",
         ],
     ) {
+        let query = explicit_kernel_web_search_subject(user_text)
+            .unwrap_or_else(|| bounded_text(user_text, MAX_TOOL_QUERY_CHARS));
         return Some(enforce_kernel_read_capability(
             input,
             AllowedCapability::WebSearch,
             kernel_web_search_read_tool_decision(
-                user_text,
+                &query,
                 "kernel_web_search_query_from_user_text",
                 "governed web search requested",
                 model_arguments_ignored,
@@ -18616,6 +18679,44 @@ mod tests {
         assert_eq!(specs[1]["fileName"], "items.csv");
     }
 
+    #[test]
+    fn generated_artifacts_fail_closed_when_safe_paths_are_unconfigured() {
+        assert_eq!(
+            resolve_generated_artifact_safe_root(&[]),
+            Err("artifact_safe_path_unavailable".into())
+        );
+    }
+
+    #[test]
+    fn generated_artifacts_do_not_bypass_an_invalid_configured_safe_path() {
+        let missing = std::env::temp_dir()
+            .join(format!(
+                "openlife-missing-artifact-root-{}",
+                uuid::Uuid::new_v4()
+            ))
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            resolve_generated_artifact_safe_root(&[missing]),
+            Err("artifact_safe_path_unavailable".into())
+        );
+    }
+
+    #[test]
+    fn generated_artifacts_reject_file_and_filesystem_root_safe_paths() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+
+        assert_eq!(
+            resolve_generated_artifact_safe_root(&[file.path().to_string_lossy().into_owned()]),
+            Err("artifact_safe_path_unavailable".into())
+        );
+        assert_eq!(
+            resolve_generated_artifact_safe_root(&["/".into()]),
+            Err("artifact_safe_path_unavailable".into())
+        );
+    }
+
     #[tokio::test]
     async fn generated_artifact_bundle_uses_provider_for_content_but_not_paths_or_effects() {
         let prompt = "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。";
@@ -18663,6 +18764,70 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn replayed_web_read_preserves_generated_artifact_proposal_route() {
+        let prompt = "使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 phase3-web-search-evidence.md，并在我确认后保存。";
+        let observation = openlife_core::web_search::WebSearchObservation::parse_tool_output(
+            &test_web_search_observation(),
+        )
+        .expect("typed replay Web search observation");
+        let (citation_set, _) = openlife_core::web_search::WebCitationSet::from_observations(
+            "kernel-test-canonical-run",
+            std::slice::from_ref(&observation),
+        )
+        .expect("replay citation set");
+        let citation_id = citation_set.issued_ids().into_iter().next().unwrap();
+        let model = ScriptedModelClient::ok(format!(
+            r##"{{"markdown":"# Example Domain\n\n公开证据已纳入报告 [{citation_id}]。"}}"##
+        ));
+        let receipt =
+            openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+                Some("kernel-test-canonical-run".into()),
+                Some("web.search".into()),
+                "sha256:replayed-web-search".into(),
+                true,
+            );
+        let kernel = test_kernel(model.clone(), Vec::new()).with_replayed_read_observations(vec![
+            MainChatReplayedReadObservation {
+                queue_action_id: "queue-replayed-web-search".into(),
+                tool_name: "web.search".into(),
+                queue_action_type: "web.search".into(),
+                executor_action_type: "mcp_tool".into(),
+                requested_target: "web.search".into(),
+                target: "web.search".into(),
+                governed_input: serde_json::json!({"query": "Example Domain"}),
+                observation_content: serde_json::to_string(&observation).unwrap(),
+                observation_metadata: serde_json::json!({"actionId": "queue-replayed-web-search"}),
+                output_preview: "bounded replay Web search evidence".into(),
+                execution_receipt: receipt,
+            },
+        ]);
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                generated_artifact_turn_input("replayed-web-generated-artifact", prompt),
+                &mut events,
+            )
+            .await;
+
+        assert!(result.blockers.is_empty(), "{:?}", result.blockers);
+        assert_eq!(model.call_count(), 1);
+        assert!(!result.direct_writes_executed);
+        let outcome = result
+            .write_outcome
+            .expect("replayed Web evidence must still produce a reviewable artifact outcome");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::FileWriteProposal
+        );
+        let artifacts = outcome.governed_input["artifacts"]
+            .as_array()
+            .expect("validated replay-backed artifact draft");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["fileName"], "phase3-web-search-evidence.md");
     }
 
     #[tokio::test]

@@ -508,6 +508,14 @@ async fn pick_and_import_resources<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+async fn select_artifact_output_directory<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<commands::settings::ArtifactOutputDirectorySelection, errors::AppError> {
+    commands::settings::select_artifact_output_directory(app_handle, state.inner()).await
+}
+
+#[tauri::command]
 async fn cancel_resource_import(
     operation_id: String,
     state: State<'_, Arc<AppState>>,
@@ -945,6 +953,7 @@ pub fn run() {
             get_workspace_view_model,
             get_config,
             save_config,
+            select_artifact_output_directory,
             recover_required_credential_access,
             get_agent_run,
             list_agent_runs,

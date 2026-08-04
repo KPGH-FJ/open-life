@@ -8,6 +8,7 @@ const tauriMocks = vi.hoisted(() => ({
   getReviewCenterViewModel: vi.fn(),
   recoverRequiredCredentialAccess: vi.fn(),
   saveConfig: vi.fn(),
+  selectArtifactOutputDirectory: vi.fn(),
   testLlmConnection: vi.fn(),
 }));
 
@@ -66,6 +67,18 @@ describe("Tauri settings privacy data source", () => {
       report
     );
     expect(tauriMocks.recoverRequiredCredentialAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("delegates artifact output selection to the native Tauri command", async () => {
+    tauriMocks.selectArtifactOutputDirectory.mockResolvedValue({
+      cancelled: false,
+      selectedPath: "/tmp/openlife-artifacts",
+    });
+
+    await expect(tauriSettingsPrivacyDataSource.selectArtifactOutputDirectory?.()).resolves.toEqual(
+      { cancelled: false, selectedPath: "/tmp/openlife-artifacts" }
+    );
+    expect(tauriMocks.selectArtifactOutputDirectory).toHaveBeenCalledTimes(1);
   });
 
   it("keeps Safe Mode unknown when LifeStateProjection cannot be read", async () => {

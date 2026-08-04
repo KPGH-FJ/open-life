@@ -684,4 +684,60 @@ describe("settings privacy journey", () => {
     act(() => result.current.edit({ field: "provider", value: "deepseek" }));
     expect(result.current.draft?.llm.openai_key).toBe("***");
   });
+
+  it("does not carry a stored search credential to a different search provider", async () => {
+    const current = {
+      ...config(),
+      system: {
+        search_provider: "deepseek" as const,
+        search_provider_key: "***",
+        search_provider_key_ref: "keychain://com.openlife.desktop/search-provider-api-key",
+      },
+    };
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy: vi.fn().mockResolvedValue(snapshot(current, boundary())),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.edit({ field: "search_provider", value: "brave" }));
+    expect(result.current.draft?.system?.search_provider_key).toBe("");
+    expect(result.current.draft?.system?.search_provider_key_ref).toBeUndefined();
+
+    act(() => result.current.edit({ field: "search_provider", value: "deepseek" }));
+    expect(result.current.draft?.system?.search_provider_key).toBe("***");
+  });
+
+  it("reloads backend-owned artifact output state after native folder selection", async () => {
+    const initial = { ...config(), system: { safe_paths: [] } };
+    const refreshed = { ...config(), system: { safe_paths: ["/tmp/openlife-artifacts"] } };
+    const loadSettingsPrivacy = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot(initial, boundary()))
+      .mockResolvedValueOnce(snapshot(refreshed, boundary()));
+    const source: SettingsPrivacyDataSource = {
+      loadSettingsPrivacy,
+      selectArtifactOutputDirectory: vi.fn().mockResolvedValue({
+        cancelled: false,
+        selectedPath: "/tmp/openlife-artifacts",
+      }),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+    };
+    const { result } = renderHook(() => useSettingsPrivacyJourney(source, vi.fn()));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.selectArtifactOutputDirectory());
+    await waitFor(() =>
+      expect(result.current.draft?.system?.safe_paths).toEqual(["/tmp/openlife-artifacts"])
+    );
+    expect(source.selectArtifactOutputDirectory).toHaveBeenCalledTimes(1);
+    expect(loadSettingsPrivacy).toHaveBeenCalledTimes(2);
+  });
 });

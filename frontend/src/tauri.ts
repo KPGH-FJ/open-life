@@ -279,6 +279,7 @@ export interface AppConfig {
     safe_paths?: string[];
     search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
     search_provider_key?: string;
+    search_provider_key_ref?: string;
     searxng_url?: string;
     network_policy?: NetworkPolicy;
   };
@@ -298,6 +299,15 @@ export async function getConfig(): Promise<AppConfig> {
 
 export async function saveConfig(config: AppConfig): Promise<void> {
   return safeInvoke("save_config", { config });
+}
+
+export interface ArtifactOutputDirectorySelection {
+  cancelled: boolean;
+  selectedPath: string | null;
+}
+
+export async function selectArtifactOutputDirectory(): Promise<ArtifactOutputDirectorySelection> {
+  return safeInvoke<ArtifactOutputDirectorySelection>("select_artifact_output_directory");
 }
 
 export interface CredentialRecoveryItem {

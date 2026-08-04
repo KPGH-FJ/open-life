@@ -225,7 +225,7 @@ async fn stage_network_consent(
         "{}_network_consent:{}",
         subject.permission_source, decision.decision_id
     ));
-    let request = DurableWriteRequest::from_agent_proposal(
+    let mut request = DurableWriteRequest::from_agent_proposal(
         durable_source,
         DurableWriteSubject::ToolPermission,
         proposal,
@@ -235,6 +235,19 @@ async fn stage_network_consent(
         format!("network_policy_decision:{}", decision.decision_id),
         format!("network_endpoint:{endpoint_digest}"),
     ]);
+    // A pending AllowOnce blocks and resumes one exact Main Chat task. Two
+    // independent tasks targeting the same endpoint therefore need distinct
+    // Review items; reusing the first task's proposal would either bind the
+    // wrong terminal owner or fail the second turn closed as a foreign
+    // blocking collision. Exact retries within one task retain the same key.
+    if let NetworkConsentSubmissionScope::MainChatTurn { origin, .. } = submission_scope {
+        let base_idempotency_key = request.idempotency_key.clone();
+        request = request.with_idempotency_key(format!(
+            "main_chat_network_consent:{}:{}",
+            origin.task_session_id(),
+            base_idempotency_key
+        ));
+    }
     match submission_scope {
         NetworkConsentSubmissionScope::MainChatTurn {
             origin, admission, ..

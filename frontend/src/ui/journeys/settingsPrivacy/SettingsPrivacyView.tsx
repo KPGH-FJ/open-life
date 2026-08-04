@@ -1,4 +1,4 @@
-import { Check, RefreshCw, Save, Unplug, Wifi } from "lucide-react";
+import { Check, FolderOpen, RefreshCw, Save, Unplug, Wifi } from "lucide-react";
 import type { ReviewItem } from "@/tauri";
 import {
   FoundationActionButton,
@@ -12,9 +12,11 @@ import { boundaryPresentation } from "@/ui/journeys/readOnly";
 import {
   credentialState,
   endpointHost,
+  searchCredentialState,
   settingsBoundaryLabels,
   settingsProviderLabels,
   settingsProviderOptions,
+  settingsSearchProviderOptions,
   type SettingsPrivacySurfaceId,
 } from "./settingsPrivacyPresentation";
 import {
@@ -37,7 +39,8 @@ export function SettingsPrivacyView({
   const boundary = boundaryPresentation(controller.effectiveBoundaryEnvelope);
   const busy =
     controller.loading ||
-    ["testing", "saving", "refreshing_boundary"].includes(controller.state.phase);
+    ["testing", "saving", "refreshing_boundary"].includes(controller.state.phase) ||
+    controller.artifactDirectorySelection.phase === "selecting";
   const testTarget = settingsTestConfirmationTarget(controller);
 
   if (!controller.snapshot && controller.loading) {
@@ -75,6 +78,9 @@ export function SettingsPrivacyView({
   const networkEnabled = draft.system?.network_policy?.enabled;
   const networkDefault = draft.system?.network_policy?.default_decision;
   const reviewItem = controller.lastTestOutcome?.reviewItem ?? null;
+  const searchProvider = draft.system?.search_provider ?? "duckduckgo";
+  const searchCredential = searchCredentialState(draft);
+  const artifactOutputDirectory = draft.system?.safe_paths?.[0];
 
   return (
     <div
@@ -230,6 +236,86 @@ export function SettingsPrivacyView({
             />
           </section>
 
+          <section className="ol-settings-section" aria-labelledby="ol-settings-search-title">
+            <div className="ol-settings-section-heading">
+              <span>独立工具连接，不继承模型凭据</span>
+              <h2 id="ol-settings-search-title">网页搜索</h2>
+            </div>
+            <label className="ol-settings-select-field" htmlFor="ol-settings-search-provider">
+              <span className="ol-settings-select-field__label">Search Provider</span>
+              <span className="ol-settings-select-field__description">
+                这是 web.search
+                工具的后端，不是生成模型自身的联网能力。保存配置不等于搜索已经验证成功。
+              </span>
+              <select
+                id="ol-settings-search-provider"
+                aria-label="Search Provider"
+                value={searchProvider}
+                onChange={event =>
+                  controller.edit({
+                    field: "search_provider",
+                    value: event.target.value as NonNullable<
+                      NonNullable<typeof draft.system>["search_provider"]
+                    >,
+                  })
+                }
+              >
+                {settingsSearchProviderOptions.map(option => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {searchProvider === "searxng" && (
+              <FoundationTextField
+                id="ol-settings-searxng-url"
+                label="SearXNG 地址"
+                description="填写你信任的 SearXNG 实例根地址；实际请求仍受网络权限控制。"
+                value={draft.system?.searxng_url ?? ""}
+                onChange={event =>
+                  controller.edit({ field: "searxng_url", value: event.target.value })
+                }
+                error={
+                  endpointHost(draft.system?.searxng_url ?? "")
+                    ? undefined
+                    : "请输入完整的 HTTP 或 HTTPS 地址。"
+                }
+                spellCheck={false}
+                autoCapitalize="none"
+              />
+            )}
+            {(searchProvider === "deepseek" || searchProvider === "brave") && (
+              <FoundationTextField
+                id="ol-settings-search-api-key"
+                label="搜索凭据"
+                description="与生成模型凭据分开保存；真实值不会返回网页层。"
+                type="password"
+                value={
+                  searchCredential === "stored" ? "" : (draft.system?.search_provider_key ?? "")
+                }
+                placeholder={searchCredential === "stored" ? "已保存搜索凭据" : "输入搜索凭据"}
+                stateMessage={
+                  searchCredential === "stored"
+                    ? "后端只返回凭据存在状态；同一搜索目标下留空会按后端规则保留。"
+                    : searchCredential === "entered"
+                      ? "新搜索凭据只存在于当前草稿，保存后才会进入系统凭据存储。"
+                      : "当前搜索目标缺少必需凭据，设置不能保存。"
+                }
+                onChange={event =>
+                  controller.edit({ field: "search_credential", value: event.target.value })
+                }
+                autoComplete="new-password"
+                spellCheck={false}
+              />
+            )}
+            {searchProvider === "duckduckgo" && (
+              <FoundationNotice title="无需凭据，但不保证可用">
+                <p>DuckDuckGo HTML 端点可能返回挑战页；只有真实任务成功后才算本次搜索证据。</p>
+              </FoundationNotice>
+            )}
+          </section>
+
           <SettingsTestResult
             controller={controller}
             reviewItem={reviewItem}
@@ -353,6 +439,40 @@ export function SettingsPrivacyView({
                 <option value="deny">拒绝</option>
               </select>
             </label>
+          </section>
+
+          <section className="ol-settings-section" aria-labelledby="ol-settings-artifact-title">
+            <div className="ol-settings-section-heading">
+              <span>原生选择，精确目录</span>
+              <h2 id="ol-settings-artifact-title">Artifact 输出目录</h2>
+            </div>
+            <p>
+              {artifactOutputDirectory
+                ? `当前目录：${artifactOutputDirectory}`
+                : "尚未配置。生成 artifact 时会被后端明确阻止，不会回退到进程当前目录。"}
+            </p>
+            {controller.artifactDirectorySelection.phase === "failed" && (
+              <FoundationNotice title="目录没有保存" tone="error" live>
+                <p>原生选择或后端持久化失败；现有路径保持不变。</p>
+              </FoundationNotice>
+            )}
+            <FoundationActionButton
+              label="选择输出文件夹"
+              variant="secondary"
+              icon={<FolderOpen size={18} strokeWidth={1.75} aria-hidden="true" />}
+              loading={controller.artifactDirectorySelection.phase === "selecting"}
+              loadingLabel="等待系统选择"
+              disabled={
+                controller.protectionState !== "normal" ||
+                controller.state.draftRevision !== controller.state.savedRevision
+              }
+              disabledReason={
+                controller.protectionState !== "normal"
+                  ? "后端保护状态不是正常态，目录修改保持关闭。"
+                  : "请先保存当前设置草稿，避免目录选择覆盖未保存内容。"
+              }
+              onClick={controller.selectArtifactOutputDirectory}
+            />
           </section>
 
           <SettingsActions controller={controller} />

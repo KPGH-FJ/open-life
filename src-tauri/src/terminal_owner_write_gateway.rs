@@ -3336,11 +3336,7 @@ impl TerminalOwnerWriteGateway {
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
         let final_event = self
             .event_store
-            .get_immutable_event(
-                origin.task_session_id(),
-                "final_delivery.created",
-                &format!("delivery:{}:{}", origin.task_session_id(), origin.run_id()),
-            )?
+            .terminal_owner_final_event(origin.task_session_id())?
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
         if final_event.event_id != final_event_id {
             anyhow::bail!("terminal_owner_final_event_identity_mismatch");
@@ -3443,11 +3439,7 @@ impl TerminalOwnerWriteGateway {
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
         let final_event = self
             .event_store
-            .get_immutable_event(
-                origin.task_session_id(),
-                "final_delivery.created",
-                &format!("delivery:{}:{}", origin.task_session_id(), origin.run_id()),
-            )?
+            .terminal_owner_final_event(origin.task_session_id())?
             .ok_or_else(|| anyhow::anyhow!("terminal_owner_final_event_missing"))?;
         if final_event.event_id != final_event_id {
             anyhow::bail!("terminal_owner_final_event_identity_mismatch");

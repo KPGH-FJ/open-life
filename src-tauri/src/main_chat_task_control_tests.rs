@@ -5989,6 +5989,26 @@ async fn resume_main_chat_task_reaches_executor_for_mixed_web_tool_permission_sc
             .expect("peek accepted native web action-bound permission")
             .is_some());
     }
+    let mut compound_artifact_session = session.clone();
+    compound_artifact_session.selected_strategy = MainChatAgentStrategy::FileWriteProposal;
+    assert_eq!(
+        crate::main_chat_task_controls::main_chat_pending_action_permission_diagnostic_for_test(
+            &state,
+            &compound_artifact_session,
+            &queued,
+        )
+        .await
+        .expect("diagnose compound artifact ToolPermission replay"),
+        "ready",
+        "a proposal-only artifact task must be able to resume its exact governed read prefix"
+    );
+    crate::main_chat_turn_runtime::validate_openlife_replay_readiness(
+        &state,
+        &compound_artifact_session,
+        &queued,
+    )
+    .await
+    .expect("compound artifact strategy must pass the exact governed read replay gate");
     let pre_resume_detail =
         crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
             &session.id,

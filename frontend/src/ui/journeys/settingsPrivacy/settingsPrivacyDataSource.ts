@@ -5,8 +5,10 @@ import {
   getReviewCenterViewModel,
   recoverRequiredCredentialAccess,
   saveConfig,
+  selectArtifactOutputDirectory,
   testLlmConnection,
   type AppConfig,
+  type ArtifactOutputDirectorySelection,
   type CredentialBootstrapSnapshot,
   type CredentialRecoveryReport,
   type LifeSafeModeProjection,
@@ -48,6 +50,7 @@ export interface SettingsPrivacyDataSource {
   initializeRequiredCredentials?(): Promise<CredentialRecoveryReport>;
   testProviderConnection(config: AppConfig): Promise<SettingsConnectionTestOutcome>;
   saveSettings(config: AppConfig): Promise<void>;
+  selectArtifactOutputDirectory?(): Promise<ArtifactOutputDirectorySelection>;
 }
 
 function boundaryErrorEnvelope(message: string): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
@@ -168,4 +171,5 @@ export const tauriSettingsPrivacyDataSource: SettingsPrivacyDataSource = {
   initializeRequiredCredentials: recoverRequiredCredentialAccess,
   testProviderConnection,
   saveSettings: saveConfig,
+  selectArtifactOutputDirectory,
 };

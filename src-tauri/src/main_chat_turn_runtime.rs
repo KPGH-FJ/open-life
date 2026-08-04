@@ -247,6 +247,331 @@ mod provider_consent_continuation_tests {
     }
 
     #[tokio::test]
+    async fn accepted_provider_consent_preserves_current_review_origin_for_artifact_proposal() {
+        let workspace = tempfile::tempdir().expect("artifact workspace");
+        let safe_workspace = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical artifact workspace");
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind artifact provider continuation fixture");
+        let address = listener.local_addr().expect("provider fixture address");
+        let mut config = state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = format!("http://{address}/v1");
+        config.llm.openai_key = "sk-artifact-provider-continuation-test".into();
+        config.llm.chat_model = "gpt-artifact-provider-continuation-test".into();
+        config.prefer_local_model = false;
+        config.system.safe_paths = vec![safe_workspace.display().to_string()];
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        state.replace_provider_runtime_config(config).await;
+
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let file_name = "provider-continuation-artifact.md";
+        let initial = OpenLifeTurnRuntime::new(&state)
+            .run_buffered(OpenLifeTurnInput {
+                operation_id: operation_id.clone(),
+                session_id: "artifact-provider-continuation-chat".into(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: format!("生成一份 Markdown 报告 {file_name}，并在我确认后保存。"),
+                }],
+                selected_skill_id: None,
+                stream_mode: MainChatTurnStreamMode::Buffered,
+            })
+            .await
+            .expect("initial artifact turn must stage provider consent");
+        assert_eq!(initial.terminal.proposals.len(), 1);
+        let consent_proposal_id = initial.terminal.proposals[0]
+            .strip_prefix("proposal:")
+            .unwrap_or(&initial.terminal.proposals[0])
+            .to_string();
+        crate::commands::proposal::accept_proposal_with_state(consent_proposal_id, &state)
+            .await
+            .expect("accept artifact provider consent");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept provider request");
+            let mut input = [0_u8; 16384];
+            let _ = socket
+                .read(&mut input)
+                .await
+                .expect("read provider request");
+            let body = serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": serde_json::json!({
+                            "markdown": "# Provider continuation artifact\n\nGenerated before review."
+                        }).to_string()
+                    }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write provider response");
+        });
+
+        let continued = crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+            &operation_id,
+            &state,
+        )
+        .await
+        .expect("provider continuation must stage the artifact proposal");
+        server.await.expect("provider fixture task");
+        assert_eq!(
+            continued.session.as_ref().map(|session| session.status),
+            Some(AgentTaskSessionStatus::WaitingPermission)
+        );
+        assert!(!safe_workspace.join(file_name).exists());
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await;
+        let artifact_proposal = proposal_store
+            .list_all_proposals(100, 0)
+            .expect("list proposals")
+            .into_iter()
+            .find(|proposal| {
+                proposal.proposal_type == openlife_core::agent::ProposalType::ExternalWriteAction
+                    && proposal.affected_path.ends_with(file_name)
+            })
+            .expect("artifact proposal linked to the provider continuation");
+        assert_eq!(
+            artifact_proposal.status,
+            openlife_core::agent::ProposalStatus::Pending
+        );
+        let artifact_proposal_id = artifact_proposal.id.clone();
+        drop(proposal_store);
+
+        let accepted_artifact =
+            crate::commands::proposal::accept_proposal_with_state(artifact_proposal_id, &state)
+                .await
+                .expect("accept provider-continuation artifact proposal");
+        assert_eq!(
+            accepted_artifact["proposal_projection_status"],
+            serde_json::json!("confirmed"),
+            "artifact effect and Proposal projection must converge in one reviewed command: {accepted_artifact}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(safe_workspace.join(file_name))
+                .expect("read materialized provider-continuation artifact"),
+            "# Provider continuation artifact\n\nGenerated before review."
+        );
+        let completed = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load artifact task after review")
+            .expect("artifact task exists after review");
+        assert_eq!(completed.status, AgentTaskSessionStatus::Completed);
+        assert!(completed.pending_blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn separate_turns_stage_independent_provider_consent_reviews() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider consent fixture");
+        let address = listener.local_addr().expect("provider fixture address");
+        let mut config = state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = format!("http://{address}/v1");
+        config.llm.openai_key = "sk-independent-provider-consent-test".into();
+        config.llm.chat_model = "gpt-independent-provider-consent-test".into();
+        config.prefer_local_model = false;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        state.replace_provider_runtime_config(config).await;
+
+        let mut proposal_ids = Vec::new();
+        for turn in ["first", "second"] {
+            let output = OpenLifeTurnRuntime::new(&state)
+                .run_buffered(OpenLifeTurnInput {
+                    operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+                    session_id: format!("independent-provider-consent-{turn}"),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: format!("Draft the {turn} concise product summary."),
+                    }],
+                    selected_skill_id: None,
+                    stream_mode: MainChatTurnStreamMode::Buffered,
+                })
+                .await
+                .expect("each turn must terminate through the product contract");
+            assert_eq!(
+                output.terminal.provider_invocation_status,
+                ProviderInvocationState::NotAttempted
+            );
+            assert_eq!(
+                output.terminal.proposals.len(),
+                1,
+                "each independent task needs its own resumable provider consent"
+            );
+            proposal_ids.push(output.terminal.proposals[0].clone());
+        }
+
+        assert_ne!(proposal_ids[0], proposal_ids[1]);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(75), listener.accept())
+                .await
+                .is_err(),
+            "neither unapproved turn may cross the provider edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_web_permission_resumes_compound_artifact_turn_to_network_review() {
+        use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
+        use openlife_core::tool_permissions::ToolPermissionPolicy;
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        state
+            .tool_permission_store
+            .lock()
+            .await
+            .grant(
+                "web.search",
+                "builtin",
+                "medium",
+                "read",
+                ToolPermissionPolicy::AskEveryTime,
+                None,
+            )
+            .expect("require exact web.search action review");
+        let mut config = state.config.lock().await.clone();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = "http://127.0.0.1:9/v1".into();
+        config.llm.openai_key = "sk-compound-artifact-replay-test".into();
+        config.llm.chat_model = "gpt-compound-artifact-replay-test".into();
+        config.prefer_local_model = false;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "ask".into();
+        state.replace_provider_runtime_config(config).await;
+
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let prompt = "使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 phase3-web-search-evidence.md，并在我确认后保存。不要读取本地文件，不要修改 LifeModel。";
+        let initial = OpenLifeTurnRuntime::new(&state)
+            .run_buffered(OpenLifeTurnInput {
+                operation_id: operation_id.clone(),
+                session_id: "compound-artifact-web-permission-chat".into(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: prompt.into(),
+                }],
+                selected_skill_id: None,
+                stream_mode: MainChatTurnStreamMode::Buffered,
+            })
+            .await
+            .expect("compound artifact turn must stop before the reviewed web action");
+
+        let session = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("task store")
+            .lock()
+            .await
+            .load_session(&operation_id)
+            .expect("load compound artifact task")
+            .expect("compound artifact task exists");
+        let final_event = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .terminal_owner_final_event(&operation_id)
+            .expect("load compound artifact final event")
+            .expect("compound artifact final event exists");
+        assert_eq!(
+            final_event.payload["status"], "completed_with_pending_items",
+            "a resumable permission wait must survive restart as waiting_permission"
+        );
+        assert_eq!(
+            session.selected_strategy,
+            MainChatAgentStrategy::FileWriteProposal
+        );
+        assert_eq!(
+            session.status,
+            AgentTaskSessionStatus::WaitingPermission,
+            "initial terminal={:?}, task={:?}",
+            initial.terminal,
+            session
+        );
+        let action = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(&operation_id)
+            .expect("load compound artifact action")
+            .into_iter()
+            .next()
+            .expect("compound artifact web action exists");
+        assert_eq!(action.status, ExecutionQueueStatus::PendingPermission);
+        let proposal_id = action
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("proposalId"))
+            .and_then(serde_json::Value::as_str)
+            .expect("exact action-bound web proposal")
+            .to_string();
+        crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+            .await
+            .expect("accept exact web.search action permission");
+
+        crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+            &operation_id,
+            &state,
+        )
+        .await
+        .expect("compound artifact web action must resume to the distinct network review");
+
+        let replayed = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .load(&action.id)
+            .expect("reload compound artifact action")
+            .expect("compound artifact action remains durable");
+        assert_eq!(replayed.status, ExecutionQueueStatus::PendingPermission);
+        assert!(replayed
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("networkConsentProposalId"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|proposal_id| !proposal_id.trim().is_empty()));
+        assert_eq!(
+            replayed
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("governedInput"))
+                .and_then(|input| input.get("query")),
+            Some(&serde_json::json!("Example Domain")),
+            "the public search subject must be minimized before any network approval"
+        );
+    }
+
+    #[tokio::test]
     async fn provider_continuation_preparation_failure_seals_failed_generation() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let mut config = state.config.lock().await.clone();
@@ -2199,6 +2524,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 proposal_id,
             )
             .await?;
+            let replay_admission_id = replay_admission.admission_id().to_string();
             let terminal_epoch = self
                 .state
                 .main_chat_agent_event_store
@@ -2210,7 +2536,8 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                 .open_terminal_owner_replay_epoch_from_admission(&replay_admission)
                 .map_err(|error| format!("open provider consent replay epoch failed: {error}"))?;
             let review_origin = match original_admission
-                .into_opened_epoch_review_origin(
+                .into_opened_replay_epoch_review_origin(
+                    replay_admission_id,
                     terminal_epoch.epoch_id().to_string(),
                     terminal_epoch.generation(),
                 )
@@ -3136,10 +3463,8 @@ async fn prepare_openlife_replay(
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
 ) -> Result<PreparedOpenLifeReplay, String> {
-    if session.selected_strategy
-        != openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::ReActToolExecution
-    {
-        return Err("retry_replay_strategy_not_react".into());
+    if !session.selected_strategy.supports_governed_read_replay() {
+        return Err("retry_replay_strategy_not_governed_read".into());
     }
     if !openlife_core::agent::main_chat_agent_v1::typed_tool_receipt_allows_automatic_retry(action)
     {
@@ -6749,6 +7074,13 @@ async fn persist_openlife_turn_final_delivery_receipt(
     {
         return Err("turn_final_canonical_owner_graph_mismatch".into());
     }
+    let final_status = if task_owner.status
+        == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    {
+        "completed_with_pending_items"
+    } else {
+        terminal.status.as_str()
+    };
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run_owner)?;
     let action_queue_refs = action_queue_owners
         .iter()
@@ -6867,7 +7199,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "deliveryId": terminal.final_delivery.delivery_id,
             "taskSessionId": task_session_id,
             "runId": run_id,
-            "status": terminal.status,
+            "status": final_status,
             "completedActionCount": terminal.final_delivery.completed_actions.len(),
             "observationCount": terminal.final_delivery.observations_used.len(),
             "proposalCount": terminal.final_delivery.proposal_count,
@@ -6971,7 +7303,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
                 delivery_id: terminal.final_delivery.delivery_id.clone(),
                 expected_task_owner_revision: task_owner_head.revision(),
                 expected_task_owner_digest: task_owner_head.digest().to_string(),
-                status: terminal.status.clone(),
+                status: final_status.to_string(),
             },
         )
         .map_err(|error| format!("append terminal final and seal failed: {error}"))

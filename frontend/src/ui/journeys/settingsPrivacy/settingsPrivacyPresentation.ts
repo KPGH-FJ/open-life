@@ -56,6 +56,23 @@ export const settingsProviderOptions = Object.entries(settingsProviderLabels).ma
   })
 );
 
+export const settingsSearchProviderLabels: Record<
+  NonNullable<NonNullable<AppConfig["system"]>["search_provider"]>,
+  string
+> = {
+  duckduckgo: "DuckDuckGo（无需凭据，可能遇到挑战页）",
+  deepseek: "DeepSeek Web Search",
+  brave: "Brave Search API",
+  searxng: "SearXNG",
+};
+
+export const settingsSearchProviderOptions = Object.entries(settingsSearchProviderLabels).map(
+  ([value, label]) => ({
+    value: value as NonNullable<NonNullable<AppConfig["system"]>["search_provider"]>,
+    label,
+  })
+);
+
 function cloneNetworkPolicy(config: AppConfig): AppConfig["system"] {
   if (!config.system) return undefined;
   return {
@@ -107,6 +124,26 @@ export function credentialState(config: AppConfig): "stored" | "entered" | "miss
   return "missing";
 }
 
+export function searchProviderIdentity(config: AppConfig): string {
+  const provider = (config.system?.search_provider ?? "duckduckgo").trim().toLowerCase();
+  if (provider !== "searxng") return provider;
+  const endpoint = config.system?.searxng_url?.trim() ?? "";
+  try {
+    return `${provider}|${new URL(endpoint).toString()}`;
+  } catch {
+    return `${provider}|${endpoint}`;
+  }
+}
+
+export function searchCredentialState(config: AppConfig): "stored" | "entered" | "missing" {
+  const credential = config.system?.search_provider_key?.trim() ?? "";
+  if (credential && credential !== "***") return "entered";
+  if (credential === "***" || Boolean(config.system?.search_provider_key_ref?.trim())) {
+    return "stored";
+  }
+  return "missing";
+}
+
 function canonicalizeForComparison(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalizeForComparison);
   if (value && typeof value === "object") {
@@ -152,12 +189,26 @@ export function settingsConfigMatchesSavedDraft(
     delete llm.openai_key;
     delete llm.openai_key_ref;
     delete llm.credential_version;
+    const system = config.system ? { ...config.system } : undefined;
+    if (system) {
+      delete system.search_provider_key;
+      delete system.search_provider_key_ref;
+    }
     return {
       ...config,
       llm: {
         ...llm,
         credentialPresence: credentialState(config) === "missing" ? "missing" : "present",
       },
+      ...(system
+        ? {
+            system: {
+              ...system,
+              searchCredentialPresence:
+                searchCredentialState(config) === "missing" ? "missing" : "present",
+            },
+          }
+        : {}),
     };
   };
 
@@ -247,6 +298,28 @@ export function validateSettingsDraft(config: AppConfig | null): SettingsDraftVa
       saveDisabledReason: "启用本地优先时必须填写本地模型。",
       canTest: false,
       testDisabledReason: "先补充本地模型配置。",
+      endpointHost: host,
+      mayTransmitExternally: endpointMayTransmitExternally(config.llm.openai_base),
+    };
+  }
+  const searchProvider = config.system?.search_provider ?? "duckduckgo";
+  if (
+    (searchProvider === "deepseek" || searchProvider === "brave") &&
+    searchCredentialState(config) === "missing"
+  ) {
+    return {
+      canSave: false,
+      saveDisabledReason: "当前网页搜索供应商需要单独的搜索凭据。",
+      canTest: hasUsableCredential(config),
+      endpointHost: host,
+      mayTransmitExternally: endpointMayTransmitExternally(config.llm.openai_base),
+    };
+  }
+  if (searchProvider === "searxng" && !endpointHost(config.system?.searxng_url ?? "")) {
+    return {
+      canSave: false,
+      saveDisabledReason: "SearXNG 地址必须是完整的 HTTP 或 HTTPS 地址。",
+      canTest: hasUsableCredential(config),
       endpointHost: host,
       mayTransmitExternally: endpointMayTransmitExternally(config.llm.openai_base),
     };
