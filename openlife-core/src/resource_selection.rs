@@ -47,11 +47,7 @@ pub fn is_canonical_resource_context_ref(reference: &str) -> bool {
     let ordinal_is_canonical = ordinal
         .parse::<u32>()
         .is_ok_and(|parsed| parsed.to_string() == ordinal);
-    let citation_is_canonical = citation_id.len() == 29
-        && citation_id.starts_with("cite_")
-        && citation_id[5..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let citation_is_canonical = is_canonical_citation_id(citation_id);
     resource_id_is_canonical && ordinal_is_canonical && citation_is_canonical
 }
 
@@ -351,13 +347,33 @@ fn validate_uuid_v4(label: &str, value: &str) -> Result<()> {
 fn citation_id(request_id: &str, resource_id: &str, ordinal: u32, content_digest: &str) -> String {
     let material = format!("{request_id}\0{resource_id}\0{ordinal}\0{content_digest}");
     let digest = digest(&SHA256, material.as_bytes());
+    // Preserve the full 96 selected bits while avoiding decimal runs that the
+    // outbound privacy filter can correctly classify as phone, ID, or card
+    // numbers. Each nibble maps bijectively to one lowercase letter a-p.
     let compact = digest
         .as_ref()
         .iter()
         .take(12)
-        .map(|byte| format!("{byte:02x}"))
+        .flat_map(|byte| {
+            [
+                char::from(b'a' + (byte >> 4)),
+                char::from(b'a' + (byte & 0x0f)),
+            ]
+        })
         .collect::<String>();
     format!("cite_{compact}")
+}
+
+fn is_canonical_citation_id(candidate: &str) -> bool {
+    if candidate.len() != 29 || !candidate.starts_with("cite_") {
+        return false;
+    }
+    let compact = &candidate[5..];
+    let legacy_hex = compact
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let privacy_safe_v1 = compact.bytes().all(|byte| (b'a'..=b'p').contains(&byte));
+    legacy_hex || privacy_safe_v1
 }
 
 fn extract_model_citation_ids(model_output: &str) -> Result<Vec<String>> {
@@ -365,9 +381,7 @@ fn extract_model_citation_ids(model_output: &str) -> Result<Vec<String>> {
     let mut seen = BTreeSet::new();
     for (start, _) in model_output.match_indices("cite_") {
         let candidate = model_output[start..].chars().take(29).collect::<String>();
-        let valid = candidate.len() == 29
-            && candidate.starts_with("cite_")
-            && candidate[5..].bytes().all(|byte| byte.is_ascii_hexdigit());
+        let valid = is_canonical_citation_id(&candidate);
         let trailing = model_output[start + candidate.len()..].chars().next();
         if !valid
             || trailing.is_some_and(|character| character.is_alphanumeric() || character == '_')
@@ -723,11 +737,48 @@ mod tests {
     }
 
     #[test]
+    fn generated_citation_ids_cannot_collide_with_default_privacy_patterns() {
+        let legacy_collision = "cite_f056530372860487007c02f1";
+        assert!(crate::privacy::PrivacyEngine::new()
+            .detect(legacy_collision)
+            .iter()
+            .any(|(privacy_type, _)| {
+                matches!(
+                    privacy_type,
+                    crate::privacy::PrivacyType::IdCard
+                        | crate::privacy::PrivacyType::Phone
+                        | crate::privacy::PrivacyType::BankCard
+                )
+            }));
+
+        let privacy_engine = crate::privacy::PrivacyEngine::new();
+        for ordinal in 0..1_024 {
+            let generated = citation_id(
+                "ed564b60-07eb-423c-aa5e-84eb9010a0b7",
+                "44b9bb88-374c-4edf-b095-bdefa185f59b",
+                ordinal,
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            );
+            assert!(is_canonical_citation_id(&generated));
+            assert!(generated[5..]
+                .bytes()
+                .all(|byte| (b'a'..=b'p').contains(&byte)));
+            assert!(
+                privacy_engine.detect(&generated).is_empty(),
+                "generated citation must remain intact in privacy-filtered provider payloads: {generated}"
+            );
+        }
+    }
+
+    #[test]
     fn resource_context_reference_accepts_only_canonical_metadata() {
         let resource_id = Uuid::new_v4().to_string();
         let canonical =
             format!("resource://{resource_id}/chunk/0?citation=cite_0123456789abcdef01234567");
         assert!(is_canonical_resource_context_ref(&canonical));
+        let privacy_safe =
+            format!("resource://{resource_id}/chunk/0?citation=cite_abcdefghijklmnopabcdefgh");
+        assert!(is_canonical_resource_context_ref(&privacy_safe));
         for invalid in [
             format!("resource://{resource_id}/chunk/00?citation=cite_0123456789abcdef01234567"),
             format!("resource://{resource_id}/chunk/0?citation=cite_0123456789ABCDEF01234567"),

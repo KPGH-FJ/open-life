@@ -572,7 +572,7 @@ LifeModel 与 Memory 个人智能闭环开发。**
 - action receipt、幂等恢复、取消、拒绝和启动 reconciliation 已接入持久任务
   事实；修复了高风险拒绝后 TaskSession 仍等待、启动时先恢复 proposal 后恢复
   task，以及 move/trash/restore 未同时校验源和目标安全路径的问题；
-- 当前全量 Rust（Core 1510 通过/2 条件忽略，Tauri 1141 通过/13 条件忽略）、
+- 当前全量 Rust（Core 1511 通过/2 条件忽略，Tauri 1141 通过/13 条件忽略）、
   严格 Clippy、前端格式/typecheck/Vitest/build、absence guard 和 browser shell
   门禁均通过；没有调用 Provider 或外部网络来替代行动证据；
 - 自动化测试覆盖取消竞争、超时终态、同 operation replay 去重、staged/final
@@ -618,6 +618,12 @@ LifeModel 与 Memory 个人智能闭环开发。**
   复现，再只在 `source_proposal_id`、来源 run、内容、日期、优先级、动作类型和
   `LocalOnly` route 全部精确匹配时，把 claimed action 收敛为待投影确认；重复或
   不匹配记录继续 fail-closed，浏览器、邮件和云端动作仍保持 unknown 且不会重放。
+- 首次远端 Linux Review 门禁还暴露了 Resource citation 的随机隐私碰撞：旧的
+  24 位十六进制 token 偶尔包含 18 位连续数字，被默认隐私规则当作身份证号
+  block，导致 Provider 看不到可回传的原始 citation。新 token 保持 96-bit
+  request-scoped 绑定和固定长度，但用 `a`–`p` 字母编码，从构造上避开号码类
+  PII；历史十六进制 citation 仍可读取。1024 组生成回归、真实碰撞反例、引用
+  输出契约和混合 Resource/Web 产品测试共同覆盖该边界。
 
 第三阶段完成的产品切片：
 

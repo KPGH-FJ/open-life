@@ -14673,10 +14673,12 @@ mod tests {
                 .match_indices("cite_")
                 .find_map(|(start, _)| {
                     let candidate = request_text.get(start..start.checked_add(29)?)?;
-                    candidate[5..]
+                    let suffix = &candidate[5..];
+                    (suffix
                         .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit())
-                        .then_some(candidate)
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        || suffix.bytes().all(|byte| (b'a'..=b'p').contains(&byte)))
+                    .then_some(candidate)
                 })
                 .expect("issued citation in payload");
             assert!(
