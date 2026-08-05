@@ -263,6 +263,23 @@ async fn submit_tool_permission_terminal_relation_for_test(
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     run_id: &str,
 ) -> (String, crate::main_chat_event_stream::TerminalOwnerEpoch) {
+    submit_terminal_relation_for_test(
+        state,
+        proposal,
+        session,
+        run_id,
+        openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite,
+    )
+    .await
+}
+
+async fn submit_terminal_relation_for_test(
+    state: &std::sync::Arc<crate::AppState>,
+    proposal: &openlife_core::agent::AgentProposal,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    run_id: &str,
+    relation_kind: openlife_core::agent::ProposalTerminalRelationKind,
+) -> (String, crate::main_chat_event_stream::TerminalOwnerEpoch) {
     let canonical_message = {
         let memory_store = state.memory_store.lock().await;
         memory_store
@@ -318,18 +335,20 @@ async fn submit_tool_permission_terminal_relation_for_test(
             epoch
                 .review_origin_proof()
                 .expect("replay fixture review origin proof"),
-            openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite,
+            relation_kind,
             openlife_core::agent::DurableWriteRequest::from_agent_proposal(
                 openlife_core::agent::DurableWriteSource::MainChat,
-                openlife_core::agent::DurableWriteSubject::ToolPermission,
+                openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                    proposal.proposal_type,
+                ),
                 proposal.clone(),
-                "Task-control ToolPermission fixture is pending exact action review.",
+                "Task-control fixture is pending exact review.",
             )
-            .with_idempotency_key(format!("task_control_tool_permission:{}", proposal.id)),
+            .with_idempotency_key(format!("task_control_terminal_relation:{}", proposal.id)),
             &execution_epoch,
         )
         .await
-        .expect("submit ToolPermission fixture through typed terminal relation");
+        .expect("submit fixture through typed terminal relation");
     assert!(submission.owns_terminal_relation());
     (submission.review().proposal_id().to_string(), epoch)
 }
@@ -5022,6 +5041,250 @@ async fn rejecting_action_resume_permission_cancels_the_blocked_task_and_queued_
 }
 
 #[tokio::test]
+async fn rejecting_effect_blocking_action_cancels_the_terminal_task() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{
+        AgentProposal, AgentRunStatus, ProposalSource, ProposalTerminalRelationKind, ProposalType,
+        RiskLevel,
+    };
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let session = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "reject-effect-blocking-action".into(),
+            user_goal: "Open in browser `https://example.com/rejected`.".into(),
+            selected_strategy: MainChatAgentStrategy::ActionProposal,
+            current_plan_summary: Some("Waiting for exact browser-open review.".into()),
+            context_snapshot_refs: Vec::new(),
+        })
+        .expect("create blocked governed-action task");
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
+        &state,
+        &session.id,
+        &session.chat_session_id,
+        &session.user_goal,
+        AgentRunStatus::WaitingPermission,
+    )
+    .await;
+    let proposal = AgentProposal::new(
+        ProposalType::DataExport,
+        "browser.open",
+        serde_json::json!({
+            "tool": "browser.open",
+            "url": "https://example.com/rejected",
+            "directWritesExecuted": false,
+        }),
+        "Browser handoff requires exact review.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    let (proposal_id, terminal_epoch) = submit_terminal_relation_for_test(
+        &state,
+        &proposal,
+        &session,
+        &run_id,
+        ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+    )
+    .await;
+    {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .set_pending_blockers(&session.id, vec![format!("proposal:{proposal_id}")])
+            .expect("bind exact proposal blocker");
+        store
+            .mark_waiting_permission(&session.id)
+            .expect("mark governed-action task waiting");
+    }
+    seal_tool_permission_terminal_relation_for_test(&state, &session, &run_id, &terminal_epoch)
+        .await;
+
+    crate::commands::proposal::reject_proposal_with_state(proposal_id.clone(), &state)
+        .await
+        .expect("reject exact effect-blocking action");
+    crate::commands::proposal::reject_proposal_with_state(proposal_id, &state)
+        .await
+        .expect("rejected action converges idempotently");
+
+    let task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .load_session(&session.id)
+        .expect("load rejected task")
+        .expect("rejected task exists");
+    assert_eq!(task.status, AgentTaskSessionStatus::Cancelled);
+    assert!(task.pending_blockers.is_empty());
+    let run = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .get_run(&run_id)
+        .expect("load rejected run")
+        .expect("rejected run exists");
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn startup_recovers_rejected_effect_blocking_review_before_task_transition() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{
+        AgentProposal, AgentRunStatus, ProposalSource, ProposalStatus,
+        ProposalTerminalRelationKind, ProposalType, RiskLevel,
+    };
+
+    let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let session = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "restart-rejected-effect-blocking-action".into(),
+            user_goal: "Open in browser `https://example.com/restart-rejected`.".into(),
+            selected_strategy: MainChatAgentStrategy::ActionProposal,
+            current_plan_summary: Some("Waiting for exact browser-open review.".into()),
+            context_snapshot_refs: Vec::new(),
+        })
+        .expect("create blocked governed-action task");
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
+        &state,
+        &session.id,
+        &session.chat_session_id,
+        &session.user_goal,
+        AgentRunStatus::WaitingPermission,
+    )
+    .await;
+    let proposal = AgentProposal::new(
+        ProposalType::DataExport,
+        "browser.open",
+        serde_json::json!({
+            "tool": "browser.open",
+            "url": "https://example.com/restart-rejected",
+            "directWritesExecuted": false,
+        }),
+        "Browser handoff requires exact review.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    let (proposal_id, terminal_epoch) = submit_terminal_relation_for_test(
+        &state,
+        &proposal,
+        &session,
+        &run_id,
+        ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+    )
+    .await;
+    {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .set_pending_blockers(&session.id, vec![format!("proposal:{proposal_id}")])
+            .expect("bind exact proposal blocker");
+        store
+            .mark_waiting_permission(&session.id)
+            .expect("mark governed-action task waiting");
+    }
+    seal_tool_permission_terminal_relation_for_test(&state, &session, &run_id, &terminal_epoch)
+        .await;
+
+    // Simulate a process ending after canonical ReviewWorkflow rejection and
+    // AgentRun projection, but before the TaskSession terminal-owner successor.
+    {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await;
+        let mut rejected = store
+            .get_proposal(&proposal_id)
+            .expect("load proposal")
+            .expect("proposal exists");
+        rejected.reject();
+        store
+            .update_review_before_dispatch(&rejected, ProposalStatus::Pending)
+            .expect("persist canonical rejected review");
+    }
+    {
+        let store = state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await;
+        let mut run = store
+            .get_run(&run_id)
+            .expect("load run")
+            .expect("run exists");
+        run.status = AgentRunStatus::Cancelled;
+        run.finished_at = Some(chrono::Utc::now());
+        store
+            .update_run(&run)
+            .expect("persist cancelled run projection");
+    }
+
+    let startup_coordinator =
+        crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+    for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+        startup_coordinator.register_read_write(*store);
+    }
+    std::sync::Arc::get_mut(&mut state)
+        .expect("isolated state has one owner")
+        .persistence_coordinator = std::sync::Arc::new(startup_coordinator);
+
+    crate::bootstrap::reconcile_startup_orphaned_main_chat_runs(&state)
+        .await
+        .expect("startup converges the rejected blocking review");
+
+    let task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .load_session(&session.id)
+        .expect("load recovered task")
+        .expect("recovered task exists");
+    assert_eq!(task.status, AgentTaskSessionStatus::Cancelled);
+    assert!(task.pending_blockers.is_empty());
+    let run = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .get_run(&run_id)
+        .expect("load recovered run")
+        .expect("recovered run exists");
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acceptance() {
     use openlife_core::agent::main_chat_agent_v1::{
         AgentTaskSessionDraft, AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy,
@@ -6613,6 +6876,144 @@ async fn cancel_main_chat_task_cancels_nonterminal_queued_actions() {
         .map(|event| event.event_type)
         .collect::<Vec<_>>();
     assert_eq!(lifecycle_events, vec!["cancel_requested", "local_aborted"]);
+}
+
+#[tokio::test]
+async fn cancelling_a_sealed_effect_blocking_task_rejects_the_pending_proposal() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{
+        AgentProposal, AgentRunStatus, ProposalSource, ProposalStatus,
+        ProposalTerminalRelationKind, ProposalType, RiskLevel,
+    };
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let session = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store")
+        .lock()
+        .await
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "cancel-sealed-effect-blocking-task".into(),
+            user_goal: "Open the reviewed target only after confirmation.".into(),
+            selected_strategy: MainChatAgentStrategy::ActionProposal,
+            current_plan_summary: Some("Wait for exact review or cancellation.".into()),
+            context_snapshot_refs: Vec::new(),
+        })
+        .expect("create sealed cancellation task");
+    let run_id = create_terminal_owner_task_bound_agent_run_for_test(
+        &state,
+        &session.id,
+        &session.chat_session_id,
+        &session.user_goal,
+        AgentRunStatus::WaitingPermission,
+    )
+    .await;
+    let proposal = AgentProposal::new(
+        ProposalType::DataExport,
+        "browser.open",
+        serde_json::json!({
+            "tool": "browser.open",
+            "url": "https://example.com/cancelled-before-review",
+            "directWritesExecuted": false,
+        }),
+        "The external handoff requires exact review.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    let (proposal_id, terminal_epoch) = submit_terminal_relation_for_test(
+        &state,
+        &proposal,
+        &session,
+        &run_id,
+        ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+    )
+    .await;
+    {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .set_pending_blockers(&session.id, vec![format!("proposal:{proposal_id}")])
+            .expect("bind exact proposal blocker");
+        store
+            .mark_waiting_permission(&session.id)
+            .expect("mark sealed task waiting");
+    }
+    seal_tool_permission_terminal_relation_for_test(&state, &session, &run_id, &terminal_epoch)
+        .await;
+
+    crate::main_chat_task_controls::cancel_main_chat_agent_task_with_state(&session.id, &state)
+        .await
+        .expect("cancel must resolve a sealed review wait without an open-turn write");
+
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .expect("proposal store")
+        .lock()
+        .await;
+    let proposal = proposal_store
+        .get_proposal(&proposal_id)
+        .expect("load cancelled proposal")
+        .expect("cancelled proposal exists");
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+    assert_eq!(
+        proposal_store
+            .dispatch_state(&proposal_id)
+            .expect("load cancelled proposal dispatch state")
+            .as_deref(),
+        Some("unclaimed")
+    );
+    drop(proposal_store);
+
+    let task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("task store")
+        .lock()
+        .await
+        .load_session(&session.id)
+        .expect("load cancelled task")
+        .expect("cancelled task exists");
+    assert_eq!(task.status, AgentTaskSessionStatus::Cancelled);
+    assert!(task.pending_blockers.is_empty());
+    let run = state
+        .agent_run_store
+        .as_ref()
+        .expect("run store")
+        .lock()
+        .await
+        .get_run(&run_id)
+        .expect("load cancelled run")
+        .expect("cancelled run exists");
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+    let events = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .list(&session.id, 0, 100)
+        .expect("load sealed cancellation evidence");
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.event_type.as_str(),
+            "cancel_requested" | "local_aborted"
+        )
+    }));
+    let successor = events
+        .iter()
+        .find(|event| event.event_type == "terminal_owner.successor_confirmed")
+        .expect("review rejection is the sealed terminal successor");
+    assert_eq!(successor.payload["causeKind"], "proposal_review_rejection");
+    assert_eq!(successor.payload["causeRef"], proposal_id);
 }
 
 #[tokio::test]

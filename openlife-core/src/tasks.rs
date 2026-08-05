@@ -2968,6 +2968,40 @@ impl TaskStore {
         Ok(tasks)
     }
 
+    /// Load the one canonical task materialized from an exact reviewed
+    /// Proposal. The source proposal column is indexed, but older databases do
+    /// not declare it UNIQUE, so duplicate rows fail closed instead of picking
+    /// an arbitrary recovery owner.
+    pub fn get_task_by_source_proposal_id(
+        &self,
+        source_proposal_id: &str,
+    ) -> Result<Option<ScheduledTask>> {
+        validate_reference("scheduled source proposal id", source_proposal_id)?;
+        let mut task = {
+            let conn = self.lock_connection()?;
+            let ids = {
+                let mut statement = conn.prepare(
+                    "SELECT id FROM tasks WHERE source_proposal_id = ?1 ORDER BY id ASC LIMIT 2",
+                )?;
+                let rows = statement
+                    .query_map([source_proposal_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            match ids.as_slice() {
+                [] => None,
+                [task_id] => Some(load_task_from_connection(&conn, task_id)?),
+                _ => anyhow::bail!(
+                    "scheduled source proposal id resolves to multiple canonical tasks"
+                ),
+            }
+        };
+        if let Some(task) = task.as_mut() {
+            self.apply_runtime_reviewed_cloud_authority(task)?;
+        }
+        Ok(task)
+    }
+
     /// Atomically claims one due task and creates its immutable execution attempt
     /// with deterministic policy provenance.
     pub fn claim_next_due(

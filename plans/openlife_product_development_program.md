@@ -7,9 +7,10 @@
 本计划的目标按以下顺序固定：
 
 1. 让 OpenLife 安全、可靠并真正可用；
-2. 让它达到一线 Agent 产品应有的能力；
+2. 让它具备一线 Agent 产品应有的工作记忆和任务能力；
 3. 让它能够在用户控制下安全执行行动；
-4. 让 LifeModel 和 Memory 形成真正的个人智能闭环；
+4. 让 Agent Memory 与用户拥有的 LifeModel 分工协同，形成真正的个人
+   智能闭环；
 5. 让源码版本达到稳定、可复现的内部试用水平。
 
 仓库治理平台、开发自进化系统、机器化计划系统、通用 Agent
@@ -87,6 +88,45 @@
 - 前端有控件，但后端没有真实状态；
 - 测试通过，但生产路径并未使用；
 - 为未来想象中的平台预建大量扩展点。
+
+### Agent Memory、LifeModel 与业务事实的长期边界
+
+OpenLife 是 Personal Agent OS。Agent Memory 与 LifeModel 是协同的两个域，
+不能互相替代，也不能把同一事实同时交给多个写入权威。
+
+- **Agent Memory** 服务“如何完成任务”：包括会话历史、Workspace/项目
+  上下文、任务步骤、中间结果、情景记忆、程序性经验、Reflection 和有界
+  Markdown 工作记忆；
+- **LifeModel** 服务“如何长期理解并为这个用户决策”：包括身份、价值观、
+  长期目标、稳定偏好、个人边界、重要关系、长期协作方式和决策原则；
+- **Evidence / Proposal** 是二者之间的受治理桥梁。日常交互、任务和行动结果
+  可以形成候选证据，但只有具有长期意义、去重并处理冲突的信息才可以形成
+  LifeModel proposal；只有用户确认并完成物化后才成为 LifeModel 的一部分；
+- **业务事实继续由各自域拥有**：短期状态和每日任务属于 StateStore，任务与
+  行动生命周期属于 Tasks/AgentRun/action receipt，日历和邮件对象属于对应
+  connector。它们不得因为被 Agent 使用就自动复制为 LifeModel 真相；
+- **索引与表达不是第二权威**：FTS、vector、cache 和 runtime packet 是可重建
+  投影。Markdown 是工作上下文或人类可读表面，不是权限；YAML 是用户可读、
+  可导出和可比较的 LifeModel 表达，不得与结构化存储形成独立双写权威；
+- **用户直接编辑 YAML** 时，修改应先转为结构化 diff 并进入与其他 LifeModel
+  更新相同的校验和 proposal 流程，不能绕过版本、冲突和审核；
+- **每个任务可以反思，但不必产生 proposal**。候选证据先经过相关性、稳定性、
+  重复、冲突和敏感度判断，避免 Review Center proposal 疲劳。
+
+运行时不得把完整 LifeModel 或所有 Memory 无边界注入 prompt。它必须按当前
+任务选择有来源、版本、置信度和新鲜度的最小上下文。默认决策优先级为：
+
+1. 产品安全、隐私与权限政策；
+2. 用户当前明确指令；
+3. 已确认且与当前任务相关的 LifeModel；
+4. 当前 Workspace、项目和任务上下文；
+5. 相关情景、语义和程序性 Memory；
+6. Agent 推断与 Reflection。
+
+当前指令与 LifeModel 冲突时，产品必须区分“本次例外”和“长期改变”。本次
+例外不能静默更新 LifeModel；长期改变通过 proposal。LifeModel 可以影响
+planning、reasoning、context building、memory retrieval 和 tool selection，
+但不能授予工具权限、凭据或外部写入许可。
 
 ## 5. 每个阶段统一采用的执行方法
 
@@ -312,14 +352,21 @@ OpenLife 能够像成熟 Agent 产品一样，可靠完成有用的多步骤读�
 #### 阶段目标
 
 OpenLife 能够在用户控制下执行有用改变，同时保持确认、审核、幂等、
-副作用确定性、恢复和用户所有权。
+副作用确定性、恢复和用户所有权；Agent 能够通过成熟但有界的工作记忆继续
+任务，并使用经确认的 LifeModel 上下文改善规划和选择，而不混淆事实与权限。
 
 #### 主要范围
 
-- 受治理的文件创建和修改；
-- 持久化本地任务；
-- 有界后台或长时间工作；
-- 外部 connector action 按能力逐项加入；
+- 先收敛 Agent Memory、LifeModel、StateStore、Tasks 和 action receipt 的
+  当前读写职责，修复会让第四阶段读取错误事实的交叉路径；
+- 补足行动所必需的 Agent 工作记忆：会话恢复、有界历史与压缩、Workspace/
+  项目作用域、Markdown 索引和专题上下文、Reflection、来源和删除控制；
+- 建立任务相关的 LifeModel runtime packet v1，只选择与当前任务相关、已确认、
+  有来源和新鲜度的最小长期上下文；
+- 受治理的文件创建、修改、移动、回收和常用工作产物；
+- 持久化本地任务、提醒和可撤销状态变更；
+- 日历、邮件和 Web/browser 等外部 connector action 按能力逐项加入；
+- 有边界的本地执行，以及可暂停、恢复和取消的后台或长时间工作；
 - 风险分级的确认和 Review Center 流程；
 - 幂等和精确 action identity；
 - cancel、timeout、unknown effect、reconcile 和 rollback；
@@ -328,62 +375,100 @@ OpenLife 能够在用户控制下执行有用改变，同时保持确认、审�
 
 #### 大致路径
 
-一次只加入一种行动能力。先做可逆本地行动，只有当同一授权和证据契约
-能够安全支撑更敏感目标时，才进入外部行动。
+1. 建立真实 source map 和职责表，只修复第四阶段会触及的双权威、旧投影或
+   错误读取，不全面重构 LifeModel；
+2. 补足可靠行动所需的 Agent Memory 基础，不在本阶段建设完整个人学习系统；
+3. 建立 LifeModel runtime packet v1，并证明它只提供决策上下文、不授予权限；
+4. 依次完成文件/工作产物、本地任务与提醒、日历、邮件、Web/browser、有边界
+   本地执行和长任务；一次只加入一种行动能力；
+5. 行动结束后分别保存业务事实、action receipt 和 Agent Reflection。具有长期
+   意义的信息只成为候选证据，不直接写入 LifeModel；
+6. 先验证可逆本地行动，再验证敏感外部行动，最后进行真实 Tauri 多步骤验收。
 
 #### 非目标
 
 - 不静默执行外部或持久写入；
 - 不从助手文本推断用户授权；
+- 不从 LifeModel 偏好、Memory 或 Markdown 推断工具权限；
 - 不自动重试可能已经产生远端副作用的行动；
 - 不同时上线邮件、日历、shell、plugin 和 Provider 写入；
+- 不在本阶段完成 LifeModel schema、证据网络和长期学习闭环的全面重构；
+- 不把所有 Agent Memory 迁入 LifeModel；
 - 不脱离真实用户场景建设通用 action 平台。
 
 #### 退出标准
 
 - 每种 shipped action 都有明确 capability、risk、confirmation 和
   terminal evidence；
+- 会话、Workspace 和任务所需工作记忆能够跨重启恢复，Markdown 记忆按作用域
+  有界加载，过期、冲突或来源不明内容不能冒充事实；
+- 至少在 planning、context building、memory retrieval 或 tool selection 的代表性
+  场景中，LifeModel runtime packet 产生可追溯的正面影响，同时当前用户指令和
+  权限边界保持更高优先级；
 - 代表性可逆行动能够完成和回滚；
 - 敏感行动没有所需授权就不能 dispatch；
 - 远端副作用不明时保持 unknown，直到完成 reconciliation；
 - Tasks 和 Review Center 与持久执行事实一致；
+- 行动结果、Agent Reflection、Memory 候选和 LifeModel proposal 保持可验证的
+  分离，没有静默长期画像写入；
 - native 内部试用覆盖成功、拒绝、取消、超时、防重复和恢复。
 
 ### 第五阶段：LifeModel 与 Memory 个人智能闭环
 
 #### 阶段目标
 
-OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和行动，同时让
-每条持久事实都可查看、纠正、撤销并受到治理。
+OpenLife 在成熟 Agent Memory 之上构建用户拥有的长期个人模型。LifeModel
+持续刻画用户并真实改善对话、规划、写作和行动；每条进入长期模型的信息都有
+证据、proposal、版本、用户决定和回滚能力。
 
 #### 标准闭环
 
 ```text
-交互
-  -> 有界候选信息提取
-  -> 明确低风险写入或用户审核
-  -> Memory / LifeModel 物化
-  -> 在后续任务中使用
-  -> 用户反馈
-  -> 修正、归档或回滚
+交互、任务与行动
+  -> Agent Memory / Workspace / Reflection
+  -> 候选证据提取
+  -> 相关性、稳定性、重复、冲突与敏感度判断
+  -> LifeModel proposal 或无长期写入
+  -> 用户审核
+  -> 版本化 LifeModel 物化
+  -> YAML 人类视图与 runtime packet 投影
+  -> 后续任务中可解释地使用
+  -> 用户反馈、修正、归档或回滚
 ```
 
 #### 主要范围
 
-- 明确的记住、查看、编辑、归档、恢复和忘记；
-- 从真实交互中提取受治理候选信息；
-- 区分用户事实、偏好、生活事件、短期状态和模型推断；
-- proposal-backed LifeModel 演进；
-- 真正改善产品任务的检索；
-- 来源和原因可见；
+- 明确区分 Agent Memory 和 LifeModel，并分别提供查看、编辑、归档、恢复和
+  忘记能力；
+- 从真实交互、任务和反馈中提取受治理候选证据，去重、累计、批处理并避免
+  每个任务都产生 proposal；
+- 重新收敛 LifeModel schema：身份、价值观、长期目标、稳定偏好、个人边界、
+  重要关系、长期协作方式和决策原则；每日任务、工具输出和原始对话不进入
+  LifeModel 主体；
+- 区分用户明确陈述、生活事件、短期状态、模型推断和已确认长期模型；
+- proposal-backed、版本化的 LifeModel 演进，proposal 包含来源、置信度、
+  稳定性、敏感度、冲突和 before/after diff；
+- 确立结构化存储与 YAML 的单一权威关系：结构化资产负责事务、版本、证据和
+  回滚，YAML 作为确定性的人类可读、可导出表达；用户编辑 YAML 进入同一
+  proposal 路径；
+- 将完整 LifeModel 编译为任务相关 runtime packet，并分别验证它对 planning、
+  reasoning、context building、memory retrieval 和 tool selection 的实际影响；
+- 来源、使用原因、影响过的决策和当前新鲜度对用户可见；
 - revision、conflict、stale、materialization 和 rollback；
 - 隐私与敏感度控制；
-- 验证个人上下文是否真实改善任务结果。
+- 建立受治理、可测试、可版本化的协作规则网络。AI 可以生成规则 diff 和行为
+  检查建议，但只有用户审核后才能激活；规则不得成为任意源代码执行入口；
+- 使用相同真实任务比较无 LifeModel、过期/冲突 LifeModel 和已确认相关
+  LifeModel，验证个人模型是否真实改善结果。
 
 #### 非目标
 
 - 不自主修改 OpenLife 源码；
 - 不做仓库自进化；
+- 不让运行时 LifeModel 生成或执行未经审核的任意代码；
+- 不把会话、Workspace、工具日志和全部 Agent Memory 塞入 LifeModel；
+- 不让 LifeModel 或 Memory 授予工具权限、凭据或外部写入许可；
+- 不因为一次行为或一次推断就修改长期画像；
 - 不自动把模型推断提升为用户事实；
 - 不隐藏 profiling；
 - 不建设通用学习平台；
@@ -391,12 +476,17 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 
 #### 退出标准
 
-- 用户能够看见并控制 OpenLife 记住和理解的内容；
-- 写入、proposal、物化、修正和回滚通过当前产品区域完成；
+- 用户能够分别看见并控制 Agent Memory 与 LifeModel，理解二者职责；
+- 从日常使用到候选证据、proposal、用户确认、物化、新版本、YAML 表达和
+  runtime 使用的完整闭环通过当前产品区域完成；
 - 敏感信息或推断不能静默成为 canonical truth；
-- 后续对话和任务能够证明受到受治理上下文的正面帮助；
+- YAML 与结构化存储没有可独立漂移的双写权威，导出、用户编辑、冲突和回滚
+  均走受治理路径；
+- 后续对话和任务能够证明受到受治理 LifeModel 的正面帮助，并能解释使用了
+  哪些长期信息；
 - 过期或冲突内容保持可见且可恢复；
 - 删除和回滚会从活跃上下文移除对应信息；
+- 协作规则具有版本、来源、适用范围、冲突处理和行为检查；
 - 内部 dogfood 证明个性化有用且没有夺走用户控制权。
 
 ### 第六阶段：内部产品完善与源码试用
@@ -456,8 +546,78 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 
 ## 7. 当前阶段
 
-当前阶段：**第三阶段——一线 Agent 基础能力已完成；第四阶段尚未开始，等待用户
-明确批准。**
+当前阶段：**第四阶段——受治理的行动型 Agent 已完成（2026-08-05）。第五阶段
+尚未开始。当前停在第四阶段交付与审阅边界；未经下一阶段单独审阅和确认，不进入
+LifeModel 与 Memory 个人智能闭环开发。**
+
+第四阶段实际完成：
+
+- 任务所需的 Markdown 工作记忆、会话/Workspace 上下文和 Reflection 保持
+  有界、可追溯且不冒充业务事实；任务相关 LifeModel runtime packet v1 只读取
+  已确认且相关的长期上下文，并且不能授予工具权限；
+- shipped runtime 支持 proposal-first 的文件创建、修改、移动、回收和恢复，
+  本地计划任务及可选 ICS 投影，邮件草稿与浏览器的 OS handoff，以及精确
+  allowlist 内的只读本地工具；邮件未获得发送或送达信用，浏览器未获得页面
+  加载信用，日历未获得远端 connector 信用；
+- 文件创建和覆盖 proposal 精确绑定审核时的目标不存在状态或内容摘要；目标在
+  审核后发生变化时 fail-closed，新文件通过不覆盖既有目标的原子链接提交；ICS
+  投影复用同一 staged/commit 路径，不再直接把可能不完整的内容写到最终文件；
+- LifeModel runtime packet 只接收具有非空版本和合法 RFC3339 更新时间的来源；
+  同一邮件任务的确定性有/无 LifeModel A/B 集成测试已证明相关长期沟通偏好会
+  改变最终回答，并保留来源元数据。该测试是产品路径证据，不是外部模型质量
+  或 external-live 证据；
+- 每类行动都通过 capability、operation、risk、confirmation、effect boundary、
+  terminal evidence 和精确 action identity 进入 Review Center；批准、dispatch、
+  materialization、unknown、failed、rejected 和 rolled-back 不再混为同一状态；
+- action receipt、幂等恢复、取消、拒绝和启动 reconciliation 已接入持久任务
+  事实；修复了高风险拒绝后 TaskSession 仍等待、启动时先恢复 proposal 后恢复
+  task，以及 move/trash/restore 未同时校验源和目标安全路径的问题；
+- 当前全量 Rust（Core 1510 通过/2 条件忽略，Tauri 1141 通过/13 条件忽略）、
+  严格 Clippy、前端格式/typecheck/Vitest/build、absence guard 和 browser shell
+  门禁均通过；没有调用 Provider 或外部网络来替代行动证据；
+- 自动化测试覆盖取消竞争、超时终态、同 operation replay 去重、staged/final
+  artifact 重启恢复和并发目标变化；同 operation ingress replay 的防重复信用来自
+  自动化产品测试，不能用启动 reconciliation 的无重复结果冒充；
+- 精确构建
+  `5f4d6c72675f0fe67b62efd5d2577a3dfdd490b35d150905c23392ade916f5cc`
+  已在全新隔离数据目录完成 5 类系统凭据初始化，关闭安全模式，并真实渲染
+  `/today` 与 `/settings`；原生取消一个已 sealed、等待文件写入 Review 的任务时，
+  复现了普通 open-turn 写通道被终态 fence 拒绝的真实缺陷。数据库证明取消事件
+  已持久化、目标文件未生成，但 AgentRun/Task 投影仍为 waiting_permission；
+- 该缺陷已有修复前同构失败反例。修复没有放宽 sealed fence，而是把取消仍未
+  dispatch 的阻断 Review 映射为既有 ReviewWorkflow rejection successor，使
+  Proposal、TaskSession、AgentRun 和 action queue 一起终态收敛，不留下可继续
+  批准的悬空 Proposal。修复后的精确构建
+  `02117e78573f44b9cc8b9d167f2366cf329cdb71ab2c1ac2c50964ff2f228f20`
+  在隔离 QA 中完成 5 类凭据初始化和原生复核：取消 sealed 文件写入任务后，
+  Proposal 为 rejected/unclaimed，TaskSession 与 AgentRun 为 cancelled，目标文件
+  不存在，重启后仍保持同一终态且没有新增 terminal successor；
+- `02117e78` 的原生超时试用进一步暴露了产品层错误分类：ToolGateway 已返回
+  `tool_gateway_timeout`，但 Kernel 稳定错误码白名单遗漏该值，导致界面退回低层
+  `tool_locally_aborted` transport truth。修复前失败反例先证明该遗漏，随后仅把
+  `tool_gateway_timeout` 映射为产品稳定码 `timeout`，没有改写 action receipt 的
+  本地中止事实；
+- 修复后的精确构建
+  `55ffd1b37452da8a3b4dcf632fc5f752588002a413c83ac02b16d43eb902aa66`
+  已恢复同一隔离 QA 的 5 类既有凭据并关闭安全模式。真实 `file.read` FIFO 任务
+  在 120 秒边界失败，界面与最终交付均显示 `timeout`；对应 run 只有一次 dispatch
+  prepared、一次 tool started、一次低层 local-aborted receipt 和一次 failed final
+  delivery。删除临时 FIFO 并重启同一构建后，任务仍为失败，run、事件、派发与
+  最终交付数量均未增加。该试用没有调用外部 Provider 或网络；
+- 精确构建
+  `a6d6b8091e4a3f9fef33c72c1893ff9fcf73f103950e510a1d9198f6769a7dca`
+  在全新隔离 QA 中完成原生成功、拒绝和回滚验证：浏览器动作拒绝后未打开
+  URL；文件在批准前不存在，批准后以匹配摘要落盘；随后经独立审核移入
+  OpenLife 恢复区，原路径消失且 41-byte 内容摘要保持
+  `1392b76ef08c6a12669eebbf48381bfeb554d5c1f5596f317ce54c3df3ed03cd`；
+  再次重启后安全模式保持关闭，Review receipt 与 completed/cancelled 任务终态
+  继续存在且没有悬挂任务。
+- 阶段收口代码 Review 发现启动 reconciliation 曾把本地 `ScheduledTask` 与无法
+  检查真实副作用的 OS handoff 一并封存为 unknown：如果任务已创建但 Proposal
+  receipt 尚未确认便崩溃，会丢失可由本地规范记录证明的效果。修复先以失败反例
+  复现，再只在 `source_proposal_id`、来源 run、内容、日期、优先级、动作类型和
+  `LocalOnly` route 全部精确匹配时，把 claimed action 收敛为待投影确认；重复或
+  不匹配记录继续 fail-closed，浏览器、邮件和云端动作仍保持 unknown 且不会重放。
 
 第三阶段完成的产品切片：
 
@@ -487,8 +647,8 @@ OpenLife 使用用户拥有的长期上下文改善对话、规划、写作和�
 Example Domain 与 MCP 观察，并保留未背书 Web 引用。mock、fixture、本地
 Ollama 和旧 final11 失败试用均未替代这次 external-live 信用。
 
-第三阶段没有新增平行编排平台、计划 JSON、能力 ledger 或自进化系统。进入
-第四阶段必须由用户在本次统一交付后另行明确批准；不得因本段更新自动开工。
+第三阶段没有新增平行编排平台、计划 JSON、能力 ledger 或自进化系统。第四
+阶段已经在用户批准后开始；不得把计划、测试或治理代码本身计为行动能力。
 
 短收口完成（2026-08-04）：CSV spreadsheet formula injection 已在生成阶段
 fail-closed；会话技能选择已从进程内状态迁移到现有 `MemoryStore` 会话所有者，
@@ -540,8 +700,8 @@ Keychain 证据均不作为 external-live 证明。
   门禁通过，没有以测试 fixture 或旧签名 QA profile 代替当前源码结论。
 
 本阶段使用的真实生成来自本机 Ollama，不能计为 external-live Provider 证据。
-第三阶段后续已经使用隔离 DeepSeek 配置补足 external-live Provider 证据；第四至
-第六阶段尚未开始。
+第三阶段后续已经使用隔离 DeepSeek 配置补足 external-live Provider 证据；第四
+阶段已经完成，第五和第六阶段尚未开始。
 
 ## 8. 进度记录规则
 

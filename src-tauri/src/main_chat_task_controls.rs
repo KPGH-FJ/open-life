@@ -3671,6 +3671,100 @@ fn collect_main_chat_proposal_ids(value: &serde_json::Value, ids: &mut Vec<Strin
     }
 }
 
+/// A sealed task that is waiting on an effect-blocking Review decision no
+/// longer has an open turn write lane. Cancelling that product task is the
+/// semantic equivalent of rejecting the still-unclaimed prerequisite: use the
+/// existing ReviewWorkflow terminal-successor path so the Proposal, task, run,
+/// and queued effects converge together instead of attempting a forbidden
+/// post-seal lifecycle write.
+async fn sealed_blocking_review_proposals_for_task(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+) -> Result<Vec<String>, String> {
+    let epoch = match state.main_chat_agent_event_store.as_ref() {
+        Some(store) => store
+            .lock()
+            .await
+            .terminal_owner_epoch(task_session_id)
+            .map_err(|error| format!("load terminal owner before cancel failed: {error}"))?,
+        None => None,
+    };
+    let Some(epoch) = epoch else {
+        return Ok(Vec::new());
+    };
+    if epoch.state() != crate::main_chat_event_stream::TerminalOwnerSealState::Sealed {
+        return Ok(Vec::new());
+    }
+
+    let run = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "agent_run_store_unavailable".to_string())?
+        .lock()
+        .await
+        .get_run_for_task_id(task_session_id)
+        .map_err(|error| format!("load sealed AgentRun before cancel failed: {error}"))?
+        .ok_or_else(|| format!("canonical_agent_run_missing_for_task:{task_session_id}"))?;
+    if run.id != epoch.run_id() {
+        return Err("sealed_cancel_terminal_owner_run_mismatch".into());
+    }
+
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?
+        .lock()
+        .await;
+    let mut proposal_ids = Vec::new();
+    for proposal_id in &run.generated_proposals {
+        let Some(proposal) = proposal_store
+            .get_proposal(proposal_id)
+            .map_err(|error| format!("load sealed proposal before cancel failed: {error}"))?
+        else {
+            return Err(format!(
+                "sealed_cancel_linked_proposal_missing:{proposal_id}"
+            ));
+        };
+        if !matches!(
+            proposal.status,
+            openlife_core::agent::ProposalStatus::Pending
+                | openlife_core::agent::ProposalStatus::Postponed
+                | openlife_core::agent::ProposalStatus::Edited
+        ) {
+            continue;
+        }
+        let origin = proposal_store
+            .terminal_owner_origin_binding(proposal_id)
+            .map_err(|error| format!("load sealed proposal origin before cancel failed: {error}"))?
+            .ok_or_else(|| format!("sealed_cancel_proposal_origin_missing:{proposal_id}"))?;
+        let relation = proposal_store
+            .terminal_relation_projection_proof(proposal_id)
+            .map_err(|error| {
+                format!("load sealed proposal relation before cancel failed: {error}")
+            })?
+            .ok_or_else(|| format!("sealed_cancel_proposal_relation_missing:{proposal_id}"))?;
+        if origin.task_session_id() != task_session_id
+            || origin.run_id() != run.id
+            || relation.task_session_id() != task_session_id
+            || relation.run_id() != run.id
+        {
+            return Err(format!(
+                "sealed_cancel_proposal_owner_mismatch:{proposal_id}"
+            ));
+        }
+        if matches!(
+            relation.relation_kind(),
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+                | openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+        ) {
+            proposal_ids.push(proposal_id.clone());
+        }
+    }
+    proposal_ids.sort();
+    proposal_ids.dedup();
+    Ok(proposal_ids)
+}
+
 #[tauri::command]
 pub(crate) async fn cancel_main_chat_agent_task(
     task_session_id: String,
@@ -3686,6 +3780,14 @@ pub(crate) async fn cancel_main_chat_agent_task_with_state(
     let mut current = load_main_chat_agent_task_state(task_session_id, state).await?;
     if current.session.is_none() {
         return Err(format!("Main Chat task not found: {task_session_id}"));
+    }
+    let sealed_blocking_proposals =
+        sealed_blocking_review_proposals_for_task(state, task_session_id).await?;
+    if !sealed_blocking_proposals.is_empty() {
+        for proposal_id in sealed_blocking_proposals {
+            crate::commands::proposal::reject_proposal_with_state(proposal_id, state).await?;
+        }
+        return load_main_chat_agent_task_state(task_session_id, state).await;
     }
     let store_arc = state
         .agent_run_store

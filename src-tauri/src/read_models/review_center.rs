@@ -1,9 +1,9 @@
 use crate::state::AppState;
 use openlife_core::agent::{
-    build_review_center_view_model, MemoryLifecycleStatus, MemoryMaterializationStatus,
-    ReviewCenterBuildInput, ReviewCenterViewModel, ReviewItemArtifactEvidence,
-    ReviewItemMaterializationStatus, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
-    ViewModelWarningSeverity,
+    build_review_center_view_model, AgentProposal, MemoryLifecycleStatus,
+    MemoryMaterializationStatus, ProposalStatus, ProposalType, ReviewCenterBuildInput,
+    ReviewCenterViewModel, ReviewItemArtifactEvidence, ReviewItemMaterializationStatus,
+    ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -71,13 +71,17 @@ pub(crate) async fn get_review_center_view_model_with_state(
         .into_iter()
         .flatten()
         .collect::<BTreeMap<_, _>>();
+    let (action_materialization_overrides, mut action_warnings) =
+        action_materialization_overrides(&proposal_store, &proposals);
     drop(proposal_store);
     let config = state.config.lock().await;
     let safe_paths = config.system.safe_paths.clone();
     drop(config);
 
-    let (materialization_overrides, mut warnings) =
+    let (mut materialization_overrides, mut warnings) =
         memory_materialization_overrides(state, &proposals).await;
+    materialization_overrides.extend(action_materialization_overrides);
+    warnings.append(&mut action_warnings);
     let safe_mode_reason = if state.startup_warnings.is_empty() {
         None
     } else {
@@ -105,6 +109,91 @@ pub(crate) async fn get_review_center_view_model_with_state(
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
     envelope.warnings.append(&mut warnings);
     Ok(envelope)
+}
+
+fn action_materialization_overrides(
+    proposal_store: &openlife_core::agent::ProposalStore,
+    proposals: &[AgentProposal],
+) -> (
+    BTreeMap<String, ReviewItemMaterializationStatus>,
+    Vec<ViewModelWarning>,
+) {
+    let mut overrides = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for proposal in proposals
+        .iter()
+        .filter(|proposal| is_dispatch_backed_governed_action(proposal))
+    {
+        match proposal_store.dispatch_state(&proposal.id) {
+            Ok(Some(dispatch_state)) => {
+                if let Some(status) =
+                    action_materialization_status(proposal.status, dispatch_state.as_str())
+                {
+                    overrides.insert(proposal.id.clone(), status);
+                }
+            }
+            Ok(None) => {
+                overrides.insert(
+                    proposal.id.clone(),
+                    ReviewItemMaterializationStatus::Unknown,
+                );
+                warnings.push(warning(
+                    "governed_action_dispatch_receipt_missing",
+                    format!(
+                        "Governed action {} has no dispatch receipt; its effect stays unknown.",
+                        proposal.id
+                    ),
+                ));
+            }
+            Err(error) => {
+                overrides.insert(
+                    proposal.id.clone(),
+                    ReviewItemMaterializationStatus::Unknown,
+                );
+                warnings.push(warning(
+                    "governed_action_dispatch_receipt_unavailable",
+                    format!(
+                        "Governed action {} dispatch receipt could not be read: {error}",
+                        proposal.id
+                    ),
+                ));
+            }
+        }
+    }
+    (overrides, warnings)
+}
+
+fn is_dispatch_backed_governed_action(proposal: &AgentProposal) -> bool {
+    match proposal.proposal_type {
+        ProposalType::ScheduledTask => true,
+        ProposalType::DataExport => matches!(
+            proposal
+                .after
+                .get("tool")
+                .and_then(serde_json::Value::as_str),
+            Some("email.propose_draft" | "browser.open" | "local.run_utility")
+        ),
+        _ => false,
+    }
+}
+
+fn action_materialization_status(
+    proposal_status: ProposalStatus,
+    dispatch_state: &str,
+) -> Option<ReviewItemMaterializationStatus> {
+    match dispatch_state {
+        "unclaimed" => None,
+        "claimed" | "confirmed_projection_pending" => {
+            Some(ReviewItemMaterializationStatus::Applying)
+        }
+        "failed_before_effect" => Some(ReviewItemMaterializationStatus::Failed),
+        "unknown" => Some(ReviewItemMaterializationStatus::Unknown),
+        "confirmed" if proposal_status == ProposalStatus::Accepted => {
+            Some(ReviewItemMaterializationStatus::Applied)
+        }
+        "confirmed" => Some(ReviewItemMaterializationStatus::Unknown),
+        _ => Some(ReviewItemMaterializationStatus::Unknown),
+    }
 }
 
 async fn memory_materialization_overrides(
@@ -175,5 +264,93 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
         message: message.into(),
         severity: ViewModelWarningSeverity::Warning,
         evidence_refs: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        action_materialization_overrides, action_materialization_status,
+        is_dispatch_backed_governed_action,
+    };
+    use openlife_core::agent::{
+        AgentProposal, ProposalSource, ProposalStatus, ProposalStore, ProposalType,
+        ReviewItemMaterializationStatus, RiskLevel,
+    };
+    use serde_json::json;
+
+    fn local_utility_proposal() -> AgentProposal {
+        AgentProposal::new(
+            ProposalType::DataExport,
+            "local.utility",
+            json!({
+                "tool": "local.run_utility",
+                "command": "uptime",
+                "timeout_ms": 3_000,
+                "content": "Run the reviewed read-only utility `uptime`."
+            }),
+            "Run one reviewed read-only utility.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        )
+    }
+
+    #[test]
+    fn confirmed_dispatch_is_applied_only_after_accepted_projection() {
+        assert_eq!(
+            action_materialization_status(ProposalStatus::Accepted, "confirmed"),
+            Some(ReviewItemMaterializationStatus::Applied)
+        );
+        assert_eq!(
+            action_materialization_status(ProposalStatus::Pending, "confirmed"),
+            Some(ReviewItemMaterializationStatus::Unknown)
+        );
+        assert_eq!(
+            action_materialization_status(ProposalStatus::Pending, "unknown"),
+            Some(ReviewItemMaterializationStatus::Unknown)
+        );
+    }
+
+    #[test]
+    fn review_projection_reads_confirmed_local_utility_dispatch_receipt() {
+        let store = ProposalStore::new_in_memory().expect("proposal store");
+        let mut proposal = local_utility_proposal();
+        store.create_proposal(&proposal).expect("create proposal");
+        let claim = store
+            .claim_dispatch(&proposal.id)
+            .expect("claim dispatch")
+            .expect("claim id");
+        assert!(store
+            .mark_effect_confirmed_projection_pending(&proposal.id, &claim)
+            .expect("persist confirmed effect"));
+        proposal.accept();
+        assert!(store
+            .project_confirmed_effect(&proposal, &claim)
+            .expect("project accepted proposal"));
+
+        let (overrides, warnings) =
+            action_materialization_overrides(&store, std::slice::from_ref(&proposal));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            overrides.get(&proposal.id),
+            Some(&ReviewItemMaterializationStatus::Applied)
+        );
+    }
+
+    #[test]
+    fn generic_data_export_does_not_gain_dispatch_backed_action_credit() {
+        let proposal = AgentProposal::new(
+            ProposalType::DataExport,
+            "exports.generic",
+            json!({"content": "data", "filename": "export.txt"}),
+            "Export reviewed data.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+
+        assert!(!is_dispatch_backed_governed_action(&proposal));
     }
 }

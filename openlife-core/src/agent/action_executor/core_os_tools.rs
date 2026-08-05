@@ -46,14 +46,22 @@ impl super::ActionExecutor {
                 error: Some(format!("Unknown core_os tool: {}", tool_name)),
             });
         }
-        if matches!(tool_name, "life_model.read" | "goal.read" | "state.read")
-            && ctx.life_model.is_none()
-        {
+        if matches!(tool_name, "life_model.read" | "goal.read") && ctx.life_model.is_none() {
             return Ok(ToolCallInternalResult {
                 success: false,
                 output: None,
                 error: Some(format!(
                     "LifeModel not available in execution context for core_os tool '{}'",
+                    tool_name
+                )),
+            });
+        }
+        if matches!(tool_name, "goal.read" | "state.read") && ctx.canonical_state.is_none() {
+            return Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!(
+                    "canonical StateStore snapshot not available for core_os tool '{}'",
                     tool_name
                 )),
             });
@@ -81,18 +89,38 @@ impl super::ActionExecutor {
                             tool_name
                         )
                     })?;
-                    serde_json::to_string_pretty(&life_model.goals)
-                        .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
-                }
-                "state.read" => {
-                    let life_model = ctx.life_model.ok_or_else(|| {
+                    let canonical_state = ctx.canonical_state.ok_or_else(|| {
                         anyhow::anyhow!(
-                            "LifeModel not available in execution context for core_os tool '{}'",
+                            "canonical StateStore snapshot not available for core_os tool '{}'",
                             tool_name
                         )
                     })?;
-                    serde_json::to_string_pretty(&life_model.state)
-                        .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "canonicalOwners": {
+                            "longTermGoals": "life_model",
+                            "dailyTasks": "state_store"
+                        },
+                        "shortTerm": &life_model.goals.short_term,
+                        "mediumTerm": &life_model.goals.medium_term,
+                        "longTerm": &life_model.goals.long_term,
+                        "lifeGoals": &life_model.goals.life_goals,
+                        "dailyTasks": &canonical_state.daily_tasks,
+                    }))
+                    .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
+                }
+                "state.read" => {
+                    let canonical_state = ctx.canonical_state.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "canonical StateStore snapshot not available for core_os tool '{}'",
+                            tool_name
+                        )
+                    })?;
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "canonicalOwner": "state_store",
+                        "dailyTasks": &canonical_state.daily_tasks,
+                        "observations": &canonical_state.observations,
+                    }))
+                    .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
                 }
                 "memory.search" => {
                     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");

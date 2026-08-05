@@ -1106,6 +1106,7 @@ export type MainChatExecutionTranscriptKind =
   | "error"
   | "retry"
   | "final_result"
+  | "reflection"
   | "fallback";
 
 export interface MainChatExecutionTranscriptEntry {
@@ -2297,6 +2298,25 @@ export type ReviewDecisionContext = {
   affectedObjectLabels: string[];
   expiresAt?: string;
   permission?: PermissionDecisionContext;
+  actionContract?: {
+    capabilityId: string;
+    operation:
+      | "create"
+      | "overwrite"
+      | "move"
+      | "trash"
+      | "restore"
+      | "create_local_calendar_projection"
+      | "create_scheduled_task"
+      | "open_email_draft"
+      | "open_browser_url"
+      | "run_local_utility"
+      | "export_data"
+      | string;
+    confirmationSummary: string;
+    terminalEvidenceSummary: string;
+    effectBoundary: string;
+  };
   evidenceRefs: EvidenceRef[];
 };
 
@@ -2604,6 +2624,7 @@ export type WorkspaceActivityKind =
   | "error"
   | "retry"
   | "final_result"
+  | "reflection"
   | "fallback"
   | "blocker"
   | "durable_lifecycle"

@@ -48,6 +48,7 @@ pub(crate) struct GovernedToolGatewayResources {
     pub(crate) memory_store: openlife_core::memory::MemoryStore,
     pub(crate) memory_lifecycle_retrieval_reader:
         Option<openlife_core::agent::MemoryLifecycleRetrievalReader>,
+    pub(crate) canonical_state: Option<openlife_core::agent::CanonicalStateSnapshot>,
 }
 
 #[cfg(any(test, feature = "dev-extensions"))]
@@ -149,6 +150,26 @@ async fn capture_governed(
         } else {
             None
         };
+    let canonical_state = state.state_store.as_ref().and_then(|store| {
+        let daily_tasks = store.get_product_daily_tasks();
+        let observations = store.list_state_observations(false);
+        match (daily_tasks, observations) {
+            (Ok(daily_tasks), Ok(observations)) => {
+                Some(openlife_core::agent::CanonicalStateSnapshot {
+                    daily_tasks,
+                    observations,
+                })
+            }
+            (daily_tasks, observations) => {
+                log::warn!(
+                    "[tool-gateway] canonical StateStore snapshot unavailable: daily_tasks={:?}, observations={:?}",
+                    daily_tasks.as_ref().err().map(ToString::to_string),
+                    observations.as_ref().err().map(ToString::to_string),
+                );
+                None
+            }
+        }
+    });
     (
         GovernedToolGatewayResources {
             shared,
@@ -157,6 +178,7 @@ async fn capture_governed(
             search_provider: config.search_provider.clone(),
             memory_store,
             memory_lifecycle_retrieval_reader,
+            canonical_state,
         },
         config,
     )

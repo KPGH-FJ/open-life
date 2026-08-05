@@ -896,18 +896,18 @@ impl McpRegistry {
 
         self.register_core_os_tool(
             "goal.read",
-            "读取当前 Goals 和 Daily Goals",
+            "读取 LifeModel 长期目标与 StateStore 当前每日任务（明确标注各自权威）",
             "low",
-            vec!["read".into(), "lifemodel".into()],
+            vec!["read".into(), "lifemodel".into(), "state_store".into()],
             "read",
             ToolIdempotencyContract::Idempotent,
         );
 
         self.register_core_os_tool(
             "state.read",
-            "读取当前 State（情绪、健康、焦点、习惯等）",
+            "读取 StateStore 当前任务与状态观察；不从 LifeModel 兼容字段重建事实",
             "low",
-            vec!["read".into(), "lifemodel".into()],
+            vec!["read".into(), "state_store".into()],
             "read",
             ToolIdempotencyContract::Idempotent,
         );

@@ -65,7 +65,7 @@ use crate::main_chat_event_stream::{
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, main_chat_provider_endpoint_kind, preview_text,
 };
-use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
+use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 #[cfg(test)]
 use crate::main_chat_react_runtime::MainChatReactCanonicalToolDelta;
 use crate::main_chat_react_runtime::{
@@ -306,6 +306,10 @@ pub enum MainChatKernelWriteOutcomeKind {
     MemoryProposal,
     LifeModelProposal,
     FileWriteProposal,
+    CalendarEventProposal,
+    EmailDraftProposal,
+    BrowserOpenProposal,
+    LocalUtilityProposal,
     ExternalConfirmationBlocker,
     DangerousHardBlock,
 }
@@ -316,6 +320,10 @@ impl MainChatKernelWriteOutcomeKind {
             Self::MemoryProposal => "memory_proposal",
             Self::LifeModelProposal => "lifemodel_proposal",
             Self::FileWriteProposal => "file_write_proposal",
+            Self::CalendarEventProposal => "calendar_event_proposal",
+            Self::EmailDraftProposal => "email_draft_proposal",
+            Self::BrowserOpenProposal => "browser_open_proposal",
+            Self::LocalUtilityProposal => "local_utility_proposal",
             Self::ExternalConfirmationBlocker => "external_confirmation_blocker",
             Self::DangerousHardBlock => "dangerous_hard_block",
         }
@@ -1004,6 +1012,9 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         {
             action_ctx = action_ctx.with_memory_lifecycle_retrieval_reader(retrieval_reader);
         }
+        if let Some(canonical_state) = resources.governed.canonical_state.as_ref() {
+            action_ctx = action_ctx.with_canonical_state(canonical_state);
+        }
         let lifecycle_observer = crate::main_chat_event_stream::MainChatToolLifecycleObserver::new(
             Arc::clone(&self.state),
             self.task_session_id.clone(),
@@ -1580,6 +1591,7 @@ fn typed_kernel_read_policy_code(value: Option<&str>) -> Option<&'static str> {
         Some("proposal_required") => Some("proposal_required"),
         Some("target_tool_needs_confirmation") => Some("target_tool_needs_confirmation"),
         Some("tool_manifest_not_found") => Some("tool_manifest_not_found"),
+        Some("tool_gateway_timeout") => Some("timeout"),
         Some("tool_permission_required") => Some("tool_permission_required"),
         Some("unsupported_tool_source") => Some("unsupported_tool_source"),
         _ => None,
@@ -2152,6 +2164,7 @@ where
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
         | MainChatAgentStrategy::FileWriteProposal
+        | MainChatAgentStrategy::ActionProposal
         | MainChatAgentStrategy::BlockedConfirmation => {
             execution_transcript.extend(
                 append_main_chat_kernel_write_contract_transcript(
@@ -2241,6 +2254,7 @@ where
         state,
         &provider_config.system.knowledge_roots,
         sanitized_selected_skill_id.as_deref(),
+        &user_text,
     )
     .await?;
     if direct_reply.is_some()
@@ -2941,6 +2955,21 @@ where
         )
         .await,
     );
+    execution_transcript.extend(
+        append_task_scoped_agent_reflection(
+            state,
+            task_session_id,
+            TaskScopedAgentReflection {
+                run_id: &agent_run.id,
+                outcome: "completed",
+                successful_action_count: usize::from(receipt.is_some()),
+                failed_or_unknown_action_count: 0,
+                proposal_count: 0,
+                business_fact_written: receipt.is_some(),
+            },
+        )
+        .await,
+    );
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -3338,6 +3367,21 @@ where
         )
         .await,
     );
+    execution_transcript.extend(
+        append_task_scoped_agent_reflection(
+            state,
+            task_session_id,
+            TaskScopedAgentReflection {
+                run_id: &agent_run.id,
+                outcome: "completed",
+                successful_action_count: 1,
+                failed_or_unknown_action_count: 0,
+                proposal_count: 0,
+                business_fact_written: true,
+            },
+        )
+        .await,
+    );
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -3488,6 +3532,7 @@ pub(crate) fn main_chat_kernel_support_disposition(
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
         | MainChatAgentStrategy::FileWriteProposal
+        | MainChatAgentStrategy::ActionProposal
         | MainChatAgentStrategy::BlockedConfirmation => {
             MainChatKernelSupportDisposition::KernelSupported
         }
@@ -3729,6 +3774,41 @@ async fn append_main_chat_kernel_write_contract_transcript(
             "legacyFallbackUsed": false,
             "kernelBackedProposalOnlyWrite": true,
             "selectedSkillId": selected_skill_id,
+        }),
+    )
+    .await
+}
+
+struct TaskScopedAgentReflection<'a> {
+    run_id: &'a str,
+    outcome: &'a str,
+    successful_action_count: usize,
+    failed_or_unknown_action_count: usize,
+    proposal_count: usize,
+    business_fact_written: bool,
+}
+
+async fn append_task_scoped_agent_reflection(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    reflection: TaskScopedAgentReflection<'_>,
+) -> Vec<ExecutionTranscriptEntry> {
+    append_main_chat_agent_transcript(
+        state,
+        Some(task_session_id),
+        ExecutionTranscriptEntryKind::Reflection,
+        "Task-scoped Agent reflection recorded separately from business facts, Memory, and LifeModel.",
+        serde_json::json!({
+            "runId": reflection.run_id,
+            "scope": "task",
+            "outcome": reflection.outcome,
+            "successfulActionCount": reflection.successful_action_count,
+            "failedOrUnknownActionCount": reflection.failed_or_unknown_action_count,
+            "proposalCount": reflection.proposal_count,
+            "businessFactWritten": reflection.business_fact_written,
+            "promotionStatus": "not_proposed",
+            "memoryWritten": false,
+            "lifeModelWritten": false,
         }),
     )
     .await
@@ -5318,8 +5398,9 @@ where
             return self.blocked("invalid_policy_decision", event_sink);
         }
 
+        let task_text = latest_user_text(&input.messages).unwrap_or("");
         let (context_metadata, system_prompt) =
-            self.compile_context(session_id, selected_skill_id.clone());
+            self.compile_context(session_id, selected_skill_id.clone(), task_text);
         event_sink.emit(MainChatKernelEvent::ContextLoaded {
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
             selected_source_count: context_metadata.selected_source_count,
@@ -6735,11 +6816,13 @@ where
         &self,
         session_id: &str,
         selected_skill_id: Option<String>,
+        task_text: &str,
     ) -> (MainChatKernelContextMetadata, String) {
         let mut candidates = kernel_base_context_candidates(session_id);
         if self.context_config.load_workspace_knowledge {
             candidates.extend(load_current_workspace_knowledge_context_candidates(
                 selected_skill_id.as_deref(),
+                task_text,
             ));
         }
         ensure_bundled_selected_skill_context_candidate(
@@ -7801,6 +7884,33 @@ async fn build_successful_kernel_command_surface_result(
         )
         .await,
     );
+    execution_transcript.extend(
+        append_task_scoped_agent_reflection(
+            state,
+            task_session_id,
+            TaskScopedAgentReflection {
+                run_id: &agent_run.id,
+                outcome: if !pending_read_tool_blockers.is_empty() {
+                    "blocked"
+                } else if !pending_proposal_ids.is_empty() {
+                    "waiting_review"
+                } else {
+                    "completed"
+                },
+                successful_action_count: tool_calls
+                    .iter()
+                    .filter(|call| matches!(call.status, ToolCallStatus::Success))
+                    .count(),
+                failed_or_unknown_action_count: tool_calls
+                    .iter()
+                    .filter(|call| !matches!(call.status, ToolCallStatus::Success))
+                    .count(),
+                proposal_count: visible_proposal_ids.len(),
+                business_fact_written: false,
+            },
+        )
+        .await,
+    );
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -7828,6 +7938,10 @@ fn is_kernel_proposal_outcome(kind: MainChatKernelWriteOutcomeKind) -> bool {
         MainChatKernelWriteOutcomeKind::MemoryProposal
             | MainChatKernelWriteOutcomeKind::LifeModelProposal
             | MainChatKernelWriteOutcomeKind::FileWriteProposal
+            | MainChatKernelWriteOutcomeKind::CalendarEventProposal
+            | MainChatKernelWriteOutcomeKind::EmailDraftProposal
+            | MainChatKernelWriteOutcomeKind::BrowserOpenProposal
+            | MainChatKernelWriteOutcomeKind::LocalUtilityProposal
     )
 }
 
@@ -7841,6 +7955,18 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
             "Create a ReviewWorkflow file-write item from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::CalendarEventProposal => {
+            "Create a ReviewWorkflow calendar-event item from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::EmailDraftProposal => {
+            "Create a ReviewWorkflow email-draft item from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::BrowserOpenProposal => {
+            "Create a ReviewWorkflow browser-open item from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::LocalUtilityProposal => {
+            "Create a ReviewWorkflow bounded-local-utility item from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => {
             "Record an external-write permission boundary without dispatching it.".into()
@@ -7856,6 +7982,10 @@ fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'s
         MainChatKernelWriteOutcomeKind::MemoryProposal => "memory.write",
         MainChatKernelWriteOutcomeKind::LifeModelProposal => "life_model.update",
         MainChatKernelWriteOutcomeKind::FileWriteProposal => "file.write",
+        MainChatKernelWriteOutcomeKind::CalendarEventProposal => "calendar.propose_event",
+        MainChatKernelWriteOutcomeKind::EmailDraftProposal => "email.propose_draft",
+        MainChatKernelWriteOutcomeKind::BrowserOpenProposal => "browser.open",
+        MainChatKernelWriteOutcomeKind::LocalUtilityProposal => "local.run_utility",
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => "external.write",
         MainChatKernelWriteOutcomeKind::DangerousHardBlock => "shell.destructive",
     }
@@ -8292,43 +8422,154 @@ async fn prepare_kernel_write_proposal(
                 None,
             )
         }
+        MainChatKernelWriteOutcomeKind::CalendarEventProposal => (
+            ProposalType::ScheduledTask,
+            "calendar.events".into(),
+            "User requested a proposal-first calendar event from MainChatKernel.".into(),
+            RiskLevel::Medium,
+            outcome.governed_input.clone(),
+            None,
+        ),
+        MainChatKernelWriteOutcomeKind::EmailDraftProposal => (
+            ProposalType::DataExport,
+            "email.drafts".into(),
+            "User requested a proposal-first email draft handoff from MainChatKernel.".into(),
+            RiskLevel::Medium,
+            outcome.governed_input.clone(),
+            None,
+        ),
+        MainChatKernelWriteOutcomeKind::BrowserOpenProposal => (
+            ProposalType::DataExport,
+            "browser.open".into(),
+            "User requested a proposal-first browser handoff from MainChatKernel.".into(),
+            RiskLevel::Medium,
+            outcome.governed_input.clone(),
+            None,
+        ),
+        MainChatKernelWriteOutcomeKind::LocalUtilityProposal => (
+            ProposalType::DataExport,
+            "local.run_utility".into(),
+            "User requested a reviewed bounded local utility from MainChatKernel.".into(),
+            RiskLevel::High,
+            outcome.governed_input.clone(),
+            None,
+        ),
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
-            let path = outcome
+            let operation = outcome
                 .governed_input
-                .get("path")
+                .get("operation")
                 .and_then(Value::as_str)
-                .unwrap_or("workspace.pending_file_write");
-            let content = outcome
-                .governed_input
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let content_digest = openlife_core::agent::metadata_safe_text_digest(content).1;
-            (
-                ProposalType::ExternalWriteAction,
-                format!("filesystem.{path}"),
-                "User requested a proposal-first file write from MainChatKernel.".to_string(),
-                RiskLevel::High,
-                serde_json::json!({
-                    "path": path,
-                    "content": content,
-                    "contentDigest": content_digest,
-                    "encoding": "utf-8",
-                    "operation": "propose_write",
-                    "artifactKind": outcome.governed_input.get("artifactKind").cloned(),
-                    "artifactBundleDigest": outcome.governed_input.get("artifactBundleDigest").cloned(),
-                    "generatedByProvider": outcome.governed_input.get("generatedByProvider").and_then(Value::as_bool).unwrap_or(false),
-                    "providerMaySelectPath": false,
-                    "source": "main_chat_kernel",
-                    "sourceRunId": run_id,
-                    "payloadSummary": outcome.payload_summary,
-                    "directFileWrite": false,
-                    "fileWritten": false,
-                    "externalWritesExecuted": false,
-                    "directWritesExecuted": false,
-                }),
-                None,
-            )
+                .unwrap_or("propose_write");
+            if matches!(operation, "move" | "trash" | "restore") {
+                let source = outcome
+                    .governed_input
+                    .get("source_path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "file operation source path missing".to_string())?;
+                let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+                let target = if operation == "trash" {
+                    crate::artifact_materializer::trash_target_for_source(source, &safe_paths)?
+                } else {
+                    std::path::PathBuf::from(
+                        outcome
+                            .governed_input
+                            .get("target_path")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "file operation target path missing".to_string())?,
+                    )
+                };
+                let prepared = crate::artifact_materializer::prepare_artifact_move(
+                    "proposal-preview",
+                    source,
+                    &target.to_string_lossy(),
+                    "",
+                    &safe_paths,
+                )?;
+                let source_path = prepared.source_path.to_string_lossy().into_owned();
+                let target_path = prepared.target_path.to_string_lossy().into_owned();
+                (
+                    ProposalType::ExternalWriteAction,
+                    format!("filesystem.{source_path}->{target_path}"),
+                    format!(
+                        "User requested a proposal-first file {operation} from MainChatKernel."
+                    ),
+                    RiskLevel::High,
+                    serde_json::json!({
+                        "operation": operation,
+                        "source_path": source_path,
+                        "target_path": target_path,
+                        "source_digest": prepared.content_digest,
+                        "size_bytes": prepared.byte_size,
+                        "rollback": {
+                            "operation": "restore",
+                            "source_path": prepared.target_path,
+                            "target_path": prepared.source_path,
+                            "source_digest": prepared.content_digest,
+                        },
+                        "source": "main_chat_kernel",
+                        "sourceRunId": run_id,
+                        "payloadSummary": outcome.payload_summary,
+                        "directFileWrite": false,
+                        "fileWritten": false,
+                        "externalWritesExecuted": false,
+                        "directWritesExecuted": false,
+                    }),
+                    None,
+                )
+            } else {
+                let path = outcome
+                    .governed_input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("workspace.pending_file_write");
+                let content = outcome
+                    .governed_input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let content_digest = openlife_core::agent::metadata_safe_text_digest(content).1;
+                let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+                let target_precondition =
+                    crate::artifact_materializer::capture_artifact_target_precondition(
+                        path,
+                        &safe_paths,
+                    )?;
+                let (expected_target_absent, expected_target_digest) = match target_precondition {
+                    crate::artifact_materializer::ArtifactTargetPrecondition::Absent => {
+                        (true, None)
+                    }
+                    crate::artifact_materializer::ArtifactTargetPrecondition::ContentDigest(
+                        digest,
+                    ) => (false, Some(digest)),
+                };
+                (
+                    ProposalType::ExternalWriteAction,
+                    format!("filesystem.{path}"),
+                    "User requested a proposal-first file write from MainChatKernel.".to_string(),
+                    RiskLevel::High,
+                    serde_json::json!({
+                        "path": path,
+                        "content": content,
+                        "contentDigest": content_digest,
+                        "expected_target_absent": expected_target_absent,
+                        "expected_target_digest": expected_target_digest,
+                        "encoding": "utf-8",
+                        "operation": "propose_write",
+                        "artifactKind": outcome.governed_input.get("artifactKind").cloned(),
+                        "artifactBundleDigest": outcome.governed_input.get("artifactBundleDigest").cloned(),
+                        "generatedByProvider": outcome.governed_input.get("generatedByProvider").and_then(Value::as_bool).unwrap_or(false),
+                        "providerMaySelectPath": false,
+                        "source": "main_chat_kernel",
+                        "sourceRunId": run_id,
+                        "payloadSummary": outcome.payload_summary,
+                        "directFileWrite": false,
+                        "fileWritten": false,
+                        "externalWritesExecuted": false,
+                        "directWritesExecuted": false,
+                    }),
+                    None,
+                )
+            }
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
         | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
@@ -8352,6 +8593,12 @@ async fn prepare_kernel_write_proposal(
             .get("content")
             .and_then(Value::as_str)
             .map(|content| openlife_core::agent::metadata_safe_text_digest(content).1)
+            .or_else(|| {
+                after
+                    .get("source_digest")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| "sha256:missing".into());
         let binding = format!(
             "{}\0{}\0{}",
@@ -8404,6 +8651,14 @@ async fn prepare_kernel_write_proposal(
             openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+        }
+        MainChatKernelWriteOutcomeKind::CalendarEventProposal
+        | MainChatKernelWriteOutcomeKind::EmailDraftProposal
+        | MainChatKernelWriteOutcomeKind::BrowserOpenProposal => {
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+        }
+        MainChatKernelWriteOutcomeKind::LocalUtilityProposal => {
             openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
@@ -9924,6 +10179,31 @@ async fn build_kernel_write_outcome_command_surface_result(
         )
         .await,
     );
+    execution_transcript.extend(
+        append_task_scoped_agent_reflection(
+            state,
+            task_session_id,
+            TaskScopedAgentReflection {
+                run_id: &agent_run.id,
+                outcome: if outcome.hard_blocked {
+                    "blocked"
+                } else {
+                    "waiting_review"
+                },
+                successful_action_count: tool_calls
+                    .iter()
+                    .filter(|call| matches!(call.status, ToolCallStatus::Success))
+                    .count(),
+                failed_or_unknown_action_count: tool_calls
+                    .iter()
+                    .filter(|call| !matches!(call.status, ToolCallStatus::Success))
+                    .count(),
+                proposal_count: agent_run.generated_proposals.len(),
+                business_fact_written: false,
+            },
+        )
+        .await,
+    );
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -11125,6 +11405,7 @@ async fn command_surface_kernel_hs_context(
         &life_model,
         life_model_available,
         hs_packet.as_ref(),
+        user_text,
         warnings,
     );
     (life_model, Some(context))
@@ -11134,11 +11415,13 @@ async fn command_surface_kernel_context_candidates(
     state: &Arc<AppState>,
     configured_knowledge_roots: &[String],
     selected_skill_id: Option<&str>,
+    task_text: &str,
 ) -> Result<Vec<ContextSourceCandidate>, String> {
     let mut candidates = Vec::new();
     candidates.extend(load_configured_knowledge_context_candidates(
         configured_knowledge_roots,
         selected_skill_id,
+        task_text,
     ));
     ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id);
     candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
@@ -11166,16 +11449,19 @@ fn build_kernel_hs_context(
     life_model: &LifeModel,
     life_model_available: bool,
     packet: Option<&RuntimeHSPacket>,
+    task_text: &str,
     mut warning_codes: Vec<String>,
 ) -> MainChatKernelHsContext {
     warning_codes.sort();
     warning_codes.dedup();
 
-    let included_sections = if life_model_available {
-        included_life_model_sections(life_model)
-    } else {
-        Vec::new()
-    };
+    let life_model_runtime_packet = life_model_available
+        .then(|| openlife_core::agent::LifeModelRuntimeContextV1::build(life_model, task_text))
+        .flatten();
+    let included_sections = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| packet.selected_sections.clone())
+        .unwrap_or_default();
     let selected_policy_ids = packet
         .map(|packet| packet.audit.selected_policy_ids.clone())
         .unwrap_or_default()
@@ -11218,25 +11504,27 @@ fn build_kernel_hs_context(
                 .all(|guidance| guidance.policy_boundary.proposal_first_preserved)
         })
         .unwrap_or(true);
-    let freshness = life_model_available
-        .then(|| bounded_label(&life_model.metadata.updated_at, MAX_ROUTE_LABEL_CHARS))
+    let freshness = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| bounded_label(&packet.source_updated_at, MAX_ROUTE_LABEL_CHARS))
         .filter(|value| !value.is_empty())
-        .or_else(|| life_model_available.then(|| chrono::Utc::now().to_rfc3339()));
+        .or_else(|| life_model_runtime_packet.as_ref().map(|_| "unknown".into()));
     let source_provenance = Some(match packet {
         Some(packet) => format!(
-            "life_model_manager.load_existing + hs_selector.audit:{}",
+            "life_model_manager.load_existing + lifemodel_runtime_context.v1 + hs_selector.audit:{}",
             bounded_label(&packet.audit.input_digest, MAX_ROUTE_LABEL_CHARS)
         ),
-        None => "life_model_manager.load_existing + hs_selector.none".into(),
+        None => "life_model_manager.load_existing + lifemodel_runtime_context.v1 + hs_selector.none".into(),
     });
     let privacy_class = Some("private".to_string());
-    let summary_source_id = life_model_available.then(|| "hs.summary.lifemodel".to_string());
+    let summary_source_id = life_model_runtime_packet
+        .as_ref()
+        .map(|_| "hs.summary.lifemodel".to_string());
 
-    let summary_content = life_model_available.then(|| {
+    let summary_content = life_model_runtime_packet.as_ref().map(|runtime_packet| {
         bounded_text(
             &render_kernel_hs_summary(
-                life_model,
-                &included_sections,
+                runtime_packet,
                 packet,
                 source_provenance.as_deref().unwrap_or("unknown"),
                 freshness.as_deref().unwrap_or("unknown"),
@@ -11331,8 +11619,7 @@ fn build_kernel_hs_context(
 }
 
 fn render_kernel_hs_summary(
-    life_model: &LifeModel,
-    included_sections: &[String],
+    runtime_packet: &openlife_core::agent::LifeModelRuntimeContextV1,
     packet: Option<&RuntimeHSPacket>,
     provenance: &str,
     freshness: &str,
@@ -11345,48 +11632,9 @@ fn render_kernel_hs_summary(
     let accepted_guidance_count = packet
         .map(|packet| packet.guidance_refs.len())
         .unwrap_or_default();
-    let default_life_model = LifeModel::default_model();
-    let current_focus = if life_model.state.current_focus == default_life_model.state.current_focus
-    {
-        String::new()
-    } else {
-        bounded_label(&life_model.state.current_focus, MAX_REASON_CHARS)
-    };
-    let energy_level = if life_model.state.health_status.energy_level == 0
-        || life_model.state.health_status.energy_level
-            == default_life_model.state.health_status.energy_level
-    {
-        "unknown".to_string()
-    } else {
-        life_model.state.health_status.energy_level.to_string()
-    };
-    let identity_name_present = !life_model.identity.name.trim().is_empty();
-    let active_goal_count = life_model
-        .goals
-        .short_term
-        .iter()
-        .filter(|goal| goal.status != "completed")
-        .count()
-        + life_model
-            .goals
-            .daily
-            .iter()
-            .filter(|goal| !goal.done)
-            .count();
-
     format!(
-        "LifeModel-HS bounded summary\nsource: hs.summary.lifemodel\nprovenance: {provenance}\nfreshness: {freshness}\nprivacy: {privacy_class}\nsections: {}\nidentity_name_present: {identity_name_present}\nactive_goal_count: {active_goal_count}\nenergy_level: {}\ncurrent_focus: {}\nselected_policy_ids: {selected_policy_ids}\naccepted_guidance_count: {accepted_guidance_count}\nwarnings: {}",
-        if included_sections.is_empty() {
-            "none".into()
-        } else {
-            included_sections.join(",")
-        },
-        energy_level,
-        if current_focus.is_empty() {
-            "none".into()
-        } else {
-            current_focus
-        },
+        "{}\nselection_freshness: {freshness}\nprovenance: {provenance}\nprivacy: {privacy_class}\nselected_policy_ids: {selected_policy_ids}\naccepted_guidance_count: {accepted_guidance_count}\nwarnings: {}",
+        runtime_packet.render_prompt(),
         if warning_codes.is_empty() {
             "none".into()
         } else {
@@ -12238,8 +12486,164 @@ fn plan_kernel_write_outcome(
 
     if input
         .policy_decision
+        .allows(AllowedCapability::CalendarEventProposal)
+    {
+        let values = governed_backtick_values(user_text);
+        let (title, scheduled_at) = match values.as_slice() {
+            [title, scheduled_at, ..] => (*title, *scheduled_at),
+            _ => ("Untitled event", ""),
+        };
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::CalendarEventProposal,
+            action_type: "proposal.create".into(),
+            target: "calendar.events".into(),
+            reason: "calendar changes require Review Center approval".into(),
+            payload_summary: payload_summary.clone(),
+            governed_input: serde_json::json!({
+                "title": bounded_text(title, MAX_TOOL_QUERY_CHARS),
+                "scheduled_at": bounded_text(scheduled_at, MAX_TOOL_QUERY_CHARS),
+                "description": "",
+                "location": "",
+                "tool": "calendar.propose_event",
+                "proposal_kind": "calendar_event",
+                "governedInputSource": "kernel_calendar_event_proposal",
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("scheduled_task".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    if input
+        .policy_decision
+        .allows(AllowedCapability::EmailDraftProposal)
+    {
+        let values = governed_backtick_values(user_text);
+        let (to, subject, body) = match values.as_slice() {
+            [to, subject, body, ..] => (*to, *subject, *body),
+            _ => ("", "", ""),
+        };
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::EmailDraftProposal,
+            action_type: "proposal.create".into(),
+            target: "email.drafts".into(),
+            reason: "email draft handoff requires Review Center approval".into(),
+            payload_summary: payload_summary.clone(),
+            governed_input: serde_json::json!({
+                "to": bounded_text(to, MAX_TOOL_QUERY_CHARS),
+                "subject": bounded_text(subject, MAX_TOOL_QUERY_CHARS),
+                "body": bounded_text(body, MAX_CONTEXT_CONTENT_CHARS),
+                "content": bounded_text(body, MAX_CONTEXT_CONTENT_CHARS),
+                "filename": "email-draft.txt",
+                "tool": "email.propose_draft",
+                "proposal_kind": "email_draft",
+                "governedInputSource": "kernel_email_draft_proposal",
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("data_export".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    if input
+        .policy_decision
+        .allows(AllowedCapability::BrowserOpenProposal)
+    {
+        let url = governed_backtick_values(user_text)
+            .into_iter()
+            .find(|value| value.starts_with("https://") || value.starts_with("http://"))
+            .or_else(|| extract_http_url(user_text))
+            .unwrap_or("");
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::BrowserOpenProposal,
+            action_type: "proposal.create".into(),
+            target: bounded_text(url, MAX_TOOL_QUERY_CHARS),
+            reason: "opening an external browser destination requires Review Center approval"
+                .into(),
+            payload_summary,
+            governed_input: serde_json::json!({
+                "url": bounded_text(url, MAX_TOOL_QUERY_CHARS),
+                "content": format!(
+                    "Open the reviewed URL in the system browser: {}",
+                    bounded_text(url, MAX_TOOL_QUERY_CHARS)
+                ),
+                "tool": "browser.open",
+                "governedInputSource": "kernel_browser_open_proposal",
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("data_export".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    if input
+        .policy_decision
+        .allows(AllowedCapability::LocalUtilityProposal)
+    {
+        let command = governed_backtick_values(user_text)
+            .first()
+            .copied()
+            .unwrap_or("");
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::LocalUtilityProposal,
+            action_type: "proposal.create".into(),
+            target: bounded_text(command, MAX_TOOL_QUERY_CHARS),
+            reason: "bounded local utility execution requires Review Center approval".into(),
+            payload_summary,
+            governed_input: serde_json::json!({
+                "command": bounded_text(command, MAX_TOOL_QUERY_CHARS),
+                "content": format!(
+                    "Run the reviewed bounded local utility: {}",
+                    bounded_text(command, MAX_TOOL_QUERY_CHARS)
+                ),
+                "tool": "local.run_utility",
+                "timeout_ms": 3000,
+                "governedInputSource": "kernel_local_utility_proposal",
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("data_export".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: false,
+        });
+    }
+
+    if input
+        .policy_decision
         .allows(AllowedCapability::FileWriteProposal)
     {
+        if let Some(operation) = governed_file_operation(user_text) {
+            return Some(MainChatKernelWriteOutcome {
+                kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
+                action_type: "proposal.create".into(),
+                target: bounded_text(operation.source(), MAX_TOOL_QUERY_CHARS),
+                reason: format!(
+                    "file {} request must create a governed ExternalWriteAction proposal",
+                    operation.name()
+                ),
+                payload_summary: payload_summary.clone(),
+                governed_input: operation.governed_input(model_arguments_ignored),
+                proposal_type: Some("external_write_action".into()),
+                blocker_code: Some("proposal_review_required".into()),
+                requires_confirmation: false,
+                hard_blocked: false,
+                replayable: true,
+            });
+        }
         if let Some(artifact_specs) = generated_artifact_specs(user_text) {
             return Some(MainChatKernelWriteOutcome {
                 kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
@@ -12418,6 +12822,99 @@ fn extract_second_backtick_value(value: &str) -> Option<&str> {
         .nth(3)
         .map(str::trim)
         .filter(|part| !part.is_empty())
+}
+
+fn governed_backtick_values(value: &str) -> Vec<&str> {
+    value
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn extract_http_url(value: &str) -> Option<&str> {
+    value.split_whitespace().find_map(|token| {
+        let trimmed = token.trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '"' | '\'' | ',' | '，' | '.' | '。' | ')' | '）'
+            )
+        });
+        (trimmed.starts_with("https://") || trimmed.starts_with("http://")).then_some(trimmed)
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GovernedFileOperation<'a> {
+    Move { source: &'a str, target: &'a str },
+    Trash { source: &'a str },
+    Restore { source: &'a str, target: &'a str },
+}
+
+impl<'a> GovernedFileOperation<'a> {
+    fn source(&self) -> &str {
+        match self {
+            Self::Move { source, .. } | Self::Trash { source } | Self::Restore { source, .. } => {
+                source
+            }
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Move { .. } => "move",
+            Self::Trash { .. } => "trash",
+            Self::Restore { .. } => "restore",
+        }
+    }
+
+    fn governed_input(&self, model_arguments_ignored: bool) -> Value {
+        let target = match self {
+            Self::Move { target, .. } | Self::Restore { target, .. } => Some(*target),
+            Self::Trash { .. } => None,
+        };
+        serde_json::json!({
+            "operation": self.name(),
+            "source_path": self.source(),
+            "target_path": target,
+            "governedInputSource": "kernel_file_operation_proposal",
+            "directFileWrite": false,
+            "directWritesExecuted": false,
+            "modelArgumentsIgnored": model_arguments_ignored,
+        })
+    }
+}
+
+fn governed_file_operation(user_text: &str) -> Option<GovernedFileOperation<'_>> {
+    let lower = user_text.to_ascii_lowercase();
+    let values = governed_backtick_values(user_text);
+    if contains_any(
+        &lower,
+        &["move to trash", "trash file", "回收文件", "移到废纸篓"],
+    ) {
+        return values
+            .first()
+            .copied()
+            .map(|source| GovernedFileOperation::Trash { source });
+    }
+    if contains_any(&lower, &["restore file", "恢复文件"]) {
+        return match values.as_slice() {
+            [source, target, ..] => Some(GovernedFileOperation::Restore { source, target }),
+            _ => None,
+        };
+    }
+    if contains_any(
+        &lower,
+        &["move file", "rename file", "移动文件", "重命名文件"],
+    ) {
+        return match values.as_slice() {
+            [source, target, ..] => Some(GovernedFileOperation::Move { source, target }),
+            _ => None,
+        };
+    }
+    None
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -12998,6 +13495,20 @@ fn synthesize_write_outcome_answer(outcome: &MainChatKernelWriteOutcome) -> Stri
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
             "I created a file-write proposal for review. I did not write the file.".into()
         }
+        MainChatKernelWriteOutcomeKind::CalendarEventProposal => {
+            "I created a calendar-event proposal for review. I did not add it to a calendar."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::EmailDraftProposal => {
+            "I created an email-draft proposal for review. I did not send an email.".into()
+        }
+        MainChatKernelWriteOutcomeKind::BrowserOpenProposal => {
+            "I created a browser-open proposal for review. I did not open the URL.".into()
+        }
+        MainChatKernelWriteOutcomeKind::LocalUtilityProposal => {
+            "I created a bounded local-utility proposal for review. I did not run the command."
+                .into()
+        }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => {
             "I cannot perform that external write directly. It requires explicit confirmation and a governed provider path; no external side effect was executed.".into()
         }
@@ -13092,7 +13603,7 @@ where
         selected_skill_id: selected_skill_id.clone(),
     });
     let (context_metadata, _system_prompt) =
-        kernel.compile_context(session_id.trim(), selected_skill_id.clone());
+        kernel.compile_context(session_id.trim(), selected_skill_id.clone(), user_text);
     event_sink.emit(MainChatKernelEvent::ContextLoaded {
         context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
         selected_source_count: context_metadata.selected_source_count,
@@ -13692,6 +14203,14 @@ mod tests {
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn kernel_preserves_tool_gateway_timeout_before_transport_fallback() {
+        assert_eq!(
+            typed_kernel_read_policy_code(Some("tool_gateway_timeout")),
+            Some("timeout")
+        );
+    }
 
     async fn create_open_terminal_review_fixture(
         state: &Arc<AppState>,
@@ -14313,6 +14832,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         prompts: Arc<Mutex<Vec<String>>>,
         route_metadata: MainChatRouteMetadata,
+        respond_from_lifemodel_context: bool,
     }
 
     impl ScriptedModelClient {
@@ -14339,7 +14859,13 @@ mod tests {
                     readiness_gate_required: false,
                     scripted_response_configured: true,
                 },
+                respond_from_lifemodel_context: false,
             }
+        }
+
+        fn with_lifemodel_sensitive_response(mut self) -> Self {
+            self.respond_from_lifemodel_context = true;
+            self
         }
 
         fn sequence(responses: Vec<String>) -> Self {
@@ -14416,6 +14942,8 @@ mod tests {
                 observed_prompt.push_str("\n\n");
                 observed_prompt.push_str(&block.content);
             }
+            let lifemodel_context_present =
+                observed_prompt.contains("preferences.communication_style = 简洁直接");
             self.prompts
                 .lock()
                 .expect("prompts lock")
@@ -14444,12 +14972,19 @@ mod tests {
                     });
                 }
             }
-            let response = self
-                .responses
-                .lock()
-                .expect("responses lock")
-                .pop_front()
-                .unwrap_or_else(|| Err("scripted model response sequence exhausted".into()));
+            let response = if self.respond_from_lifemodel_context {
+                Ok(if lifemodel_context_present {
+                    "简洁版：周五前请确认项目状态。".into()
+                } else {
+                    "通用版：这里是一封完整的项目状态确认邮件。".into()
+                })
+            } else {
+                self.responses
+                    .lock()
+                    .expect("responses lock")
+                    .pop_front()
+                    .unwrap_or_else(|| Err("scripted model response sequence exhausted".into()))
+            };
             match response {
                 Ok(content) => Ok(MainChatModelGeneration {
                     content,
@@ -14786,6 +15321,9 @@ mod tests {
             }
             MainChatAgentStrategy::FileWriteProposal => {
                 "Write this to file notes.txt."
+            }
+            MainChatAgentStrategy::ActionProposal => {
+                "Create calendar event `Planning review` at `2026-08-12T09:00:00+08:00`."
             }
             MainChatAgentStrategy::ReviewMaturation => {
                 "Review what changed in my working style this month."
@@ -18645,6 +19183,154 @@ mod tests {
         assert!(!result.direct_writes_executed);
     }
 
+    #[tokio::test]
+    async fn policy_authorized_file_move_and_trash_remain_proposal_only() {
+        for (session_id, prompt, expected_operation, expected_target) in [
+            (
+                "typed-file-move-proposal",
+                "Move file `/safe/source.md` to `/safe/target.md`.",
+                "move",
+                Some("/safe/target.md"),
+            ),
+            (
+                "typed-file-trash-proposal",
+                "Move to trash `/safe/source.md`.",
+                "trash",
+                None,
+            ),
+        ] {
+            let model = ScriptedModelClient::ok("model should not be called");
+            let kernel = test_kernel(model.clone(), Vec::new());
+            let mut events = BufferedMainChatEventSink::default();
+            let result = kernel
+                .run_turn(
+                    MainChatTurnInput {
+                        session_id: session_id.into(),
+                        provider_authorization: policy_allowed_authorization(session_id),
+                        messages: vec![user_message(prompt)],
+                        selected_skill_id: None,
+                        policy_decision: test_policy_decision(
+                            MainChatAgentStrategy::FileWriteProposal,
+                        ),
+                        model_supplied_tool_arguments: Some(serde_json::json!({
+                            "operation": "overwrite",
+                            "path": "/unsafe/model-selected"
+                        })),
+                        runtime_fact_direct_answer: false,
+                    },
+                    &mut events,
+                )
+                .await;
+
+            assert_eq!(model.call_count(), 0);
+            let outcome = result.write_outcome.expect("file operation proposal");
+            assert_eq!(
+                outcome.kind,
+                MainChatKernelWriteOutcomeKind::FileWriteProposal
+            );
+            assert_eq!(outcome.governed_input["operation"], expected_operation);
+            assert_eq!(outcome.governed_input["source_path"], "/safe/source.md");
+            assert_eq!(
+                outcome
+                    .governed_input
+                    .get("target_path")
+                    .and_then(Value::as_str),
+                expected_target
+            );
+            assert_eq!(
+                outcome.governed_input["modelArgumentsIgnored"],
+                serde_json::json!(true)
+            );
+            assert!(!result.direct_writes_executed);
+        }
+    }
+
+    #[tokio::test]
+    async fn calendar_email_and_browser_actions_stage_exact_review_proposals() {
+        for (session_id, prompt, expected_kind, expected_target) in [
+            (
+                "calendar-action-proposal",
+                "Create calendar event `Planning review` at `2026-08-12T09:00:00+08:00`.",
+                MainChatKernelWriteOutcomeKind::CalendarEventProposal,
+                "calendar.events",
+            ),
+            (
+                "email-draft-action-proposal",
+                "Draft email to `alice@example.com` subject `Update` body `The review is ready`.",
+                MainChatKernelWriteOutcomeKind::EmailDraftProposal,
+                "email.drafts",
+            ),
+            (
+                "browser-open-action-proposal",
+                "Open in browser `https://example.com/report`.",
+                MainChatKernelWriteOutcomeKind::BrowserOpenProposal,
+                "https://example.com/report",
+            ),
+            (
+                "local-utility-action-proposal",
+                "Run local utility `uptime`.",
+                MainChatKernelWriteOutcomeKind::LocalUtilityProposal,
+                "uptime",
+            ),
+        ] {
+            let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+                session_id,
+                prompt,
+                None,
+                openlife_core::agent::AgentTaskKind::Conversation,
+            );
+            assert_eq!(
+                ingress.selected_strategy,
+                MainChatAgentStrategy::ActionProposal
+            );
+            let authorization = MainChatProviderAuthorization::from_ingress_decision(&ingress)
+                .expect("provider authorization");
+            let model = ScriptedModelClient::ok("model should not be called");
+            let kernel = test_kernel(model.clone(), Vec::new());
+            let mut events = BufferedMainChatEventSink::default();
+            let result = kernel
+                .run_turn(
+                    MainChatTurnInput {
+                        session_id: session_id.into(),
+                        provider_authorization: authorization,
+                        messages: vec![user_message(prompt)],
+                        selected_skill_id: None,
+                        policy_decision: ingress.policy_decision,
+                        model_supplied_tool_arguments: Some(serde_json::json!({
+                            "target": "model-selected-target"
+                        })),
+                        runtime_fact_direct_answer: false,
+                    },
+                    &mut events,
+                )
+                .await;
+
+            assert_eq!(model.call_count(), 0);
+            let outcome = result.write_outcome.expect("action proposal outcome");
+            assert_eq!(outcome.kind, expected_kind);
+            assert_eq!(outcome.target, expected_target);
+            if matches!(
+                outcome.kind,
+                MainChatKernelWriteOutcomeKind::BrowserOpenProposal
+                    | MainChatKernelWriteOutcomeKind::LocalUtilityProposal
+            ) {
+                assert!(
+                    outcome
+                        .governed_input
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| !content.trim().is_empty()),
+                    "DataExport-backed action proposals must survive acceptance validation"
+                );
+            }
+            assert_eq!(
+                outcome.governed_input["modelArgumentsIgnored"],
+                serde_json::json!(true)
+            );
+            assert!(!result.direct_writes_executed);
+        }
+    }
+
     fn generated_artifact_turn_input(session_id: &str, prompt: &str) -> MainChatTurnInput {
         let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
             session_id,
@@ -19545,11 +20231,23 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_kernel_hs_summary_does_not_treat_default_state_as_fact() {
-        let life_model = LifeModel::default_model();
-        let summary = render_kernel_hs_summary(
+    fn main_chat_kernel_lifemodel_packet_is_task_relevant_and_excludes_state_compatibility() {
+        let mut life_model = sample_hs_life_model();
+        life_model.state.current_focus = "stale compatibility focus".into();
+        life_model
+            .goals
+            .daily
+            .push(openlife_core::life_model::DailyGoal {
+                name: "stale compatibility daily task".into(),
+                ..Default::default()
+            });
+        let runtime_packet = openlife_core::agent::LifeModelRuntimeContextV1::build(
             &life_model,
-            &["state".to_string()],
+            "Help me Ship Goal 6",
+        )
+        .expect("task-relevant LifeModel packet");
+        let summary = render_kernel_hs_summary(
+            &runtime_packet,
             None,
             "hs_selector.audit:none",
             "unknown",
@@ -19557,22 +20255,10 @@ mod tests {
             &[],
         );
 
-        assert!(summary.contains("energy_level: unknown"));
-        assert!(summary.contains("current_focus: none"));
-        assert!(!summary.contains("energy_level: 7"));
-        assert!(!summary.contains("current_focus: 构建人生模型"));
-
-        let empty_summary = render_kernel_hs_summary(
-            &LifeModel::default(),
-            &["state".to_string()],
-            None,
-            "hs_selector.audit:none",
-            "unknown",
-            "private",
-            &[],
-        );
-        assert!(empty_summary.contains("energy_level: unknown"));
-        assert!(!empty_summary.contains("energy_level: 0"));
+        assert!(summary.contains("goals.short_term"));
+        assert!(!summary.contains("stale compatibility focus"));
+        assert!(!summary.contains("stale compatibility daily task"));
+        assert!(summary.contains("permissions_granted: false"));
     }
 
     #[tokio::test]
@@ -19580,7 +20266,8 @@ mod tests {
         let model = ScriptedModelClient::ok("HS-aware direct answer.");
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, false);
-        let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
+        let hs_context =
+            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
@@ -19617,7 +20304,7 @@ mod tests {
             .is_some_and(|value| value.contains("hs_selector.audit")));
         assert!(hs
             .included_life_model_sections
-            .contains(&"state".to_string()));
+            .contains(&"goals".to_string()));
         assert!(context
             .selected_source_ids
             .contains(&"hs.summary.lifemodel".to_string()));
@@ -19636,11 +20323,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirmed_lifemodel_context_changes_the_direct_answer_product_path() {
+        let user_text = "Write a project status confirmation email for Friday.";
+        let mut life_model = LifeModel::default_model();
+        life_model.preferences.communication_style = "简洁直接".into();
+        let hs_context = build_kernel_hs_context(&life_model, true, None, user_text, Vec::new());
+        let with_context_model =
+            ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
+        let without_context_model =
+            ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
+        let mut with_context_events = BufferedMainChatEventSink::default();
+        let mut without_context_events = BufferedMainChatEventSink::default();
+
+        let with_context = test_kernel_with_hs(with_context_model.clone(), hs_context, Vec::new())
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-lifemodel-ab-with".into(),
+                    provider_authorization: policy_allowed_authorization("lifemodel-ab-with"),
+                    messages: vec![user_message(user_text)],
+                    selected_skill_id: None,
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut with_context_events,
+            )
+            .await;
+        let without_context = test_kernel(without_context_model.clone(), Vec::new())
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-lifemodel-ab-without".into(),
+                    provider_authorization: policy_allowed_authorization("lifemodel-ab-without"),
+                    messages: vec![user_message(user_text)],
+                    selected_skill_id: None,
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut without_context_events,
+            )
+            .await;
+
+        assert_eq!(
+            with_context
+                .assistant_message
+                .as_ref()
+                .expect("LifeModel-aware answer")
+                .content,
+            "简洁版：周五前请确认项目状态。"
+        );
+        assert_eq!(
+            without_context
+                .assistant_message
+                .as_ref()
+                .expect("generic answer")
+                .content,
+            "通用版：这里是一封完整的项目状态确认邮件。"
+        );
+        assert_ne!(
+            with_context.assistant_message.as_ref().unwrap().content,
+            without_context.assistant_message.as_ref().unwrap().content
+        );
+        assert!(with_context
+            .context_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata
+                .selected_source_ids
+                .contains(&"hs.summary.lifemodel".to_string())));
+        assert!(without_context
+            .context_metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata
+                .selected_source_ids
+                .contains(&"hs.summary.lifemodel".to_string())));
+    }
+
+    #[tokio::test]
     async fn main_chat_kernel_goal_6_accepted_guidance_can_influence_without_policy_override() {
         let model = ScriptedModelClient::ok("Guided answer.");
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
-        let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
+        let hs_context =
+            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
@@ -19683,7 +20447,8 @@ mod tests {
         let model = ScriptedModelClient::ok("model should not be called");
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
-        let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
+        let hs_context =
+            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let memory_user_text =
             "Please remember this private health fact: coffee causes heart palpitations.";
         let memory_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
@@ -19829,7 +20594,8 @@ mod tests {
         let model = ScriptedModelClient::ok("model should not be called");
         let life_model = sample_hs_life_model();
         let packet = hs_packet(true, true);
-        let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
+        let hs_context =
+            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
@@ -19882,6 +20648,7 @@ mod tests {
             &LifeModel::default(),
             false,
             None,
+            "Give a basic direct answer.",
             vec![
                 "hs_lifemodel_missing".into(),
                 "hs_lifemodel_malformed".into(),
@@ -19931,7 +20698,8 @@ mod tests {
         let model = ScriptedModelClient::ok("No raw prompt dump.");
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
-        let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
+        let hs_context =
+            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let raw_candidates = vec![
             ContextSourceCandidate::new(
                 ContextSourceKind::LifeModelYaml,
@@ -19969,7 +20737,7 @@ mod tests {
             .await;
 
         let prompt = model.observed_prompts().join("\n");
-        assert!(prompt.contains("LifeModel-HS bounded summary"));
+        assert!(prompt.contains("Task-relevant confirmed LifeModel context"));
         assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
         assert!(!prompt.contains("RAW_MEMORY_DUMP_SECRET"));
         let context = result.context_metadata.as_ref().expect("context metadata");

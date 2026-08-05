@@ -651,7 +651,7 @@ async fn execute_scheduled_task(
     };
 
     let mut loop_result = {
-        let action_ctx = openlife_core::agent::ActionExecutionContext::new(
+        let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
             &resources.governed.shared.registry,
             &resources.governed.shared.permission_store,
             &resources.governed.shared.audit_store,
@@ -674,15 +674,16 @@ async fn execute_scheduled_task(
         .with_tool_dispatch_observer(&tool_observer)
         .with_tool_started_transition_observer(&tool_observer)
         .with_canonical_write_admission(&tool_observer);
-        let action_ctx = if let Some(reader) = resources
+        if let Some(reader) = resources
             .governed
             .memory_lifecycle_retrieval_reader
             .as_ref()
         {
-            action_ctx.with_memory_lifecycle_retrieval_reader(reader)
-        } else {
-            action_ctx
-        };
+            action_ctx = action_ctx.with_memory_lifecycle_retrieval_reader(reader);
+        }
+        if let Some(canonical_state) = resources.governed.canonical_state.as_ref() {
+            action_ctx = action_ctx.with_canonical_state(canonical_state);
+        }
         agent_loop
             .run(
                 &task,

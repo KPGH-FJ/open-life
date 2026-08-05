@@ -1007,6 +1007,9 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         {
             action_ctx = action_ctx.with_memory_lifecycle_retrieval_reader(retrieval_reader);
         }
+        if let Some(canonical_state) = resources.execution.governed.canonical_state.as_ref() {
+            action_ctx = action_ctx.with_canonical_state(canonical_state);
+        }
         action_ctx = action_ctx.with_agent_run_store(&resources.execution.agent_run_store);
         if let Some(ref packet) = hs_packet {
             action_ctx = action_ctx.with_hs_runtime_packet(packet);

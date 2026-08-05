@@ -459,6 +459,74 @@ describe("Workbench governed action journey", () => {
     ).toEqual({ label: "文件状态未知", status: "unknown" });
   });
 
+  it("labels governed actions by their exact operation and evidence boundary", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const base = snapshot.reviewEnvelope.data!.items[0];
+    const action = base.allowedActions.find(candidate => candidate.kind === "approve")!;
+    const moved: ReviewItem = {
+      ...base,
+      type: "external_write_action",
+      decisionContext: {
+        ...base.decisionContext,
+        actionContract: {
+          capabilityId: "filesystem.write",
+          operation: "move",
+          confirmationSummary: "Confirm exact source and destination.",
+          terminalEvidenceSummary: "Require matching filesystem receipt.",
+          effectBoundary: "local_filesystem",
+        },
+      },
+      artifactEvidence: {
+        state: "confirmed",
+        targetReferenceDigest: "sha256:target",
+        contentDigest: "sha256:content",
+        observedContentDigest: "sha256:content",
+        byteSize: 12,
+        mediaType: "text/markdown; charset=utf-8",
+      },
+    };
+    expect(reviewItemStatus(moved)).toMatchObject({ label: "文件移动已核验", status: "success" });
+
+    const browser: ReviewItem = {
+      ...base,
+      type: "data_export",
+      status: "approved",
+      materializationStatus: "applied",
+      decisionContext: {
+        ...base.decisionContext,
+        actionContract: {
+          capabilityId: "browser.open",
+          operation: "open_browser_url",
+          confirmationSummary: "Confirm one exact HTTP(S) address.",
+          terminalEvidenceSummary: "System handoff only; page load remains unverified.",
+          effectBoundary: "os_browser_handoff_unverified",
+        },
+      },
+    };
+    expect(reviewItemStatus(browser)).toMatchObject({
+      label: "浏览器交接已记录",
+      status: "success",
+    });
+    expect(
+      reviewDecisionFeedback(
+        {
+          phase: "resolved",
+          action,
+          refreshed: {
+            reviewItemId: browser.id,
+            status: "approved",
+            materializationStatus: "applied",
+          },
+        },
+        browser
+      )
+    ).toMatchObject({
+      title: "浏览器交接已记录",
+      body: expect.stringContaining("page load remains unverified"),
+    });
+  });
+
   it("does not delete a conversation until the explicit confirmation action", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");

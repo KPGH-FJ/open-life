@@ -1,7 +1,7 @@
 use crate::agent::action_executor::{ToolDispatchAttempt, ToolDispatchProcessRisk};
 use crate::agent::main_chat_governance_intent::{
-    extract_main_chat_intent_signals, MainChatBlockerRequirement, MainChatDurableWriteRequirement,
-    MainChatIntentSignals,
+    extract_main_chat_intent_signals, MainChatActionProposalRequirement,
+    MainChatBlockerRequirement, MainChatDurableWriteRequirement, MainChatIntentSignals,
 };
 use crate::agent::main_chat_memory_candidate::is_supplied_text_transformation_request;
 use crate::agent::types::{AgentRunReceiptKey, AgentTaskKind};
@@ -40,6 +40,7 @@ pub enum MainChatAgentStrategy {
     MemoryProposal,
     LifeModelProposal,
     FileWriteProposal,
+    ActionProposal,
     ReviewMaturation,
     BlockedConfirmation,
 }
@@ -55,6 +56,7 @@ impl MainChatAgentStrategy {
             Self::MemoryProposal => "memory_proposal",
             Self::LifeModelProposal => "life_model_proposal",
             Self::FileWriteProposal => "file_write_proposal",
+            Self::ActionProposal => "action_proposal",
             Self::ReviewMaturation => "review_maturation",
             Self::BlockedConfirmation => "blocked_confirmation",
         }
@@ -83,6 +85,7 @@ impl MainChatAgentStrategy {
             "memory_proposal" => Ok(Self::MemoryProposal),
             "life_model_proposal" => Ok(Self::LifeModelProposal),
             "file_write_proposal" => Ok(Self::FileWriteProposal),
+            "action_proposal" => Ok(Self::ActionProposal),
             "review_maturation" => Ok(Self::ReviewMaturation),
             "blocked_confirmation" => Ok(Self::BlockedConfirmation),
             _ => Err(corrupt_persisted_enum_text(
@@ -288,6 +291,8 @@ pub struct IntentFrame {
     pub requests_memory_rollback_after_commit: bool,
     pub requests_lifemodel_change: bool,
     pub requests_file_change: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_proposal_requirement: Option<MainChatActionProposalRequirement>,
     pub requests_plan_task: bool,
     #[serde(default)]
     pub transient_state_intent: Option<TransientStateIntent>,
@@ -344,8 +349,15 @@ impl IntentFrame {
         let requests_file_change = is_governed_file_write_intent(&lower)
             && !has_embedded_untrusted_instruction
             && !advice_only;
-        let requests_durable_write =
-            requests_memory_change || requests_lifemodel_change || requests_file_change;
+        let action_proposal_requirement = if !has_embedded_untrusted_instruction && !advice_only {
+            governance_intent.action_proposal_requirement
+        } else {
+            None
+        };
+        let requests_durable_write = requests_memory_change
+            || requests_lifemodel_change
+            || requests_file_change
+            || action_proposal_requirement.is_some();
         let requires_external_read = !has_embedded_untrusted_instruction
             && (governance_intent.external_read_requirement.is_some()
                 || is_current_external_read_intent(&lower));
@@ -463,6 +475,7 @@ impl IntentFrame {
                 requests_memory_rollback_after_commit,
                 requests_lifemodel_change,
                 requests_file_change,
+                action_proposal_requirement,
                 requests_plan_task,
                 transient_state_intent,
                 requests_clarification,
@@ -644,6 +657,10 @@ pub enum AllowedCapability {
     MemoryProposal,
     LifeModelProposal,
     FileWriteProposal,
+    CalendarEventProposal,
+    EmailDraftProposal,
+    BrowserOpenProposal,
+    LocalUtilityProposal,
     ExternalWriteConfirmation,
     DangerousActionBlocker,
     ReviewMaturationBlocker,
@@ -670,6 +687,10 @@ impl AllowedCapability {
             Self::MemoryProposal => "memory.proposal",
             Self::LifeModelProposal => "life_model.proposal",
             Self::FileWriteProposal => "file_write.proposal",
+            Self::CalendarEventProposal => "calendar_event.proposal",
+            Self::EmailDraftProposal => "email_draft.proposal",
+            Self::BrowserOpenProposal => "browser_open.proposal",
+            Self::LocalUtilityProposal => "local_utility.proposal",
             Self::ExternalWriteConfirmation => "external_write.confirmation",
             Self::DangerousActionBlocker => "dangerous_action.blocker",
             Self::ReviewMaturationBlocker => "review_maturation.blocker",
@@ -1533,6 +1554,14 @@ impl PolicyDecision {
             {
                 MainChatAgentStrategy::FileWriteProposal
             }
+            PolicyRouteKind::ProposalOnlyWrite
+                if self.allows(AllowedCapability::CalendarEventProposal)
+                    || self.allows(AllowedCapability::EmailDraftProposal)
+                    || self.allows(AllowedCapability::BrowserOpenProposal)
+                    || self.allows(AllowedCapability::LocalUtilityProposal) =>
+            {
+                MainChatAgentStrategy::ActionProposal
+            }
             PolicyRouteKind::ProposalOnlyWrite => MainChatAgentStrategy::MemoryProposal,
             PolicyRouteKind::ConfirmationRequest => MainChatAgentStrategy::BlockedConfirmation,
             PolicyRouteKind::GovernedBlocker
@@ -2287,7 +2316,21 @@ fn policy_allowed_capabilities(
             }
             capabilities
         }
-        PolicyRouteKind::ProposalOnlyWrite => vec![AllowedCapability::MemoryProposal],
+        PolicyRouteKind::ProposalOnlyWrite => match intent.action_proposal_requirement {
+            Some(MainChatActionProposalRequirement::CalendarEvent) => {
+                vec![AllowedCapability::CalendarEventProposal]
+            }
+            Some(MainChatActionProposalRequirement::EmailDraft) => {
+                vec![AllowedCapability::EmailDraftProposal]
+            }
+            Some(MainChatActionProposalRequirement::BrowserOpen) => {
+                vec![AllowedCapability::BrowserOpenProposal]
+            }
+            Some(MainChatActionProposalRequirement::LocalUtility) => {
+                vec![AllowedCapability::LocalUtilityProposal]
+            }
+            None => vec![AllowedCapability::MemoryProposal],
+        },
         PolicyRouteKind::ConfirmationRequest => {
             vec![AllowedCapability::ExternalWriteConfirmation]
         }
@@ -3490,6 +3533,7 @@ pub enum ExecutionTranscriptEntryKind {
     Error,
     Retry,
     FinalResult,
+    Reflection,
     Fallback,
 }
 
@@ -3507,6 +3551,7 @@ impl ExecutionTranscriptEntryKind {
             Self::Error => "error",
             Self::Retry => "retry",
             Self::FinalResult => "final_result",
+            Self::Reflection => "reflection",
             Self::Fallback => "fallback",
         }
     }
@@ -3524,6 +3569,7 @@ impl ExecutionTranscriptEntryKind {
             "error" => Ok(Self::Error),
             "retry" => Ok(Self::Retry),
             "final_result" => Ok(Self::FinalResult),
+            "reflection" => Ok(Self::Reflection),
             "fallback" => Ok(Self::Fallback),
             _ => Err(corrupt_persisted_enum_text(
                 column,
@@ -4919,7 +4965,7 @@ impl AgentTaskSessionStore {
             anyhow::bail!("terminal_owner_proposal_blocker_missing");
         }
         let final_summary = if rejected {
-            "User rejected the permission required to resume this action; no tool effect was executed."
+            "User rejected the reviewed proposal; no governed effect was executed."
         } else {
             "Accepted Review proposal resolved the Main Chat task blocker."
         };
@@ -10961,6 +11007,7 @@ fn transcript_summary_code(kind: ExecutionTranscriptEntryKind) -> &'static str {
         ExecutionTranscriptEntryKind::Error => "error_state_recorded",
         ExecutionTranscriptEntryKind::Retry => "retry_state_recorded",
         ExecutionTranscriptEntryKind::FinalResult => "final_result_state_recorded",
+        ExecutionTranscriptEntryKind::Reflection => "reflection_state_recorded",
         ExecutionTranscriptEntryKind::Fallback => "fallback_state_recorded",
     }
 }
@@ -11001,7 +11048,7 @@ fn minimize_transcript_metadata(
     let mut default_denied = !matches!(value, Value::Null | Value::Object(_));
     if let Some(object) = value.as_object() {
         for (field, candidate) in object {
-            if transcript_metadata_field_value_allowed(field, candidate) {
+            if transcript_metadata_field_value_allowed(kind, field, candidate) {
                 minimized.insert(field.clone(), candidate.clone());
             } else {
                 default_denied = true;
@@ -11039,7 +11086,29 @@ fn minimize_transcript_metadata(
     Value::Object(minimized)
 }
 
-fn transcript_metadata_field_value_allowed(field: &str, value: &Value) -> bool {
+fn transcript_metadata_field_value_allowed(
+    kind: ExecutionTranscriptEntryKind,
+    field: &str,
+    value: &Value,
+) -> bool {
+    if kind == ExecutionTranscriptEntryKind::Reflection {
+        return match field {
+            "runId" => value.as_str().is_some_and(safe_typed_session_identifier),
+            "businessFactWritten" | "memoryWritten" | "lifeModelWritten" => {
+                matches!(value, Value::Bool(_))
+            }
+            "successfulActionCount" | "failedOrUnknownActionCount" | "proposalCount" => value
+                .as_u64()
+                .is_some_and(|count| count <= MAX_TASK_SESSION_METADATA_ITEMS as u64),
+            "scope" => value.as_str() == Some("task"),
+            "outcome" => matches!(
+                value.as_str(),
+                Some("completed" | "blocked" | "waiting_review" | "failed" | "unknown")
+            ),
+            "promotionStatus" => value.as_str() == Some("not_proposed"),
+            _ => false,
+        };
+    }
     const BOOLEAN_FIELDS: &[&str] = &[
         "acceptedDurableTruthWritten",
         "agentLoopAttempted",
@@ -11159,7 +11228,7 @@ fn transcript_metadata_field_value_allowed(field: &str, value: &Value) -> bool {
     false
 }
 
-fn transcript_metadata_v2_is_valid(value: &Value) -> bool {
+fn transcript_metadata_v2_is_valid(kind: ExecutionTranscriptEntryKind, value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.iter().all(|(field, value)| match field.as_str() {
             "summaryCode" => value.as_str().is_some_and(|code| {
@@ -11173,7 +11242,7 @@ fn transcript_metadata_v2_is_valid(value: &Value) -> bool {
                     && reference.len() <= 384
                     && !reference.chars().any(char::is_whitespace)
             }),
-            _ => transcript_metadata_field_value_allowed(field, value),
+            _ => transcript_metadata_field_value_allowed(kind, field, value),
         })
     })
 }
@@ -11216,7 +11285,7 @@ fn row_to_transcript_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Executio
     let summary: String = row.get(3)?;
     if minimized_version != TRANSCRIPT_PAYLOAD_VERSION
         || summary != transcript_summary_code(kind)
-        || !transcript_metadata_v2_is_valid(&metadata)
+        || !transcript_metadata_v2_is_valid(kind, &metadata)
     {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             6,
@@ -13406,7 +13475,8 @@ fn run_one_main_chat_runtime_eval_case(
         }
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
-        | MainChatAgentStrategy::FileWriteProposal => {
+        | MainChatAgentStrategy::FileWriteProposal
+        | MainChatAgentStrategy::ActionProposal => {
             proposal_exercised = true;
             blocker_exercised = true;
             session_store
@@ -14731,7 +14801,8 @@ fn runtime_eval_actions_for_strategy(
         )],
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
-        | MainChatAgentStrategy::FileWriteProposal => {
+        | MainChatAgentStrategy::FileWriteProposal
+        | MainChatAgentStrategy::ActionProposal => {
             vec![ExecutionAction::new(
                 "proposal.create",
                 "Runtime eval proposal-first write",
@@ -16475,12 +16546,22 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             "save file",
             "patch file",
             "edit file",
+            "move file",
+            "rename file",
+            "trash file",
+            "move to trash",
+            "restore file",
             "写入工作区",
             "写入文件",
             "创建文件",
             "保存到文件",
             "保存到工作区",
             "修改文件",
+            "移动文件",
+            "重命名文件",
+            "回收文件",
+            "移到废纸篓",
+            "恢复文件",
         ],
     );
     let named_file_write =
@@ -17612,6 +17693,112 @@ mod session_content_minimization_tests {
             );
             assert!(durable_metadata.get("unregisteredBooleanFact").is_none());
         }
+    }
+
+    #[test]
+    fn reflection_transcript_persists_only_bounded_task_scoped_state() {
+        let store = AgentTaskSessionStore::new_in_memory().unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "reflection-metadata-chat".into(),
+                user_goal: "transient goal".into(),
+                selected_strategy: MainChatAgentStrategy::PlanExecute,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .unwrap();
+
+        let transcript = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id.clone(),
+                kind: ExecutionTranscriptEntryKind::Reflection,
+                summary: "transient reflection summary".into(),
+                metadata: serde_json::json!({
+                    "runId": "run-reflection-1",
+                    "scope": "task",
+                    "outcome": "waiting_review",
+                    "successfulActionCount": 2,
+                    "failedOrUnknownActionCount": 1,
+                    "proposalCount": 3,
+                    "businessFactWritten": false,
+                    "memoryWritten": false,
+                    "lifeModelWritten": false,
+                    "promotionStatus": "not_proposed",
+                    "proposalIds": ["proposal-secret"],
+                    "privateBody": "must-not-persist",
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(transcript.metadata["scope"], "task");
+        assert_eq!(transcript.metadata["outcome"], "waiting_review");
+        assert_eq!(transcript.metadata["successfulActionCount"], 2);
+        assert_eq!(transcript.metadata["failedOrUnknownActionCount"], 1);
+        assert_eq!(transcript.metadata["proposalCount"], 3);
+        assert_eq!(transcript.metadata["businessFactWritten"], false);
+        assert_eq!(transcript.metadata["memoryWritten"], false);
+        assert_eq!(transcript.metadata["lifeModelWritten"], false);
+        assert_eq!(transcript.metadata["promotionStatus"], "not_proposed");
+        assert!(transcript.metadata.get("proposalIds").is_none());
+        assert!(transcript.metadata.get("privateBody").is_none());
+        assert!(transcript
+            .metadata
+            .get("defaultDeniedMetadataReceipt")
+            .and_then(Value::as_str)
+            .is_some_and(is_exact_hmac_receipt));
+
+        let durable_metadata: String = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT metadata_json FROM execution_transcript_entries WHERE id = ?1",
+                [&transcript.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!durable_metadata.contains("proposal-secret"));
+        assert!(!durable_metadata.contains("must-not-persist"));
+        assert!(durable_metadata.contains("successfulActionCount"));
+    }
+
+    #[test]
+    fn reflection_transcript_rejects_unbounded_or_cross_kind_metadata() {
+        let store = AgentTaskSessionStore::new_in_memory().unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "invalid-reflection-metadata-chat".into(),
+                user_goal: "transient goal".into(),
+                selected_strategy: MainChatAgentStrategy::PlanExecute,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .unwrap();
+
+        let transcript = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::Reflection,
+                summary: "transient invalid reflection summary".into(),
+                metadata: serde_json::json!({
+                    "scope": "global",
+                    "outcome": "succeeded_and_promoted",
+                    "proposalCount": MAX_TASK_SESSION_METADATA_ITEMS + 1,
+                    "directWritesExecuted": true,
+                    "memoryWritten": false,
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(transcript.metadata["memoryWritten"], false);
+        for rejected in ["scope", "outcome", "proposalCount", "directWritesExecuted"] {
+            assert!(transcript.metadata.get(rejected).is_none(), "{rejected}");
+        }
+        assert!(transcript
+            .metadata
+            .get("defaultDeniedMetadataReceipt")
+            .and_then(Value::as_str)
+            .is_some_and(is_exact_hmac_receipt));
     }
 
     #[test]

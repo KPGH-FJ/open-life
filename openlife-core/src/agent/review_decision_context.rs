@@ -123,6 +123,16 @@ impl PermissionDecisionContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GovernedActionReviewContract {
+    pub capability_id: String,
+    pub operation: String,
+    pub confirmation_summary: String,
+    pub terminal_evidence_summary: String,
+    pub effect_boundary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewDecisionContext {
     pub review_item_id: String,
     pub title: String,
@@ -139,6 +149,8 @@ pub struct ReviewDecisionContext {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission: Option<PermissionDecisionContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_contract: Option<GovernedActionReviewContract>,
     #[serde(default)]
     pub evidence_refs: Vec<EvidenceRef>,
 }
@@ -164,18 +176,105 @@ pub fn build_review_decision_context(
 
     ReviewDecisionContext {
         review_item_id: proposal.id.clone(),
-        title: proposal_title(proposal.proposal_type).into(),
+        title: proposal_title(proposal),
         summary: proposal_summary(proposal),
         before: proposal.before.as_ref().map(readable_value),
         after,
         reason_summary: bounded_text(&proposal.reason, "No reason was supplied."),
         source_summary: proposal_source_summary(proposal.source).into(),
-        impact_summary: impact_summary(proposal.proposal_type).into(),
+        impact_summary: impact_summary(proposal).into(),
         affected_object_labels: vec![affected_object_label(proposal)],
         expires_at: proposal.expires_at,
         permission,
+        action_contract: build_governed_action_review_contract(proposal),
         evidence_refs: evidence_refs.to_vec(),
     }
+}
+
+fn build_governed_action_review_contract(
+    proposal: &AgentProposal,
+) -> Option<GovernedActionReviewContract> {
+    let contract = match proposal.proposal_type {
+        ProposalType::ExternalWriteAction => {
+            let operation = proposal_operation(proposal).unwrap_or("create");
+            GovernedActionReviewContract {
+                capability_id: "filesystem.write".into(),
+                operation: operation.into(),
+                confirmation_summary: match operation {
+                    "move" | "trash" | "restore" => {
+                        "Confirm one exact source, destination, and reviewed source digest."
+                    }
+                    _ => "Confirm one exact path and reviewed content digest.",
+                }
+                .into(),
+                terminal_evidence_summary:
+                    "Completion requires a refreshed matching filesystem materialization receipt."
+                        .into(),
+                effect_boundary: "local_filesystem".into(),
+            }
+        }
+        ProposalType::ScheduledTask if proposal_tool(proposal) == Some("calendar.propose_event") => {
+            GovernedActionReviewContract {
+                capability_id: "calendar.local_projection".into(),
+                operation: "create_local_calendar_projection".into(),
+                confirmation_summary:
+                    "Confirm the exact local task title, scheduled time, and optional ICS projection."
+                        .into(),
+                terminal_evidence_summary:
+                    "Completion proves the local scheduled task. A configured ICS file is only a local projection and never proves a system or remote calendar event."
+                        .into(),
+                effect_boundary: "local_task_and_optional_ics_projection".into(),
+            }
+        }
+        ProposalType::ScheduledTask => GovernedActionReviewContract {
+            capability_id: "tasks.schedule".into(),
+            operation: "create_scheduled_task".into(),
+            confirmation_summary: "Confirm the exact task title and scheduled time.".into(),
+            terminal_evidence_summary:
+                "Completion requires the refreshed scheduled-task materialization state.".into(),
+            effect_boundary: "local_task_store".into(),
+        },
+        ProposalType::DataExport => match proposal_tool(proposal) {
+            Some("email.propose_draft") => GovernedActionReviewContract {
+                capability_id: "email.draft".into(),
+                operation: "open_email_draft".into(),
+                confirmation_summary: "Confirm the exact recipient, subject, and draft body."
+                    .into(),
+                terminal_evidence_summary:
+                    "Success proves only that the operating system accepted the draft handoff; it never proves send or delivery."
+                        .into(),
+                effect_boundary: "os_mail_handoff_unverified".into(),
+            },
+            Some("browser.open") => GovernedActionReviewContract {
+                capability_id: "browser.open".into(),
+                operation: "open_browser_url".into(),
+                confirmation_summary: "Confirm one exact HTTP(S) address.".into(),
+                terminal_evidence_summary:
+                    "Success proves only that the operating system accepted the browser handoff; page load remains unverified."
+                        .into(),
+                effect_boundary: "os_browser_handoff_unverified".into(),
+            },
+            Some("local.run_utility") => GovernedActionReviewContract {
+                capability_id: "local.utility.read_only".into(),
+                operation: "run_local_utility".into(),
+                confirmation_summary: "Confirm one exact allowlisted command.".into(),
+                terminal_evidence_summary:
+                    "Completion requires a bounded exit result; timeout or interrupted execution is not success."
+                        .into(),
+                effect_boundary: "bounded_local_process".into(),
+            },
+            _ => GovernedActionReviewContract {
+                capability_id: "data.export".into(),
+                operation: "export_data".into(),
+                confirmation_summary: "Confirm the exact export target and content scope.".into(),
+                terminal_evidence_summary:
+                    "Completion requires refreshed export materialization evidence.".into(),
+                effect_boundary: "local_export".into(),
+            },
+        },
+        _ => return None,
+    };
+    Some(contract)
 }
 
 fn build_permission_decision_context(
@@ -477,8 +576,16 @@ fn action_bound_transmission_boundary(
     }
 }
 
-fn proposal_title(proposal_type: ProposalType) -> &'static str {
-    match proposal_type {
+fn proposal_tool(proposal: &AgentProposal) -> Option<&str> {
+    proposal.after.get("tool").and_then(Value::as_str)
+}
+
+fn proposal_operation(proposal: &AgentProposal) -> Option<&str> {
+    proposal.after.get("operation").and_then(Value::as_str)
+}
+
+fn proposal_title(proposal: &AgentProposal) -> String {
+    let title = match proposal.proposal_type {
         ProposalType::GoalUpdate => "Update a goal",
         ProposalType::StateUpdate => "Update personal state",
         ProposalType::PreferenceUpdate => "Update a preference",
@@ -487,20 +594,58 @@ fn proposal_title(proposal_type: ProposalType) -> &'static str {
         ProposalType::MemoryArchive => "Archive a memory",
         ProposalType::ToolPermission => "Allow one action",
         ProposalType::PluginPermission => "Review plugin access",
+        ProposalType::ScheduledTask
+            if proposal_tool(proposal) == Some("calendar.propose_event") =>
+        {
+            "Create a local task and calendar projection"
+        }
         ProposalType::ScheduledTask => "Schedule a task",
-        ProposalType::ExternalWriteAction => "Review an external write",
+        ProposalType::ExternalWriteAction => match proposal_operation(proposal) {
+            Some("move") => "Move a file",
+            Some("trash") => "Move a file to OpenLife recovery",
+            Some("restore") => "Restore a file",
+            Some("overwrite") => "Overwrite a file",
+            _ => "Create a file",
+        },
         ProposalType::ModelPolicyChange => "Change model policy",
-        ProposalType::DataExport => "Export data",
+        ProposalType::DataExport => match proposal_tool(proposal) {
+            Some("email.propose_draft") => "Open an email draft",
+            Some("browser.open") => "Open a reviewed web address",
+            Some("local.run_utility") => "Run a reviewed local utility",
+            _ => "Export data",
+        },
         ProposalType::ScheduleCheckin => "Schedule a check-in",
         ProposalType::LifeModelUpdate => "Update LifeModel",
         ProposalType::Unsupported => "Unsupported change",
-    }
+    };
+    title.into()
 }
 
 fn proposal_summary(proposal: &AgentProposal) -> String {
     match proposal.proposal_type {
         ProposalType::ToolPermission => {
             "Review the exact permission scope before allowing one matching action.".into()
+        }
+        ProposalType::ExternalWriteAction => match proposal_operation(proposal) {
+            Some("move" | "trash" | "restore") => {
+                "Review the exact source, destination, and source digest before one filesystem change."
+                    .into()
+            }
+            _ => "Review the exact path and content digest before one file write.".into(),
+        },
+        ProposalType::ScheduledTask if proposal_tool(proposal) == Some("calendar.propose_event") => {
+            "Review the exact title and time before creating a local task and optional ICS projection."
+                .into()
+        }
+        ProposalType::DataExport if proposal_tool(proposal) == Some("email.propose_draft") => {
+            "Review the recipient, subject, and body before opening a draft; this action never sends email."
+                .into()
+        }
+        ProposalType::DataExport if proposal_tool(proposal) == Some("browser.open") => {
+            "Review the exact HTTP(S) address before handing it to the system browser.".into()
+        }
+        ProposalType::DataExport if proposal_tool(proposal) == Some("local.run_utility") => {
+            "Review one exact allowlisted read-only command before local execution.".into()
         }
         _ => format!(
             "Proposed change to {}.",
@@ -525,16 +670,31 @@ fn proposal_source_summary(source: ProposalSource) -> &'static str {
     }
 }
 
-fn impact_summary(proposal_type: ProposalType) -> &'static str {
-    match proposal_type {
+fn impact_summary(proposal: &AgentProposal) -> &'static str {
+    match proposal.proposal_type {
         ProposalType::ToolPermission => {
             "Approval creates only a scoped permission decision. Execution and its result require refreshed backend evidence."
         }
         ProposalType::PluginPermission => {
             "No plugin access is granted until a supported backend approval path confirms it."
         }
-        ProposalType::ExternalWriteAction | ProposalType::DataExport => {
+        ProposalType::ExternalWriteAction => {
             "Approval is not proof that the external effect completed; materialization evidence remains separate."
+        }
+        ProposalType::ScheduledTask if proposal_tool(proposal) == Some("calendar.propose_event") => {
+            "Approval creates a local scheduled task and may create an ICS projection. It does not prove a system or remote calendar event exists."
+        }
+        ProposalType::DataExport if proposal_tool(proposal) == Some("email.propose_draft") => {
+            "Approval asks the operating system to open a draft. OpenLife does not send the message, and a successful handoff does not prove delivery."
+        }
+        ProposalType::DataExport if proposal_tool(proposal) == Some("browser.open") => {
+            "Approval asks the operating system to open this address. It does not prove the page loaded or that any remote action succeeded."
+        }
+        ProposalType::DataExport if proposal_tool(proposal) == Some("local.run_utility") => {
+            "Approval runs one exact allowlisted read-only utility with an empty environment and a bounded timeout."
+        }
+        ProposalType::DataExport => {
+            "Approval is not proof that the export completed; refreshed backend evidence remains separate."
         }
         _ => {
             "Approval is a decision only. The change is complete only after refreshed materialization evidence reports applied."
@@ -804,6 +964,81 @@ mod tests {
 
         assert!(detail.contains("[REDACTED]"));
         assert!(!detail.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn governed_actions_project_exact_capability_confirmation_and_evidence_boundaries() {
+        for (proposal_type, after, capability, operation, evidence_phrase) in [
+            (
+                ProposalType::ExternalWriteAction,
+                json!({
+                    "operation": "move",
+                    "source_path": "/safe/a.md",
+                    "target_path": "/safe/b.md",
+                    "source_digest": format!("sha256:{}", "0".repeat(64)),
+                }),
+                "filesystem.write",
+                "move",
+                "filesystem materialization receipt",
+            ),
+            (
+                ProposalType::ScheduledTask,
+                json!({
+                    "tool": "calendar.propose_event",
+                    "title": "Review",
+                    "scheduled_at": "2026-08-12T09:00:00+08:00",
+                }),
+                "calendar.local_projection",
+                "create_local_calendar_projection",
+                "local scheduled task",
+            ),
+            (
+                ProposalType::DataExport,
+                json!({
+                    "tool": "email.propose_draft",
+                    "to": "alice@example.com",
+                    "subject": "Review",
+                    "body": "Ready",
+                    "content": "Ready",
+                }),
+                "email.draft",
+                "open_email_draft",
+                "never proves send",
+            ),
+            (
+                ProposalType::DataExport,
+                json!({
+                    "tool": "browser.open",
+                    "url": "https://example.com",
+                    "content": "Open URL",
+                }),
+                "browser.open",
+                "open_browser_url",
+                "page load remains unverified",
+            ),
+            (
+                ProposalType::DataExport,
+                json!({
+                    "tool": "local.run_utility",
+                    "command": "uptime",
+                    "content": "Run uptime",
+                }),
+                "local.utility.read_only",
+                "run_local_utility",
+                "bounded exit result",
+            ),
+        ] {
+            let context = build_review_decision_context(&proposal(proposal_type, after), &[]);
+            let contract = context.action_contract.expect("action contract");
+            assert_eq!(contract.capability_id, capability);
+            assert_eq!(contract.operation, operation);
+            assert!(!contract.confirmation_summary.trim().is_empty());
+            assert!(
+                contract.terminal_evidence_summary.contains(evidence_phrase),
+                "{}",
+                contract.terminal_evidence_summary
+            );
+        }
     }
 
     #[test]

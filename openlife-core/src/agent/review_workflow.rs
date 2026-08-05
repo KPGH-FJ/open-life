@@ -35,6 +35,7 @@ pub enum DurableWriteSubject {
     ToolPermission,
     ExternalWrite,
     FileWrite,
+    Task,
     Calendar,
     Email,
     PlanStep,

@@ -80,6 +80,7 @@ pub(crate) fn product_transcript_summary(
         ExecutionTranscriptEntryKind::Error => "error_state_recorded",
         ExecutionTranscriptEntryKind::Retry => "retry_state_recorded",
         ExecutionTranscriptEntryKind::FinalResult => "final_result_state_recorded",
+        ExecutionTranscriptEntryKind::Reflection => "reflection_state_recorded",
         ExecutionTranscriptEntryKind::Fallback => "fallback_state_recorded",
     }
 }

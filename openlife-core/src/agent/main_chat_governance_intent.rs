@@ -11,6 +11,26 @@ pub enum MainChatDurableWriteRequirement {
     LifeModelProposal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MainChatActionProposalRequirement {
+    CalendarEvent,
+    EmailDraft,
+    BrowserOpen,
+    LocalUtility,
+}
+
+impl MainChatActionProposalRequirement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CalendarEvent => "calendar_event",
+            Self::EmailDraft => "email_draft",
+            Self::BrowserOpen => "browser_open",
+            Self::LocalUtility => "local_utility",
+        }
+    }
+}
+
 impl MainChatDurableWriteRequirement {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -56,6 +76,7 @@ pub struct MainChatIntentSignals {
     pub durable_write_requirement: Option<MainChatDurableWriteRequirement>,
     pub external_read_requirement: Option<MainChatExternalReadRequirement>,
     pub blocker_requirement: Option<MainChatBlockerRequirement>,
+    pub action_proposal_requirement: Option<MainChatActionProposalRequirement>,
     pub reason_codes: Vec<String>,
     pub matched_terms: Vec<String>,
     pub confidence: f32,
@@ -69,6 +90,7 @@ impl MainChatIntentSignals {
             durable_write_requirement: None,
             external_read_requirement: None,
             blocker_requirement: None,
+            action_proposal_requirement: None,
             reason_codes: Vec::new(),
             matched_terms: Vec::new(),
             confidence: 0.0,
@@ -80,6 +102,7 @@ impl MainChatIntentSignals {
         self.durable_write_requirement.is_some()
             || self.external_read_requirement.is_some()
             || self.blocker_requirement.is_some()
+            || self.action_proposal_requirement.is_some()
     }
 }
 
@@ -94,6 +117,7 @@ pub fn extract_main_chat_intent_signals(user_text: &str) -> MainChatIntentSignal
 
     let mut intent = MainChatIntentSignals::empty();
     collect_blocker_requirement(&normalized, &mut intent);
+    collect_action_proposal_requirement(&normalized, &mut intent);
     let candidates = extract_main_chat_memory_candidates(user_text);
     let memory_routing = route_memory_candidates(&candidates);
     collect_durable_write_requirement_from_memory_routing(&memory_routing, &mut intent);
@@ -107,6 +131,68 @@ pub fn extract_main_chat_intent_signals(user_text: &str) -> MainChatIntentSignal
     intent.reason_codes.dedup();
     intent.confidence = intent.confidence.clamp(0.0, 0.99);
     intent
+}
+
+fn collect_action_proposal_requirement(normalized: &str, intent: &mut MainChatIntentSignals) {
+    if contains_any(
+        normalized,
+        &[
+            "draft email",
+            "email draft",
+            "write an email draft",
+            "邮件草稿",
+            "起草邮件",
+        ],
+    ) && !contains_any(normalized, &["send email", "发送邮件", "发邮件"])
+        && normalized.matches('`').count() >= 6
+    {
+        intent.action_proposal_requirement = Some(MainChatActionProposalRequirement::EmailDraft);
+        push_reason(intent, "email_draft_proposal_required", "email draft", 0.94);
+        return;
+    }
+    if is_calendar_write_intent(normalized) && normalized.matches('`').count() >= 4 {
+        intent.action_proposal_requirement = Some(MainChatActionProposalRequirement::CalendarEvent);
+        push_reason(
+            intent,
+            "calendar_event_proposal_required",
+            "calendar event",
+            0.94,
+        );
+        return;
+    }
+    if contains_any(
+        normalized,
+        &[
+            "open in browser",
+            "open url",
+            "browser.open",
+            "在浏览器打开",
+            "用浏览器打开",
+        ],
+    ) && (normalized.contains("http://") || normalized.contains("https://"))
+    {
+        intent.action_proposal_requirement = Some(MainChatActionProposalRequirement::BrowserOpen);
+        push_reason(
+            intent,
+            "browser_open_proposal_required",
+            "browser open",
+            0.92,
+        );
+        return;
+    }
+    if contains_any(
+        normalized,
+        &["run local utility", "local.run_utility", "运行本地工具"],
+    ) && normalized.matches('`').count() >= 2
+    {
+        intent.action_proposal_requirement = Some(MainChatActionProposalRequirement::LocalUtility);
+        push_reason(
+            intent,
+            "local_utility_proposal_required",
+            "local utility",
+            0.93,
+        );
+    }
 }
 
 fn collect_blocker_requirement(normalized: &str, intent: &mut MainChatIntentSignals) {
@@ -954,5 +1040,46 @@ mod tests {
             intent.durable_write_requirement,
             Some(MainChatDurableWriteRequirement::LifeModelProposal)
         );
+    }
+
+    #[test]
+    fn governed_action_proposals_require_explicit_reviewable_arguments() {
+        for (prompt, expected) in [
+            (
+                "Create calendar event `Planning review` at `2026-08-12T09:00:00+08:00`.",
+                MainChatActionProposalRequirement::CalendarEvent,
+            ),
+            (
+                "Draft email to `alice@example.com` subject `Update` body `The review is ready`.",
+                MainChatActionProposalRequirement::EmailDraft,
+            ),
+            (
+                "Open in browser `https://example.com/report`.",
+                MainChatActionProposalRequirement::BrowserOpen,
+            ),
+            (
+                "Run local utility `uptime`.",
+                MainChatActionProposalRequirement::LocalUtility,
+            ),
+        ] {
+            let intent = extract_main_chat_intent_signals(prompt);
+            assert_eq!(
+                intent.action_proposal_requirement,
+                Some(expected),
+                "{prompt}"
+            );
+        }
+
+        for malformed in [
+            "Create calendar event sometime tomorrow.",
+            "Draft email to Alice.",
+        ] {
+            assert!(
+                extract_main_chat_intent_signals(malformed)
+                    .action_proposal_requirement
+                    .is_none(),
+                "{malformed} must not fabricate missing action arguments"
+            );
+        }
     }
 }

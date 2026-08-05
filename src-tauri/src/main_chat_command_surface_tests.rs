@@ -3634,7 +3634,10 @@ async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_o
 
 #[tokio::test]
 async fn main_chat_kernel_goal_4_file_write_send_stream_creates_proposal_without_writing_file() {
-    let proposed_path = std::env::temp_dir().join(format!(
+    let temp_safe_path = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp safe path");
+    let proposed_path = temp_safe_path.join(format!(
         "openlife-k4-file-write-{}.txt",
         uuid::Uuid::new_v4()
     ));
@@ -3645,6 +3648,7 @@ async fn main_chat_kernel_goal_4_file_write_send_stream_creates_proposal_without
     );
 
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    send_state.config.lock().await.system.safe_paths = vec![temp_safe_path.display().to_string()];
     let send_response = invoke_send_message_for_kernel_goal_3(
         send_state.clone(),
         "k4-send-file-write-proposal",
@@ -3696,6 +3700,7 @@ async fn main_chat_kernel_goal_4_file_write_send_stream_creates_proposal_without
     );
 
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    stream_state.config.lock().await.system.safe_paths = vec![temp_safe_path.display().to_string()];
     let stream_response = invoke_start_stream_message_for_kernel_goal_3(
         stream_state.clone(),
         "k4-stream-file-write-proposal",

@@ -1,8 +1,11 @@
 use crate::{
     artifact_materializer::{
-        commit_staged_artifact, confirmed_artifact_receipt, inspect_artifact_filesystem,
-        prepare_artifact_materialization, stage_artifact_bytes, ArtifactFilesystemFailure,
-        ArtifactFilesystemObservation, ArtifactMaterializationReceipt,
+        commit_artifact_move, commit_staged_artifact, confirmed_artifact_receipt,
+        confirmed_move_receipt, confirmed_move_receipt_from_paths, inspect_artifact_filesystem,
+        inspect_artifact_move, prepare_artifact_materialization,
+        prepare_artifact_materialization_with_precondition, prepare_artifact_move,
+        stage_artifact_bytes, ArtifactFilesystemFailure, ArtifactFilesystemObservation,
+        ArtifactMaterializationReceipt, ArtifactTargetPrecondition,
     },
     danger_action_confirmation::{
         require_native_danger_action_confirmation, NativeDangerActionRequest,
@@ -24,11 +27,31 @@ use std::sync::Arc;
 use tauri::State;
 
 #[cfg(test)]
-use crate::artifact_materializer::PreparedArtifactMaterialization;
+use crate::artifact_materializer::{PreparedArtifactMaterialization, PreparedArtifactMove};
 
 /// Maximum content size for ExternalWriteAction (100 KB)
 const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 pub(crate) const COMMUNICATION_STYLE_CANONICAL_PATH: &str = "preferences.communication_style";
+
+fn reviewed_artifact_target_precondition(
+    after: &Value,
+) -> Result<ArtifactTargetPrecondition, String> {
+    let expected_absent = after
+        .get("expected_target_absent")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "Artifact Proposal 缺少 expected_target_absent。".to_string())?;
+    let expected_digest = after
+        .get("expected_target_digest")
+        .and_then(Value::as_str)
+        .filter(|digest| !digest.trim().is_empty());
+    match (expected_absent, expected_digest) {
+        (true, None) => Ok(ArtifactTargetPrecondition::Absent),
+        (false, Some(digest)) if digest.starts_with("sha256:") => Ok(
+            ArtifactTargetPrecondition::ContentDigest(digest.to_string()),
+        ),
+        _ => Err("Artifact Proposal 必须精确绑定目标不存在或审核时的目标内容摘要。".into()),
+    }
+}
 
 fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
     state
@@ -323,12 +346,14 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProposalReconciliationReport {
     pub artifact_effects_reconciled: usize,
+    pub ambiguous_action_effects_marked_unknown: usize,
     pub proposal_projections_repaired: usize,
     pub agent_runs_reconciled: usize,
     pub agent_run_candidates_examined: usize,
     pub agent_run_cursor_advanced: bool,
     pub agent_run_cursor_wrapped: bool,
     pub artifact_backlog_may_remain: bool,
+    pub action_effect_backlog_may_remain: bool,
     pub projection_backlog_may_remain: bool,
     pub agent_run_backlog_may_remain: bool,
 }
@@ -468,6 +493,108 @@ async fn reconcile_artifact_effects_with_state(
                 "artifact_proposal_type_mismatch",
             )
             .await?;
+            reconciled += 1;
+            continue;
+        }
+        let operation = proposal
+            .after
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("propose_write");
+        if matches!(operation, "move" | "trash" | "restore") {
+            let Some(source) = proposal.after.get("source_path").and_then(Value::as_str) else {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_move_recovery_source_missing",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            };
+            let Some(target) = proposal.after.get("target_path").and_then(Value::as_str) else {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_move_recovery_target_missing",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            };
+            let inspection =
+                inspect_artifact_move(source, target, &record.content_digest, &safe_paths);
+            let (target_reference_digest, observation) = match inspection {
+                Ok(value) => value,
+                Err(_) => {
+                    persist_artifact_unknown(
+                        state,
+                        &record.proposal_id,
+                        &record.dispatch_claim_id,
+                        "artifact_move_recovery_preflight_failed",
+                    )
+                    .await?;
+                    reconciled += 1;
+                    continue;
+                }
+            };
+            if target_reference_digest != record.target_reference_digest {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_move_recovery_binding_mismatch",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
+            match observation {
+                ArtifactFilesystemObservation::Confirmed {
+                    observed_content_digest,
+                } => {
+                    let store = state
+                        .proposal_store
+                        .as_ref()
+                        .ok_or_else(proposal_store_missing)?
+                        .lock()
+                        .await;
+                    if !store
+                        .finish_artifact_confirmed(
+                            &record.proposal_id,
+                            &record.dispatch_claim_id,
+                            &observed_content_digest,
+                        )
+                        .map_err(|error| runtime_proposal_store_error(state, error))?
+                    {
+                        return Err("artifact move recovery confirmation CAS lost".into());
+                    }
+                }
+                ArtifactFilesystemObservation::NoStagedOrFinalBytes
+                    if record.state == ArtifactEffectState::Prepared =>
+                {
+                    persist_artifact_failed_before_effect(
+                        state,
+                        &record.proposal_id,
+                        &record.dispatch_claim_id,
+                        "artifact_move_recovery_proved_no_effect",
+                    )
+                    .await?;
+                }
+                ArtifactFilesystemObservation::NoStagedOrFinalBytes
+                | ArtifactFilesystemObservation::Staged
+                | ArtifactFilesystemObservation::Unknown { .. } => {
+                    persist_artifact_unknown(
+                        state,
+                        &record.proposal_id,
+                        &record.dispatch_claim_id,
+                        "artifact_move_recovery_state_ambiguous",
+                    )
+                    .await?;
+                }
+            }
             reconciled += 1;
             continue;
         }
@@ -670,6 +797,130 @@ async fn release_startup_artifact_claims_proven_before_effect(
     Ok((released, backlog_may_remain))
 }
 
+fn claimed_local_scheduled_task_matches_canonical_effect(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<bool, String> {
+    if proposal.proposal_type != ProposalType::ScheduledTask
+        || parse_reviewed_scheduled_provider_route(&proposal.after)?.is_some()
+    {
+        return Ok(false);
+    }
+    let Some(task) = state
+        .scheduled_task_store
+        .get_task_by_source_proposal_id(&proposal.id)
+        .map_err(|error| format!("load claimed scheduled task effect failed: {error}"))?
+    else {
+        return Ok(false);
+    };
+    let reviewed_due_at = proposal
+        .after
+        .get("scheduled_at")
+        .or_else(|| proposal.after.get("due_date"))
+        .or_else(|| proposal.after.get("date"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let reviewed_due_at = parse_scheduled_at(reviewed_due_at)?.map(|value| value.to_rfc3339());
+    let reviewed_title = proposal
+        .after
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled Task");
+    let reviewed_description = proposal
+        .after
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let reviewed_priority = proposal
+        .after
+        .get("priority")
+        .and_then(Value::as_str)
+        .unwrap_or("medium");
+    let reviewed_action_type = proposal
+        .after
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or("scheduled_task");
+
+    Ok(task.id == proposal.id
+        && task.source_proposal_id.as_deref() == Some(proposal.id.as_str())
+        && task.source_run_id == proposal.run_id
+        && task.title == reviewed_title
+        && task.description == reviewed_description
+        && task.due_date == reviewed_due_at
+        && task.priority == reviewed_priority
+        && task.action_type == reviewed_action_type
+        && task.provider_grant.data_route == openlife_core::llm::ProviderDataRoute::LocalOnly)
+}
+
+async fn seal_startup_governed_action_claims_as_unknown(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<(usize, bool), String> {
+    let bounded_limit = limit.clamp(1, 200);
+    let claims = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .list_claimed_governed_actions_for_unknown_recovery(bounded_limit as usize)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+    };
+    let backlog_may_remain = claims.len() == bounded_limit as usize;
+    let mut sealed = 0usize;
+    for (proposal_id, claim_id) in claims {
+        let proposal = {
+            let store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(proposal_store_missing)?
+                .lock()
+                .await;
+            store
+                .get_proposal(&proposal_id)
+                .map_err(|error| runtime_proposal_store_error(state, error))?
+                .ok_or_else(|| format!("startup_claimed_governed_action_missing:{proposal_id}"))?
+        };
+        if claimed_local_scheduled_task_matches_canonical_effect(state, &proposal)? {
+            let store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(proposal_store_missing)?
+                .lock()
+                .await;
+            if !store
+                .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
+                .map_err(|error| runtime_proposal_store_error(state, error))?
+            {
+                return Err(format!(
+                    "startup_scheduled_task_confirmation_cas_lost:{proposal_id}"
+                ));
+            }
+            continue;
+        }
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        if store
+            .mark_dispatch_unknown(
+                &proposal_id,
+                &claim_id,
+                "startup_governed_action_effect_unknown",
+            )
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+        {
+            sealed += 1;
+        }
+    }
+    Ok((sealed, backlog_may_remain))
+}
+
 pub(crate) async fn reconcile_durable_proposal_projections_with_state(
     state: &Arc<AppState>,
     limit: i64,
@@ -707,6 +958,12 @@ async fn reconcile_durable_proposal_projections_inner(
         } else {
             (0, false)
         };
+    let (ambiguous_action_effects_marked_unknown, action_effect_backlog_may_remain) =
+        if matches!(admission, ProposalReconciliationAdmission::StartupInternal) {
+            seal_startup_governed_action_claims_as_unknown(state, bounded_limit).await?
+        } else {
+            (0, false)
+        };
     let (reconciled_artifact_effects, artifact_effect_backlog_may_remain) =
         reconcile_artifact_effects_with_state(state, bounded_limit).await?;
     let artifact_effects_reconciled =
@@ -727,6 +984,8 @@ async fn reconcile_durable_proposal_projections_inner(
 
     let mut report = ProposalReconciliationReport {
         artifact_effects_reconciled,
+        ambiguous_action_effects_marked_unknown,
+        action_effect_backlog_may_remain,
         artifact_backlog_may_remain,
         projection_backlog_may_remain: confirmed_projection_pending.len() == bounded_limit as usize,
         ..ProposalReconciliationReport::default()
@@ -815,6 +1074,43 @@ async fn confirmed_artifact_receipt_from_store(
     else {
         return Ok(None);
     };
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("propose_write");
+    if matches!(operation, "move" | "trash" | "restore") {
+        let source = proposal
+            .after
+            .get("source_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "confirmed artifact move lost source_path".to_string())?;
+        let target = proposal
+            .after
+            .get("target_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "confirmed artifact move lost target_path".to_string())?;
+        let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+        let (target_reference_digest, observation) =
+            inspect_artifact_move(source, target, &record.content_digest, &safe_paths)?;
+        if target_reference_digest != record.target_reference_digest
+            || !matches!(observation, ArtifactFilesystemObservation::Confirmed { .. })
+        {
+            return Err("confirmed artifact move receipt binding mismatch".into());
+        }
+        let observed = record
+            .observed_content_digest
+            .filter(|digest| digest == &record.content_digest)
+            .ok_or_else(|| "confirmed artifact move observed digest missing".to_string())?;
+        return Ok(Some(confirmed_move_receipt_from_paths(
+            &proposal.id,
+            target,
+            target_reference_digest,
+            observed,
+            record.byte_size,
+            record.media_type,
+        )));
+    }
     let path = proposal
         .after
         .get("path")
@@ -1392,6 +1688,14 @@ async fn apply_external_write_artifact(
     proposal: &AgentProposal,
     claim_id: &str,
 ) -> ArtifactApplyOutcome {
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("propose_write");
+    if matches!(operation, "move" | "trash" | "restore") {
+        return apply_external_move_artifact(state, proposal, claim_id).await;
+    }
     let path = match proposal.after.get("path").and_then(Value::as_str) {
         Some(path) => path,
         None => {
@@ -1412,12 +1716,22 @@ async fn apply_external_write_artifact(
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
     let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
-    let prepared = match prepare_artifact_materialization(
+    let target_precondition = match reviewed_artifact_target_precondition(&proposal.after) {
+        Ok(precondition) => precondition,
+        Err(error) => {
+            let code = "artifact_target_precondition_missing";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+        }
+    };
+    let prepared = match prepare_artifact_materialization_with_precondition(
         &proposal.id,
         claim_id,
         path,
         content,
         &safe_paths,
+        target_precondition,
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1545,6 +1859,123 @@ async fn apply_external_write_artifact(
     }
 }
 
+async fn apply_external_move_artifact(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    claim_id: &str,
+) -> ArtifactApplyOutcome {
+    let source = match proposal.after.get("source_path").and_then(Value::as_str) {
+        Some(source) => source,
+        None => {
+            let code = "artifact_move_source_missing";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+        }
+    };
+    let target = match proposal.after.get("target_path").and_then(Value::as_str) {
+        Some(target) => target,
+        None => {
+            let code = "artifact_move_target_missing";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+        }
+    };
+    let expected_digest = proposal
+        .after
+        .get("source_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if expected_digest.is_empty() {
+        let code = "artifact_move_digest_missing";
+        let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+        return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+    }
+    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let prepared =
+        match prepare_artifact_move(&proposal.id, source, target, expected_digest, &safe_paths) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let code = "artifact_move_preflight_failed";
+                let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code)
+                    .await;
+                return ArtifactApplyOutcome::FailedBeforeEffect(error);
+            }
+        };
+    let prepared_record = {
+        let store = match state.proposal_store.as_ref() {
+            Some(store) => store.lock().await,
+            None => return ArtifactApplyOutcome::FailedBeforeEffect(proposal_store_missing()),
+        };
+        store.prepare_artifact_effect(
+            &proposal.id,
+            claim_id,
+            &prepared.target_reference_digest,
+            &prepared.content_digest,
+            prepared.byte_size,
+            &prepared.media_type,
+        )
+    };
+    if let Err(error) = prepared_record {
+        let detail = runtime_proposal_store_error(state, error);
+        let _ = persist_artifact_failed_before_effect(
+            state,
+            &proposal.id,
+            claim_id,
+            "artifact_move_prepare_receipt_failed",
+        )
+        .await;
+        return ArtifactApplyOutcome::FailedBeforeEffect(detail);
+    }
+    let move_prepared = prepared.clone();
+    let move_safe_paths = safe_paths.clone();
+    let move_result =
+        tokio::task::spawn_blocking(move || commit_artifact_move(&move_prepared, &move_safe_paths))
+            .await;
+    let observed_digest = match move_result {
+        Ok(Ok(digest)) => digest,
+        Ok(Err(ArtifactFilesystemFailure::FailedBeforeEffect(code))) => {
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, &code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code);
+        }
+        Ok(Err(ArtifactFilesystemFailure::Unknown(code))) => {
+            let _ = persist_artifact_unknown(state, &proposal.id, claim_id, &code).await;
+            return ArtifactApplyOutcome::Unknown(code);
+        }
+        Err(_) => {
+            let code = "artifact_move_worker_outcome_unknown";
+            let _ = persist_artifact_unknown(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::Unknown(code.into());
+        }
+    };
+    let confirmed = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .expect("ProposalStore checked before artifact move")
+            .lock()
+            .await;
+        store.finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
+    };
+    if !matches!(confirmed, Ok(true)) {
+        return ArtifactApplyOutcome::Unknown("artifact_move_confirmed_receipt_unavailable".into());
+    }
+    ArtifactApplyOutcome::Confirmed {
+        patch_result: patch_result_for_proposal(
+            proposal,
+            true,
+            &format!(
+                "artifact_{}_materialized",
+                proposal.after["operation"].as_str().unwrap_or("move")
+            ),
+            None,
+        ),
+        receipt: Box::new(confirmed_move_receipt(&prepared, observed_digest)),
+    }
+}
+
 pub(crate) fn memory_session_id(after: &Value) -> String {
     after
         .get("session_id")
@@ -1588,34 +2019,185 @@ fn validate_export_filename(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Minimal URL-encoding (only encodes space, newline, and special chars).
 fn urlencoding(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            ' ' => "%20".to_string(),
-            '\n' => "%0A".to_string(),
-            '\r' => "%0D".to_string(),
-            '&' => "%26".to_string(),
-            '=' => "%3D".to_string(),
-            '+' => "%2B".to_string(),
-            '%' => "%25".to_string(),
-            '#' => "%23".to_string(),
-            c if c.is_ascii_alphanumeric()
-                || c == '-'
-                || c == '_'
-                || c == '.'
-                || c == '!'
-                || c == '~'
-                || c == '*'
-                || c == '\''
-                || c == '('
-                || c == ')' =>
-            {
-                c.to_string()
+    let mut encoded = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(*byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn validate_browser_open_url(raw: &str) -> Result<reqwest::Url, String> {
+    match reqwest::Url::parse(raw) {
+        Ok(url)
+            if matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none() =>
+        {
+            Ok(url)
+        }
+        _ => {
+            Err("Browser handoff requires a valid http(s) URL without embedded credentials.".into())
+        }
+    }
+}
+
+async fn run_bounded_local_utility(command: &str, timeout_ms: u64) -> Result<String, String> {
+    let executable = local_utility_executable(command)
+        .ok_or_else(|| "Local utility is not in the exact read-only allowlist.".to_string())?;
+    if !(100..=3_000).contains(&timeout_ms) {
+        return Err("Local utility timeout must be between 100 and 3000 ms.".into());
+    }
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let executable = executable.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(&executable)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Failed to start local utility: {error}"))?;
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() < timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("Local utility timed out and was terminated.".into());
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("Failed to observe local utility: {error}"));
+                }
             }
-            c => format!("%{:02X}", c as u8),
-        })
-        .collect()
+        };
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_string(&mut stdout)
+                .map_err(|error| format!("Failed to read local utility output: {error}"))?;
+        }
+        if let Some(mut pipe) = child.stderr.take() {
+            pipe.read_to_string(&mut stderr)
+                .map_err(|error| format!("Failed to read local utility error output: {error}"))?;
+        }
+        if !status.success() {
+            return Err(format!(
+                "Local utility exited with {}: {}",
+                status,
+                stderr.chars().take(500).collect::<String>()
+            ));
+        }
+        Ok(stdout.chars().take(4_000).collect::<String>())
+    })
+    .await
+    .map_err(|_| "Local utility worker outcome is unknown.".to_string())?
+}
+
+fn local_utility_executable(command: &str) -> Option<&'static str> {
+    match command {
+        "date" => Some("/bin/date"),
+        "uptime" => Some("/usr/bin/uptime"),
+        "uname" => Some("/usr/bin/uname"),
+        "whoami" => Some("/usr/bin/whoami"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod browser_handoff_contract_tests {
+    use super::{
+        run_bounded_local_utility, urlencoding, validate_browser_open_url,
+        validate_proposal_payload,
+    };
+    use openlife_core::agent::ProposalType;
+
+    #[test]
+    fn browser_handoff_accepts_only_http_without_embedded_credentials() {
+        assert!(validate_browser_open_url("https://example.com/report").is_ok());
+        for rejected in [
+            "file:///tmp/private",
+            "javascript:alert(1)",
+            "https://user:secret@example.com/private",
+            "not a url",
+        ] {
+            assert!(validate_browser_open_url(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn mailto_components_are_encoded_as_utf8_bytes() {
+        assert_eq!(
+            urlencoding("会议 & update"),
+            "%E4%BC%9A%E8%AE%AE%20%26%20update"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_utility_is_exact_allowlist_only() {
+        let output = run_bounded_local_utility("whoami", 3_000).await.unwrap();
+        assert!(!output.trim().is_empty());
+        for rejected in ["whoami --help", "sh", "/bin/date", "rm"] {
+            assert!(run_bounded_local_utility(rejected, 3_000).await.is_err());
+        }
+    }
+
+    #[test]
+    fn governed_data_export_actions_validate_exact_arguments_before_dispatch() {
+        assert!(validate_proposal_payload(
+            ProposalType::DataExport,
+            &serde_json::json!({
+                "tool": "browser.open",
+                "url": "https://example.com/report",
+                "content": "Open reviewed URL",
+            }),
+        )
+        .is_ok());
+        assert!(validate_proposal_payload(
+            ProposalType::DataExport,
+            &serde_json::json!({
+                "tool": "browser.open",
+                "url": "file:///tmp/private",
+                "content": "Invalid browser target",
+            }),
+        )
+        .is_err());
+        assert!(validate_proposal_payload(
+            ProposalType::DataExport,
+            &serde_json::json!({
+                "tool": "email.propose_draft",
+                "to": "alice@example.com",
+                "subject": "Review",
+                "content": "Missing exact body",
+            }),
+        )
+        .is_err());
+        for (command, timeout_ms) in [("whoami --help", 3_000), ("whoami", 3_001)] {
+            assert!(validate_proposal_payload(
+                ProposalType::DataExport,
+                &serde_json::json!({
+                    "tool": "local.run_utility",
+                    "command": command,
+                    "timeout_ms": timeout_ms,
+                    "content": "Run reviewed utility",
+                }),
+            )
+            .is_err());
+        }
+    }
 }
 
 fn parse_scheduled_at(value: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
@@ -1652,10 +2234,11 @@ fn ics_escape(value: &str) -> String {
         .replace(['\r', '\n'], "\\n")
 }
 
-/// Build a minimal ICS (iCalendar) VEVENT string from proposal after data.
-fn build_ics_event(after: &Value) -> Result<String, String> {
-    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let uid = uuid::Uuid::new_v4().to_string();
+/// Build a deterministic ICS (iCalendar) VEVENT from the reviewed proposal.
+/// Stable UID/DTSTAMP values make an exact acceptance replay byte-identical.
+fn build_ics_event(proposal: &AgentProposal, after: &Value) -> Result<String, String> {
+    let now = proposal.created_at.format("%Y%m%dT%H%M%SZ").to_string();
+    let uid = format!("openlife-{}@local", proposal.id);
     let title = ics_escape(
         after
             .get("title")
@@ -1712,6 +2295,160 @@ fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn calendar_projection_filename(proposal: &AgentProposal, title: &str) -> String {
+    let mut title = sanitize_filename(title).trim().to_string();
+    if title.is_empty() {
+        title = "OpenLife event".into();
+    }
+    let digest = openlife_core::agent::metadata_safe_text_digest(&proposal.id).1;
+    let token = digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&digest)
+        .chars()
+        .take(16)
+        .collect::<String>();
+    format!("{title}-{token}.ics")
+}
+
+fn write_calendar_projection_once(
+    proposal: &AgentProposal,
+    after: &Value,
+    safe_paths: &[String],
+) -> Result<Option<std::path::PathBuf>, String> {
+    if safe_paths.is_empty() {
+        return Ok(None);
+    }
+    let title = after
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled Event");
+    let content = build_ics_event(proposal, after)?;
+    let filename = calendar_projection_filename(proposal, title);
+    let prepared = safe_paths
+        .iter()
+        .find_map(|safe_path| {
+            let requested = std::path::Path::new(safe_path).join(&filename);
+            prepare_artifact_materialization(
+                &proposal.id,
+                "calendar-ics-projection",
+                &requested.to_string_lossy(),
+                &content,
+                safe_paths,
+            )
+            .ok()
+        })
+        .ok_or_else(|| "No valid safe path is available for the ICS projection.".to_string())?;
+
+    if prepared.target_path.exists() {
+        let existing = std::fs::read(&prepared.target_path).map_err(|error| {
+            format!(
+                "Failed to inspect existing ICS projection '{}': {error}",
+                prepared.target_path.display()
+            )
+        })?;
+        if existing != content.as_bytes() {
+            return Err(format!(
+                "ICS projection target '{}' already exists with different content.",
+                prepared.target_path.display()
+            ));
+        }
+    }
+
+    stage_artifact_bytes(&prepared, &content)
+        .map_err(|error| format!("Failed to stage ICS projection: {}", error.code()))?;
+    commit_staged_artifact(&prepared, safe_paths)
+        .map_err(|error| format!("Failed to commit ICS projection: {}", error.code()))?;
+    Ok(Some(prepared.target_path))
+}
+
+#[cfg(test)]
+mod calendar_projection_tests {
+    use super::{build_ics_event, write_calendar_projection_once};
+    use crate::artifact_materializer::{prepare_artifact_materialization, stage_artifact_bytes};
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+    use serde_json::json;
+
+    fn proposal() -> AgentProposal {
+        AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "calendar.events",
+            json!({
+                "tool": "calendar.propose_event",
+                "title": "Planning Review",
+                "scheduled_at": "2026-08-12T09:00:00+08:00",
+                "description": "Review Phase 4",
+            }),
+            "reviewed local calendar projection",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        )
+    }
+
+    #[test]
+    fn calendar_projection_is_deterministic_idempotent_and_never_overwrites_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let proposal = proposal();
+        let first_ics = build_ics_event(&proposal, &proposal.after).unwrap();
+        let second_ics = build_ics_event(&proposal, &proposal.after).unwrap();
+        assert_eq!(first_ics, second_ics);
+
+        let safe_root = directory.path().canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        let path = write_calendar_projection_once(&proposal, &proposal.after, &safe_paths)
+            .unwrap()
+            .expect("configured safe path creates a projection");
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(original, first_ics.as_bytes());
+
+        assert_eq!(
+            write_calendar_projection_once(&proposal, &proposal.after, &safe_paths)
+                .unwrap()
+                .as_deref(),
+            Some(path.as_path())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        std::fs::write(&path, b"unrelated existing file").unwrap();
+        let error =
+            write_calendar_projection_once(&proposal, &proposal.after, &safe_paths).unwrap_err();
+        assert!(error.contains("already exists with different content"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated existing file");
+    }
+
+    #[test]
+    fn calendar_projection_commits_and_cleans_a_matching_staged_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let proposal = proposal();
+        let content = build_ics_event(&proposal, &proposal.after).unwrap();
+        let safe_root = directory.path().canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        let filename = super::calendar_projection_filename(
+            &proposal,
+            proposal.after["title"].as_str().unwrap(),
+        );
+        let target = safe_root.join(filename);
+        let prepared = prepare_artifact_materialization(
+            &proposal.id,
+            "calendar-ics-projection",
+            &target.to_string_lossy(),
+            &content,
+            &safe_paths,
+        )
+        .unwrap();
+        stage_artifact_bytes(&prepared, &content).unwrap();
+        assert!(prepared.stage_path.exists());
+
+        let path = write_calendar_projection_once(&proposal, &proposal.after, &safe_paths)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(path, prepared.target_path);
+        assert_eq!(std::fs::read(&path).unwrap(), content.as_bytes());
+        assert!(!prepared.stage_path.exists());
+    }
 }
 
 pub(crate) fn memory_content(after: &Value) -> Result<String, String> {
@@ -1945,16 +2682,43 @@ pub(crate) fn validate_proposal_payload(
             Ok(())
         }
         ProposalType::ExternalWriteAction => {
-            let path = after
-                .get("path")
+            let operation = after
+                .get("operation")
                 .and_then(Value::as_str)
-                .filter(|s| !s.is_empty());
-            if path.is_none() {
-                return Err(
-                    "ExternalWriteAction Proposal 缺少 after.path（非空字符串）。".to_string(),
-                );
+                .unwrap_or("propose_write");
+            match operation {
+                "move" | "trash" | "restore" => {
+                    for field in ["source_path", "target_path", "source_digest"] {
+                        if after
+                            .get(field)
+                            .and_then(Value::as_str)
+                            .is_none_or(|value| value.trim().is_empty())
+                        {
+                            return Err(format!(
+                                "ExternalWriteAction {operation} Proposal 缺少 after.{field}（非空字符串）。"
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+                "create" | "overwrite" | "propose_write" => {
+                    let path = after
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty());
+                    if path.is_none() {
+                        return Err(
+                            "ExternalWriteAction Proposal 缺少 after.path（非空字符串）。"
+                                .to_string(),
+                        );
+                    }
+                    reviewed_artifact_target_precondition(after)?;
+                    Ok(())
+                }
+                _ => Err(format!(
+                    "ExternalWriteAction Proposal 包含不受支持的 operation：{operation}。"
+                )),
             }
-            Ok(())
         }
         ProposalType::ScheduledTask => {
             let title = after
@@ -1980,7 +2744,56 @@ pub(crate) fn validate_proposal_payload(
             if content.is_none() {
                 return Err("DataExport Proposal 缺少 after.content（字符串）。".to_string());
             }
-            Ok(())
+            match after.get("tool").and_then(Value::as_str) {
+                Some("browser.open") => {
+                    let url = after
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| "browser.open Proposal 缺少精确 after.url。".to_string())?;
+                    validate_browser_open_url(url).map(|_| ())
+                }
+                Some("email.propose_draft") => {
+                    for field in ["to", "subject", "body"] {
+                        if after
+                            .get(field)
+                            .and_then(Value::as_str)
+                            .is_none_or(|value| value.trim().is_empty())
+                        {
+                            return Err(format!(
+                                "email.propose_draft Proposal 缺少精确 after.{field}。"
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+                Some("local.run_utility") => {
+                    let command = after
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .filter(|value| local_utility_executable(value).is_some())
+                        .ok_or_else(|| {
+                            "local.run_utility Proposal 必须使用精确只读 allowlist command。"
+                                .to_string()
+                        })?;
+                    debug_assert!(local_utility_executable(command).is_some());
+                    let timeout_ms =
+                        after
+                            .get("timeout_ms")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| {
+                                "local.run_utility Proposal 缺少精确 after.timeout_ms。".to_string()
+                            })?;
+                    if !(100..=3_000).contains(&timeout_ms) {
+                        return Err(
+                            "local.run_utility Proposal timeout_ms 必须在 100..=3000。".to_string()
+                        );
+                    }
+                    Ok(())
+                }
+                Some(other) => Err(format!("DataExport Proposal 工具不受支持：{other}。")),
+                None => Ok(()),
+            }
         }
         ProposalType::PluginPermission
         | ProposalType::ModelPolicyChange
@@ -2724,23 +3537,11 @@ async fn apply_proposal_to_state(
                     let cfg = state.config.lock().await;
                     cfg.system.safe_paths.clone()
                 };
-                if !safe_paths.is_empty() {
-                    let ics_content = build_ics_event(&after)?;
-                    let ics_filename = format!("{}.ics", sanitize_filename(title));
-                    let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
-                    if let Err(e) =
-                        openlife_core::atomic_file::write_atomic(&ics_path, ics_content.as_bytes())
-                    {
-                        log::warn!(
-                            "[proposal] Failed to write ICS file '{}': {}",
-                            ics_path.display(),
-                            e
-                        );
-                        projection_warning = Some(format!(
-                            "projection_degraded: failed to materialize ICS view: {}",
-                            e
-                        ));
-                    }
+                if let Err(error) = write_calendar_projection_once(proposal, &after, &safe_paths) {
+                    log::warn!("[proposal] Failed to create ICS projection: {error}");
+                    projection_warning = Some(format!(
+                        "projection_degraded: failed to materialize ICS view: {error}"
+                    ));
                 }
             }
 
@@ -2763,14 +3564,64 @@ async fn apply_proposal_to_state(
                 .unwrap_or("export.txt");
             let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
 
+            if tool == "browser.open" {
+                let raw_url = after.get("url").and_then(Value::as_str).unwrap_or("");
+                let url = match validate_browser_open_url(raw_url) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        return Ok(patch_result_for_proposal(
+                            proposal,
+                            false,
+                            "browser_open",
+                            Some(error),
+                        ))
+                    }
+                };
+                match open::that(url.as_str()) {
+                    Ok(_) => Ok(patch_result_for_proposal(
+                        proposal,
+                        true,
+                        "browser_handoff_opened",
+                        Some("The system accepted the browser handoff; page load and remote outcome remain unverified.".into()),
+                    )),
+                    Err(error) => Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "browser_open",
+                        Some(format!("Failed to open system browser: {error}")),
+                    )),
+                }
+            } else if tool == "local.run_utility" {
+                let command = after.get("command").and_then(Value::as_str).unwrap_or("");
+                let timeout_ms = after
+                    .get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(3_000);
+                match run_bounded_local_utility(command, timeout_ms).await {
+                    Ok(output) => Ok(patch_result_for_proposal(
+                        proposal,
+                        true,
+                        "local_utility_completed",
+                        Some(format!(
+                            "Reviewed read-only utility completed. Output: {}",
+                            output.trim()
+                        )),
+                    )),
+                    Err(error) => Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "local_utility_failed",
+                        Some(error),
+                    )),
+                }
             // email.propose_draft: open system mail client via mailto: URI
-            if tool == "email.propose_draft" {
+            } else if tool == "email.propose_draft" {
                 let to = after.get("to").and_then(Value::as_str).unwrap_or("");
                 let subject = after.get("subject").and_then(Value::as_str).unwrap_or("");
                 let body = after.get("body").and_then(Value::as_str).unwrap_or(content);
                 let mailto = format!(
                     "mailto:{}?subject={}&body={}",
-                    to,
+                    urlencoding(to),
                     urlencoding(subject),
                     urlencoding(body)
                 );
@@ -2778,13 +3629,13 @@ async fn apply_proposal_to_state(
                     Ok(_) => Ok(patch_result_for_proposal(
                         proposal,
                         true,
-                        "data_export",
-                        None,
+                        "email_draft_handoff_opened",
+                        Some("The system accepted the email-draft handoff; OpenLife did not send the message and delivery remains unverified.".into()),
                     )),
                     Err(e) => Ok(patch_result_for_proposal(
                         proposal,
                         false,
-                        "data_export",
+                        "email_draft_handoff_failed",
                         Some(format!("Failed to open mail client: {}", e)),
                     )),
                 }
@@ -3188,6 +4039,14 @@ async fn accept_proposal_with_state_and_confirmation(
                 "successorEventId": transition.successor_event_id,
             });
         }
+        drop(terminal_owner_fence_guard);
+        if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
+            response["agentRunProjectionStatus"] = "reconciliation_required".into();
+            response["warnings"] =
+                serde_json::json!([format!("AgentRun 投影仍等待 reconciliation: {error}")]);
+        } else {
+            response["agentRunProjectionStatus"] = "confirmed".into();
+        }
         return Ok(response);
     }
     let (result, artifact_materialization) = if proposal.proposal_type
@@ -3491,6 +4350,8 @@ fn proposal_type_resolves_main_chat_review_blocker(proposal_type: ProposalType) 
             | ProposalType::PreferenceUpdate
             | ProposalType::CapabilityUpdate
             | ProposalType::ExternalWriteAction
+            | ProposalType::ScheduledTask
+            | ProposalType::DataExport
     )
 }
 
@@ -3618,7 +4479,7 @@ async fn sync_main_chat_task_blockers_after_review_proposal_accept(
     })]
 }
 
-async fn sync_main_chat_task_after_action_permission_reject(
+async fn sync_main_chat_task_after_blocking_review_reject(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
 ) -> Result<bool, String> {
@@ -3637,17 +4498,21 @@ async fn sync_main_chat_task_after_action_permission_reject(
                 .map(|proof| proof.relation_kind()),
         )
     };
-    if relation_kind
-        != Some(openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite)
-    {
+    if !matches!(
+        relation_kind,
+        Some(
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+                | openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+        )
+    ) {
         return Ok(false);
     }
     let Some(origin) = origin else {
-        return Err("action-resume rejection is missing its terminal-owner origin".into());
+        return Err("blocking review rejection is missing its terminal-owner origin".into());
     };
     terminal_owner_write_gateway_from_state(state)
         .await?
-        .apply_action_resume_review_rejection(&proposal.id)
+        .apply_blocking_review_rejection(&proposal.id)
         .await
         .map_err(|error| error.to_string())?;
     let cancelled = state
@@ -3662,7 +4527,7 @@ async fn sync_main_chat_task_after_action_permission_reject(
         session.status
             != openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled
     }) {
-        return Err("action-resume rejection cancellation is not yet confirmed".into());
+        return Err("blocking review rejection cancellation is not yet confirmed".into());
     }
     Ok(true)
 }
@@ -3674,7 +4539,7 @@ pub(crate) async fn reject_proposal_with_state(
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     if proposal.status == ProposalStatus::Rejected
-        && sync_main_chat_task_after_action_permission_reject(state, &proposal).await?
+        && sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?
     {
         if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
             log::warn!(
@@ -3691,7 +4556,7 @@ pub(crate) async fn reject_proposal_with_state(
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
     let _task_cancelled =
-        sync_main_chat_task_after_action_permission_reject(state, &proposal).await?;
+        sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?;
     if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         log::warn!(
             "[proposal] AgentRun rejection reconciliation pending for {}: {}",
@@ -4252,6 +5117,23 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
+
+    #[test]
+    fn confirmed_governed_actions_are_eligible_for_task_blocker_recovery() {
+        for proposal_type in [
+            ProposalType::ExternalWriteAction,
+            ProposalType::ScheduledTask,
+            ProposalType::DataExport,
+        ] {
+            assert!(
+                proposal_type_resolves_main_chat_review_blocker(proposal_type),
+                "{proposal_type} must recover an exact effect-blocking terminal relation"
+            );
+        }
+        assert!(!proposal_type_resolves_main_chat_review_blocker(
+            ProposalType::ToolPermission
+        ));
+    }
 
     fn reviewed_memory_after(
         session_id: &str,
@@ -6654,6 +7536,8 @@ mod tests {
                 "content_hash": "",
                 "size_bytes": 15,
                 "operation": "create",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
             }),
             "测试写入文件",
             0.8,
@@ -6698,6 +7582,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_external_move_and_restore_are_digest_bound_and_receipted() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let safe_root = temp_dir.path().join("safe-move");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        state.config.lock().await.system.safe_paths =
+            vec![safe_root.to_string_lossy().into_owned()];
+
+        let source = safe_root.join("source.md");
+        let target = safe_root.join("archive.md");
+        let content = "# Reviewed artifact move";
+        std::fs::write(&source, content).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+
+        let move_proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.move.{}", source.display()),
+            serde_json::json!({
+                "operation": "move",
+                "source_path": source.to_string_lossy(),
+                "target_path": target.to_string_lossy(),
+                "source_digest": digest,
+            }),
+            "Move an explicitly reviewed file",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&move_proposal)
+            .unwrap();
+
+        let moved = accept_proposal_with_state(move_proposal.id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(moved["effect_status"], "confirmed");
+        assert_eq!(
+            moved["artifactMaterialization"]["targetReference"],
+            target.to_string_lossy().as_ref()
+        );
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), content);
+
+        let restore_proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.restore.{}", target.display()),
+            serde_json::json!({
+                "operation": "restore",
+                "source_path": target.to_string_lossy(),
+                "target_path": source.to_string_lossy(),
+                "source_digest": digest,
+            }),
+            "Restore the explicitly reviewed file",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&restore_proposal)
+            .unwrap();
+
+        let restored = accept_proposal_with_state(restore_proposal.id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(restored["effect_status"], "confirmed");
+        assert!(source.exists());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn external_move_refuses_changed_source_after_review() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let safe_root = temp_dir.path().join("safe-move-cas");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        state.config.lock().await.system.safe_paths =
+            vec![safe_root.to_string_lossy().into_owned()];
+        let source = safe_root.join("source.md");
+        let target = safe_root.join("target.md");
+        let reviewed_content = "reviewed";
+        std::fs::write(&source, reviewed_content).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(reviewed_content.as_bytes()));
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            "filesystem.move.cas",
+            serde_json::json!({
+                "operation": "move",
+                "source_path": source.to_string_lossy(),
+                "target_path": target.to_string_lossy(),
+                "source_digest": digest,
+            }),
+            "Digest-bound move",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        std::fs::write(&source, "changed after review").unwrap();
+
+        let error = accept_proposal_with_state(proposal.id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("digest") || error.contains("preflight"));
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "changed after review"
+        );
+        assert!(!target.exists());
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal.id)
+                .unwrap()
+                .as_deref(),
+            Some("failed_before_effect")
+        );
+    }
+
+    #[tokio::test]
     async fn proposal_accepts_hs_external_write_payload_and_verifies_hash() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -6735,6 +7766,8 @@ mod tests {
                 "content_hash": content_hash,
                 "size_bytes": content.len(),
                 "operation": "create",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
                 "requires_confirmation": true,
                 "hs_policy_id": openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
             }),
@@ -6807,6 +7840,46 @@ mod tests {
         (claim_id, prepared)
     }
 
+    async fn prepare_move_crash_fixture(
+        state: &Arc<AppState>,
+        proposal: &AgentProposal,
+        safe_paths: &[String],
+    ) -> (String, PreparedArtifactMove) {
+        let claim_id = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal.id)
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_artifact_move(
+            &proposal.id,
+            proposal.after["source_path"].as_str().unwrap(),
+            proposal.after["target_path"].as_str().unwrap(),
+            proposal.after["source_digest"].as_str().unwrap(),
+            safe_paths,
+        )
+        .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .prepare_artifact_effect(
+                &proposal.id,
+                &claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            )
+            .unwrap();
+        (claim_id, prepared)
+    }
+
     #[tokio::test]
     async fn artifact_restart_recovers_staged_bytes_without_blind_redispatch() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -6825,7 +7898,12 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::ExternalWriteAction,
             &format!("filesystem.{}", target.display()),
-            serde_json::json!({"path": target, "content": content}),
+            serde_json::json!({
+                "path": target,
+                "content": content,
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+            }),
             "Restart recovery fixture",
             1.0,
             RiskLevel::High,
@@ -6897,7 +7975,12 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::ExternalWriteAction,
             &format!("filesystem.{}", target.display()),
-            serde_json::json!({"path": target, "content": content}),
+            serde_json::json!({
+                "path": target,
+                "content": content,
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+            }),
             "Rename crash fixture",
             1.0,
             RiskLevel::High,
@@ -6941,6 +8024,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_move_restart_observes_completed_rename_without_redispatch() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("artifact-move-restart.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let safe_root = temp_dir.path().join("safe-move-restart");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        state.config.lock().await.system.safe_paths = safe_paths.clone();
+        let source = safe_root.join("before.md");
+        let target = safe_root.join("after.md");
+        let content = "move exactly once";
+        std::fs::write(&source, content).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            "filesystem.move.restart",
+            serde_json::json!({
+                "operation": "move",
+                "source_path": source.to_string_lossy(),
+                "target_path": target.to_string_lossy(),
+                "source_digest": digest,
+            }),
+            "Move restart fixture",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let (_claim_id, prepared) =
+            prepare_move_crash_fixture(&state, &proposal, &safe_paths).await;
+        let observed = commit_artifact_move(&prepared, &safe_paths).unwrap();
+        assert_eq!(observed, prepared.content_digest);
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), content);
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let report = reconcile_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.artifact_effects_reconciled, 1);
+        assert_eq!(report.proposal_projections_repaired, 1);
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), content);
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.artifact_effect(&proposal.id).unwrap().unwrap().state,
+            ArtifactEffectState::Confirmed
+        );
+        assert_eq!(
+            store.get_proposal(&proposal.id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_seals_claimed_os_handoff_as_unknown_instead_of_retrying() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("os-handoff-restart.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let proposal = AgentProposal::new(
+            ProposalType::DataExport,
+            "https://example.com/report",
+            serde_json::json!({
+                "tool": "browser.open",
+                "url": "https://example.com/report",
+                "content": "Open the reviewed URL in the system browser",
+            }),
+            "Browser handoff restart fixture",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal.id)
+            .unwrap()
+            .is_some());
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let startup_coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            startup_coordinator.register_read_write(*store);
+        }
+        Arc::get_mut(&mut state).unwrap().persistence_coordinator = Arc::new(startup_coordinator);
+        let report = reconcile_startup_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.ambiguous_action_effects_marked_unknown, 1);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal.id)
+                .unwrap()
+                .as_deref(),
+            Some("unknown")
+        );
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal.id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_claimed_local_scheduled_task_from_canonical_task() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("scheduled-task-restart.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "calendar.events",
+            serde_json::json!({
+                "tool": "calendar.propose_event",
+                "title": "Restart Review",
+                "scheduled_at": "2026-08-12T09:00:00+08:00",
+                "description": "Prove the local task without redispatching an OS handoff",
+            }),
+            "Local scheduled task restart fixture",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let claim_id = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+            store
+                .claim_dispatch(&proposal.id)
+                .unwrap()
+                .expect("claim local scheduled task")
+        };
+        let review_acceptance = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            openlife_core::agent::ReviewWorkflow::new(&store)
+                .claimed_acceptance_snapshot(&proposal.id, &claim_id)
+                .unwrap()
+        };
+        let effect = apply_proposal_to_state(
+            &state,
+            &proposal,
+            proposal.after.clone(),
+            Some(&review_acceptance),
+        )
+        .await
+        .unwrap();
+        assert!(effect.success);
+        assert_eq!(
+            state.scheduled_task_store.list_tasks(None).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal.id)
+                .unwrap()
+                .as_deref(),
+            Some("claimed")
+        );
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        let startup_coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            startup_coordinator.register_read_write(*store);
+        }
+        Arc::get_mut(&mut state).unwrap().persistence_coordinator = Arc::new(startup_coordinator);
+
+        let report = reconcile_startup_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+
+        assert_eq!(report.ambiguous_action_effects_marked_unknown, 0);
+        assert_eq!(report.proposal_projections_repaired, 1);
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal.id).unwrap().as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal.id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
+        drop(store);
+        assert_eq!(
+            state.scheduled_task_store.list_tasks(None).unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn artifact_restart_proves_prepared_without_bytes_is_retryable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut state = test_app_state(&temp_dir);
@@ -6958,7 +8280,12 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::ExternalWriteAction,
             &format!("filesystem.{}", target.display()),
-            serde_json::json!({"path": target, "content": content}),
+            serde_json::json!({
+                "path": target,
+                "content": content,
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+            }),
             "Prepared crash fixture",
             1.0,
             RiskLevel::High,
@@ -7023,6 +8350,8 @@ mod tests {
             serde_json::json!({
                 "path": file_path.to_string_lossy().to_string(),
                 "content": "should not write",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
             }),
             "测试安全路径拦截",
             0.8,
@@ -7141,6 +8470,53 @@ mod tests {
         assert_eq!(tasks[0].id, id);
         assert_eq!(tasks[0].source_proposal_id.as_deref(), Some(id.as_str()));
         assert!(!temp_dir.path().join("scheduled_tasks.json").exists());
+    }
+
+    #[tokio::test]
+    async fn accept_calendar_event_creates_local_task_and_ics_projection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let safe_root = temp_dir.path().join("calendar-projection");
+        std::fs::create_dir_all(&safe_root).unwrap();
+        let safe_root = safe_root.canonicalize().unwrap();
+        state.config.lock().await.system.safe_paths =
+            vec![safe_root.to_string_lossy().into_owned()];
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "calendar.events",
+            serde_json::json!({
+                "tool": "calendar.propose_event",
+                "title": "Planning Review",
+                "scheduled_at": "2026-08-12T09:00:00+08:00",
+                "description": "Phase 4 review",
+            }),
+            "Create a reviewed local calendar projection",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let response = accept_proposal_with_state(proposal.id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(response["effect_status"], "confirmed");
+        let tasks = state.scheduled_task_store.list_tasks(None).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].action_type, "calendar.propose_event");
+        let ics_path = safe_root.join(calendar_projection_filename(&proposal, "Planning Review"));
+        let ics = std::fs::read_to_string(ics_path).unwrap();
+        assert!(ics.contains("BEGIN:VEVENT"));
+        assert!(ics.contains("SUMMARY:Planning Review"));
+        assert!(ics.contains("DTSTART:20260812T010000Z"));
+        assert!(ics.contains(&format!("UID:openlife-{}@local", proposal.id)));
     }
 
     #[tokio::test]
@@ -7394,6 +8770,55 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_local_utility_runs_only_the_reviewed_bounded_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::DataExport,
+            "local.utility.whoami",
+            serde_json::json!({
+                "tool": "local.run_utility",
+                "command": "whoami",
+                "timeout_ms": 3_000,
+                "content": "Run the exact reviewed read-only utility",
+            }),
+            "Run one reviewed local utility",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let response = accept_proposal_with_state(proposal.id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(response["effect_status"], "confirmed");
+        assert_eq!(
+            response["patch_result"]["operation"],
+            "local_utility_completed"
+        );
+        assert!(response["patch_result"]["error"]
+            .as_str()
+            .is_some_and(|value| value.contains("Reviewed read-only utility completed")));
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal.id).unwrap().as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal.id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
     }
 
     fn scheduled_builder_proposal(title: &str) -> AgentProposal {
@@ -7738,6 +9163,250 @@ mod tests {
             .unwrap();
         assert_eq!(reconciled_run.status, AgentRunStatus::WaitingPermission);
         assert!(reconciled_run.finished_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_review_successor_after_agent_run_projection_crash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .main_chat_agent_event_store = Some(Arc::new(Mutex::new(
+            crate::main_chat_event_stream::MainChatAgentEventStore::new_in_memory().unwrap(),
+        )));
+
+        let task_session_id = uuid::Uuid::new_v4().to_string();
+        let chat_session_id = uuid::Uuid::new_v4().to_string();
+        let user_goal = "remember one reviewed preference";
+        state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_session_with_id(
+                task_session_id.clone(),
+                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                    chat_session_id: chat_session_id.clone(),
+                    user_goal: user_goal.into(),
+                    selected_strategy:
+                        openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::MemoryProposal,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let canonical_message = state
+            .memory_store
+            .lock()
+            .await
+            .save_message_idempotent_with_proof(
+                &chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: user_goal.into(),
+                },
+                &task_session_id,
+            )
+            .unwrap();
+        {
+            let memory_store = state.memory_store.lock().await;
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .bind_canonical_memory_store(&memory_store)
+                .unwrap();
+            let task_store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            task_store
+                .bind_canonical_memory_store(&memory_store)
+                .unwrap();
+            task_store
+                .bind_session_canonical_user_message(
+                    &task_session_id,
+                    &canonical_message.receipt().canonical_ref,
+                    user_goal,
+                )
+                .unwrap();
+        }
+        let mut run = AgentRun::new_chat_run(&chat_session_id, user_goal);
+        run.id = task_session_id.clone();
+        run.task_id = task_session_id.clone();
+        run.input_ref = Some(canonical_message.receipt().canonical_ref.clone());
+        crate::terminal_owner_write_gateway::create_conversation_bound_agent_run(
+            &state,
+            &run,
+            &canonical_message,
+        )
+        .await
+        .unwrap();
+
+        let admission = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .issue_terminal_owner_epoch_admission(
+                &task_session_id,
+                &task_session_id,
+                canonical_message,
+            )
+            .unwrap();
+        let epoch = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .open_terminal_owner_epoch_from_admission(admission)
+            .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.candidates",
+            reviewed_memory_after(
+                &chat_session_id,
+                "Prefer concise progress reports.",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
+            "Remember only after explicit review.",
+            1.0,
+            RiskLevel::Low,
+            ProposalSource::ChatConversation,
+        );
+        let execution_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let execution_registration = execution_registry.register(&task_session_id);
+        let submission =
+            crate::terminal_owner_write_gateway::submit_main_chat_terminal_review_relation(
+                &state,
+                epoch.review_origin_proof().unwrap(),
+                openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite,
+                openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                    openlife_core::agent::DurableWriteSource::MainChat,
+                    openlife_core::agent::DurableWriteSubject::Memory,
+                    proposal,
+                    "Await explicit memory review.",
+                )
+                .with_idempotency_key(format!("startup-review-successor:{task_session_id}")),
+                &execution_registration.execution_epoch(),
+            )
+            .await
+            .unwrap();
+        let proposal_id = submission.review().proposal_id().to_string();
+        {
+            let task_store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            task_store
+                .set_pending_blockers(&task_session_id, vec![format!("proposal:{proposal_id}")])
+                .unwrap();
+            task_store
+                .mark_waiting_permission(&task_session_id)
+                .unwrap();
+        }
+        let owner = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .canonical_owner_head(&task_session_id)
+            .unwrap()
+            .unwrap();
+        {
+            let event_store = state
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            event_store
+                .begin_terminal_owner_seal(&task_session_id, &task_session_id, epoch.generation())
+                .unwrap();
+            event_store
+                .append_terminal_final_and_seal(
+                    crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                        task_session_id: task_session_id.clone(),
+                        run_id: task_session_id.clone(),
+                        epoch_generation: epoch.generation(),
+                        delivery_id: format!("delivery:{task_session_id}"),
+                        expected_task_owner_revision: owner.revision(),
+                        expected_task_owner_digest: owner.digest().to_string(),
+                        status: "completed_with_pending_items".into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let acceptance = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .expect("review acceptance commits the effect and terminal successor");
+        assert_eq!(acceptance["agentRunProjectionStatus"], "confirmed");
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&task_session_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::Completed
+        );
+
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            let mut stale_run = store.get_run(&task_session_id).unwrap().unwrap();
+            stale_run.status = AgentRunStatus::WaitingPermission;
+            stale_run.finished_at = None;
+            store.update_run(&stale_run).unwrap();
+        }
+        drop(execution_registration);
+        let startup_coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            startup_coordinator.register_read_write(*store);
+        }
+        Arc::get_mut(&mut state).unwrap().persistence_coordinator = Arc::new(startup_coordinator);
+
+        assert_eq!(
+            crate::bootstrap::reconcile_startup_orphaned_main_chat_runs(&state)
+                .await
+                .expect("startup repairs the exact successor-backed AgentRun projection"),
+            1
+        );
+        state.persistence_coordinator.seal();
+        state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .expect("exact successor recovery must not leave Safe Mode active");
+        let recovered = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&task_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, AgentRunStatus::Completed);
+        assert!(recovered.finished_at.is_some());
     }
 
     #[tokio::test]

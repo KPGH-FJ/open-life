@@ -132,6 +132,7 @@ fn test_action_parser_final_envelope() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -176,6 +177,7 @@ fn test_action_parser_actions_envelope() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -227,6 +229,7 @@ fn test_action_parser_direct_read_actions_keep_executor_input_shape() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -276,6 +279,7 @@ fn test_action_parser_legacy_tool_calls() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -320,6 +324,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -365,6 +370,7 @@ fn test_action_parser_no_json() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -409,6 +415,7 @@ fn test_action_parser_final_with_actions() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -500,6 +507,7 @@ fn test_max_tool_calls_stop_reason() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -546,6 +554,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -595,6 +604,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -670,6 +680,7 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: Some(&memory_store),
         memory_lifecycle_retrieval_reader: Some(&memory_lifecycle_retrieval_reader),
         proposal_store: None,
@@ -1139,6 +1150,7 @@ async fn test_proposal_tool_bypass_permission_blocking() {
         safe_paths: &safe_paths,
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&prop_store),
@@ -1220,6 +1232,7 @@ async fn test_permission_check_tool() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
@@ -1285,6 +1298,7 @@ async fn test_memory_propose_write_creates_proposal() {
         safe_paths: &[],
         calendar_ics_paths: &[],
         life_model: None,
+        canonical_state: None,
         memory_store: None,
         memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&prop_store),
@@ -1370,4 +1384,74 @@ fn test_agent_loop_config_toolset_allowlist() {
     };
     assert_eq!(config.toolset_allowlist.len(), 2);
     assert!(config.toolset_allowlist.contains(&"goal.read".to_string()));
+}
+
+#[tokio::test]
+async fn state_tools_use_canonical_state_store_snapshot_instead_of_lifemodel_compatibility_fields()
+{
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_default_builtins();
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    for tool in ["goal.read", "state.read"] {
+        permission_store
+            .grant(
+                tool,
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+    }
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let mut life_model = LifeModel::default();
+    life_model.goals.daily.push(crate::life_model::DailyGoal {
+        name: "stale YAML daily task".into(),
+        ..Default::default()
+    });
+    life_model.state.current_focus = "stale YAML state".into();
+    let canonical_state = crate::agent::CanonicalStateSnapshot {
+        daily_tasks: Vec::new(),
+        observations: Vec::new(),
+    };
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_life_model(&life_model)
+    .with_canonical_state(&canonical_state);
+    let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
+
+    for tool in ["goal.read", "state.read"] {
+        let result = gateway
+            .execute(
+                crate::agent::AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: tool.into(),
+                    input: serde_json::json!({"arguments": {}}),
+                    source_run_id: None,
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status,
+            crate::agent::ActionExecutionStatus::Succeeded
+        );
+        let output = result.action.output.expect("tool output").to_string();
+        assert!(
+            !output.contains("stale YAML daily task"),
+            "{tool}: {output}"
+        );
+        assert!(!output.contains("stale YAML state"), "{tool}: {output}");
+        assert!(output.contains("state_store"), "{tool}: {output}");
+    }
 }
