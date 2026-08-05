@@ -9,6 +9,58 @@ import {
 import type { ReviewDispatchState } from "@/contracts/reviewDispatchContract";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 
+function actionOperation(item: ReviewItem): string | undefined {
+  return item.decisionContext.actionContract?.operation;
+}
+
+function approvedActionLabel(item: ReviewItem): string {
+  switch (actionOperation(item)) {
+    case "move":
+      return "批准并移动文件";
+    case "trash":
+      return "批准并移入 OpenLife 恢复区";
+    case "restore":
+      return "批准并恢复文件";
+    case "create_local_calendar_projection":
+      return "批准并创建本地任务及日历投影";
+    case "create_scheduled_task":
+      return "批准并创建定时任务";
+    case "open_email_draft":
+      return "批准并打开邮件草稿";
+    case "open_browser_url":
+      return "批准并打开网址";
+    case "run_local_utility":
+      return "批准并运行本地工具";
+    case "export_data":
+      return "批准并导出";
+    default:
+      return item.type === "external_write_action" ? "批准并写入文件" : "批准变更";
+  }
+}
+
+function confirmedActionStatusLabel(item: ReviewItem): string {
+  switch (actionOperation(item)) {
+    case "move":
+      return "文件移动已核验";
+    case "trash":
+      return "已移入恢复区";
+    case "restore":
+      return "文件恢复已核验";
+    case "create_local_calendar_projection":
+      return "本地任务及日历投影已处理";
+    case "create_scheduled_task":
+      return "定时任务已创建";
+    case "open_email_draft":
+      return "邮件草稿交接已记录";
+    case "open_browser_url":
+      return "浏览器交接已记录";
+    case "run_local_utility":
+      return "本地工具已完成";
+    default:
+      return item.type === "external_write_action" ? "文件写入已核验" : "已应用";
+  }
+}
+
 export function reviewItemStatus(item: ReviewItem): {
   label: string;
   status: "neutral" | "waiting" | "unknown" | "error" | "success";
@@ -19,10 +71,10 @@ export function reviewItemStatus(item: ReviewItem): {
       item.artifactEvidence.state === "confirmed" &&
       item.artifactEvidence.observedContentDigest === item.artifactEvidence.contentDigest
     ) {
-      return { label: "文件已写入", status: "success", verified: true };
+      return { label: confirmedActionStatusLabel(item), status: "success", verified: true };
     }
     if (item.artifactEvidence.state === "failed_before_effect") {
-      return { label: "写入前失败", status: "error" };
+      return { label: "执行前失败", status: "error" };
     }
     if (item.artifactEvidence.state === "unknown") {
       return { label: "文件状态未知", status: "unknown" };
@@ -41,7 +93,7 @@ export function reviewItemStatus(item: ReviewItem): {
     }
     if (item.materializationStatus === "applying") return { label: "正在应用", status: "waiting" };
     if (item.materializationStatus === "applied")
-      return { label: "已应用", status: "success", verified: true };
+      return { label: confirmedActionStatusLabel(item), status: "success", verified: true };
     if (item.materializationStatus === "failed") return { label: "应用失败", status: "error" };
     if (item.materializationStatus === "rolled_back") return { label: "已回滚", status: "waiting" };
     if (item.materializationStatus === "unknown")
@@ -54,8 +106,7 @@ export function reviewItemStatus(item: ReviewItem): {
 
 function actionLabel(action: ReviewAction, item: ReviewItem): string {
   if (action.kind === "approve") {
-    if (item.type === "external_write_action") return "批准并写入文件";
-    return item.type === "tool_permission" ? "仅允许本次" : "批准变更";
+    return item.type === "tool_permission" ? "仅允许本次" : approvedActionLabel(item);
   }
   const labels: Partial<Record<ReviewAction["kind"], string>> = {
     reject: "拒绝",
@@ -121,6 +172,19 @@ export function reviewDecisionFeedback(
             : {
                 title: "文件结果尚未确认",
                 body: "批准请求已经返回，但后端读模型没有提供匹配的确认收据；当前保持未完成或未知。",
+                tone: "protection",
+              };
+        }
+        if (item.decisionContext.actionContract) {
+          return state.refreshed.materializationStatus === "applied"
+            ? {
+                title: confirmedActionStatusLabel(item),
+                body: item.decisionContext.actionContract.terminalEvidenceSummary,
+                tone: "neutral",
+              }
+            : {
+                title: "动作结果尚未确认",
+                body: "批准已返回，但刷新后的后端读模型尚未证明这一精确动作完成。",
                 tone: "protection",
               };
         }
@@ -349,6 +413,43 @@ export function ReviewGovernedView({
               </section>
             )}
 
+            {selectedItem.decisionContext.actionContract && (
+              <section className="ol-review-rationale" aria-labelledby="action-contract-title">
+                <div className="ol-governed-section-heading">
+                  <span>动作合同</span>
+                  <h3 id="action-contract-title">这次批准精确允许什么</h3>
+                </div>
+                <dl>
+                  <div>
+                    <dt>能力</dt>
+                    <dd>{selectedItem.decisionContext.actionContract.capabilityId}</dd>
+                  </div>
+                  <div>
+                    <dt>操作</dt>
+                    <dd>{selectedItem.decisionContext.actionContract.operation}</dd>
+                  </div>
+                  <div>
+                    <dt>确认范围</dt>
+                    <dd>{selectedItem.decisionContext.actionContract.confirmationSummary}</dd>
+                  </div>
+                  <div>
+                    <dt>副作用边界</dt>
+                    <dd>{selectedItem.decisionContext.actionContract.effectBoundary}</dd>
+                  </div>
+                  <div>
+                    <dt>完成证据</dt>
+                    <dd>{selectedItem.decisionContext.actionContract.terminalEvidenceSummary}</dd>
+                  </div>
+                </dl>
+                {selectedItem.decisionContext.after.detail && (
+                  <details>
+                    <summary>查看已审核的精确参数</summary>
+                    <pre>{selectedItem.decisionContext.after.detail}</pre>
+                  </details>
+                )}
+              </section>
+            )}
+
             {permission && (
               <section className="ol-permission-summary" aria-labelledby="permission-scope-title">
                 <div className="ol-governed-section-heading">
@@ -431,8 +532,8 @@ export function ReviewGovernedView({
             {selectedItem.type === "external_write_action" && (
               <section className="ol-review-rationale" aria-labelledby="artifact-evidence-title">
                 <div className="ol-governed-section-heading">
-                  <span>文件交付</span>
-                  <h3 id="artifact-evidence-title">后端物化证据</h3>
+                  <span>本地文件动作</span>
+                  <h3 id="artifact-evidence-title">后端终态证据</h3>
                 </div>
                 {selectedItem.artifactEvidence ? (
                   <dl>
@@ -462,8 +563,10 @@ export function ReviewGovernedView({
                     </div>
                   </dl>
                 ) : (
-                  <FoundationNotice title="尚无文件写入收据" tone="protection" live>
-                    <p>批准前这是正常状态；批准后若仍无收据，页面不会显示文件已写入。</p>
+                  <FoundationNotice title="尚无文件动作收据" tone="protection" live>
+                    <p>
+                      批准前这是正常状态；批准后若仍无收据，页面不会显示创建、移动、回收或恢复已完成。
+                    </p>
                   </FoundationNotice>
                 )}
               </section>
@@ -585,13 +688,13 @@ export function ReviewGovernedView({
         title={
           selectedItem?.type === "tool_permission"
             ? "仅允许这一次？"
-            : selectedItem?.type === "external_write_action"
-              ? "批准并写入这个文件？"
+            : selectedItem?.decisionContext.actionContract
+              ? `${approvedActionLabel(selectedItem)}？`
               : "确认批准变更？"
         }
         description={
-          selectedItem?.type === "external_write_action"
-            ? "确认会请求后端按提案中的精确路径与内容执行一次原子写入；只有刷新后的匹配收据才能证明完成。"
+          selectedItem?.decisionContext.actionContract
+            ? `${selectedItem.decisionContext.actionContract.confirmationSummary} ${selectedItem.decisionContext.actionContract.terminalEvidenceSummary}`
             : "确认只记录审核决定；任务恢复、应用结果和完成状态都需要后续刷新证明。"
         }
         busy={false}
@@ -603,8 +706,8 @@ export function ReviewGovernedView({
               label={
                 selectedItem?.type === "tool_permission"
                   ? "确认仅允许本次"
-                  : selectedItem?.type === "external_write_action"
-                    ? "确认写入文件"
+                  : selectedItem?.decisionContext.actionContract
+                    ? approvedActionLabel(selectedItem)
                     : "确认批准"
               }
               variant="primary"

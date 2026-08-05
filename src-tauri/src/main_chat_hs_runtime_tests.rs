@@ -78,10 +78,6 @@ fn main_chat_hs_runtime_helpers_are_extracted_from_lib_rs() {
         "HS tool requirement classifier must be reusable outside src/lib.rs"
     );
     assert!(
-        module_source.contains("pub(crate) fn included_life_model_sections("),
-        "LifeModel section metadata helper must be reusable outside src/lib.rs"
-    );
-    assert!(
         !source.contains("\npub(crate) async fn build_chat_runtime_hs_packet("),
         "HS packet builder should not stay concentrated in lib.rs"
     );
@@ -92,10 +88,6 @@ fn main_chat_hs_runtime_helpers_are_extracted_from_lib_rs() {
     assert!(
         !source.contains("\nfn hs_tool_requirements("),
         "HS tool requirement classifier should not stay concentrated in lib.rs"
-    );
-    assert!(
-        !source.contains("\nfn included_life_model_sections("),
-        "LifeModel section metadata helper should not stay concentrated in lib.rs"
     );
 }
 

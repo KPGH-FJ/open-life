@@ -75,13 +75,19 @@ pub(crate) async fn compile_main_chat_context(
     };
     let current_skill_id = selected_skill_id.clone();
     let configured_skill_id = selected_skill_id.clone();
+    let current_task_text = user_text.to_string();
+    let configured_task_text = user_text.to_string();
     let current_context = tokio::task::spawn_blocking(move || {
-        load_current_workspace_knowledge_context_candidates(current_skill_id.as_deref())
+        load_current_workspace_knowledge_context_candidates(
+            current_skill_id.as_deref(),
+            &current_task_text,
+        )
     });
     let configured_context = tokio::task::spawn_blocking(move || {
         load_configured_knowledge_context_candidates(
             &configured_knowledge_roots,
             configured_skill_id.as_deref(),
+            &configured_task_text,
         )
     });
     let (current_context, configured_context) = tokio::join!(current_context, configured_context);
@@ -213,6 +219,7 @@ pub(crate) fn ensure_bundled_selected_skill_context_candidate(
 // memories/USER.md, memories/MEMORY.md, skills/<selected>/SKILL.md.
 pub(crate) fn load_current_workspace_knowledge_context_candidates(
     selected_skill_id: Option<&str>,
+    task_text: &str,
 ) -> Vec<ContextSourceCandidate> {
     let mut roots = Vec::new();
     if let Ok(workspace) = crate::workspace_file_resolver::resolve_workspace_root() {
@@ -222,12 +229,13 @@ pub(crate) fn load_current_workspace_knowledge_context_candidates(
         roots.push(KnowledgeContextRoot::new("configured", configured));
     }
 
-    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id)
+    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id, task_text)
 }
 
 pub(crate) fn load_configured_knowledge_context_candidates(
     configured_roots: &[String],
     selected_skill_id: Option<&str>,
+    task_text: &str,
 ) -> Vec<ContextSourceCandidate> {
     let roots = configured_roots
         .iter()
@@ -253,16 +261,17 @@ pub(crate) fn load_configured_knowledge_context_candidates(
         })
         .collect::<Vec<_>>();
 
-    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id)
+    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id, task_text)
 }
 
 #[cfg(test)]
 pub(crate) fn load_workspace_knowledge_context_candidates(
     root: &Path,
     selected_skill_id: Option<&str>,
+    task_text: &str,
 ) -> Vec<ContextSourceCandidate> {
     let roots = vec![KnowledgeContextRoot::new("workspace", root)];
-    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id)
+    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id, task_text)
 }
 
 fn configured_knowledge_root() -> Option<PathBuf> {
@@ -297,6 +306,7 @@ impl KnowledgeContextRoot {
 fn load_knowledge_context_candidates_from_roots(
     roots: &[KnowledgeContextRoot],
     selected_skill_id: Option<&str>,
+    task_text: &str,
 ) -> Vec<ContextSourceCandidate> {
     let selected_skill_id = selected_skill_id.and_then(validate_selected_skill_id);
     let mut candidates = Vec::new();
@@ -339,16 +349,7 @@ fn load_knowledge_context_candidates_from_roots(
             "private",
             8,
         );
-        push_known_file(
-            &mut candidates,
-            &mut seen,
-            root,
-            ContextSourceKind::SelectedPersonalContext,
-            "MEMORY.md",
-            "bounded memory context surface; not trusted raw memory",
-            "private",
-            8,
-        );
+        push_task_scoped_markdown_file(&mut candidates, &mut seen, root, "MEMORY.md", task_text);
         push_known_file(
             &mut candidates,
             &mut seen,
@@ -359,19 +360,148 @@ fn load_knowledge_context_candidates_from_roots(
             "private",
             8,
         );
-        push_known_file(
+        push_task_scoped_markdown_file(
             &mut candidates,
             &mut seen,
             root,
-            ContextSourceKind::SelectedPersonalContext,
             "memories/MEMORY.md",
-            "bounded memory context surface; not trusted raw memory",
-            "private",
-            8,
+            task_text,
         );
     }
 
     candidates
+}
+
+fn push_task_scoped_markdown_file(
+    candidates: &mut Vec<ContextSourceCandidate>,
+    seen: &mut HashSet<String>,
+    root: &KnowledgeContextRoot,
+    relative: &str,
+    task_text: &str,
+) {
+    if let Some(candidate) = read_task_scoped_markdown_file(root, relative, task_text) {
+        push_unique(candidates, seen, candidate);
+    }
+}
+
+fn read_task_scoped_markdown_file(
+    root: &KnowledgeContextRoot,
+    relative: &str,
+    task_text: &str,
+) -> Option<ContextSourceCandidate> {
+    let relative_path = validate_context_relative_path(relative)?;
+    let canonical_root = root.path.canonicalize().ok()?;
+    let path = canonical_root.join(relative_path);
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(canonical).ok()?;
+    let scoped = select_task_relevant_markdown(&content, task_text)?;
+    let source = source_id(root, relative);
+    let bounded = format!(
+        "Unverified task-scoped Markdown memory from {source}. Use as working context only; it is not canonical user truth or permission.\n{scoped}"
+    )
+    .chars()
+    .take(MAX_CONTEXT_CHARS_PER_FILE)
+    .collect::<String>();
+    Some(ContextSourceCandidate::new(
+        ContextSourceKind::SelectedPersonalContext,
+        source,
+        bounded,
+        "task-relevant Markdown working memory; bounded and non-authoritative",
+        "private",
+        8,
+    ))
+}
+
+fn select_task_relevant_markdown(content: &str, task_text: &str) -> Option<String> {
+    let task = task_text.trim().to_ascii_lowercase();
+    if task.is_empty() {
+        return None;
+    }
+    let task_terms = task_relevance_terms(&task);
+    let mut sections = Vec::<String>::new();
+    let mut current = String::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with('#') && !current.trim().is_empty() {
+            sections.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        sections.push(current);
+    }
+
+    let mut selected = sections
+        .into_iter()
+        .filter_map(|section| {
+            let lower = section.to_ascii_lowercase();
+            let heading = section
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('#')
+                .trim();
+            let heading_lower = heading.to_ascii_lowercase();
+            let direct = !heading_lower.is_empty()
+                && (task.contains(&heading_lower) || heading_lower.contains(&task));
+            let matches = task_terms
+                .iter()
+                .filter(|term| lower.contains(term.as_str()))
+                .count();
+            (direct || matches > 0).then_some((usize::from(direct) * 100 + matches, section))
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|item| std::cmp::Reverse(item.0));
+    let output = selected
+        .into_iter()
+        .take(3)
+        .map(|(_, section)| section)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!output.trim().is_empty()).then_some(output)
+}
+
+fn task_relevance_terms(value: &str) -> Vec<String> {
+    let mut terms = value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|term| term.chars().count() >= 3)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut cjk_run = Vec::new();
+    let flush_cjk = |run: &mut Vec<char>, terms: &mut Vec<String>| {
+        if run.len() >= 2 {
+            terms.extend(
+                run.windows(2)
+                    .map(|window| window.iter().collect::<String>()),
+            );
+        }
+        run.clear();
+    };
+    for character in value.chars() {
+        if is_cjk(character) {
+            cjk_run.push(character);
+        } else {
+            flush_cjk(&mut cjk_run, &mut terms);
+        }
+    }
+    flush_cjk(&mut cjk_run, &mut terms);
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+    )
 }
 
 fn push_selected_skill_file(
@@ -539,7 +669,11 @@ mod tests {
         .expect("other skill");
 
         let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(&roots, Some("summarize"));
+        let candidates = load_knowledge_context_candidates_from_roots(
+            &roots,
+            Some("summarize"),
+            "use this memory context",
+        );
         let source_ids = candidates
             .iter()
             .map(|candidate| candidate.source_id.as_str())
@@ -577,7 +711,8 @@ mod tests {
         .expect("selected skill");
 
         let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(&roots, Some("../summarize"));
+        let candidates =
+            load_knowledge_context_candidates_from_roots(&roots, Some("../summarize"), "task");
 
         assert!(!candidates
             .iter()
@@ -633,13 +768,81 @@ mod tests {
         .expect("agents");
 
         let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(&roots, None);
+        let candidates = load_knowledge_context_candidates_from_roots(&roots, None, "task");
         let agents = candidates
             .iter()
             .find(|candidate| candidate.source_id == "AGENTS.md")
             .expect("agents candidate");
 
         assert_eq!(agents.content.chars().count(), MAX_CONTEXT_CHARS_PER_FILE);
+    }
+
+    #[test]
+    fn markdown_memory_loads_only_task_relevant_sections_and_stays_non_authoritative() {
+        let dir = tempfile::tempdir().expect("temp knowledge root");
+        std::fs::write(
+            dir.path().join("MEMORY.md"),
+            "# Roadshow\nUse the verified investor deck.\n\n# Gardening\nBuy tomato seeds.",
+        )
+        .expect("memory");
+
+        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
+        let candidates = load_knowledge_context_candidates_from_roots(
+            &roots,
+            None,
+            "Help prepare the roadshow deck",
+        );
+        let memory = candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "MEMORY.md")
+            .expect("task-relevant memory");
+
+        assert!(memory.content.contains("Roadshow"));
+        assert!(memory
+            .content
+            .contains("not canonical user truth or permission"));
+        assert!(!memory.content.contains("Gardening"));
+    }
+
+    #[test]
+    fn unrelated_markdown_memory_is_not_injected() {
+        let dir = tempfile::tempdir().expect("temp knowledge root");
+        std::fs::write(
+            dir.path().join("MEMORY.md"),
+            "# Gardening\nBuy tomato seeds.",
+        )
+        .expect("memory");
+
+        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
+        let candidates = load_knowledge_context_candidates_from_roots(
+            &roots,
+            None,
+            "Prepare the quarterly finance report",
+        );
+
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.source_id == "MEMORY.md"));
+    }
+
+    #[test]
+    fn chinese_task_selects_related_markdown_section_without_loading_unrelated_sections() {
+        let dir = tempfile::tempdir().expect("temp knowledge root");
+        std::fs::write(
+            dir.path().join("MEMORY.md"),
+            "# 季度财务\n财务报告需要先核对现金流。\n\n# 园艺\n购买番茄种子。",
+        )
+        .expect("memory");
+
+        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
+        let candidates =
+            load_knowledge_context_candidates_from_roots(&roots, None, "请帮我准备季度财务报告");
+        let memory = candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "MEMORY.md")
+            .expect("Chinese task-relevant memory");
+        assert!(memory.content.contains("现金流"));
+        assert!(!memory.content.contains("番茄"));
     }
 
     #[tokio::test]

@@ -307,13 +307,22 @@ enum LocalCitationEcho {
 
 impl LocalCitationEcho {
     fn response_content(self, request_text: &str, reply: &str) -> String {
+        let is_resource_citation_suffix = |suffix: &str| {
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || suffix.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+        };
         let issued_citation = |prefix: &str, length: usize| {
             request_text.match_indices(prefix).find_map(|(start, _)| {
                 let candidate = request_text.get(start..start.checked_add(length)?)?;
-                candidate[prefix.len()..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit())
-                    .then(|| candidate.to_string())
+                let suffix = &candidate[prefix.len()..];
+                let valid = if prefix == "cite_" {
+                    is_resource_citation_suffix(suffix)
+                } else {
+                    suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                };
+                valid.then(|| candidate.to_string())
             })
         };
         match self {
@@ -326,10 +335,7 @@ impl LocalCitationEcho {
                     .match_indices("cite_")
                     .filter_map(|(start, _)| {
                         let candidate = request_text.get(start..start.checked_add(29)?)?;
-                        candidate[5..]
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit())
-                            .then(|| candidate.to_string())
+                        is_resource_citation_suffix(&candidate[5..]).then(|| candidate.to_string())
                     })
                     .collect::<std::collections::BTreeSet<_>>();
                 if citations.is_empty() {

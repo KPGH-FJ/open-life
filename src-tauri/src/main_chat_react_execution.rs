@@ -215,6 +215,9 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
     {
         action_ctx = action_ctx.with_memory_lifecycle_retrieval_reader(retrieval_reader);
     }
+    if let Some(canonical_state) = resources.governed.canonical_state.as_ref() {
+        action_ctx = action_ctx.with_canonical_state(canonical_state);
+    }
     action_ctx = action_ctx.with_agent_run_store(&resources.agent_run_store);
     let bound_action_permission = action_bound_permission
         .cloned()

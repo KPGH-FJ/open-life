@@ -538,6 +538,16 @@ impl<'a> ToolDispatchAdmission<'a> {
     }
 }
 
+/// Immutable read snapshot of the StateStore-owned product state used by a
+/// single tool execution. It is a transport value, not another persistence
+/// owner, and can always be rebuilt from StateStore.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalStateSnapshot {
+    pub daily_tasks: Vec<crate::state_store::StateAsset>,
+    pub observations: Vec<crate::state_store::StateObservation>,
+}
+
 /// Dependencies required for action execution.
 ///
 /// Essential fields (registry, permission_store, audit_store, privacy_engine,
@@ -550,6 +560,10 @@ pub struct ActionExecutionContext<'a> {
     pub privacy_engine: &'a PrivacyEngine,
     pub safe_paths: &'a [String],
     pub life_model: Option<&'a crate::life_model::LifeModel>,
+    /// Canonical short-lived state owned by StateStore. This snapshot is
+    /// deliberately separate from the LifeModel YAML compatibility view so
+    /// `goal.read` and `state.read` cannot revive the retired dual authority.
+    pub canonical_state: Option<&'a CanonicalStateSnapshot>,
     pub memory_store: Option<&'a crate::memory::MemoryStore>,
     pub memory_lifecycle_retrieval_reader: Option<&'a crate::agent::MemoryLifecycleRetrievalReader>,
     pub proposal_store: Option<&'a crate::agent::ProposalStore>,
@@ -622,6 +636,7 @@ impl<'a> ActionExecutionContext<'a> {
             privacy_engine,
             safe_paths,
             life_model: None,
+            canonical_state: None,
             memory_store: None,
             memory_lifecycle_retrieval_reader: None,
             proposal_store: None,
@@ -643,6 +658,11 @@ impl<'a> ActionExecutionContext<'a> {
 
     pub fn with_life_model(mut self, life_model: &'a crate::life_model::LifeModel) -> Self {
         self.life_model = Some(life_model);
+        self
+    }
+
+    pub fn with_canonical_state(mut self, state: &'a CanonicalStateSnapshot) -> Self {
+        self.canonical_state = Some(state);
         self
     }
 

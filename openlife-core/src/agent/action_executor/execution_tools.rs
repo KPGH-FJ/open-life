@@ -867,7 +867,7 @@ impl super::ActionExecutor {
                         .await?;
                     match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
                         DurableWriteSource::ToolPermission,
-                        DurableWriteSubject::Calendar,
+                        DurableWriteSubject::Task,
                         proposal,
                         "Task proposal is pending Review Center approval.",
                     )) {

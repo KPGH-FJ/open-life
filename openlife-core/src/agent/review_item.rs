@@ -526,9 +526,17 @@ fn edit_blocker(
         );
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
-        && !is_path_in_safe_paths(external_write_path(proposal), &input.safe_paths)
+        && !external_write_paths_are_safe(proposal, &input.safe_paths)
     {
         return Some("The external write path is outside configured safe paths.".into());
+    }
+    if proposal.proposal_type == ProposalType::ExternalWriteAction
+        && !external_write_target_precondition_is_complete(proposal)
+    {
+        return Some(
+            "The reviewed file target state is incomplete; create a fresh proposal before editing."
+                .into(),
+        );
     }
     None
 }
@@ -571,9 +579,17 @@ fn approve_blocker(
         );
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
-        && !is_path_in_safe_paths(external_write_path(proposal), &input.safe_paths)
+        && !external_write_paths_are_safe(proposal, &input.safe_paths)
     {
         return Some("The external write path is outside configured safe paths.".into());
+    }
+    if proposal.proposal_type == ProposalType::ExternalWriteAction
+        && !external_write_target_precondition_is_complete(proposal)
+    {
+        return Some(
+            "The reviewed file target state is incomplete; create a fresh proposal before approval."
+                .into(),
+        );
     }
     None
 }
@@ -597,12 +613,61 @@ fn is_unsupported_type(proposal_type: ProposalType) -> bool {
     )
 }
 
-fn external_write_path(proposal: &AgentProposal) -> Option<&str> {
+fn external_write_paths(proposal: &AgentProposal) -> Vec<&str> {
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(|value| value.as_str());
+    if matches!(operation, Some("move" | "trash" | "restore")) {
+        return ["source_path", "target_path"]
+            .into_iter()
+            .filter_map(|field| proposal.after.get(field).and_then(|value| value.as_str()))
+            .filter(|value| !value.trim().is_empty())
+            .collect();
+    }
     proposal
         .after
         .get("path")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
+        .into_iter()
+        .collect()
+}
+
+fn external_write_paths_are_safe(proposal: &AgentProposal, safe_paths: &[String]) -> bool {
+    let paths = external_write_paths(proposal);
+    !paths.is_empty()
+        && paths
+            .into_iter()
+            .all(|path| is_path_in_safe_paths(Some(path), safe_paths))
+}
+
+fn external_write_target_precondition_is_complete(proposal: &AgentProposal) -> bool {
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .unwrap_or("propose_write");
+    if matches!(operation, "move" | "trash" | "restore") {
+        return true;
+    }
+    let Some(expected_absent) = proposal
+        .after
+        .get("expected_target_absent")
+        .and_then(|value| value.as_bool())
+    else {
+        return false;
+    };
+    let expected_digest = proposal
+        .after
+        .get("expected_target_digest")
+        .and_then(|value| value.as_str())
+        .filter(|value| value.starts_with("sha256:") && value.len() > "sha256:".len());
+    if expected_absent {
+        expected_digest.is_none()
+    } else {
+        expected_digest.is_some()
+    }
 }
 
 fn is_path_in_safe_paths(path: Option<&str>, safe_paths: &[String]) -> bool {
@@ -900,6 +965,72 @@ mod tests {
         assert!(!edit.enabled);
         assert!(reject.enabled);
         assert_eq!(model.summary.blocked_action_count, 2);
+    }
+
+    #[test]
+    fn review_item_file_trash_inside_safe_path_enables_approval() {
+        let mut proposal = proposal(ProposalType::ExternalWriteAction);
+        proposal.after = json!({
+            "operation": "trash",
+            "source_path": "/allowed/report.txt",
+            "target_path": "/allowed/.openlife-trash-report.txt",
+            "source_digest": "sha256:source"
+        });
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            safe_paths: vec!["/allowed".into()],
+            ..Default::default()
+        });
+
+        let item = &model.items[0];
+        assert!(find_action(item, ReviewActionKind::Approve).enabled);
+        assert!(find_action(item, ReviewActionKind::Edit).enabled);
+    }
+
+    #[test]
+    fn review_item_file_write_without_reviewed_target_state_stays_blocked() {
+        let mut proposal = proposal(ProposalType::ExternalWriteAction);
+        proposal.after = json!({
+            "operation": "propose_write",
+            "path": "/allowed/report.txt",
+            "content": "report"
+        });
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            safe_paths: vec!["/allowed".into()],
+            ..Default::default()
+        });
+
+        let item = &model.items[0];
+        let approve = find_action(item, ReviewActionKind::Approve);
+        assert!(!approve.enabled);
+        assert!(approve
+            .disabled_reason
+            .as_deref()
+            .unwrap()
+            .contains("target state is incomplete"));
+        assert!(find_action(item, ReviewActionKind::Reject).enabled);
+    }
+
+    #[test]
+    fn review_item_file_move_with_unsafe_target_stays_blocked() {
+        let mut proposal = proposal(ProposalType::ExternalWriteAction);
+        proposal.after = json!({
+            "operation": "move",
+            "source_path": "/allowed/report.txt",
+            "target_path": "/outside/report.txt",
+            "source_digest": "sha256:source"
+        });
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            safe_paths: vec!["/allowed".into()],
+            ..Default::default()
+        });
+
+        let item = &model.items[0];
+        assert!(!find_action(item, ReviewActionKind::Approve).enabled);
+        assert!(!find_action(item, ReviewActionKind::Edit).enabled);
+        assert!(find_action(item, ReviewActionKind::Reject).enabled);
     }
 
     #[test]

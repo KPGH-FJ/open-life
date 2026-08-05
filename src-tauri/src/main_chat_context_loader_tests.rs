@@ -108,7 +108,11 @@ fn create_main_chat_knowledge_workspace() -> tempfile::TempDir {
 #[test]
 fn main_chat_knowledge_context_loader_loads_bounded_workspace_formats() {
     let root = create_main_chat_knowledge_workspace();
-    let candidates = load_workspace_knowledge_context_candidates(root.path(), Some("summarize"));
+    let candidates = load_workspace_knowledge_context_candidates(
+        root.path(),
+        Some("summarize"),
+        "use bounded memory context",
+    );
     let source_ids = candidates
         .iter()
         .map(|candidate| candidate.source_id.as_str())
@@ -140,7 +144,8 @@ fn main_chat_knowledge_context_loader_loads_bounded_workspace_formats() {
 #[test]
 fn main_chat_knowledge_context_loader_does_not_load_unselected_skill_instruction() {
     let root = create_main_chat_knowledge_workspace();
-    let candidates = load_workspace_knowledge_context_candidates(root.path(), None);
+    let candidates =
+        load_workspace_knowledge_context_candidates(root.path(), None, "ordinary task");
 
     assert!(!candidates.iter().any(|candidate| {
         candidate.source_kind

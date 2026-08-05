@@ -75,7 +75,8 @@ impl MainChatAgentProductStrategyRoute {
             MainChatAgentStrategy::ReversibleMemoryCommit => Self::MemoryCommit,
             MainChatAgentStrategy::MemoryProposal
             | MainChatAgentStrategy::LifeModelProposal
-            | MainChatAgentStrategy::FileWriteProposal => Self::MemoryProposal,
+            | MainChatAgentStrategy::FileWriteProposal
+            | MainChatAgentStrategy::ActionProposal => Self::MemoryProposal,
             MainChatAgentStrategy::BlockedConfirmation => Self::Blocked,
         }
     }
@@ -87,9 +88,10 @@ impl MainChatAgentProductStrategyRoute {
             "react_tool_execution" => Self::ReactToolExecution,
             "plan_execute" => Self::PlanExecute,
             "memory_commit" | "reversible_memory_commit" => Self::MemoryCommit,
-            "memory_proposal" | "life_model_proposal" | "file_write_proposal" => {
-                Self::MemoryProposal
-            }
+            "memory_proposal"
+            | "life_model_proposal"
+            | "file_write_proposal"
+            | "action_proposal" => Self::MemoryProposal,
             "permission_request" => Self::PermissionRequest,
             "task_control" => Self::TaskControl,
             "blocked" | "blocked_confirmation" => Self::Blocked,

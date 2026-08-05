@@ -3398,7 +3398,7 @@ impl TerminalOwnerWriteGateway {
         Ok(transition_from_receipt(receipt, successor))
     }
 
-    pub(crate) async fn apply_action_resume_review_rejection(
+    pub(crate) async fn apply_blocking_review_rejection(
         &self,
         proposal_id: &str,
     ) -> anyhow::Result<TerminalOwnerReviewTransition> {
@@ -3413,9 +3413,11 @@ impl TerminalOwnerWriteGateway {
             .proposal_store
             .terminal_relation_projection_proof(proposal_id)?
             .ok_or_else(|| anyhow::anyhow!("typed_terminal_owner_relation_missing"))?;
-        if projection.relation_kind()
-            != openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
-        {
+        if !matches!(
+            projection.relation_kind(),
+            openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
+                | openlife_core::agent::ProposalTerminalRelationKind::ActionResumePrerequisite
+        ) {
             anyhow::bail!("terminal_owner_review_rejection_relation_mismatch");
         }
         let origin = self

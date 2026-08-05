@@ -285,6 +285,7 @@ pub enum WorkspaceActivityKind {
     Error,
     Retry,
     FinalResult,
+    Reflection,
     Fallback,
     Blocker,
     DurableLifecycle,
@@ -305,6 +306,7 @@ impl WorkspaceActivityKind {
             "error" => Self::Error,
             "retry" => Self::Retry,
             "final_result" => Self::FinalResult,
+            "reflection" => Self::Reflection,
             "fallback" => Self::Fallback,
             "blocker" => Self::Blocker,
             value if value.starts_with("turn_") || value.contains("lifecycle") => {
@@ -327,6 +329,7 @@ impl WorkspaceActivityKind {
             Self::Error => "Execution failed",
             Self::Retry => "Retry requested",
             Self::FinalResult => "Final result recorded",
+            Self::Reflection => "Agent reflection recorded",
             Self::Fallback => "Fallback recorded",
             Self::Blocker => "Execution blocked",
             Self::DurableLifecycle => "Durable task state recorded",

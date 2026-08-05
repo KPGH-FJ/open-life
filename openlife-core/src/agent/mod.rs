@@ -11,6 +11,7 @@ pub mod governor;
 pub mod heuristic_store;
 pub mod hs_asset_authority;
 pub mod hs_selector;
+pub mod life_model_runtime_context;
 pub mod life_model_view_model;
 pub mod lifemodel_backend_completion;
 pub mod main_chat_agent_v1;
@@ -62,7 +63,7 @@ pub use accepted_guidance::{
 };
 pub use action_executor::{
     A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
-    ActionExecutorConfig, AgentActionRequest, DurableStoreFailureObserver,
+    ActionExecutorConfig, AgentActionRequest, CanonicalStateSnapshot, DurableStoreFailureObserver,
     DurableToolExecutionOwner, ToolAuditPersistenceObserver, ToolDispatchAttempt,
     ToolDispatchObserver, ToolStartedTransitionObserver,
 };
@@ -131,6 +132,7 @@ pub use hs_selector::{
     HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
     SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
 };
+pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntimeFact};
 pub use life_model_view_model::{
     build_life_model_view_model_envelope, LifeModelCandidateChange,
     LifeModelCandidateDecisionStatus, LifeModelCanonicalSummary, LifeModelChangeKind,
@@ -246,10 +248,10 @@ pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
 pub use review_decision_context::{
-    build_review_decision_context, PermissionDecisionContext, PermissionDecisionContextStatus,
-    PermissionPolicyKind, PermissionRequestDigestKind, PermissionScopeKind,
-    PermissionTransmissionBoundary, ReviewDecisionContext, ReviewReadableValue,
-    ReviewReadableValueKind,
+    build_review_decision_context, GovernedActionReviewContract, PermissionDecisionContext,
+    PermissionDecisionContextStatus, PermissionPolicyKind, PermissionRequestDigestKind,
+    PermissionScopeKind, PermissionTransmissionBoundary, ReviewDecisionContext,
+    ReviewReadableValue, ReviewReadableValueKind,
 };
 pub use review_item::{
     build_review_center_view_model, build_review_item, ReviewBatch, ReviewBatchDomain,

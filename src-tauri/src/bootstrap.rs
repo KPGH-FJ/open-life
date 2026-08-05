@@ -338,6 +338,29 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
         if run.task_id != task.id {
             return Err("startup_main_chat_agent_run_task_identity_mismatch".into());
         }
+        if let Some(proposal_id) =
+            startup_rejected_blocking_review_proposal(state, &run, &task).await?
+        {
+            crate::terminal_owner_write_gateway::TerminalOwnerWriteGateway::from_state(state)
+                .await?
+                .apply_blocking_review_rejection(&proposal_id)
+                .await
+                .map_err(|error| {
+                    format!("apply startup blocking review rejection failed: {error}")
+                })?;
+            crate::terminal_owner_write_gateway::update_agent_run_after_startup_review_reconciliation(
+                state,
+                &proposal_id,
+                &run.id,
+            )
+            .await
+            .map_err(|error| {
+                format!("project startup rejected-review AgentRun failed: {error}")
+            })?;
+            verify_startup_terminal_owner_successor_projection(state, &run.id, &task.id).await?;
+            reconciled = reconciled.saturating_add(1);
+            continue;
+        }
         if crate::main_chat_turn_runtime::reconcile_orphaned_openlife_replay_epoch_after_restart(
             state, &task.id, &run.id,
         )
@@ -370,6 +393,27 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
                 "startup_orphan_run_task_event_identity_mismatch:{}:{}",
                 run.id, run.task_id
             ));
+        }
+        if let Some(proposal_id) = startup_terminal_owner_successor_proposal(
+            state,
+            &run,
+            &task,
+            lifecycle.lifecycle_event.as_ref(),
+        )
+        .await?
+        {
+            crate::terminal_owner_write_gateway::update_agent_run_after_startup_review_reconciliation(
+                state,
+                &proposal_id,
+                &run.id,
+            )
+            .await
+            .map_err(|error| {
+                format!("project startup terminal-owner AgentRun successor failed: {error}")
+            })?;
+            verify_startup_terminal_owner_successor_projection(state, &run.id, &task.id).await?;
+            reconciled = reconciled.saturating_add(1);
+            continue;
         }
         if lifecycle.lifecycle_event.as_ref().is_some_and(|event| {
             startup_lifecycle_projection_matches(&run, &task, event).unwrap_or(false)
@@ -519,6 +563,243 @@ async fn reconcile_startup_orphaned_main_chat_runs_inner(
         reconciled = reconciled.saturating_add(1);
     }
     Ok(reconciled)
+}
+
+async fn startup_rejected_blocking_review_proposal(
+    state: &Arc<AppState>,
+    run: &openlife_core::agent::AgentRun,
+    task: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+) -> Result<Option<String>, String> {
+    use openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus;
+    use openlife_core::agent::{ProposalStatus, ProposalTerminalRelationKind};
+
+    if task.status != AgentTaskSessionStatus::WaitingPermission {
+        return Ok(None);
+    }
+    let proposal_ids = task
+        .pending_blockers
+        .iter()
+        .filter_map(|blocker| blocker.strip_prefix("proposal:"))
+        .filter(|proposal_id| !proposal_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    if proposal_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let store_arc = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "startup_rejected_review_proposal_store_unavailable".to_string())?;
+    let store = store_arc.lock().await;
+    for proposal_id in proposal_ids {
+        let proposal = store
+            .get_proposal(proposal_id)
+            .map_err(|error| format!("load startup rejected review failed: {error}"))?
+            .ok_or_else(|| format!("startup_rejected_review_proposal_missing:{proposal_id}"))?;
+        if proposal.status != ProposalStatus::Rejected {
+            continue;
+        }
+        let origin = store
+            .terminal_owner_origin_binding(proposal_id)
+            .map_err(|error| format!("load startup rejected review origin failed: {error}"))?
+            .ok_or_else(|| "startup_rejected_review_origin_missing".to_string())?;
+        let relation = store
+            .terminal_relation_projection_proof(proposal_id)
+            .map_err(|error| format!("load startup rejected review relation failed: {error}"))?
+            .ok_or_else(|| "startup_rejected_review_relation_missing".to_string())?;
+        if origin.task_session_id() != task.id
+            || origin.run_id() != run.id
+            || relation.task_session_id() != task.id
+            || relation.run_id() != run.id
+        {
+            return Err("startup_rejected_review_identity_mismatch".into());
+        }
+        if matches!(
+            relation.relation_kind(),
+            ProposalTerminalRelationKind::EffectBlockingPrerequisite
+                | ProposalTerminalRelationKind::ActionResumePrerequisite
+        ) {
+            return Ok(Some(proposal_id.to_string()));
+        }
+        return Err("startup_rejected_review_relation_not_blocking".into());
+    }
+    Ok(None)
+}
+
+async fn startup_terminal_owner_successor_proposal(
+    state: &Arc<AppState>,
+    run: &openlife_core::agent::AgentRun,
+    task: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    lifecycle_event: Option<&crate::main_chat_event_stream::MainChatAgentDurableEvent>,
+) -> Result<Option<String>, String> {
+    let Some(final_event) = lifecycle_event.filter(|event| {
+        event.event_type == "final_delivery.created"
+            && event
+                .payload
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                == Some("completed_with_pending_items")
+    }) else {
+        return Ok(None);
+    };
+    let successor = {
+        let store_arc = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .ok_or_else(|| "startup_orphan_event_store_unavailable".to_string())?;
+        let store = store_arc.lock().await;
+        let post_final = store
+            .list(&task.id, final_event.sequence, 2)
+            .map_err(|error| format!("load startup terminal-owner successor failed: {error}"))?;
+        match post_final.as_slice() {
+            [] => return Ok(None),
+            [successor] => successor.clone(),
+            _ => return Err("startup_terminal_owner_successor_window_invalid".into()),
+        }
+    };
+    if successor.event_type != "terminal_owner.successor_confirmed"
+        || successor.object_type != "terminal_owner_successor"
+        || successor.source != "terminal_owner_write_gateway.review_successor"
+        || successor.task_session_id != task.id
+        || successor.run_id != run.id
+        || successor
+            .payload
+            .get("finalEventId")
+            .and_then(serde_json::Value::as_str)
+            != Some(final_event.event_id.as_str())
+        || successor
+            .payload
+            .get("ownerKind")
+            .and_then(serde_json::Value::as_str)
+            != Some("agent_task_session")
+        || successor
+            .payload
+            .get("ownerId")
+            .and_then(serde_json::Value::as_str)
+            != Some(task.id.as_str())
+        || !matches!(
+            successor
+                .payload
+                .get("causeKind")
+                .and_then(serde_json::Value::as_str),
+            Some("proposal_review_acceptance" | "proposal_review_rejection")
+        )
+    {
+        return Err("startup_terminal_owner_successor_identity_invalid".into());
+    }
+    let proposal_id = successor
+        .payload
+        .get("causeRef")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "startup_terminal_owner_successor_proposal_missing".to_string())?;
+    let receipt_ref = successor
+        .payload
+        .get("localTransitionReceiptRef")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_terminal_owner_successor_receipt_ref_missing".to_string())?;
+    let receipt_digest = successor
+        .payload
+        .get("localTransitionReceiptDigest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_terminal_owner_successor_receipt_digest_missing".to_string())?;
+    let before_revision = successor
+        .payload
+        .get("beforeOwnerRevision")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "startup_terminal_owner_successor_before_revision_missing".to_string())?;
+    let after_revision = successor
+        .payload
+        .get("afterOwnerRevision")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "startup_terminal_owner_successor_after_revision_missing".to_string())?;
+    let before_digest = successor
+        .payload
+        .get("beforeOwnerDigest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_terminal_owner_successor_before_digest_missing".to_string())?;
+    let after_digest = successor
+        .payload
+        .get("afterOwnerDigest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_terminal_owner_successor_after_digest_missing".to_string())?;
+    let task_store_arc = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "startup_orphan_task_store_unavailable".to_string())?;
+    let task_store = task_store_arc.lock().await;
+    let receipt = task_store
+        .verified_terminal_owner_transition_receipt(receipt_ref)
+        .map_err(|error| format!("verify startup terminal-owner receipt failed: {error}"))?
+        .ok_or_else(|| "startup_terminal_owner_successor_receipt_missing".to_string())?;
+    let owner_head = task_store
+        .canonical_owner_head(&task.id)
+        .map_err(|error| format!("load startup terminal-owner task head failed: {error}"))?
+        .ok_or_else(|| "startup_terminal_owner_task_head_missing".to_string())?;
+    if receipt.receipt_digest() != receipt_digest
+        || receipt.proposal_id() != proposal_id
+        || receipt.owner_kind() != "agent_task_session"
+        || receipt.owner_id() != task.id
+        || receipt.before_revision() != before_revision
+        || receipt.after_revision() != after_revision
+        || receipt.before_digest() != before_digest
+        || receipt.after_digest() != after_digest
+        || owner_head.revision() != after_revision
+        || owner_head.digest() != after_digest
+    {
+        return Err("startup_terminal_owner_successor_receipt_mismatch".into());
+    }
+    Ok(Some(proposal_id.to_string()))
+}
+
+async fn verify_startup_terminal_owner_successor_projection(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+) -> Result<(), String> {
+    let run = {
+        let store_arc = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "startup_orphan_agent_run_store_unavailable".to_string())?;
+        let store = store_arc.lock().await;
+        crate::terminal_owner_write_gateway::register_agent_run_store_result(
+            state,
+            store.get_run(run_id).map_err(|error| error.to_string()),
+        )
+        .map_err(|error| format!("reload startup successor AgentRun failed: {error}"))?
+        .ok_or_else(|| format!("startup_successor_agent_run_missing:{run_id}"))?
+    };
+    let task = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "startup_orphan_task_store_unavailable".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|error| format!("reload startup successor task failed: {error}"))?
+            .ok_or_else(|| format!("startup_successor_task_missing:{task_session_id}"))?
+    };
+    use openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus;
+    use openlife_core::agent::AgentRunStatus;
+    let projection_matches = matches!(
+        (run.status, task.status),
+        (AgentRunStatus::Completed, AgentTaskSessionStatus::Completed)
+            | (AgentRunStatus::Cancelled, AgentTaskSessionStatus::Cancelled)
+            | (
+                AgentRunStatus::WaitingPermission,
+                AgentTaskSessionStatus::WaitingPermission
+            )
+            | (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed)
+            | (AgentRunStatus::Failed, AgentTaskSessionStatus::Blocked)
+    );
+    if !projection_matches || run.task_id != task_session_id {
+        return Err(format!(
+            "startup_terminal_owner_successor_projection_inconsistent:{run_id}:{task_session_id}"
+        ));
+    }
+    Ok(())
 }
 
 fn startup_failure_kind_from_terminal(

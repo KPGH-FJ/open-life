@@ -2156,6 +2156,35 @@ impl ProposalStore {
             .map_err(Into::into)
     }
 
+    /// Startup-only recovery input for reviewed actions whose dispatch crossed
+    /// an operating-system or local execution boundary but has no independently
+    /// inspectable artifact intent. A surviving `claimed` row cannot prove
+    /// whether the handoff happened, so callers must seal it as `unknown` and
+    /// must never turn it back into an automatic retry.
+    pub fn list_claimed_governed_actions_for_unknown_recovery(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut statement = conn.prepare(
+            "SELECT id, dispatch_claim_id
+             FROM proposals INDEXED BY idx_proposals_dispatch_reconciliation
+             WHERE proposal_type IN ('scheduled_task', 'data_export')
+               AND dispatch_state = 'claimed'
+               AND dispatch_claim_id IS NOT NULL
+             ORDER BY dispatch_claimed_at ASC, id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit.clamp(1, 250))?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Reload the exact Proposal snapshot only while the supplied acceptance
     /// dispatch claim is the canonical owner. This is the mechanical bridge
     /// used by ReviewWorkflow to issue a non-serializable acceptance proof;

@@ -9,19 +9,6 @@ use openlife_core::privacy::{PrivacyEngine, PrivacyType};
 
 use crate::AppState;
 
-pub(crate) fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
-    if life_model.is_effectively_empty() {
-        Vec::new()
-    } else {
-        vec![
-            "identity".to_string(),
-            "goals".to_string(),
-            "capabilities".to_string(),
-            "state".to_string(),
-        ]
-    }
-}
-
 pub(crate) async fn build_chat_runtime_hs_packet(
     state: &Arc<AppState>,
     task: &AgentTask,
