@@ -6,6 +6,7 @@ import {
   type DurableTruthSnapshot,
 } from "./durableTruthDataSource";
 import { durableReviewItems } from "./durableTruthPresentation";
+import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 
 type Announce = (message: string) => void;
 
@@ -16,6 +17,11 @@ export function useDurableTruthJourney(
   const [snapshot, setSnapshot] = useState<DurableTruthSnapshot | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [memoryAction, setMemoryAction] = useState<{
+    memoryId: string;
+    action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase";
+    error?: string;
+  } | null>(null);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -23,6 +29,7 @@ export function useDurableTruthJourney(
     setSnapshot(null);
     setSelectedItemId(null);
     setRefreshing(false);
+    setMemoryAction(null);
     return () => {
       requestRef.current += 1;
     };
@@ -72,5 +79,107 @@ export function useDurableTruthJourney(
 
   const selectItem = useCallback((item: ReviewItem) => setSelectedItemId(item.id), []);
 
-  return { snapshot, selectedItem, refreshing, load, selectItem };
+  const runMemoryAction = useCallback(
+    async (
+      memoryId: string,
+      action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase",
+      operation: (source: DurableTruthDataSource) => Promise<void>,
+      success: string
+    ): Promise<boolean> => {
+      if (!dataSource || memoryAction) return false;
+      setMemoryAction({ memoryId, action });
+      try {
+        await operation(dataSource);
+        const refreshed = await load(false);
+        if (refreshed.memoryEnvelope.status === "error") {
+          throw new Error("memory_action_refresh_unverified");
+        }
+        setMemoryAction(null);
+        announce(success);
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setMemoryAction({ memoryId, action, error: reason });
+        announce(`Memory 操作未完成：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, load, memoryAction]
+  );
+
+  const correctMemory = useCallback(
+    (memoryId: string, content: string) =>
+      runMemoryAction(
+        memoryId,
+        "correct",
+        source => source.correctMemory(memoryId, content),
+        "Memory 纠正已进入 Review；旧记忆仍保持当前状态。"
+      ),
+    [runMemoryAction]
+  );
+  const archiveMemory = useCallback(
+    (memoryId: string) =>
+      runMemoryAction(
+        memoryId,
+        "archive",
+        source => source.archiveMemory(memoryId),
+        "归档已进入 Review；确认应用前仍保持当前状态。"
+      ),
+    [runMemoryAction]
+  );
+  const stopRecall = useCallback(
+    (memoryId: string) =>
+      runMemoryAction(
+        memoryId,
+        "stop_recall",
+        source => source.stopRecall(memoryId),
+        "停止召回已进入 Review；确认应用前仍会正常召回。"
+      ),
+    [runMemoryAction]
+  );
+  const restoreMemory = useCallback(
+    (memoryId: string) =>
+      runMemoryAction(
+        memoryId,
+        "restore",
+        source => source.restoreMemory(memoryId),
+        "Memory 已恢复为可召回状态。"
+      ),
+    [runMemoryAction]
+  );
+  const rollbackMemory = useCallback(
+    (memoryId: string, reason: string) =>
+      runMemoryAction(
+        memoryId,
+        "rollback",
+        source => source.rollbackMemory(memoryId, reason),
+        "该次 Memory 变更已回滚；历史仍保留。"
+      ),
+    [runMemoryAction]
+  );
+  const privacyEraseMemory = useCallback(
+    (memoryId: string) =>
+      runMemoryAction(
+        memoryId,
+        "erase",
+        source => source.privacyEraseMemory(memoryId),
+        "Memory 正文与派生检索内容已经永久擦除。"
+      ),
+    [runMemoryAction]
+  );
+
+  return {
+    snapshot,
+    selectedItem,
+    refreshing,
+    memoryAction,
+    load,
+    selectItem,
+    correctMemory,
+    archiveMemory,
+    stopRecall,
+    restoreMemory,
+    rollbackMemory,
+    privacyEraseMemory,
+  };
 }

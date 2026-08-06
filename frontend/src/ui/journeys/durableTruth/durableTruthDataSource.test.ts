@@ -4,6 +4,12 @@ const tauriMocks = vi.hoisted(() => ({
   getLifeModelViewModel: vi.fn(),
   getMemoryViewModel: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
+  draftMemoryCorrectionProposal: vi.fn(),
+  draftMemoryArchiveProposal: vi.fn(),
+  draftMemoryStopRecallProposal: vi.fn(),
+  restoreArchivedMemory: vi.fn(),
+  rollbackMemoryAsset: vi.fn(),
+  privacyEraseMemoryAsset: vi.fn(),
 }));
 
 vi.mock("@/tauri", () => tauriMocks);
@@ -53,5 +59,66 @@ describe("durable truth Tauri data source", () => {
       status: "failed",
       message: "memory unavailable",
     });
+  });
+
+  it("keeps correction and archive reviewed while restore, rollback, and erase use exact owners", async () => {
+    tauriMocks.draftMemoryCorrectionProposal.mockResolvedValue({
+      memoryId: "memory:one",
+      action: "correct",
+      status: "review_required",
+    });
+    tauriMocks.draftMemoryArchiveProposal.mockResolvedValue({
+      memoryId: "memory:one",
+      action: "archive",
+      status: "review_required",
+    });
+    tauriMocks.draftMemoryStopRecallProposal.mockResolvedValue({
+      memoryId: "memory:one",
+      action: "stop_recall",
+      status: "review_required",
+    });
+    tauriMocks.restoreArchivedMemory.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "applied",
+    });
+    tauriMocks.rollbackMemoryAsset.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "applied",
+    });
+    tauriMocks.privacyEraseMemoryAsset.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "applied",
+    });
+
+    await tauriDurableTruthDataSource.correctMemory("memory:one", "corrected");
+    await tauriDurableTruthDataSource.archiveMemory("memory:one");
+    await tauriDurableTruthDataSource.stopRecall("memory:one");
+    await tauriDurableTruthDataSource.restoreMemory("memory:one");
+    await tauriDurableTruthDataSource.rollbackMemory("memory:one", "user correction");
+    await tauriDurableTruthDataSource.privacyEraseMemory("memory:one");
+
+    expect(tauriMocks.draftMemoryCorrectionProposal).toHaveBeenCalledWith(
+      "memory:one",
+      "corrected"
+    );
+    expect(tauriMocks.draftMemoryArchiveProposal).toHaveBeenCalledWith("memory:one");
+    expect(tauriMocks.draftMemoryStopRecallProposal).toHaveBeenCalledWith("memory:one");
+    expect(tauriMocks.restoreArchivedMemory).toHaveBeenCalledWith({
+      ownerKind: "memory_lifecycle",
+      ownerId: "memory:one",
+    });
+    expect(tauriMocks.rollbackMemoryAsset).toHaveBeenCalledWith("memory:one", "user correction");
+    expect(tauriMocks.privacyEraseMemoryAsset).toHaveBeenCalledWith("memory:one");
+  });
+
+  it("does not report a direct Memory action as complete while its projection is pending", async () => {
+    tauriMocks.privacyEraseMemoryAsset.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "pending",
+    });
+
+    await expect(tauriDurableTruthDataSource.privacyEraseMemory("memory:one")).rejects.toThrow(
+      "memory_privacy_erase_projection_pending"
+    );
   });
 });

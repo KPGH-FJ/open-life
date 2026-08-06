@@ -482,6 +482,10 @@ pub struct MemoryLifecycleAcceptanceInput {
     pub evidence_ids: Vec<String>,
     pub confidence: String,
     pub conflict_ids: Vec<String>,
+    /// Exact canonical Memory owner replaced by this reviewed correction.
+    /// Ordinary writes leave this empty; a caller cannot infer a target from
+    /// similar text or vector search.
+    pub supersedes_memory_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -538,6 +542,11 @@ pub struct ExplicitMemoryWriteReceipt {
 pub struct MemoryLifecycleAcceptanceReport {
     pub record: MemoryLifecycleRecord,
     pub materialized_view: Option<MemoryMaterializedView>,
+    /// Canonical mutations that must project before the primary mutation can
+    /// truthfully be reported as fully applied. A reviewed correction uses
+    /// this for the superseded owner's tombstone.
+    #[serde(default)]
+    pub preceding_canonical_mutations: Vec<CanonicalMutationReceipt>,
     pub canonical_mutation: Option<CanonicalMutationReceipt>,
     pub canonical_committed: bool,
     pub canonical_fact_key: String,
@@ -554,6 +563,20 @@ pub struct MemoryLifecycleAcceptanceReport {
 pub struct MemoryRollbackReport {
     pub record: MemoryLifecycleRecord,
     pub rollback_event: MemoryRollbackEvent,
+    pub materialized_view: MemoryMaterializedView,
+    pub canonical_mutation: CanonicalMutationReceipt,
+    pub canonical_committed: bool,
+    #[serde(default)]
+    pub projection_state: ProjectionDeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_error_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryPrivacyEraseReport {
+    pub memory_id: String,
+    pub erased_at: DateTime<Utc>,
     pub materialized_view: MemoryMaterializedView,
     pub canonical_mutation: CanonicalMutationReceipt,
     pub canonical_committed: bool,
@@ -805,7 +828,7 @@ impl MemoryLifecycleStore {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_lifecycle_retrieval_states (
                 memory_id TEXT PRIMARY KEY,
-                disposition TEXT NOT NULL CHECK(disposition IN ('active', 'archived')),
+                disposition TEXT NOT NULL CHECK(disposition IN ('active', 'paused', 'archived')),
                 revision INTEGER NOT NULL CHECK(revision > 0),
                 last_event_id TEXT NOT NULL,
                 reason_digest TEXT NOT NULL CHECK(TRIM(reason_digest) != ''),
@@ -816,6 +839,7 @@ impl MemoryLifecycleStore {
              CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_retrieval_disposition
              ON memory_lifecycle_retrieval_states(disposition, changed_at DESC);",
         )?;
+        rebuild_memory_lifecycle_retrieval_table_if_needed_tx(&tx)?;
         tx.execute_batch(
             "DROP INDEX IF EXISTS idx_memory_lifecycle_active_fact_key;
              CREATE UNIQUE INDEX idx_memory_lifecycle_active_fact_key
@@ -826,7 +850,7 @@ impl MemoryLifecycleStore {
                     'materialization_failed'
                );",
         )?;
-        crate::sqlite_migration::record_schema_version(&tx, "memory_lifecycle_store", 5)?;
+        crate::sqlite_migration::record_schema_version(&tx, "memory_lifecycle_store", 6)?;
         tx.commit()?;
         Ok(())
     }
@@ -896,6 +920,129 @@ impl MemoryLifecycleStore {
             )?;
             tx.commit()?;
             return Ok(report);
+        }
+
+        if let Some(supersedes_memory_id) = input.supersedes_memory_id.as_deref() {
+            if supersedes_memory_id.trim() != supersedes_memory_id
+                || !supersedes_memory_id.starts_with("memory:")
+                || supersedes_memory_id.len() > 256
+            {
+                anyhow::bail!("reviewed Memory correction target id is invalid");
+            }
+            let mut previous = record_by_memory_id_tx(&tx, supersedes_memory_id)?
+                .context("reviewed Memory correction target is missing")?;
+            if !previous.status.is_runtime_active()
+                || previous.materialization_status != MemoryMaterializationStatus::Materialized
+                || previous.runtime_context_excluded_at.is_some()
+            {
+                anyhow::bail!("reviewed Memory correction target is stale or inactive");
+            }
+            if previous.scope != input.fact.scope {
+                anyhow::bail!("reviewed Memory correction cannot change scope implicitly");
+            }
+            if previous.content == input.fact.canonical_body {
+                anyhow::bail!("reviewed Memory correction must change the canonical content");
+            }
+            if let Some(conflict) = active_record_by_fact_key_tx(&tx, &fact_key)? {
+                anyhow::bail!(
+                    "reviewed Memory correction collides with active owner {}",
+                    conflict.memory_id
+                );
+            }
+
+            let memory_id = format!("memory:{}", Uuid::new_v4());
+            let mut replacement = MemoryLifecycleRecord {
+                memory_id: memory_id.clone(),
+                proposal_id: input.proposal_id.clone(),
+                source_task_session_id: input.source_task_session_id,
+                source_run_id: input.source_run_id,
+                content: input.fact.canonical_body,
+                scope: input.fact.scope,
+                category: input.fact.category,
+                risk_level: input.fact.risk_level,
+                sensitivity: input.fact.sensitivity,
+                audit_digest: String::new(),
+                status: MemoryLifecycleStatus::Accepted,
+                materialization_status: MemoryMaterializationStatus::Pending,
+                materialization_error_code: None,
+                created_by: input.created_by,
+                accepted_by: Some(input.accepted_by),
+                accepted_at: Some(now),
+                materialized_view_id: None,
+                materialized_view_version: None,
+                evidence_ids: input.evidence_ids,
+                confidence,
+                conflict_ids: input.conflict_ids,
+                supersedes_memory_id: Some(previous.memory_id.clone()),
+                replacement_memory_id: None,
+                rolled_back_by_event_id: None,
+                runtime_context_excluded_at: None,
+            };
+            replacement.audit_digest = memory_record_audit_digest(&replacement, &fact_key);
+            insert_record_tx(&tx, &replacement, &fact_key, now, now)?;
+            link_proposal_to_memory_tx(
+                &tx,
+                &input.proposal_id,
+                &replacement.memory_id,
+                &fact_key,
+                &admission_digest,
+                input.fact.risk_level,
+                input.fact.sensitivity,
+                now,
+            )?;
+
+            previous.status = MemoryLifecycleStatus::Superseded;
+            previous.materialization_status = MemoryMaterializationStatus::NotRequired;
+            previous.replacement_memory_id = Some(replacement.memory_id.clone());
+            previous.runtime_context_excluded_at = Some(now);
+            let (_, previous_fact_key) = canonical_memory_fact_identity(
+                previous.scope,
+                previous.category,
+                &previous.content,
+            )?;
+            previous.audit_digest = memory_record_audit_digest(&previous, &previous_fact_key);
+            update_record_tx(&tx, &previous, now)?;
+
+            let view = rebuild_view_tx(
+                &tx,
+                Some(replacement.scope),
+                Some(&replacement.memory_id),
+                Some(&previous.memory_id),
+            )?;
+            replacement.status = MemoryLifecycleStatus::Materialized;
+            replacement.materialization_status = MemoryMaterializationStatus::Materialized;
+            replacement.materialized_view_id = Some(view.materialized_view_id.clone());
+            replacement.materialized_view_version = Some(view.version);
+            update_record_tx(&tx, &replacement, Utc::now())?;
+            let superseded_canonical_mutation = persistence_outbox::enqueue_tombstone(
+                &tx,
+                MEMORY_LIFECYCLE_AGGREGATE_KIND,
+                &previous.memory_id,
+                Some("reviewed_memory_correction_superseded"),
+                &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+            )?;
+            let canonical_mutation = persistence_outbox::enqueue_mutation(
+                &tx,
+                MEMORY_LIFECYCLE_AGGREGATE_KIND,
+                &replacement.memory_id,
+                "materialized",
+                &memory_lifecycle_projection_token(&replacement),
+                &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+            )?;
+            tx.commit()?;
+            return Ok(MemoryLifecycleAcceptanceReport {
+                record: replacement,
+                materialized_view: Some(view),
+                preceding_canonical_mutations: vec![superseded_canonical_mutation],
+                canonical_mutation: Some(canonical_mutation),
+                canonical_committed: true,
+                canonical_fact_key: fact_key,
+                newly_committed: true,
+                admission_outcome: MemoryAdmissionOutcome::OwnerCreated,
+                admission_at: now,
+                owner_accepted_at: Some(now),
+                projection_state: ProjectionDeliveryState::Pending,
+            });
         }
 
         if let Some(record) = active_record_by_fact_key_tx(&tx, &fact_key)? {
@@ -992,6 +1139,7 @@ impl MemoryLifecycleStore {
         Ok(MemoryLifecycleAcceptanceReport {
             record,
             materialized_view: Some(view),
+            preceding_canonical_mutations: Vec::new(),
             canonical_mutation: Some(canonical_mutation),
             canonical_committed: true,
             canonical_fact_key: fact_key,
@@ -1381,6 +1529,82 @@ impl MemoryLifecycleStore {
         })
     }
 
+    /// Irreversibly remove the canonical Memory body and all content-bearing
+    /// lifecycle metadata. The row remains only as a body-free tombstone so
+    /// outbox projections can delete derived MemoryStore/vector content and a
+    /// later replay cannot silently resurrect the erased owner.
+    pub fn privacy_erase_memory_asset(&self, memory_id: &str) -> Result<MemoryPrivacyEraseReport> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut record = tx
+            .query_row(
+                record_select_sql!("WHERE memory_id = ?1"),
+                [memory_id],
+                row_to_record,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("Memory privacy erase target not found"))?;
+        if record.content.is_empty() {
+            anyhow::bail!("Memory privacy erase target is already erased");
+        }
+        let erased_at = Utc::now();
+        let scope = record.scope;
+        record.content.clear();
+        record.status = MemoryLifecycleStatus::RolledBack;
+        record.materialization_status = MemoryMaterializationStatus::NotRequired;
+        record.materialization_error_code = None;
+        record.source_task_session_id = None;
+        record.source_run_id = None;
+        record.created_by = "privacy_erasure_tombstone".into();
+        record.accepted_by = None;
+        record.accepted_at = None;
+        record.materialized_view_id = None;
+        record.materialized_view_version = None;
+        record.evidence_ids.clear();
+        record.conflict_ids.clear();
+        record.supersedes_memory_id = None;
+        record.replacement_memory_id = None;
+        record.rolled_back_by_event_id = None;
+        record.runtime_context_excluded_at = Some(erased_at);
+        record.audit_digest =
+            memory_record_audit_digest(&record, &format!("privacy_erased:{}", record.memory_id));
+        tx.execute(
+            "DELETE FROM memory_lifecycle_retrieval_states WHERE memory_id = ?1",
+            [memory_id],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_rollback_events WHERE memory_id = ?1",
+            [memory_id],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_lifecycle_proposal_links
+             WHERE memory_id = ?1 OR admitted_memory_id = ?1",
+            [memory_id],
+        )?;
+        update_record_tx(&tx, &record, erased_at)?;
+        let materialized_view = rebuild_view_tx(&tx, Some(scope), None, Some(memory_id))?;
+        let canonical_mutation = persistence_outbox::enqueue_tombstone(
+            &tx,
+            MEMORY_LIFECYCLE_AGGREGATE_KIND,
+            memory_id,
+            Some("user_confirmed_privacy_erase"),
+            &MEMORY_LIFECYCLE_PROJECTION_TARGETS,
+        )?;
+        tx.commit()?;
+        Ok(MemoryPrivacyEraseReport {
+            memory_id: memory_id.to_string(),
+            erased_at,
+            materialized_view,
+            canonical_mutation,
+            canonical_committed: true,
+            projection_state: ProjectionDeliveryState::Pending,
+            projection_error_digest: None,
+        })
+    }
+
     pub fn list_replayable_projection_deliveries(
         &self,
         limit: usize,
@@ -1547,7 +1771,7 @@ impl MemoryLifecycleStore {
              AND NOT EXISTS (
                  SELECT 1 FROM memory_lifecycle_retrieval_states retrieval
                  WHERE retrieval.memory_id = memory_lifecycle_records.memory_id
-                   AND retrieval.disposition = 'archived'
+                   AND retrieval.disposition != 'active'
              )";
         if let Some(scope) = scope {
             let sql = format!(
@@ -2072,7 +2296,7 @@ fn lifecycle_memory_is_retrievable_from_conn(conn: &Connection, memory_id: &str)
                AND NOT EXISTS (
                    SELECT 1 FROM memory_lifecycle_retrieval_states retrieval
                    WHERE retrieval.memory_id = records.memory_id
-                     AND retrieval.disposition = 'archived'
+                     AND retrieval.disposition != 'active'
                )",
             [memory_id],
             |_| Ok(()),
@@ -2208,6 +2432,14 @@ impl MemoryLifecycleAcceptanceInput {
                 .collect(),
             confidence: format!("{:.3}", proposal.confidence),
             conflict_ids: conflict_ids_from_proposal(proposal),
+            supersedes_memory_id: proposal
+                .after
+                .get("supersedesMemoryId")
+                .or_else(|| proposal.after.get("supersedes_memory_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
         })
     }
 }
@@ -2697,6 +2929,7 @@ fn existing_acceptance_report_tx(
     Ok(MemoryLifecycleAcceptanceReport {
         record,
         materialized_view: Some(materialized_view),
+        preceding_canonical_mutations: Vec::new(),
         canonical_mutation: Some(canonical_mutation),
         canonical_committed: true,
         canonical_fact_key: fact_key,
@@ -2718,6 +2951,7 @@ fn terminal_historical_acceptance_report(
         owner_accepted_at: record.accepted_at,
         record,
         materialized_view: None,
+        preceding_canonical_mutations: Vec::new(),
         canonical_mutation: None,
         canonical_committed: false,
         canonical_fact_key: fact_key,
@@ -2771,11 +3005,51 @@ fn load_materialized_view_tx(
     .map_err(Into::into)
 }
 
+fn rebuild_memory_lifecycle_retrieval_table_if_needed_tx(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<()> {
+    let sql = tx
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'memory_lifecycle_retrieval_states'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if sql.as_deref().is_some_and(|sql| sql.contains("'paused'")) {
+        return Ok(());
+    }
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_memory_lifecycle_retrieval_disposition;
+         ALTER TABLE memory_lifecycle_retrieval_states
+             RENAME TO memory_lifecycle_retrieval_states_v5;
+         CREATE TABLE memory_lifecycle_retrieval_states (
+            memory_id TEXT PRIMARY KEY,
+            disposition TEXT NOT NULL CHECK(disposition IN ('active', 'paused', 'archived')),
+            revision INTEGER NOT NULL CHECK(revision > 0),
+            last_event_id TEXT NOT NULL,
+            reason_digest TEXT NOT NULL CHECK(TRIM(reason_digest) != ''),
+            changed_at TEXT NOT NULL,
+            FOREIGN KEY(memory_id) REFERENCES memory_lifecycle_records(memory_id),
+            FOREIGN KEY(last_event_id) REFERENCES canonical_outbox_events(event_id)
+         ) WITHOUT ROWID;
+         INSERT INTO memory_lifecycle_retrieval_states (
+            memory_id, disposition, revision, last_event_id, reason_digest, changed_at
+         )
+         SELECT memory_id, disposition, revision, last_event_id, reason_digest, changed_at
+         FROM memory_lifecycle_retrieval_states_v5;
+         DROP TABLE memory_lifecycle_retrieval_states_v5;
+         CREATE INDEX idx_memory_lifecycle_retrieval_disposition
+         ON memory_lifecycle_retrieval_states(disposition, changed_at DESC);",
+    )?;
+    Ok(())
+}
+
 fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     let records = {
         let mut statement = tx.prepare(
             "SELECT memory_id, proposal_id, content, scope, category, risk_level,
-                    COALESCE(sensitivity, '')
+                    COALESCE(sensitivity, ''), COALESCE(fact_key, ''), status
              FROM memory_lifecycle_records ORDER BY memory_id ASC",
         )?;
         let loaded = statement
@@ -2788,13 +3062,26 @@ fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()>
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         loaded
     };
     let now = Utc::now();
-    for (memory_id, proposal_id, content, scope, category, risk_level, sensitivity) in records {
+    for (
+        memory_id,
+        proposal_id,
+        content,
+        scope,
+        category,
+        risk_level,
+        sensitivity,
+        existing_fact_key,
+        status,
+    ) in records
+    {
         let scope = MemoryLifecycleScope::from_str(&scope)?;
         let category = MemoryLifecycleCategory::from_str(&category)?;
         let risk_level = MemoryLifecycleRiskLevel::from_str(&risk_level);
@@ -2803,6 +3090,12 @@ fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()>
         } else {
             MemoryLifecycleSensitivity::from_str(&sensitivity)
         };
+        if content.is_empty() && status == "rolled_back" && !existing_fact_key.trim().is_empty() {
+            // Privacy-erased rows intentionally retain only a one-way fact-key
+            // digest. Reopening must not require or reconstruct the removed
+            // canonical body, proposal link, or provenance.
+            continue;
+        }
         let fact =
             CanonicalMemoryFactDescriptor::new(content, scope, category, risk_level, sensitivity)?;
         let (_, fact_key) =
@@ -3525,6 +3818,7 @@ mod tests {
             evidence_ids: vec![format!("evidence:{proposal_id}")],
             confidence: "0.900".into(),
             conflict_ids: Vec::new(),
+            supersedes_memory_id: None,
         }
     }
 
@@ -4652,12 +4946,191 @@ mod tests {
                 evidence_ids: Vec::new(),
                 confidence: "0.900".into(),
                 conflict_ids: Vec::new(),
+                supersedes_memory_id: None,
             })
             .unwrap();
         assert_eq!(
             historical.admission_outcome,
             MemoryAdmissionOutcome::TerminalHistorical
         );
+    }
+
+    #[test]
+    fn reviewed_correction_replaces_one_exact_owner_and_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("correction.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let original = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-original",
+                "User prefers meetings in the afternoon.",
+            ))
+            .unwrap();
+        let mut correction =
+            acceptance_input("proposal-correction", "User prefers meetings before noon.");
+        correction.supersedes_memory_id = Some(original.record.memory_id.clone());
+        let replacement = store.accept_memory_proposal(correction).unwrap();
+
+        assert_eq!(replacement.preceding_canonical_mutations.len(), 1);
+        assert_eq!(
+            replacement.preceding_canonical_mutations[0].aggregate_id,
+            original.record.memory_id
+        );
+        assert_eq!(
+            replacement.preceding_canonical_mutations[0].mutation_kind,
+            "deleted"
+        );
+        assert_eq!(
+            replacement.record.supersedes_memory_id.as_deref(),
+            Some(original.record.memory_id.as_str())
+        );
+        let historical = store
+            .get_record(&original.record.memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(historical.status, MemoryLifecycleStatus::Superseded);
+        assert_eq!(
+            historical.replacement_memory_id.as_deref(),
+            Some(replacement.record.memory_id.as_str())
+        );
+        assert!(!store.is_memory_retrievable(&historical.memory_id).unwrap());
+        assert!(store
+            .is_memory_retrievable(&replacement.record.memory_id)
+            .unwrap());
+        drop(store);
+
+        let reopened = MemoryLifecycleStore::new(&path).unwrap();
+        assert_eq!(
+            reopened
+                .list_retrievable_records(None, 10)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.content)
+                .collect::<Vec<_>>(),
+            vec!["User prefers meetings before noon.".to_string()]
+        );
+        let mut stale = acceptance_input("proposal-stale", "A third preference");
+        stale.supersedes_memory_id = Some(original.record.memory_id);
+        assert!(reopened.accept_memory_proposal(stale).is_err());
+    }
+
+    #[test]
+    fn privacy_erase_removes_body_and_provenance_but_keeps_metadata_tombstone() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("privacy-erase.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let accepted = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-private",
+                "Private medical detail that must be erased.",
+            ))
+            .unwrap();
+        store
+            .set_memory_retrieval_disposition(
+                &accepted.record.memory_id,
+                MemoryRetrievalDisposition::Archived,
+                "test_archive_before_erase",
+            )
+            .unwrap();
+
+        let report = store
+            .privacy_erase_memory_asset(&accepted.record.memory_id)
+            .unwrap();
+        assert!(report.canonical_committed);
+        assert_eq!(report.canonical_mutation.mutation_kind, "deleted");
+        let tombstone = store
+            .get_record(&accepted.record.memory_id)
+            .unwrap()
+            .unwrap();
+        assert!(tombstone.content.is_empty());
+        assert!(tombstone.evidence_ids.is_empty());
+        assert!(tombstone.source_task_session_id.is_none());
+        assert!(tombstone.source_run_id.is_none());
+        assert!(tombstone.accepted_by.is_none());
+        assert!(tombstone.runtime_context_excluded_at.is_some());
+        assert!(!store.is_memory_retrievable(&tombstone.memory_id).unwrap());
+        assert!(store
+            .memory_retrieval_state(&tombstone.memory_id)
+            .unwrap()
+            .is_none());
+        drop(store);
+
+        let reopened = MemoryLifecycleStore::new(&path).unwrap();
+        let tombstone = reopened
+            .get_record(&accepted.record.memory_id)
+            .unwrap()
+            .unwrap();
+        assert!(tombstone.content.is_empty());
+        assert!(reopened
+            .list_retrievable_records(None, 10)
+            .unwrap()
+            .is_empty());
+        assert!(reopened
+            .accept_memory_proposal(acceptance_input(
+                "proposal-private",
+                "Private medical detail that must be erased.",
+            ))
+            .is_err());
+    }
+
+    #[test]
+    fn paused_recall_is_distinct_from_recoverable_archive_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("paused-recall.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let accepted = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-paused",
+                "A memory that can leave normal recall without being archived.",
+            ))
+            .unwrap();
+        store
+            .set_memory_retrieval_disposition(
+                &accepted.record.memory_id,
+                MemoryRetrievalDisposition::Paused,
+                "user_reviewed_stop_recall",
+            )
+            .unwrap();
+        assert!(!store
+            .is_memory_retrievable(&accepted.record.memory_id)
+            .unwrap());
+        assert_eq!(store.count_archived_memory_retrieval_states().unwrap(), 0);
+        assert!(store
+            .list_archived_memory_retrieval_states(10)
+            .unwrap()
+            .is_empty());
+        drop(store);
+
+        let reopened = MemoryLifecycleStore::new(&path).unwrap();
+        assert_eq!(
+            reopened
+                .memory_retrieval_state(&accepted.record.memory_id)
+                .unwrap()
+                .unwrap()
+                .disposition,
+            MemoryRetrievalDisposition::Paused
+        );
+        reopened
+            .set_memory_retrieval_disposition(
+                &accepted.record.memory_id,
+                MemoryRetrievalDisposition::Archived,
+                "user_reviewed_archive",
+            )
+            .unwrap();
+        assert_eq!(
+            reopened.count_archived_memory_retrieval_states().unwrap(),
+            1
+        );
+        reopened
+            .set_memory_retrieval_disposition(
+                &accepted.record.memory_id,
+                MemoryRetrievalDisposition::Active,
+                "user_reviewed_restore",
+            )
+            .unwrap();
+        assert!(reopened
+            .is_memory_retrievable(&accepted.record.memory_id)
+            .unwrap());
     }
 
     #[test]

@@ -601,6 +601,28 @@ export function createMockMemoryViewModelEnvelope(
         memoryRefs: [],
         evidenceRefs: [],
       },
+      items: [
+        {
+          memoryId: "memory:mock",
+          content: "User prefers concise answers.",
+          scope: "global",
+          category: "preference",
+          status: "materialized",
+          materializationStatus: "materialized",
+          recallState: "active",
+          sensitivity: "internal",
+          whyRemembered: "The user approved this reviewed Memory proposal.",
+          acceptedAt: now,
+          evidenceIds: ["message:mock"],
+          privacyErased: false,
+          canCorrect: true,
+          canStopRecall: true,
+          canArchive: true,
+          canRestore: false,
+          canRollback: true,
+          canPrivacyErase: true,
+        },
+      ],
       sourceRefs: [],
       contractLimitations: [
         "Vector tier counts are supporting storage telemetry; lifecycle materialization status remains the product memory authority.",
@@ -2895,6 +2917,50 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           updatedAt: new Date().toISOString(),
           contentDigest: "digest",
         },
+      } as T);
+    case "draft_memory_correction_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:memory-correction:mock",
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        action: "correct",
+        status: "review_required",
+      } as T);
+    case "draft_memory_archive_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:memory-archive:mock",
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        action: "archive",
+        status: "review_required",
+      } as T);
+    case "draft_memory_stop_recall_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:memory-stop-recall:mock",
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        action: "stop_recall",
+        status: "review_required",
+      } as T);
+    case "privacy_erase_memory_asset":
+      return Promise.resolve({
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        erasedAt: new Date().toISOString(),
+        materializedView: {
+          materializedViewId: "memory_view:global",
+          version: 2,
+          activeMemoryIds: [],
+          runtimeSurfaceIds: ["runtime:global"],
+          updatedAt: new Date().toISOString(),
+          contentDigest: "erased-view",
+        },
+        canonicalMutation: {
+          eventId: "memory-erase:mock",
+          aggregateKind: "memory_lifecycle",
+          aggregateId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+          mutationKind: "deleted",
+          payloadDigest: "erased",
+          createdAt: new Date().toISOString(),
+        },
+        canonicalCommitted: true,
+        projectionState: "applied",
       } as T);
     case "list_stage4_knowledge_asset_inventory":
       return Promise.resolve({

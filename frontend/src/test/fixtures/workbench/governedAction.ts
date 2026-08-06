@@ -773,6 +773,12 @@ export function workbenchJourneyFixtureDataSource(
       );
       return buildDurableFixtureSnapshot(id, durableStage, builderReviewItems);
     },
+    async correctMemory() {},
+    async archiveMemory() {},
+    async stopRecall() {},
+    async restoreMemory() {},
+    async rollbackMemory() {},
+    async privacyEraseMemory() {},
     async listUnfinished() {
       return builderSession ? [{ ...builderSession }] : [];
     },

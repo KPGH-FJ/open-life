@@ -2,13 +2,297 @@ use crate::commands::settings::{
     require_danger_action_confirmation, DangerActionConfirmationReference,
     DangerActionConfirmationRequest,
 };
+use crate::danger_action_confirmation::{
+    require_native_danger_action_confirmation, NativeDangerActionRequest,
+};
 use crate::errors::AppError;
 use crate::memory_gateway;
 use crate::AppState;
+use openlife_core::agent::{
+    AgentProposal, MemoryLifecycleCategory, MemoryLifecycleRiskLevel, ProposalSource, ProposalType,
+    RiskLevel,
+};
 use openlife_core::memory_cache::HotMemoryCache;
 use openlife_core::vectors::{TierStats, VectorRebuildJob};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryActionProposalReceipt {
+    pub proposal_id: String,
+    pub memory_id: String,
+    pub action: String,
+    pub status: String,
+}
+
+fn proposal_risk(risk: MemoryLifecycleRiskLevel) -> RiskLevel {
+    match risk {
+        MemoryLifecycleRiskLevel::Low => RiskLevel::Low,
+        MemoryLifecycleRiskLevel::Medium => RiskLevel::Medium,
+        MemoryLifecycleRiskLevel::High => RiskLevel::High,
+        MemoryLifecycleRiskLevel::IdentityValue => RiskLevel::Critical,
+    }
+}
+
+fn candidate_kind(category: MemoryLifecycleCategory) -> Option<&'static str> {
+    match category {
+        MemoryLifecycleCategory::Preference => Some("preference"),
+        MemoryLifecycleCategory::Fact => Some("semantic_user_fact"),
+        MemoryLifecycleCategory::Workflow => Some("procedural_rule"),
+        MemoryLifecycleCategory::Correction => None,
+        MemoryLifecycleCategory::Boundary => Some("identity_or_role"),
+    }
+}
+
+async fn create_memory_action_proposal(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<(), String> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| error.to_string())?;
+    state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "ProposalStore unavailable".to_string())?
+        .lock()
+        .await
+        .create_proposal(proposal)
+        .map_err(|error| format!("Memory action proposal creation failed: {error}"))
+}
+
+async fn lifecycle_record(
+    state: &Arc<AppState>,
+    memory_id: &str,
+) -> Result<openlife_core::agent::MemoryLifecycleRecord, String> {
+    if memory_id.trim() != memory_id || !memory_id.starts_with("memory:") || memory_id.len() > 256 {
+        return Err("Memory action requires an exact lifecycle memory id".into());
+    }
+    state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
+        .lock()
+        .await
+        .get_record(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Memory action target not found".into())
+}
+
+#[tauri::command]
+pub async fn draft_memory_correction_proposal(
+    memory_id: String,
+    content: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryActionProposalReceipt, String> {
+    draft_memory_correction_proposal_with_state(memory_id, content, state.inner()).await
+}
+
+pub(crate) async fn draft_memory_correction_proposal_with_state(
+    memory_id: String,
+    content: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryActionProposalReceipt, String> {
+    let record = lifecycle_record(state, &memory_id).await?;
+    let content = content.trim();
+    if !record.status.is_runtime_active()
+        || record.runtime_context_excluded_at.is_some()
+        || record.content.is_empty()
+    {
+        return Err("Only a current, non-erased Memory can be corrected".into());
+    }
+    if !state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
+        .lock()
+        .await
+        .is_memory_retrievable(&record.memory_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("Restore an archived Memory before correcting it".into());
+    }
+    if content.is_empty() || content == record.content {
+        return Err("Memory correction must provide different non-empty content".into());
+    }
+    if content.chars().count() > 32_768 {
+        return Err("Memory correction exceeds the 32,768 character limit".into());
+    }
+    let candidate_kind = candidate_kind(record.category)
+        .ok_or_else(|| "Historical correction records cannot be corrected again".to_string())?;
+    let affected_path = format!("memory.lifecycle.{}", record.memory_id);
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryWrite,
+        &affected_path,
+        serde_json::json!({
+            "content": content,
+            "scope": record.scope,
+            "category": record.category,
+            "candidateKind": candidate_kind,
+            "riskLevel": record.risk_level,
+            "sensitivity": record.sensitivity,
+            "supersedesMemoryId": record.memory_id,
+            "correctionKind": "user_reviewed_replacement"
+        }),
+        "User requested a reviewed correction that replaces one exact canonical Memory owner.",
+        1.0,
+        proposal_risk(record.risk_level),
+        ProposalSource::Manual,
+    );
+    proposal.id = format!("proposal:memory-correction:{}", uuid::Uuid::new_v4());
+    create_memory_action_proposal(state, &proposal).await?;
+    Ok(MemoryActionProposalReceipt {
+        proposal_id: proposal.id,
+        memory_id,
+        action: "correct".into(),
+        status: "review_required".into(),
+    })
+}
+
+#[tauri::command]
+pub async fn draft_memory_archive_proposal(
+    memory_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryActionProposalReceipt, String> {
+    draft_memory_archive_proposal_with_state(memory_id, state.inner()).await
+}
+
+pub(crate) async fn draft_memory_archive_proposal_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryActionProposalReceipt, String> {
+    let record = lifecycle_record(state, &memory_id).await?;
+    let store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
+        .lock()
+        .await;
+    if !store
+        .is_memory_active(&record.memory_id)
+        .map_err(|error| error.to_string())?
+        || store
+            .memory_retrieval_state(&record.memory_id)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|state| {
+                state.disposition == openlife_core::memory::MemoryRetrievalDisposition::Archived
+            })
+    {
+        return Err("Memory is already archived, inactive, or unavailable".into());
+    }
+    drop(store);
+    let affected_path = format!("memory.lifecycle.{}", record.memory_id);
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryArchive,
+        &affected_path,
+        serde_json::json!({
+            "owner": {
+                "ownerKind": "memory_lifecycle",
+                "ownerId": record.memory_id,
+            },
+            "recallDisposition": "archived"
+        }),
+        "User requested a reviewed, recoverable stop-recall action for one exact Memory.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::Manual,
+    );
+    proposal.id = format!("proposal:memory-archive:{}", uuid::Uuid::new_v4());
+    create_memory_action_proposal(state, &proposal).await?;
+    Ok(MemoryActionProposalReceipt {
+        proposal_id: proposal.id,
+        memory_id,
+        action: "archive".into(),
+        status: "review_required".into(),
+    })
+}
+
+#[tauri::command]
+pub async fn draft_memory_stop_recall_proposal(
+    memory_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryActionProposalReceipt, String> {
+    draft_memory_stop_recall_proposal_with_state(memory_id, state.inner()).await
+}
+
+pub(crate) async fn draft_memory_stop_recall_proposal_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryActionProposalReceipt, String> {
+    let record = lifecycle_record(state, &memory_id).await?;
+    if !state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
+        .lock()
+        .await
+        .is_memory_retrievable(&record.memory_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("Memory is already excluded from normal recall".into());
+    }
+    let affected_path = format!("memory.lifecycle.{}", record.memory_id);
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryArchive,
+        &affected_path,
+        serde_json::json!({
+            "owner": {
+                "ownerKind": "memory_lifecycle",
+                "ownerId": record.memory_id,
+            },
+            "recallDisposition": "paused"
+        }),
+        "User requested a reviewed stop-recall action without archiving the Memory asset.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::Manual,
+    );
+    proposal.id = format!("proposal:memory-stop-recall:{}", uuid::Uuid::new_v4());
+    create_memory_action_proposal(state, &proposal).await?;
+    Ok(MemoryActionProposalReceipt {
+        proposal_id: proposal.id,
+        memory_id,
+        action: "stop_recall".into(),
+        status: "review_required".into(),
+    })
+}
+
+#[tauri::command]
+pub async fn privacy_erase_memory_asset(
+    memory_id: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<openlife_core::agent::MemoryPrivacyEraseReport, String> {
+    let record = lifecycle_record(state.inner(), &memory_id).await?;
+    if record.content.is_empty() {
+        return Err("Memory content is already privacy-erased".into());
+    }
+    let arguments = serde_json::json!({
+        "memory_id": memory_id,
+        "operation": "irreversible_privacy_erase",
+        "content_digest": openlife_core::persistence_outbox::metadata_digest(&record.content),
+    });
+    require_native_danger_action_confirmation(
+        &window,
+        NativeDangerActionRequest {
+            action_type: "memory_privacy_erase",
+            target_ids_for_new_challenge: std::slice::from_ref(&memory_id),
+            requested_target: Some(memory_id.as_str()),
+            affected_count: 1,
+            arguments: &arguments,
+            arguments_summary:
+                "永久擦除一条 Memory 的 canonical 正文及其 MemoryStore/Vector 派生内容。",
+            scope_summary: "该操作不可恢复；仅保留不含正文的最小 tombstone 与 outbox 审计元数据。",
+            challenge_id: None,
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    memory_gateway::privacy_erase_memory_asset_with_state(memory_id, state.inner()).await
+}
 
 #[tauri::command]
 pub async fn run_memory_tier_maintenance(
@@ -220,7 +504,11 @@ pub async fn cancel_memory_index_rebuild(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::{embedding::clear_embedding_cache, llm::ChatMessage};
+    use openlife_core::{
+        agent::{MemoryLifecycleAcceptanceInput, ProposalStatus},
+        embedding::clear_embedding_cache,
+        llm::ChatMessage,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc as StdArc,
@@ -228,6 +516,152 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     static OLLAMA_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn accepted_test_memory(state: &Arc<AppState>) -> String {
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.project",
+            serde_json::json!({
+                "content": "User prefers written project updates.",
+                "scope": "project",
+                "category": "preference",
+                "candidateKind": "preference",
+                "riskLevel": "low",
+                "sensitivity": "internal"
+            }),
+            "reviewed test memory",
+            1.0,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.id = "proposal:accepted-memory-action".into();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &proposal,
+            "User prefers written project updates.".into(),
+        )
+        .unwrap();
+        let memory_id = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .accept_memory_proposal(input)
+            .unwrap()
+            .record
+            .memory_id;
+        proposal.accept();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .update_proposal(&proposal)
+            .unwrap();
+        memory_id
+    }
+
+    #[tokio::test]
+    async fn correction_and_archive_actions_only_create_review_proposals() {
+        let state = crate::test_utils::test_app_state();
+        let memory_id = accepted_test_memory(&state).await;
+
+        let correction = draft_memory_correction_proposal_with_state(
+            memory_id.clone(),
+            "User prefers spoken project updates.".into(),
+            &state,
+        )
+        .await
+        .unwrap();
+        let archive = draft_memory_archive_proposal_with_state(memory_id.clone(), &state)
+            .await
+            .unwrap();
+        let stop_recall = draft_memory_stop_recall_proposal_with_state(memory_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        let correction_proposal = store
+            .get_proposal(&correction.proposal_id)
+            .unwrap()
+            .unwrap();
+        let archive_proposal = store.get_proposal(&archive.proposal_id).unwrap().unwrap();
+        let stop_recall_proposal = store
+            .get_proposal(&stop_recall.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(correction_proposal.status, ProposalStatus::Pending);
+        assert_eq!(correction_proposal.proposal_type, ProposalType::MemoryWrite);
+        assert_eq!(correction_proposal.after["supersedesMemoryId"], memory_id);
+        assert_eq!(archive_proposal.status, ProposalStatus::Pending);
+        assert_eq!(archive_proposal.proposal_type, ProposalType::MemoryArchive);
+        assert_eq!(archive_proposal.after["recallDisposition"], "archived");
+        assert_eq!(
+            stop_recall_proposal.proposal_type,
+            ProposalType::MemoryArchive
+        );
+        assert_eq!(stop_recall_proposal.after["recallDisposition"], "paused");
+        drop(store);
+
+        let record = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_record(&memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.content, "User prefers written project updates.");
+        assert!(record.status.is_runtime_active());
+    }
+
+    #[tokio::test]
+    async fn privacy_erase_redacts_the_review_payload_and_canonical_memory_body() {
+        let state = crate::test_utils::test_app_state();
+        let memory_id = accepted_test_memory(&state).await;
+
+        let report =
+            memory_gateway::privacy_erase_memory_asset_with_state(memory_id.clone(), &state)
+                .await
+                .unwrap();
+
+        assert!(report.canonical_committed);
+        let proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal("proposal:accepted-memory-action")
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.after["privacyErased"], true);
+        assert_eq!(proposal.after["memoryId"], memory_id);
+        assert!(!serde_json::to_string(&proposal)
+            .unwrap()
+            .contains("User prefers written project updates."));
+        let record = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_record(&memory_id)
+            .unwrap()
+            .unwrap();
+        assert!(record.content.is_empty());
+        assert!(record.runtime_context_excluded_at.is_some());
+    }
 
     async fn fake_cloud_embedding_endpoint() -> (String, StdArc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

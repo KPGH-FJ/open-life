@@ -6,7 +6,7 @@ use openlife_core::agent::{
     ViewModelWarning, ViewModelWarningSeverity,
 };
 use openlife_core::vectors::TierStats;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use tauri::State;
 
 use super::review_center::get_review_center_view_model_with_state;
@@ -22,7 +22,7 @@ pub(crate) async fn get_memory_view_model_with_state(
     state: &Arc<AppState>,
 ) -> Result<ViewModelEnvelope<MemoryViewModel>, String> {
     let mut warnings = Vec::new();
-    let (lifecycle_available, lifecycle_records) =
+    let (lifecycle_available, lifecycle_records, retrieval_dispositions) =
         load_lifecycle_records(state, &mut warnings).await;
     let tier_summary = load_tier_summary(state, &mut warnings).await;
     let review_items = load_review_items(state, &mut warnings).await;
@@ -44,6 +44,7 @@ pub(crate) async fn get_memory_view_model_with_state(
             "Accepted proposal decisions remain decision state until lifecycle materialization evidence proves applied.".into(),
             "Archived count comes from proven canonical Memory retrieval state; vector archive flags are projection telemetry only.".into(),
         ],
+        retrieval_dispositions,
     });
 
     let status = if !lifecycle_available {
@@ -64,23 +65,47 @@ pub(crate) async fn get_memory_view_model_with_state(
 async fn load_lifecycle_records(
     state: &Arc<AppState>,
     warnings: &mut Vec<ViewModelWarning>,
-) -> (bool, Vec<openlife_core::agent::MemoryLifecycleRecord>) {
+) -> (
+    bool,
+    Vec<openlife_core::agent::MemoryLifecycleRecord>,
+    BTreeMap<String, String>,
+) {
     let Some(store) = state.memory_lifecycle_store.as_ref() else {
         warnings.push(warning(
             "memory_lifecycle_store_unavailable",
             "MemoryViewModel cannot prove durable memory materialization without MemoryLifecycleStore.",
         ));
-        return (false, Vec::new());
+        return (false, Vec::new(), BTreeMap::new());
     };
 
-    match store.lock().await.list_records(None, None, 200, 0) {
-        Ok(records) => (true, records),
+    let store = store.lock().await;
+    match store.list_records(None, None, 200, 0) {
+        Ok(records) => {
+            let mut dispositions = BTreeMap::new();
+            for record in &records {
+                match store.memory_retrieval_state(&record.memory_id) {
+                    Ok(Some(state)) => {
+                        dispositions
+                            .insert(record.memory_id.clone(), state.disposition.as_str().into());
+                    }
+                    Ok(None) => {}
+                    Err(err) => warnings.push(warning(
+                        "memory_retrieval_state_unavailable",
+                        format!(
+                            "Memory recall state could not be loaded for {}: {err}",
+                            record.memory_id
+                        ),
+                    )),
+                }
+            }
+            (true, records, dispositions)
+        }
         Err(err) => {
             warnings.push(warning(
                 "memory_lifecycle_records_unavailable",
                 format!("MemoryViewModel could not load lifecycle records: {err}"),
             ));
-            (false, Vec::new())
+            (false, Vec::new(), BTreeMap::new())
         }
     }
 }
@@ -145,5 +170,97 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
         message: message.into(),
         severity: ViewModelWarningSeverity::Warning,
         evidence_refs: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::{
+        agent::{
+            AgentProposal, MemoryLifecycleAcceptanceInput, ProposalSource, ProposalType, RiskLevel,
+        },
+        memory::MemoryRetrievalDisposition,
+    };
+
+    fn memory_proposal(id: &str, content: &str) -> AgentProposal {
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.project",
+            serde_json::json!({
+                "content": content,
+                "scope": "project",
+                "category": "preference",
+                "candidateKind": "preference",
+                "riskLevel": "low",
+                "sensitivity": "internal"
+            }),
+            "reviewed test memory",
+            1.0,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.id = id.into();
+        proposal
+    }
+
+    #[tokio::test]
+    async fn product_items_distinguish_archived_from_privacy_erased_memory() {
+        let state = crate::test_utils::test_app_state();
+        let proposal = memory_proposal("proposal:memory-view", "A readable project preference");
+        let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &proposal,
+            "A readable project preference".into(),
+        )
+        .unwrap();
+        let memory_id = {
+            let store = state.memory_lifecycle_store.as_ref().unwrap().lock().await;
+            let accepted = store.accept_memory_proposal(input).unwrap();
+            store
+                .set_memory_retrieval_disposition(
+                    &accepted.record.memory_id,
+                    MemoryRetrievalDisposition::Archived,
+                    "test_user_archive",
+                )
+                .unwrap();
+            accepted.record.memory_id
+        };
+
+        let archived = get_memory_view_model_with_state(&state).await.unwrap();
+        let archived_item = archived
+            .data
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.memory_id == memory_id)
+            .unwrap();
+        assert_eq!(archived_item.recall_state, "archived");
+        assert!(archived_item.can_restore);
+        assert_eq!(
+            archived_item.content.as_deref(),
+            Some("A readable project preference")
+        );
+
+        state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .privacy_erase_memory_asset(&memory_id)
+            .unwrap();
+        let erased = get_memory_view_model_with_state(&state).await.unwrap();
+        let erased_item = erased
+            .data
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.memory_id == memory_id)
+            .unwrap();
+        assert_eq!(erased_item.recall_state, "erased");
+        assert!(erased_item.privacy_erased);
+        assert!(erased_item.content.is_none());
+        assert!(erased_item.evidence_ids.is_empty());
+        assert!(!erased_item.can_privacy_erase);
     }
 }

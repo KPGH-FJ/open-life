@@ -591,6 +591,15 @@ fn proposal_title(proposal: &AgentProposal) -> String {
         ProposalType::PreferenceUpdate => "Update a preference",
         ProposalType::CapabilityUpdate => "Update a capability",
         ProposalType::MemoryWrite => "Add a memory",
+        ProposalType::MemoryArchive
+            if proposal
+                .after
+                .get("recallDisposition")
+                .and_then(Value::as_str)
+                == Some("paused") =>
+        {
+            "Stop recalling a memory"
+        }
         ProposalType::MemoryArchive => "Archive a memory",
         ProposalType::ToolPermission => "Allow one action",
         ProposalType::PluginPermission => "Review plugin access",
@@ -623,6 +632,17 @@ fn proposal_title(proposal: &AgentProposal) -> String {
 
 fn proposal_summary(proposal: &AgentProposal) -> String {
     match proposal.proposal_type {
+        ProposalType::MemoryArchive
+            if proposal.after.get("recallDisposition").and_then(Value::as_str)
+                == Some("paused") =>
+        {
+            "Review whether this memory should stop participating in recall while remaining available to restore."
+                .into()
+        }
+        ProposalType::MemoryArchive => {
+            "Review whether this memory should move to the archive and leave active recall."
+                .into()
+        }
         ProposalType::ToolPermission => {
             "Review the exact permission scope before allowing one matching action.".into()
         }
@@ -964,6 +984,29 @@ mod tests {
 
         assert!(detail.contains("[REDACTED]"));
         assert!(!detail.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn memory_stop_recall_and_archive_have_distinct_review_language() {
+        let paused = build_review_decision_context(
+            &proposal(
+                ProposalType::MemoryArchive,
+                json!({"recallDisposition": "paused"}),
+            ),
+            &[],
+        );
+        let archived = build_review_decision_context(
+            &proposal(
+                ProposalType::MemoryArchive,
+                json!({"recallDisposition": "archived"}),
+            ),
+            &[],
+        );
+
+        assert_eq!(paused.title, "Stop recalling a memory");
+        assert!(paused.summary.contains("remaining available to restore"));
+        assert_eq!(archived.title, "Archive a memory");
+        assert!(archived.summary.contains("move to the archive"));
     }
 
     #[test]

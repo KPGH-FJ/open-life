@@ -1441,6 +1441,68 @@ impl ProposalStore {
         Ok(())
     }
 
+    /// Removes content-bearing fields from one accepted Memory proposal after
+    /// the user has confirmed irreversible privacy erasure of the canonical
+    /// Memory asset. Stable ids, decision state, timestamps, and existing
+    /// digests remain available as body-free audit metadata.
+    pub fn redact_accepted_memory_proposal_content(
+        &self,
+        proposal_id: &str,
+        memory_id: &str,
+    ) -> Result<bool> {
+        let proposal_id = proposal_id.trim();
+        let memory_id = memory_id.trim();
+        if proposal_id.is_empty() || memory_id.is_empty() {
+            anyhow::bail!("Memory proposal privacy redaction requires exact ids");
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let proposal = conn
+            .query_row(
+                "SELECT id, run_id, proposal_type, source, source_detail, base_hash,
+                        affected_path, before_json, after_json, reason, confidence,
+                        risk_level, status, created_at, resolved_at, expires_at
+                 FROM proposals WHERE id = ?1",
+                [proposal_id],
+                Self::row_to_proposal,
+            )
+            .optional()?;
+        let Some(proposal) = proposal else {
+            return Ok(false);
+        };
+        if proposal.status != ProposalStatus::Accepted {
+            anyhow::bail!("Memory proposal privacy redaction requires an accepted proposal");
+        }
+        if !matches!(
+            proposal.proposal_type,
+            ProposalType::MemoryWrite | ProposalType::MemoryArchive
+        ) {
+            anyhow::bail!("proposal privacy redaction target is not a Memory proposal");
+        }
+        let redacted_after = serde_json::to_string(&serde_json::json!({
+            "memoryId": memory_id,
+            "privacyErased": true,
+        }))?;
+        let changed = conn.execute(
+            "UPDATE proposals
+             SET source_detail = 'privacy_erased',
+                 base_hash = NULL,
+                 before_json = NULL,
+                 after_json = ?2,
+                 reason = 'Memory proposal content privacy-erased by user request.'
+             WHERE id = ?1
+               AND status = 'accepted'
+               AND proposal_type IN ('memory_write', 'memory_archive')",
+            params![proposal_id, redacted_after],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("Memory proposal privacy redaction lost its exact target");
+        }
+        Ok(true)
+    }
+
     /// Applies a review-only mutation with a compare-and-swap guard. The mutation is
     /// rejected if another reviewer changed the Proposal or any effect dispatch started
     /// after the caller read it.
@@ -3643,6 +3705,45 @@ mod tests {
         assert_eq!(fetched.source, ProposalSource::ChatConversation);
         assert_eq!(fetched.after, proposal.after);
         assert!(fetched.expires_at.is_some());
+    }
+
+    #[test]
+    fn accepted_memory_proposal_privacy_redaction_removes_content_but_keeps_audit_identity() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory:privacy-target",
+            serde_json::json!({
+                "content": "PROPOSAL_PRIVATE_MEMORY_BODY",
+                "scope": "project"
+            }),
+            "PROPOSAL_PRIVATE_MEMORY_REASON",
+            1.0,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.id = "proposal:privacy-target".into();
+        proposal.before = Some(serde_json::json!({
+            "content": "PROPOSAL_PRIVATE_MEMORY_BEFORE"
+        }));
+        store.create_proposal(&proposal).unwrap();
+        proposal.status = ProposalStatus::Accepted;
+        proposal.resolved_at = Some(chrono::Utc::now());
+        store.update_proposal(&proposal).unwrap();
+
+        assert!(store
+            .redact_accepted_memory_proposal_content(&proposal.id, "memory:privacy-target")
+            .unwrap());
+        let redacted = store.get_proposal(&proposal.id).unwrap().unwrap();
+        let rendered = serde_json::to_string(&redacted).unwrap();
+        assert_eq!(redacted.id, proposal.id);
+        assert_eq!(redacted.status, ProposalStatus::Accepted);
+        assert_eq!(redacted.after["memoryId"], "memory:privacy-target");
+        assert_eq!(redacted.after["privacyErased"], true);
+        assert!(redacted.before.is_none());
+        assert!(!rendered.contains("PROPOSAL_PRIVATE_MEMORY_BODY"));
+        assert!(!rendered.contains("PROPOSAL_PRIVATE_MEMORY_BEFORE"));
+        assert!(!rendered.contains("PROPOSAL_PRIVATE_MEMORY_REASON"));
     }
 
     #[test]

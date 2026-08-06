@@ -190,11 +190,11 @@ pub use memory_lifecycle::{
     MemoryLifecycleEvent, MemoryLifecycleRecord, MemoryLifecycleRetrievalReader,
     MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity,
     MemoryLifecycleStatus, MemoryLifecycleStore, MemoryMaterializationStatus,
-    MemoryMaterializedView, MemoryRollbackEvent, MemoryRollbackReport,
+    MemoryMaterializedView, MemoryPrivacyEraseReport, MemoryRollbackEvent, MemoryRollbackReport,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use memory_view_model::{
-    build_memory_view_model, MemoryLaneSummary, MemoryLifeModelLinkageStatus,
+    build_memory_view_model, MemoryItemView, MemoryLaneSummary, MemoryLifeModelLinkageStatus,
     MemoryLifeModelLinkageSummary, MemoryLifecycleSummary, MemoryTierSummary, MemoryViewModel,
     MemoryViewModelBuildInput, MemoryViewModelSummary,
 };

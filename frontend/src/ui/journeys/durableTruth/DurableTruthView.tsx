@@ -1,4 +1,5 @@
-import { ArrowRight, Eye, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { Archive, ArrowRight, Eye, RefreshCw, RotateCcw, ShieldX, SquarePen } from "lucide-react";
 import type { ReviewItem } from "@/tauri";
 import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from "@/ui/foundation";
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
@@ -18,6 +19,13 @@ export function DurableTruthView({
   onOpenInspector,
   builder,
   onOpenReviewCenter,
+  memoryAction,
+  onCorrectMemory,
+  onArchiveMemory,
+  onStopRecall,
+  onRestoreMemory,
+  onRollbackMemory,
+  onPrivacyEraseMemory,
 }: {
   snapshot: DurableTruthSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -28,7 +36,20 @@ export function DurableTruthView({
   onOpenInspector: () => void;
   builder?: LifeModelBuilderController;
   onOpenReviewCenter?: () => void;
+  memoryAction: {
+    memoryId: string;
+    action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase";
+    error?: string;
+  } | null;
+  onCorrectMemory: (memoryId: string, content: string) => Promise<boolean>;
+  onArchiveMemory: (memoryId: string) => Promise<boolean>;
+  onStopRecall: (memoryId: string) => Promise<boolean>;
+  onRestoreMemory: (memoryId: string) => Promise<boolean>;
+  onRollbackMemory: (memoryId: string, reason: string) => Promise<boolean>;
+  onPrivacyEraseMemory: (memoryId: string) => Promise<boolean>;
 }) {
+  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
+  const [memoryDraft, setMemoryDraft] = useState("");
   if (!snapshot || snapshot.lifeModelEnvelope.status === "loading") {
     return (
       <div className="ol-durable-page ol-durable-page--centered" aria-busy="true">
@@ -365,6 +386,162 @@ export function DurableTruthView({
                   </span>
                 </div>
               ))}
+            </div>
+            <div className="ol-memory-assets" aria-label="可管理的长期记忆">
+              <div className="ol-memory-assets__heading">
+                <div>
+                  <strong>记忆内容与控制</strong>
+                  <p>纠正和停止召回先进入 Review；恢复立即生效；永久擦除需要原生确认。</p>
+                </div>
+              </div>
+              {memory.items.length > 0 ? (
+                memory.items.map(item => {
+                  const busy = memoryAction?.memoryId === item.memoryId;
+                  const editing = editingMemoryId === item.memoryId;
+                  return (
+                    <article className="ol-memory-asset" key={item.memoryId}>
+                      <div className="ol-memory-asset__meta">
+                        <FoundationStatusLabel
+                          label={
+                            item.recallState === "active"
+                              ? "正在召回"
+                              : item.recallState === "paused"
+                                ? "已停止召回"
+                                : item.recallState === "archived"
+                                  ? "已归档"
+                                  : item.recallState === "erased"
+                                    ? "正文已擦除"
+                                    : "历史记录"
+                          }
+                          status={item.recallState === "active" ? "neutral" : "unknown"}
+                        />
+                        <span>{item.scope}</span>
+                        <span>{item.category}</span>
+                      </div>
+                      <p className="ol-memory-asset__content">
+                        {item.content ?? "该记忆的正文和来源已经永久擦除。"}
+                      </p>
+                      <small>为什么记住：{item.whyRemembered}</small>
+                      {item.evidenceIds.length > 0 ? (
+                        <small>来源：{item.evidenceIds.slice(0, 3).join(" · ")}</small>
+                      ) : null}
+                      {editing ? (
+                        <div className="ol-memory-asset__editor">
+                          <label htmlFor={`memory-correction-${item.memoryId}`}>
+                            纠正后的完整内容
+                          </label>
+                          <textarea
+                            id={`memory-correction-${item.memoryId}`}
+                            value={memoryDraft}
+                            onChange={event => setMemoryDraft(event.target.value)}
+                            disabled={busy}
+                          />
+                          <div>
+                            <FoundationActionButton
+                              label="提交 Review"
+                              loading={busy && memoryAction?.action === "correct"}
+                              loadingLabel="正在提交"
+                              disabled={!memoryDraft.trim() || memoryDraft.trim() === item.content}
+                              onClick={() =>
+                                void onCorrectMemory(item.memoryId, memoryDraft).then(ok => {
+                                  if (ok) setEditingMemoryId(null);
+                                })
+                              }
+                            />
+                            <FoundationActionButton
+                              label="取消"
+                              variant="quiet"
+                              disabled={busy}
+                              onClick={() => setEditingMemoryId(null)}
+                            />
+                          </div>
+                        </div>
+                      ) : null}
+                      {memoryAction?.memoryId === item.memoryId && memoryAction.error ? (
+                        <FoundationNotice title="Memory 操作未完成" tone="error" live>
+                          <p>{memoryAction.error}</p>
+                        </FoundationNotice>
+                      ) : null}
+                      <div className="ol-memory-asset__actions">
+                        {item.canCorrect ? (
+                          <FoundationActionButton
+                            label="纠正"
+                            icon={<SquarePen size={16} aria-hidden="true" />}
+                            variant="quiet"
+                            disabled={busy}
+                            onClick={() => {
+                              setEditingMemoryId(item.memoryId);
+                              setMemoryDraft(item.content ?? "");
+                            }}
+                          />
+                        ) : null}
+                        {item.canStopRecall ? (
+                          <FoundationActionButton
+                            label="停止召回"
+                            icon={<Archive size={16} aria-hidden="true" />}
+                            variant="quiet"
+                            loading={busy && memoryAction?.action === "stop_recall"}
+                            loadingLabel="正在提交"
+                            disabled={busy}
+                            onClick={() => void onStopRecall(item.memoryId)}
+                          />
+                        ) : null}
+                        {item.canArchive ? (
+                          <FoundationActionButton
+                            label="归档"
+                            icon={<Archive size={16} aria-hidden="true" />}
+                            variant="quiet"
+                            loading={busy && memoryAction?.action === "archive"}
+                            loadingLabel="正在提交"
+                            disabled={busy}
+                            onClick={() => void onArchiveMemory(item.memoryId)}
+                          />
+                        ) : null}
+                        {item.canRestore ? (
+                          <FoundationActionButton
+                            label="恢复召回"
+                            icon={<RotateCcw size={16} aria-hidden="true" />}
+                            variant="quiet"
+                            loading={busy && memoryAction?.action === "restore"}
+                            loadingLabel="正在恢复"
+                            disabled={busy}
+                            onClick={() => void onRestoreMemory(item.memoryId)}
+                          />
+                        ) : null}
+                        {item.canRollback ? (
+                          <FoundationActionButton
+                            label="回滚这次变更"
+                            icon={<RotateCcw size={16} aria-hidden="true" />}
+                            variant="quiet"
+                            loading={busy && memoryAction?.action === "rollback"}
+                            loadingLabel="正在回滚"
+                            disabled={busy}
+                            onClick={() =>
+                              void onRollbackMemory(
+                                item.memoryId,
+                                "user_requested_product_memory_rollback"
+                              )
+                            }
+                          />
+                        ) : null}
+                        {item.canPrivacyErase ? (
+                          <FoundationActionButton
+                            label="永久擦除"
+                            icon={<ShieldX size={16} aria-hidden="true" />}
+                            variant="quiet"
+                            loading={busy && memoryAction?.action === "erase"}
+                            loadingLabel="等待确认"
+                            disabled={busy}
+                            onClick={() => void onPrivacyEraseMemory(item.memoryId)}
+                          />
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <p className="ol-durable-muted">还没有可管理的跨会话 Memory。</p>
+              )}
             </div>
           </>
         ) : (

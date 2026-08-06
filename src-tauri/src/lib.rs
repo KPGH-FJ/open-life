@@ -169,8 +169,10 @@ use commands::mcp::{
     list_mcp_tools, recommend_mcp_manifests, register_mcp_server, unregister_mcp_server,
 };
 use commands::memory::{
-    archive_low_access_memories, count_memory_chunks, create_knowledge_note, get_hot_cache,
-    get_memory_tier_stats, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
+    archive_low_access_memories, count_memory_chunks, create_knowledge_note,
+    draft_memory_archive_proposal, draft_memory_correction_proposal,
+    draft_memory_stop_recall_proposal, get_hot_cache, get_memory_tier_stats, list_archived_chunks,
+    privacy_erase_memory_asset, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
 use commands::proactive::get_proactive_suggestions;
@@ -1002,6 +1004,10 @@ pub fn run() {
             draft_edit_memory_proposal,
             postpone_proposal,
             rollback_memory_asset,
+            draft_memory_correction_proposal,
+            draft_memory_archive_proposal,
+            draft_memory_stop_recall_proposal,
+            privacy_erase_memory_asset,
             list_memory_assets,
             get_memory_asset,
             send_message,

@@ -1,7 +1,13 @@
 import {
+  draftMemoryArchiveProposal,
+  draftMemoryCorrectionProposal,
+  draftMemoryStopRecallProposal,
   getLifeModelViewModel,
   getMemoryViewModel,
   getReviewCenterViewModel,
+  privacyEraseMemoryAsset,
+  restoreArchivedMemory,
+  rollbackMemoryAsset,
   type LifeModelViewModel,
   type MemoryViewModel,
   type ReviewCenterViewModel,
@@ -25,6 +31,38 @@ export type DurableTruthSnapshot = {
 
 export interface DurableTruthDataSource {
   loadDurableTruth(): Promise<DurableTruthSnapshot>;
+  correctMemory(memoryId: string, content: string): Promise<void>;
+  archiveMemory(memoryId: string): Promise<void>;
+  stopRecall(memoryId: string): Promise<void>;
+  restoreMemory(memoryId: string): Promise<void>;
+  rollbackMemory(memoryId: string, reason: string): Promise<void>;
+  privacyEraseMemory(memoryId: string): Promise<void>;
+}
+
+function requireReviewedMemoryProposal(
+  receipt: { memoryId: string; action: string; status: string },
+  memoryId: string,
+  action: string
+) {
+  if (
+    receipt.memoryId !== memoryId ||
+    receipt.action !== action ||
+    receipt.status !== "review_required"
+  ) {
+    throw new Error(`memory_${action}_proposal_receipt_unverified`);
+  }
+}
+
+function requireAppliedMemoryProjection(
+  receipt: { canonicalCommitted: boolean; projectionState: string },
+  action: string
+) {
+  if (!receipt.canonicalCommitted) {
+    throw new Error(`memory_${action}_canonical_commit_unverified`);
+  }
+  if (receipt.projectionState !== "applied") {
+    throw new Error(`memory_${action}_projection_${receipt.projectionState || "unknown"}`);
+  }
 }
 
 function settledEnvelope<T>(
@@ -118,4 +156,31 @@ async function loadDurableTruth(): Promise<DurableTruthSnapshot> {
 
 export const tauriDurableTruthDataSource: DurableTruthDataSource = {
   loadDurableTruth,
+  async correctMemory(memoryId, content) {
+    const receipt = await draftMemoryCorrectionProposal(memoryId, content);
+    requireReviewedMemoryProposal(receipt, memoryId, "correct");
+  },
+  async archiveMemory(memoryId) {
+    const receipt = await draftMemoryArchiveProposal(memoryId);
+    requireReviewedMemoryProposal(receipt, memoryId, "archive");
+  },
+  async stopRecall(memoryId) {
+    const receipt = await draftMemoryStopRecallProposal(memoryId);
+    requireReviewedMemoryProposal(receipt, memoryId, "stop_recall");
+  },
+  async restoreMemory(memoryId) {
+    const receipt = await restoreArchivedMemory({
+      ownerKind: "memory_lifecycle",
+      ownerId: memoryId,
+    });
+    requireAppliedMemoryProjection(receipt, "restore");
+  },
+  async rollbackMemory(memoryId, reason) {
+    const receipt = await rollbackMemoryAsset(memoryId, reason);
+    requireAppliedMemoryProjection(receipt, "rollback");
+  },
+  async privacyEraseMemory(memoryId) {
+    const receipt = await privacyEraseMemoryAsset(memoryId);
+    requireAppliedMemoryProjection(receipt, "privacy_erase");
+  },
 };

@@ -575,6 +575,90 @@
   gap: var(--ol-space-2);
 }
 
+.ol-memory-assets {
+  display: grid;
+  gap: var(--ol-space-4);
+  margin-top: var(--ol-space-6);
+  padding-top: var(--ol-space-5);
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-memory-assets__heading p,
+.ol-memory-asset p,
+.ol-memory-asset small {
+  margin: 0;
+}
+
+.ol-memory-assets__heading p,
+.ol-memory-asset small {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-memory-asset {
+  display: grid;
+  gap: var(--ol-space-3);
+  padding: var(--ol-space-4);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-medium);
+  background: var(--ol-surface);
+}
+
+.ol-memory-asset__meta,
+.ol-memory-asset__actions,
+.ol-memory-asset__editor > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+  align-items: center;
+}
+
+.ol-memory-asset__meta > span {
+  color: var(--ol-ink-muted);
+  font-family: var(--ol-font-mono);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-memory-asset__content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-reading);
+  line-height: var(--ol-line-reading);
+}
+
+.ol-memory-asset__editor {
+  display: grid;
+  gap: var(--ol-space-2);
+  padding: var(--ol-space-3);
+  background: var(--ol-surface-sunken);
+}
+
+.ol-memory-asset__editor label {
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-memory-asset__editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 112px;
+  padding: var(--ol-space-3);
+  resize: vertical;
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-small);
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  font: inherit;
+  line-height: var(--ol-line-reading);
+}
+
+.ol-memory-asset__editor textarea:focus-visible {
+  outline: var(--ol-focus-width) solid var(--ol-focus);
+  outline-offset: var(--ol-focus-offset);
+}
+
 @media (max-width: 1120px) {
   .ol-durable-page {
     padding-right: var(--ol-space-6);

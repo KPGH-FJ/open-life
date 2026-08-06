@@ -17,7 +17,7 @@ accepted through the governed bridge.
 
 ## Last verified
 
-2026-08-06 during Phase 5 architecture-boundary implementation.
+2026-08-06 during Phase 5.1D explicit cross-session Memory lifecycle implementation.
 
 ## Source map
 
@@ -82,6 +82,30 @@ Accepted memory proposals create `memory:<uuid>` ids and update a materialized
 view. Rollback removes accepted memory from active runtime context. High-risk
 or identity/value memory rollback requires explicit confirmation instead of
 being silently rolled back.
+
+The product lifecycle now keeps the following actions distinct:
+
+- correction creates a reviewed `MemoryWrite` replacement bound to one exact
+  prior `memory:<uuid>`; the old owner becomes superseded only after acceptance;
+- stop recall commits the `paused` retrieval disposition after Review and keeps
+  the canonical asset outside normal runtime retrieval;
+- archive commits the separate `archived` disposition after Review; paused and
+  archived assets can both be restored to `active` without recreating content;
+- rollback terminates one applied change while retaining its body and lifecycle
+  history;
+- privacy erase requires native confirmation, removes the canonical body,
+  content-bearing provenance, and corresponding accepted Review proposal
+  payload, then emits a tombstone that deletes the MemoryStore and VectorStore
+  projections. Only body-free Memory audit metadata remains, and replay of the
+  erased proposal cannot resurrect the body. This exact-Memory action does not
+  silently delete a separate source conversation or workspace document; those
+  retain their own explicit deletion controls.
+
+`MemoryViewModel.items` is the product-facing owner for content, scope,
+provenance explanation, recall state and allowed actions. The `/life-model`
+Memory area consumes that ViewModel instead of merging raw lifecycle rows and
+vector telemetry in the browser. It labels proposal creation as pending Review,
+not as an applied Memory change.
 
 `src-tauri/src/main_chat_memory_proposals.rs` supports draft edits for pending
 Memory or Preference proposals. The edit report is draft-only, preserves the

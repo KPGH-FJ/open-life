@@ -507,6 +507,7 @@ impl CanonicalConversationMessageCommit {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryRetrievalDisposition {
     Active,
+    Paused,
     Archived,
 }
 
@@ -514,6 +515,7 @@ impl MemoryRetrievalDisposition {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
+            Self::Paused => "paused",
             Self::Archived => "archived",
         }
     }
@@ -521,6 +523,7 @@ impl MemoryRetrievalDisposition {
     pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
             "archived" => Ok(Self::Archived),
             other => anyhow::bail!("unsupported canonical Memory retrieval disposition: {other}"),
         }

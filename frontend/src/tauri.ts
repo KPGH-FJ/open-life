@@ -2790,6 +2790,29 @@ export type MemoryViewModelSummary = {
   tierSummary?: MemoryTierSummary;
 };
 
+export type MemoryItemView = {
+  memoryId: string;
+  content?: string;
+  scope: string;
+  category: string;
+  status: string;
+  materializationStatus: string;
+  recallState: "active" | "paused" | "archived" | "historical" | "erased" | "unavailable";
+  sensitivity: string;
+  whyRemembered: string;
+  acceptedAt?: string;
+  evidenceIds: string[];
+  supersedesMemoryId?: string;
+  replacementMemoryId?: string;
+  privacyErased: boolean;
+  canCorrect: boolean;
+  canStopRecall: boolean;
+  canArchive: boolean;
+  canRestore: boolean;
+  canRollback: boolean;
+  canPrivacyErase: boolean;
+};
+
 export type MemoryViewModel = {
   summary: MemoryViewModelSummary;
   lifecycleSummary: MemoryLifecycleSummary;
@@ -2797,6 +2820,7 @@ export type MemoryViewModel = {
   recentMemoryRefs: BackendEntityRef[];
   reviewItemRefs: BackendEntityRef[];
   lifeModelLinkage: MemoryLifeModelLinkageSummary;
+  items: MemoryItemView[];
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };
@@ -4579,6 +4603,7 @@ export interface MemoryRollbackReport {
     aggregateKind: string;
     aggregateId: string;
     mutationKind: string;
+    aggregateRevision: number;
     payloadDigest: string;
     tombstoneId?: string | null;
     createdAt: string;
@@ -4586,6 +4611,32 @@ export interface MemoryRollbackReport {
   canonicalCommitted: boolean;
   projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
   projectionErrorDigest?: string;
+}
+
+export interface MemoryPrivacyEraseReport {
+  memoryId: string;
+  erasedAt: string;
+  materializedView: MemoryMaterializedView;
+  canonicalMutation: {
+    eventId: string;
+    aggregateKind: string;
+    aggregateId: string;
+    mutationKind: string;
+    aggregateRevision: number;
+    payloadDigest: string;
+    tombstoneId?: string | null;
+    createdAt: string;
+  };
+  canonicalCommitted: boolean;
+  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
+}
+
+export interface MemoryActionProposalReceipt {
+  proposalId: string;
+  memoryId: string;
+  action: "correct" | "stop_recall" | "archive";
+  status: "review_required";
 }
 
 export interface MemoryProposalDraftEditReport {
@@ -4669,6 +4720,33 @@ export async function rollbackMemoryAsset(
   reason: string
 ): Promise<MemoryRollbackReport> {
   return safeInvoke("rollback_memory_asset", { memoryId, memory_id: memoryId, reason });
+}
+
+export async function draftMemoryCorrectionProposal(
+  memoryId: string,
+  content: string
+): Promise<MemoryActionProposalReceipt> {
+  return safeInvoke("draft_memory_correction_proposal", {
+    memoryId,
+    memory_id: memoryId,
+    content,
+  });
+}
+
+export async function draftMemoryArchiveProposal(
+  memoryId: string
+): Promise<MemoryActionProposalReceipt> {
+  return safeInvoke("draft_memory_archive_proposal", { memoryId, memory_id: memoryId });
+}
+
+export async function draftMemoryStopRecallProposal(
+  memoryId: string
+): Promise<MemoryActionProposalReceipt> {
+  return safeInvoke("draft_memory_stop_recall_proposal", { memoryId, memory_id: memoryId });
+}
+
+export async function privacyEraseMemoryAsset(memoryId: string): Promise<MemoryPrivacyEraseReport> {
+  return safeInvoke("privacy_erase_memory_asset", { memoryId, memory_id: memoryId });
 }
 
 export async function listMemoryAssets(

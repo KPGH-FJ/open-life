@@ -570,6 +570,22 @@ summary 后可从 canonical transcript 重建。
 退出标准：显式记忆能够跨会话召回、纠正、归档和恢复；隐私擦除后正文不再出现
 于 canonical store、FTS、Vector、cache、runtime context 或普通产品读取路径。
 
+本切片实施边界（2026-08-06）：
+
+- 复用现有 `MemoryLifecycleStore`、MemoryStore/VectorStore outbox projection、
+  Review Center 和 Main Chat 显式记住路径，不新增 Memory 数据库或生命周期平台；
+- 纠正只接受一个精确 `memory:<uuid>`，以受审 `MemoryWrite` 创建 replacement；
+  Review 接受前旧 owner 不变，接受后旧记录成为 superseded 并退出 runtime；
+- 停止召回、归档、恢复分别使用 `paused`、`archived`、`active` canonical retrieval
+  disposition；paused 不冒充 archived，二者都不会进入正常检索；
+- 回滚保留历史正文；隐私擦除使用原生危险操作确认，清空 canonical 正文、来源和
+  content-bearing metadata，留下 body-free tombstone，并通过既有 outbox 删除
+  MemoryStore/VectorStore 派生内容；
+- backend `MemoryViewModel.items` 统一给出正文、scope、来源解释、召回状态和允许
+  动作；`/life-model` 的 Memory 区域不从原始 store/telemetry 拼装产品真相；
+- 非目标：不在本切片增加 FTS/Vector 排序、新鲜度算法、跨 scope 检索策略或
+  provider 驱动 Reflection；这些属于 5.1E 及其后的独立验证边界。
+
 ###### 5.1E 混合检索与召回解释
 
 - FTS 和 Vector 只检索允许 scope 内的 active Memory，合并、去重并按任务相关性、
@@ -835,9 +851,9 @@ JSON。不得为了完成某个小切片而提前建设下一板块的平台能�
 versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户确认。
 5.1A“跨重启继续当前会话”已于提交 `d77e38f` 完成并经用户确认；5.1B“摘要与
 长上下文压缩”已于提交 `a21d9f4` 完成并经用户确认。5.1C“Workspace/Project
-Markdown Memory”已经完成实现、本地代码审阅、focused 失败反例、前端完整门禁、
-严格 Clippy 与全量 Rust 测试；当前停在 5.1C 用户审阅边界，尚未提交，也未进入
-5.1D。**
+Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显式跨会话 Memory
+生命周期”已经完成实现、本地代码审阅、失败反例、前端完整门禁、严格 Clippy 与
+全量 Rust 测试；当前停在 5.1D 用户审阅边界，尚未提交，也未进入 5.1E。**
 
 第五阶段第一步实际完成：
 
