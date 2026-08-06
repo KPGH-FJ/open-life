@@ -1,3 +1,7 @@
+use crate::agent::conversation_context::{
+    compact_conversation_context, CanonicalConversationMessage, ConversationContextConfig,
+    ConversationContextProjection,
+};
 use crate::agent::{AgentRun, AgentRunStore};
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -731,6 +735,21 @@ impl MemoryStore {
             [],
         )?;
         Self::ensure_column_exists(&conn, "chat_sessions", "selected_skill_id", "TEXT")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_context_summaries (
+                session_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+                source_start_message_id INTEGER NOT NULL,
+                source_end_message_id INTEGER NOT NULL,
+                source_message_count INTEGER NOT NULL CHECK(source_message_count > 0),
+                source_digest TEXT NOT NULL,
+                summary_digest TEXT NOT NULL,
+                summary_content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS idx_conversation_context_summary_source
+             ON conversation_context_summaries(session_id, source_end_message_id);",
+        )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS state_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -860,7 +879,7 @@ impl MemoryStore {
             "DELETE FROM memories WHERE content_type = 'chat_message'",
             [],
         )?;
-        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 7)?;
+        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 8)?;
         Ok(())
     }
 
@@ -1423,6 +1442,109 @@ impl MemoryStore {
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Build the provider-facing conversation window from the canonical
+    /// transcript that ends at `operation_id`. The stored summary is only a
+    /// rebuildable projection: this method never trusts a previously stored
+    /// body and always derives the returned context from `messages`.
+    pub fn materialize_bounded_conversation_context_through_operation(
+        &self,
+        operation_id: &str,
+        config: ConversationContextConfig,
+    ) -> Result<ConversationContextProjection> {
+        ensure_message_operation_id(operation_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
+        let target = conn
+            .query_row(
+                "SELECT id, session_id, role FROM messages WHERE operation_id = ?1",
+                [operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((target_id, session_id, target_role)) = target else {
+            return Ok(ConversationContextProjection {
+                provider_messages: Vec::new(),
+                summary: None,
+                omitted_message_count: 0,
+                total_chars: 0,
+            });
+        };
+        if target_role != "user"
+            || persistence_outbox::has_active_tombstone(&conn, "conversation", &session_id)?
+        {
+            return Ok(ConversationContextProjection {
+                provider_messages: Vec::new(),
+                summary: None,
+                omitted_message_count: 0,
+                total_chars: 0,
+            });
+        }
+        let messages = {
+            let mut statement = conn.prepare(
+                "SELECT id, role, content FROM messages
+                 WHERE session_id = ?1 AND id <= ?2
+                 ORDER BY id ASC",
+            )?;
+            let rows = statement
+                .query_map(params![session_id, target_id], |row| {
+                    Ok(CanonicalConversationMessage {
+                        id: row.get(0)?,
+                        role: row.get(1)?,
+                        content: row.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let projection = compact_conversation_context(&messages, config);
+        if let Some(summary) = projection.summary.as_ref() {
+            conn.execute(
+                "INSERT INTO conversation_context_summaries (
+                    session_id, schema_version, source_start_message_id,
+                    source_end_message_id, source_message_count, source_digest,
+                    summary_digest, summary_content, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    source_start_message_id = excluded.source_start_message_id,
+                    source_end_message_id = excluded.source_end_message_id,
+                    source_message_count = excluded.source_message_count,
+                    source_digest = excluded.source_digest,
+                    summary_digest = excluded.summary_digest,
+                    summary_content = excluded.summary_content,
+                    created_at = excluded.created_at
+                 WHERE excluded.source_end_message_id
+                    >= conversation_context_summaries.source_end_message_id",
+                params![
+                    session_id,
+                    i64::from(summary.schema_version),
+                    summary.source_start_message_id,
+                    summary.source_end_message_id,
+                    i64::try_from(summary.source_message_count)?,
+                    summary.source_digest,
+                    summary.summary_digest,
+                    summary.content,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM conversation_context_summaries
+                 WHERE session_id = ?1 AND source_end_message_id <= ?2",
+                params![session_id, target_id],
+            )?;
+        }
+        Ok(projection)
     }
 
     fn create_agent_run_from_active_conversation_message_internal(
@@ -2361,6 +2483,10 @@ impl MemoryStore {
         )?;
         tx.execute(
             "DELETE FROM snapshots WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM conversation_context_summaries WHERE session_id = ?1",
             params![session_id],
         )?;
         tx.execute(
@@ -4868,6 +4994,126 @@ mod tests {
             prefix.last().map(|message| message.role.as_str()),
             Some("user")
         );
+    }
+
+    #[test]
+    fn bounded_context_rebuilds_projection_from_canonical_transcript_and_ignores_tampering() {
+        let store = MemoryStore::new_in_memory().unwrap();
+        let session_id = "bounded-context";
+        for id in 1..=31 {
+            let role = if id % 2 == 0 { "assistant" } else { "user" };
+            let content = if id == 3 {
+                "必须保留离线约束，不要执行外部写入。".to_string()
+            } else if id == 9 {
+                "未完成：仍需检查 evidence at https://example.com/report".to_string()
+            } else {
+                format!("message-{id}-{}", "x".repeat(180))
+            };
+            store
+                .save_message_idempotent(
+                    session_id,
+                    &ChatMessage {
+                        role: role.into(),
+                        content,
+                    },
+                    &format!("bounded-context-operation-{id}"),
+                )
+                .unwrap();
+        }
+        let config = ConversationContextConfig {
+            max_chars: 1_600,
+            recent_chars: 700,
+            summary_chars: 700,
+            excerpt_chars: 180,
+        };
+
+        let first = store
+            .materialize_bounded_conversation_context_through_operation(
+                "bounded-context-operation-31",
+                config,
+            )
+            .unwrap();
+        assert!(first.total_chars <= config.max_chars);
+        assert!(first.omitted_message_count > 0);
+        let summary = first.summary.as_ref().expect("derived summary");
+        assert!(summary.content.contains("必须保留离线约束"));
+        assert!(summary.content.contains("未完成"));
+        assert_eq!(first.provider_messages.last().unwrap().role, "user");
+
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE conversation_context_summaries
+                 SET summary_content = 'tampered projection'
+                 WHERE session_id = ?1",
+                [session_id],
+            )
+            .unwrap();
+        let rebuilt = store
+            .materialize_bounded_conversation_context_through_operation(
+                "bounded-context-operation-31",
+                config,
+            )
+            .unwrap();
+        assert_eq!(rebuilt.summary, first.summary);
+        assert!(!rebuilt.provider_messages[0]
+            .content
+            .contains("tampered projection"));
+
+        let earlier = store
+            .materialize_bounded_conversation_context_through_operation(
+                "bounded-context-operation-5",
+                config,
+            )
+            .unwrap();
+        assert!(earlier.summary.is_none());
+        let stored_source_end_after_earlier_replay: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT source_end_message_id FROM conversation_context_summaries
+                 WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_source_end_after_earlier_replay,
+            summary.source_end_message_id
+        );
+
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM conversation_context_summaries WHERE session_id = ?1",
+                [session_id],
+            )
+            .unwrap();
+        let rebuilt_after_delete = store
+            .materialize_bounded_conversation_context_through_operation(
+                "bounded-context-operation-31",
+                config,
+            )
+            .unwrap();
+        assert_eq!(rebuilt_after_delete.summary, first.summary);
+
+        store.delete_chat_session(session_id).unwrap();
+        let stored_summary_count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_context_summaries WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_summary_count, 0);
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod agent_loop;
 pub mod backend_contract_freeze;
 pub mod canonical_write_admission;
 pub mod context_assembler;
+pub mod conversation_context;
 pub mod evidence_graph;
 pub mod evidence_store;
 pub mod golden_paths;

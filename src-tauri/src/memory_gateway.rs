@@ -938,16 +938,18 @@ pub(crate) async fn save_turn_user_message_idempotent_with_state(
     Ok(commit)
 }
 
-pub(crate) async fn load_turn_context_through_operation_with_state(
+pub(crate) async fn materialize_bounded_turn_context_through_operation_with_state(
     operation_id: &str,
-    limit: usize,
     state: &Arc<AppState>,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<openlife_core::agent::conversation_context::ConversationContextProjection, String> {
     state
         .memory_store
         .lock()
         .await
-        .load_conversation_messages_through_operation(operation_id, limit)
+        .materialize_bounded_conversation_context_through_operation(
+            operation_id,
+            openlife_core::agent::conversation_context::ConversationContextConfig::default(),
+        )
         .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())
 }
 

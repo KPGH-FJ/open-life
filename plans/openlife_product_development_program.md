@@ -500,6 +500,25 @@ Markdown 只在对应 Workspace/Project 文件域内拥有该文档内容；进�
 - 上下文预算必须有上限，不把全部历史消息、全部 Markdown 和全部检索结果同时
   注入。
 
+本切片实施边界（2026-08-06）：
+
+- canonical owner：每个新回合先由 TurnRuntime 持久化当前用户消息，再从
+  `MemoryStore.messages` 按该 operation 重新构建完整会话前缀；前端提交的旧消息
+  不再被当成 provider 上下文权威；
+- 有界上下文：Conversation provider message 正文总预算固定为 65,536 个字符；近期
+  原文优先保留 45,056 个字符，旧消息使用最多 16,384 个字符的派生投影；单条当前用户输入不能
+  超过总预算，避免无法压缩的当前指令突破上限；
+- projection：`conversation_context_summaries` 只保存 schema version、canonical
+  message ID 范围、source digest、summary digest 和确定性摘录；它不属于长期
+  Memory 或 LifeModel，删除后可由 messages 重建，会话删除时同步删除；
+- 保真与权限层级：明确约束、未完成事项、Review/权限和证据引用优先于普通首尾
+  消息；被选中的历史摘录保持原始 `user` / `assistant` 角色，不把旧正文提升为
+  system 指令，也不把摘要当作任务完成证明；
+- 收敛：普通 send、stream、Provider consent continuation 和 read-tool replay
+  共用同一个 bounded canonical context 入口；退役固定“最近 64 条”的恢复路径；
+- 非目标：本切片不调用额外 Provider 生成摘要，不新增 Markdown Memory、Vector、
+  LifeModel 或通用摘要平台，不扩展 durable event schema 来证明摘要系统。
+
 退出标准：代表性长会话压缩前后，关键约束、未完成事项和证据引用保持一致；删除
 summary 后可从 canonical transcript 重建。
 
@@ -792,10 +811,11 @@ JSON。不得为了完成某个小切片而提前建设下一板块的平台能�
 当前阶段：**第五阶段——LifeModel 与 Memory 个人智能闭环已开始。前置“架构
 边界校准”于 2026-08-06 完成；Agent Memory 四层边界、LifeModel v2 范围、
 versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户确认。
-当前正在实施 5.1A“跨重启继续当前会话”，不提前进入 5.1B。源码核对和自动化
-产品反例已经确认：后端恢复 owner 已存在，缺口位于 Workspace 活动任务与前端
-会话选择的重启绑定。代码与自动化门禁完成后，仍需一次同一精确构建的隔离原生
-重启验证，才可将 5.1A 标记完成并进入 5.1B。**
+5.1A“跨重启继续当前会话”已于提交 `d77e38f` 完成并经用户确认。当前正在实施
+5.1B“摘要与长上下文压缩”，不提前进入 5.1C。canonical transcript 重建、65,536
+字符 Conversation 上下文预算、带 source/content digest 的确定性派生摘要、角色
+保真和 send/continuation/replay 收敛已经完成代码、focused 反例、严格 Clippy 与
+全量 Rust 测试；当前停在 5.1B 用户审阅边界，确认后才可提交并进入 5.1C。**
 
 第五阶段第一步实际完成：
 
