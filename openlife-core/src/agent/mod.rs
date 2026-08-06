@@ -184,13 +184,14 @@ pub use maturation::{
     MaturationProposalCandidate, MaturationReport, MaturationService,
 };
 pub use memory_lifecycle::{
-    memory_lifecycle_category_for_candidate_kind, CanonicalMemoryFactDescriptor,
-    ExplicitMemoryWriteInput, ExplicitMemoryWriteReceipt, MemoryAdmissionOutcome,
-    MemoryLifecycleAcceptanceInput, MemoryLifecycleAcceptanceReport, MemoryLifecycleCategory,
-    MemoryLifecycleEvent, MemoryLifecycleRecord, MemoryLifecycleRetrievalReader,
-    MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity,
-    MemoryLifecycleStatus, MemoryLifecycleStore, MemoryMaterializationStatus,
-    MemoryMaterializedView, MemoryPrivacyEraseReport, MemoryRollbackEvent, MemoryRollbackReport,
+    bind_memory_fact_scope_owner, memory_lifecycle_category_for_candidate_kind,
+    memory_scope_owner_ref, CanonicalMemoryFactDescriptor, ExplicitMemoryWriteInput,
+    ExplicitMemoryWriteReceipt, MemoryAdmissionOutcome, MemoryLifecycleAcceptanceInput,
+    MemoryLifecycleAcceptanceReport, MemoryLifecycleCategory, MemoryLifecycleEvent,
+    MemoryLifecycleRecord, MemoryLifecycleRetrievalReader, MemoryLifecycleRiskLevel,
+    MemoryLifecycleScope, MemoryLifecycleSensitivity, MemoryLifecycleStatus, MemoryLifecycleStore,
+    MemoryMaterializationStatus, MemoryMaterializedView, MemoryPrivacyEraseReport,
+    MemoryRollbackEvent, MemoryRollbackReport,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use memory_view_model::{

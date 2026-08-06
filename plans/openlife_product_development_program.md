@@ -599,6 +599,31 @@ summary 后可从 canonical transcript 重建。
 退出标准：must-not-recall 与跨 scope 泄漏场景为零；所有已召回 Memory 都能追溯
 真实来源，检索降级对用户可见且基础 Agent 可继续工作。
 
+本切片实施边界（2026-08-06）：
+
+- production owner：普通 send、stream 和 replay 继续经 `MainChatKernel` 编译上下文，
+  lifecycle Memory 的唯一检索适配器改为调用现有 `MemoryGateway`；不恢复已退役的
+  `main_chat_preprocess` runtime caller，也不新增检索或评测平台；
+- scope authority：global Memory 可跨会话召回；conversation Memory 只允许精确的
+  canonical conversation owner；Workspace/Project Memory 必须绑定用户明确选择的
+  root 的不透明 owner ref。历史非 global 记录缺少 owner 时保持可查看但不进入
+  runtime，禁止从当前 cwd、标签或相似文本猜测归属；
+- hybrid retrieval：先在允许 scope 内 over-fetch FTS 与 Vector 派生候选，再以
+  `MemoryLifecycleStore` 的 active owner 为最终过滤权威；按 memory id 去重，并综合
+  lexical/vector relevance、freshness、未解决冲突、confidence 与来源质量作确定性
+  排序；
+- degradation：embedding 调用失败、profile unknown、rebuild required 或 vector
+  query failure 时保留 FTS 结果，并把精确 degradation code 放入 context evidence；
+  FTS 与 canonical lifecycle 读取失败仍然 fail closed，不把空结果描述为健康；
+- explanation 与预算：每个注入块包含 `memory:<id>` source ref、scope/owner、
+  freshness 和 selected reason；每回合最多 4 条、正文总计最多 4,800 字符，禁止把
+  全部历史 Memory 注入 prompt；
+- 验证：只新增少量产品黄金场景，覆盖 should-recall、must-not-recall、跨 scope、
+  conflict、stale、中文和无 embedding fallback，并记录同一 QA 机器上的有界本地
+  检索基线；不建立通用 benchmark、case registry 或治理 JSON；
+- 非目标：本切片不实现 5.1F 的完整 Memory UI，不改变 LifeModel，不用 Memory
+  授予权限，也不以检索命中证明任务完成或外部事实为真。
+
 ###### 5.1F 用户控制界面与原生验收
 
 - 在现有 `/life-model` 产品区域中把“Agent 记忆”和“关于我 / LifeModel”呈现为
@@ -852,8 +877,9 @@ versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户�
 5.1A“跨重启继续当前会话”已于提交 `d77e38f` 完成并经用户确认；5.1B“摘要与
 长上下文压缩”已于提交 `a21d9f4` 完成并经用户确认。5.1C“Workspace/Project
 Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显式跨会话 Memory
-生命周期”已经完成实现、本地代码审阅、失败反例、前端完整门禁、严格 Clippy 与
-全量 Rust 测试；当前停在 5.1D 用户审阅边界，尚未提交，也未进入 5.1E。**
+生命周期”已于提交 `177b144` 完成并经用户确认。5.1E“混合检索与召回解释”已经
+完成实现、本地代码审阅、失败反例、前端完整门禁、严格 Clippy 与全量 Rust 测试；
+当前停在 5.1E 用户审阅边界，尚未提交，也未进入 5.1F。**
 
 第五阶段第一步实际完成：
 

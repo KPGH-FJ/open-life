@@ -17,7 +17,7 @@ accepted through the governed bridge.
 
 ## Last verified
 
-2026-08-06 during Phase 5.1D explicit cross-session Memory lifecycle implementation.
+2026-08-06 during Phase 5.1E scoped hybrid retrieval implementation.
 
 ## Source map
 
@@ -113,9 +113,29 @@ original provenance, and reports that no durable write was executed.
 
 ## Retrieval And Context
 
-`openlife-core/src/agent/memory_service.rs` retrieves memory context from text
-search and optional vector search, merges and deduplicates hits, and formats a
-bounded context string. Embedding failure falls back to text-only retrieval.
+The production Main Chat retrieval path is
+`main_chat_context_loader -> memory_gateway -> MemoryStore/VectorStore ->
+MemoryLifecycleStore`. It queries the existing FTS and Vector projections, but
+only lifecycle owners admitted for the active scope may be returned or receive
+access telemetry. The canonical lifecycle store rechecks active/paused/archive,
+supersede and rollback truth before any content becomes prompt context.
+
+Global Memory has no scope owner. Conversation, Workspace and Project Memory
+uses an opaque `scopeOwnerRef` derived from the canonical conversation or the
+user-selected root. The owner is part of fact identity, so identical text in
+two projects remains two facts. A trusted runtime binds proposal materialization
+to the current selected scope; a forged or mismatched owner is rejected.
+Historical non-global records without an owner remain visible but are excluded
+from normal recall rather than being assigned from cwd or guessed by content.
+
+Eligible candidates are deduplicated by lifecycle owner and ranked by combined
+retrieval relevance, freshness, conflict state, confidence and source quality.
+Unresolved conflicts are excluded. Every selected block contains its
+`memory:<uuid>` source ref, scope owner, freshness and selection reason. A turn
+injects at most four Memory blocks and 4,800 body characters. Embedding failure,
+unknown profile, rebuild or Vector query failure keeps FTS results and adds an
+explicit degraded marker; it never reports text fallback as complete hybrid
+retrieval.
 
 `openlife-core/src/memory_cache.rs` builds a hot cache from the current
 LifeModel for identity, values, current goals, recent state, refresh time, and

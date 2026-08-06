@@ -2257,6 +2257,7 @@ where
         state,
         &provider_config.system.knowledge_roots,
         sanitized_selected_skill_id.as_deref(),
+        &task_session_id,
         &user_text,
     )
     .await?;
@@ -11399,9 +11400,13 @@ async fn command_surface_kernel_context_candidates(
     state: &Arc<AppState>,
     configured_knowledge_roots: &[String],
     selected_skill_id: Option<&str>,
+    conversation_owner_id: &str,
     task_text: &str,
 ) -> Result<Vec<ContextSourceCandidate>, String> {
     let mut candidates = Vec::new();
+    candidates.extend(
+        retrievable_lifecycle_context_candidates(state, conversation_owner_id, task_text).await?,
+    );
     candidates.extend(load_configured_knowledge_context_candidates(
         configured_knowledge_roots,
         selected_skill_id,
@@ -11409,7 +11414,6 @@ async fn command_surface_kernel_context_candidates(
     ));
     candidates.extend(load_configured_markdown_memory_context_candidates(state, task_text).await?);
     ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id);
-    candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
     let sessions = {
         let store = state.memory_store.lock().await;
         store.list_sessions(5).map_err(|error| {

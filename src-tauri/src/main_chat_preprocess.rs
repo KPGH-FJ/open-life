@@ -810,6 +810,7 @@ mod tests {
             source_run_id: None,
             content: content.to_string(),
             scope: MemoryLifecycleScope::Global,
+            scope_owner_ref: None,
             category: MemoryLifecycleCategory::Fact,
             risk_level: MemoryLifecycleRiskLevel::Low,
             sensitivity: MemoryLifecycleSensitivity::Internal,

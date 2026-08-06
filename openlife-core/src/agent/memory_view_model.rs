@@ -634,6 +634,7 @@ mod tests {
             source_run_id: None,
             content: "metadata-safe content".into(),
             scope: crate::agent::memory_lifecycle::MemoryLifecycleScope::Global,
+            scope_owner_ref: None,
             category,
             risk_level: crate::agent::memory_lifecycle::MemoryLifecycleRiskLevel::Low,
             sensitivity: crate::agent::memory_lifecycle::MemoryLifecycleSensitivity::Internal,

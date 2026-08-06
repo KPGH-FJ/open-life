@@ -3232,6 +3232,8 @@ pub(crate) struct TerminalOwnerWriteGateway {
     task_store: AgentTaskSessionStore,
     proposal_store: ProposalStore,
     memory_store: MemoryLifecycleStore,
+    workspace_memory_root: Option<String>,
+    project_memory_root: Option<String>,
     action_queue_store: Option<Arc<tokio::sync::Mutex<ActionQueueStore>>>,
 }
 
@@ -3265,7 +3267,15 @@ impl TerminalOwnerWriteGateway {
             .lock()
             .await
             .clone();
-        let mut gateway = Self::new(&event_store, &task_store, &proposal_store, &memory_store);
+        let (workspace_memory_root, project_memory_root) = {
+            let config = state.config.lock().await;
+            (
+                config.system.workspace_memory_root.clone(),
+                config.system.project_memory_root.clone(),
+            )
+        };
+        let mut gateway = Self::new(&event_store, &task_store, &proposal_store, &memory_store)
+            .with_memory_scope_roots(workspace_memory_root, project_memory_root);
         if let Some(action_queue_store) = state.main_chat_action_queue_store.as_ref() {
             gateway = gateway.with_action_queue_store(action_queue_store.clone());
         }
@@ -3283,8 +3293,20 @@ impl TerminalOwnerWriteGateway {
             task_store: task_store.clone(),
             proposal_store: proposal_store.clone(),
             memory_store: memory_store.clone(),
+            workspace_memory_root: None,
+            project_memory_root: None,
             action_queue_store: None,
         }
+    }
+
+    fn with_memory_scope_roots(
+        mut self,
+        workspace_memory_root: Option<String>,
+        project_memory_root: Option<String>,
+    ) -> Self {
+        self.workspace_memory_root = workspace_memory_root;
+        self.project_memory_root = project_memory_root;
+        self
     }
 
     pub(crate) fn with_action_queue_store(
@@ -3527,7 +3549,7 @@ impl TerminalOwnerWriteGateway {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
-                let input =
+                let mut input =
                     MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                         &proposal,
                         content.to_string(),
@@ -3536,6 +3558,12 @@ impl TerminalOwnerWriteGateway {
                         origin.canonical_user_message_ref(),
                         origin.canonical_user_message_digest(),
                     )?;
+                openlife_core::agent::bind_memory_fact_scope_owner(
+                    &mut input.fact,
+                    Some(origin.task_session_id()),
+                    self.workspace_memory_root.as_deref(),
+                    self.project_memory_root.as_deref(),
+                )?;
                 self.memory_store.accept_memory_proposal(input)?;
             }
         } else if dispatch_state != "confirmed_projection_pending" {
@@ -3619,7 +3647,7 @@ impl TerminalOwnerWriteGateway {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
-                let input =
+                let mut input =
                     MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                         &proposal,
                         content.to_string(),
@@ -3628,6 +3656,12 @@ impl TerminalOwnerWriteGateway {
                         origin.canonical_user_message_ref(),
                         origin.canonical_user_message_digest(),
                     )?;
+                openlife_core::agent::bind_memory_fact_scope_owner(
+                    &mut input.fact,
+                    Some(origin.task_session_id()),
+                    self.workspace_memory_root.as_deref(),
+                    self.project_memory_root.as_deref(),
+                )?;
                 self.memory_store.accept_memory_proposal(input)?;
             }
             if dispatch_state == "claimed" {

@@ -2186,6 +2186,7 @@ mod tests {
                     source_run_id: Some(HOSTILE.into()),
                     content: HOSTILE.into(),
                     scope: openlife_core::agent::memory_lifecycle::MemoryLifecycleScope::Global,
+                    scope_owner_ref: None,
                     category:
                         openlife_core::agent::memory_lifecycle::MemoryLifecycleCategory::Fact,
                     risk_level:

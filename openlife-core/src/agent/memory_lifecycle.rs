@@ -29,7 +29,7 @@ const MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND: &str = "memory_lifecycle";
 macro_rules! record_select_sql {
     ($suffix:expr) => {
         concat!(
-            "SELECT memory_id, proposal_id, source_task_session_id, source_run_id, content, scope, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at FROM memory_lifecycle_records ",
+            "SELECT memory_id, proposal_id, source_task_session_id, source_run_id, content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at FROM memory_lifecycle_records ",
             $suffix
         )
     };
@@ -350,6 +350,11 @@ pub struct CanonicalMemoryFactDescriptor {
     /// normalization never rewrites this value.
     pub canonical_body: String,
     pub scope: MemoryLifecycleScope,
+    /// Opaque identity of the scope selected by the user. Global facts do not
+    /// carry an owner; non-global facts without one are legacy/unbound and are
+    /// never eligible for normal runtime retrieval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_owner_ref: Option<String>,
     pub category: MemoryLifecycleCategory,
     pub risk_level: MemoryLifecycleRiskLevel,
     pub sensitivity: MemoryLifecycleSensitivity,
@@ -370,10 +375,18 @@ impl CanonicalMemoryFactDescriptor {
         Ok(Self {
             canonical_body,
             scope,
+            scope_owner_ref: None,
             category,
             risk_level,
             sensitivity,
         })
+    }
+
+    pub fn with_scope_owner_ref(mut self, scope_owner_ref: impl Into<String>) -> Result<Self> {
+        let scope_owner_ref = scope_owner_ref.into();
+        validate_scope_owner_ref(self.scope, Some(&scope_owner_ref))?;
+        self.scope_owner_ref = Some(scope_owner_ref);
+        Ok(self)
     }
 
     pub fn from_candidate(
@@ -396,8 +409,13 @@ impl CanonicalMemoryFactDescriptor {
     /// canonical Memory owner. Source, confidence, evidence and run metadata
     /// are intentionally excluded by the lifecycle identity contract.
     pub fn fact_key(&self) -> Result<String> {
-        canonical_memory_fact_identity(self.scope, self.category, &self.canonical_body)
-            .map(|(_, fact_key)| fact_key)
+        canonical_memory_fact_identity(
+            self.scope,
+            self.scope_owner_ref.as_deref(),
+            self.category,
+            &self.canonical_body,
+        )
+        .map(|(_, fact_key)| fact_key)
     }
 }
 
@@ -410,6 +428,8 @@ pub struct MemoryLifecycleRecord {
     pub source_run_id: Option<String>,
     pub content: String,
     pub scope: MemoryLifecycleScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_owner_ref: Option<String>,
     pub category: MemoryLifecycleCategory,
     pub risk_level: MemoryLifecycleRiskLevel,
     pub sensitivity: MemoryLifecycleSensitivity,
@@ -704,6 +724,7 @@ impl MemoryLifecycleStore {
                 source_run_id TEXT,
                 content TEXT NOT NULL,
                 scope TEXT NOT NULL CHECK(scope IN ('global', 'workspace', 'conversation', 'project')),
+                scope_owner_ref TEXT,
                 category TEXT NOT NULL CHECK(category IN ('preference', 'fact', 'workflow', 'correction', 'boundary')),
                 risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'identity_value')),
                 sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal', 'sensitive')),
@@ -783,6 +804,12 @@ impl MemoryLifecycleStore {
             "audit_digest",
             "TEXT",
         )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "memory_lifecycle_records",
+            "scope_owner_ref",
+            "TEXT",
+        )?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_lifecycle_proposal_links (
                 proposal_id TEXT PRIMARY KEY,
@@ -850,7 +877,7 @@ impl MemoryLifecycleStore {
                     'materialization_failed'
                );",
         )?;
-        crate::sqlite_migration::record_schema_version(&tx, "memory_lifecycle_store", 6)?;
+        crate::sqlite_migration::record_schema_version(&tx, "memory_lifecycle_store", 7)?;
         tx.commit()?;
         Ok(())
     }
@@ -864,6 +891,7 @@ impl MemoryLifecycleStore {
         }
         let (_, fact_key) = canonical_memory_fact_identity(
             input.fact.scope,
+            input.fact.scope_owner_ref.as_deref(),
             input.fact.category,
             &input.fact.canonical_body,
         )?;
@@ -940,6 +968,9 @@ impl MemoryLifecycleStore {
             if previous.scope != input.fact.scope {
                 anyhow::bail!("reviewed Memory correction cannot change scope implicitly");
             }
+            if previous.scope_owner_ref != input.fact.scope_owner_ref {
+                anyhow::bail!("reviewed Memory correction cannot change scope owner implicitly");
+            }
             if previous.content == input.fact.canonical_body {
                 anyhow::bail!("reviewed Memory correction must change the canonical content");
             }
@@ -958,6 +989,7 @@ impl MemoryLifecycleStore {
                 source_run_id: input.source_run_id,
                 content: input.fact.canonical_body,
                 scope: input.fact.scope,
+                scope_owner_ref: input.fact.scope_owner_ref,
                 category: input.fact.category,
                 risk_level: input.fact.risk_level,
                 sensitivity: input.fact.sensitivity,
@@ -997,6 +1029,7 @@ impl MemoryLifecycleStore {
             previous.runtime_context_excluded_at = Some(now);
             let (_, previous_fact_key) = canonical_memory_fact_identity(
                 previous.scope,
+                previous.scope_owner_ref.as_deref(),
                 previous.category,
                 &previous.content,
             )?;
@@ -1089,6 +1122,7 @@ impl MemoryLifecycleStore {
             source_run_id: input.source_run_id,
             content: input.fact.canonical_body,
             scope: input.fact.scope,
+            scope_owner_ref: input.fact.scope_owner_ref,
             category: input.fact.category,
             risk_level: input.fact.risk_level,
             sensitivity: input.fact.sensitivity,
@@ -1174,6 +1208,7 @@ impl MemoryLifecycleStore {
         }
         let (_, fact_key) = canonical_memory_fact_identity(
             input.fact.scope,
+            input.fact.scope_owner_ref.as_deref(),
             input.fact.category,
             &input.fact.canonical_body,
         )?;
@@ -1315,6 +1350,7 @@ impl MemoryLifecycleStore {
             source_run_id: Some(input.source_run_id),
             content: input.fact.canonical_body,
             scope: input.fact.scope,
+            scope_owner_ref: input.fact.scope_owner_ref,
             category: input.fact.category,
             risk_level: input.fact.risk_level,
             sensitivity: input.fact.sensitivity,
@@ -2370,6 +2406,14 @@ impl MemoryLifecycleAcceptanceInput {
         }
         input.source_task_session_id = Some(task_session_id.to_string());
         input.source_run_id = Some(run_id.to_string());
+        if input.fact.scope == MemoryLifecycleScope::Conversation
+            && input.fact.scope_owner_ref.is_none()
+        {
+            input.fact.scope_owner_ref = Some(memory_scope_owner_ref(
+                MemoryLifecycleScope::Conversation,
+                task_session_id,
+            )?);
+        }
         input.evidence_ids = vec![
             proposal.id.clone(),
             canonical_user_message_ref.to_string(),
@@ -2406,13 +2450,21 @@ impl MemoryLifecycleAcceptanceInput {
         {
             anyhow::bail!("high-risk Memory proposal must be marked sensitive");
         }
-        let fact = CanonicalMemoryFactDescriptor::new(
+        let mut fact = CanonicalMemoryFactDescriptor::new(
             content,
             scope_from_proposal(proposal)?,
             category_from_proposal(proposal)?,
             risk_level,
             sensitivity,
         )?;
+        if let Some(scope_owner_ref) = proposal
+            .after
+            .get("scopeOwnerRef")
+            .or_else(|| proposal.after.get("scope_owner_ref"))
+            .and_then(serde_json::Value::as_str)
+        {
+            fact = fact.with_scope_owner_ref(scope_owner_ref)?;
+        }
         Ok(Self {
             proposal_id: proposal.id.clone(),
             // Untyped Proposal fields are never terminal-owner authority.
@@ -2604,15 +2656,17 @@ fn configure_memory_lifecycle_connection(conn: &Connection, file_backed: bool) -
 
 /// Canonical identity for one active Memory fact. Governance metadata that can
 /// legitimately vary between proposals (source, evidence and confidence) is
-/// deliberately excluded; scope, category and normalized content define the
-/// semantic identity without rewriting the canonical body. Each admission
+/// deliberately excluded; scope owner, scope, category and normalized content
+/// define the semantic identity without rewriting the canonical body. Each admission
 /// retains its exact risk and sensitivity, while the shared owner only moves
 /// toward the more conservative effective governance level.
 fn canonical_memory_fact_identity(
     scope: MemoryLifecycleScope,
+    scope_owner_ref: Option<&str>,
     category: MemoryLifecycleCategory,
     content: &str,
 ) -> Result<(String, String)> {
+    validate_scope_owner_ref(scope, scope_owner_ref)?;
     let compatibility_normalized = content.nfkc().collect::<String>();
     let normalized = compatibility_normalized
         .split_whitespace()
@@ -2625,8 +2679,9 @@ fn canonical_memory_fact_identity(
     }
     let mut material = Vec::new();
     for value in [
-        "openlife_memory_fact_v1",
+        "openlife_memory_fact_v2",
         scope.as_str(),
+        scope_owner_ref.unwrap_or(""),
         category.as_str(),
         normalized.as_str(),
     ] {
@@ -2640,7 +2695,33 @@ fn canonical_memory_fact_identity(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    Ok((normalized, format!("memory_fact_v1:sha256:{encoded}")))
+    Ok((normalized, format!("memory_fact_v2:sha256:{encoded}")))
+}
+
+fn validate_scope_owner_ref(
+    scope: MemoryLifecycleScope,
+    scope_owner_ref: Option<&str>,
+) -> Result<()> {
+    match (scope, scope_owner_ref) {
+        (MemoryLifecycleScope::Global, None) => Ok(()),
+        (MemoryLifecycleScope::Global, Some(_)) => {
+            anyhow::bail!("global Memory must not carry a scope owner")
+        }
+        (_, Some(value))
+            if value.trim() == value
+                && (1..=160).contains(&value.len())
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-' | b'.')
+                }) =>
+        {
+            Ok(())
+        }
+        // Older rows and callers may still produce an unbound non-global
+        // fact. It remains canonical and user-visible, but the runtime scope
+        // filter treats it as ineligible instead of guessing an owner.
+        (_, None) => Ok(()),
+        _ => anyhow::bail!("non-global Memory scope owner ref is invalid"),
+    }
 }
 
 fn digest_length_delimited_values(namespace: &str, values: &[&str]) -> String {
@@ -2658,6 +2739,60 @@ fn digest_length_delimited_values(namespace: &str, values: &[&str]) -> String {
     format!("sha256:{encoded}")
 }
 
+/// Builds a stable, non-path-bearing identity for one user-selected runtime
+/// scope. The raw conversation id or filesystem path never enters Memory
+/// records, prompt explanations, or audit payloads.
+pub fn memory_scope_owner_ref(
+    scope: MemoryLifecycleScope,
+    canonical_identity: &str,
+) -> Result<String> {
+    if scope == MemoryLifecycleScope::Global {
+        anyhow::bail!("global Memory has no scope owner");
+    }
+    let canonical_identity = canonical_identity.trim();
+    if canonical_identity.is_empty() {
+        anyhow::bail!("Memory scope owner identity is empty");
+    }
+    let digest = digest_length_delimited_values(
+        "openlife_memory_scope_owner_v1",
+        &[scope.as_str(), canonical_identity],
+    );
+    Ok(format!("{}:{}", scope.as_str(), digest))
+}
+
+/// Binds an accepted fact to runtime-owned scope identity. Proposal JSON may
+/// describe the scope, but it cannot choose a different project/workspace
+/// owner than the one supplied by the trusted product runtime.
+pub fn bind_memory_fact_scope_owner(
+    fact: &mut CanonicalMemoryFactDescriptor,
+    conversation_identity: Option<&str>,
+    workspace_identity: Option<&str>,
+    project_identity: Option<&str>,
+) -> Result<()> {
+    let identity = match fact.scope {
+        MemoryLifecycleScope::Global => {
+            if fact.scope_owner_ref.is_some() {
+                anyhow::bail!("global Memory must not carry a scope owner");
+            }
+            return Ok(());
+        }
+        MemoryLifecycleScope::Conversation => conversation_identity,
+        MemoryLifecycleScope::Workspace => workspace_identity,
+        MemoryLifecycleScope::Project => project_identity,
+    }
+    .context("selected Memory scope owner is unavailable")?;
+    let expected = memory_scope_owner_ref(fact.scope, identity)?;
+    if fact
+        .scope_owner_ref
+        .as_ref()
+        .is_some_and(|provided| provided != &expected)
+    {
+        anyhow::bail!("Memory proposal scope owner does not match the active selected scope");
+    }
+    fact.scope_owner_ref = Some(expected);
+    Ok(())
+}
+
 fn memory_fact_admission_digest(fact_key: &str, fact: &CanonicalMemoryFactDescriptor) -> String {
     digest_length_delimited_values(
         "openlife_memory_admission_v1",
@@ -2665,6 +2800,7 @@ fn memory_fact_admission_digest(fact_key: &str, fact: &CanonicalMemoryFactDescri
             fact_key,
             &fact.canonical_body,
             fact.scope.as_str(),
+            fact.scope_owner_ref.as_deref().unwrap_or(""),
             fact.category.as_str(),
             fact.risk_level.as_str(),
             fact.sensitivity.as_str(),
@@ -2681,6 +2817,7 @@ fn memory_record_audit_digest(record: &MemoryLifecycleRecord, fact_key: &str) ->
             fact_key,
             &record.content,
             record.scope.as_str(),
+            record.scope_owner_ref.as_deref().unwrap_or(""),
             record.category.as_str(),
             record.risk_level.as_str(),
             record.sensitivity.as_str(),
@@ -3048,7 +3185,7 @@ fn rebuild_memory_lifecycle_retrieval_table_if_needed_tx(
 fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     let records = {
         let mut statement = tx.prepare(
-            "SELECT memory_id, proposal_id, content, scope, category, risk_level,
+            "SELECT memory_id, proposal_id, content, scope, scope_owner_ref, category, risk_level,
                     COALESCE(sensitivity, ''), COALESCE(fact_key, ''), status
              FROM memory_lifecycle_records ORDER BY memory_id ASC",
         )?;
@@ -3059,11 +3196,12 @@ fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()>
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -3075,6 +3213,7 @@ fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()>
         proposal_id,
         content,
         scope,
+        scope_owner_ref,
         category,
         risk_level,
         sensitivity,
@@ -3096,10 +3235,15 @@ fn migrate_memory_fact_identity_tx(tx: &rusqlite::Transaction<'_>) -> Result<()>
             // canonical body, proposal link, or provenance.
             continue;
         }
-        let fact =
+        let mut fact =
             CanonicalMemoryFactDescriptor::new(content, scope, category, risk_level, sensitivity)?;
-        let (_, fact_key) =
-            canonical_memory_fact_identity(fact.scope, fact.category, &fact.canonical_body)?;
+        fact.scope_owner_ref = scope_owner_ref;
+        let (_, fact_key) = canonical_memory_fact_identity(
+            fact.scope,
+            fact.scope_owner_ref.as_deref(),
+            fact.category,
+            &fact.canonical_body,
+        )?;
         let admission_digest = memory_fact_admission_digest(&fact_key, &fact);
         tx.execute(
             "UPDATE memory_lifecycle_records
@@ -3337,6 +3481,7 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
             source_run_id TEXT,
             content TEXT NOT NULL,
             scope TEXT NOT NULL CHECK(scope IN ('global', 'workspace', 'conversation', 'project')),
+            scope_owner_ref TEXT,
             category TEXT NOT NULL CHECK(category IN ('preference', 'fact', 'workflow', 'correction', 'boundary')),
             risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'identity_value')),
             sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal', 'sensitive')),
@@ -3361,14 +3506,14 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
          );
          INSERT INTO memory_lifecycle_records_v4 (
             memory_id, proposal_id, fact_key, source_task_session_id, source_run_id,
-            content, scope, category, risk_level, sensitivity, audit_digest, status,
+            content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status,
             materialization_status, materialization_error_code, created_by, accepted_by,
             accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json,
             confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id,
             rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at
          )
          SELECT memory_id, proposal_id, fact_key, source_task_session_id, source_run_id,
-            content, scope, category, risk_level, sensitivity, audit_digest, status,
+            content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status,
             materialization_status, materialization_error_code, created_by, accepted_by,
             accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json,
             confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id,
@@ -3433,8 +3578,8 @@ fn insert_record_tx(
         .collect::<Vec<_>>();
     params.push(Box::new(fact_key.to_string()));
     tx.execute(
-        "INSERT INTO memory_lifecycle_records (memory_id, proposal_id, fact_key, source_task_session_id, source_run_id, content, scope, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at)
-         VALUES (?1, ?2, ?28, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+        "INSERT INTO memory_lifecycle_records (memory_id, proposal_id, fact_key, source_task_session_id, source_run_id, content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at)
+         VALUES (?1, ?2, ?29, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
     )?;
     Ok(())
@@ -3447,7 +3592,7 @@ fn update_record_tx(
 ) -> Result<()> {
     let params = record_update_params(record, updated_at);
     tx.execute(
-        "UPDATE memory_lifecycle_records SET proposal_id = ?2, source_task_session_id = ?3, source_run_id = ?4, content = ?5, scope = ?6, category = ?7, risk_level = ?8, sensitivity = ?9, audit_digest = ?10, status = ?11, materialization_status = ?12, materialization_error_code = ?13, created_by = ?14, accepted_by = ?15, accepted_at = ?16, materialized_view_id = ?17, materialized_view_version = ?18, evidence_ids_json = ?19, confidence = ?20, conflict_ids_json = ?21, supersedes_memory_id = ?22, replacement_memory_id = ?23, rolled_back_by_event_id = ?24, runtime_context_excluded_at = ?25, updated_at = ?26 WHERE memory_id = ?1",
+        "UPDATE memory_lifecycle_records SET proposal_id = ?2, source_task_session_id = ?3, source_run_id = ?4, content = ?5, scope = ?6, scope_owner_ref = ?7, category = ?8, risk_level = ?9, sensitivity = ?10, audit_digest = ?11, status = ?12, materialization_status = ?13, materialization_error_code = ?14, created_by = ?15, accepted_by = ?16, accepted_at = ?17, materialized_view_id = ?18, materialized_view_version = ?19, evidence_ids_json = ?20, confidence = ?21, conflict_ids_json = ?22, supersedes_memory_id = ?23, replacement_memory_id = ?24, rolled_back_by_event_id = ?25, runtime_context_excluded_at = ?26, updated_at = ?27 WHERE memory_id = ?1",
         rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
     )?;
     Ok(())
@@ -3457,7 +3602,7 @@ fn record_params(
     record: &MemoryLifecycleRecord,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-) -> [Box<dyn rusqlite::ToSql>; 27] {
+) -> [Box<dyn rusqlite::ToSql>; 28] {
     [
         Box::new(record.memory_id.clone()),
         Box::new(record.proposal_id.clone()),
@@ -3465,6 +3610,7 @@ fn record_params(
         Box::new(record.source_run_id.clone()),
         Box::new(record.content.clone()),
         Box::new(record.scope.to_string()),
+        Box::new(record.scope_owner_ref.clone()),
         Box::new(record.category.to_string()),
         Box::new(record.risk_level.to_string()),
         Box::new(record.sensitivity.to_string()),
@@ -3496,7 +3642,7 @@ fn record_params(
 fn record_update_params(
     record: &MemoryLifecycleRecord,
     updated_at: DateTime<Utc>,
-) -> [Box<dyn rusqlite::ToSql>; 26] {
+) -> [Box<dyn rusqlite::ToSql>; 27] {
     [
         Box::new(record.memory_id.clone()),
         Box::new(record.proposal_id.clone()),
@@ -3504,6 +3650,7 @@ fn record_update_params(
         Box::new(record.source_run_id.clone()),
         Box::new(record.content.clone()),
         Box::new(record.scope.to_string()),
+        Box::new(record.scope_owner_ref.clone()),
         Box::new(record.category.to_string()),
         Box::new(record.risk_level.to_string()),
         Box::new(record.sensitivity.to_string()),
@@ -3655,14 +3802,14 @@ fn invalid_db_enum_error(column: usize, kind: &str, value: &str) -> rusqlite::Er
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLifecycleRecord> {
-    let evidence_json: String = row.get(18)?;
-    let conflict_json: String = row.get(20)?;
+    let evidence_json: String = row.get(19)?;
+    let conflict_json: String = row.get(21)?;
     let scope_raw = row.get::<_, String>(5)?;
-    let category_raw = row.get::<_, String>(6)?;
+    let category_raw = row.get::<_, String>(7)?;
     let scope = MemoryLifecycleScope::from_str(&scope_raw)
         .map_err(|_| invalid_db_enum_error(5, "scope", &scope_raw))?;
     let category = MemoryLifecycleCategory::from_str(&category_raw)
-        .map_err(|_| invalid_db_enum_error(6, "category", &category_raw))?;
+        .map_err(|_| invalid_db_enum_error(7, "category", &category_raw))?;
     Ok(MemoryLifecycleRecord {
         memory_id: row.get(0)?,
         proposal_id: row.get(1)?,
@@ -3670,25 +3817,26 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLifecycleRec
         source_run_id: row.get(3)?,
         content: row.get(4)?,
         scope,
+        scope_owner_ref: row.get(6)?,
         category,
-        risk_level: MemoryLifecycleRiskLevel::from_str(&row.get::<_, String>(7)?),
-        sensitivity: MemoryLifecycleSensitivity::from_str(&row.get::<_, String>(8)?),
-        audit_digest: row.get(9)?,
-        status: MemoryLifecycleStatus::from_str(&row.get::<_, String>(10)?),
-        materialization_status: MemoryMaterializationStatus::from_str(&row.get::<_, String>(11)?),
-        materialization_error_code: row.get(12)?,
-        created_by: row.get(13)?,
-        accepted_by: row.get(14)?,
-        accepted_at: parse_optional_time(row.get::<_, Option<String>>(15)?),
-        materialized_view_id: row.get(16)?,
-        materialized_view_version: row.get(17)?,
+        risk_level: MemoryLifecycleRiskLevel::from_str(&row.get::<_, String>(8)?),
+        sensitivity: MemoryLifecycleSensitivity::from_str(&row.get::<_, String>(9)?),
+        audit_digest: row.get(10)?,
+        status: MemoryLifecycleStatus::from_str(&row.get::<_, String>(11)?),
+        materialization_status: MemoryMaterializationStatus::from_str(&row.get::<_, String>(12)?),
+        materialization_error_code: row.get(13)?,
+        created_by: row.get(14)?,
+        accepted_by: row.get(15)?,
+        accepted_at: parse_optional_time(row.get::<_, Option<String>>(16)?),
+        materialized_view_id: row.get(17)?,
+        materialized_view_version: row.get(18)?,
         evidence_ids: serde_json::from_str(&evidence_json).unwrap_or_default(),
-        confidence: row.get(19)?,
+        confidence: row.get(20)?,
         conflict_ids: serde_json::from_str(&conflict_json).unwrap_or_default(),
-        supersedes_memory_id: row.get(21)?,
-        replacement_memory_id: row.get(22)?,
-        rolled_back_by_event_id: row.get(23)?,
-        runtime_context_excluded_at: parse_optional_time(row.get::<_, Option<String>>(24)?),
+        supersedes_memory_id: row.get(22)?,
+        replacement_memory_id: row.get(23)?,
+        rolled_back_by_event_id: row.get(24)?,
+        runtime_context_excluded_at: parse_optional_time(row.get::<_, Option<String>>(25)?),
     })
 }
 
@@ -4214,6 +4362,49 @@ mod tests {
     }
 
     #[test]
+    fn fact_identity_keeps_same_project_fact_distinct_across_scope_owners() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let mut project_a = acceptance_input("proposal-project-a", "Use the release checklist");
+        project_a.fact.scope = MemoryLifecycleScope::Project;
+        project_a.fact.scope_owner_ref =
+            Some(memory_scope_owner_ref(MemoryLifecycleScope::Project, "/tmp/project-a").unwrap());
+        let mut project_b = acceptance_input("proposal-project-b", "Use the release checklist");
+        project_b.fact.scope = MemoryLifecycleScope::Project;
+        project_b.fact.scope_owner_ref =
+            Some(memory_scope_owner_ref(MemoryLifecycleScope::Project, "/tmp/project-b").unwrap());
+
+        let accepted_a = store.accept_memory_proposal(project_a).unwrap();
+        let accepted_b = store.accept_memory_proposal(project_b).unwrap();
+
+        assert_ne!(accepted_a.canonical_fact_key, accepted_b.canonical_fact_key);
+        assert_ne!(accepted_a.record.memory_id, accepted_b.record.memory_id);
+        assert_ne!(
+            accepted_a.record.scope_owner_ref,
+            accepted_b.record.scope_owner_ref
+        );
+    }
+
+    #[test]
+    fn trusted_scope_binding_rejects_a_forged_project_owner() {
+        let mut fact = fact_descriptor(
+            "Use the release checklist",
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::Internal,
+        );
+        fact.scope = MemoryLifecycleScope::Project;
+        bind_memory_fact_scope_owner(&mut fact, None, None, Some("/tmp/project-a")).unwrap();
+        let bound = fact.scope_owner_ref.clone().expect("project owner");
+
+        let mut forged = fact.clone();
+        forged.scope_owner_ref =
+            Some(memory_scope_owner_ref(MemoryLifecycleScope::Project, "/tmp/project-b").unwrap());
+        assert!(
+            bind_memory_fact_scope_owner(&mut forged, None, None, Some("/tmp/project-a")).is_err()
+        );
+        assert_eq!(fact.scope_owner_ref.as_deref(), Some(bound.as_str()));
+    }
+
+    #[test]
     fn public_fact_identity_finds_the_existing_active_canonical_owner() {
         let store = MemoryLifecycleStore::new_in_memory().unwrap();
         let accepted = store
@@ -4241,18 +4432,21 @@ mod tests {
         let original_body = "Ｃａｆｅ\u{301} １２３";
         let (normalized_original, original_key) = canonical_memory_fact_identity(
             MemoryLifecycleScope::Global,
+            None,
             MemoryLifecycleCategory::Fact,
             original_body,
         )
         .unwrap();
         let (normalized_equivalent, equivalent_key) = canonical_memory_fact_identity(
             MemoryLifecycleScope::Global,
+            None,
             MemoryLifecycleCategory::Fact,
             "Café 123",
         )
         .unwrap();
         let (_, decomposed_key) = canonical_memory_fact_identity(
             MemoryLifecycleScope::Global,
+            None,
             MemoryLifecycleCategory::Fact,
             "Cafe\u{301} 123",
         )
@@ -4702,6 +4896,7 @@ mod tests {
             .unwrap();
         let (_, fact_key) = canonical_memory_fact_identity(
             MemoryLifecycleScope::Global,
+            None,
             MemoryLifecycleCategory::Fact,
             "Legacy duplicate fact",
         )
