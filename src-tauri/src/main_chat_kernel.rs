@@ -305,6 +305,7 @@ pub struct MainChatKernelToolCall {
 pub enum MainChatKernelWriteOutcomeKind {
     MemoryProposal,
     LifeModelProposal,
+    LifeModelTypedDiffBlocker,
     FileWriteProposal,
     CalendarEventProposal,
     EmailDraftProposal,
@@ -319,6 +320,7 @@ impl MainChatKernelWriteOutcomeKind {
         match self {
             Self::MemoryProposal => "memory_proposal",
             Self::LifeModelProposal => "lifemodel_proposal",
+            Self::LifeModelTypedDiffBlocker => "lifemodel_typed_diff_blocker",
             Self::FileWriteProposal => "file_write_proposal",
             Self::CalendarEventProposal => "calendar_event_proposal",
             Self::EmailDraftProposal => "email_draft_proposal",
@@ -7953,6 +7955,9 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
             "Create a ReviewWorkflow LifeModel item from MainChatKernel.".into()
         }
+        MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
+            "Block an untyped LifeModel request without creating a fake review item.".into()
+        }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
             "Create a ReviewWorkflow file-write item from MainChatKernel.".into()
         }
@@ -7981,6 +7986,9 @@ fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'s
     match kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => "memory.write",
         MainChatKernelWriteOutcomeKind::LifeModelProposal => "life_model.update",
+        MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
+            "life_model.change_requires_typed_diff"
+        }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => "file.write",
         MainChatKernelWriteOutcomeKind::CalendarEventProposal => "calendar.propose_event",
         MainChatKernelWriteOutcomeKind::EmailDraftProposal => "email.propose_draft",
@@ -8378,47 +8386,18 @@ async fn prepare_kernel_write_proposal(
             )
         }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            let requested_change = outcome
-                .governed_input
-                .get("requestedChange")
-                .and_then(Value::as_str)
-                .unwrap_or(user_text);
-            let after = if let Some(asset_id) = outcome.target.strip_prefix("knowledge_asset.") {
-                serde_json::json!({
-                    "assetId": asset_id,
-                    "assetKind": "knowledge_markdown",
-                    "requestedChange": requested_change,
-                    "source": "main_chat_kernel",
-                    "sourceRunId": run_id,
-                    "payloadSummary": outcome.payload_summary,
-                    "proposedDiff": {
-                        "operation": "append_note",
-                        "target": asset_id,
-                        "summary": "Add bounded knowledge asset note from Main Chat.",
-                    },
-                    "directKnowledgeFileWrite": false,
-                    "requiresReviewCenterApproval": true,
-                    "directLifeModelWrite": false,
-                    "acceptedDurableTruthWritten": false,
-                    "directWritesExecuted": false,
-                })
-            } else {
-                serde_json::json!({
-                    "requestedChange": requested_change,
-                    "source": "main_chat_kernel",
-                    "sourceRunId": run_id,
-                    "payloadSummary": outcome.payload_summary,
-                    "directLifeModelWrite": false,
-                    "acceptedDurableTruthWritten": false,
-                    "directWritesExecuted": false,
-                })
-            };
+            let change = main_chat_lifemodel_typed_change(user_text)
+                .ok_or_else(|| "lifemodel_typed_diff_required".to_string())?;
+            if outcome.target != change.affected_path {
+                return Err("lifemodel_typed_diff_target_mismatch".into());
+            }
             (
-                ProposalType::LifeModelUpdate,
-                outcome.target.clone(),
-                "User requested a proposal-first LifeModel update from MainChatKernel.".to_string(),
+                change.proposal_type,
+                change.affected_path,
+                "User requested a typed, proposal-first LifeModel update from MainChatKernel."
+                    .to_string(),
                 RiskLevel::High,
-                after,
+                change.after,
                 None,
             )
         }
@@ -8572,7 +8551,8 @@ async fn prepare_kernel_write_proposal(
             }
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
-        | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+        | MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        | MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             return Err("kernel blocker outcome cannot create proposal".into());
         }
     };
@@ -8662,7 +8642,8 @@ async fn prepare_kernel_write_proposal(
             openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
-        | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+        | MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        | MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             return Err("kernel blocker outcome cannot create proposal".into())
         }
     };
@@ -9126,6 +9107,14 @@ async fn materialize_kernel_memory_governance(
             push_unique_string(&mut blockers, "policy_memory_candidate_not_authorized");
             continue;
         }
+        if candidate.destination == MemoryDestination::LifeModelProposal
+            && main_chat_lifemodel_typed_change(&candidate.normalized_claim)
+                .or_else(|| main_chat_lifemodel_typed_change(&candidate.evidence_text))
+                .is_none()
+        {
+            push_unique_string(&mut blockers, "lifemodel_typed_diff_required");
+            continue;
+        }
         let queued = enqueue_main_chat_agent_action(
             state,
             task_session_id,
@@ -9351,31 +9340,25 @@ async fn create_kernel_memory_governance_proposal(
                 Some(fact),
             )
         }
-        MemoryDestination::LifeModelProposal => (
-            ProposalType::LifeModelUpdate,
-            "lifemodel.pending.chat_conversation".to_string(),
-            if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite {
-                "The current authenticated user explicitly requested a governed LifeModel change; review is required before accepted LifeModel truth changes."
-                    .to_string()
-            } else {
-                "OpenLife inferred a possible LifeModel candidate while answering; user review is required and the candidate is not an explicit write request."
-                    .to_string()
-            },
-            RiskLevel::High,
-            serde_json::json!({
-                "requestedChange": candidate.normalized_claim,
-                "candidateId": candidate.candidate_id,
-                "candidateKind": candidate.kind,
-                "sourceEvidence": candidate.source_preview,
-                "impactPreview": memory_candidate_impact_preview(candidate),
-                "source": "main_chat_memory_governance",
-                "sourceRunId": run_id,
-                "directLifeModelWrite": false,
-                "acceptedDurableTruthWritten": false,
-                "directWritesExecuted": false,
-            }),
-            None,
-        ),
+        MemoryDestination::LifeModelProposal => {
+            let change = main_chat_lifemodel_typed_change(&candidate.normalized_claim)
+                .or_else(|| main_chat_lifemodel_typed_change(&candidate.evidence_text))
+                .ok_or_else(|| "lifemodel_typed_diff_required".to_string())?;
+            (
+                change.proposal_type,
+                change.affected_path,
+                if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite {
+                    "The current authenticated user explicitly requested a typed LifeModel change; review is required before accepted LifeModel truth changes."
+                        .to_string()
+                } else {
+                    "OpenLife inferred a typed LifeModel candidate while answering; user review is required and the candidate is not an explicit write request."
+                        .to_string()
+                },
+                RiskLevel::High,
+                change.after,
+                None,
+            )
+        }
         _ => return Err("candidate destination cannot create proposal".into()),
     };
 
@@ -12461,26 +12444,50 @@ fn plan_kernel_write_outcome(
         .policy_decision
         .allows(AllowedCapability::LifeModelProposal)
     {
-        let target = main_chat_lifemodel_write_target(user_text);
+        if let Some(change) = main_chat_lifemodel_typed_change(user_text) {
+            return Some(MainChatKernelWriteOutcome {
+                kind: MainChatKernelWriteOutcomeKind::LifeModelProposal,
+                action_type: "proposal.create".into(),
+                target: change.affected_path.clone(),
+                reason: "LifeModel-affecting request has a typed diff and requires governed review"
+                    .into(),
+                payload_summary: payload_summary.clone(),
+                governed_input: serde_json::json!({
+                    "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+                    "target": change.affected_path,
+                    "targetValue": change.after,
+                    "proposalType": change.proposal_type.to_string(),
+                    "governedInputSource": "kernel_lifemodel_update_proposal",
+                    "directLifeModelWrite": false,
+                    "directWritesExecuted": false,
+                    "modelArgumentsIgnored": model_arguments_ignored,
+                }),
+                proposal_type: Some(change.proposal_type.to_string()),
+                blocker_code: Some("proposal_review_required".into()),
+                requires_confirmation: false,
+                hard_blocked: false,
+                replayable: true,
+            });
+        }
         return Some(MainChatKernelWriteOutcome {
-            kind: MainChatKernelWriteOutcomeKind::LifeModelProposal,
-            action_type: "proposal.create".into(),
-            target: target.clone(),
-            reason: "LifeModel-affecting request must create a governed LifeModel proposal".into(),
-            payload_summary: payload_summary.clone(),
+            kind: MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker,
+            action_type: "life_model.change_requires_typed_diff".into(),
+            target: "life_model.unresolved".into(),
+            reason: "LifeModel proposal was not created because the requested change has no exact materializable field diff"
+                .into(),
+            payload_summary,
             governed_input: serde_json::json!({
                 "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
-                "target": target,
-                "governedInputSource": "kernel_lifemodel_update_proposal",
+                "governedInputSource": "kernel_lifemodel_typed_diff_blocker",
                 "directLifeModelWrite": false,
                 "directWritesExecuted": false,
                 "modelArgumentsIgnored": model_arguments_ignored,
             }),
-            proposal_type: Some("life_model_update".into()),
-            blocker_code: Some("proposal_review_required".into()),
+            proposal_type: None,
+            blocker_code: Some("lifemodel_typed_diff_required".into()),
             requires_confirmation: false,
-            hard_blocked: false,
-            replayable: true,
+            hard_blocked: true,
+            replayable: false,
         });
     }
 
@@ -12741,31 +12748,6 @@ fn is_memory_write_intent(lower: &str) -> bool {
     )
 }
 
-fn is_lifemodel_write_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "knowledge asset edit",
-            "edit a knowledge asset",
-            "edit agents.md",
-            "edit soul.md",
-            "edit user.md",
-            "edit memory.md",
-            "propose an edit to agents.md",
-            "propose an edit to soul.md",
-            "propose an edit to user.md",
-            "propose an edit to memory.md",
-            "lifemodel",
-            "life model",
-            "life_model",
-            "switching careers",
-            "update my life",
-            "update my identity",
-            "design lead",
-        ],
-    )
-}
-
 fn is_external_write_intent(lower: &str) -> bool {
     contains_any(
         lower,
@@ -12793,19 +12775,84 @@ fn external_write_action_type(lower: &str) -> &'static str {
     }
 }
 
-fn main_chat_lifemodel_write_target(user_text: &str) -> String {
-    let lower = user_text.to_ascii_lowercase();
-    if lower.contains("agents.md") {
-        "knowledge_asset.AGENTS.md".into()
-    } else if lower.contains("soul.md") {
-        "knowledge_asset.SOUL.md".into()
-    } else if lower.contains("user.md") {
-        "knowledge_asset.USER.md".into()
-    } else if lower.contains("memory.md") {
-        "knowledge_asset.MEMORY.md".into()
-    } else {
-        "lifemodel.pending.chat_conversation".into()
+#[derive(Debug, Clone, PartialEq)]
+struct MainChatLifeModelTypedChange {
+    proposal_type: openlife_core::agent::ProposalType,
+    affected_path: String,
+    after: Value,
+}
+
+fn main_chat_lifemodel_typed_change(user_text: &str) -> Option<MainChatLifeModelTypedChange> {
+    use openlife_core::agent::ProposalType;
+
+    let communication_style = value_after_case_insensitive_marker(
+        user_text,
+        &[
+            "communication style to ",
+            "communication style is ",
+            "沟通风格改为",
+            "沟通风格是",
+        ],
+    );
+    if let Some(value) = communication_style {
+        return Some(MainChatLifeModelTypedChange {
+            proposal_type: ProposalType::PreferenceUpdate,
+            affected_path: "preferences.communication_style".into(),
+            after: Value::String(value),
+        });
     }
+
+    let primary_role = value_after_case_insensitive_marker(
+        user_text,
+        &[
+            "switching careers into ",
+            "switching careers toward ",
+            "switch careers into ",
+            "switch careers toward ",
+            "my primary role is ",
+            "primary role to ",
+            "我的主要角色是",
+            "我的主要角色改为",
+            "转型为",
+        ],
+    );
+    primary_role.map(|value| MainChatLifeModelTypedChange {
+        proposal_type: ProposalType::LifeModelUpdate,
+        affected_path: "identity.role_definition.primary_role".into(),
+        after: Value::String(value),
+    })
+}
+
+fn value_after_case_insensitive_marker(value: &str, markers: &[&str]) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    markers.iter().find_map(|marker| {
+        let marker_lower = marker.to_ascii_lowercase();
+        let index = lower.find(&marker_lower)?;
+        let candidate =
+            value
+                .get(index + marker.len()..)?
+                .trim()
+                .trim_matches(|character: char| {
+                    character.is_whitespace()
+                        || matches!(
+                            character,
+                            '.' | ','
+                                | ';'
+                                | ':'
+                                | '!'
+                                | '?'
+                                | '。'
+                                | '，'
+                                | '；'
+                                | '：'
+                                | '！'
+                                | '？'
+                                | '"'
+                                | '\''
+                        )
+                });
+        (!candidate.is_empty() && candidate.chars().count() <= 120).then(|| candidate.to_string())
+    })
 }
 
 fn extract_backtick_value(value: &str) -> Option<&str> {
@@ -13490,6 +13537,10 @@ fn synthesize_write_outcome_answer(outcome: &MainChatKernelWriteOutcome) -> Stri
         }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
             "I created a LifeModel proposal for review. I did not update accepted LifeModel truth."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
+            "I did not create a LifeModel proposal because this request does not identify an exact supported field change. No LifeModel truth was changed."
                 .into()
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
@@ -15319,7 +15370,7 @@ mod tests {
                 "Please remember this private health fact: coffee causes heart palpitations."
             }
             MainChatAgentStrategy::LifeModelProposal => {
-                "以后我做计划时，先提醒我留出通勤和休息缓冲。"
+                "Update my life model: my primary role is design lead."
             }
             MainChatAgentStrategy::FileWriteProposal => {
                 "Write this to file notes.txt."
@@ -15385,7 +15436,7 @@ mod tests {
             ),
             (
                 MainChatAgentStrategy::LifeModelProposal,
-                "以后我做计划时，先提醒我留出通勤和休息缓冲。",
+                "Update my life model: my primary role is design lead.",
             ),
             (
                 MainChatAgentStrategy::FileWriteProposal,
@@ -20591,6 +20642,31 @@ mod tests {
         assert!(!life_model_result.legacy_fallback_used);
     }
 
+    #[test]
+    fn lifemodel_chat_change_requires_a_materializable_typed_diff() {
+        let role = main_chat_lifemodel_typed_change(
+            "Update my life model: I am switching careers into design leadership.",
+        )
+        .expect("explicit role change has a typed LifeModel target");
+        assert_eq!(role.affected_path, "identity.role_definition.primary_role");
+        assert_eq!(role.after, serde_json::json!("design leadership"));
+
+        let communication = main_chat_lifemodel_typed_change(
+            "Update my communication style to concise and direct.",
+        )
+        .expect("explicit communication preference has a typed LifeModel target");
+        assert_eq!(
+            communication.affected_path,
+            "preferences.communication_style"
+        );
+        assert_eq!(communication.after, serde_json::json!("concise and direct"));
+
+        assert!(
+            main_chat_lifemodel_typed_change("Update my life model based on this chat").is_none()
+        );
+        assert!(main_chat_lifemodel_typed_change("Propose an edit to MEMORY.md").is_none());
+    }
+
     #[tokio::test]
     async fn main_chat_kernel_goal_6_hs_policy_can_surface_blocker_or_proposal_outcome() {
         let model = ScriptedModelClient::ok("model should not be called");
@@ -21023,6 +21099,135 @@ mod tests {
             lifecycle_input.fact.sensitivity,
             MemoryLifecycleSensitivity::Sensitive
         );
+    }
+
+    #[tokio::test]
+    async fn kernel_lifemodel_proposal_persists_an_existing_field_value_not_a_placeholder() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_session_id = "proposal-typed-lifemodel";
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register(task_session_id);
+        let user_text = "Update my life model: I am switching careers into design leadership.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            task_session_id,
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let input = MainChatTurnInput {
+            session_id: task_session_id.into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("LifeModel authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision.clone(),
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("typed write outcome");
+
+        let proposal = match create_kernel_write_proposal_without_terminal_owner_for_unit_test(
+            &state,
+            task_session_id,
+            "run-proposal-typed-lifemodel",
+            &outcome,
+            user_text,
+            &decision.policy_decision,
+            &registration.execution_epoch(),
+        )
+        .await
+        .expect("typed LifeModel proposal")
+        {
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("LifeModel change must stage review")
+            }
+        };
+
+        assert_eq!(
+            proposal.affected_path,
+            "identity.role_definition.primary_role"
+        );
+        assert_eq!(proposal.after, serde_json::json!("design leadership"));
+        assert_ne!(
+            proposal.affected_path,
+            "lifemodel.pending.chat_conversation"
+        );
+        assert!(proposal.base_hash.is_some());
+    }
+
+    #[test]
+    fn generic_lifemodel_request_blocks_without_a_fake_proposal() {
+        let user_text = "Update my life model based on this chat";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "untyped-lifemodel",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let input = MainChatTurnInput {
+            session_id: "untyped-lifemodel".into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("LifeModel authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("explicit blocker");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker
+        );
+        assert_eq!(
+            outcome.blocker_code.as_deref(),
+            Some("lifemodel_typed_diff_required")
+        );
+        assert!(outcome.proposal_type.is_none());
+        assert!(outcome.hard_blocked);
+    }
+
+    #[test]
+    fn markdown_edit_is_a_file_proposal_not_a_lifemodel_proposal() {
+        let user_text = "Propose an edit to MEMORY.md";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "markdown-file-edit",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::FileWriteProposal
+        );
+        let input = MainChatTurnInput {
+            session_id: "markdown-file-edit".into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("file proposal authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("file proposal");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::FileWriteProposal
+        );
+        assert_eq!(
+            outcome.proposal_type.as_deref(),
+            Some("external_write_action")
+        );
+        assert_ne!(outcome.target, "lifemodel.pending.chat_conversation");
     }
 
     #[tokio::test]

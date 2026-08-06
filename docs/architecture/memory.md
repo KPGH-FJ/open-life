@@ -10,9 +10,14 @@ retrieval, and Main Chat memory-candidate surfaces.
 Authority remains with `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and current
 source.
 
+ADR 0016 makes Agent Memory a first-class domain separate from LifeModel.
+Procedural working rules, project context, Reflection, and bounded Markdown
+memory belong here unless an exact supported LifeModel field is proposed and
+accepted through the governed bridge.
+
 ## Last verified
 
-2026-07-31 during repository cleanup source tracing.
+2026-08-06 during Phase 5 architecture-boundary implementation.
 
 ## Source map
 
@@ -104,6 +109,13 @@ Memory proposal, LifeModel proposal, or no-op destinations based on explicit
 memory markers, future-rule language, identity/preference signals, and life
 event expressions.
 
-Low-confidence candidates are not routed into durable paths. Future rules and
-identity/preference style claims route to proposal destinations, not direct
-truth mutation.
+Low-confidence candidates are not routed into durable paths. Personal future
+working rules route to Agent Memory proposal candidates. Identity and stable
+preference candidates can reach the LifeModel bridge only when the runtime can
+produce an exact supported field path and typed value; otherwise the candidate
+remains blocked and no fake proposal is created.
+
+Memory lifecycle and vector retrieval enrich the Agent. If an optional
+enrichment store is unavailable, Main Chat carries an explicit degraded marker
+and continues with healthy base context; exact reads and writes against the
+missing store remain unavailable.

@@ -438,34 +438,262 @@ OpenLife 在成熟 Agent Memory 之上构建用户拥有的长期个人模型。
 
 #### 主要范围
 
-- 明确区分 Agent Memory 和 LifeModel，并分别提供查看、编辑、归档、恢复和
-  忘记能力；
-- 从真实交互、任务和反馈中提取受治理候选证据，去重、累计、批处理并避免
-  每个任务都产生 proposal；
-- 重新收敛 LifeModel schema：身份、价值观、长期目标、稳定偏好、个人边界、
-  重要关系、长期协作方式和决策原则；每日任务、工具输出和原始对话不进入
-  LifeModel 主体；
-- 区分用户明确陈述、生活事件、短期状态、模型推断和已确认长期模型；
-- proposal-backed、版本化的 LifeModel 演进，proposal 包含来源、置信度、
-  稳定性、敏感度、冲突和 before/after diff；
-- 确立结构化存储与 YAML 的单一权威关系：结构化资产负责事务、版本、证据和
-  回滚，YAML 作为确定性的人类可读、可导出表达；用户编辑 YAML 进入同一
-  proposal 路径；
-- 将完整 LifeModel 编译为任务相关 runtime packet，并分别验证它对 planning、
-  reasoning、context building、memory retrieval 和 tool selection 的实际影响；
-- 来源、使用原因、影响过的决策和当前新鲜度对用户可见；
-- revision、conflict、stale、materialization 和 rollback；
-- 隐私与敏感度控制；
-- 建立受治理、可测试、可版本化的协作规则网络。AI 可以生成规则 diff 和行为
-  检查建议，但只有用户审核后才能激活；规则不得成为任意源代码执行入口；
+阶段五采用一个已经完成的前置架构边界切片和以下六个顺序固定的产品板块。
+前一板块未达到退出标准前，不以补写计划、增加验证系统或并行建设下一套架构来
+绕过问题。
+
+##### Agent Memory 权威矩阵
+
+阶段五不得再把层级、作用域、类型和存储载体混为一个枚举或一个总 Memory 表：
+
+| 维度 | 固定语义 |
+| --- | --- |
+| 生命周期层 | 当前任务状态、Workspace Markdown Memory、跨会话 Memory、Task Reflection |
+| 作用域 | Conversation、Workspace、Project、Global；Task 只是来源引用和检索绑定，不新增为第五种持久作用域 |
+| 信息类型 | semantic fact、episodic experience、procedural working rule；Reflection 是候选来源，不是第四种长期 Memory |
+| canonical owner | 原始会话归 messages/checkpoint；明确作用域内的工作文档归对应 Markdown 文件；跨会话可治理 Memory 归 MemoryLifecycleStore；Reflection 归 Task/AgentRun transcript |
+| projection | 摘要、FTS、Vector、hot cache 和 runtime packet 均可重建，不能反向成为 canonical truth |
+
+Markdown 只在对应 Workspace/Project 文件域内拥有该文档内容；进入 Agent 上下文
+后仍是不授予权限、不冒充用户长期事实的 working context。当前用户明确指令在
+当前任务中优先，但不会因此静默修改任何长期 Memory 或 LifeModel；发现冲突时
+生成候选或提示用户，而不是在读取阶段决定新的 durable truth。
+
+##### 5.1 完成主流 Agent Memory
+
+目标：先让 Agent 本身真正会长期工作，不依赖 LifeModel 保存工作过程。
+
+5.1 固定拆成以下六个顺序切片；不得把六个切片合并成一次基础设施重构。
+
+###### 5.1A 跨重启继续当前会话
+
+- 固定 messages/checkpoint 为原始会话和任务恢复权威；
+- 核对 Main Chat、TaskSession、AgentRun 和 Workspace read model 的恢复边界；
+- 同一操作的重放保持幂等，缺失或损坏 checkpoint 显式 degraded/failed；
+- 不在本切片引入长期 Memory、Vector 或 LifeModel 变化。
+
+退出标准：同一真实项目经过对话、任务暂停、应用重启后能够从已确认 checkpoint
+继续；没有从助手文本或旧摘要重建虚假完成状态。
+
+###### 5.1B 摘要与长上下文压缩
+
+- 原始 transcript 继续作为 canonical owner；summary 是带 source range、版本和
+  digest 的可重建 projection；
+- 压缩必须保留当前目标、未完成事项、用户明确约束、工具结果来源和未决 Review；
+- summary 过期、来源缺失或与原始 transcript 不一致时不进入正常上下文；
+- 上下文预算必须有上限，不把全部历史消息、全部 Markdown 和全部检索结果同时
+  注入。
+
+退出标准：代表性长会话压缩前后，关键约束、未完成事项和证据引用保持一致；删除
+summary 后可从 canonical transcript 重建。
+
+###### 5.1C Workspace/Project Markdown Memory
+
+- 明确允许的根目录、文件名、Workspace/Project scope 和最大加载预算；
+- 使用简洁入口文件加按需主题文件，不把所有内容塞进一个无限增长的 MEMORY.md；
+- 文件创建、编辑、移动和删除复用现有受治理 file-write 路径；Agent 推断不能
+  静默写文件；
+- 每次加载显示文件来源、scope、选中段落和选择原因；错误 Workspace 的内容不能
+  跨项目进入上下文。
+
+退出标准：用户可在一个真实项目中创建、查看、修改和停用 Markdown Memory；
+另一个项目无法召回该内容，重启后作用域和来源仍一致。
+
+###### 5.1D 显式跨会话 Memory 生命周期
+
+- 完成“请记住”、受治理推断候选、纠正和 supersede；
+- 精确定义四种不同产品动作：停止召回只移出 runtime context；归档可恢复；回滚
+  撤销某次变更但保留历史；隐私擦除删除 canonical 正文以及 FTS、Vector、cache
+  和其他内容投影，只保留不含正文的最小 tombstone/audit metadata；
+- semantic、episodic 和 procedural Memory 分别有 scope、来源、敏感度、新鲜度和
+  冲突语义；
+- “忘记”不得作为模糊后端操作名；界面必须告诉用户实际执行的是停止召回、归档
+  还是不可恢复擦除。
+
+退出标准：显式记忆能够跨会话召回、纠正、归档和恢复；隐私擦除后正文不再出现
+于 canonical store、FTS、Vector、cache、runtime context 或普通产品读取路径。
+
+###### 5.1E 混合检索与召回解释
+
+- FTS 和 Vector 只检索允许 scope 内的 active Memory，合并、去重并按任务相关性、
+  新鲜度、冲突和来源质量排序；
+- embedding 不可用时降级到文本检索，不把空 Vector 结果冒充完整检索；
+- 每条进入上下文的 Memory 都带 source ref、scope、freshness 和 selected reason；
+- 建立少量产品黄金场景，验证 should-recall、must-not-recall、冲突、过期、中文和
+  无 embedding 降级，不建设通用评估平台；
+- 在本切片测量并固定 context token budget 与本机检索延迟基线，禁止无界加载。
+
+退出标准：must-not-recall 与跨 scope 泄漏场景为零；所有已召回 Memory 都能追溯
+真实来源，检索降级对用户可见且基础 Agent 可继续工作。
+
+###### 5.1F 用户控制界面与原生验收
+
+- 在现有 `/life-model` 产品区域中把“Agent 记忆”和“关于我 / LifeModel”呈现为
+  两个平级对象，不让 Memory 看起来是 LifeModel 的附属数据库；
+- 提供单条查看、来源、召回原因、纠正、停止召回、归档、恢复和隐私擦除动作；
+- 读取、写入和终态都来自 backend ViewModel/receipt，不从前端计数推断已应用；
+- 在同一隔离 QA profile 中完成多次会话、重启、降级和恢复验证。
+
+退出标准：同一个真实项目能够跨多次会话和重启继续工作；用户能完成“记住、
+召回、纠正、停止召回、归档、恢复、擦除”闭环；错误作用域、过期或冲突 Memory
+不会冒充当前事实；工作记忆不需要塞入 LifeModel。
+
+##### 5.2 重建 LifeModel 核心
+
+目标：让 LifeModel 只描述长期的用户，而不是 Agent Runtime、Memory、业务数据
+或权限系统。
+
+- schema 收敛到身份与自我定义、价值观、长期目标、稳定偏好、个人边界、重要
+  关系、用户自身的长期能力与资源、决策原则和长期协作方式；
+- 临时状态迁往 StateStore，每日任务和短期计划归 Tasks/State，程序性 Agent
+  经验归 Agent Memory，Agent 工具能力和权限归各自所有者；
+- LifeModel 中的长期目标只保存方向和用户确认的意义，不保存任务 progress、
+  deadline 或 milestone；长期能力只保存用户确认的技能、专长和稳定资源，不保存
+  Agent 工具能力、自动推断的 proficiency score 或资源的实时 availability；
+- 重要关系属于高敏感字段，默认不从普通对话自动提取第三方画像；只有用户明确
+  提出或审核具体 typed diff 后才能进入 canonical LifeModel；
+- 未经用户确认的人格分数、模型推断和虚构默认值不得成为 canonical truth；空
+  模型保持 empty/unknown；
+- 以 SQLite 中的版本、父版本、摘要、来源关系和经过 schema 验证的结构化 JSON
+  document 作为 canonical store；
+- 每个文档具有 schema_version、model_version 和 parent_version；数组/集合元素
+  使用稳定 ID，typed patch 同时校验 document base version 与目标字段/元素的
+  before value 或 digest，避免无关字段变化造成虚假冲突；
+- Patch 只开放 schema allowlist 内的 add、replace、remove 等受限操作，不提供任意
+  JSON Patch 或自由路径写入；
+- YAML 由指定 canonical version 确定性生成，只作为可读、可导出、可比较的
+  projection；用户编辑 YAML 时先解析为结构化 diff，再进入 proposal；
+- 迁移按“冻结旧 YAML 写入 -> 备份原文件与 digest -> 解析 v2 candidate -> 隔离
+  无法自动分类字段 -> 写入新 store -> 从新版本生成 YAML -> 逐字段和 digest 对照
+  -> 原子切换 read owner -> 拒绝旧写入口”执行；
+- 切换后旧 YAML 只作为有期限的只读恢复备份，不参与正常读取或写入；验证完成后
+  按明确清理条件删除，迁移期间允许两个物理副本但只有一个写权威；
+- 提供版本、来源、新鲜度、冲突、删除和回滚能力，并同步修正仍依赖旧 4D
+  Identity/Goals/Capabilities/State 分类的 Builder 与读模型。
+
+退出标准：结构化 store 与 YAML 不存在双写权威；用户能看懂、导出、修改和
+回滚自己的模型；State、Tasks、Memory 与 LifeModel 的职责没有重叠。
+
+##### 5.3 建立真实学习闭环
+
+目标：从日常使用中稳定产生少量、高质量、可物化的 LifeModel proposal。
+
+- 从对话、任务结果、用户纠正和反馈形成 Observation；
+- Observation 和 Reflection 只是来源，不自动成为 Memory 或 LifeModel；
+- Observation 默认只保存完成判断所需的最小摘要、source ref 和 metadata，不复制
+  整段对话、文件或工具输出；
+- 跨多次任务累计证据，并进行去重、冲突、稳定性、敏感度、明确陈述/推断和
+  长期意义判断；
+- Candidate 按 sensitivity、decision status 和 usefulness 设置有限保留期；被拒绝、
+  放弃或长期未处理的候选到期清理正文，保留最小无内容审计事实；
+- 不跨 Workspace 聚合候选；涉及第三方关系、健康、凭据或私密文件的内容默认不
+  自动形成 proposal；
+- 如候选提取需要外部 Provider，必须沿用当前 Provider privacy route 和用户配置的
+  传输边界；没有允许的 Provider 或本地提取能力时宁可跳过，不静默外发原始数据；
+- 不值得沉淀、来源不足或只反映短期状态的内容直接结束；
+- 相似候选先累计和合并，再批量进入 Review，避免每次任务都产生 proposal；
+- proposal 必须包含受支持的精确字段、typed before/after diff、来源、置信度、
+  稳定性、敏感度、冲突和 base version；
+- 用户可以修改、确认、拒绝或稍后处理；确认后仍需经过 materialization gateway
+  才能创建新 LifeModel 版本；
+- Heuristic learning 只作为候选提炼逻辑存在，不再维护独立通用 Maturation 或
+  自进化平台。
+
+退出标准：真实产品路径完成“使用 -> Observation -> 候选 -> proposal -> 人审 ->
+版本化物化 -> 后续使用”，且没有静默长期画像写入和 proposal 疲劳。
+
+##### 5.4 让 LifeModel 真正增强 Agent
+
+目标：证明 LifeModel 不是静态档案或被动数据库。
+
+- 将已确认且与任务相关的 LifeModel 编译为有界 runtime packet；
+- 分别验证它对 planning、reasoning、context building、memory retrieval 排序、
+  写作/沟通风格和已获准工具之间的 tool selection 优先级的影响；
+- 当前用户指令、Policy、权限、凭据和效果确认始终优先；LifeModel 和 Memory
+  均不能授予能力或授权持久/外部写入；
+- 用户能够看到使用了哪条信息、来源版本、为什么相关、是否新鲜，以及它影响了
+  哪个决定；
+- 过期、冲突、来源不明或当前任务不相关的字段不进入正常决策；
 - 使用相同真实任务比较无 LifeModel、过期/冲突 LifeModel 和已确认相关
-  LifeModel，验证个人模型是否真实改善结果。
+  LifeModel，评估实际结果而不是只检查 prompt 中出现了字段。
+
+退出标准：代表性对照任务证明受治理 LifeModel 对结果有可解释的正面帮助，同时
+不改变权限和当前指令边界。
+
+##### 5.5 贯穿式替换清理与最终收敛
+
+目标：不再先做数月大清理，也不让已经被替代的历史平台继续增加维护成本。
+
+- 5.5 的清理规则从 5.1A 开始贯穿 5.1 至 5.4：每个新 owner 或产品能力激活的
+  同一切片中，追踪并删除已经被替代的旧写入、读取、command、bridge、兼容和
+  迁移路径；不得等到 5.4 完成后才一次性清理；
+- 5.5 作为独立板块时只做最终 caller、数据和 authority 收敛，不重新实现已经完成
+  的替代能力；
+- 重点检查 HSAssetAuthorityRegistry、独立 Maturation Engine、runtime canonical
+  RegressionSuite、通用 Heuristic 平台、Calibration/Micro Evolution 历史入口和
+  无生产调用者的 Tauri command；
+- EvidenceStore 中仍有价值的来源、证据与冲突概念可以迁入 LifeModel 学习桥梁，
+  但不能继续作为广义 HS 平台；
+- 触及到的巨型文件只按已经建立的领域 owner 拆分，不为追求文件大小而机械拆分；
+- 删除前用真实 caller、数据迁移和恢复测试证明替代已经完成；不因为名称像历史
+  模块就直接删除生产代码。
+
+退出标准：阶段五主路径不存在并行旧权威；保留的历史兼容均有真实消费者、明确
+退出条件和测试，未使用路径从源码而不是仅从索引中消失。
+
+##### 5.6 原生闭环验收
+
+最后用真实 Tauri 和隔离 QA profile 完成：
+
+- 多次会话和跨重启的 Agent Memory；
+- Markdown Memory 查看、受治理编辑、遗忘和恢复；
+- 真实任务产生候选，用户修改并确认 LifeModel proposal；
+- 结构化版本物化和确定性 YAML 更新；
+- 后续任务真实使用并解释使用原因；
+- 冲突、过期、拒绝、回滚和删除；
+- LifeModel 或增强 Memory 故障时，健康的普通 Agent 仍可继续工作；
+- must-not-recall 和跨 Workspace/Project 泄漏场景为零；所有进入上下文的 Memory
+  与 LifeModel fact 均有真实 source ref；
+- 隐私擦除后正文不再存在于 canonical、FTS、Vector、cache、YAML projection 和
+  runtime context；
+- 长上下文压缩保留黄金场景中的目标、约束、未决 Review 与关键证据引用；
+- 同一任务的 LifeModel A/B 人工 rubric 至少检查正确性、个性化相关性、当前指令
+  遵循和权限边界，不以“字段出现在 prompt”代替效果改善；
+- 5.1E 固定的 context budget 与检索延迟目标在同一 QA 机器上满足，任何超出保持
+  可测量、可解释而不是通过扩大超时掩盖；
+- 只在具备产品意义的候选构建上做原生验收，不因每次小修改重复建立新的 finalN
+  profile、反复初始化同类凭据或把人工授权过程当作开发成果。
+
+退出标准：第五阶段完整黄金路径在同一精确构建和隔离 QA 中跨重启成立，底层
+数据库、产品读模型和用户界面相互一致；自动化、本地原生和 external-live 证据
+等级保持分离。
+
+#### 小板块执行规则
+
+5.1 至 5.6 是固定顺序的大板块，每个大板块继续拆成可独立交付的小垂直切片。
+每个小切片开始前必须在现有 Program 或当期唯一 Markdown 实施计划中写清：
+
+1. 用户会获得的具体产品能力；
+2. 当前源码入口、唯一 owner 和权威存储；
+3. 输入、输出、持久写入和权限边界；
+4. 本切片明确不做什么；
+5. 至少一个正常场景和多个关键失败反例；
+6. 用户在哪里查看、纠正、撤销或恢复结果；
+7. 同一切片将删除哪些已被替代的旧 caller，以及哪些历史路径因尚无替代而继续
+   保留；
+8. 退出标准对应的自动化、原生和 external-live 证据等级。
+
+实现顺序固定为“源码与现状核对 -> 失败反例 -> 最小产品实现 -> focused tests ->
+比例适当的全量门禁 -> 自审 -> 必要的真实 UI/原生验证 -> 停在审阅边界”。测试
+优先验证产品行为，不增加计划账本、任务包、审批文本验证器、行数检查或大型治理
+JSON。不得为了完成某个小切片而提前建设下一板块的平台能力。
 
 #### 非目标
 
 - 不自主修改 OpenLife 源码；
 - 不做仓库自进化；
-- 不让运行时 LifeModel 生成或执行未经审核的任意代码；
+- 现阶段不建设 LifeModel Coding、任意代码生成执行或通用规则编程系统；未来如
+  要加入，只能另行提出、研究和审批，不由阶段五当前实现预留大型平台；
 - 不把会话、Workspace、工具日志和全部 Agent Memory 塞入 LifeModel；
 - 不让 LifeModel 或 Memory 授予工具权限、凭据或外部写入许可；
 - 不因为一次行为或一次推断就修改长期画像；
@@ -486,7 +714,6 @@ OpenLife 在成熟 Agent Memory 之上构建用户拥有的长期个人模型。
   哪些长期信息；
 - 过期或冲突内容保持可见且可恢复；
 - 删除和回滚会从活跃上下文移除对应信息；
-- 协作规则具有版本、来源、适用范围、冲突处理和行为检查；
 - 内部 dogfood 证明个性化有用且没有夺走用户控制权。
 
 ### 第六阶段：内部产品完善与源码试用
@@ -546,9 +773,29 @@ OpenLife 在成熟 Agent Memory 之上构建用户拥有的长期个人模型。
 
 ## 7. 当前阶段
 
-当前阶段：**第四阶段——受治理的行动型 Agent 已完成（2026-08-05）。第五阶段
-尚未开始。当前停在第四阶段交付与审阅边界；未经下一阶段单独审阅和确认，不进入
-LifeModel 与 Memory 个人智能闭环开发。**
+当前阶段：**第五阶段——LifeModel 与 Memory 个人智能闭环已开始。前置“架构
+边界校准”于 2026-08-06 完成；Agent Memory 四层边界、LifeModel v2 范围、
+versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户确认。
+当前停在 5.1A 实施前，不提前进入 Agent Memory 代码开发；下一步只能先对
+5.1A“跨重启继续当前会话”核对真实源码与已有能力，再形成该切片的精确实施
+边界。**
+
+第五阶段第一步实际完成：
+
+- ADR 0016 取代 ADR 0013 的广义 LifeModel-HS 方向，固定 Agent Runtime、Agent
+  Memory、LifeModel、业务域事实、安全与治理五个所有权边界；
+- LifeModel、学习和增强检索的可选存储故障不再自动关闭健康的基础 Agent，具体
+  缺失能力仍由精确读写网关 fail-closed；启动 reconciliation 与多 owner recovery
+  继续保持保守；
+- 缺失 MemoryLifecycleStore 时，Main Chat 使用显式 degraded context marker，而
+  不是中止基础上下文编译或把空结果冒充健康；
+- 程序性未来规则归入 Agent Memory proposal 候选，不再写入 LifeModel；
+- Main Chat 只为已支持的精确 LifeModel 字段和值创建 proposal。通用请求
+  返回 `lifemodel_typed_diff_required`，不再生成无法物化的
+  `lifemodel.pending.chat_conversation` 占位记录；Markdown 编辑则进入受治理的
+  file-write proposal 路径，不再被冒充为 LifeModel 变更；
+- 本切片没有实现完整 Agent Memory、没有重构完整 LifeModel schema、没有进入
+  自动候选证据与长期学习闭环。
 
 第四阶段实际完成：
 

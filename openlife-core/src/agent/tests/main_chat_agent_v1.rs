@@ -156,7 +156,8 @@ fn intent_frame_extracts_real_life_semantics_without_routing() {
     let future_preference =
         IntentFrame::from_user_message("以后我做计划时，先提醒我留出通勤和休息缓冲。");
     assert!(future_preference.requests_durable_write);
-    assert!(future_preference.requests_lifemodel_change);
+    assert!(future_preference.requests_memory_change);
+    assert!(!future_preference.requests_lifemodel_change);
     assert!(!future_preference.requires_external_read);
     assert_eq!(
         future_preference.time_range,
@@ -785,7 +786,7 @@ fn policy_governance_plan_keeps_goal_progress_conversation_only() {
 }
 
 #[test]
-fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
+fn policy_governance_plan_preserves_episode_inferred_and_procedural_memory_lanes() {
     let decision = AgentIngress::default().decide(
         "policy-governance-mixed",
         "今天午饭吃了牛肉面，下午犯困。I usually batch similar tasks to stay focused. Going forward, remind me to check my task list before scheduling work.",
@@ -808,7 +809,7 @@ fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
         candidate.disposition == PolicyGovernanceDisposition::InferredStableFact
     }));
     assert!(plan.candidate_dispositions.iter().any(|candidate| {
-        candidate.disposition == PolicyGovernanceDisposition::ExplicitGovernedLifeModelRequest
+        candidate.disposition == PolicyGovernanceDisposition::ExplicitReversibleMemoryRequest
     }));
     assert!(plan.deferred_review_groups.iter().any(|group| {
         group.mode == PolicyGovernanceReviewMode::Deferred
@@ -817,7 +818,7 @@ fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
     }));
     assert!(plan.blocking_review_groups.iter().any(|group| {
         group.mode == PolicyGovernanceReviewMode::Blocking
-            && group.domain == PolicyGovernanceReviewDomain::LifeModel
+            && group.domain == PolicyGovernanceReviewDomain::Memory
             && group.candidate_ids.len() == 1
     }));
 }
@@ -1421,7 +1422,7 @@ fn stage1_browser_prompts_select_expected_main_chat_strategies() {
         (
             "D34",
             "Propose an edit to SOUL.md knowledge asset wording.",
-            MainChatAgentStrategy::LifeModelProposal,
+            MainChatAgentStrategy::FileWriteProposal,
         ),
     ];
 

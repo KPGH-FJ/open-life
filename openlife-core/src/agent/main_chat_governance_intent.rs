@@ -122,7 +122,6 @@ pub fn extract_main_chat_intent_signals(user_text: &str) -> MainChatIntentSignal
     let memory_routing = route_memory_candidates(&candidates);
     collect_durable_write_requirement_from_memory_routing(&memory_routing, &mut intent);
     intent.memory_routing = memory_routing;
-    collect_durable_write_requirement_from_knowledge_asset_operation(&normalized, &mut intent);
     collect_external_read_requirement(&normalized, &mut intent);
 
     intent.matched_terms.sort();
@@ -262,51 +261,6 @@ fn collect_durable_write_requirement_from_memory_routing(
             0.92,
         );
     }
-}
-
-fn collect_durable_write_requirement_from_knowledge_asset_operation(
-    normalized: &str,
-    intent: &mut MainChatIntentSignals,
-) {
-    if intent.durable_write_requirement.is_some() || !is_knowledge_asset_edit_proposal(normalized) {
-        return;
-    }
-
-    set_durable_write_requirement(
-        intent,
-        MainChatDurableWriteRequirement::LifeModelProposal,
-        "knowledge_asset_edit_proposal_required",
-        "knowledge_asset_edit",
-        0.9,
-    );
-}
-
-fn is_knowledge_asset_edit_proposal(normalized: &str) -> bool {
-    contains_any(
-        normalized,
-        &[
-            "propose an edit",
-            "propose edit",
-            "edit a knowledge asset",
-            "edit knowledge asset",
-            "edit agents.md",
-            "edit soul.md",
-            "edit user.md",
-            "edit memory.md",
-            "修改知识资产",
-            "提议修改",
-        ],
-    ) && contains_any(
-        normalized,
-        &[
-            "knowledge asset",
-            "agents.md",
-            "soul.md",
-            "user.md",
-            "memory.md",
-            "知识资产",
-        ],
-    )
 }
 
 fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatIntentSignals) {
@@ -824,38 +778,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn main_chat_governance_intent_classifies_chinese_memory_request() {
+    fn main_chat_governance_intent_keeps_explicit_fact_and_procedural_rule_in_memory() {
         let intent = extract_main_chat_intent_signals(
             "这条对我挺重要：空腹喝咖啡会让我心慌，尤其是在赶路的时候。帮我记下来，下次提醒我先吃点东西。",
         );
 
         assert_eq!(
             intent.durable_write_requirement,
-            Some(MainChatDurableWriteRequirement::LifeModelProposal)
+            Some(MainChatDurableWriteRequirement::MemoryProposal)
         );
         assert!(intent.external_read_requirement.is_none());
         assert!(intent
             .reason_codes
-            .contains(&"memory_candidate_lifemodel_proposal_required".to_string()));
+            .contains(&"memory_candidate_memory_proposal_required".to_string()));
         assert!(intent
             .matched_terms
             .iter()
-            .any(|term| term == "life_model_candidate"));
+            .any(|term| term == "memory_candidate"));
         assert!(intent.confidence >= 0.9);
     }
 
     #[test]
-    fn main_chat_governance_intent_classifies_future_preference_request() {
+    fn main_chat_governance_intent_routes_explicit_future_rule_to_memory_review() {
         let intent =
             extract_main_chat_intent_signals("以后如果我说空腹喝了咖啡，你优先提醒我先吃点东西。");
 
         assert_eq!(
             intent.durable_write_requirement,
-            Some(MainChatDurableWriteRequirement::LifeModelProposal)
+            Some(MainChatDurableWriteRequirement::MemoryProposal)
         );
+        assert_eq!(intent.memory_routing.memory_proposal_candidate_ids.len(), 1);
         assert!(intent
-            .reason_codes
-            .contains(&"memory_candidate_lifemodel_proposal_required".to_string()));
+            .memory_routing
+            .lifemodel_proposal_candidate_ids
+            .is_empty());
         assert!(intent.external_read_requirement.is_none());
     }
 
@@ -914,16 +870,14 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_governance_intent_routes_knowledge_asset_edit_without_intercepting_inspection() {
+    fn main_chat_governance_intent_does_not_relabel_knowledge_files_as_lifemodel() {
         let edit =
             extract_main_chat_intent_signals("Propose an edit to SOUL.md knowledge asset wording.");
-        assert_eq!(
-            edit.durable_write_requirement,
-            Some(MainChatDurableWriteRequirement::LifeModelProposal)
-        );
+        assert!(edit.durable_write_requirement.is_none());
         assert!(edit
-            .reason_codes
-            .contains(&"knowledge_asset_edit_proposal_required".to_string()));
+            .memory_routing
+            .lifemodel_proposal_candidate_ids
+            .is_empty());
 
         let inspect = extract_main_chat_intent_signals("Inspect loaded knowledge assets.");
         assert!(inspect.durable_write_requirement.is_none());

@@ -2,8 +2,8 @@
 
 Date: 2026-07-12
 Status: accepted
-Relationship: applies ADR 0013 transient `StateAsset` governance; does not
-relax ADR 0014 or LifeModel-HS proposal requirements
+Relationship: preserved by ADR 0016 as the domain-owned transient StateStore
+lane; does not relax ADR 0014 or LifeModel proposal requirements
 
 ## Context
 
@@ -17,8 +17,9 @@ Moving only the operation UUID earlier would reduce duplicate writes but would
 leave policy, execution, truth projection, and user-facing completion owned by
 the frontend. That would preserve the architectural cause.
 
-ADR 0013 already permits automatic acceptance only for bounded transient
-`StateAsset` updates. The existing YAML daily-goal and state-history shapes do
+The original ADR 0013 permitted automatic acceptance only for bounded transient
+`StateAsset` updates; ADR 0016 preserves that rule under domain ownership. The
+existing YAML daily-goal and state-history shapes do
 not meet that contract because they do not uniformly carry TTL, source,
 confidence, privacy, operation identity, and an inspectable receipt.
 
@@ -65,7 +66,7 @@ with a different payload fails closed. Concurrent submissions have one winner.
 Projection failure is `projection_degraded`, never canonical failure.
 
 The YAML LifeModel remains a migration/compatibility view for this asset class
-until the ADR 0013 parity and rollback gates pass. During migration:
+until the StateStore parity and rollback gates pass. During migration:
 
 - existing YAML/state-history data may be imported or shadow-read;
 - product writes have one owner and must not dual-write independently;

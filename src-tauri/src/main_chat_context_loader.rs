@@ -130,10 +130,16 @@ pub(crate) async fn compile_main_chat_context(
 pub(crate) async fn retrievable_lifecycle_context_candidates(
     state: &Arc<AppState>,
 ) -> Result<Vec<ContextSourceCandidate>, String> {
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(|| "memory_retrieval_degraded:lifecycle_store_unavailable".to_string())?;
+    let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() else {
+        return Ok(vec![ContextSourceCandidate::new(
+            ContextSourceKind::RuntimePolicy,
+            "memory.lifecycle.unavailable",
+            "memory_retrieval_degraded:lifecycle_store_unavailable; accepted lifecycle memory is unavailable for this turn and must not be inferred",
+            "explicit optional-memory degradation boundary",
+            "internal",
+            12,
+        )]);
+    };
     let store = lifecycle_store.lock().await;
     let records = store.list_retrievable_records(None, 8).map_err(|error| {
         format!("memory_retrieval_degraded:lifecycle_records_query_failed:{error}")
@@ -918,18 +924,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_lifecycle_store_is_degraded_not_healthy_empty_context() {
+    async fn missing_lifecycle_store_is_explicitly_degraded_without_blocking_base_context() {
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         Arc::get_mut(&mut state)
             .expect("isolated state owner")
             .memory_lifecycle_store = None;
 
-        let error = retrievable_lifecycle_context_candidates(&state)
+        let candidates = retrievable_lifecycle_context_candidates(&state)
             .await
-            .expect_err("missing canonical lifecycle store cannot become empty context");
-        assert_eq!(
-            error,
-            "memory_retrieval_degraded:lifecycle_store_unavailable"
-        );
+            .expect("optional lifecycle memory must not disable the base Agent");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_id, "memory.lifecycle.unavailable");
+        assert!(candidates[0]
+            .content
+            .contains("memory_retrieval_degraded:lifecycle_store_unavailable"));
     }
 }

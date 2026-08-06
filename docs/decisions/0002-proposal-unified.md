@@ -1,7 +1,7 @@
 # ADR 0002: Proposal 统一层
 
 > Historical ADR retained for Proposal-layer intent. Current semantics are
-> governed by `AGENTS.md`, ADR 0013, and current source.
+> governed by `AGENTS.md`, ADR 0016, and current source.
 
 ## 状态
 

@@ -3,11 +3,12 @@
 ## Status
 
 Source-backed description of the current LifeModel implementation and write
-governance. It is not a claim that all intended HS assets are canonical.
+governance under ADR 0016. LifeModel is the user-owned long-term model; it is
+not Agent Memory, business state, policy, audit, or a general heuristic system.
 
-The current repository still contains a YAML compatibility model and a governed
-proposal/write-gateway path. Canonical truth promotion remains proposal-first and
-gateway-bound.
+The current repository still contains a YAML model and a governed
+proposal/write-gateway path. Canonical truth promotion remains proposal-first
+and gateway-bound.
 
 ## Authority
 
@@ -19,11 +20,11 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-07-31 during repository cleanup source tracing.
+2026-08-06 during Phase 5 architecture-boundary implementation.
 
 ## Source map
 
-- `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
+- `plans/adr/0016-agent-memory-lifemodel-domain-boundaries.md`
 - `openlife-core/src/life_model.rs`
 - `openlife-core/src/life_model/patch.rs`
 - `openlife-core/src/life_model/patch_store.rs`
@@ -36,12 +37,12 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 - `src-tauri/src/commands/life_model.rs`
 - `src-tauri/src/commands/proposal.rs`
 
-## Inherited blocker
+## Current boundary
 
-The source-of-truth ADR defines a target HS architecture, but current code still
-uses a compatibility materialized view and proposal materialization gateways.
-This page must not be read as proof that all HS assets are migrated or that
-ordinary chat may apply LifeModel truth directly.
+ADR 0013's broad LifeModel-HS target is superseded. EvidenceStore,
+HeuristicStore, StateStore, PolicyStore, regression, and audit code may still
+exist, but they are not jointly the canonical LifeModel. Existing code is
+reviewed by its real owner and may be narrowed or removed in later slices.
 
 ## Current Model Shape
 
@@ -51,14 +52,11 @@ evolution rules. It also defines a `LifeModelHSCompatibilityView` and provenance
 fields that explicitly mark the compatibility view as not accepted source of
 truth and not durable truth materialization.
 
-The manager still loads and saves `life_model.yaml`. The compatibility view adds
-source digests and asset references so runtime code can reason about provenance
-without treating the YAML view as canonical HS truth.
-
-The ADR in `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` states
-the direction: evidence, state, heuristics, policies, regression state, and
-audit should become governed HS assets. During migration, YAML remains a
-compatibility/materialized surface.
+The manager still loads and saves `life_model.yaml`. Structured accepted change
+records and gateway checks govern mutations; YAML is the deterministic
+human-readable representation and must not become a second independently
+writable truth. The complete structured-store/YAML migration remains later
+Phase 5 work.
 
 ## Patch And Proposal Path
 
@@ -118,7 +116,7 @@ gateway decision route through the LifeModel write gateway.
 
 ## Practical Rule For New Docs
 
-Use "LifeModel" to describe the current model and compatibility surface. Use
-"LifeModel-HS" only with the governance caveat that the ADR is the target
-architecture and that current durable truth writes are proposal-first and
-gateway-enforced.
+Use "LifeModel" for the user's confirmed long-term model. Use "Agent Memory"
+for working, project, episodic, semantic, procedural, Reflection, and Markdown
+context. `LifeModel-HS` is a superseded historical term. Current durable
+LifeModel writes remain proposal-first and gateway-enforced.

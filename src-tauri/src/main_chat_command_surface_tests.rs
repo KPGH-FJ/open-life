@@ -3236,7 +3236,7 @@ async fn main_chat_kernel_chinese_memory_proposal_send_stream() {
 }
 
 #[tokio::test]
-async fn main_chat_kernel_chinese_lifemodel_proposal_send_stream() {
+async fn main_chat_kernel_chinese_procedural_rule_routes_to_agent_memory_send_stream() {
     let user_text = "以后早上安排工作前先确认我有没有吃东西";
 
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -3252,35 +3252,43 @@ async fn main_chat_kernel_chinese_lifemodel_proposal_send_stream() {
     .await;
     assert_eq!(
         send_response["agent_ingress"]["selectedStrategy"],
-        "life_model_proposal"
+        "memory_proposal"
     );
     let generation = &send_response["reasoning_trace"]["generation_result"];
     assert_eq!(
-        generation["memoryGovernance"]["lifeModelProposalIds"]
+        generation["memoryGovernance"]["memoryProposalIds"]
             .as_array()
-            .expect("lifemodel proposal ids")
+            .expect("memory proposal ids")
             .len(),
         1
     );
-    assert!(generation["memoryGovernance"]["memoryProposalIds"]
+    assert!(generation["memoryGovernance"]["lifeModelProposalIds"]
         .as_array()
-        .expect("memory proposal ids")
+        .expect("lifemodel proposal ids")
         .is_empty());
     let task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
-        .expect("lifemodel task id");
+        .expect("memory task id");
     let proposal = find_command_surface_proposal_for_task(
         &send_state,
         task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
+        openlife_core::agent::ProposalType::MemoryWrite,
     )
     .await;
     assert_eq!(
         proposal
             .after
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(|content| content.contains("早上安排工作前先确认我有没有吃东西")),
+        Some(true)
+    );
+    assert_eq!(
+        proposal
+            .after
             .get("directLifeModelWrite")
             .and_then(serde_json::Value::as_bool),
-        Some(false)
+        None
     );
     let model_after = {
         let manager = send_state.life_model_manager.lock().await;
@@ -3300,11 +3308,18 @@ async fn main_chat_kernel_chinese_lifemodel_proposal_send_stream() {
     .await;
     assert_eq!(
         stream_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["memoryProposalIds"]
+            .as_array()
+            .expect("stream memory proposal ids")
+            .len(),
+        1
+    );
+    assert!(
+        stream_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
             ["lifeModelProposalIds"]
             .as_array()
             .expect("stream lifemodel proposal ids")
-            .len(),
-        1
+            .is_empty()
     );
 }
 
@@ -3324,7 +3339,7 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
     assert_eq!(send_response["legacy_fallback_used"], false);
     assert_eq!(
         send_response["agent_ingress"]["selectedStrategy"],
-        "life_model_proposal"
+        "memory_proposal"
     );
     let generation = &send_response["reasoning_trace"]["generation_result"];
     assert_eq!(generation["kernelBackedMemoryGovernance"], true);
@@ -3349,14 +3364,14 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .as_array()
             .expect("memory proposal ids")
             .len(),
-        1
+        2
     );
     assert_eq!(
         memory_governance["lifeModelProposalIds"]
             .as_array()
             .expect("lifemodel proposal ids")
             .len(),
-        1
+        0
     );
     let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
@@ -3384,23 +3399,11 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
     assert!(send_memory_content.contains("空腹喝咖啡"));
     assert!(send_memory_content.contains("心慌"));
     assert!(!send_memory_content.contains("帮我记下来"));
-    let lifemodel_proposal = find_command_surface_proposal_for_task(
-        &send_state,
-        send_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
-    assert_eq!(
-        lifemodel_proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
-    );
-    assert_eq!(
-        lifemodel_proposal
-            .after
-            .get("directLifeModelWrite")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
+    assert!(list_command_surface_proposals(&send_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
     assert!(list_command_surface_life_events(&send_state)
         .await
         .is_empty());
@@ -3452,14 +3455,14 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .as_array()
             .expect("stream memory proposal ids")
             .len(),
-        1
+        2
     );
     assert_eq!(
         stream_generation["memoryGovernance"]["lifeModelProposalIds"]
             .as_array()
             .expect("stream lifemodel proposal ids")
             .len(),
-        1
+        0
     );
     let stream_proposal = find_command_surface_proposal_for_task(
         &stream_state,
@@ -3471,16 +3474,11 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
         stream_proposal.status,
         openlife_core::agent::ProposalStatus::Pending
     );
-    let stream_lifemodel_proposal = find_command_surface_proposal_for_task(
-        &stream_state,
-        &stream_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
-    assert_eq!(
-        stream_lifemodel_proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
-    );
+    assert!(list_command_surface_proposals(&stream_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
     let stream_memory_content = stream_proposal
         .after
         .get("content")
@@ -3585,18 +3583,12 @@ async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_o
         openlife_core::agent::ProposalStatus::Pending
     );
     assert_eq!(
-        proposal
-            .after
-            .get("directLifeModelWrite")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
+        proposal.affected_path,
+        "identity.role_definition.primary_role"
     );
     assert_eq!(
-        proposal
-            .after
-            .get("acceptedDurableTruthWritten")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
+        proposal.after,
+        serde_json::Value::String("design lead".into())
     );
     let model_after = {
         let manager = send_state.life_model_manager.lock().await;

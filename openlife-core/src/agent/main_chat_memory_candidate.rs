@@ -243,7 +243,7 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
         }
         let span_id = source_span_id(index, &compact);
         let explicit_memory = has_explicit_memory_marker(&lower);
-        let future_rule = is_future_rule(&lower);
+        let future_rule = is_future_rule(&lower) && has_personal_rule_subject(&lower);
         let identity_or_preference = is_identity_or_long_term_preference(&lower);
         let no_op_weather_statement = is_weather_statement_only(&lower);
         let hypothetical_only = is_hypothetical_plan_only(&lower);
@@ -282,19 +282,15 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
                 &mut candidates,
                 &span_id,
                 MemoryCandidateKind::ProceduralRule,
-                MemoryDestination::LifeModelProposal,
+                MemoryDestination::MemoryProposal,
                 &compact,
                 &claim,
                 "internal",
                 "stable",
-                if explicit_memory {
-                    "explicit"
-                } else {
-                    "implicit"
-                },
+                "explicit",
                 "future_rule",
                 0.91,
-                vec!["future_behavior_rule".into()],
+                vec!["agent_procedural_memory_rule".into()],
             );
         }
 
@@ -771,6 +767,13 @@ fn is_future_rule(lower: &str) -> bool {
             "before",
         ],
     )
+}
+
+fn has_personal_rule_subject(lower: &str) -> bool {
+    lower.starts_with("i ")
+        || lower.starts_with("my ")
+        || lower.starts_with("me ")
+        || contains_any(lower, &[" i ", " my ", " me ", "我", "我的"])
 }
 
 fn is_identity_or_long_term_preference(lower: &str) -> bool {
@@ -1272,11 +1275,15 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_memory_candidate_routes_future_rule_to_lifemodel_proposal() {
+    fn main_chat_memory_candidate_routes_future_rule_to_agent_memory_proposal() {
         let result = routed("以后早上安排工作前先确认我有没有吃东西");
 
-        assert_eq!(result.lifemodel_proposal_candidate_ids.len(), 1);
-        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert_eq!(result.memory_proposal_candidate_ids.len(), 1);
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        assert!(result.candidates.iter().any(|candidate| {
+            candidate.kind == MemoryCandidateKind::ProceduralRule
+                && candidate.destination == MemoryDestination::MemoryProposal
+        }));
     }
 
     #[test]
@@ -1370,8 +1377,12 @@ mod tests {
             routed("空腹喝咖啡会心慌，香蕉酸奶会缓解。以后早上安排工作前先确认我有没有吃东西");
 
         assert!(result.life_event_candidate_ids.is_empty());
-        assert_eq!(result.memory_proposal_candidate_ids.len(), 1);
-        assert_eq!(result.lifemodel_proposal_candidate_ids.len(), 1);
+        assert_eq!(result.memory_proposal_candidate_ids.len(), 2);
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        assert!(result.candidates.iter().any(|candidate| {
+            candidate.kind == MemoryCandidateKind::ProceduralRule
+                && candidate.destination == MemoryDestination::MemoryProposal
+        }));
         assert!(result.candidates.len() >= 2);
     }
 

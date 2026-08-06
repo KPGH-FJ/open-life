@@ -1,7 +1,11 @@
 # ADR 0013: LifeModel-HS Source Of Truth And Governance
 
 Date: 2026-05-28
-Status: accepted
+Status: superseded by ADR 0016
+
+ADR 0016 replaces the broad LifeModel-HS ownership model with explicit Agent
+Runtime, Agent Memory, LifeModel, domain-data, and safety/governance boundaries.
+This file remains historical design evidence only.
 
 ## Context
 

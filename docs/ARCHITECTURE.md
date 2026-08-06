@@ -25,6 +25,22 @@ Product read state is exposed through `LifeStateProjection` and backend
 ViewModels. Governed writes pass through proposal, permission, and persistence
 owners rather than page-local state.
 
+## Domain Ownership
+
+The current boundary is defined by ADR 0016:
+
+- Agent Runtime owns turn and action execution;
+- Agent Memory owns working, project, episodic, semantic, procedural, and
+  Reflection context;
+- LifeModel owns confirmed long-term understanding of the user;
+- domain stores own task, transient state, calendar, email, and other business
+  facts;
+- safety and governance own permissions, privacy, review, and write admission.
+
+Evidence and proposals connect these domains without becoming another fact
+owner. Optional personalization failures degrade that capability, not a healthy
+base Agent. Every affected read or write gateway still fails closed.
+
 ## Source Maps
 
 - [Agent runtime](architecture/agent-runtime.md)

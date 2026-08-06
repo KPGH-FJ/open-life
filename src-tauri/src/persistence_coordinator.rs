@@ -42,6 +42,23 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "TaskStore",
 ];
 
+/// Personalization and learning stores enrich the Agent but do not own its
+/// basic ability to answer or dispatch an otherwise authorized capability.
+/// Their exact read/write gateways still fail closed when the corresponding
+/// feature is used.
+const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
+    "LifeModelFileStore",
+    "LifeModelFileJournal",
+    "HSAssetAuthorityRegistry",
+    "BuilderSessionStore",
+    "FeedbackStore",
+    "VectorStore",
+    "EvidenceStore",
+    "HeuristicStore",
+    "MemoryLifecycleStore",
+    "PatchStore",
+];
+
 #[cfg(test)]
 pub const EXPLICIT_NON_CANONICAL_BOOTSTRAP_SURFACES: &[(&str, &str)] = &[
     ("VersionManager", "derived rollback snapshots"),
@@ -161,6 +178,27 @@ impl From<GovernedDataImportRecoveryOwner> for CanonicalWriteOwner {
 }
 
 impl CanonicalWriteOwner {
+    fn required_store_names(self) -> &'static [&'static str] {
+        match self {
+            Self::GovernedDataImport(GovernedDataImportRecoveryOwner::LifeModelFileStore) => {
+                &["LifeModelFileStore", "LifeModelFileJournal", "PatchStore"]
+            }
+            Self::GovernedDataImport(GovernedDataImportRecoveryOwner::MemoryStore) => {
+                &["MemoryStore"]
+            }
+            Self::GovernedDataImport(GovernedDataImportRecoveryOwner::VectorStore) => {
+                &["VectorStore"]
+            }
+            // State imports already run through the coordinator's global
+            // critical-store gate. Unlike optional personalization stores,
+            // StateStore is not independently registered by every governed
+            // import fixture/runtime owner, so requiring a second registry
+            // entry here would reject an otherwise available canonical store.
+            Self::GovernedDataImport(GovernedDataImportRecoveryOwner::StateStore) => &[],
+            Self::AgentRunStore => &["AgentRunStore"],
+        }
+    }
+
     fn governed_data_import_store_name(self) -> Option<&'static str> {
         match self {
             Self::GovernedDataImport(owner) => Some(owner.store_name()),
@@ -573,7 +611,7 @@ impl PersistenceCoordinator {
             .copied()
             .map(CanonicalWriteOwner::from)
             .collect::<BTreeSet<_>>();
-        let (mode, generation, recovery_state_is_safe) = {
+        let (mode, generation, recovery_state_is_safe, unavailable_owner) = {
             let state = self
                 .state
                 .read()
@@ -588,6 +626,7 @@ impl PersistenceCoordinator {
                 mode,
                 state.admission_generation,
                 governed_data_import_recovery_state_is_safe(&state),
+                canonical_owner_write_error(&state, &owners),
             )
         };
         if owners.is_empty() || owners.len() != requested_owner_count {
@@ -603,6 +642,9 @@ impl PersistenceCoordinator {
             // healthy AppState merely because normal writes are enabled there.
             if recovery.is_some() {
                 return Err(PersistenceGateError::EffectsBlocked { mode });
+            }
+            if let Some(error) = unavailable_owner {
+                return Err(error);
             }
             return Ok(CanonicalWriteAdmission {
                 generation,
@@ -746,6 +788,12 @@ impl PersistenceCoordinator {
         ) {
             return Err(PersistenceGateError::EffectsBlocked { mode });
         }
+        if let Some(error) = canonical_owner_write_error(
+            &state,
+            &[CanonicalWriteOwner::AgentRunStore].into_iter().collect(),
+        ) {
+            return Err(error);
+        }
         Ok(AgentRunCanonicalWriteAdmission {
             inner: CanonicalWriteAdmission {
                 generation: state.admission_generation,
@@ -792,7 +840,13 @@ impl PersistenceCoordinator {
         admission: &CanonicalWriteAdmission<'_>,
     ) -> Result<CanonicalCommitPermit<'coordinator>, PersistenceGateError> {
         let barrier = self.canonical_write_barrier.read().await;
-        let (mode, generation, recovery_state_is_safe, startup_reconciliation_is_safe) = {
+        let (
+            mode,
+            generation,
+            recovery_state_is_safe,
+            startup_reconciliation_is_safe,
+            unavailable_owner,
+        ) = {
             let state = self
                 .state
                 .read()
@@ -807,6 +861,7 @@ impl PersistenceCoordinator {
                 state.admission_generation,
                 governed_data_import_recovery_state_is_safe(&state),
                 startup_reconciliation_state_is_safe(&state),
+                canonical_owner_write_error(&state, &admission.owners),
             )
         };
         if admission.generation != generation {
@@ -821,7 +876,12 @@ impl PersistenceCoordinator {
                 if matches!(
                     mode,
                     PersistenceRuntimeMode::ReadWrite | PersistenceRuntimeMode::IsolatedEvaluation
-                ) => {}
+                ) =>
+            {
+                if let Some(error) = unavailable_owner {
+                    return Err(error);
+                }
+            }
             CanonicalWriteAdmissionKind::StartupReconciliation
                 if startup_reconciliation_is_safe => {}
             CanonicalWriteAdmissionKind::GovernedDataImportRecovery {
@@ -1269,23 +1329,54 @@ fn runtime_mode(
         PersistenceRuntimeMode::Initializing
     } else if stores
         .iter()
+        .filter(|health| store_blocks_base_agent_effects(&health.store))
         .any(|health| health.mode == PersistenceStoreMode::Unavailable)
     {
         PersistenceRuntimeMode::UnavailableDegraded
     } else if !global_reason_codes.is_empty()
         || stores
             .iter()
+            .filter(|health| store_blocks_base_agent_effects(&health.store))
             .any(|health| health.mode == PersistenceStoreMode::ReadOnlyCanonical)
     {
         PersistenceRuntimeMode::ReadOnlyDegraded
     } else if stores
         .iter()
+        .filter(|health| store_blocks_base_agent_effects(&health.store))
         .any(|health| health.mode == PersistenceStoreMode::EphemeralDevelopment)
     {
         PersistenceRuntimeMode::EphemeralDevelopment
     } else {
         PersistenceRuntimeMode::ReadWrite
     }
+}
+
+fn store_blocks_base_agent_effects(store: &str) -> bool {
+    !OPTIONAL_PERSONALIZATION_STORES.contains(&store)
+}
+
+fn canonical_owner_write_error(
+    state: &PersistenceCoordinatorState,
+    owners: &BTreeSet<CanonicalWriteOwner>,
+) -> Option<PersistenceGateError> {
+    if state.isolated_evaluation {
+        return None;
+    }
+    owners.iter().find_map(|owner| {
+        owner.required_store_names().iter().find_map(|store| {
+            let mode = state
+                .stores
+                .get(*store)
+                .map(|health| health.mode)
+                .unwrap_or(PersistenceStoreMode::Unavailable);
+            (mode != PersistenceStoreMode::ReadWriteCanonical).then(|| {
+                PersistenceGateError::StoreUnavailable {
+                    store: (*store).to_string(),
+                    mode,
+                }
+            })
+        })
+    })
 }
 
 fn error_digest(error: &str) -> String {
@@ -1440,6 +1531,40 @@ mod tests {
         assert!(matches!(
             coordinator.require_trusted_read("memory"),
             Err(PersistenceGateError::StoreUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn optional_personalization_store_failure_does_not_disable_base_agent_effects() {
+        let coordinator =
+            PersistenceCoordinator::with_expected_stores(["AgentRunStore", "LifeModelFileStore"]);
+        coordinator.register_read_write("AgentRunStore");
+        coordinator.register_read_write("LifeModelFileStore");
+        coordinator.seal();
+
+        coordinator.register_unavailable(
+            "LifeModelFileStore",
+            "lifemodel_open_failed",
+            "injected optional personalization failure",
+        );
+
+        assert_eq!(
+            coordinator.snapshot().mode,
+            PersistenceRuntimeMode::ReadWrite
+        );
+        coordinator
+            .require_effects_allowed()
+            .expect("base Agent remains available without LifeModel personalization");
+        assert!(matches!(
+            coordinator.require_normal_or_governed_data_import_write(
+                GovernedDataImportRecoveryOwner::LifeModelFileStore,
+                None,
+                "",
+                "",
+                "",
+            ),
+            Err(PersistenceGateError::StoreUnavailable { store, .. })
+                if store == "LifeModelFileStore"
         ));
     }
 

@@ -2498,6 +2498,11 @@ fn policy_authorized_explicit_memory_candidate_ids(intent: &IntentFrame) -> Vec<
             candidate.destination == crate::agent::MemoryDestination::MemoryProposal
                 && candidate.explicitness == "explicit"
                 && candidate.sensitivity != "sensitive"
+                && !matches!(
+                    candidate.kind,
+                    crate::agent::MemoryCandidateKind::ProceduralRule
+                        | crate::agent::MemoryCandidateKind::IdentityOrRole
+                )
         })
         .map(|candidate| candidate.candidate_id.clone())
         .collect::<Vec<_>>();
@@ -2649,6 +2654,7 @@ fn build_policy_governance_plan(
                     && candidate.sensitivity == "internal"
                     && candidate.confidence >= 0.85
                     && candidate.kind != MemoryCandidateKind::IdentityOrRole
+                    && candidate.kind != MemoryCandidateKind::ProceduralRule
                     && explicit_direct_ids.contains(&candidate.candidate_id) =>
             {
                 explicit_reversible_memory_candidate_ids.push(candidate.candidate_id.clone());
@@ -16551,6 +16557,14 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             "trash file",
             "move to trash",
             "restore file",
+            "propose an edit",
+            "propose edit",
+            "edit a knowledge asset",
+            "edit knowledge asset",
+            "edit agents.md",
+            "edit soul.md",
+            "edit user.md",
+            "edit memory.md",
             "写入工作区",
             "写入文件",
             "创建文件",
@@ -16562,6 +16576,8 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             "回收文件",
             "移到废纸篓",
             "恢复文件",
+            "修改知识资产",
+            "提议修改",
         ],
     );
     let named_file_write =
