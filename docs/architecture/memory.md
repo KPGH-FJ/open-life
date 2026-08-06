@@ -30,6 +30,7 @@ accepted through the governed bridge.
 - `src-tauri/src/memory_gateway.rs`
 - `src-tauri/src/main_chat_memory_proposals.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
+- `src-tauri/src/markdown_memory.rs`
 - `src-tauri/src/commands/memory.rs`
 
 ## Inherited blocker
@@ -98,8 +99,35 @@ LifeModel version. The cache is a prompt/context support surface, not a
 canonical truth write path.
 
 `src-tauri/src/main_chat_context_loader.rs` can include accepted lifecycle
-memory snippets and bounded `MEMORY.md` surfaces in Main Chat context. It labels
-them as bounded memory context and not trusted raw memory.
+memory snippets and bounded Markdown working-memory surfaces in Main Chat
+context. It labels them as bounded memory context and not trusted raw memory.
+
+Conversation history remains canonical in `MemoryStore.messages`. The runtime
+reconstructs a bounded provider context through
+`agent/conversation_context.rs`; its deterministic summary is a derived
+projection with a source range and digest, not long-term Memory.
+
+## Workspace And Project Markdown Memory
+
+`src-tauri/src/markdown_memory.rs` owns the file and scope contract. Workspace
+and Project are two explicit, user-selected directory roots stored in config.
+They are not inferred from the process working directory or from the list of
+generic knowledge roots. If both scopes select the same physical directory,
+the directory is loaded once rather than receiving two competing identities.
+
+Within each selected root, the active readable files are limited to
+`MEMORY.md` and one-level `memories/*.md` topic files. Symbolic links, nested
+paths, disabled `*.disabled.md` files, oversized files, and every other root are
+excluded. Runtime selection is task-relevant and capped by both file count and
+total character budgets. Each context block exposes its scope, relative source,
+and selection reason, and says explicitly that working memory is not identity,
+permission, or completion evidence.
+
+The Workspace editor reads through a backend ViewModel. Creating or editing a
+file only creates an `ExternalWriteAction` Review proposal with an exact target
+precondition. Deactivation is a reviewed move to `*.disabled.md`. Approval and
+artifact materialization still use the existing proposal and artifact gateway;
+neither the editor nor the context loader writes files directly.
 
 ## Main Chat Memory Candidates
 

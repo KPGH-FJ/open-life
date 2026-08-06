@@ -534,6 +534,28 @@ summary 后可从 canonical transcript 重建。
 退出标准：用户可在一个真实项目中创建、查看、修改和停用 Markdown Memory；
 另一个项目无法召回该内容，重启后作用域和来源仍一致。
 
+本切片实施边界（2026-08-06）：
+
+- scope owner：`SystemConfig.workspace_memory_root` 与
+  `project_memory_root` 分别绑定用户通过原生目录选择器明确选定的 Workspace 和
+  Project 根目录；进程 cwd 与通用 `knowledge_roots` 不再获得 Markdown Memory
+  权威；两个 scope 指向同一物理目录时只加载一次；
+- 文件契约：每个 root 只承认 `MEMORY.md` 与一层 `memories/*.md`；
+  `*.disabled.md`、符号链接、嵌套/逃逸路径、超限或非 UTF-8 文件不进入正常读取；
+  ViewModel 总计最多 65,536 个字符、每文件最多 32,768 个字符、每 scope 最多
+  16 个文件；
+- runtime 选择：仅把与当前任务标题或段落相关的最多 4 个文件、总计不超过 4,800
+  字符注入 Main Chat；每个 context block 明示 scope、相对来源和选择原因，并标明
+  它不是用户身份、权限或完成证据；
+- 用户控制：Workspace 提供最小 Markdown 编辑器和两个 scope 的原生目录选择；
+  读取来自 backend ViewModel，写入与停用分别只生成带 current digest/absent
+  precondition 的 `ExternalWriteAction` proposal 和受审 move proposal；
+- 物化与停用：批准后继续复用既有 artifact materializer；停用把文件移动为同目录
+  `*.disabled.md`，在批准和确认物化前仍保持当前召回状态；
+- 非目标：本切片不把 Markdown 写入 SQLite/LifeModel，不实现 5.1D 的跨会话
+  semantic/episodic/procedural 生命周期，不增加 Vector/FTS，也不建立通用文件记忆
+  平台。
+
 ###### 5.1D 显式跨会话 Memory 生命周期
 
 - 完成“请记住”、受治理推断候选、纠正和 supersede；
@@ -811,11 +833,11 @@ JSON。不得为了完成某个小切片而提前建设下一板块的平台能�
 当前阶段：**第五阶段——LifeModel 与 Memory 个人智能闭环已开始。前置“架构
 边界校准”于 2026-08-06 完成；Agent Memory 四层边界、LifeModel v2 范围、
 versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户确认。
-5.1A“跨重启继续当前会话”已于提交 `d77e38f` 完成并经用户确认。当前正在实施
-5.1B“摘要与长上下文压缩”，不提前进入 5.1C。canonical transcript 重建、65,536
-字符 Conversation 上下文预算、带 source/content digest 的确定性派生摘要、角色
-保真和 send/continuation/replay 收敛已经完成代码、focused 反例、严格 Clippy 与
-全量 Rust 测试；当前停在 5.1B 用户审阅边界，确认后才可提交并进入 5.1C。**
+5.1A“跨重启继续当前会话”已于提交 `d77e38f` 完成并经用户确认；5.1B“摘要与
+长上下文压缩”已于提交 `a21d9f4` 完成并经用户确认。5.1C“Workspace/Project
+Markdown Memory”已经完成实现、本地代码审阅、focused 失败反例、前端完整门禁、
+严格 Clippy 与全量 Rust 测试；当前停在 5.1C 用户审阅边界，尚未提交，也未进入
+5.1D。**
 
 第五阶段第一步实际完成：
 

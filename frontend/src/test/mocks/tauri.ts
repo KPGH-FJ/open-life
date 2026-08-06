@@ -926,6 +926,39 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(createMockLifeModelViewModelEnvelope() as T);
     case "get_memory_view_model":
       return Promise.resolve(createMockMemoryViewModelEnvelope() as T);
+    case "get_markdown_memory_view_model":
+      return Promise.resolve({
+        roots: [
+          { scope: "workspace", configured: false, rootPath: null, status: "unconfigured" },
+          { scope: "project", configured: false, rootPath: null, status: "unconfigured" },
+        ],
+        files: [],
+        totalCharCount: 0,
+        truncated: false,
+        sourceRule: "explicit roots only",
+      } as T);
+    case "select_markdown_memory_root":
+      return Promise.resolve({
+        cancelled: true,
+        scope: _args?.scope ?? "project",
+        selectedPath: null,
+      } as T);
+    case "draft_markdown_memory_file_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:markdown-memory:mock",
+        scope: _args?.request?.scope ?? "project",
+        relativePath: _args?.request?.relativePath ?? "MEMORY.md",
+        operation: "write",
+        status: "review_required",
+      } as T);
+    case "deactivate_markdown_memory_file_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:markdown-memory:mock-deactivate",
+        scope: _args?.request?.scope ?? "project",
+        relativePath: _args?.request?.relativePath ?? "MEMORY.md",
+        operation: "deactivate",
+        status: "review_required",
+      } as T);
     case "get_provider_privacy_boundary_summary":
       return Promise.resolve(createMockProviderPrivacyBoundarySummaryEnvelope() as T);
     case "get_tasks_view_model":

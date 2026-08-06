@@ -1,5 +1,6 @@
 import {
   FilePlus2,
+  FolderOpen,
   MessageSquarePlus,
   Pencil,
   RefreshCw,
@@ -10,7 +11,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
 import { WorkspaceMessageContent } from "./WorkspaceMessageContent";
@@ -90,6 +91,188 @@ function resourceFailureText(code: string): string {
   }
   if (code.includes("cancel")) return "文件读取已取消，没有把它显示为成功。";
   return `文件处理失败（${code}）。`;
+}
+
+function MarkdownMemoryPanel({ controller }: { controller: WorkspaceConversationController }) {
+  const memory = controller.markdownMemory;
+  const model = memory.model;
+  const [scope, setScope] = useState<"workspace" | "project">("project");
+  const [relativePath, setRelativePath] = useState("MEMORY.md");
+  const [newFile, setNewFile] = useState(false);
+  const selected = newFile
+    ? undefined
+    : model?.files.find(file => file.scope === scope && file.relativePath === relativePath);
+  const [content, setContent] = useState("");
+  const selectedKey = selected
+    ? `${selected.scope}:${selected.relativePath}:${selected.contentDigest}`
+    : "";
+
+  useEffect(() => {
+    setContent(selected?.content ?? "");
+  }, [selected?.content, selectedKey]);
+
+  const root = model?.roots.find(item => item.scope === scope);
+  const busy = memory.phase === "submitting" || memory.phase === "selecting_root";
+
+  return (
+    <section className="ol-workspace-markdown-memory" aria-labelledby="workspace-memory-title">
+      <div className="ol-workspace-resources__header">
+        <div>
+          <strong id="workspace-memory-title">Markdown 工作记忆</strong>
+          <span>按 Workspace / Project 隔离；不是 Life Model</span>
+        </div>
+        <button
+          type="button"
+          className="ol-workspace-resources__add"
+          disabled={busy}
+          onClick={() => void controller.reloadMarkdownMemory()}
+        >
+          <RefreshCw size={15} aria-hidden="true" />
+          重新读取
+        </button>
+      </div>
+
+      {memory.phase === "failed" && (
+        <FoundationNotice title="Markdown Memory 状态未确认" tone="error" live>
+          <p>{memory.reason}</p>
+        </FoundationNotice>
+      )}
+      {model?.truncated && (
+        <FoundationNotice title="部分 Markdown Memory 未加载" tone="protection">
+          <p>至少一个文件超出数量、大小或安全边界；当前不会把这次读取解释为完整。</p>
+        </FoundationNotice>
+      )}
+
+      <div className="ol-workspace-markdown-memory__roots">
+        {(["workspace", "project"] as const).map(candidateScope => {
+          const candidate = model?.roots.find(item => item.scope === candidateScope);
+          return (
+            <button
+              key={candidateScope}
+              type="button"
+              className={scope === candidateScope ? "is-active" : undefined}
+              disabled={busy}
+              onClick={() => setScope(candidateScope)}
+            >
+              <strong>{candidateScope === "workspace" ? "Workspace" : "Project"}</strong>
+              <span>{candidate?.status === "ready" ? "已绑定" : "未绑定"}</span>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void controller.selectMarkdownMemoryRoot(scope)}
+        >
+          <FolderOpen size={15} aria-hidden="true" />
+          {root?.configured ? "更换文件夹" : "选择文件夹"}
+        </button>
+      </div>
+
+      {root?.status === "ready" ? (
+        <div className="ol-workspace-markdown-memory__editor">
+          <label>
+            <span>文件</span>
+            <select
+              value={selected ? `${selected.scope}:${selected.relativePath}` : "new"}
+              disabled={busy}
+              onChange={event => {
+                const value = event.target.value;
+                if (value === "new") {
+                  setNewFile(true);
+                  setRelativePath("MEMORY.md");
+                  setContent("");
+                  return;
+                }
+                const [, ...pathParts] = value.split(":");
+                setNewFile(false);
+                setRelativePath(pathParts.join(":"));
+              }}
+            >
+              <option value="new">新建或替换 MEMORY.md</option>
+              {model?.files
+                .filter(file => file.scope === scope)
+                .map(file => (
+                  <option
+                    key={`${file.scope}:${file.relativePath}`}
+                    value={`${file.scope}:${file.relativePath}`}
+                  >
+                    {file.relativePath}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>相对路径</span>
+            <input
+              value={relativePath}
+              disabled={Boolean(selected) || busy}
+              onChange={event => setRelativePath(event.target.value)}
+              placeholder="MEMORY.md 或 memories/topic.md"
+            />
+          </label>
+          <label>
+            <span>Markdown 内容</span>
+            <textarea
+              rows={7}
+              value={content}
+              disabled={busy}
+              onChange={event => setContent(event.target.value)}
+            />
+          </label>
+          <div className="ol-workspace-markdown-memory__actions">
+            <FoundationActionButton
+              label="提交到 Review"
+              icon={<Pencil size={15} aria-hidden="true" />}
+              loading={memory.phase === "submitting" && memory.operation === "write"}
+              disabled={busy || !relativePath.trim() || !content.trim()}
+              disabledReason={!content.trim() ? "先填写 Markdown 内容。" : undefined}
+              onClick={() =>
+                void controller.proposeMarkdownMemoryWrite({
+                  scope,
+                  relativePath,
+                  content,
+                  ...(selected ? { expectedCurrentDigest: selected.contentDigest } : {}),
+                })
+              }
+            />
+            {selected && (
+              <FoundationActionButton
+                label="停用"
+                icon={<Trash2 size={15} aria-hidden="true" />}
+                variant="quiet"
+                loading={memory.phase === "submitting" && memory.operation === "deactivate"}
+                disabled={busy}
+                onClick={() =>
+                  void controller.proposeMarkdownMemoryDeactivation({
+                    scope,
+                    relativePath: selected.relativePath,
+                    expectedCurrentDigest: selected.contentDigest,
+                  })
+                }
+              />
+            )}
+          </div>
+          <small>
+            提交只创建 Review
+            项；批准并确认物化前，文件不会改变。运行时只选择与当前任务相关的有界段落。
+          </small>
+        </div>
+      ) : (
+        <p>先为当前作用域选择一个真实文件夹；其他文件夹中的 Memory 不会被召回。</p>
+      )}
+
+      {memory.phase === "ready" && memory.lastProposal && (
+        <FoundationNotice title="等待 Review" tone="protection" live>
+          <p>
+            {memory.lastProposal.relativePath} 的
+            {memory.lastProposal.operation === "write" ? "写入" : "停用"}
+            仍待审核；当前不显示为已应用。
+          </p>
+        </FoundationNotice>
+      )}
+    </section>
+  );
 }
 
 export function WorkspaceConversationPanel({
@@ -231,6 +414,8 @@ export function WorkspaceConversationPanel({
           <p>{resourceFailureText(controller.resourceMutation.reason)}</p>
         </FoundationNotice>
       )}
+
+      <MarkdownMemoryPanel controller={controller} />
 
       <form
         className="ol-workspace-composer"

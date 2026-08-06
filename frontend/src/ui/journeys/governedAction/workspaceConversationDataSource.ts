@@ -2,14 +2,18 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelMainChatAgentTask,
   createChatSession,
+  deactivateMarkdownMemoryFileProposal,
   deleteChatSession,
   detachResourceFromTurn,
+  draftMarkdownMemoryFileProposal,
   getChatHistory,
+  getMarkdownMemoryViewModel,
   listChatSessions,
   listMainChatSkills,
   listMainChatToolCandidates,
   pickAndImportResources,
   renameChatSession,
+  selectMarkdownMemoryRoot,
   selectMainChatSkill,
   clearMainChatSkill,
   startStreamMessage,
@@ -21,6 +25,10 @@ import {
   type MainChatSelectedSkill,
   type MainChatSkillSummary,
   type MainChatToolCandidateList,
+  type MarkdownMemoryProposalReceipt,
+  type MarkdownMemoryRootSelection,
+  type MarkdownMemoryScope,
+  type MarkdownMemoryViewModel,
   type StreamMessageChunkPayload,
   type StreamMessageDonePayload,
   type StreamMessageStartPayload,
@@ -58,6 +66,19 @@ export interface WorkspaceConversationDataSource {
   selectSkill?(sessionId: string, skillId: string): Promise<MainChatSelectedSkill>;
   clearSkill?(sessionId: string): Promise<MainChatSelectedSkill>;
   listToolCandidates?(taskSessionId?: string): Promise<MainChatToolCandidateList>;
+  loadMarkdownMemory?(): Promise<MarkdownMemoryViewModel>;
+  selectMarkdownMemoryRoot?(scope: MarkdownMemoryScope): Promise<MarkdownMemoryRootSelection>;
+  draftMarkdownMemoryFileProposal?(request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    content: string;
+    expectedCurrentDigest?: string;
+  }): Promise<MarkdownMemoryProposalReceipt>;
+  deactivateMarkdownMemoryFileProposal?(request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    expectedCurrentDigest: string;
+  }): Promise<MarkdownMemoryProposalReceipt>;
 }
 
 function matchesActiveStream(
@@ -110,4 +131,8 @@ export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSour
   selectSkill: selectMainChatSkill,
   clearSkill: clearMainChatSkill,
   listToolCandidates: listMainChatToolCandidates,
+  loadMarkdownMemory: getMarkdownMemoryViewModel,
+  selectMarkdownMemoryRoot,
+  draftMarkdownMemoryFileProposal,
+  deactivateMarkdownMemoryFileProposal,
 };

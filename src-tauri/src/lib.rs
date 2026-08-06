@@ -58,6 +58,7 @@ pub(crate) mod main_chat_task_controls;
 pub(crate) mod main_chat_turn_pipeline;
 #[allow(dead_code)]
 pub mod main_chat_turn_runtime;
+pub(crate) mod markdown_memory;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
@@ -196,6 +197,10 @@ use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
     retry_main_chat_agent_action,
+};
+use markdown_memory::{
+    deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
+    get_markdown_memory_view_model,
 };
 use read_models::life_model::get_life_model_view_model;
 use read_models::memory::get_memory_view_model;
@@ -513,6 +518,15 @@ async fn select_artifact_output_directory<R: tauri::Runtime>(
     state: State<'_, Arc<AppState>>,
 ) -> Result<commands::settings::ArtifactOutputDirectorySelection, errors::AppError> {
     commands::settings::select_artifact_output_directory(app_handle, state.inner()).await
+}
+
+#[tauri::command]
+async fn select_markdown_memory_root<R: tauri::Runtime>(
+    scope: markdown_memory::MarkdownMemoryScope,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<commands::settings::MarkdownMemoryRootSelection, errors::AppError> {
+    commands::settings::select_markdown_memory_root(app_handle, state.inner(), scope).await
 }
 
 #[tauri::command]
@@ -948,12 +962,16 @@ pub fn run() {
             get_life_model_view_model,
             get_review_center_view_model,
             get_memory_view_model,
+            get_markdown_memory_view_model,
+            draft_markdown_memory_file_proposal,
+            deactivate_markdown_memory_file_proposal,
             get_provider_privacy_boundary_summary,
             get_tasks_view_model,
             get_workspace_view_model,
             get_config,
             save_config,
             select_artifact_output_directory,
+            select_markdown_memory_root,
             recover_required_credential_access,
             get_agent_run,
             list_agent_runs,

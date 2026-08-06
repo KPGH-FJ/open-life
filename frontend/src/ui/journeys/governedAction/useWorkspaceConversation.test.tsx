@@ -76,6 +76,65 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
 }
 
 describe("workspace conversation journey", () => {
+  it("keeps Markdown Memory changes pending until the backend returns a Review receipt", async () => {
+    const loadMarkdownMemory = vi.fn().mockResolvedValue({
+      roots: [
+        { scope: "workspace", configured: false, rootPath: null, status: "unconfigured" },
+        { scope: "project", configured: true, rootPath: "/project", status: "ready" },
+      ],
+      files: [
+        {
+          scope: "project",
+          relativePath: "MEMORY.md",
+          content: "# Release\nKeep sources exact.",
+          contentDigest: "sha256:current",
+          charCount: 29,
+          active: true,
+        },
+      ],
+      totalCharCount: 29,
+      truncated: false,
+      sourceRule: "exact roots only",
+    });
+    const draftMarkdownMemoryFileProposal = vi.fn().mockResolvedValue({
+      proposalId: "proposal-1",
+      scope: "project",
+      relativePath: "MEMORY.md",
+      operation: "write",
+      status: "review_required",
+    });
+    const dataSource = source({ loadMarkdownMemory, draftMarkdownMemoryFileProposal });
+    const announce = vi.fn();
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await waitFor(() => expect(result.current.markdownMemory.phase).toBe("ready"));
+
+    await act(async () =>
+      expect(
+        await result.current.proposeMarkdownMemoryWrite({
+          scope: "project",
+          relativePath: "MEMORY.md",
+          content: "# Release\nKeep sources and dates exact.",
+          expectedCurrentDigest: "sha256:current",
+        })
+      ).toBe(true)
+    );
+
+    expect(draftMarkdownMemoryFileProposal).toHaveBeenCalledWith({
+      scope: "project",
+      relativePath: "MEMORY.md",
+      content: "# Release\nKeep sources and dates exact.",
+      expectedCurrentDigest: "sha256:current",
+    });
+    expect(result.current.markdownMemory).toMatchObject({
+      phase: "ready",
+      lastProposal: { proposalId: "proposal-1", status: "review_required" },
+    });
+    expect(loadMarkdownMemory).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith("Markdown Memory 变更已进入 Review；当前文件尚未修改。");
+  });
+
   it("binds selected resources and the streamed turn to one exact operation", async () => {
     const pickResources = vi.fn(async (importOperationId: string, turnOperationId: string) => ({
       cancelled: false,

@@ -53,6 +53,78 @@ fn reviewed_artifact_target_precondition(
     }
 }
 
+async fn artifact_safe_paths_for_proposal(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Vec<String>, String> {
+    let config = state.config.lock().await;
+    if proposal.after.get("source").and_then(Value::as_str) != Some("markdown_memory_editor") {
+        return Ok(config.system.safe_paths.clone());
+    }
+    let scope = match proposal.after.get("memoryScope").and_then(Value::as_str) {
+        Some("workspace") => crate::markdown_memory::MarkdownMemoryScope::Workspace,
+        Some("project") => crate::markdown_memory::MarkdownMemoryScope::Project,
+        _ => return Err("Markdown memory proposal scope is missing or invalid".into()),
+    };
+    let relative = proposal
+        .after
+        .get("memoryRelativePath")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Markdown memory proposal relative path is missing".to_string())?;
+    let relative = crate::markdown_memory::validate_markdown_memory_relative_path(relative)?;
+    let configured_root = match scope {
+        crate::markdown_memory::MarkdownMemoryScope::Workspace => {
+            config.system.workspace_memory_root.as_deref()
+        }
+        crate::markdown_memory::MarkdownMemoryScope::Project => {
+            config.system.project_memory_root.as_deref()
+        }
+    }
+    .ok_or_else(|| "Markdown memory proposal root is no longer configured".to_string())?;
+    let root = std::path::PathBuf::from(configured_root)
+        .canonicalize()
+        .map_err(|error| format!("Markdown memory proposal root is unavailable: {error}"))?;
+    let expected_source = root.join(&relative);
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("propose_write");
+    if matches!(operation, "move" | "trash" | "restore") {
+        let source = proposal
+            .after
+            .get("source_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Markdown memory move source is missing".to_string())?;
+        let target = proposal
+            .after
+            .get("target_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Markdown memory move target is missing".to_string())?;
+        let filename = expected_source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| "Markdown memory move filename is invalid".to_string())?;
+        let expected_target = expected_source.with_file_name(format!("{filename}.disabled.md"));
+        if operation != "move" || source != expected_source || target != expected_target {
+            return Err("Markdown memory move is not bound to the selected scope root".into());
+        }
+    } else {
+        let target = proposal
+            .after
+            .get("path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Markdown memory write target is missing".to_string())?;
+        if target != expected_source {
+            return Err("Markdown memory write is not bound to the selected scope root".into());
+        }
+    }
+    Ok(vec![root.to_string_lossy().into_owned()])
+}
+
 fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
     state
         .persistence_coordinator
@@ -468,7 +540,6 @@ async fn reconcile_artifact_effects_with_state(
             .map_err(|error| runtime_proposal_store_error(state, error))?
     };
     let backlog_may_remain = records.len() == bounded_limit as usize;
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
     let mut reconciled = 0usize;
     for record in records {
         let proposal = {
@@ -496,6 +567,20 @@ async fn reconcile_artifact_effects_with_state(
             reconciled += 1;
             continue;
         }
+        let safe_paths = match artifact_safe_paths_for_proposal(state, &proposal).await {
+            Ok(safe_paths) => safe_paths,
+            Err(_) => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_scope_binding_failed",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
+        };
         let operation = proposal
             .after
             .get("operation")
@@ -1090,7 +1175,7 @@ async fn confirmed_artifact_receipt_from_store(
             .get("target_path")
             .and_then(Value::as_str)
             .ok_or_else(|| "confirmed artifact move lost target_path".to_string())?;
-        let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+        let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
         let (target_reference_digest, observation) =
             inspect_artifact_move(source, target, &record.content_digest, &safe_paths)?;
         if target_reference_digest != record.target_reference_digest
@@ -1121,7 +1206,7 @@ async fn confirmed_artifact_receipt_from_store(
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
     let prepared = prepare_artifact_materialization(
         &proposal.id,
         &record.dispatch_claim_id,
@@ -1715,7 +1800,15 @@ async fn apply_external_write_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_paths = match artifact_safe_paths_for_proposal(state, proposal).await {
+        Ok(safe_paths) => safe_paths,
+        Err(error) => {
+            let code = "artifact_scope_binding_failed";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+        }
+    };
     let target_precondition = match reviewed_artifact_target_precondition(&proposal.after) {
         Ok(precondition) => precondition,
         Err(error) => {
@@ -1892,7 +1985,15 @@ async fn apply_external_move_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_paths = match artifact_safe_paths_for_proposal(state, proposal).await {
+        Ok(safe_paths) => safe_paths,
+        Err(error) => {
+            let code = "artifact_move_scope_binding_failed";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+        }
+    };
     let prepared =
         match prepare_artifact_move(&proposal.id, source, target, expected_digest, &safe_paths) {
             Ok(prepared) => prepared,

@@ -277,6 +277,8 @@ export interface AppConfig {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     safe_paths?: string[];
+    workspace_memory_root?: string;
+    project_memory_root?: string;
     search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
     search_provider_key?: string;
     search_provider_key_ref?: string;
@@ -308,6 +310,77 @@ export interface ArtifactOutputDirectorySelection {
 
 export async function selectArtifactOutputDirectory(): Promise<ArtifactOutputDirectorySelection> {
   return safeInvoke<ArtifactOutputDirectorySelection>("select_artifact_output_directory");
+}
+
+export type MarkdownMemoryScope = "workspace" | "project";
+
+export interface MarkdownMemoryRootSelection {
+  cancelled: boolean;
+  scope: MarkdownMemoryScope;
+  selectedPath: string | null;
+}
+
+export interface MarkdownMemoryRootView {
+  scope: MarkdownMemoryScope;
+  configured: boolean;
+  rootPath: string | null;
+  status: "ready" | "unavailable" | "unconfigured";
+}
+
+export interface MarkdownMemoryFileView {
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  content: string;
+  contentDigest: string;
+  charCount: number;
+  active: boolean;
+}
+
+export interface MarkdownMemoryViewModel {
+  roots: MarkdownMemoryRootView[];
+  files: MarkdownMemoryFileView[];
+  totalCharCount: number;
+  truncated: boolean;
+  sourceRule: string;
+}
+
+export interface MarkdownMemoryProposalReceipt {
+  proposalId: string;
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  operation: "write" | "deactivate";
+  status: "review_required";
+}
+
+export async function selectMarkdownMemoryRoot(
+  scope: MarkdownMemoryScope
+): Promise<MarkdownMemoryRootSelection> {
+  return safeInvoke<MarkdownMemoryRootSelection>("select_markdown_memory_root", { scope });
+}
+
+export async function getMarkdownMemoryViewModel(): Promise<MarkdownMemoryViewModel> {
+  return safeInvoke<MarkdownMemoryViewModel>("get_markdown_memory_view_model");
+}
+
+export async function draftMarkdownMemoryFileProposal(request: {
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  content: string;
+  expectedCurrentDigest?: string;
+}): Promise<MarkdownMemoryProposalReceipt> {
+  return safeInvoke<MarkdownMemoryProposalReceipt>("draft_markdown_memory_file_proposal", {
+    request,
+  });
+}
+
+export async function deactivateMarkdownMemoryFileProposal(request: {
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  expectedCurrentDigest: string;
+}): Promise<MarkdownMemoryProposalReceipt> {
+  return safeInvoke<MarkdownMemoryProposalReceipt>("deactivate_markdown_memory_file_proposal", {
+    request,
+  });
 }
 
 export interface CredentialRecoveryItem {

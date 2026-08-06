@@ -93,6 +93,7 @@ pub(crate) async fn compile_main_chat_context(
     let (current_context, configured_context) = tokio::join!(current_context, configured_context);
     candidates.extend(current_context.unwrap_or_default());
     candidates.extend(configured_context.unwrap_or_default());
+    candidates.extend(load_configured_markdown_memory_context_candidates(state, user_text).await?);
     ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id.as_deref());
     candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
     let sessions = {
@@ -221,8 +222,10 @@ pub(crate) fn ensure_bundled_selected_skill_context_candidate(
     );
 }
 
-// Bounded knowledge-format surfaces: AGENTS.md, SOUL.md, USER.md, MEMORY.md,
-// memories/USER.md, memories/MEMORY.md, skills/<selected>/SKILL.md.
+// Bounded instruction and user-context surfaces: AGENTS.md, SOUL.md, USER.md,
+// memories/USER.md, and skills/<selected>/SKILL.md. Markdown working memory has
+// its own explicitly selected Workspace/Project roots below; it must not be
+// rediscovered through the process working directory or every knowledge root.
 pub(crate) fn load_current_workspace_knowledge_context_candidates(
     selected_skill_id: Option<&str>,
     task_text: &str,
@@ -312,7 +315,7 @@ impl KnowledgeContextRoot {
 fn load_knowledge_context_candidates_from_roots(
     roots: &[KnowledgeContextRoot],
     selected_skill_id: Option<&str>,
-    task_text: &str,
+    _task_text: &str,
 ) -> Vec<ContextSourceCandidate> {
     let selected_skill_id = selected_skill_id.and_then(validate_selected_skill_id);
     let mut candidates = Vec::new();
@@ -355,7 +358,6 @@ fn load_knowledge_context_candidates_from_roots(
             "private",
             8,
         );
-        push_task_scoped_markdown_file(&mut candidates, &mut seen, root, "MEMORY.md", task_text);
         push_known_file(
             &mut candidates,
             &mut seen,
@@ -366,59 +368,86 @@ fn load_knowledge_context_candidates_from_roots(
             "private",
             8,
         );
-        push_task_scoped_markdown_file(
-            &mut candidates,
-            &mut seen,
-            root,
-            "memories/MEMORY.md",
-            task_text,
-        );
     }
 
     candidates
 }
 
-fn push_task_scoped_markdown_file(
-    candidates: &mut Vec<ContextSourceCandidate>,
-    seen: &mut HashSet<String>,
-    root: &KnowledgeContextRoot,
-    relative: &str,
+pub(crate) async fn load_configured_markdown_memory_context_candidates(
+    state: &Arc<AppState>,
     task_text: &str,
-) {
-    if let Some(candidate) = read_task_scoped_markdown_file(root, relative, task_text) {
-        push_unique(candidates, seen, candidate);
-    }
+) -> Result<Vec<ContextSourceCandidate>, String> {
+    let (workspace_root, project_root) = {
+        let config = state.config.lock().await;
+        (
+            config.system.workspace_memory_root.clone(),
+            config.system.project_memory_root.clone(),
+        )
+    };
+    let roots = crate::markdown_memory::configured_markdown_memory_roots(
+        workspace_root.as_deref(),
+        project_root.as_deref(),
+    );
+    let task_text = task_text.to_string();
+    tokio::task::spawn_blocking(move || {
+        load_markdown_memory_context_candidates_from_roots(&roots, &task_text)
+    })
+    .await
+    .map_err(|error| format!("Markdown memory context worker failed: {error}"))
 }
 
-fn read_task_scoped_markdown_file(
-    root: &KnowledgeContextRoot,
-    relative: &str,
+pub(crate) fn load_markdown_memory_context_candidates_from_roots(
+    roots: &[crate::markdown_memory::MarkdownMemoryRoot],
     task_text: &str,
-) -> Option<ContextSourceCandidate> {
-    let relative_path = validate_context_relative_path(relative)?;
-    let canonical_root = root.path.canonicalize().ok()?;
-    let path = canonical_root.join(relative_path);
-    let canonical = path.canonicalize().ok()?;
-    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
-        return None;
+) -> Vec<ContextSourceCandidate> {
+    let (files, _) = crate::markdown_memory::load_markdown_memory_files(roots);
+    let mut selected = Vec::new();
+    let mut used_chars = 0usize;
+    for file in files {
+        let Some(section) = select_task_relevant_markdown(&file.content, task_text) else {
+            continue;
+        };
+        let source = format!(
+            "markdown-memory:{}:{}",
+            file.scope.as_str(),
+            file.relative_path
+        );
+        let prefix = format!(
+            "Task-selected {} Markdown working memory from {}. It is not user identity, permission, or completion evidence. Selection reason: current task terms matched one or more headings or sections.\n",
+            file.scope.as_str(),
+            source
+        );
+        let remaining =
+            crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_CHARS.saturating_sub(used_chars);
+        if remaining <= prefix.chars().count() {
+            break;
+        }
+        let per_file_budget = MAX_CONTEXT_CHARS_PER_FILE.min(remaining);
+        let content = format!("{prefix}{section}")
+            .chars()
+            .take(per_file_budget)
+            .collect::<String>();
+        used_chars += content.chars().count();
+        selected.push(ContextSourceCandidate::new(
+            ContextSourceKind::SelectedPersonalContext,
+            source,
+            content,
+            format!(
+                "task-relevant {} Markdown working memory; bounded, source-visible, and non-authoritative",
+                file.scope.as_str()
+            ),
+            "private",
+            if file.scope == crate::markdown_memory::MarkdownMemoryScope::Project {
+                10
+            } else {
+                8
+            },
+        ));
+        if selected.len() >= crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_FILES {
+            break;
+        }
     }
-    let content = std::fs::read_to_string(canonical).ok()?;
-    let scoped = select_task_relevant_markdown(&content, task_text)?;
-    let source = source_id(root, relative);
-    let bounded = format!(
-        "Unverified task-scoped Markdown memory from {source}. Use as working context only; it is not canonical user truth or permission.\n{scoped}"
-    )
-    .chars()
-    .take(MAX_CONTEXT_CHARS_PER_FILE)
-    .collect::<String>();
-    Some(ContextSourceCandidate::new(
-        ContextSourceKind::SelectedPersonalContext,
-        source,
-        bounded,
-        "task-relevant Markdown working memory; bounded and non-authoritative",
-        "private",
-        8,
-    ))
+    selected
 }
 
 fn select_task_relevant_markdown(content: &str, task_text: &str) -> Option<String> {
@@ -650,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_bounded_workspace_knowledge_surfaces_and_selected_skill_only() {
+    fn generic_knowledge_roots_do_not_gain_markdown_memory_authority() {
         let dir = tempfile::tempdir().expect("temp knowledge root");
         std::fs::create_dir_all(dir.path().join("memories")).expect("memories dir");
         std::fs::create_dir_all(dir.path().join("skills/summarize")).expect("selected skill dir");
@@ -689,9 +718,7 @@ mod tests {
             "AGENTS.md",
             "SOUL.md",
             "USER.md",
-            "MEMORY.md",
             "memories/USER.md",
-            "memories/MEMORY.md",
             "skills/summarize/SKILL.md",
         ] {
             assert!(
@@ -699,6 +726,8 @@ mod tests {
                 "missing bounded knowledge source {expected}"
             );
         }
+        assert!(!source_ids.contains(&"MEMORY.md"));
+        assert!(!source_ids.contains(&"memories/MEMORY.md"));
         assert!(!source_ids.contains(&"skills/other/SKILL.md"));
         assert!(candidates.iter().any(|candidate| {
             candidate.source_kind == ContextSourceKind::SkillInstruction
@@ -792,21 +821,21 @@ mod tests {
         )
         .expect("memory");
 
-        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(
+        let roots =
+            crate::markdown_memory::configured_markdown_memory_roots(dir.path().to_str(), None);
+        let candidates = load_markdown_memory_context_candidates_from_roots(
             &roots,
-            None,
             "Help prepare the roadshow deck",
         );
         let memory = candidates
             .iter()
-            .find(|candidate| candidate.source_id == "MEMORY.md")
+            .find(|candidate| candidate.source_id == "markdown-memory:workspace:MEMORY.md")
             .expect("task-relevant memory");
 
         assert!(memory.content.contains("Roadshow"));
         assert!(memory
             .content
-            .contains("not canonical user truth or permission"));
+            .contains("not user identity, permission, or completion evidence"));
         assert!(!memory.content.contains("Gardening"));
     }
 
@@ -819,16 +848,16 @@ mod tests {
         )
         .expect("memory");
 
-        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(
+        let roots =
+            crate::markdown_memory::configured_markdown_memory_roots(dir.path().to_str(), None);
+        let candidates = load_markdown_memory_context_candidates_from_roots(
             &roots,
-            None,
             "Prepare the quarterly finance report",
         );
 
         assert!(!candidates
             .iter()
-            .any(|candidate| candidate.source_id == "MEMORY.md"));
+            .any(|candidate| candidate.source_id.contains("MEMORY.md")));
     }
 
     #[test]
@@ -840,15 +869,69 @@ mod tests {
         )
         .expect("memory");
 
-        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
+        let roots =
+            crate::markdown_memory::configured_markdown_memory_roots(dir.path().to_str(), None);
         let candidates =
-            load_knowledge_context_candidates_from_roots(&roots, None, "请帮我准备季度财务报告");
+            load_markdown_memory_context_candidates_from_roots(&roots, "请帮我准备季度财务报告");
         let memory = candidates
             .iter()
-            .find(|candidate| candidate.source_id == "MEMORY.md")
+            .find(|candidate| candidate.source_id == "markdown-memory:workspace:MEMORY.md")
             .expect("Chinese task-relevant memory");
         assert!(memory.content.contains("现金流"));
         assert!(!memory.content.contains("番茄"));
+    }
+
+    #[test]
+    fn switching_project_root_cannot_recall_the_previous_project() {
+        let project_a = tempfile::tempdir().expect("project a");
+        let project_b = tempfile::tempdir().expect("project b");
+        std::fs::write(
+            project_a.path().join("MEMORY.md"),
+            "# Launch\nALPHA_PROJECT_SECRET launch checklist.",
+        )
+        .unwrap();
+        std::fs::write(
+            project_b.path().join("MEMORY.md"),
+            "# Launch\nBETA_PROJECT_ONLY launch checklist.",
+        )
+        .unwrap();
+        let roots = crate::markdown_memory::configured_markdown_memory_roots(
+            None,
+            project_b.path().to_str(),
+        );
+        let candidates =
+            load_markdown_memory_context_candidates_from_roots(&roots, "prepare launch checklist");
+        let serialized = serde_json::to_string(&candidates).unwrap();
+
+        assert!(serialized.contains("BETA_PROJECT_ONLY"));
+        assert!(!serialized.contains("ALPHA_PROJECT_SECRET"));
+    }
+
+    #[test]
+    fn markdown_memory_runtime_context_has_a_total_and_file_count_budget() {
+        let root = tempfile::tempdir().expect("bounded project");
+        std::fs::create_dir_all(root.path().join("memories")).unwrap();
+        for index in 0..8 {
+            std::fs::write(
+                root.path().join(format!("memories/topic-{index}.md")),
+                format!(
+                    "# Shared task {index}\n{}",
+                    "bounded shared context ".repeat(100)
+                ),
+            )
+            .unwrap();
+        }
+        let roots =
+            crate::markdown_memory::configured_markdown_memory_roots(None, root.path().to_str());
+        let candidates =
+            load_markdown_memory_context_candidates_from_roots(&roots, "shared task context");
+        let total_chars = candidates
+            .iter()
+            .map(|candidate| candidate.content.chars().count())
+            .sum::<usize>();
+
+        assert!(candidates.len() <= crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_FILES);
+        assert!(total_chars <= crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_CHARS);
     }
 
     #[tokio::test]

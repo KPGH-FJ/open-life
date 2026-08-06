@@ -5,6 +5,9 @@ import type {
   MainChatSkillSummary,
   MainChatToolCandidateList,
   MainChatTurnStatus,
+  MarkdownMemoryProposalReceipt,
+  MarkdownMemoryScope,
+  MarkdownMemoryViewModel,
   ProductAction,
   StreamMessageChunkPayload,
   StreamMessageStartPayload,
@@ -34,6 +37,13 @@ export type WorkspaceCapabilityState =
   | { phase: "ready" }
   | { phase: "selecting"; skillId: string | null }
   | { phase: "failed"; reason: string };
+
+export type WorkspaceMarkdownMemoryState =
+  | { phase: "loading"; model: MarkdownMemoryViewModel | null }
+  | { phase: "ready"; model: MarkdownMemoryViewModel; lastProposal?: MarkdownMemoryProposalReceipt }
+  | { phase: "selecting_root"; model: MarkdownMemoryViewModel | null; scope: MarkdownMemoryScope }
+  | { phase: "submitting"; model: MarkdownMemoryViewModel; operation: "write" | "deactivate" }
+  | { phase: "failed"; model: MarkdownMemoryViewModel | null; reason: string };
 
 export type WorkspaceTurnState =
   | { phase: "idle" }
@@ -96,6 +106,7 @@ export type WorkspaceConversationController = {
   selectedSkillId: string | null;
   toolCandidates: MainChatToolCandidateList | null;
   capabilityState: WorkspaceCapabilityState;
+  markdownMemory: WorkspaceMarkdownMemoryState;
   busy: boolean;
   ensureLoaded: () => void;
   reload: () => Promise<boolean>;
@@ -105,6 +116,19 @@ export type WorkspaceConversationController = {
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
   selectSkill: (skillId: string | null) => Promise<boolean>;
+  reloadMarkdownMemory: () => Promise<boolean>;
+  selectMarkdownMemoryRoot: (scope: MarkdownMemoryScope) => Promise<boolean>;
+  proposeMarkdownMemoryWrite: (request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    content: string;
+    expectedCurrentDigest?: string;
+  }) => Promise<boolean>;
+  proposeMarkdownMemoryDeactivation: (request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    expectedCurrentDigest: string;
+  }) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
   cancel: () => Promise<void>;
@@ -143,9 +167,14 @@ export function useWorkspaceConversation(
   const [capabilityState, setCapabilityState] = useState<WorkspaceCapabilityState>({
     phase: "idle",
   });
+  const [markdownMemory, setMarkdownMemory] = useState<WorkspaceMarkdownMemoryState>({
+    phase: "loading",
+    model: null,
+  });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
   const cancelRequestRef = useRef(0);
+  const markdownMemoryRequestRef = useRef(0);
   const loadedRef = useRef(false);
   const explicitConversationChoiceRef = useRef(false);
 
@@ -153,6 +182,7 @@ export function useWorkspaceConversation(
     requestRef.current += 1;
     operationRef.current += 1;
     cancelRequestRef.current += 1;
+    markdownMemoryRequestRef.current += 1;
     loadedRef.current = false;
     explicitConversationChoiceRef.current = false;
     setSessions([]);
@@ -172,13 +202,144 @@ export function useWorkspaceConversation(
     setSelectedSkillId(null);
     setToolCandidates(null);
     setCapabilityState({ phase: "idle" });
+    setMarkdownMemory({ phase: "loading", model: null });
     return () => {
       requestRef.current += 1;
       operationRef.current += 1;
       cancelRequestRef.current += 1;
+      markdownMemoryRequestRef.current += 1;
       loadedRef.current = false;
     };
   }, [dataSource]);
+
+  const reloadMarkdownMemory = useCallback(async (): Promise<boolean> => {
+    const requestId = ++markdownMemoryRequestRef.current;
+    if (!dataSource?.loadMarkdownMemory) {
+      setMarkdownMemory(current => ({
+        phase: "failed",
+        model: current.model,
+        reason: "markdown_memory_data_source_unavailable",
+      }));
+      return false;
+    }
+    setMarkdownMemory(current => ({ phase: "loading", model: current.model }));
+    try {
+      const model = await dataSource.loadMarkdownMemory();
+      if (requestId !== markdownMemoryRequestRef.current) return false;
+      setMarkdownMemory({ phase: "ready", model });
+      return true;
+    } catch (error) {
+      if (requestId !== markdownMemoryRequestRef.current) return false;
+      setMarkdownMemory(current => ({
+        phase: "failed",
+        model: current.model,
+        reason: errorText(error),
+      }));
+      return false;
+    }
+  }, [dataSource]);
+
+  useEffect(() => {
+    if (!dataSource?.loadMarkdownMemory) return;
+    void reloadMarkdownMemory();
+  }, [dataSource, reloadMarkdownMemory]);
+
+  const selectMarkdownMemoryRoot = useCallback(
+    async (scope: MarkdownMemoryScope): Promise<boolean> => {
+      if (!dataSource?.selectMarkdownMemoryRoot || markdownMemory.phase === "selecting_root") {
+        announce("当前不能选择 Markdown Memory 文件夹。");
+        return false;
+      }
+      const currentModel = markdownMemory.model;
+      const requestId = ++markdownMemoryRequestRef.current;
+      setMarkdownMemory({ phase: "selecting_root", model: currentModel, scope });
+      try {
+        const selection = await dataSource.selectMarkdownMemoryRoot(scope);
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        if (selection.cancelled) {
+          if (currentModel) setMarkdownMemory({ phase: "ready", model: currentModel });
+          else setMarkdownMemory({ phase: "loading", model: null });
+          announce("没有选择文件夹；当前 Markdown Memory 作用域未改变。");
+          return false;
+        }
+        if (selection.scope !== scope || !selection.selectedPath) {
+          throw new Error("markdown_memory_root_selection_identity_mismatch");
+        }
+        const reloaded = await reloadMarkdownMemory();
+        announce(
+          reloaded
+            ? `${scope === "workspace" ? "Workspace" : "Project"} Memory 文件夹已重新读取。`
+            : "文件夹选择已返回，但 Memory 状态没有得到后端确认。"
+        );
+        return reloaded;
+      } catch (error) {
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "failed", model: currentModel, reason: errorText(error) });
+        announce("Markdown Memory 文件夹没有完成选择。");
+        return false;
+      }
+    },
+    [announce, dataSource, markdownMemory, reloadMarkdownMemory]
+  );
+
+  const proposeMarkdownMemoryWrite = useCallback(
+    async (request: {
+      scope: MarkdownMemoryScope;
+      relativePath: string;
+      content: string;
+      expectedCurrentDigest?: string;
+    }): Promise<boolean> => {
+      if (!dataSource?.draftMarkdownMemoryFileProposal || !markdownMemory.model) {
+        announce("当前不能提交 Markdown Memory 变更。");
+        return false;
+      }
+      const model = markdownMemory.model;
+      const requestId = ++markdownMemoryRequestRef.current;
+      setMarkdownMemory({ phase: "submitting", model, operation: "write" });
+      try {
+        const receipt = await dataSource.draftMarkdownMemoryFileProposal(request);
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "ready", model, lastProposal: receipt });
+        announce("Markdown Memory 变更已进入 Review；当前文件尚未修改。");
+        return true;
+      } catch (error) {
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "failed", model, reason: errorText(error) });
+        announce("Markdown Memory 变更未能进入 Review；当前文件未修改。");
+        return false;
+      }
+    },
+    [announce, dataSource, markdownMemory.model]
+  );
+
+  const proposeMarkdownMemoryDeactivation = useCallback(
+    async (request: {
+      scope: MarkdownMemoryScope;
+      relativePath: string;
+      expectedCurrentDigest: string;
+    }): Promise<boolean> => {
+      if (!dataSource?.deactivateMarkdownMemoryFileProposal || !markdownMemory.model) {
+        announce("当前不能停用 Markdown Memory 文件。");
+        return false;
+      }
+      const model = markdownMemory.model;
+      const requestId = ++markdownMemoryRequestRef.current;
+      setMarkdownMemory({ phase: "submitting", model, operation: "deactivate" });
+      try {
+        const receipt = await dataSource.deactivateMarkdownMemoryFileProposal(request);
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "ready", model, lastProposal: receipt });
+        announce("停用请求已进入 Review；批准并物化前仍会继续召回当前文件。");
+        return true;
+      } catch (error) {
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "failed", model, reason: errorText(error) });
+        announce("停用请求未能进入 Review；当前文件仍保持启用。");
+        return false;
+      }
+    },
+    [announce, dataSource, markdownMemory.model]
+  );
 
   useEffect(() => {
     let active = true;
@@ -792,6 +953,7 @@ export function useWorkspaceConversation(
       selectedSkillId,
       toolCandidates,
       capabilityState,
+      markdownMemory,
       busy,
       ensureLoaded,
       reload,
@@ -801,6 +963,10 @@ export function useWorkspaceConversation(
       attachResources,
       detachResource,
       selectSkill,
+      reloadMarkdownMemory,
+      selectMarkdownMemoryRoot,
+      proposeMarkdownMemoryWrite,
+      proposeMarkdownMemoryDeactivation,
       sendAction,
       send,
       cancel,
@@ -811,6 +977,7 @@ export function useWorkspaceConversation(
       busy,
       cancel,
       capabilityState,
+      markdownMemory,
       deleteSelected,
       detachResource,
       draft,
@@ -822,9 +989,11 @@ export function useWorkspaceConversation(
       pendingResources,
       pendingResourceTurnOperationId,
       renameSelected,
+      reloadMarkdownMemory,
       reload,
       resourceMutation,
       selectSkill,
+      selectMarkdownMemoryRoot,
       selectSession,
       selectedSessionId,
       selectedSkillId,
@@ -839,6 +1008,8 @@ export function useWorkspaceConversation(
       turnState,
       toolCandidates,
       updateDraft,
+      proposeMarkdownMemoryWrite,
+      proposeMarkdownMemoryDeactivation,
     ]
   );
 }

@@ -55,6 +55,7 @@ use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_tur
 use crate::main_chat_context_loader::{
     compile_main_chat_context, ensure_bundled_selected_skill_context_candidate,
     load_configured_knowledge_context_candidates,
+    load_configured_markdown_memory_context_candidates,
     load_current_workspace_knowledge_context_candidates, retrievable_lifecycle_context_candidates,
     sanitize_main_chat_selected_skill_id,
 };
@@ -11406,6 +11407,7 @@ async fn command_surface_kernel_context_candidates(
         selected_skill_id,
         task_text,
     ));
+    candidates.extend(load_configured_markdown_memory_context_candidates(state, task_text).await?);
     ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id);
     candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
     let sessions = {

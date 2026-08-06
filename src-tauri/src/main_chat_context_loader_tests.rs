@@ -1,4 +1,5 @@
 use crate::main_chat_context_loader::{
+    load_markdown_memory_context_candidates_from_roots,
     load_workspace_knowledge_context_candidates, sanitize_main_chat_selected_skill_id,
 };
 use crate::main_chat_react_tool_selection::main_chat_workspace_file_target;
@@ -42,9 +43,9 @@ fn main_chat_context_loader_declares_controlled_knowledge_format_surfaces() {
         "AGENTS.md",
         "SOUL.md",
         "USER.md",
-        "MEMORY.md",
         "memories/USER.md",
-        "memories/MEMORY.md",
+        "configured_markdown_memory_roots",
+        "load_markdown_memory_files",
         "skills/<selected>/SKILL.md",
     ] {
         assert!(
@@ -121,7 +122,7 @@ fn main_chat_knowledge_context_loader_loads_bounded_workspace_formats() {
     assert!(source_ids.contains(&"AGENTS.md"));
     assert!(source_ids.contains(&"SOUL.md"));
     assert!(source_ids.contains(&"memories/USER.md"));
-    assert!(source_ids.contains(&"memories/MEMORY.md"));
+    assert!(!source_ids.contains(&"memories/MEMORY.md"));
     assert!(source_ids.contains(&"skills/summarize/SKILL.md"));
     assert!(!source_ids.contains(&"skills/other/SKILL.md"));
     assert!(candidates
@@ -139,6 +140,27 @@ fn main_chat_knowledge_context_loader_loads_bounded_workspace_formats() {
         selected_skill.selected_skill_id.as_deref(),
         Some("summarize")
     );
+}
+
+#[test]
+fn main_chat_markdown_memory_requires_an_explicit_scope_root() {
+    let root = create_main_chat_knowledge_workspace();
+    let generic = load_workspace_knowledge_context_candidates(
+        root.path(),
+        None,
+        "use bounded memory context",
+    );
+    assert!(!generic
+        .iter()
+        .any(|candidate| candidate.source_id.contains("MEMORY.md")));
+
+    let roots =
+        crate::markdown_memory::configured_markdown_memory_roots(root.path().to_str(), None);
+    let scoped =
+        load_markdown_memory_context_candidates_from_roots(&roots, "use bounded memory context");
+    assert!(scoped
+        .iter()
+        .any(|candidate| candidate.source_id == "markdown-memory:workspace:memories/MEMORY.md"));
 }
 
 #[test]

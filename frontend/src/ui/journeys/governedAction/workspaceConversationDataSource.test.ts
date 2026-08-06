@@ -11,6 +11,10 @@ const mocks = vi.hoisted(() => ({
   selectMainChatSkill: vi.fn(),
   clearMainChatSkill: vi.fn(),
   listMainChatToolCandidates: vi.fn(),
+  getMarkdownMemoryViewModel: vi.fn(),
+  selectMarkdownMemoryRoot: vi.fn(),
+  draftMarkdownMemoryFileProposal: vi.fn(),
+  deactivateMarkdownMemoryFileProposal: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -34,6 +38,10 @@ vi.mock("@/tauri", () => ({
   selectMainChatSkill: mocks.selectMainChatSkill,
   clearMainChatSkill: mocks.clearMainChatSkill,
   listMainChatToolCandidates: mocks.listMainChatToolCandidates,
+  getMarkdownMemoryViewModel: mocks.getMarkdownMemoryViewModel,
+  selectMarkdownMemoryRoot: mocks.selectMarkdownMemoryRoot,
+  draftMarkdownMemoryFileProposal: mocks.draftMarkdownMemoryFileProposal,
+  deactivateMarkdownMemoryFileProposal: mocks.deactivateMarkdownMemoryFileProposal,
 }));
 
 import { tauriWorkspaceConversationDataSource } from "./workspaceConversationDataSource";
@@ -49,6 +57,54 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.selectMainChatSkill.mockReset();
     mocks.clearMainChatSkill.mockReset();
     mocks.listMainChatToolCandidates.mockReset();
+    mocks.getMarkdownMemoryViewModel.mockReset();
+    mocks.selectMarkdownMemoryRoot.mockReset();
+    mocks.draftMarkdownMemoryFileProposal.mockReset();
+    mocks.deactivateMarkdownMemoryFileProposal.mockReset();
+  });
+
+  it("keeps Markdown Memory reads, root selection, writes, and deactivation on backend bridges", async () => {
+    const model = {
+      roots: [],
+      files: [],
+      totalCharCount: 0,
+      truncated: false,
+      sourceRule: "exact",
+    };
+    mocks.getMarkdownMemoryViewModel.mockResolvedValue(model);
+    mocks.selectMarkdownMemoryRoot.mockResolvedValue({
+      cancelled: false,
+      scope: "project",
+      selectedPath: "/project",
+    });
+    mocks.draftMarkdownMemoryFileProposal.mockResolvedValue({ proposalId: "proposal-1" });
+    mocks.deactivateMarkdownMemoryFileProposal.mockResolvedValue({ proposalId: "proposal-2" });
+
+    await tauriWorkspaceConversationDataSource.loadMarkdownMemory?.();
+    await tauriWorkspaceConversationDataSource.selectMarkdownMemoryRoot?.("project");
+    await tauriWorkspaceConversationDataSource.draftMarkdownMemoryFileProposal?.({
+      scope: "project",
+      relativePath: "MEMORY.md",
+      content: "# Project",
+    });
+    await tauriWorkspaceConversationDataSource.deactivateMarkdownMemoryFileProposal?.({
+      scope: "project",
+      relativePath: "MEMORY.md",
+      expectedCurrentDigest: "sha256:current",
+    });
+
+    expect(mocks.getMarkdownMemoryViewModel).toHaveBeenCalledOnce();
+    expect(mocks.selectMarkdownMemoryRoot).toHaveBeenCalledWith("project");
+    expect(mocks.draftMarkdownMemoryFileProposal).toHaveBeenCalledWith({
+      scope: "project",
+      relativePath: "MEMORY.md",
+      content: "# Project",
+    });
+    expect(mocks.deactivateMarkdownMemoryFileProposal).toHaveBeenCalledWith({
+      scope: "project",
+      relativePath: "MEMORY.md",
+      expectedCurrentDigest: "sha256:current",
+    });
   });
 
   it("forwards skill selection and tool discovery through backend-owned bridges", async () => {
