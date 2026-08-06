@@ -380,6 +380,115 @@ describe("workspace conversation journey", () => {
     expect(dataSource.loadHistory).toHaveBeenCalledWith("conversation-1");
   });
 
+  it("restores the paused task conversation instead of a newer unrelated session", async () => {
+    const loadHistory = vi.fn().mockResolvedValue(existingMessages);
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-2",
+          title: "稍后更新的其他对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:02:00Z",
+        },
+        {
+          session_id: "conversation-1",
+          title: "等待继续的项目任务",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:01:00Z",
+        },
+      ]),
+      loadHistory,
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(
+        dataSource,
+        vi.fn(),
+        vi.fn().mockResolvedValue(undefined),
+        "conversation-1"
+      )
+    );
+
+    await act(async () => result.current.reload());
+
+    expect(result.current.selectedSessionId).toBe("conversation-1");
+    expect(loadHistory).toHaveBeenCalledWith("conversation-1");
+    expect(loadHistory).not.toHaveBeenCalledWith("conversation-2");
+  });
+
+  it("rebinds the paused task conversation when the task read model loads after history", async () => {
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-2",
+          title: "稍后更新的其他对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:02:00Z",
+        },
+        {
+          session_id: "conversation-1",
+          title: "等待继续的项目任务",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:01:00Z",
+        },
+      ]),
+    });
+    const { result, rerender } = renderHook(
+      ({ preferredSessionId }: { preferredSessionId: string | null }) =>
+        useWorkspaceConversation(
+          dataSource,
+          vi.fn(),
+          vi.fn().mockResolvedValue(undefined),
+          preferredSessionId
+        ),
+      { initialProps: { preferredSessionId: null as string | null } }
+    );
+
+    await act(async () => result.current.reload());
+    expect(result.current.selectedSessionId).toBe("conversation-2");
+
+    rerender({ preferredSessionId: "conversation-1" });
+
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+  });
+
+  it("does not override an explicit conversation choice with task recovery preference", async () => {
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-2",
+          title: "活动任务对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:02:00Z",
+        },
+        {
+          session_id: "conversation-1",
+          title: "用户选择的对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:01:00Z",
+        },
+      ]),
+    });
+    const { result, rerender } = renderHook(
+      ({ preferredSessionId }: { preferredSessionId: string | null }) =>
+        useWorkspaceConversation(
+          dataSource,
+          vi.fn(),
+          vi.fn().mockResolvedValue(undefined),
+          preferredSessionId
+        ),
+      { initialProps: { preferredSessionId: null as string | null } }
+    );
+
+    await act(async () => result.current.reload());
+    act(() => result.current.selectSession("conversation-1"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+
+    rerender({ preferredSessionId: "conversation-2" });
+
+    await act(async () => Promise.resolve());
+    expect(result.current.selectedSessionId).toBe("conversation-1");
+  });
+
   it("keeps pending work distinct after send and refreshes both history and work state", async () => {
     const refreshedMessages: ChatMessage[] = [
       ...existingMessages,

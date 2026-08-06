@@ -475,6 +475,22 @@ Markdown 只在对应 Workspace/Project 文件域内拥有该文档内容；进�
 退出标准：同一真实项目经过对话、任务暂停、应用重启后能够从已确认 checkpoint
 继续；没有从助手文本或旧摘要重建虚假完成状态。
 
+本切片实施边界（2026-08-06）：
+
+- 用户能力：重启进入 Workspace 时，优先打开后端活动任务绑定的真实对话，而不是
+  简单打开更新时间最新的无关对话；用户手动选定对话或开始输入后不再自动切换；
+- owner：会话正文继续由 `MemoryStore.messages` 拥有，暂停与恢复资格继续由
+  TaskSession、ActionQueue、AgentRun 和 durable event 共同证明，Workspace
+  ViewModel 只提供活动任务及其 `conversationId`；前端不新增持久恢复状态；
+- 失败边界：活动任务对应会话不存在时明确显示恢复依据缺失并关闭继续动作；运行中
+  进程异常退出继续由 startup reconciliation 终止为可验证失败，不猜测成功；
+- 非目标：不新增 summary、长期 Memory、Vector、LifeModel 或第二套 checkpoint；
+  不把前端当前选择写成新的 canonical owner；
+- 产品反例：覆盖“无关对话更新更晚”“任务读模型晚于会话历史返回”“用户已手动
+  选择其他对话”“任务引用的原始会话缺失”；
+- 清理：本切片没有建立替代 owner，因此没有可安全删除的后端恢复路径；后续不得
+  保留按最新时间选择和按活动任务选择两套互相竞争的首次恢复规则。
+
 ###### 5.1B 摘要与长上下文压缩
 
 - 原始 transcript 继续作为 canonical owner；summary 是带 source range、版本和
@@ -776,9 +792,10 @@ JSON。不得为了完成某个小切片而提前建设下一板块的平台能�
 当前阶段：**第五阶段——LifeModel 与 Memory 个人智能闭环已开始。前置“架构
 边界校准”于 2026-08-06 完成；Agent Memory 四层边界、LifeModel v2 范围、
 versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户确认。
-当前停在 5.1A 实施前，不提前进入 Agent Memory 代码开发；下一步只能先对
-5.1A“跨重启继续当前会话”核对真实源码与已有能力，再形成该切片的精确实施
-边界。**
+当前正在实施 5.1A“跨重启继续当前会话”，不提前进入 5.1B。源码核对和自动化
+产品反例已经确认：后端恢复 owner 已存在，缺口位于 Workspace 活动任务与前端
+会话选择的重启绑定。代码与自动化门禁完成后，仍需一次同一精确构建的隔离原生
+重启验证，才可将 5.1A 标记完成并进入 5.1B。**
 
 第五阶段第一步实际完成：
 

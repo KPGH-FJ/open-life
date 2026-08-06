@@ -115,7 +115,8 @@ export type WorkspaceConversationController = {
 export function useWorkspaceConversation(
   dataSource: WorkspaceConversationDataSource | undefined,
   announce: Announce,
-  onAfterTurn: () => Promise<void>
+  onAfterTurn: () => Promise<void>,
+  preferredSessionId?: string | null
 ): WorkspaceConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -146,12 +147,14 @@ export function useWorkspaceConversation(
   const operationRef = useRef(0);
   const cancelRequestRef = useRef(0);
   const loadedRef = useRef(false);
+  const explicitConversationChoiceRef = useRef(false);
 
   useEffect(() => {
     requestRef.current += 1;
     operationRef.current += 1;
     cancelRequestRef.current += 1;
     loadedRef.current = false;
+    explicitConversationChoiceRef.current = false;
     setSessions([]);
     setSelectedSessionId(null);
     setMessages([]);
@@ -236,9 +239,13 @@ export function useWorkspaceConversation(
       setSessions(nextSessions);
       const currentStillExists =
         selectedSessionId && nextSessions.some(item => item.session_id === selectedSessionId);
+      const preferredStillExists =
+        preferredSessionId && nextSessions.some(item => item.session_id === preferredSessionId);
       const nextSessionId = currentStillExists
         ? selectedSessionId
-        : (nextSessions[0]?.session_id ?? null);
+        : preferredStillExists
+          ? preferredSessionId
+          : (nextSessions[0]?.session_id ?? null);
       if (nextSessionId) {
         await loadHistory(nextSessionId, requestId);
       } else {
@@ -257,7 +264,45 @@ export function useWorkspaceConversation(
       setMessages([]);
       return false;
     }
-  }, [dataSource, loadHistory, selectedSessionId]);
+  }, [dataSource, loadHistory, preferredSessionId, selectedSessionId]);
+
+  useEffect(() => {
+    if (
+      !preferredSessionId ||
+      loadStatus !== "ready" ||
+      selectedSessionId === preferredSessionId ||
+      explicitConversationChoiceRef.current ||
+      draft.trim() ||
+      pendingResources.length > 0 ||
+      !sessions.some(session => session.session_id === preferredSessionId)
+    ) {
+      return;
+    }
+    const requestId = ++requestRef.current;
+    setLoadStatus("loading");
+    setLoadError(null);
+    setTurnState({ phase: "idle" });
+    setStreamingReply("");
+    setActiveTaskSessionId(null);
+    void loadHistory(preferredSessionId, requestId)
+      .then(() => {
+        if (requestId === requestRef.current) setLoadStatus("ready");
+      })
+      .catch(error => {
+        if (requestId !== requestRef.current) return;
+        setLoadStatus("error");
+        setLoadError(errorText(error));
+        setMessages([]);
+      });
+  }, [
+    draft,
+    loadHistory,
+    loadStatus,
+    pendingResources.length,
+    preferredSessionId,
+    selectedSessionId,
+    sessions,
+  ]);
 
   const ensureLoaded = useCallback(() => {
     if (loadedRef.current || loadStatus === "loading") return;
@@ -322,6 +367,7 @@ export function useWorkspaceConversation(
         announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
         return;
       }
+      explicitConversationChoiceRef.current = true;
       const requestId = ++requestRef.current;
       setLoadStatus("loading");
       setLoadError(null);
@@ -348,6 +394,7 @@ export function useWorkspaceConversation(
       announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
       return;
     }
+    explicitConversationChoiceRef.current = true;
     requestRef.current += 1;
     setSelectedSessionId(null);
     setMessages([]);
@@ -359,6 +406,11 @@ export function useWorkspaceConversation(
     setActiveTaskSessionId(null);
     announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
   }, [announce, busy, pendingResources.length]);
+
+  const updateDraft = useCallback((value: string) => {
+    if (value.trim()) explicitConversationChoiceRef.current = true;
+    setDraft(value);
+  }, []);
 
   const attachResources = useCallback(async (): Promise<boolean> => {
     if (!dataSource || loadStatus !== "ready" || busy) {
@@ -745,7 +797,7 @@ export function useWorkspaceConversation(
       reload,
       selectSession,
       startNewConversation,
-      setDraft,
+      setDraft: updateDraft,
       attachResources,
       detachResource,
       selectSkill,
@@ -786,6 +838,7 @@ export function useWorkspaceConversation(
       activeTaskSessionId,
       turnState,
       toolCandidates,
+      updateDraft,
     ]
   );
 }

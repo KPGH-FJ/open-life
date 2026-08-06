@@ -511,10 +511,13 @@ export function ReadOnlySpineJourney({
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) await governed.load(false);
   }, [governed.load, governedActionDataSource]);
+  const preferredWorkspaceConversationId =
+    governed.snapshot?.workspaceEnvelope.data?.activeTask?.conversationId ?? null;
   const conversation = useWorkspaceConversation(
     workspaceConversationDataSource,
     setAnnouncement,
-    refreshGovernedAfterTurn
+    refreshGovernedAfterTurn,
+    preferredWorkspaceConversationId
   );
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
   const lifeModelBuilder = useLifeModelBuilder(lifeModelBuilderDataSource, setAnnouncement);

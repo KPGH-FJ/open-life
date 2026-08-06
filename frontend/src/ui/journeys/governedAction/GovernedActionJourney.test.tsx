@@ -287,8 +287,13 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
-  it("labels a global active task that belongs to another selected conversation", async () => {
+  it("fails closed when an active task points to a missing conversation", async () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const initial = await fixture.load();
+    const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
+      action => action.kind === "approve"
+    )!;
+    await fixture.dispatchReviewAction(approve);
     const dataSource = {
       ...fixture,
       load: async () => {
@@ -320,8 +325,13 @@ describe("Workbench governed action journey", () => {
 
     expect(await screen.findByText("全局活动任务")).toBeInTheDocument();
     expect(
-      screen.getByText("这项活动任务属于另一段对话；下方消息和发送操作仍以当前选中的对话为准。")
+      screen.getByText(
+        "后端仍有这项任务，但对应会话记录已经缺失；当前不会从摘要猜测上下文或继续执行。"
+      )
     ).toBeInTheDocument();
+    const resume = screen.getByRole("button", { name: "继续任务" });
+    expect(resume).toBeDisabled();
+    expect(resume).toHaveAttribute("data-action-enabled", "false");
   });
 
   it("shows only backend-confirmed resources and removes them through the exact binding", async () => {
