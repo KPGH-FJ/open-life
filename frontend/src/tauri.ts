@@ -2700,8 +2700,19 @@ export type LifeModelLearningCandidate = {
   summary: string;
   section: LifeModelSectionV2;
   value: LifeModelUserValueV2;
-  status: "accumulating";
-  explicitness: "explicit_user_request";
+  targetKey: string;
+  suggestionClass: string;
+  supportCount: number;
+  independentSupportCount: number;
+  status:
+    | "accumulating"
+    | "reviewable"
+    | "conflicted"
+    | "proposed"
+    | "rejected"
+    | "materialized"
+    | "expired";
+  explicitness: "explicit_user_request" | "passive_inference";
   sensitivity: "internal";
   observationIds: string[];
   sourceRefs: string[];
@@ -2720,6 +2731,16 @@ export type DeleteLifeModelLearningCandidateReceipt = {
   candidateId: string;
   deleted: boolean;
   proposalDeleted: false;
+  canonicalLifeModelChanged: false;
+};
+
+export type LifeModelLearningDecisionReceipt = {
+  candidateId: string;
+  changed: boolean;
+  status: "rejected" | "expired";
+  suppressionKind: "exact_candidate" | "suggestion_class" | null;
+  contentScrubbed: boolean;
+  proposalChanged: false;
   canonicalLifeModelChanged: false;
 };
 
@@ -4319,6 +4340,24 @@ export async function deleteLifeModelLearningCandidate(
     "delete_lifemodel_learning_candidate",
     { candidateId, candidate_id: candidateId }
   );
+}
+
+export async function rejectLifeModelLearningCandidate(
+  candidateId: string
+): Promise<LifeModelLearningDecisionReceipt> {
+  return safeInvoke<LifeModelLearningDecisionReceipt>("reject_lifemodel_learning_candidate", {
+    candidateId,
+    candidate_id: candidateId,
+  });
+}
+
+export async function pauseLifeModelLearningSuggestionClass(
+  candidateId: string
+): Promise<LifeModelLearningDecisionReceipt> {
+  return safeInvoke<LifeModelLearningDecisionReceipt>("pause_lifemodel_learning_suggestion_class", {
+    candidateId,
+    candidate_id: candidateId,
+  });
 }
 
 export async function draftLegacyLifeModelMigration(

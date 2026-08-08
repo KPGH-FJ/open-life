@@ -1026,6 +1026,8 @@ export function ReadOnlySpineJourney({
         onDraftLifeModelRollback={durable.draftLifeModelRollback}
         onDraftLifeModelExport={durable.draftLifeModelExport}
         onDeleteLearningCandidate={durable.deleteLifeModelLearningCandidate}
+        onRejectLearningCandidate={durable.rejectLifeModelLearningCandidate}
+        onPauseLearningSuggestionClass={durable.pauseLifeModelLearningSuggestionClass}
         onOpenReviewCenter={() => navigateProduct("review", "life-model")}
       />
     );

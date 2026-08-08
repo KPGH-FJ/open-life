@@ -136,8 +136,9 @@ pub use hs_selector::{
 };
 pub use life_model_learning::{
     LifeModelLearningCandidate, LifeModelLearningCandidateStatus, LifeModelLearningCapture,
-    LifeModelLearningCaptureReceipt, LifeModelLearningExplicitness, LifeModelLearningObservation,
-    LifeModelLearningSensitivity, LifeModelLearningStore,
+    LifeModelLearningCaptureReceipt, LifeModelLearningDecisionReceipt,
+    LifeModelLearningExplicitness, LifeModelLearningObservation, LifeModelLearningSensitivity,
+    LifeModelLearningStore, LifeModelLearningSuppressionKind,
 };
 pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntimeFact};
 pub use life_model_view_model::{

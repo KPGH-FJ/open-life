@@ -60,6 +60,7 @@ export function useDurableTruthJourney(
   } | null>(null);
   const [learningAction, setLearningAction] = useState<{
     candidateId: string;
+    kind: "delete" | "reject" | "pause_class";
     error?: string;
   } | null>(null);
   const requestRef = useRef(0);
@@ -299,7 +300,7 @@ export function useDurableTruthJourney(
   const deleteLifeModelLearningCandidate = useCallback(
     async (candidateId: string): Promise<boolean> => {
       if (!dataSource || learningAction) return false;
-      setLearningAction({ candidateId });
+      setLearningAction({ candidateId, kind: "delete" });
       try {
         await dataSource.deleteLifeModelLearningCandidate(candidateId);
         const refreshed = await load(false);
@@ -314,8 +315,58 @@ export function useDurableTruthJourney(
         return true;
       } catch (error) {
         const reason = errorText(error);
-        setLearningAction({ candidateId, error: reason });
+        setLearningAction({ candidateId, kind: "delete", error: reason });
         announce(`待验证长期信息未删除：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, learningAction, load]
+  );
+  const rejectLifeModelLearningCandidate = useCallback(
+    async (candidateId: string): Promise<boolean> => {
+      if (!dataSource || learningAction) return false;
+      setLearningAction({ candidateId, kind: "reject" });
+      try {
+        await dataSource.rejectLifeModelLearningCandidate(candidateId);
+        const refreshed = await load(false);
+        const stillPresent = refreshed.lifeModelEnvelope.data?.learning.candidates.some(
+          candidate => candidate.id === candidateId
+        );
+        if (refreshed.lifeModelEnvelope.status === "error" || stillPresent) {
+          throw new Error("lifemodel_learning_candidate_reject_refresh_unverified");
+        }
+        setLearningAction(null);
+        announce("已拒绝并清除正文；类似内容不会再次建议，LifeModel 和 Review 没有改变。");
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setLearningAction({ candidateId, kind: "reject", error: reason });
+        announce(`候选未被拒绝：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, learningAction, load]
+  );
+  const pauseLifeModelLearningSuggestionClass = useCallback(
+    async (candidateId: string): Promise<boolean> => {
+      if (!dataSource || learningAction) return false;
+      setLearningAction({ candidateId, kind: "pause_class" });
+      try {
+        await dataSource.pauseLifeModelLearningSuggestionClass(candidateId);
+        const refreshed = await load(false);
+        const stillPresent = refreshed.lifeModelEnvelope.data?.learning.candidates.some(
+          candidate => candidate.id === candidateId
+        );
+        if (refreshed.lifeModelEnvelope.status === "error" || stillPresent) {
+          throw new Error("lifemodel_learning_suggestion_class_pause_refresh_unverified");
+        }
+        setLearningAction(null);
+        announce("这类长期信息建议已暂停；当前正文已清除，LifeModel 和 Review 没有改变。");
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setLearningAction({ candidateId, kind: "pause_class", error: reason });
+        announce(`这类建议未暂停：${reason}`);
         return false;
       }
     },
@@ -343,5 +394,7 @@ export function useDurableTruthJourney(
     draftLifeModelRollback,
     draftLifeModelExport,
     deleteLifeModelLearningCandidate,
+    rejectLifeModelLearningCandidate,
+    pauseLifeModelLearningSuggestionClass,
   };
 }

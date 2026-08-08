@@ -9,6 +9,8 @@ const tauriMocks = vi.hoisted(() => ({
   draftLifeModelV2Rollback: vi.fn(),
   draftLifeModelV2Export: vi.fn(),
   deleteLifeModelLearningCandidate: vi.fn(),
+  rejectLifeModelLearningCandidate: vi.fn(),
+  pauseLifeModelLearningSuggestionClass: vi.fn(),
   draftMemoryCorrectionProposal: vi.fn(),
   draftMemoryArchiveProposal: vi.fn(),
   draftMemoryStopRecallProposal: vi.fn(),
@@ -87,6 +89,33 @@ describe("durable truth Tauri data source", () => {
     await expect(
       tauriDurableTruthDataSource.deleteLifeModelLearningCandidate("candidate:one")
     ).rejects.toThrow("lifemodel_learning_candidate_delete_receipt_unverified");
+  });
+
+  it("accepts candidate suppression only with scrubbed content and no Proposal or LifeModel change", async () => {
+    tauriMocks.rejectLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      changed: true,
+      status: "rejected",
+      suppressionKind: "exact_candidate",
+      contentScrubbed: true,
+      proposalChanged: false,
+      canonicalLifeModelChanged: false,
+    });
+    tauriMocks.pauseLifeModelLearningSuggestionClass.mockResolvedValueOnce({
+      candidateId: "candidate:two",
+      changed: true,
+      status: "rejected",
+      suppressionKind: "suggestion_class",
+      contentScrubbed: true,
+      proposalChanged: false,
+      canonicalLifeModelChanged: false,
+    });
+
+    await tauriDurableTruthDataSource.rejectLifeModelLearningCandidate("candidate:one");
+    await tauriDurableTruthDataSource.pauseLifeModelLearningSuggestionClass("candidate:two");
+
+    expect(tauriMocks.rejectLifeModelLearningCandidate).toHaveBeenCalledWith("candidate:one");
+    expect(tauriMocks.pauseLifeModelLearningSuggestionClass).toHaveBeenCalledWith("candidate:two");
   });
 
   it("keeps correction and archive reviewed while restore, rollback, and erase use exact owners", async () => {

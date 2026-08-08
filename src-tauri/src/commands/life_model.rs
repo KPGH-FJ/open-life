@@ -32,6 +32,22 @@ pub async fn delete_lifemodel_learning_candidate(
     crate::life_model_learning::delete_candidate_with_state(state.inner(), &candidate_id).await
 }
 
+#[tauri::command]
+pub async fn reject_lifemodel_learning_candidate(
+    candidate_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<openlife_core::agent::LifeModelLearningDecisionReceipt, String> {
+    crate::life_model_learning::reject_candidate_with_state(state.inner(), &candidate_id).await
+}
+
+#[tauri::command]
+pub async fn pause_lifemodel_learning_suggestion_class(
+    candidate_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<openlife_core::agent::LifeModelLearningDecisionReceipt, String> {
+    crate::life_model_learning::pause_candidate_class_with_state(state.inner(), &candidate_id).await
+}
+
 #[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT: &str = "manual_lifemodel_override_audit";
 #[cfg(test)]

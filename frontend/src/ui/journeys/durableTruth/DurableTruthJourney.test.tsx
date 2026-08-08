@@ -50,7 +50,11 @@ describe("Workbench durable truth journey", () => {
       summary: "先给结论",
       section: "collaboration_preferences" as const,
       value: { kind: "statement" as const, value: { statement: "先给结论" } },
-      status: "accumulating" as const,
+      targetKey: "collaboration_preferences.communication_style",
+      suggestionClass: "collaboration_preferences",
+      supportCount: 1,
+      independentSupportCount: 1,
+      status: "reviewable" as const,
       explicitness: "explicit_user_request" as const,
       sensitivity: "internal" as const,
       observationIds: ["lmo_observation_one"],
@@ -86,6 +90,9 @@ describe("Workbench durable truth journey", () => {
 
     expect(await screen.findByText("先给结论")).toBeVisible();
     expect(screen.getByText(/目前不是 Proposal/)).toBeVisible();
+    expect(screen.getByText(/已具备审核条件 · 1 条证据 \/ 1 个独立来源/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "拒绝并不再建议类似内容" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "暂停这类建议" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "删除这条候选" }));
 
     await waitFor(() => expect(screen.queryByText("先给结论")).not.toBeInTheDocument());

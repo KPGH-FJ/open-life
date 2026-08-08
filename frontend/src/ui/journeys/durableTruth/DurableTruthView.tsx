@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowRight,
   Brain,
+  CirclePause,
   Eye,
   RefreshCw,
   RotateCcw,
@@ -47,6 +48,16 @@ const learningSectionLabel: Partial<Record<LifeModelLearningCandidate["section"]
   collaboration_preferences: "长期协作偏好",
 };
 
+const learningStatusLabel: Record<LifeModelLearningCandidate["status"], string> = {
+  accumulating: "正在累计证据",
+  reviewable: "已具备审核条件",
+  conflicted: "存在冲突，不能提案",
+  proposed: "已进入审核",
+  rejected: "已拒绝",
+  materialized: "已写入确认版本",
+  expired: "已过期",
+};
+
 export function DurableTruthView({
   snapshot,
   selectedItem,
@@ -71,6 +82,8 @@ export function DurableTruthView({
   onDraftLifeModelExport,
   learningAction,
   onDeleteLearningCandidate,
+  onRejectLearningCandidate,
+  onPauseLearningSuggestionClass,
 }: {
   snapshot: DurableTruthSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -101,8 +114,14 @@ export function DurableTruthView({
   onDraftLifeModelChange: Parameters<typeof LifeModelV2ControlsPanel>[0]["onChange"];
   onDraftLifeModelRollback: Parameters<typeof LifeModelV2ControlsPanel>[0]["onRollback"];
   onDraftLifeModelExport: Parameters<typeof LifeModelV2ControlsPanel>[0]["onExport"];
-  learningAction: { candidateId: string; error?: string } | null;
+  learningAction: {
+    candidateId: string;
+    kind: "delete" | "reject" | "pause_class";
+    error?: string;
+  } | null;
   onDeleteLearningCandidate: (candidateId: string) => Promise<boolean>;
+  onRejectLearningCandidate: (candidateId: string) => Promise<boolean>;
+  onPauseLearningSuggestionClass: (candidateId: string) => Promise<boolean>;
 }) {
   const [activeDomain, setActiveDomain] = useState<"life_model" | "agent_memory">("life_model");
   const lifeModelTabRef = useRef<HTMLButtonElement>(null);
@@ -355,20 +374,55 @@ export function DurableTruthView({
                         <span>{learningSectionLabel[candidate.section] ?? candidate.section}</span>
                       </div>
                       <small>
-                        明确用户请求 · {candidate.sourceRefs.length} 个来源 · 到期时间：
+                        {learningStatusLabel[candidate.status]} · {candidate.supportCount} 条证据 /{" "}
+                        {candidate.independentSupportCount} 个独立来源 · 到期时间：
                         {candidate.expiresAt}
                       </small>
                       <FoundationActionButton
                         label="删除这条候选"
                         icon={<Trash2 size={16} aria-hidden="true" />}
                         loading={
-                          learningAction?.candidateId === candidate.id && !learningAction.error
+                          learningAction?.candidateId === candidate.id &&
+                          learningAction.kind === "delete" &&
+                          !learningAction.error
                         }
                         loadingLabel="正在删除"
                         onClick={() => void onDeleteLearningCandidate(candidate.id)}
                       />
+                      <FoundationActionButton
+                        label="拒绝并不再建议类似内容"
+                        icon={<ShieldX size={16} aria-hidden="true" />}
+                        loading={
+                          learningAction?.candidateId === candidate.id &&
+                          learningAction.kind === "reject" &&
+                          !learningAction.error
+                        }
+                        loadingLabel="正在拒绝"
+                        onClick={() => void onRejectLearningCandidate(candidate.id)}
+                      />
+                      <FoundationActionButton
+                        label="暂停这类建议"
+                        icon={<CirclePause size={16} aria-hidden="true" />}
+                        loading={
+                          learningAction?.candidateId === candidate.id &&
+                          learningAction.kind === "pause_class" &&
+                          !learningAction.error
+                        }
+                        loadingLabel="正在暂停"
+                        onClick={() => void onPauseLearningSuggestionClass(candidate.id)}
+                      />
                       {learningAction?.candidateId === candidate.id && learningAction.error ? (
-                        <FoundationNotice title="候选未删除" tone="error" live>
+                        <FoundationNotice
+                          title={
+                            learningAction.kind === "delete"
+                              ? "候选未删除"
+                              : learningAction.kind === "reject"
+                                ? "候选未拒绝"
+                                : "这类建议未暂停"
+                          }
+                          tone="error"
+                          live
+                        >
                           <p>{learningAction.error}</p>
                         </FoundationNotice>
                       ) : null}

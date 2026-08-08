@@ -7,6 +7,8 @@ import {
   draftLifeModelV2Export,
   draftLifeModelV2Rollback,
   deleteLifeModelLearningCandidate,
+  pauseLifeModelLearningSuggestionClass,
+  rejectLifeModelLearningCandidate,
   getLifeModelViewModel,
   getMemoryViewModel,
   getReviewCenterViewModel,
@@ -51,6 +53,8 @@ export interface DurableTruthDataSource {
   draftLifeModelRollback(request: DraftLifeModelV2RollbackRequest): Promise<string>;
   draftLifeModelExport(request: DraftLifeModelV2ExportRequest): Promise<string>;
   deleteLifeModelLearningCandidate(candidateId: string): Promise<void>;
+  rejectLifeModelLearningCandidate(candidateId: string): Promise<void>;
+  pauseLifeModelLearningSuggestionClass(candidateId: string): Promise<void>;
 }
 
 function requireLifeModelProposalReceipt(
@@ -193,6 +197,34 @@ export const tauriDurableTruthDataSource: DurableTruthDataSource = {
       receipt.canonicalLifeModelChanged
     ) {
       throw new Error("lifemodel_learning_candidate_delete_receipt_unverified");
+    }
+  },
+  async rejectLifeModelLearningCandidate(candidateId) {
+    const receipt = await rejectLifeModelLearningCandidate(candidateId);
+    if (
+      receipt.candidateId !== candidateId ||
+      !receipt.changed ||
+      receipt.status !== "rejected" ||
+      receipt.suppressionKind !== "exact_candidate" ||
+      !receipt.contentScrubbed ||
+      receipt.proposalChanged ||
+      receipt.canonicalLifeModelChanged
+    ) {
+      throw new Error("lifemodel_learning_candidate_reject_receipt_unverified");
+    }
+  },
+  async pauseLifeModelLearningSuggestionClass(candidateId) {
+    const receipt = await pauseLifeModelLearningSuggestionClass(candidateId);
+    if (
+      receipt.candidateId !== candidateId ||
+      !receipt.changed ||
+      receipt.status !== "rejected" ||
+      receipt.suppressionKind !== "suggestion_class" ||
+      !receipt.contentScrubbed ||
+      receipt.proposalChanged ||
+      receipt.canonicalLifeModelChanged
+    ) {
+      throw new Error("lifemodel_learning_suggestion_class_pause_receipt_unverified");
     }
   },
   async draftLegacyLifeModelMigration(request) {

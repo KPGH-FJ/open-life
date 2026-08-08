@@ -155,6 +155,7 @@ pub use openlife_core::privacy::PrivacyEngine;
 use commands::life_model::{
     delete_lifemodel_learning_candidate, draft_legacy_lifemodel_migration,
     draft_lifemodel_v2_change, draft_lifemodel_v2_export, draft_lifemodel_v2_rollback,
+    pause_lifemodel_learning_suggestion_class, reject_lifemodel_learning_candidate,
 };
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
@@ -942,6 +943,8 @@ pub fn run() {
             draft_lifemodel_v2_rollback,
             draft_lifemodel_v2_export,
             delete_lifemodel_learning_candidate,
+            reject_lifemodel_learning_candidate,
+            pause_lifemodel_learning_suggestion_class,
             get_life_state_projection,
             get_life_model_view_model,
             get_review_center_view_model,

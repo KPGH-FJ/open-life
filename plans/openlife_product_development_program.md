@@ -1253,7 +1253,7 @@ legacy 隔离 profile 完成建立、迁移、编辑、冲突、删除、回滚�
 v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy QA 的独立凭据恢复、
 重启、v2 version 1 保持和迁移终态复核。未调用外部 Provider 或网络，未迁移真实
 用户 profile。5.3A“Observation 与 Candidate 边界”已于 2026-08-08 完成源码与
-自动化产品验证，并停在用户审阅和提交边界：当前用户明确表达的低敏长期偏好和
+自动化产品验证，并以提交 `aa7ac1b` 形成独立基线：当前用户明确表达的低敏长期偏好和
 协作偏好会暂存为可查看、可删除、可跨存储重启恢复的 Candidate；该路径不会创建
 Proposal，也不会修改 canonical LifeModel v2。前端产品测试、browser-shell 路由验收、
 Rust 格式、严格 Clippy 和全仓 Rust 测试均通过；browser-shell 证据不冒充真实 Tauri
@@ -1282,8 +1282,17 @@ Rust 格式、严格 Clippy 和全仓 Rust 测试均通过；browser-shell 证�
 - 自动化已经覆盖 send/stream 两条真实命令路径、ProposalStore 与 canonical v2
   零写入、磁盘关闭重开和 read-only 重开、用户删除及恶意回执 fail-closed；本切片
   没有调用外部 Provider、网络或真实用户数据；
-- 当前没有进入被动学习、Reflection/任务结果提取、Provider 辅助提取、Candidate
-  累计质量判断或 Proposal 物化；这些继续属于 5.3B—5.3F。
+- 5.3B 已把 Candidate owner 收敛为同一 Workspace 内的累计和质量边界：相同 typed
+  内容跨来源合并，未来被动来源必须来自至少两个独立任务或会话，明确用户请求可直接
+  进入 `reviewable`；不同 typed 值只有在共享同一窄目标时才进入 `conflicted`，删除、
+  拒绝或到期冲突项后会重新计算剩余候选状态；
+- Candidate 状态固定为 `accumulating / reviewable / conflicted / proposed / rejected /
+  materialized / expired`。拒绝与到期会清除 Candidate 和 Observation 正文，只留下
+  无正文 digest；用户可以删除当前候选、阻止同一内容再次建议或暂停整个建议类别，
+  且这些控制均按 Workspace 隔离；5.3A 的既有数据库会原位迁移，不丢失当前候选；
+- 5.3B 仍不接入 Reflection、任务结果或 Provider，不创建 Proposal、不写 canonical
+  LifeModel。真实来源提取继续属于 5.3C，Proposal 与物化继续属于 5.3D—5.3E，完整
+  原生学习闭环仍属于 5.3F。
 
 第四阶段实际完成：
 
