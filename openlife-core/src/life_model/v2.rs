@@ -7,7 +7,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::DateTime;
 use ring::digest::{digest, SHA256};
-#[cfg(test)]
 use rusqlite::TransactionBehavior;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -29,6 +28,7 @@ const MAX_SOURCE_REFS_PER_ITEM: usize = 32;
 const MAX_SOURCE_REF_CHARS: usize = 256;
 const MAX_LEGACY_MIGRATION_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LEGACY_MIGRATION_ITEMS: usize = 4_096;
+const MAX_TYPED_DIFF_OPERATIONS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -120,7 +120,7 @@ pub enum LegacyLifeModelMigrationOwnerV2 {
     Unassigned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifeModelSectionV2 {
     Identity,
@@ -133,6 +133,74 @@ pub enum LifeModelSectionV2 {
     Resources,
     DecisionPrinciples,
     CollaborationPreferences,
+}
+
+pub const LIFE_MODEL_V2_TYPED_DIFF_SCHEMA: &str = "openlife.lifemodel.v2.typed-diff.v1";
+pub const LIFE_MODEL_V2_TYPED_DIFF_PATH: &str = "$lifemodel_v2";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum LifeModelItemV2 {
+    Statement(LifeModelStatementV2),
+    LongTermGoal(LifeModelLongTermGoalV2),
+    Relationship(LifeModelRelationshipV2),
+    Capability(LifeModelCapabilityV2),
+    Resource(LifeModelResourceV2),
+}
+
+impl LifeModelItemV2 {
+    fn id(&self) -> &str {
+        match self {
+            Self::Statement(item) => &item.id,
+            Self::LongTermGoal(item) => &item.id,
+            Self::Relationship(item) => &item.id,
+            Self::Capability(item) => &item.id,
+            Self::Resource(item) => &item.id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LifeModelTypedOperationV2 {
+    Add {
+        section: LifeModelSectionV2,
+        item: LifeModelItemV2,
+    },
+    Replace {
+        section: LifeModelSectionV2,
+        item_id: String,
+        before_item_digest: String,
+        item: LifeModelItemV2,
+    },
+    Remove {
+        section: LifeModelSectionV2,
+        item_id: String,
+        before_item_digest: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelTypedDiffV2 {
+    pub schema_version: String,
+    pub model_id: String,
+    pub base_version: Option<u64>,
+    pub base_document_digest: Option<String>,
+    pub operations: Vec<LifeModelTypedOperationV2>,
+    pub result_document_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelPatchMaterializationResultV2 {
+    pub version: LifeModelVersionV2,
+    pub replayed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -917,6 +985,230 @@ impl LifeModelDocumentV2 {
     }
 }
 
+impl LifeModelTypedDiffV2 {
+    pub fn apply_to_version(
+        &self,
+        current: Option<&LifeModelVersionV2>,
+    ) -> Result<LifeModelDocumentV2> {
+        self.validate_contract()?;
+        let mut document = match current {
+            Some(version) => {
+                if self.base_version != Some(version.model_version)
+                    || self.base_document_digest.as_deref()
+                        != Some(version.document_digest.as_str())
+                    || version.model_id != self.model_id
+                {
+                    bail!("lifemodel_v2_typed_diff_stale_base");
+                }
+                version.document.validate()?;
+                version.document.clone()
+            }
+            None => {
+                if self.base_version.is_some() || self.base_document_digest.is_some() {
+                    bail!("lifemodel_v2_typed_diff_initial_base_mismatch");
+                }
+                LifeModelDocumentV2::empty(self.model_id.clone())
+            }
+        };
+
+        let mut value =
+            serde_json::to_value(&document).context("serialize_lifemodel_v2_typed_diff_base")?;
+        for operation in &self.operations {
+            apply_typed_operation(&mut value, operation)?;
+        }
+        document =
+            serde_json::from_value(value).context("deserialize_lifemodel_v2_typed_diff_result")?;
+        document.validate()?;
+        if current.is_some() && document.is_empty() {
+            bail!("lifemodel_v2_typed_diff_empty_result_requires_owner_cutover");
+        }
+        if document.model_id != self.model_id || document.digest()? != self.result_document_digest {
+            bail!("lifemodel_v2_typed_diff_result_digest_mismatch");
+        }
+        Ok(document)
+    }
+
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.schema_version != LIFE_MODEL_V2_TYPED_DIFF_SCHEMA {
+            bail!("unsupported_lifemodel_v2_typed_diff_schema");
+        }
+        validate_identifier(&self.model_id, "invalid_lifemodel_v2_typed_diff_model_id")?;
+        match (&self.base_version, &self.base_document_digest) {
+            (None, None) => {}
+            (Some(version), Some(digest)) if *version > 0 && is_sha256_digest(digest) => {}
+            _ => bail!("invalid_lifemodel_v2_typed_diff_base"),
+        }
+        if self.operations.is_empty() || self.operations.len() > MAX_TYPED_DIFF_OPERATIONS {
+            bail!("lifemodel_v2_typed_diff_operation_count_out_of_bounds");
+        }
+        if !is_sha256_digest(&self.result_document_digest) {
+            bail!("invalid_lifemodel_v2_typed_diff_result_digest");
+        }
+
+        let mut targets = BTreeSet::new();
+        for operation in &self.operations {
+            let (section, item_id, before_digest, item) = match operation {
+                LifeModelTypedOperationV2::Add { section, item } => {
+                    (*section, item.id(), None, Some(item))
+                }
+                LifeModelTypedOperationV2::Replace {
+                    section,
+                    item_id,
+                    before_item_digest,
+                    item,
+                } => (
+                    *section,
+                    item_id.as_str(),
+                    Some(before_item_digest),
+                    Some(item),
+                ),
+                LifeModelTypedOperationV2::Remove {
+                    section,
+                    item_id,
+                    before_item_digest,
+                } => (*section, item_id.as_str(), Some(before_item_digest), None),
+            };
+            validate_identifier(item_id, "invalid_lifemodel_v2_typed_diff_item_id")?;
+            if before_digest.is_some_and(|digest| !is_sha256_digest(digest)) {
+                bail!("invalid_lifemodel_v2_typed_diff_before_digest");
+            }
+            if let Some(item) = item {
+                if item.id() != item_id || !section_accepts_item(section, item) {
+                    bail!("lifemodel_v2_typed_diff_section_item_mismatch");
+                }
+            }
+            if !targets.insert((section_key(section), item_id.to_string())) {
+                bail!("duplicate_lifemodel_v2_typed_diff_target");
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn life_model_item_digest_v2(item: &LifeModelItemV2) -> Result<String> {
+    let value = item_value(item)?;
+    digest_json_value(&value)
+}
+
+fn apply_typed_operation(
+    document: &mut serde_json::Value,
+    operation: &LifeModelTypedOperationV2,
+) -> Result<()> {
+    let (section, target_id) = match operation {
+        LifeModelTypedOperationV2::Add { section, item } => (*section, item.id()),
+        LifeModelTypedOperationV2::Replace {
+            section, item_id, ..
+        }
+        | LifeModelTypedOperationV2::Remove {
+            section, item_id, ..
+        } => (*section, item_id.as_str()),
+    };
+    let items = document
+        .get_mut(section_key(section))
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow!("lifemodel_v2_typed_diff_section_unavailable"))?;
+    let existing_index = items
+        .iter()
+        .position(|value| value.get("id").and_then(serde_json::Value::as_str) == Some(target_id));
+
+    match operation {
+        LifeModelTypedOperationV2::Add { item, .. } => {
+            if existing_index.is_some() {
+                bail!("lifemodel_v2_typed_diff_add_target_exists");
+            }
+            items.push(item_value(item)?);
+        }
+        LifeModelTypedOperationV2::Replace {
+            before_item_digest,
+            item,
+            ..
+        } => {
+            let index =
+                existing_index.ok_or_else(|| anyhow!("lifemodel_v2_typed_diff_target_missing"))?;
+            if digest_json_value(&items[index])? != *before_item_digest {
+                bail!("lifemodel_v2_typed_diff_before_item_mismatch");
+            }
+            items[index] = item_value(item)?;
+        }
+        LifeModelTypedOperationV2::Remove {
+            before_item_digest, ..
+        } => {
+            let index =
+                existing_index.ok_or_else(|| anyhow!("lifemodel_v2_typed_diff_target_missing"))?;
+            if digest_json_value(&items[index])? != *before_item_digest {
+                bail!("lifemodel_v2_typed_diff_before_item_mismatch");
+            }
+            items.remove(index);
+        }
+    }
+    Ok(())
+}
+
+fn item_value(item: &LifeModelItemV2) -> Result<serde_json::Value> {
+    match item {
+        LifeModelItemV2::Statement(value) => serde_json::to_value(value),
+        LifeModelItemV2::LongTermGoal(value) => serde_json::to_value(value),
+        LifeModelItemV2::Relationship(value) => serde_json::to_value(value),
+        LifeModelItemV2::Capability(value) => serde_json::to_value(value),
+        LifeModelItemV2::Resource(value) => serde_json::to_value(value),
+    }
+    .context("serialize_lifemodel_v2_typed_diff_item")
+}
+
+fn section_accepts_item(section: LifeModelSectionV2, item: &LifeModelItemV2) -> bool {
+    match section {
+        LifeModelSectionV2::Identity
+        | LifeModelSectionV2::Values
+        | LifeModelSectionV2::StablePreferences
+        | LifeModelSectionV2::PersonalBoundaries
+        | LifeModelSectionV2::DecisionPrinciples
+        | LifeModelSectionV2::CollaborationPreferences => {
+            matches!(item, LifeModelItemV2::Statement(_))
+        }
+        LifeModelSectionV2::LongTermGoals => {
+            matches!(item, LifeModelItemV2::LongTermGoal(_))
+        }
+        LifeModelSectionV2::ImportantRelationships => {
+            matches!(item, LifeModelItemV2::Relationship(_))
+        }
+        LifeModelSectionV2::Capabilities => {
+            matches!(item, LifeModelItemV2::Capability(_))
+        }
+        LifeModelSectionV2::Resources => matches!(item, LifeModelItemV2::Resource(_)),
+    }
+}
+
+fn section_key(section: LifeModelSectionV2) -> &'static str {
+    match section {
+        LifeModelSectionV2::Identity => "identity",
+        LifeModelSectionV2::Values => "values",
+        LifeModelSectionV2::LongTermGoals => "longTermGoals",
+        LifeModelSectionV2::StablePreferences => "stablePreferences",
+        LifeModelSectionV2::PersonalBoundaries => "personalBoundaries",
+        LifeModelSectionV2::ImportantRelationships => "importantRelationships",
+        LifeModelSectionV2::Capabilities => "capabilities",
+        LifeModelSectionV2::Resources => "resources",
+        LifeModelSectionV2::DecisionPrinciples => "decisionPrinciples",
+        LifeModelSectionV2::CollaborationPreferences => "collaborationPreferences",
+    }
+}
+
+fn digest_json_value(value: &serde_json::Value) -> Result<String> {
+    let bytes = serde_json::to_vec(value).context("serialize_lifemodel_v2_digest_value")?;
+    Ok(format!(
+        "sha256:{}",
+        hex_digest(digest(&SHA256, &bytes).as_ref())
+    ))
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn normalize_statements(items: &mut [LifeModelStatementV2]) {
     items.sort_by(|left, right| left.id.cmp(&right.id));
     for item in items {
@@ -1117,7 +1409,6 @@ fn life_model_projection_digest(
     ))
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct LifeModelCommitV2 {
     pub document: LifeModelDocumentV2,
@@ -1128,7 +1419,6 @@ pub(crate) struct LifeModelCommitV2 {
     pub created_at: String,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifeModelCommitResultV2 {
     pub version: LifeModelVersionV2,
@@ -1211,7 +1501,6 @@ impl LifeModelV2Store {
         load_current(&connection, model_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn commit(&self, request: LifeModelCommitV2) -> Result<LifeModelCommitResultV2> {
         request.document.validate()?;
         validate_identifier(
@@ -1241,6 +1530,7 @@ impl LifeModelV2Store {
                 || existing.parent_version != request.expected_parent_version
                 || existing.parent_digest != request.expected_parent_digest
                 || existing.source_refs != normalized_source_refs(&request.source_refs)
+                || existing.created_at != request.created_at
             {
                 bail!("lifemodel_v2_materialization_identity_conflict");
             }
@@ -1329,6 +1619,58 @@ impl LifeModelV2Store {
             replayed: false,
         })
     }
+
+    pub(crate) fn materialize_typed_diff(
+        &self,
+        diff: &LifeModelTypedDiffV2,
+        materialization_id: &str,
+        source_refs: Vec<String>,
+        created_at: &str,
+    ) -> Result<LifeModelPatchMaterializationResultV2> {
+        diff.validate_contract()?;
+        validate_identifier(
+            materialization_id,
+            "invalid_lifemodel_v2_materialization_id",
+        )?;
+        validate_version_source_refs(&source_refs)?;
+        DateTime::parse_from_rfc3339(created_at)
+            .map_err(|_| anyhow!("invalid_lifemodel_v2_created_at"))?;
+        let existing = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+            load_by_materialization(&connection, &diff.model_id, materialization_id)?
+        };
+        if let Some(existing) = existing {
+            if existing.document_digest != diff.result_document_digest
+                || existing.parent_version != diff.base_version
+                || existing.parent_digest != diff.base_document_digest
+                || existing.source_refs != normalized_source_refs(&source_refs)
+                || existing.created_at != created_at
+            {
+                bail!("lifemodel_v2_materialization_identity_conflict");
+            }
+            return Ok(LifeModelPatchMaterializationResultV2 {
+                version: existing,
+                replayed: true,
+            });
+        }
+        let current = self.current(&diff.model_id)?;
+        let document = diff.apply_to_version(current.as_ref())?;
+        let committed = self.commit(LifeModelCommitV2 {
+            document,
+            expected_parent_version: diff.base_version,
+            expected_parent_digest: diff.base_document_digest.clone(),
+            materialization_id: materialization_id.into(),
+            source_refs,
+            created_at: created_at.into(),
+        })?;
+        Ok(LifeModelPatchMaterializationResultV2 {
+            version: committed.version,
+            replayed: committed.replayed,
+        })
+    }
 }
 
 #[expect(
@@ -1401,7 +1743,6 @@ fn load_current(connection: &Connection, model_id: &str) -> Result<Option<LifeMo
         .map(Option::flatten)
 }
 
-#[cfg(test)]
 fn load_by_materialization(
     connection: &Connection,
     model_id: &str,
@@ -1835,6 +2176,208 @@ goals:
             first.deterministic_yaml().unwrap(),
             second.deterministic_yaml().unwrap()
         );
+    }
+
+    fn initial_statement_diff(item: LifeModelStatementV2) -> LifeModelTypedDiffV2 {
+        let mut result = LifeModelDocumentV2::empty("primary");
+        result.values.push(item.clone());
+        LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: None,
+            base_document_digest: None,
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        }
+    }
+
+    #[test]
+    fn typed_diff_materializes_exact_add_replace_remove_and_replays() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let initial = initial_statement_diff(statement("value:1", "Autonomy matters."));
+        let first = store
+            .materialize_typed_diff(
+                &initial,
+                "proposal:add",
+                vec!["proposal:add".into()],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+        assert_eq!(first.version.model_version, 1);
+        assert!(!first.replayed);
+        let replay = store
+            .materialize_typed_diff(
+                &initial,
+                "proposal:add",
+                vec!["proposal:add".into()],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.version.version_digest, first.version.version_digest);
+
+        let replacement = statement("value:1", "Autonomy and clarity matter.");
+        let second_value = statement("value:2", "Care matters.");
+        let mut replaced_document = first.version.document.clone();
+        replaced_document.values[0] = replacement.clone();
+        replaced_document.values.push(second_value.clone());
+        let replace = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: Some(first.version.model_version),
+            base_document_digest: Some(first.version.document_digest.clone()),
+            operations: vec![
+                LifeModelTypedOperationV2::Replace {
+                    section: LifeModelSectionV2::Values,
+                    item_id: "value:1".into(),
+                    before_item_digest: life_model_item_digest_v2(&LifeModelItemV2::Statement(
+                        first.version.document.values[0].clone(),
+                    ))
+                    .unwrap(),
+                    item: LifeModelItemV2::Statement(replacement),
+                },
+                LifeModelTypedOperationV2::Add {
+                    section: LifeModelSectionV2::Values,
+                    item: LifeModelItemV2::Statement(second_value),
+                },
+            ],
+            result_document_digest: replaced_document.digest().unwrap(),
+        };
+        let second = store
+            .materialize_typed_diff(
+                &replace,
+                "proposal:replace",
+                vec!["proposal:replace".into()],
+                "2026-08-08T10:02:00Z",
+            )
+            .unwrap();
+        assert_eq!(second.version.model_version, 2);
+        assert_eq!(
+            second.version.document.values[0].statement,
+            "Autonomy and clarity matter."
+        );
+
+        let mut removed_document = second.version.document.clone();
+        removed_document.values.retain(|item| item.id != "value:1");
+        let remove = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: Some(second.version.model_version),
+            base_document_digest: Some(second.version.document_digest.clone()),
+            operations: vec![LifeModelTypedOperationV2::Remove {
+                section: LifeModelSectionV2::Values,
+                item_id: "value:1".into(),
+                before_item_digest: life_model_item_digest_v2(&LifeModelItemV2::Statement(
+                    second.version.document.values[0].clone(),
+                ))
+                .unwrap(),
+            }],
+            result_document_digest: removed_document.digest().unwrap(),
+        };
+        let third = store
+            .materialize_typed_diff(
+                &remove,
+                "proposal:remove",
+                vec!["proposal:remove".into()],
+                "2026-08-08T10:03:00Z",
+            )
+            .unwrap();
+        assert_eq!(third.version.model_version, 3);
+        assert_eq!(third.version.document.values.len(), 1);
+        assert_eq!(third.version.document.values[0].id, "value:2");
+    }
+
+    #[test]
+    fn typed_diff_rejects_stale_tampered_and_wrong_section_without_writes() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let initial = initial_statement_diff(statement("value:1", "Autonomy matters."));
+        let first = store
+            .materialize_typed_diff(
+                &initial,
+                "proposal:add",
+                vec!["proposal:add".into()],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+
+        let mut stale = initial.clone();
+        stale.operations = vec![LifeModelTypedOperationV2::Add {
+            section: LifeModelSectionV2::Values,
+            item: LifeModelItemV2::Statement(statement("value:2", "Clarity matters.")),
+        }];
+        assert!(store
+            .materialize_typed_diff(
+                &stale,
+                "proposal:stale",
+                vec!["proposal:stale".into()],
+                "2026-08-08T10:02:00Z",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("stale_base"));
+
+        let wrong_section = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: Some(first.version.model_version),
+            base_document_digest: Some(first.version.document_digest.clone()),
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Capabilities,
+                item: LifeModelItemV2::Statement(statement("value:2", "Clarity matters.")),
+            }],
+            result_document_digest: first.version.document_digest.clone(),
+        };
+        assert!(wrong_section.validate_contract().is_err());
+
+        let mut tampered = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: Some(first.version.model_version),
+            base_document_digest: Some(first.version.document_digest.clone()),
+            operations: vec![LifeModelTypedOperationV2::Replace {
+                section: LifeModelSectionV2::Values,
+                item_id: "value:1".into(),
+                before_item_digest:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+                item: LifeModelItemV2::Statement(statement("value:1", "Changed.")),
+            }],
+            result_document_digest: first.version.document_digest.clone(),
+        };
+        assert!(tampered.apply_to_version(Some(&first.version)).is_err());
+        tampered.operations = vec![LifeModelTypedOperationV2::Add {
+            section: LifeModelSectionV2::Values,
+            item: LifeModelItemV2::Statement(statement("value:2", "Clarity matters.")),
+        }];
+        assert!(tampered.apply_to_version(Some(&first.version)).is_err());
+
+        let empty = LifeModelDocumentV2::empty("primary");
+        let remove_last = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: Some(first.version.model_version),
+            base_document_digest: Some(first.version.document_digest.clone()),
+            operations: vec![LifeModelTypedOperationV2::Remove {
+                section: LifeModelSectionV2::Values,
+                item_id: "value:1".into(),
+                before_item_digest: life_model_item_digest_v2(&LifeModelItemV2::Statement(
+                    first.version.document.values[0].clone(),
+                ))
+                .unwrap(),
+            }],
+            result_document_digest: empty.digest().unwrap(),
+        };
+        assert!(remove_last
+            .apply_to_version(Some(&first.version))
+            .unwrap_err()
+            .to_string()
+            .contains("empty_result_requires_owner_cutover"));
+
+        let current = store.current("primary").unwrap().unwrap();
+        assert_eq!(current.model_version, 1);
+        assert_eq!(current.version_digest, first.version.version_digest);
     }
 
     #[test]

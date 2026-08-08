@@ -689,6 +689,35 @@ summary 后可从 canonical transcript 重建。
 退出标准：结构化 store 与 YAML 不存在双写权威；用户能看懂、导出、修改和
 回滚自己的模型；State、Tasks、Memory 与 LifeModel 的职责没有重叠。
 
+###### 5.2 范围冻结与执行顺序
+
+5.2 固定为 5.2A—5.2G 七个切片，到 5.2G 为止，不再默认增加 5.2H 或其他尾部
+切片。A—D 建立结构、只读迁移证据、人类投影和受审写入；E—G 完成迁移切换、
+用户控制和旧路径收敛。完成任一小切片不代表 5.2 整体完成，只有 5.2G 的阶段验收
+满足上面的总退出标准后才能进入 5.3。
+
+实现中发现的问题按以下规则处理：能够完成既有退出标准的工作必须归入 E、F 或
+G；不影响 5.2 退出标准的优化进入后续 backlog；若发现当前分法存在无法安全完成的
+真实阻塞，只能在说明源码证据、范围与代价并获得用户批准后重排或替换 E—G，不得
+通过继续追加新切片来移动终点。
+
+固定依赖顺序为：
+
+```text
+5.2A canonical schema/store
+  -> 5.2B legacy classification
+  -> 5.2C human-readable projection
+  -> 5.2D reviewed typed write
+  -> 5.2E migration and owner cutover
+  -> 5.2F edit/history/rollback/delete/export
+  -> 5.2G legacy retirement and native closeout
+```
+
+5.2 不实现从日常任务自动提炼 Observation/Candidate，不让 Provider 自动构建长期
+画像，也不把 LifeModel 注入 Agent planning/reasoning；前者属于 5.3，后者属于
+5.4。5.2 的目标只是在用户控制下建立正确、可读、可迁移、可修改和可恢复的
+LifeModel canonical owner。
+
 ###### 5.2A 空模型语义与版本化 canonical owner
 
 用户能力：新建或尚未建立 LifeModel 的用户看到 empty/unknown，不再获得虚构的
@@ -760,6 +789,141 @@ summary 后可从 canonical transcript 重建。
 
 退出标准：用户能读取与精确 canonical version 一致的 YAML；JSON/SQLite 与 YAML 不存在
 双写权威；自动化证明确定性、摘要绑定、兼容路径隔离和只读界面。
+
+###### 5.2D 受限 typed diff 与原子 v2 物化
+
+用户能力：经过 Review Center 审核的 LifeModel v2 变更能够作为一个精确、可理解的
+typed diff 原子追加为新 canonical version；批准本身仍不等于已物化。
+
+- proposal payload 只接受版本化 typed diff，操作限定为 schema 白名单 section 内的
+  条目级 `add`、`replace`、`remove`；不接受任意 JSON Pointer、自由 JSON Patch、整份
+  document 替换或旧 4D path；
+- diff 必须绑定 model id、base version、base document digest 和预期 result document
+  digest；`replace/remove` 还必须绑定目标稳定 ID 与 exact before item digest；
+- proposal 的 `base_hash`、affected path 和 after payload 必须与 typed diff 一致；未知
+  字段、类型与 section 不匹配、重复目标、跨 model、陈旧 base、before 漂移和结果摘要
+  不一致均在任何写入前 fail-closed；
+- Review 接受后才允许通过既有 proposal dispatch 与 canonical-write admission，在一个
+  SQLite transaction 中校验当前 head、追加 version 并推进 head；materialization id
+  绑定 proposal id，相同 proposal 只允许 exact replay；
+- 在 legacy owner 尚未完成 cutover 前，`remove` 不得产生空 v2 head，避免产品重新回退
+  并展示已经被用户移除的旧 YAML；空 canonical/tombstone 语义随 owner cutover 完成；
+- receipt 必须区分 confirmed materialization、definite pre-effect conflict 和 unknown；
+  `LifeModelViewModel` 继续只从实际 v2 head/source refs 判断已经应用；
+- 本切片不创建学习候选、不开放 YAML 编辑、不迁移旧 YAML、不切换 legacy owner，也
+  不恢复 Builder 4D 批量路径。
+
+退出标准：自动化证明有效 add/replace/remove、幂等重放和跨重启；stale base、before
+漂移、result digest 篡改、未知字段、错误 section 与重复 proposal identity 均零写入；
+接受链只有在 v2 head 已确认推进后才把 proposal 投影为 accepted/applied。
+
+###### 5.2E 受治理迁移与 canonical owner 切换
+
+用户能力：仍使用旧 YAML 的用户能够逐项确认哪些长期信息进入 LifeModel v2，明确
+放弃或保留为备份的其他字段；只有迁移物化和 owner 切换都确认完成后，产品才从 v2
+读取长期画像。新用户和已经切换的用户不再依赖旧 YAML。
+
+- 迁移输入只来自 5.2B 绑定 exact source digest 的预览；长期用户内容转为 5.2D 的
+  typed diff，State、Tasks、Agent Memory、Agent Runtime 和 `manual_classification`
+  项不得被迁移命令静默写入其他 owner；
+- 用户必须逐项确认、修改、排除或明确留待以后处理；重要关系和其他敏感内容默认
+  不选中。迁移 proposal 绑定旧 YAML digest、v2 base version/digest、所选 item 与
+  预期结果 digest；源文件或 v2 head 漂移时在任何切换前失败；
+- 物化前以原始字节建立只读恢复备份并验证 digest。备份失败、不可读或摘要不一致时
+  不提交 v2 version，也不切换 owner；备份不是第二写权威；
+- v2 数据提交与 owner-cutover receipt 使用同一 canonical SQLite transaction，receipt
+  至少绑定 profile/model、legacy digest、backup digest、v2 version/digest 和 proposal
+  id。进程在备份后中断可以安全重试，在事务提交后重启必须继续认定 v2 为唯一 owner；
+- read owner 由明确状态决定，而不是由 `item_count > 0` 猜测：无 legacy source 的
+  fresh profile 是不触发落盘的 canonical empty；已有 v2 head 的 profile 继续以 v2
+  为 owner；只有 legacy source 且没有 v2/cutover 的 profile 才进入兼容迁移状态；
+  已切换的空 v2 模型仍是 authoritative empty，不得回退显示旧 YAML；5.2D 对删除
+  最后一个条目的临时限制只在持久化 cutover state 成立后解除；
+- 切换后拒绝旧 YAML 的正常产品写入口；旧文件只作为有明确来源摘要的只读恢复
+  备份和受限迁移证据，不再参与正常 ViewModel、runtime packet 或 proposal base；
+- 同一 profile 只允许一个确定的迁移结果。已有非空 v2 与未迁移旧 YAML 同时存在时，
+  不覆盖 v2；用户只能通过普通 typed diff 合并选定信息或明确归档旧来源；
+- 本切片不自动产生学习候选，不迁移非 LifeModel 领域数据，不提供任意 YAML 保存，
+  不删除仍被未迁移 profile 使用的迁移读取器。
+
+失败反例至少覆盖：源 YAML 在审核后变化、备份失败、v2 base 漂移、重复迁移、空
+迁移、部分事务失败、cutover receipt 损坏、v2 store 不可读，以及重启发生在备份后
+或事务提交后。所有场景都必须保持一个可判定 owner，无法判定时显示 unavailable，
+不得猜测或双写。
+
+退出标准：fresh profile、legacy profile、已有 v2 profile 和 authoritative-empty profile
+四种状态都有唯一 owner；真实旧 YAML 可经用户审核迁移并跨重启保持 v2 权威；旧
+YAML 不再影响已切换用户，但恢复备份仍可验证且没有数据被静默分流到其他领域。
+
+###### 5.2F 用户编辑、版本、删除、回滚与导出
+
+用户能力：用户可以在“关于我 / LifeModel”中理解当前版本和来源，修改或删除具体
+长期信息，查看有限版本历史，回滚到以前的内容，并导出可读 YAML；所有改变继续
+经过 Review Center，任何一次批准都只有在新 canonical version 确认后才算完成。
+
+- `LifeModelViewModel` 增加 backend-owned 的当前版本、父版本、更新时间、最小来源、
+  freshness/conflict 状态和有界版本历史；前端不读取原始 SQLite 或旧 snapshot 目录
+  拼装产品真相；
+- 默认编辑采用 schema-aware 字段/条目界面。YAML 始终是 projection；如允许用户
+  编辑 YAML，只能编辑由 exact canonical version 生成的 draft，解析、schema 校验并
+  比较为 5.2D typed diff 后进入 Review，绝不把 YAML 文件直接保存为 owner；
+- 修改、单项删除和清空模型都绑定 exact base version/digest。cutover 后清空通过追加
+  authoritative-empty version 表达，不删除历史、不恢复 legacy fallback；
+- 回滚不移动或改写旧 head，而是把用户选择的历史 document 作为一个受审的新版本
+  追加，source ref 指向 rollback proposal 与目标版本；重复回滚必须 exact replay；
+- 冲突、陈旧或来源不足的内容保持可见但不进入普通编辑结果；用户可以取消、修改或
+  重新基于新 head 创建 proposal，不提供“强制覆盖”；
+- YAML/JSON 导出绑定 exact model version、document digest 与 projection digest。
+  复制到剪贴板必须是用户明确触发的本地动作；写入文件继续复用现有受治理
+  file/data-export 路径，不赋予导入或后续写权限；
+- 重要关系等敏感内容的查看、编辑与导出使用现有本地隐私边界；日志、receipt 和
+  telemetry 不复制正文。删除与回滚的 source/audit metadata 保持最小化；
+- 本切片不实现自动 Observation/Candidate，不调用外部 Provider，不改变 Agent 的
+  planning/reasoning，也不把历史版本或 YAML projection 建成新的独立存储系统。
+
+失败反例至少覆盖：编辑 draft 基础版本已变化、YAML 含未知字段或重复 ID、错误
+model id、回滚目标不存在或损坏、删除最后一项、重复操作、导出目标漂移和数据库
+提交结果未知。未知结果不得自动重试，UI 必须从重新读取的 canonical head 判断结果。
+
+退出标准：用户通过真实产品界面完成 add/replace/remove、清空、历史查看、回滚和
+YAML 导出；所有 durable change 都经过 proposal 和 confirmed materialization；跨重启
+后版本、来源、空模型和导出内容与 canonical store 一致。
+
+###### 5.2G 旧 4D 路径替换与阶段收口
+
+用户能力：新建、迁移、查看和维护 LifeModel 全部使用同一 v2 模型，不再遇到
+Identity/Goals/Capabilities/State 旧分类、旧快照和新 v2 同时声称权威；尚未迁移的
+已有用户只看到一条有界迁移入口，不会继续在旧系统上产生新数据。
+
+- 将当前仍在产品中的 LifeModel Builder 从旧 4D signal/path 和 legacy patch batch
+  改为 v2 schema-aware 建立流程；它只能根据用户在 Builder 中明确给出的回答创建
+  typed diff proposal，默认不选择候选，不能直接写入 v2；
+- Builder 中的短期状态、任务进度、Agent 工具能力和程序性经验不再成为 LifeModel
+  候选。无法唯一映射的旧问题或 signal 删除或标为不支持，不用兼容转换猜测含义；
+- `/life-model` 及 shipped frontend 只消费统一 `LifeModelViewModel`。删除无生产调用者
+  的 `get_life_model`、`get_life_model_current_view`、旧 4D completion/report、legacy
+  patch/snapshot bridge 和 TypeScript wrapper；测试专用入口不获得产品 caller 信用；
+- 已切换 profile 的正常读取、写入、runtime packet 和 Review materialization 不再调用
+  legacy YAML manager、旧 patch store 或文件 snapshot。尚未迁移 profile 只允许读取
+  migration preview 和启动 5.2E；不得继续通过旧 proposal/materializer 更新 YAML；
+- 逐个核对真实 caller 后删除已完全替代的旧 command、bridge、DTO、前端组件和测试。
+  若旧 version manager 或 patch store 仍服务其他产品领域，只移除 LifeModel 依赖，
+  不按名称整模块删除；
+- 更新稳定架构文档，使 SQLite/versioned JSON、YAML projection、Review typed diff、
+  cutover state 和 legacy migration reader 各自只有一个明确职责；不新增第二份计划、
+  迁移账本或治理 JSON；
+- 使用同一隔离 QA profile 完成真实 Tauri 验收，不调用外部 Provider：fresh empty ->
+  用户建立 -> Review -> v2 materialization -> YAML；legacy preview -> 审核迁移 ->
+  cutover -> 重启；编辑 -> 冲突 -> 删除 -> 回滚 -> 导出；v2 故障时普通 Agent 保持
+  可用，但 LifeModel 能力明确 unavailable。
+
+阶段失败条件：仍有 shipped 旧写入口、已切换 profile 可以回退到 YAML、Builder 仍
+产生 4D/State/Agent 能力字段、前端从原始 store 猜测应用状态、回滚改写历史，或只靠
+自动化测试而没有真实 Tauri 产品闭环。任一成立都不能宣布 5.2 完成。
+
+退出标准：5.2 顶层退出标准逐项成立；A—G 的产品路径和失败边界通过比例适当的
+自动化门禁，E—G 在一个精确构建和同一隔离 QA profile 中完成真实 Tauri 验收；
+工作树停在用户审阅边界。至此必须进入 5.3，不再追加新的 5.2 切片。
 
 ##### 5.3 建立真实学习闭环
 
@@ -970,9 +1134,10 @@ Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显�
 于提交 `7110e99` 完成并经用户确认。5.1F“用户控制界面与原生验收”已于提交
 `653693b` 完成并经用户确认。5.2A“空模型语义与版本化 canonical owner”已于提交
 `3a6c2bb` 完成并经用户确认。5.2B“旧 YAML 迁移预览与字段归属”已于提交
-`39e8fe9` 完成。5.2C“Canonical YAML 人类投影”已完成实现、本地自审和全量门禁，
-当前停在用户审阅与提交边界；尚未开始真实数据迁移、v2 proposal materialization、
-YAML 编辑或 canonical owner cutover。**
+`39e8fe9` 完成。5.2C“Canonical YAML 人类投影”已于提交 `22708f9` 完成。5.2D
+“受限 typed diff 与原子 v2 物化”已完成实现、自审和全量门禁，当前停在用户审阅与
+提交边界。5.2 已封顶为 A—G；5.2E—G 的迁移切换、用户控制和旧路径收敛已经规划
+但尚未实施，不再默认增加 5.2H。**
 
 第五阶段第一步实际完成：
 

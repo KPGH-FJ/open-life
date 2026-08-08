@@ -12,6 +12,7 @@ use openlife_core::agent::AgentProposal;
 use openlife_core::life_model::patch::{
     ConflictResolution, ConflictType, LifeModelPatch, PatchApplyResult, PatchConflict,
 };
+use openlife_core::life_model::v2::{LifeModelTypedDiffV2, LIFE_MODEL_V2_TYPED_DIFF_PATH};
 use openlife_core::life_model::LifeModel;
 use openlife_core::life_model_write_gateway::{
     LifeModelWriteGateway, LifeModelWriteGatewayRequest, LifeModelWriteIntentKind,
@@ -937,6 +938,127 @@ pub(crate) async fn materialize_accepted_lifemodel_proposal_with_state(
     } else {
         Ok(apply_result)
     }
+}
+
+pub(crate) async fn materialize_accepted_lifemodel_v2_typed_diff_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    diff: &LifeModelTypedDiffV2,
+) -> Result<PatchApplyResult, String> {
+    let failed = |operation: &str, error: String| PatchApplyResult {
+        patch_id: proposal.id.clone(),
+        success: false,
+        path: LIFE_MODEL_V2_TYPED_DIFF_PATH.into(),
+        operation: operation.into(),
+        error: Some(error),
+    };
+    if proposal.proposal_type != openlife_core::agent::ProposalType::LifeModelUpdate
+        || proposal.affected_path != LIFE_MODEL_V2_TYPED_DIFF_PATH
+    {
+        return Ok(failed(
+            "lifemodel_v2_typed_diff_validation_failed",
+            "lifemodel_v2_typed_diff_proposal_identity_mismatch".into(),
+        ));
+    }
+    if let Err(error) = diff.validate_contract() {
+        return Ok(failed(
+            "lifemodel_v2_typed_diff_validation_failed",
+            error.to_string(),
+        ));
+    }
+    if proposal.base_hash.as_deref() != diff.base_document_digest.as_deref() {
+        return Ok(failed(
+            "lifemodel_v2_typed_diff_validation_failed",
+            "lifemodel_v2_typed_diff_proposal_base_mismatch".into(),
+        ));
+    }
+
+    let write_admission = state
+        .persistence_coordinator
+        .admit_normal_or_governed_data_import_writes(
+            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
+            None,
+            "",
+            "",
+            "",
+        )
+        .map_err(|error| error.to_string())?;
+    let commit_permit = state
+        .persistence_coordinator
+        .acquire_canonical_commit_permit(&write_admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    let coordinator_guard = state.life_model_write_coordinator.lock().await;
+    let manager = state.life_model_manager.lock().await;
+    let current = manager
+        .load_v2_current(&diff.model_id)
+        .map_err(|error| error.to_string())?;
+    let current_digest = current
+        .as_ref()
+        .map(|version| version.document_digest.clone());
+    if let Err(error) = diff.apply_to_version(current.as_ref()) {
+        return Ok(failed(
+            "lifemodel_v2_typed_diff_precondition_failed",
+            error.to_string(),
+        ));
+    }
+
+    let created_at = proposal.created_at.to_rfc3339();
+    let materialized =
+        match manager.materialize_reviewed_v2_typed_diff(diff, &proposal.id, &created_at) {
+            Ok(result) => result,
+            Err(error)
+                if [
+                    "lifemodel_v2_parent_version_conflict",
+                    "lifemodel_v2_parent_digest_conflict",
+                    "lifemodel_v2_materialization_identity_conflict",
+                ]
+                .iter()
+                .any(|code| error.to_string().contains(code)) =>
+            {
+                return Ok(failed(
+                    "lifemodel_v2_typed_diff_commit_conflict",
+                    error.to_string(),
+                ));
+            }
+            Err(error) => return Err(format!("lifemodel_v2_materialization_unknown:{error}")),
+        };
+    drop(manager);
+    drop(coordinator_guard);
+    drop(commit_permit);
+
+    let snapshot_version = materialized.version.model_version.to_string();
+    record_lifemodel_gateway_audit(
+        state,
+        "lifemodel_v2_gateway_materialized",
+        Some(proposal),
+        Some(&proposal.id),
+        Some(&snapshot_version),
+        if materialized.replayed {
+            "lifemodel_v2_materialization_replayed"
+        } else {
+            "lifemodel_v2_materialized"
+        },
+        None,
+        diff.base_document_digest.as_deref(),
+        current_digest.as_deref(),
+        current_digest.as_deref(),
+        Some(&materialized.version.document_digest),
+        "canonical_lifemodel_v2_truth",
+    )
+    .await;
+
+    Ok(PatchApplyResult {
+        patch_id: proposal.id.clone(),
+        success: true,
+        path: LIFE_MODEL_V2_TYPED_DIFF_PATH.into(),
+        operation: if materialized.replayed {
+            "lifemodel_v2_materialization_replayed".into()
+        } else {
+            "lifemodel_v2_materialized".into()
+        },
+        error: None,
+    })
 }
 
 pub(crate) async fn materialize_accepted_lifemodel_patch_batch_with_state(

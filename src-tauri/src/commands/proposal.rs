@@ -387,6 +387,11 @@ fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
         && proposal.affected_path == openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
 }
 
+fn is_lifemodel_v2_typed_diff(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+}
+
 fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
     matches!(
         operation,
@@ -401,6 +406,9 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
             | "lifemodel_patch_batch_conflict"
             | "lifemodel_gateway_batch_blocked"
             | "lifemodel_compare_and_swap_conflict"
+            | "lifemodel_v2_typed_diff_validation_failed"
+            | "lifemodel_v2_typed_diff_precondition_failed"
+            | "lifemodel_v2_typed_diff_commit_conflict"
             | "memory_write_not_committed"
             | "memory_write_duplicate_no_effect"
             | "scheduled_task_review_snapshot_missing"
@@ -2908,6 +2916,17 @@ pub(crate) fn validate_proposal_payload(
 
 fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), String> {
     validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    if is_lifemodel_v2_typed_diff(proposal) {
+        let diff = serde_json::from_value::<openlife_core::life_model::v2::LifeModelTypedDiffV2>(
+            proposal.after.clone(),
+        )
+        .map_err(|_| "invalid_lifemodel_v2_typed_diff_payload".to_string())?;
+        diff.validate_contract()
+            .map_err(|error| error.to_string())?;
+        if proposal.base_hash.as_deref() != diff.base_document_digest.as_deref() {
+            return Err("lifemodel_v2_typed_diff_proposal_base_mismatch".into());
+        }
+    }
     if proposal.proposal_type == ProposalType::ToolPermission
         && tool_permission_scope_kind(&proposal.after)? == ToolPermissionScopeKind::ActionBound
         && tool_permission_scope_field(&proposal.after, "action_type") == Some("network")
@@ -3202,6 +3221,16 @@ async fn apply_proposal_to_state(
         | ProposalType::StateUpdate
         | ProposalType::PreferenceUpdate
         | ProposalType::CapabilityUpdate => {
+            if is_lifemodel_v2_typed_diff(proposal) {
+                let diff = serde_json::from_value::<
+                    openlife_core::life_model::v2::LifeModelTypedDiffV2,
+                >(after)
+                .map_err(|_| "invalid_lifemodel_v2_typed_diff_payload".to_string())?;
+                return life_model_write_gateway::materialize_accepted_lifemodel_v2_typed_diff_with_state(
+                    state, proposal, &diff,
+                )
+                .await;
+            }
             let canonical_affected_path = canonical_lifemodel_path(&proposal.affected_path);
             let model = {
                 let manager = state.life_model_manager.lock().await;
@@ -6625,6 +6654,216 @@ mod tests {
             model.preferences.communication_style,
             "changed outside proposal"
         );
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+    }
+
+    fn v2_value_add_diff(
+        base: Option<&openlife_core::life_model::v2::LifeModelVersionV2>,
+        item_id: &str,
+        statement: &str,
+    ) -> openlife_core::life_model::v2::LifeModelTypedDiffV2 {
+        use openlife_core::life_model::v2::{
+            LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
+            LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
+        };
+
+        let item = LifeModelStatementV2 {
+            id: item_id.into(),
+            statement: statement.into(),
+            source_refs: vec!["message:user:v2-review".into()],
+            confirmed_at: "2026-08-08T10:00:00Z".into(),
+        };
+        let mut result = base
+            .map(|version| version.document.clone())
+            .unwrap_or_else(|| LifeModelDocumentV2::empty("primary"));
+        result.values.push(item.clone());
+        LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: base.map(|version| version.model_version),
+            base_document_digest: base.map(|version| version.document_digest.clone()),
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        }
+    }
+
+    async fn store_v2_diff_proposal(
+        state: &Arc<AppState>,
+        diff: openlife_core::life_model::v2::LifeModelTypedDiffV2,
+    ) -> String {
+        let mut proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            serde_json::to_value(&diff).unwrap(),
+            "User reviewed an exact LifeModel v2 change.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        proposal.base_hash = diff.base_document_digest.clone();
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn reviewed_v2_typed_diff_advances_head_only_after_accept_and_stale_stays_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        assert!(state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .is_none());
+
+        let initial_id = store_v2_diff_proposal(
+            &state,
+            v2_value_add_diff(None, "value:autonomy", "Autonomy matters."),
+        )
+        .await;
+        assert!(state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .is_none());
+
+        let accepted = accept_proposal_with_state(initial_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["success"], true);
+        let first = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.model_version, 1);
+        assert_eq!(first.source_refs, vec![format!("proposal:{initial_id}")]);
+        let audit = state
+            .feedback_store
+            .lock()
+            .await
+            .analytics_details_for_event("lifemodel_v2_gateway_materialized", 5)
+            .unwrap();
+        let audit = audit
+            .iter()
+            .find_map(|detail| serde_json::from_str::<serde_json::Value>(detail).ok())
+            .expect("v2 materialization audit");
+        assert_eq!(audit["proposalId"], initial_id);
+        assert_eq!(audit["lane"], "canonical_lifemodel_v2_truth");
+        assert_eq!(audit["afterHash"], first.document_digest);
+        assert_eq!(audit["containsRawContent"], false);
+
+        let stale_id = store_v2_diff_proposal(
+            &state,
+            v2_value_add_diff(Some(&first), "value:clarity", "Clarity matters."),
+        )
+        .await;
+        let winner_id = store_v2_diff_proposal(
+            &state,
+            v2_value_add_diff(Some(&first), "value:care", "Care matters."),
+        )
+        .await;
+        accept_proposal_with_state(winner_id.clone(), &state)
+            .await
+            .unwrap();
+        let winner_replay = accept_proposal_with_state(winner_id, &state).await.unwrap();
+        assert_eq!(winner_replay["success"], true);
+
+        let error = accept_proposal_with_state(stale_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("lifemodel_v2_typed_diff_stale_base"));
+        let current = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.model_version, 2);
+        assert!(current
+            .document
+            .values
+            .iter()
+            .any(|item| item.id == "value:care"));
+        assert!(!current
+            .document
+            .values
+            .iter()
+            .any(|item| item.id == "value:clarity"));
+        let stale = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&stale_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.status, ProposalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn v2_typed_diff_proposal_base_mismatch_is_rejected_before_store_creation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let diff = v2_value_add_diff(None, "value:autonomy", "Autonomy matters.");
+        let mut proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            serde_json::to_value(diff).unwrap(),
+            "The review snapshot is intentionally inconsistent.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        proposal.base_hash =
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("lifemodel_v2_typed_diff_proposal_base_mismatch"));
+        assert!(!state
+            .life_model_manager
+            .lock()
+            .await
+            .v2_store_path()
+            .exists());
         let stored = state
             .proposal_store
             .as_ref()

@@ -21,7 +21,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-08 during Phase 5.2C canonical YAML projection implementation.
+2026-08-08 during Phase 5.2D typed diff materialization implementation.
 
 ## Source map
 
@@ -74,9 +74,10 @@ Merely opening `/life-model` does not create the database or an empty model.
 
 `get_life_model_view_model` consumes an existing v2 head and gives canonical
 credit only to a non-empty validated version. Without one, existing YAML remains
-the compatibility owner. The v2 store does not yet accept product writes, YAML
-has not been migrated, and the current proposal materializer still targets the
-legacy governed gateway; those are later 5.2 slices.
+the compatibility owner. The v2 store accepts only an exact reviewed typed-diff
+proposal through the canonical proposal dispatch and write gateway. YAML has not
+been migrated and the legacy patch materializer remains isolated to legacy paths;
+owner cutover is a later 5.2 slice.
 
 Before cutover, `LegacyLifeModelMigrationPreviewV2` reads the exact YAML bytes
 that produced the compatibility model and classifies every non-empty source
@@ -95,8 +96,14 @@ validates this binding before granting canonical `LifeModelViewModel` credit;
 the frontend only renders the backend-owned projection. A changed YAML body,
 version transplant, item-count drift, or document mismatch fails closed rather
 than falling back to the legacy YAML. The product view is collapsed and
-read-only: no YAML editor, import, proposal, or v2 write path is introduced by
-this slice.
+read-only: 5.2C introduced no YAML editor, import, proposal, or v2 write path.
+
+`LifeModelTypedDiffV2` is the only v2 mutation contract. It allows item-level
+add, replace, and remove operations in schema-owned sections; it does not expose
+an arbitrary JSON path or whole-document replacement. Every diff binds the
+model, base version and document digest, expected result digest, and for replace
+or remove the exact stable item id and before-item digest. Review Center renders
+the backend-owned operation summary and exact values before approval.
 
 ## Patch And Proposal Path
 
@@ -138,9 +145,19 @@ It materializes accepted LifeModel proposals by checking base hash, applying the
 patch, saving the model through the gateway, recording patch state, and writing
 metadata-safe audit details.
 
-This gateway currently materializes the legacy YAML shape. It does not receive
-v2 canonical-store credit until a later slice replaces its patch allowlist and
-commit path with exact v2 document versions.
+Legacy proposal paths continue to materialize the legacy YAML shape. The exact
+`$lifemodel_v2` path instead parses a `LifeModelTypedDiffV2`, verifies proposal
+`base_hash`, acquires the existing canonical-write admission, checks the current
+v2 head, and appends one SQLite version before reporting success. Stale base,
+before-item drift, result-digest drift, section mismatch, and materialization-id
+reuse fail closed. A database error whose effect cannot be proven remains
+unknown and is not automatically retried.
+
+Until legacy owner cutover is complete, a typed remove may not produce an empty
+v2 head. Otherwise the current compatibility read policy could surface old YAML
+again after the user removed the last canonical item. Empty canonical/tombstone
+semantics therefore remain a cutover requirement rather than an implicit
+fallback.
 
 `src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
 contexts. Governed manual override, restore/import, source-data compatibility,

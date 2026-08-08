@@ -81,6 +81,68 @@ describe("Workbench governed action journey", () => {
     expect(dispatchReview).not.toHaveBeenCalled();
   });
 
+  it("shows the backend-owned exact LifeModel typed diff before approval", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const item = snapshot.reviewEnvelope.data!.items[0];
+        return {
+          ...snapshot,
+          reviewEnvelope: {
+            ...snapshot.reviewEnvelope,
+            data: {
+              ...snapshot.reviewEnvelope.data!,
+              items: [
+                {
+                  ...item,
+                  type: "life_model_update" as const,
+                  decisionContext: {
+                    ...item.decisionContext,
+                    title: "Review LifeModel changes",
+                    summary: "Review an exact version-bound LifeModel change.",
+                    permission: undefined,
+                    before: {
+                      kind: "object" as const,
+                      summary: "LifeModel v2 version 1",
+                      detail: "sha256:base",
+                      sensitivity: "local_private" as const,
+                      truncated: false,
+                    },
+                    after: {
+                      kind: "list" as const,
+                      summary: "1 LifeModel change(s): 1 add, 0 replace, 0 remove",
+                      detail: "add values/value:autonomy: Autonomy matters.",
+                      sensitivity: "local_private" as const,
+                      truncated: false,
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        initialSurface="review"
+      />
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Review LifeModel changes", level: 2 })
+    ).toBeInTheDocument();
+    expect(screen.getByText("LifeModel v2 version 1")).toBeInTheDocument();
+    await user.click(screen.getByText("查看精确变更"));
+    expect(screen.getByText("add values/value:autonomy: Autonomy matters.")).toBeInTheDocument();
+  });
+
   it("fails stale governed state closed while preserving evidence access", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-stale");

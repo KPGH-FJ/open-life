@@ -1780,6 +1780,25 @@ impl LifeModelManager {
         v2::LifeModelV2Store::open(path)?.current(model_id)
     }
 
+    /// Append one exact, already-reviewed typed diff to the canonical v2
+    /// owner. The proposal id is both the idempotency identity and the sole
+    /// version source reference; callers cannot relabel an accepted review as
+    /// an automatic or unreviewed write.
+    pub fn materialize_reviewed_v2_typed_diff(
+        &self,
+        diff: &v2::LifeModelTypedDiffV2,
+        proposal_id: &str,
+        created_at: &str,
+    ) -> Result<v2::LifeModelPatchMaterializationResultV2> {
+        let proposal_ref = format!("proposal:{proposal_id}");
+        v2::LifeModelV2Store::open(self.v2_store_path())?.materialize_typed_diff(
+            diff,
+            &proposal_ref,
+            vec![proposal_ref.clone()],
+            created_at,
+        )
+    }
+
     pub fn load_existing(&self) -> Result<Option<LifeModel>> {
         self.load_existing_with_source()
             .map(|loaded| loaded.map(|(model, _)| model))

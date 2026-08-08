@@ -2,6 +2,9 @@ use crate::agent::product_read_model::{
     EvidenceRef, EvidenceSensitivity, ExternalTransmissionStatus,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType};
+use crate::life_model::v2::{
+    LifeModelItemV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_PATH,
+};
 use crate::tool_permissions::ActionBoundToolPermissionScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -159,6 +162,7 @@ pub fn build_review_decision_context(
     proposal: &AgentProposal,
     evidence_refs: &[EvidenceRef],
 ) -> ReviewDecisionContext {
+    let life_model_v2_diff = reviewed_lifemodel_v2_diff(proposal);
     let permission = (proposal.proposal_type == ProposalType::ToolPermission)
         .then(|| build_permission_decision_context(proposal, evidence_refs));
     let after = if permission.is_some() {
@@ -170,15 +174,27 @@ pub fn build_review_decision_context(
             sensitivity: EvidenceSensitivity::Redacted,
             truncated: false,
         }
+    } else if let Some(diff) = life_model_v2_diff.as_ref() {
+        readable_lifemodel_v2_diff(diff)
     } else {
         readable_value(&proposal.after)
     };
+    let before = life_model_v2_diff.as_ref().map(|diff| ReviewReadableValue {
+        kind: ReviewReadableValueKind::Object,
+        summary: diff.base_version.map_or_else(
+            || "Empty LifeModel v2".into(),
+            |version| format!("LifeModel v2 version {version}"),
+        ),
+        detail: diff.base_document_digest.clone(),
+        sensitivity: EvidenceSensitivity::LocalPrivate,
+        truncated: false,
+    });
 
     ReviewDecisionContext {
         review_item_id: proposal.id.clone(),
         title: proposal_title(proposal),
         summary: proposal_summary(proposal),
-        before: proposal.before.as_ref().map(readable_value),
+        before: before.or_else(|| proposal.before.as_ref().map(readable_value)),
         after,
         reason_summary: bounded_text(&proposal.reason, "No reason was supplied."),
         source_summary: proposal_source_summary(proposal.source).into(),
@@ -188,6 +204,100 @@ pub fn build_review_decision_context(
         permission,
         action_contract: build_governed_action_review_contract(proposal),
         evidence_refs: evidence_refs.to_vec(),
+    }
+}
+
+fn reviewed_lifemodel_v2_diff(proposal: &AgentProposal) -> Option<LifeModelTypedDiffV2> {
+    (proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path == LIFE_MODEL_V2_TYPED_DIFF_PATH)
+        .then(|| serde_json::from_value(proposal.after.clone()).ok())
+        .flatten()
+        .filter(|diff: &LifeModelTypedDiffV2| diff.validate_contract().is_ok())
+}
+
+fn readable_lifemodel_v2_diff(diff: &LifeModelTypedDiffV2) -> ReviewReadableValue {
+    let mut add = 0;
+    let mut replace = 0;
+    let mut remove = 0;
+    let mut lines = Vec::new();
+    for operation in &diff.operations {
+        let (verb, section, item_id, content) = match operation {
+            LifeModelTypedOperationV2::Add { section, item } => {
+                add += 1;
+                ("add", section, item_id(item), Some(item_summary(item)))
+            }
+            LifeModelTypedOperationV2::Replace {
+                section,
+                item_id,
+                item,
+                ..
+            } => {
+                replace += 1;
+                (
+                    "replace",
+                    section,
+                    item_id.as_str(),
+                    Some(item_summary(item)),
+                )
+            }
+            LifeModelTypedOperationV2::Remove {
+                section, item_id, ..
+            } => {
+                remove += 1;
+                ("remove", section, item_id.as_str(), None)
+            }
+        };
+        let section = format!("{section:?}").to_ascii_lowercase();
+        lines.push(match content {
+            Some(content) => format!("{verb} {section}/{item_id}: {content}"),
+            None => format!("{verb} {section}/{item_id}"),
+        });
+    }
+    let detail = lines.join("\n");
+    ReviewReadableValue {
+        kind: ReviewReadableValueKind::List,
+        summary: format!(
+            "{} LifeModel change(s): {add} add, {replace} replace, {remove} remove",
+            diff.operations.len()
+        ),
+        detail: (detail.len() <= MAX_READABLE_DETAIL_BYTES).then_some(detail),
+        sensitivity: EvidenceSensitivity::LocalPrivate,
+        truncated: lines.join("\n").len() > MAX_READABLE_DETAIL_BYTES,
+    }
+}
+
+fn item_id(item: &LifeModelItemV2) -> &str {
+    match item {
+        LifeModelItemV2::Statement(item) => &item.id,
+        LifeModelItemV2::LongTermGoal(item) => &item.id,
+        LifeModelItemV2::Relationship(item) => &item.id,
+        LifeModelItemV2::Capability(item) => &item.id,
+        LifeModelItemV2::Resource(item) => &item.id,
+    }
+}
+
+fn item_summary(item: &LifeModelItemV2) -> String {
+    match item {
+        LifeModelItemV2::Statement(item) => bounded_text(&item.statement, "Empty statement"),
+        LifeModelItemV2::LongTermGoal(item) => bounded_text(
+            &format!("{} — {}", item.direction, item.meaning),
+            "Empty long-term goal",
+        ),
+        LifeModelItemV2::Relationship(item) => bounded_text(
+            &format!(
+                "{} — {} — {}",
+                item.person_label, item.relationship, item.significance
+            ),
+            "Empty relationship",
+        ),
+        LifeModelItemV2::Capability(item) => bounded_text(
+            &format!("{} — {}", item.name, item.description),
+            "Empty capability",
+        ),
+        LifeModelItemV2::Resource(item) => bounded_text(
+            &format!("{} — {}", item.name, item.description),
+            "Empty resource",
+        ),
     }
 }
 
@@ -585,6 +695,9 @@ fn proposal_operation(proposal: &AgentProposal) -> Option<&str> {
 }
 
 fn proposal_title(proposal: &AgentProposal) -> String {
+    if reviewed_lifemodel_v2_diff(proposal).is_some() {
+        return "Review LifeModel changes".into();
+    }
     let title = match proposal.proposal_type {
         ProposalType::GoalUpdate => "Update a goal",
         ProposalType::StateUpdate => "Update personal state",
@@ -631,6 +744,10 @@ fn proposal_title(proposal: &AgentProposal) -> String {
 }
 
 fn proposal_summary(proposal: &AgentProposal) -> String {
+    if reviewed_lifemodel_v2_diff(proposal).is_some() {
+        return "Review the exact version-bound LifeModel changes before a new canonical version is materialized."
+            .into();
+    }
     match proposal.proposal_type {
         ProposalType::MemoryArchive
             if proposal.after.get("recallDisposition").and_then(Value::as_str)
@@ -723,6 +840,9 @@ fn impact_summary(proposal: &AgentProposal) -> &'static str {
 }
 
 fn affected_object_label(proposal: &AgentProposal) -> String {
+    if reviewed_lifemodel_v2_diff(proposal).is_some() {
+        return "LifeModel v2 canonical version".into();
+    }
     let prefix = match proposal.proposal_type {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => "Memory",
         ProposalType::ToolPermission | ProposalType::PluginPermission => "Permission",
@@ -984,6 +1104,49 @@ mod tests {
 
         assert!(detail.contains("[REDACTED]"));
         assert!(!detail.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn lifemodel_v2_typed_diff_has_version_bound_human_review_language() {
+        use crate::life_model::v2::{
+            LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
+            LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
+        };
+        let item = LifeModelStatementV2 {
+            id: "value:autonomy".into(),
+            statement: "Autonomy matters.".into(),
+            source_refs: vec!["message:user:1".into()],
+            confirmed_at: "2026-08-08T10:00:00Z".into(),
+        };
+        let mut result = LifeModelDocumentV2::empty("primary");
+        result.values.push(item.clone());
+        let diff = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: None,
+            base_document_digest: None,
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        };
+        let mut proposal = proposal(
+            ProposalType::LifeModelUpdate,
+            serde_json::to_value(diff).unwrap(),
+        );
+        proposal.affected_path = LIFE_MODEL_V2_TYPED_DIFF_PATH.into();
+
+        let context = build_review_decision_context(&proposal, &[]);
+
+        assert_eq!(context.title, "Review LifeModel changes");
+        assert_eq!(context.before.unwrap().summary, "Empty LifeModel v2");
+        assert!(context.after.summary.contains("1 add"));
+        assert!(context.after.detail.unwrap().contains("Autonomy matters."));
+        assert_eq!(
+            context.affected_object_labels,
+            vec!["LifeModel v2 canonical version"]
+        );
     }
 
     #[test]

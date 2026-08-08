@@ -410,6 +410,12 @@ export function ReviewGovernedView({
                     <strong>{selectedItem.decisionContext.after.summary}</strong>
                   </div>
                 </div>
+                {selectedItem.decisionContext.after.detail && (
+                  <details>
+                    <summary>查看精确变更</summary>
+                    <pre>{selectedItem.decisionContext.after.detail}</pre>
+                  </details>
+                )}
               </section>
             )}
 
