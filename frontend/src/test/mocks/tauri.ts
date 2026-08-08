@@ -201,6 +201,7 @@ export function createMockLifeModelViewModelEnvelope(
     data: {
       truthMode: "current_compatibility",
       canonicalSummary: null,
+      legacyMigrationPreview: null,
       currentViewSummary: null,
       dimensionSummaries: [
         {

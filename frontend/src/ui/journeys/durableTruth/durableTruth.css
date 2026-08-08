@@ -111,7 +111,8 @@
 
 .ol-durable-current,
 .ol-durable-change,
-.ol-durable-memory {
+.ol-durable-memory,
+.ol-lifemodel-migration {
   display: grid;
   gap: var(--ol-space-5);
   padding: var(--ol-space-6) 0;
@@ -157,12 +158,116 @@
 .ol-durable-change-summary,
 .ol-durable-state-conclusion,
 .ol-durable-muted,
-.ol-durable-empty p {
+.ol-durable-empty p,
+.ol-lifemodel-migration > p {
   max-width: 720px;
   margin: 0;
   color: var(--ol-ink-secondary);
   font-size: var(--ol-type-reading);
   line-height: var(--ol-line-reading);
+}
+
+.ol-lifemodel-migration-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--ol-space-2);
+  margin: 0;
+}
+
+.ol-lifemodel-migration-counts > div {
+  display: grid;
+  gap: var(--ol-space-1);
+  padding: var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface-sunken);
+}
+
+.ol-lifemodel-migration-counts dt,
+.ol-lifemodel-migration-counts dd {
+  margin: 0;
+}
+
+.ol-lifemodel-migration-counts dt {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-lifemodel-migration-counts dd {
+  color: var(--ol-ink);
+  font-size: var(--ol-type-title);
+  line-height: var(--ol-line-title);
+  font-weight: 650;
+}
+
+.ol-lifemodel-migration-details {
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-migration-details summary {
+  padding: var(--ol-space-3) 0;
+  color: var(--ol-ink);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ol-lifemodel-migration-details ol {
+  display: grid;
+  gap: var(--ol-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ol-lifemodel-migration-details li {
+  display: grid;
+  gap: var(--ol-space-1);
+  padding: var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-2);
+}
+
+.ol-lifemodel-migration-details li > div {
+  display: flex;
+  min-width: 0;
+  gap: var(--ol-space-2);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ol-lifemodel-migration-details code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-lifemodel-migration-details li span {
+  flex: none;
+  color: var(--ol-danger-ink);
+  font-size: var(--ol-type-caption);
+  font-weight: 650;
+}
+
+.ol-lifemodel-migration-details p,
+.ol-lifemodel-migration-details small,
+.ol-lifemodel-migration-digest {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ol-lifemodel-migration-details p {
+  color: var(--ol-ink);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+.ol-lifemodel-migration-details small,
+.ol-lifemodel-migration-digest {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
 }
 
 .ol-durable-dimensions {
@@ -773,10 +878,18 @@
   .ol-lifemodel-builder__progress {
     grid-template-columns: minmax(0, 1fr) 144px;
   }
+
+  .ol-lifemodel-migration-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 620px) {
   .ol-intelligence-tabs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ol-lifemodel-migration-counts {
     grid-template-columns: minmax(0, 1fr);
   }
 }

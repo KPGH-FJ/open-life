@@ -21,7 +21,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-08 during Phase 5.2A structured canonical-owner implementation.
+2026-08-08 during Phase 5.2B legacy migration-preview implementation.
 
 ## Source map
 
@@ -77,6 +77,16 @@ credit only to a non-empty validated version. Without one, existing YAML remains
 the compatibility owner. The v2 store does not yet accept product writes, YAML
 has not been migrated, and the current proposal materializer still targets the
 legacy governed gateway; those are later 5.2 slices.
+
+Before cutover, `LegacyLifeModelMigrationPreviewV2` reads the exact YAML bytes
+that produced the compatibility model and classifies every non-empty source
+leaf. Long-term user fields are review-required candidates; current state,
+tasks, Agent Memory, and Agent Runtime fields remain with their own owners;
+scores and ambiguous fields are not silently reshaped. Unknown fields,
+non-finite numbers, oversized sources, and unsupported YAML constructs make the
+preview unavailable without changing data. The product shows this classification
+only while no non-empty canonical v2 version exists. It does not create a v2
+version, proposal, backup, migration receipt, or owner cutover.
 
 ## Patch And Proposal Path
 

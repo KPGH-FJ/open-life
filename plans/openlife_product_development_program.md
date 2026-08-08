@@ -716,6 +716,31 @@ summary 后可从 canonical transcript 重建。
 退出标准：空模型无虚构事实；v2 schema/store 有真实 shipped read consumer；版本、
 父版本、摘要、来源和重放边界由自动化证明；未发生真实用户数据迁移或静默写入。
 
+###### 5.2B 旧 YAML 迁移预览与字段归属
+
+用户能力：仍使用旧 YAML 的用户可以在“关于我”中看到一份只读迁移预览，明确每个
+已有字段未来应进入 LifeModel v2、State/Tasks、Agent Memory、Agent Runtime，还是
+必须由用户重新判断；预览不会把旧内容解释成已经确认的 v2 事实。
+
+- 迁移预览从当前实际加载的旧 `LifeModel` 生成，并绑定源内容 digest；只读取，不创建
+  v2 版本、不改写 YAML、不创建 proposal，也不切换 canonical owner；
+- 对旧模型的每个非空叶子字段给出精确 source path、目标 owner、可选 v2 section、
+  disposition、理由和敏感度；新增但尚未分类的旧字段必须使预览 fail-closed；
+- 可明确映射的长期用户内容标记为 `review_required`，仍需用户确认后才能成为 v2
+  item；短期目标、每日任务和当前状态转交 State/Tasks，reflection 与 evolution rule
+  转交 Agent Memory，工具能力转交 Agent Runtime；
+- 人格分数、proficiency、实时 availability、目标 progress/deadline/milestone 等不进入
+  v2；关系内容按敏感信息展示并要求重新确认；含义不唯一的字段标记
+  `manual_classification`，不得猜测目标；
+- `/life-model` 只在存在旧 owner 且尚无 non-empty canonical v2 时展示完整预览和分类
+  计数；已有 canonical v2 时不把旧 YAML 再包装成待迁移真相；
+- 本切片不实现批量确认、typed diff、materialization、备份、原子 cutover、rollback 或
+  删除旧 YAML；这些必须在后续切片沿用 Review Center 与 exact version gateway 完成。
+
+退出标准：代表性旧模型的所有非空字段均被确定性分类；未知字段、非有限数值或无法
+安全展示的值 fail-closed；用户能区分“可审核迁移”“属于其他 owner”“需要人工判断”
+和“不会迁移”，且产品没有发生任何持久化变更。
+
 ##### 5.3 建立真实学习闭环
 
 目标：从日常使用中稳定产生少量、高质量、可物化的 LifeModel proposal。
@@ -923,9 +948,10 @@ versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户�
 Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显式跨会话 Memory
 生命周期”已于提交 `177b144` 完成并经用户确认。5.1E“混合检索与召回解释”已经
 于提交 `7110e99` 完成并经用户确认。5.1F“用户控制界面与原生验收”已于提交
-`653693b` 完成并经用户确认。5.2A“空模型语义与版本化 canonical owner”已完成
-实现、自审和全量门禁，当前停在用户审阅与提交边界；尚未开始既有 YAML 数据迁移、
-v2 proposal materialization 或 5.2 后续切片。**
+`653693b` 完成并经用户确认。5.2A“空模型语义与版本化 canonical owner”已于提交
+`3a6c2bb` 完成并经用户确认。5.2B“旧 YAML 迁移预览与字段归属”已完成实现、
+本地自审和全量门禁，当前停在用户审阅与提交边界；尚未开始真实数据迁移、v2
+proposal materialization 或 canonical owner cutover。**
 
 第五阶段第一步实际完成：
 

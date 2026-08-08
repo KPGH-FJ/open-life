@@ -59,6 +59,17 @@ describe("Workbench durable truth journey", () => {
           lastMaterializedAt: "2026-08-08T10:00:00Z",
           evidenceRefs: [],
         },
+        legacyMigrationPreview: {
+          schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1",
+          sourceDigest: "sha256:legacy",
+          items: [],
+          reviewRequiredCount: 1,
+          externalOwnerCount: 0,
+          manualClassificationCount: 0,
+          notMigratedCount: 0,
+          migrationMetadataCount: 0,
+          containsSensitiveItems: false,
+        },
       };
     }
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
@@ -80,6 +91,92 @@ describe("Workbench durable truth journey", () => {
     expect(
       screen.queryByText("负责产品与工程决策，需要保留连续的独立思考时间。")
     ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "迁移前预览" })).not.toBeInTheDocument();
+  });
+
+  it("shows a read-only field-complete legacy migration preview without claiming migration", async () => {
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    if (snapshot.lifeModelEnvelope.data) {
+      snapshot.lifeModelEnvelope.data.legacyMigrationPreview = {
+        schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1",
+        sourceDigest: "sha256:source",
+        reviewRequiredCount: 1,
+        externalOwnerCount: 1,
+        manualClassificationCount: 1,
+        notMigratedCount: 1,
+        migrationMetadataCount: 0,
+        containsSensitiveItems: true,
+        items: [
+          {
+            sourcePath: "identity.values[0].name",
+            valuePreview: "独立判断",
+            valueDigest: "sha256:value",
+            valueTruncated: false,
+            disposition: "review_required",
+            targetOwner: "life_model_v2",
+            targetSection: "values",
+            reasonCode: "legacy_value_requires_user_confirmation",
+            sensitive: false,
+          },
+          {
+            sourcePath: "state.current_focus",
+            valuePreview: "阶段五",
+            valueDigest: "sha256:state",
+            valueTruncated: false,
+            disposition: "external_owner",
+            targetOwner: "state_store",
+            targetSection: null,
+            reasonCode: "current_state_belongs_to_state_store",
+            sensitive: false,
+          },
+          {
+            sourcePath: "relationships.inner_circle[0].notes",
+            valuePreview: "私人关系说明",
+            valueDigest: "sha256:relationship",
+            valueTruncated: true,
+            disposition: "manual_classification",
+            targetOwner: "unassigned",
+            targetSection: null,
+            reasonCode: "manual_review",
+            sensitive: true,
+          },
+          {
+            sourcePath: "identity.personality_traits[0].score",
+            valuePreview: "8",
+            valueDigest: "sha256:score",
+            valueTruncated: false,
+            disposition: "not_migrated",
+            targetOwner: "unassigned",
+            targetSection: null,
+            reasonCode: "legacy_personality_score_requires_user_restatement",
+            sensitive: true,
+          },
+        ],
+      };
+    }
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "迁移前预览" })).toBeVisible();
+    expect(screen.getByText("只读 · 尚未迁移")).toBeVisible();
+    expect(screen.getByText("包含敏感个人信息")).toBeVisible();
+    expect(screen.getByText("查看全部 4 个来源字段")).toBeVisible();
+
+    await userEvent.click(screen.getByText("查看全部 4 个来源字段"));
+    expect(screen.getByText("identity.values[0].name")).toBeVisible();
+    expect(screen.getByText("独立判断")).toBeVisible();
+    expect(screen.getByText(/需要你审核 · 目标：LifeModel v2/)).toBeVisible();
+    expect(screen.getByText(/属于其他区域 · 目标：当前状态/)).toBeVisible();
+    expect(screen.getByText(/需要人工判断 · 目标：尚未确定 · 仅显示摘要/)).toBeVisible();
+    expect(screen.getByText(/不会迁移 · 目标：尚未确定/)).toBeVisible();
   });
 
   it("keeps Agent Memory available when only LifeModel fails", async () => {

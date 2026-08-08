@@ -1781,6 +1781,14 @@ impl LifeModelManager {
     }
 
     pub fn load_existing(&self) -> Result<Option<LifeModel>> {
+        self.load_existing_with_source()
+            .map(|loaded| loaded.map(|(model, _)| model))
+    }
+
+    /// Load the typed compatibility model and the exact bytes that produced it
+    /// in one read. Migration preview callers use this to avoid binding a
+    /// preview to a different on-disk revision after an external YAML edit.
+    pub fn load_existing_with_source(&self) -> Result<Option<(LifeModel, String)>> {
         let path = self.data_dir.join("life_model.yaml");
         if !path.exists() {
             return Ok(None);
@@ -1789,7 +1797,7 @@ impl LifeModelManager {
             fs::read_to_string(&path).with_context(|| format!("读取人生模型失败: {:?}", path))?;
         let model: LifeModel =
             serde_yaml::from_str(&content).with_context(|| "解析人生模型 YAML 失败")?;
-        Ok(Some(model))
+        Ok(Some((model, content)))
     }
 
     pub fn load(&self) -> Result<LifeModel> {
@@ -2027,6 +2035,22 @@ mod tests {
         mgr.save(&model).unwrap();
         let loaded = mgr.load().unwrap();
         assert_eq!(loaded.identity.name, "Test");
+    }
+
+    #[test]
+    fn manager_loads_legacy_model_and_exact_source_from_one_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = LifeModelManager::new(directory.path());
+        let source = "identity:\n  name: Exact source user\n";
+        fs::write(directory.path().join("life_model.yaml"), source).unwrap();
+
+        let (model, loaded_source) = manager
+            .load_existing_with_source()
+            .unwrap()
+            .expect("legacy source");
+
+        assert_eq!(model.identity.name, "Exact source user");
+        assert_eq!(loaded_source, source);
     }
 
     #[test]

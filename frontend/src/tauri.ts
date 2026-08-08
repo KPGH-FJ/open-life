@@ -2480,6 +2480,54 @@ export type LifeModelCanonicalSummary = {
   evidenceRefs: EvidenceRef[];
 };
 
+export type LegacyLifeModelMigrationItemV2 = {
+  sourcePath: string;
+  valuePreview: string;
+  valueDigest: string;
+  valueTruncated: boolean;
+  disposition:
+    | "review_required"
+    | "external_owner"
+    | "manual_classification"
+    | "not_migrated"
+    | "migration_metadata";
+  targetOwner:
+    | "life_model_v2"
+    | "state_store"
+    | "tasks"
+    | "agent_memory"
+    | "agent_runtime"
+    | "migration_metadata"
+    | "legacy_compatibility_projection"
+    | "unassigned";
+  targetSection:
+    | "identity"
+    | "values"
+    | "long_term_goals"
+    | "stable_preferences"
+    | "personal_boundaries"
+    | "important_relationships"
+    | "capabilities"
+    | "resources"
+    | "decision_principles"
+    | "collaboration_preferences"
+    | null;
+  reasonCode: string;
+  sensitive: boolean;
+};
+
+export type LegacyLifeModelMigrationPreviewV2 = {
+  schemaVersion: string;
+  sourceDigest: string;
+  items: LegacyLifeModelMigrationItemV2[];
+  reviewRequiredCount: number;
+  externalOwnerCount: number;
+  manualClassificationCount: number;
+  notMigratedCount: number;
+  migrationMetadataCount: number;
+  containsSensitiveItems: boolean;
+};
+
 export type LifeModelCurrentViewSummary = {
   currentViewRef: BackendEntityRef;
   compatibilityMode: boolean;
@@ -2569,6 +2617,7 @@ export type LifeModelMemoryLinkageSummary = {
 export type LifeModelViewModel = {
   truthMode: LifeModelTruthMode;
   canonicalSummary: LifeModelCanonicalSummary | null;
+  legacyMigrationPreview: LegacyLifeModelMigrationPreviewV2 | null;
   currentViewSummary: LifeModelCurrentViewSummary | null;
   dimensionSummaries: LifeModelDimensionSummary[];
   trustQualityState: LifeModelTrustQualityState;

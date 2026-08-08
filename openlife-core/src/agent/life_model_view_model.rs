@@ -6,6 +6,7 @@ use crate::agent::product_read_model::{
 };
 use crate::agent::review_item::{ReviewItem, ReviewItemType};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType};
+use crate::life_model::v2::LegacyLifeModelMigrationPreviewV2;
 use crate::life_model::{LifeModel, Model4DCompletion};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -253,6 +254,7 @@ pub struct LifeModelMemoryLinkageSummary {
 pub struct LifeModelViewModel {
     pub truth_mode: LifeModelTruthMode,
     pub canonical_summary: Option<LifeModelCanonicalSummary>,
+    pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
     pub current_view_summary: Option<LifeModelCurrentViewSummary>,
     pub dimension_summaries: Vec<LifeModelDimensionSummary>,
     pub trust_quality_state: LifeModelTrustQualityState,
@@ -347,6 +349,7 @@ pub struct LifeModelCanonicalV2Input {
 #[derive(Debug, Clone, Default)]
 pub struct LifeModelViewModelBuildInput {
     pub canonical_v2: Option<LifeModelCanonicalV2Input>,
+    pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
     pub life_model: Option<LifeModel>,
     pub current_view: Option<LifeModelCurrentViewInput>,
     pub projection: Option<LifeModelProjectionInput>,
@@ -452,6 +455,11 @@ pub fn build_life_model_view_model_envelope(
             meaningful_canonical,
         ),
         canonical_summary: build_canonical_summary(&input, meaningful_canonical),
+        legacy_migration_preview: if meaningful_canonical {
+            None
+        } else {
+            input.legacy_migration_preview.clone()
+        },
         current_view_summary,
         dimension_summaries: dimension_summaries.clone(),
         trust_quality_state: build_trust_quality_state(
@@ -1468,6 +1476,47 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code == "lifemodel.empty"));
+    }
+
+    #[test]
+    fn legacy_migration_preview_is_visible_only_before_meaningful_canonical_v2() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "identity:\n  name: Test User\nstate:\n  current_focus: Current work\n",
+        )
+        .expect("preview");
+        let compatibility = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            legacy_migration_preview: Some(preview.clone()),
+            life_model: Some(model_with_content()),
+            now: Some("2026-08-08T10:00:00Z".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            compatibility
+                .data
+                .expect("compatibility data")
+                .legacy_migration_preview,
+            Some(preview.clone())
+        );
+
+        let canonical = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            canonical_v2: Some(LifeModelCanonicalV2Input {
+                model_id: "primary".into(),
+                schema_version: "openlife.lifemodel.v2".into(),
+                model_version: 1,
+                document_digest: "sha256:canonical".into(),
+                summary: "One confirmed item".into(),
+                item_count: 1,
+                ..Default::default()
+            }),
+            legacy_migration_preview: Some(preview),
+            now: Some("2026-08-08T10:00:00Z".into()),
+            ..Default::default()
+        });
+        assert!(canonical
+            .data
+            .expect("canonical data")
+            .legacy_migration_preview
+            .is_none());
     }
 
     #[test]

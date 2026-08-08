@@ -10,7 +10,9 @@ use openlife_core::agent::{
     LifeModelProjectionInput, LifeModelViewModel, LifeModelViewModelBuildInput, ReviewItem,
     ViewModelEnvelope, ViewModelWarning, ViewModelWarningSeverity,
 };
-use openlife_core::life_model::v2::{LifeModelVersionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID};
+use openlife_core::life_model::v2::{
+    LegacyLifeModelMigrationPreviewV2, LifeModelVersionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+};
 use std::sync::Arc;
 use tauri::State;
 
@@ -29,15 +31,16 @@ pub(crate) async fn get_life_model_view_model_with_state(
     let now = chrono::Utc::now().to_rfc3339();
     let mut warnings = Vec::new();
 
-    let (life_model_result, canonical_v2_result) = {
+    let (legacy_result, canonical_v2_result) = {
         let manager = state.life_model_manager.lock().await;
-        let legacy = manager.load_existing();
+        let legacy = manager.load_existing_with_source();
         let canonical = manager.load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
         (legacy, canonical)
     };
-    let (life_model, legacy_load_error) = match life_model_result {
-        Ok(model) => (model, None),
-        Err(err) => (None, Some(format!("life_model_load_failed: {err}"))),
+    let (life_model, legacy_yaml_source, legacy_load_error) = match legacy_result {
+        Ok(Some((model, source))) => (Some(model), Some(source), None),
+        Ok(None) => (None, None, None),
+        Err(err) => (None, None, Some(format!("life_model_load_failed: {err}"))),
     };
     let (canonical_v2, canonical_v2_error) = match canonical_v2_result {
         Ok(version) => (version.map(canonical_v2_input), None),
@@ -46,8 +49,30 @@ pub(crate) async fn get_life_model_view_model_with_state(
             Some(format!("lifemodel_v2_canonical_load_failed: {err}")),
         ),
     };
+    let meaningful_canonical = canonical_v2
+        .as_ref()
+        .is_some_and(|canonical| canonical.item_count > 0);
+    let legacy_migration_preview = if meaningful_canonical {
+        None
+    } else {
+        match legacy_yaml_source {
+            Some(source) => match LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source) {
+                Ok(preview) => Some(preview),
+                Err(err) => {
+                    warnings.push(warning(
+                        "lifemodel_legacy_migration_preview_unavailable",
+                        format!(
+                            "Legacy LifeModel migration preview failed closed without changing data: {err}"
+                        ),
+                    ));
+                    None
+                }
+            },
+            None => None,
+        }
+    };
     let load_error = canonical_v2_error.or_else(|| {
-        if canonical_v2.is_none() {
+        if !meaningful_canonical {
             legacy_load_error
         } else {
             if let Some(error) = legacy_load_error {
@@ -118,6 +143,7 @@ pub(crate) async fn get_life_model_view_model_with_state(
 
     let mut envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
         canonical_v2,
+        legacy_migration_preview,
         life_model,
         current_view,
         projection,

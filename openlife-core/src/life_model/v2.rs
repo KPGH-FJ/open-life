@@ -16,6 +16,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::LifeModel;
+
 pub const LIFE_MODEL_V2_SCHEMA_VERSION: &str = "openlife.lifemodel.v2";
 pub const DEFAULT_LIFE_MODEL_V2_MODEL_ID: &str = "primary";
 const LIFE_MODEL_V2_STORE_SCHEMA_VERSION: i64 = 1;
@@ -25,6 +27,8 @@ const MAX_ITEM_ID_CHARS: usize = 160;
 const MAX_STATEMENT_CHARS: usize = 4_096;
 const MAX_SOURCE_REFS_PER_ITEM: usize = 32;
 const MAX_SOURCE_REF_CHARS: usize = 256;
+const MAX_LEGACY_MIGRATION_SOURCE_BYTES: usize = 1024 * 1024;
+const MAX_LEGACY_MIGRATION_ITEMS: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -91,6 +95,630 @@ pub struct LifeModelDocumentV2 {
     pub resources: Vec<LifeModelResourceV2>,
     pub decision_principles: Vec<LifeModelStatementV2>,
     pub collaboration_preferences: Vec<LifeModelStatementV2>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyLifeModelMigrationDispositionV2 {
+    ReviewRequired,
+    ExternalOwner,
+    ManualClassification,
+    NotMigrated,
+    MigrationMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyLifeModelMigrationOwnerV2 {
+    LifeModelV2,
+    StateStore,
+    Tasks,
+    AgentMemory,
+    AgentRuntime,
+    MigrationMetadata,
+    LegacyCompatibilityProjection,
+    Unassigned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeModelSectionV2 {
+    Identity,
+    Values,
+    LongTermGoals,
+    StablePreferences,
+    PersonalBoundaries,
+    ImportantRelationships,
+    Capabilities,
+    Resources,
+    DecisionPrinciples,
+    CollaborationPreferences,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyLifeModelMigrationItemV2 {
+    pub source_path: String,
+    pub value_preview: String,
+    pub value_digest: String,
+    pub value_truncated: bool,
+    pub disposition: LegacyLifeModelMigrationDispositionV2,
+    pub target_owner: LegacyLifeModelMigrationOwnerV2,
+    pub target_section: Option<LifeModelSectionV2>,
+    pub reason_code: String,
+    pub sensitive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyLifeModelMigrationPreviewV2 {
+    pub schema_version: String,
+    pub source_digest: String,
+    pub items: Vec<LegacyLifeModelMigrationItemV2>,
+    pub review_required_count: usize,
+    pub external_owner_count: usize,
+    pub manual_classification_count: usize,
+    pub not_migrated_count: usize,
+    pub migration_metadata_count: usize,
+    pub contains_sensitive_items: bool,
+}
+
+impl LegacyLifeModelMigrationPreviewV2 {
+    /// Build a read-only migration preview from the exact legacy YAML source.
+    ///
+    /// Parsing the raw document, rather than a default-filled `LifeModel`, is
+    /// essential: omitted legacy fields must not become migration candidates.
+    pub fn from_legacy_yaml(source: &str) -> Result<Self> {
+        if source.len() > MAX_LEGACY_MIGRATION_SOURCE_BYTES {
+            bail!("legacy_lifemodel_migration_source_too_large");
+        }
+        let _: LifeModel =
+            serde_yaml::from_str(source).context("parse_legacy_lifemodel_for_migration")?;
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(source).context("parse_legacy_lifemodel_yaml_tree")?;
+        if !matches!(value, serde_yaml::Value::Mapping(_)) {
+            bail!("legacy_lifemodel_migration_root_must_be_mapping");
+        }
+
+        let mut items = Vec::new();
+        collect_legacy_yaml_items(&value, "", &mut items)?;
+        items.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+
+        let review_required_count = items
+            .iter()
+            .filter(|item| {
+                item.disposition == LegacyLifeModelMigrationDispositionV2::ReviewRequired
+            })
+            .count();
+        let external_owner_count = items
+            .iter()
+            .filter(|item| item.disposition == LegacyLifeModelMigrationDispositionV2::ExternalOwner)
+            .count();
+        let manual_classification_count = items
+            .iter()
+            .filter(|item| {
+                item.disposition == LegacyLifeModelMigrationDispositionV2::ManualClassification
+            })
+            .count();
+        let not_migrated_count = items
+            .iter()
+            .filter(|item| item.disposition == LegacyLifeModelMigrationDispositionV2::NotMigrated)
+            .count();
+        let migration_metadata_count = items
+            .iter()
+            .filter(|item| {
+                item.disposition == LegacyLifeModelMigrationDispositionV2::MigrationMetadata
+            })
+            .count();
+        let contains_sensitive_items = items.iter().any(|item| item.sensitive);
+
+        Ok(Self {
+            schema_version: "openlife.lifemodel.legacy-migration-preview.v1".into(),
+            source_digest: format!(
+                "sha256:{}",
+                hex_digest(digest(&SHA256, source.as_bytes()).as_ref())
+            ),
+            items,
+            review_required_count,
+            external_owner_count,
+            manual_classification_count,
+            not_migrated_count,
+            migration_metadata_count,
+            contains_sensitive_items,
+        })
+    }
+
+    pub fn has_user_content(&self) -> bool {
+        self.review_required_count
+            + self.external_owner_count
+            + self.manual_classification_count
+            + self.not_migrated_count
+            > 0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LegacyFieldClassification {
+    disposition: LegacyLifeModelMigrationDispositionV2,
+    target_owner: LegacyLifeModelMigrationOwnerV2,
+    target_section: Option<LifeModelSectionV2>,
+    reason_code: &'static str,
+    sensitive: bool,
+}
+
+fn collect_legacy_yaml_items(
+    value: &serde_yaml::Value,
+    path: &str,
+    items: &mut Vec<LegacyLifeModelMigrationItemV2>,
+) -> Result<()> {
+    match value {
+        serde_yaml::Value::Null => Ok(()),
+        serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => {
+            push_legacy_leaf(value, path, items)
+        }
+        serde_yaml::Value::String(text) => {
+            if text.is_empty() {
+                Ok(())
+            } else {
+                push_legacy_leaf(value, path, items)
+            }
+        }
+        serde_yaml::Value::Sequence(values) => {
+            for (index, item) in values.iter().enumerate() {
+                let child = format!("{path}[{index}]");
+                collect_legacy_yaml_items(item, &child, items)?;
+            }
+            Ok(())
+        }
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, item) in mapping {
+                let key = key
+                    .as_str()
+                    .ok_or_else(|| anyhow!("legacy_lifemodel_migration_non_string_key"))?;
+                let child = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if child == "hs_compatibility" {
+                    if !yaml_value_is_empty(item) {
+                        push_legacy_compatibility_projection(item, &child, items)?;
+                    }
+                    continue;
+                }
+                collect_legacy_yaml_items(item, &child, items)?;
+            }
+            Ok(())
+        }
+        serde_yaml::Value::Tagged(_) => {
+            bail!("legacy_lifemodel_migration_yaml_tags_unsupported")
+        }
+    }
+}
+
+fn yaml_value_is_empty(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::Null => true,
+        serde_yaml::Value::String(value) => value.is_empty(),
+        serde_yaml::Value::Sequence(value) => value.is_empty(),
+        serde_yaml::Value::Mapping(value) => value.is_empty(),
+        _ => false,
+    }
+}
+
+fn push_legacy_compatibility_projection(
+    value: &serde_yaml::Value,
+    path: &str,
+    items: &mut Vec<LegacyLifeModelMigrationItemV2>,
+) -> Result<()> {
+    if items.len() >= MAX_LEGACY_MIGRATION_ITEMS {
+        bail!("legacy_lifemodel_migration_item_limit_exceeded");
+    }
+    let encoded = serde_yaml::to_string(value)
+        .context("serialize_legacy_lifemodel_compatibility_projection")?;
+    items.push(LegacyLifeModelMigrationItemV2 {
+        source_path: path.into(),
+        value_preview: "Derived legacy compatibility projection".into(),
+        value_digest: format!(
+            "sha256:{}",
+            hex_digest(digest(&SHA256, encoded.as_bytes()).as_ref())
+        ),
+        value_truncated: true,
+        disposition: LegacyLifeModelMigrationDispositionV2::ExternalOwner,
+        target_owner: LegacyLifeModelMigrationOwnerV2::LegacyCompatibilityProjection,
+        target_section: None,
+        reason_code: "legacy_compatibility_projection_not_user_truth".into(),
+        sensitive: true,
+    });
+    Ok(())
+}
+
+fn push_legacy_leaf(
+    value: &serde_yaml::Value,
+    path: &str,
+    items: &mut Vec<LegacyLifeModelMigrationItemV2>,
+) -> Result<()> {
+    if items.len() >= MAX_LEGACY_MIGRATION_ITEMS {
+        bail!("legacy_lifemodel_migration_item_limit_exceeded");
+    }
+    if path.is_empty() {
+        bail!("legacy_lifemodel_migration_leaf_without_path");
+    }
+    let normalized_path = normalize_legacy_path(path)?;
+    let classification = classify_legacy_path(&normalized_path)
+        .ok_or_else(|| anyhow!("unclassified_legacy_lifemodel_field:{normalized_path}"))?;
+    if let serde_yaml::Value::Number(number) = value {
+        if number.as_f64().is_some_and(|value| !value.is_finite()) {
+            bail!("legacy_lifemodel_migration_non_finite_number:{normalized_path}");
+        }
+    }
+    let raw_value = match value {
+        serde_yaml::Value::Bool(value) => value.to_string(),
+        serde_yaml::Value::Number(value) => value.to_string(),
+        serde_yaml::Value::String(value) => value.clone(),
+        _ => bail!("legacy_lifemodel_migration_non_scalar_leaf"),
+    };
+    let (value_preview, value_truncated) = bounded_preview(&raw_value, 240);
+    items.push(LegacyLifeModelMigrationItemV2 {
+        source_path: path.into(),
+        value_preview,
+        value_digest: format!(
+            "sha256:{}",
+            hex_digest(digest(&SHA256, raw_value.as_bytes()).as_ref())
+        ),
+        value_truncated,
+        disposition: classification.disposition,
+        target_owner: classification.target_owner,
+        target_section: classification.target_section,
+        reason_code: classification.reason_code.into(),
+        sensitive: classification.sensitive,
+    });
+    Ok(())
+}
+
+fn normalize_legacy_path(path: &str) -> Result<String> {
+    let mut normalized = String::with_capacity(path.len());
+    let mut chars = path.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '[' {
+            normalized.push(character);
+            continue;
+        }
+        let mut saw_digit = false;
+        while let Some(next) = chars.peek().copied() {
+            chars.next();
+            if next == ']' {
+                break;
+            }
+            if !next.is_ascii_digit() {
+                bail!("invalid_legacy_lifemodel_sequence_path");
+            }
+            saw_digit = true;
+        }
+        if !saw_digit {
+            bail!("invalid_legacy_lifemodel_sequence_path");
+        }
+        normalized.push_str("[]");
+    }
+    Ok(normalized)
+}
+
+fn bounded_preview(value: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = value.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        (format!("{preview}…"), true)
+    } else {
+        (preview, false)
+    }
+}
+
+fn classify_legacy_path(path: &str) -> Option<LegacyFieldClassification> {
+    use LegacyLifeModelMigrationDispositionV2 as Disposition;
+    use LegacyLifeModelMigrationOwnerV2 as Owner;
+    use LifeModelSectionV2 as Section;
+
+    let classification = match path {
+        "metadata.version" | "metadata.created_at" | "metadata.updated_at" | "metadata.author" => {
+            legacy_classification(
+                Disposition::MigrationMetadata,
+                Owner::MigrationMetadata,
+                None,
+                "legacy_document_metadata_only",
+                false,
+            )
+        }
+        "identity.name" | "identity.birth_date" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::Identity),
+            "legacy_identity_requires_user_confirmation",
+            path == "identity.birth_date",
+        ),
+        "identity.values[].name" | "identity.values[].description" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::Values),
+            "legacy_value_requires_user_confirmation",
+            false,
+        ),
+        "identity.values[].weight" => legacy_classification(
+            Disposition::NotMigrated,
+            Owner::Unassigned,
+            None,
+            "legacy_value_weight_is_not_canonical_truth",
+            false,
+        ),
+        "identity.personality_traits[].trait_name" | "identity.personality_traits[].score" => {
+            legacy_classification(
+                Disposition::NotMigrated,
+                Owner::Unassigned,
+                None,
+                "legacy_personality_score_requires_user_restatement",
+                true,
+            )
+        }
+        "identity.life_philosophy" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::DecisionPrinciples),
+            "legacy_life_philosophy_requires_user_confirmation",
+            false,
+        ),
+        "identity.mission_statement" => legacy_classification(
+            Disposition::ManualClassification,
+            Owner::Unassigned,
+            None,
+            "legacy_mission_could_be_identity_or_long_term_goal",
+            false,
+        ),
+        "identity.role_definition.primary_role"
+        | "identity.role_definition.professional"
+        | "identity.role_definition.secondary_roles"
+        | "identity.role_definition.secondary_roles[]"
+        | "identity.role_definition.personal"
+        | "identity.role_definition.personal[]" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::Identity),
+            "legacy_role_requires_user_confirmation",
+            false,
+        ),
+        "identity.role_definition.responsibilities[]" => legacy_classification(
+            Disposition::ManualClassification,
+            Owner::Unassigned,
+            None,
+            "legacy_responsibility_may_be_identity_or_work_context",
+            false,
+        ),
+        "identity.role_definition.boundaries[]" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::PersonalBoundaries),
+            "legacy_boundary_requires_user_confirmation",
+            true,
+        ),
+        "identity.voice_style.tone_descriptors[]"
+        | "identity.voice_style.formality"
+        | "identity.voice_style.formality_level"
+        | "identity.voice_style.vocabulary_preference"
+        | "identity.voice_style.emoji_usage" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::CollaborationPreferences),
+            "legacy_voice_style_requires_user_confirmation",
+            false,
+        ),
+        "capabilities.skills[].name" | "capabilities.skills[].description" => {
+            legacy_classification(
+                Disposition::ReviewRequired,
+                Owner::LifeModelV2,
+                Some(Section::Capabilities),
+                "legacy_user_capability_requires_user_confirmation",
+                false,
+            )
+        }
+        "capabilities.skills[].proficiency"
+        | "capabilities.knowledge_domains[].level"
+        | "capabilities.knowledge_domains[].proficiency" => legacy_classification(
+            Disposition::NotMigrated,
+            Owner::Unassigned,
+            None,
+            "legacy_proficiency_score_is_not_canonical_truth",
+            false,
+        ),
+        "capabilities.resources[].name" | "capabilities.resources[].description" => {
+            legacy_classification(
+                Disposition::ReviewRequired,
+                Owner::LifeModelV2,
+                Some(Section::Resources),
+                "legacy_stable_resource_requires_user_confirmation",
+                true,
+            )
+        }
+        "capabilities.resources[].resource_type" | "capabilities.resources[].type" => {
+            legacy_classification(
+                Disposition::ManualClassification,
+                Owner::Unassigned,
+                None,
+                "legacy_resource_type_has_no_lossless_v2_target",
+                true,
+            )
+        }
+        "capabilities.resources[].availability" => legacy_classification(
+            Disposition::ExternalOwner,
+            Owner::StateStore,
+            None,
+            "resource_availability_is_current_state",
+            true,
+        ),
+        "capabilities.networks[]" => legacy_classification(
+            Disposition::ManualClassification,
+            Owner::Unassigned,
+            None,
+            "legacy_network_could_be_relationship_or_resource",
+            true,
+        ),
+        "capabilities.tools[].name"
+        | "capabilities.tools[].proficiency"
+        | "capabilities.tools[].description" => legacy_classification(
+            Disposition::ExternalOwner,
+            Owner::AgentRuntime,
+            None,
+            "agent_tool_capability_is_not_user_lifemodel",
+            false,
+        ),
+        "capabilities.knowledge_domains[].domain"
+        | "capabilities.knowledge_domains[].name"
+        | "capabilities.knowledge_domains[].description" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::Capabilities),
+            "legacy_knowledge_domain_requires_user_confirmation",
+            false,
+        ),
+        "relationships.inner_circle[].name"
+        | "relationships.inner_circle[].relationship_type"
+        | "relationships.inner_circle[].notes"
+        | "relationships.mentors[].name"
+        | "relationships.mentors[].relationship_type"
+        | "relationships.mentors[].notes"
+        | "relationships.collaborators[].name"
+        | "relationships.collaborators[].relationship_type"
+        | "relationships.collaborators[].notes" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::ImportantRelationships),
+            "legacy_relationship_requires_sensitive_user_confirmation",
+            true,
+        ),
+        "relationships.inner_circle[].importance"
+        | "relationships.mentors[].importance"
+        | "relationships.collaborators[].importance" => legacy_classification(
+            Disposition::NotMigrated,
+            Owner::Unassigned,
+            None,
+            "legacy_relationship_score_is_not_canonical_truth",
+            true,
+        ),
+        "preferences.work_hours.preferred_start"
+        | "preferences.work_hours.preferred_end"
+        | "preferences.work_hours.timezone"
+        | "preferences.peak_energy_time"
+        | "preferences.peak_productivity_times"
+        | "preferences.peak_productivity_times[]"
+        | "preferences.learning_style" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::StablePreferences),
+            "legacy_stable_preference_requires_user_confirmation",
+            false,
+        ),
+        "preferences.communication_style"
+        | "preferences.notification_preferences"
+        | "preferences.notification_preferences[]" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::CollaborationPreferences),
+            "legacy_collaboration_preference_requires_user_confirmation",
+            false,
+        ),
+        "preferences.decision_making_style" => legacy_classification(
+            Disposition::ReviewRequired,
+            Owner::LifeModelV2,
+            Some(Section::DecisionPrinciples),
+            "legacy_decision_principle_requires_user_confirmation",
+            false,
+        ),
+        "evolution_rules[]" => legacy_classification(
+            Disposition::ExternalOwner,
+            Owner::AgentMemory,
+            None,
+            "procedural_rule_belongs_to_agent_memory",
+            false,
+        ),
+        _ if path.starts_with("goals.short_term[]")
+            || path.starts_with("goals.medium_term[]")
+            || path.starts_with("goals.daily[]") =>
+        {
+            let owner = if path.ends_with(".related_memories[]") {
+                Owner::AgentMemory
+            } else {
+                Owner::Tasks
+            };
+            legacy_classification(
+                Disposition::ExternalOwner,
+                owner,
+                None,
+                "operational_goal_belongs_outside_lifemodel",
+                false,
+            )
+        }
+        _ if path.starts_with("goals.long_term[]") || path.starts_with("goals.life_goals[]") => {
+            if path.ends_with(".name") || path.ends_with(".description") {
+                legacy_classification(
+                    Disposition::ReviewRequired,
+                    Owner::LifeModelV2,
+                    Some(Section::LongTermGoals),
+                    "legacy_long_term_goal_requires_user_confirmation",
+                    false,
+                )
+            } else if path.ends_with(".related_memories[]") {
+                legacy_classification(
+                    Disposition::ExternalOwner,
+                    Owner::AgentMemory,
+                    None,
+                    "goal_memory_link_belongs_to_agent_memory",
+                    false,
+                )
+            } else {
+                legacy_classification(
+                    Disposition::ExternalOwner,
+                    Owner::Tasks,
+                    None,
+                    "long_term_goal_operational_state_is_not_lifemodel",
+                    false,
+                )
+            }
+        }
+        _ if path.starts_with("state.recent_reflections[]")
+            || path.starts_with("state.open_questions[]")
+            || path.starts_with("state.recent_events[]") =>
+        {
+            legacy_classification(
+                Disposition::ExternalOwner,
+                Owner::AgentMemory,
+                None,
+                "historical_experience_belongs_to_agent_memory",
+                path.starts_with("state.recent_reflections[]"),
+            )
+        }
+        _ if path.starts_with("state.") => legacy_classification(
+            Disposition::ExternalOwner,
+            Owner::StateStore,
+            None,
+            "current_state_belongs_to_state_store",
+            path.starts_with("state.health_status") || path.starts_with("state.emotional_state"),
+        ),
+        _ => return None,
+    };
+    Some(classification)
+}
+
+fn legacy_classification(
+    disposition: LegacyLifeModelMigrationDispositionV2,
+    target_owner: LegacyLifeModelMigrationOwnerV2,
+    target_section: Option<LifeModelSectionV2>,
+    reason_code: &'static str,
+    sensitive: bool,
+) -> LegacyFieldClassification {
+    LegacyFieldClassification {
+        disposition,
+        target_owner,
+        target_section,
+        reason_code,
+        sensitive,
+    }
 }
 
 impl LifeModelDocumentV2 {
@@ -792,6 +1420,214 @@ fn load_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_preview_reads_only_fields_present_in_raw_yaml() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "metadata:\n  version: '0.1'\nidentity:\n  name: Alice\n",
+        )
+        .expect("preview");
+
+        let paths = preview
+            .items
+            .iter()
+            .map(|item| item.source_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["identity.name", "metadata.version"]);
+        assert_eq!(preview.review_required_count, 1);
+        assert_eq!(preview.migration_metadata_count, 1);
+        assert!(preview.has_user_content());
+        assert!(paths
+            .iter()
+            .all(|path| !path.starts_with("identity.voice_style")));
+    }
+
+    #[test]
+    fn legacy_preview_classifies_long_term_user_state_memory_and_runtime_fields() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            r#"
+identity:
+  values:
+    - name: independence
+      weight: 8
+      description: Decide deliberately.
+  personality_traits:
+    - trait_name: reflective
+      score: 9
+goals:
+  long_term:
+    - name: Build OpenLife
+      description: Create a durable personal Agent OS.
+      progress: 0.4
+      related_memories: [memory-1]
+  daily:
+    - name: Review migration
+      done: false
+capabilities:
+  skills:
+    - name: Product design
+      proficiency: 8
+      description: Product and architecture work.
+  tools:
+    - name: shell
+      proficiency: 5
+      description: Agent tool capability.
+state:
+  current_focus: Stage 5
+  recent_reflections:
+    - date: 2026-08-08
+      content: Keep product work focused.
+      insights: [Avoid platform drift.]
+relationships:
+  collaborators:
+    - name: Partner
+      relationship_type: collaborator
+      importance: 8
+      notes: private
+preferences:
+  communication_style: conclusion_first
+evolution_rules: [Always preserve user authority.]
+"#,
+        )
+        .expect("preview");
+
+        let item = |path: &str| {
+            preview
+                .items
+                .iter()
+                .find(|item| item.source_path == path)
+                .unwrap_or_else(|| panic!("missing {path}"))
+        };
+        assert_eq!(
+            item("identity.values[0].name").target_section,
+            Some(LifeModelSectionV2::Values)
+        );
+        assert_eq!(
+            item("goals.long_term[0].progress").target_owner,
+            LegacyLifeModelMigrationOwnerV2::Tasks
+        );
+        assert_eq!(
+            item("goals.long_term[0].related_memories[0]").target_owner,
+            LegacyLifeModelMigrationOwnerV2::AgentMemory
+        );
+        assert_eq!(
+            item("state.current_focus").target_owner,
+            LegacyLifeModelMigrationOwnerV2::StateStore
+        );
+        assert_eq!(
+            item("capabilities.tools[0].name").target_owner,
+            LegacyLifeModelMigrationOwnerV2::AgentRuntime
+        );
+        assert_eq!(
+            item("capabilities.skills[0].proficiency").disposition,
+            LegacyLifeModelMigrationDispositionV2::NotMigrated
+        );
+        assert_eq!(
+            item("relationships.collaborators[0].notes").target_section,
+            Some(LifeModelSectionV2::ImportantRelationships)
+        );
+        assert!(item("relationships.collaborators[0].notes").sensitive);
+        assert_eq!(
+            item("evolution_rules[0]").target_owner,
+            LegacyLifeModelMigrationOwnerV2::AgentMemory
+        );
+        assert!(preview.contains_sensitive_items);
+    }
+
+    #[test]
+    fn legacy_preview_understands_supported_yaml_aliases_without_inventing_values() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            r#"
+identity:
+  role_definition:
+    professional: founder
+    personal: parent
+  voice_style:
+    formality_level: formal
+capabilities:
+  resources:
+    - name: Studio
+      type: workspace
+preferences:
+  peak_productivity_times: [morning, evening]
+  notification_preferences: [quiet]
+goals:
+  daily:
+    - name: Focus
+      completed: true
+"#,
+        )
+        .expect("preview");
+
+        for path in [
+            "identity.role_definition.professional",
+            "identity.role_definition.personal",
+            "identity.voice_style.formality_level",
+            "capabilities.resources[0].type",
+            "preferences.peak_productivity_times[0]",
+            "preferences.notification_preferences[0]",
+            "goals.daily[0].completed",
+        ] {
+            assert!(
+                preview.items.iter().any(|item| item.source_path == path),
+                "missing alias path {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_preview_fails_closed_for_an_unclassified_field() {
+        let error = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "identity:\n  name: Alice\n  invented_future_field: value\n",
+        )
+        .expect_err("unknown field must block migration preview");
+        assert!(error
+            .to_string()
+            .contains("unclassified_legacy_lifemodel_field:identity.invented_future_field"));
+    }
+
+    #[test]
+    fn legacy_preview_rejects_non_finite_numbers_and_oversized_sources() {
+        let non_finite = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "goals:\n  long_term:\n    - name: Goal\n      progress: .nan\n",
+        )
+        .expect_err("non-finite legacy value must fail closed");
+        assert!(non_finite
+            .to_string()
+            .contains("legacy_lifemodel_migration_non_finite_number"));
+
+        let oversized = format!(
+            "identity:\n  name: {}\n",
+            "a".repeat(MAX_LEGACY_MIGRATION_SOURCE_BYTES)
+        );
+        let error = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&oversized)
+            .expect_err("oversized source must fail closed");
+        assert!(error
+            .to_string()
+            .contains("legacy_lifemodel_migration_source_too_large"));
+    }
+
+    #[test]
+    fn legacy_preview_collapses_derived_compatibility_projection() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "identity:\n  name: Alice\nhs_compatibility:\n  current_state:\n    current_focus: private\n",
+        )
+        .expect("preview");
+        let compatibility = preview
+            .items
+            .iter()
+            .find(|item| item.source_path == "hs_compatibility")
+            .expect("compatibility projection receipt");
+        assert_eq!(
+            compatibility.target_owner,
+            LegacyLifeModelMigrationOwnerV2::LegacyCompatibilityProjection
+        );
+        assert!(compatibility.value_truncated);
+        assert!(!preview
+            .items
+            .iter()
+            .any(|item| item.value_preview == "private"));
+    }
 
     fn statement(id: &str, value: &str) -> LifeModelStatementV2 {
         LifeModelStatementV2 {

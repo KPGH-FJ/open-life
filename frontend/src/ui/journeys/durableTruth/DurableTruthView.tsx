@@ -10,7 +10,7 @@ import {
   SquarePen,
   UserRound,
 } from "lucide-react";
-import type { ReviewItem } from "@/tauri";
+import type { LegacyLifeModelMigrationItemV2, ReviewItem } from "@/tauri";
 import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from "@/ui/foundation";
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 import { durableLifecyclePresentation, durableReviewItems } from "./durableTruthPresentation";
@@ -18,6 +18,25 @@ import { LifeModelBuilderPanel } from "./LifeModelBuilderPanel";
 import type { LifeModelBuilderController } from "./useLifeModelBuilder";
 
 const dimensionOrder = ["identity", "goals", "capabilities", "state"];
+
+const migrationDispositionLabel: Record<LegacyLifeModelMigrationItemV2["disposition"], string> = {
+  review_required: "需要你审核",
+  external_owner: "属于其他区域",
+  manual_classification: "需要人工判断",
+  not_migrated: "不会迁移",
+  migration_metadata: "迁移元数据",
+};
+
+const migrationOwnerLabel: Record<LegacyLifeModelMigrationItemV2["targetOwner"], string> = {
+  life_model_v2: "LifeModel v2",
+  state_store: "当前状态",
+  tasks: "任务",
+  agent_memory: "Agent 记忆",
+  agent_runtime: "Agent 工具能力",
+  migration_metadata: "迁移记录",
+  legacy_compatibility_projection: "旧兼容投影",
+  unassigned: "尚未确定",
+};
 
 export function DurableTruthView({
   snapshot,
@@ -112,6 +131,7 @@ export function DurableTruthView({
   const currentView = lifeModel?.currentViewSummary;
   const canonical = lifeModel?.canonicalSummary;
   const canonicalView = lifeModel?.truthMode === "canonical" ? (canonical ?? null) : null;
+  const migrationPreview = canonicalView ? null : lifeModel?.legacyMigrationPreview;
   const sortedDimensions = [...(lifeModel?.dimensionSummaries ?? [])].sort(
     (left, right) => dimensionOrder.indexOf(left.id) - dimensionOrder.indexOf(right.id)
   );
@@ -258,6 +278,70 @@ export function DurableTruthView({
                 </dl>
               )}
             </section>
+
+            {migrationPreview ? (
+              <section
+                className="ol-lifemodel-migration"
+                aria-labelledby="lifemodel-migration-title"
+              >
+                <header className="ol-durable-section-heading">
+                  <div>
+                    <span>旧模型整理</span>
+                    <h2 id="lifemodel-migration-title">迁移前预览</h2>
+                  </div>
+                  <FoundationStatusLabel label="只读 · 尚未迁移" status="unknown" />
+                </header>
+                <p>
+                  这是旧 YAML 中实际存在字段的归属清单。可映射内容仍需你确认；这份预览没有创建
+                  LifeModel v2、建议或任何持久化变更。
+                </p>
+                <dl className="ol-lifemodel-migration-counts" aria-label="迁移字段分类统计">
+                  <div>
+                    <dt>需要审核</dt>
+                    <dd>{migrationPreview.reviewRequiredCount}</dd>
+                  </div>
+                  <div>
+                    <dt>其他区域</dt>
+                    <dd>{migrationPreview.externalOwnerCount}</dd>
+                  </div>
+                  <div>
+                    <dt>人工判断</dt>
+                    <dd>{migrationPreview.manualClassificationCount}</dd>
+                  </div>
+                  <div>
+                    <dt>不会迁移</dt>
+                    <dd>{migrationPreview.notMigratedCount}</dd>
+                  </div>
+                </dl>
+                {migrationPreview.containsSensitiveItems ? (
+                  <FoundationNotice title="包含敏感个人信息" tone="protection">
+                    <p>关系、健康或个人边界等内容不会自动进入新模型，必须由你重新确认。</p>
+                  </FoundationNotice>
+                ) : null}
+                <details className="ol-lifemodel-migration-details">
+                  <summary>查看全部 {migrationPreview.items.length} 个来源字段</summary>
+                  <ol>
+                    {migrationPreview.items.map(item => (
+                      <li key={item.sourcePath}>
+                        <div>
+                          <code>{item.sourcePath}</code>
+                          {item.sensitive ? <span>敏感</span> : null}
+                        </div>
+                        <p>{item.valuePreview || "空值"}</p>
+                        <small>
+                          {migrationDispositionLabel[item.disposition]} · 目标：
+                          {migrationOwnerLabel[item.targetOwner]}
+                          {item.valueTruncated ? " · 仅显示摘要" : ""}
+                        </small>
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+                <small className="ol-lifemodel-migration-digest">
+                  来源摘要：{migrationPreview.sourceDigest}
+                </small>
+              </section>
+            ) : null}
 
             {!hasEstablishedView && builder && onOpenReviewCenter && (
               <LifeModelBuilderPanel
