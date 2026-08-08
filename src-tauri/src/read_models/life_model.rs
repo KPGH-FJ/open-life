@@ -31,11 +31,12 @@ pub(crate) async fn get_life_model_view_model_with_state(
     let now = chrono::Utc::now().to_rfc3339();
     let mut warnings = Vec::new();
 
-    let (canonical_v2_result, cutover_result) = {
+    let (canonical_v2_result, cutover_result, history_result) = {
         let manager = state.life_model_manager.lock().await;
         let canonical = manager.load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
         let cutover = manager.load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
-        (canonical, cutover)
+        let history = manager.load_v2_history(DEFAULT_LIFE_MODEL_V2_MODEL_ID, 12);
+        (canonical, cutover, history)
     };
     let (canonical_v2, canonical_v2_error) =
         match canonical_v2_result.and_then(|version| version.map(canonical_v2_input).transpose()) {
@@ -48,6 +49,13 @@ pub(crate) async fn get_life_model_view_model_with_state(
     let cutover_error = match cutover_result {
         Ok(_) => None,
         Err(err) => Some(format!("lifemodel_v2_cutover_load_failed: {err}")),
+    };
+    let (version_history, history_error) = match history_result {
+        Ok(history) => (history, None),
+        Err(err) => (
+            Vec::new(),
+            Some(format!("lifemodel_v2_history_load_failed: {err}")),
+        ),
     };
     let canonical_owner = canonical_v2.is_some();
     let (life_model, legacy_yaml_source, legacy_load_error) = if canonical_owner {
@@ -86,7 +94,10 @@ pub(crate) async fn get_life_model_view_model_with_state(
         && life_model.is_none()
         && legacy_yaml_source.is_none()
         && legacy_load_error.is_none();
-    let load_error = canonical_v2_error.or(cutover_error).or(legacy_load_error);
+    let load_error = canonical_v2_error
+        .or(cutover_error)
+        .or(history_error)
+        .or(legacy_load_error);
 
     let current_view = match life_model.as_ref() {
         Some(model) => match get_life_model_current_view_for_model_with_state(state, model).await {
@@ -144,6 +155,7 @@ pub(crate) async fn get_life_model_view_model_with_state(
 
     let mut envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
         canonical_v2,
+        version_history,
         fresh_profile_canonical_empty,
         legacy_migration_preview,
         life_model,
@@ -163,6 +175,7 @@ pub(crate) async fn get_life_model_view_model_with_state(
 
 fn canonical_v2_input(version: LifeModelVersionV2) -> anyhow::Result<LifeModelCanonicalV2Input> {
     let human_projection = version.human_yaml_projection()?;
+    let document = version.document.clone();
     Ok(LifeModelCanonicalV2Input {
         model_id: version.model_id,
         schema_version: version.schema_version,
@@ -173,6 +186,7 @@ fn canonical_v2_input(version: LifeModelVersionV2) -> anyhow::Result<LifeModelCa
         item_count: version.document.total_item_count(),
         updated_at: Some(version.created_at),
         source_refs: version.source_refs,
+        document: Some(document),
         human_projection,
     })
 }

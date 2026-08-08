@@ -1783,6 +1783,30 @@ impl LifeModelManager {
         v2::LifeModelV2Store::open(path)?.current(model_id)
     }
 
+    pub fn load_v2_version(
+        &self,
+        model_id: &str,
+        model_version: u64,
+    ) -> Result<Option<v2::LifeModelVersionV2>> {
+        let path = self.v2_store_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        v2::LifeModelV2Store::open(path)?.version(model_id, model_version)
+    }
+
+    pub fn load_v2_history(
+        &self,
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<v2::LifeModelVersionHistoryEntryV2>> {
+        let path = self.v2_store_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        v2::LifeModelV2Store::open(path)?.history(model_id, limit)
+    }
+
     pub fn load_v2_cutover(&self, model_id: &str) -> Result<Option<v2::LifeModelV2CutoverReceipt>> {
         let path = self.v2_store_path();
         if !path.exists() {
@@ -1868,13 +1892,16 @@ impl LifeModelManager {
         &self,
         diff: &v2::LifeModelTypedDiffV2,
         proposal_id: &str,
+        additional_source_refs: &[String],
         created_at: &str,
     ) -> Result<v2::LifeModelPatchMaterializationResultV2> {
         let proposal_ref = format!("proposal:{proposal_id}");
+        let mut source_refs = vec![proposal_ref.clone()];
+        source_refs.extend(additional_source_refs.iter().cloned());
         v2::LifeModelV2Store::open(self.v2_store_path())?.materialize_typed_diff(
             diff,
             &proposal_ref,
-            vec![proposal_ref.clone()],
+            source_refs,
             created_at,
         )
     }

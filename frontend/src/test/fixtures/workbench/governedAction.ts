@@ -776,6 +776,15 @@ export function workbenchJourneyFixtureDataSource(
     async draftLegacyLifeModelMigration() {
       return "fixture-lifemodel-migration-proposal";
     },
+    async draftLifeModelChange() {
+      return "fixture-lifemodel-v2-change-proposal";
+    },
+    async draftLifeModelRollback() {
+      return "fixture-lifemodel-v2-rollback-proposal";
+    },
+    async draftLifeModelExport() {
+      return "fixture-lifemodel-v2-export-proposal";
+    },
     async correctMemory() {},
     async archiveMemory() {},
     async stopRecall() {},

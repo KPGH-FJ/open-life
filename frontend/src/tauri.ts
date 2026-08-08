@@ -2476,9 +2476,73 @@ export type LifeModelCanonicalSummary = {
   title: string;
   summary: string;
   versionLabel: string;
+  parentVersion: number | null;
+  documentDigest: string;
   lastMaterializedAt: string | null;
+  freshnessStatus: string;
+  conflictStatus: string;
   evidenceRefs: EvidenceRef[];
+  document: LifeModelDocumentV2;
   humanProjection: LifeModelHumanProjectionV2;
+};
+
+export type LifeModelStatementV2 = {
+  id: string;
+  statement: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelLongTermGoalV2 = {
+  id: string;
+  direction: string;
+  meaning: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelRelationshipV2 = {
+  id: string;
+  personLabel: string;
+  relationship: string;
+  significance: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelNamedItemV2 = {
+  id: string;
+  name: string;
+  description: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelDocumentV2 = {
+  schemaVersion: "openlife.lifemodel.v2";
+  modelId: string;
+  identity: LifeModelStatementV2[];
+  values: LifeModelStatementV2[];
+  longTermGoals: LifeModelLongTermGoalV2[];
+  stablePreferences: LifeModelStatementV2[];
+  personalBoundaries: LifeModelStatementV2[];
+  importantRelationships: LifeModelRelationshipV2[];
+  capabilities: LifeModelNamedItemV2[];
+  resources: LifeModelNamedItemV2[];
+  decisionPrinciples: LifeModelStatementV2[];
+  collaborationPreferences: LifeModelStatementV2[];
+};
+
+export type LifeModelVersionHistoryEntryV2 = {
+  modelId: string;
+  modelVersion: number;
+  parentVersion: number | null;
+  documentDigest: string;
+  itemCount: number;
+  summary: string;
+  sourceRefs: string[];
+  createdAt: string;
+  changeSummary: { added: number; replaced: number; removed: number };
 };
 
 export type LifeModelHumanProjectionV2 = {
@@ -2562,6 +2626,49 @@ export type LegacyLifeModelMigrationCandidateValueV2 =
     }
   | { kind: "capability"; value: { name: string; description: string } }
   | { kind: "resource"; value: { name: string; description: string } };
+
+export type LifeModelUserValueV2 = LegacyLifeModelMigrationCandidateValueV2;
+
+export type LifeModelV2UserChange =
+  | { operation: "add"; section: LifeModelSectionV2; value: LifeModelUserValueV2 }
+  | {
+      operation: "replace";
+      section: LifeModelSectionV2;
+      item_id: string;
+      value: LifeModelUserValueV2;
+    }
+  | { operation: "remove"; section: LifeModelSectionV2; item_id: string }
+  | { operation: "clear" };
+
+export type DraftLifeModelV2ChangeRequest = {
+  baseVersion: number | null;
+  baseDocumentDigest: string | null;
+  change: LifeModelV2UserChange;
+};
+
+export type DraftLifeModelV2RollbackRequest = {
+  baseVersion: number;
+  baseDocumentDigest: string;
+  targetVersion: number;
+  targetDocumentDigest: string;
+};
+
+export type DraftLifeModelV2ExportRequest = {
+  modelVersion: number;
+  documentDigest: string;
+  projectionDigest: string | null;
+  format: "yaml" | "json";
+  targetPath: string;
+};
+
+export type LifeModelV2ProposalReceipt = {
+  proposalId: string;
+  status: "review_required";
+  baseVersion: number | null;
+  baseDocumentDigest: string | null;
+  resultDocumentDigest: string | null;
+  operationCount: number;
+};
 
 export type LegacyLifeModelMigrationCandidateV2 = {
   candidateId: string;
@@ -2682,6 +2789,7 @@ export type LifeModelMemoryLinkageSummary = {
 export type LifeModelViewModel = {
   truthMode: LifeModelTruthMode;
   canonicalSummary: LifeModelCanonicalSummary | null;
+  versionHistory: LifeModelVersionHistoryEntryV2[];
   legacyMigrationPreview: LegacyLifeModelMigrationPreviewV2 | null;
   currentViewSummary: LifeModelCurrentViewSummary | null;
   dimensionSummaries: LifeModelDimensionSummary[];
@@ -4582,6 +4690,24 @@ export async function draftLegacyLifeModelMigration(
   return safeInvoke<DraftLegacyLifeModelMigrationReceipt>("draft_legacy_lifemodel_migration", {
     request,
   });
+}
+
+export async function draftLifeModelV2Change(
+  request: DraftLifeModelV2ChangeRequest
+): Promise<LifeModelV2ProposalReceipt> {
+  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_change", { request });
+}
+
+export async function draftLifeModelV2Rollback(
+  request: DraftLifeModelV2RollbackRequest
+): Promise<LifeModelV2ProposalReceipt> {
+  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_rollback", { request });
+}
+
+export async function draftLifeModelV2Export(
+  request: DraftLifeModelV2ExportRequest
+): Promise<LifeModelV2ProposalReceipt> {
+  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_export", { request });
 }
 
 export async function getMemoryViewModel(): Promise<ViewModelEnvelope<MemoryViewModel>> {

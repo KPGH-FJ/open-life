@@ -3,6 +3,9 @@ import {
   draftMemoryCorrectionProposal,
   draftMemoryStopRecallProposal,
   draftLegacyLifeModelMigration,
+  draftLifeModelV2Change,
+  draftLifeModelV2Export,
+  draftLifeModelV2Rollback,
   getLifeModelViewModel,
   getMemoryViewModel,
   getReviewCenterViewModel,
@@ -11,6 +14,9 @@ import {
   rollbackMemoryAsset,
   type LifeModelViewModel,
   type DraftLegacyLifeModelMigrationRequest,
+  type DraftLifeModelV2ChangeRequest,
+  type DraftLifeModelV2ExportRequest,
+  type DraftLifeModelV2RollbackRequest,
   type MemoryViewModel,
   type ReviewCenterViewModel,
   type ViewModelEnvelope,
@@ -40,6 +46,23 @@ export interface DurableTruthDataSource {
   rollbackMemory(memoryId: string, reason: string): Promise<void>;
   privacyEraseMemory(memoryId: string): Promise<void>;
   draftLegacyLifeModelMigration(request: DraftLegacyLifeModelMigrationRequest): Promise<string>;
+  draftLifeModelChange(request: DraftLifeModelV2ChangeRequest): Promise<string>;
+  draftLifeModelRollback(request: DraftLifeModelV2RollbackRequest): Promise<string>;
+  draftLifeModelExport(request: DraftLifeModelV2ExportRequest): Promise<string>;
+}
+
+function requireLifeModelProposalReceipt(
+  receipt: { proposalId: string; status: string; baseVersion: number | null },
+  expectedBaseVersion: number | null
+): string {
+  if (
+    !receipt.proposalId ||
+    receipt.status !== "review_required" ||
+    receipt.baseVersion !== expectedBaseVersion
+  ) {
+    throw new Error("lifemodel_v2_proposal_receipt_unverified");
+  }
+  return receipt.proposalId;
 }
 
 function requireReviewedMemoryProposal(
@@ -169,6 +192,18 @@ export const tauriDurableTruthDataSource: DurableTruthDataSource = {
       throw new Error("lifemodel_migration_proposal_receipt_unverified");
     }
     return receipt.proposalId;
+  },
+  async draftLifeModelChange(request) {
+    const receipt = await draftLifeModelV2Change(request);
+    return requireLifeModelProposalReceipt(receipt, request.baseVersion);
+  },
+  async draftLifeModelRollback(request) {
+    const receipt = await draftLifeModelV2Rollback(request);
+    return requireLifeModelProposalReceipt(receipt, request.baseVersion);
+  },
+  async draftLifeModelExport(request) {
+    const receipt = await draftLifeModelV2Export(request);
+    return requireLifeModelProposalReceipt(receipt, request.modelVersion);
   },
   async correctMemory(memoryId, content) {
     const receipt = await draftMemoryCorrectionProposal(memoryId, content);

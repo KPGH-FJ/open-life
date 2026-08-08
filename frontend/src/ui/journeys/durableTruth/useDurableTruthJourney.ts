@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DraftLegacyLifeModelMigrationRequest, ReviewItem } from "@/tauri";
+import type {
+  DraftLegacyLifeModelMigrationRequest,
+  DraftLifeModelV2ChangeRequest,
+  DraftLifeModelV2ExportRequest,
+  DraftLifeModelV2RollbackRequest,
+  ReviewItem,
+} from "@/tauri";
 import {
   buildDurableTruthErrorSnapshot,
   type DurableTruthDataSource,
@@ -35,6 +41,12 @@ export function useDurableTruthJourney(
     proposalId?: string;
     error?: string;
   } | null>(null);
+  const [lifeModelAction, setLifeModelAction] = useState<{
+    kind: "change" | "rollback" | "export";
+    status: "submitting" | "review_required" | "failed";
+    proposalId?: string;
+    error?: string;
+  } | null>(null);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -44,6 +56,7 @@ export function useDurableTruthJourney(
     setRefreshing(false);
     setMemoryAction(null);
     setMigrationAction(null);
+    setLifeModelAction(null);
     return () => {
       requestRef.current += 1;
     };
@@ -211,12 +224,56 @@ export function useDurableTruthJourney(
     [announce, dataSource, load, migrationAction?.status]
   );
 
+  const draftLifeModelOperation = useCallback(
+    async (
+      kind: "change" | "rollback" | "export",
+      operation: (source: DurableTruthDataSource) => Promise<string>
+    ): Promise<boolean> => {
+      if (!dataSource || lifeModelAction?.status === "submitting") return false;
+      setLifeModelAction({ kind, status: "submitting" });
+      try {
+        const proposalId = await operation(dataSource);
+        const refreshed = await load(false);
+        setLifeModelAction({ kind, status: "review_required", proposalId });
+        announce(
+          refreshed.reviewEnvelope.status === "error"
+            ? "建议已经创建，但 Review 状态尚未验证；当前 LifeModel 没有改变。"
+            : "建议已进入 Review；批准并成功应用前，当前 LifeModel 不会改变。"
+        );
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setLifeModelAction({ kind, status: "failed", error: reason });
+        announce(`LifeModel 操作未创建：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, lifeModelAction?.status, load]
+  );
+
+  const draftLifeModelChange = useCallback(
+    (request: DraftLifeModelV2ChangeRequest) =>
+      draftLifeModelOperation("change", source => source.draftLifeModelChange(request)),
+    [draftLifeModelOperation]
+  );
+  const draftLifeModelRollback = useCallback(
+    (request: DraftLifeModelV2RollbackRequest) =>
+      draftLifeModelOperation("rollback", source => source.draftLifeModelRollback(request)),
+    [draftLifeModelOperation]
+  );
+  const draftLifeModelExport = useCallback(
+    (request: DraftLifeModelV2ExportRequest) =>
+      draftLifeModelOperation("export", source => source.draftLifeModelExport(request)),
+    [draftLifeModelOperation]
+  );
+
   return {
     snapshot,
     selectedItem,
     refreshing,
     memoryAction,
     migrationAction,
+    lifeModelAction,
     load,
     selectItem,
     correctMemory,
@@ -226,5 +283,8 @@ export function useDurableTruthJourney(
     rollbackMemory,
     privacyEraseMemory,
     draftLegacyMigration,
+    draftLifeModelChange,
+    draftLifeModelRollback,
+    draftLifeModelExport,
   };
 }

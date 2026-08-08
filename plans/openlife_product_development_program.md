@@ -806,8 +806,8 @@ typed diff 原子追加为新 canonical version；批准本身仍不等于已物
 - Review 接受后才允许通过既有 proposal dispatch 与 canonical-write admission，在一个
   SQLite transaction 中校验当前 head、追加 version 并推进 head；materialization id
   绑定 proposal id，相同 proposal 只允许 exact replay；
-- 在 legacy owner 尚未完成 cutover 前，`remove` 不得产生空 v2 head，避免产品重新回退
-  并展示已经被用户移除的旧 YAML；空 canonical/tombstone 语义随 owner cutover 完成；
+- 在尚无 v2 head 且 legacy owner 尚未完成 cutover 前，不得通过空 diff 抢占 owner；一旦
+  已有 v2 head，删除最后一项必须追加 authoritative-empty v2 version，不能回退展示旧 YAML；
 - receipt 必须区分 confirmed materialization、definite pre-effect conflict 和 unknown；
   `LifeModelViewModel` 继续只从实际 v2 head/source refs 判断已经应用；
 - 本切片不创建学习候选、不开放 YAML 编辑、不迁移旧 YAML、不切换 legacy owner，也
@@ -837,8 +837,8 @@ typed diff 原子追加为新 canonical version；批准本身仍不等于已物
 - read owner 由明确状态决定，而不是由 `item_count > 0` 猜测：无 legacy source 的
   fresh profile 是不触发落盘的 canonical empty；已有 v2 head 的 profile 继续以 v2
   为 owner；只有 legacy source 且没有 v2/cutover 的 profile 才进入兼容迁移状态；
-  已切换的空 v2 模型仍是 authoritative empty，不得回退显示旧 YAML；5.2D 对删除
-  最后一个条目的临时限制只在持久化 cutover state 成立后解除；
+  已切换的空 v2 模型仍是 authoritative empty，不得回退显示旧 YAML；已有 v2 head
+  本身已经明确当前 owner，因此删除最后一个条目不额外依赖 legacy cutover receipt；
 - 切换后拒绝旧 YAML 的正常产品写入口；旧文件只作为有明确来源摘要的只读恢复
   备份和受限迁移证据，不再参与正常 ViewModel、runtime packet 或 proposal base；
 - 同一 profile 只允许一个确定的迁移结果。已有非空 v2 与未迁移旧 YAML 同时存在时，
@@ -1136,9 +1136,10 @@ Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显�
 `3a6c2bb` 完成并经用户确认。5.2B“旧 YAML 迁移预览与字段归属”已于提交
 `39e8fe9` 完成。5.2C“Canonical YAML 人类投影”已于提交 `22708f9` 完成。5.2D
 “受限 typed diff 与原子 v2 物化”已于提交 `16572d6` 完成。5.2E“受治理迁移与
-canonical owner 切换”已完成实现，当前停在用户审阅与提交边界；未迁移真实用户
-profile。5.2 已封顶为 A—G；5.2F—G 的用户控制和旧路径收敛尚未实施，不再默认增加
-5.2H。**
+canonical owner 切换”已于提交 `55c7805` 完成；未迁移真实用户 profile。5.2F
+“用户编辑、版本、删除、回滚与导出”已完成源码实现和自动化验证，当前停在用户
+审阅与提交边界；尚未进行真实 Tauri 隔离 QA。5.2 已封顶为 A—G；5.2G 的旧路径
+收敛尚未实施，不再默认增加 5.2H。**
 
 第五阶段第一步实际完成：
 

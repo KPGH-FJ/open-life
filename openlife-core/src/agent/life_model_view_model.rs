@@ -6,7 +6,10 @@ use crate::agent::product_read_model::{
 };
 use crate::agent::review_item::{ReviewItem, ReviewItemType};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType};
-use crate::life_model::v2::{LegacyLifeModelMigrationPreviewV2, LifeModelHumanProjectionV2};
+use crate::life_model::v2::{
+    LegacyLifeModelMigrationPreviewV2, LifeModelDocumentV2, LifeModelHumanProjectionV2,
+    LifeModelVersionHistoryEntryV2,
+};
 use crate::life_model::{LifeModel, Model4DCompletion};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -138,8 +141,13 @@ pub struct LifeModelCanonicalSummary {
     pub title: String,
     pub summary: String,
     pub version_label: String,
+    pub parent_version: Option<u64>,
+    pub document_digest: String,
     pub last_materialized_at: Option<String>,
+    pub freshness_status: String,
+    pub conflict_status: String,
     pub evidence_refs: Vec<EvidenceRef>,
+    pub document: LifeModelDocumentV2,
     pub human_projection: LifeModelHumanProjectionV2,
 }
 
@@ -255,6 +263,7 @@ pub struct LifeModelMemoryLinkageSummary {
 pub struct LifeModelViewModel {
     pub truth_mode: LifeModelTruthMode,
     pub canonical_summary: Option<LifeModelCanonicalSummary>,
+    pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
     pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
     pub current_view_summary: Option<LifeModelCurrentViewSummary>,
     pub dimension_summaries: Vec<LifeModelDimensionSummary>,
@@ -345,12 +354,14 @@ pub struct LifeModelCanonicalV2Input {
     pub item_count: usize,
     pub updated_at: Option<String>,
     pub source_refs: Vec<String>,
+    pub document: Option<LifeModelDocumentV2>,
     pub human_projection: LifeModelHumanProjectionV2,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct LifeModelViewModelBuildInput {
     pub canonical_v2: Option<LifeModelCanonicalV2Input>,
+    pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
     /// A fresh profile with neither legacy YAML nor a persisted v2 head has a
     /// canonical empty owner without creating storage as a read side effect.
     pub fresh_profile_canonical_empty: bool,
@@ -461,6 +472,11 @@ pub fn build_life_model_view_model_envelope(
             canonical_owner,
         ),
         canonical_summary: build_canonical_summary(&input, valid_canonical_version),
+        version_history: if canonical_owner {
+            input.version_history.clone()
+        } else {
+            Vec::new()
+        },
         legacy_migration_preview: if canonical_owner {
             None
         } else {
@@ -594,7 +610,11 @@ fn build_canonical_summary(
             "{} · version {}",
             canonical.schema_version, canonical.model_version
         ),
+        parent_version: canonical.parent_version,
+        document_digest: canonical.document_digest.clone(),
         last_materialized_at: canonical.updated_at.clone(),
+        freshness_status: "current".into(),
+        conflict_status: "none".into(),
         evidence_refs: canonical
             .source_refs
             .iter()
@@ -605,12 +625,20 @@ fn build_canonical_summary(
                 sensitivity: Some(EvidenceSensitivity::LocalPrivate),
             })
             .collect(),
+        document: canonical.document.clone()?,
         human_projection: canonical.human_projection.clone(),
     })
 }
 
 fn canonical_v2_input_is_authoritative(canonical: &LifeModelCanonicalV2Input) -> bool {
     canonical.item_count == canonical.human_projection.item_count
+        && canonical.document.as_ref().is_some_and(|document| {
+            document.model_id == canonical.model_id
+                && document.total_item_count() == canonical.item_count
+                && document
+                    .digest()
+                    .is_ok_and(|digest| digest == canonical.document_digest)
+        })
         && canonical
             .human_projection
             .validate_binding(
@@ -1523,6 +1551,7 @@ mod tests {
             item_count: version.document.total_item_count(),
             updated_at: Some(version.created_at.clone()),
             source_refs: version.source_refs.clone(),
+            document: Some(version.document.clone()),
             human_projection: version.human_yaml_projection().unwrap(),
         }
     }

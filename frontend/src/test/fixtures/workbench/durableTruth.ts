@@ -231,6 +231,7 @@ function lifeModel(stage: DurableFixtureStage): LifeModelViewModel {
   return {
     truthMode: "current_compatibility",
     canonicalSummary: null,
+    versionHistory: [],
     legacyMigrationPreview: null,
     currentViewSummary: {
       currentViewRef: {
@@ -338,6 +339,7 @@ function emptyLifeModel(): LifeModelViewModel {
     ...base,
     truthMode: "unknown",
     canonicalSummary: null,
+    versionHistory: [],
     legacyMigrationPreview: null,
     currentViewSummary: null,
     dimensionSummaries: [],

@@ -42,6 +42,7 @@ describe("Workbench durable truth journey", () => {
   });
 
   it("shows a structured canonical version instead of the legacy compatibility summary", async () => {
+    const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
     if (snapshot.lifeModelEnvelope.data) {
@@ -55,21 +56,70 @@ describe("Workbench durable truth journey", () => {
             label: "Canonical LifeModel v2",
           },
           title: "已确认的长期个人模型",
-          summary: "2 条经过用户确认的长期信息。",
+          summary: "1 条经过用户确认的长期信息。",
           versionLabel: "openlife.lifemodel.v2 · version 2",
+          parentVersion: 1,
+          documentDigest: "sha256:document",
           lastMaterializedAt: "2026-08-08T10:00:00Z",
+          freshnessStatus: "current",
+          conflictStatus: "none",
           evidenceRefs: [],
+          document: {
+            schemaVersion: "openlife.lifemodel.v2",
+            modelId: "primary",
+            identity: [],
+            values: [
+              {
+                id: "value:1",
+                statement: "Autonomy matters.",
+                sourceRefs: ["proposal:test"],
+                confirmedAt: "2026-08-08T10:00:00Z",
+              },
+            ],
+            longTermGoals: [],
+            stablePreferences: [],
+            personalBoundaries: [],
+            importantRelationships: [],
+            capabilities: [],
+            resources: [],
+            decisionPrinciples: [],
+            collaborationPreferences: [],
+          },
           humanProjection: {
             schemaVersion: "openlife.lifemodel.v2.yaml-projection.v1",
             modelId: "primary",
             modelVersion: 2,
-            itemCount: 2,
+            itemCount: 1,
             documentDigest: "sha256:document",
             yamlContentDigest: "sha256:yaml",
             projectionDigest: "sha256:projection",
             yaml: "schemaVersion: openlife.lifemodel.v2\nmodelId: primary\nvalues:\n  - id: value:1\n    statement: Autonomy matters.\n",
           },
         },
+        versionHistory: [
+          {
+            modelId: "primary",
+            modelVersion: 2,
+            parentVersion: 1,
+            documentDigest: "sha256:document",
+            itemCount: 1,
+            summary: "1 条经过用户确认的长期信息。",
+            sourceRefs: ["proposal:current"],
+            createdAt: "2026-08-08T10:00:00Z",
+            changeSummary: { added: 0, replaced: 1, removed: 0 },
+          },
+          {
+            modelId: "primary",
+            modelVersion: 1,
+            parentVersion: null,
+            documentDigest: "sha256:historical",
+            itemCount: 1,
+            summary: "1 条较早的长期信息。",
+            sourceRefs: ["proposal:historical"],
+            createdAt: "2026-08-07T10:00:00Z",
+            changeSummary: { added: 1, replaced: 0, removed: 0 },
+          },
+        ],
         legacyMigrationPreview: {
           schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1",
           sourceDigest: "sha256:legacy",
@@ -84,6 +134,9 @@ describe("Workbench durable truth journey", () => {
         },
       };
     }
+    const change = vi.spyOn(dataSource, "draftLifeModelChange");
+    const rollback = vi.spyOn(dataSource, "draftLifeModelRollback");
+    const exportVersion = vi.spyOn(dataSource, "draftLifeModelExport");
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     render(
       <ReadOnlySpineJourney
@@ -95,7 +148,7 @@ describe("Workbench durable truth journey", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "已确认的长期个人模型" })).toBeVisible();
-    expect(screen.getByText("2 条经过用户确认的长期信息。")).toBeVisible();
+    expect(screen.getAllByText("1 条经过用户确认的长期信息。")[0]).toBeVisible();
     expect(
       screen.getByText("openlife.lifemodel.v2 · version 2 · 确认于 2026-08-08T10:00:00Z")
     ).toBeVisible();
@@ -105,10 +158,56 @@ describe("Workbench durable truth journey", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "迁移前预览" })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByText("查看 YAML 人类视图"));
+    await user.click(screen.getByText("查看 YAML 人类视图"));
     expect(screen.getByText(/SQLite 中的版本化 JSON 才是权威/)).toBeVisible();
     expect(screen.getByLabelText("LifeModel YAML 人类视图")).toHaveTextContent("Autonomy matters.");
     expect(screen.queryByRole("button", { name: /保存|导入|应用/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "修改" }));
+    const content = screen.getByLabelText("内容");
+    await user.clear(content);
+    await user.type(content, "Autonomy and clarity matter.");
+    await user.click(screen.getByRole("button", { name: /创建修改建议/ }));
+    await waitFor(() =>
+      expect(change).toHaveBeenCalledWith({
+        baseVersion: 2,
+        baseDocumentDigest: "sha256:document",
+        change: {
+          operation: "replace",
+          section: "values",
+          item_id: "value:1",
+          value: {
+            kind: "statement",
+            value: { statement: "Autonomy and clarity matter." },
+          },
+        },
+      })
+    );
+    expect(screen.getByText(/当前模型尚未改变/)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "恢复此内容" }));
+    await user.click(screen.getByRole("button", { name: "再次确认恢复" }));
+    await waitFor(() =>
+      expect(rollback).toHaveBeenCalledWith({
+        baseVersion: 2,
+        baseDocumentDigest: "sha256:document",
+        targetVersion: 1,
+        targetDocumentDigest: "sha256:historical",
+      })
+    );
+
+    await user.selectOptions(screen.getByLabelText("文件格式"), "json");
+    await user.type(screen.getByLabelText("本机绝对路径"), "/Users/test/lifemodel.json");
+    await user.click(screen.getByRole("button", { name: /创建文件导出建议/ }));
+    await waitFor(() =>
+      expect(exportVersion).toHaveBeenCalledWith({
+        modelVersion: 2,
+        documentDigest: "sha256:document",
+        projectionDigest: null,
+        format: "json",
+        targetPath: "/Users/test/lifemodel.json",
+      })
+    );
   });
 
   it("shows a field-complete legacy migration preview without claiming migration", async () => {

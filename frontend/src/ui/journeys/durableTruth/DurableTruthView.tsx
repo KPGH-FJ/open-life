@@ -16,6 +16,7 @@ import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 import { durableLifecyclePresentation, durableReviewItems } from "./durableTruthPresentation";
 import { LifeModelBuilderPanel } from "./LifeModelBuilderPanel";
 import { LifeModelMigrationPanel } from "./LifeModelMigrationPanel";
+import { LifeModelV2ControlsPanel } from "./LifeModelV2ControlsPanel";
 import type { LifeModelBuilderController } from "./useLifeModelBuilder";
 
 const dimensionOrder = ["identity", "goals", "capabilities", "state"];
@@ -58,6 +59,10 @@ export function DurableTruthView({
   onPrivacyEraseMemory,
   migrationAction,
   onDraftLegacyMigration,
+  lifeModelAction,
+  onDraftLifeModelChange,
+  onDraftLifeModelRollback,
+  onDraftLifeModelExport,
 }: {
   snapshot: DurableTruthSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -85,6 +90,10 @@ export function DurableTruthView({
     error?: string;
   } | null;
   onDraftLegacyMigration: Parameters<typeof LifeModelMigrationPanel>[0]["onSubmit"];
+  lifeModelAction: Parameters<typeof LifeModelV2ControlsPanel>[0]["action"];
+  onDraftLifeModelChange: Parameters<typeof LifeModelV2ControlsPanel>[0]["onChange"];
+  onDraftLifeModelRollback: Parameters<typeof LifeModelV2ControlsPanel>[0]["onRollback"];
+  onDraftLifeModelExport: Parameters<typeof LifeModelV2ControlsPanel>[0]["onExport"];
 }) {
   const [activeDomain, setActiveDomain] = useState<"life_model" | "agent_memory">("life_model");
   const lifeModelTabRef = useRef<HTMLButtonElement>(null);
@@ -154,6 +163,12 @@ export function DurableTruthView({
     if (statuses.includes("stale")) return "长期状态已陈旧；请先重新读取。";
     if (statuses.includes("loading")) {
       return "长期状态读模型尚不可用。";
+    }
+    if (canonical?.conflictStatus && canonical.conflictStatus !== "none") {
+      return "当前规范版本存在冲突；请先重新读取并解决冲突。";
+    }
+    if (canonical?.freshnessStatus && canonical.freshnessStatus !== "current") {
+      return "当前规范版本不是最新状态；请先重新读取。";
     }
     return undefined;
   })();
@@ -288,6 +303,18 @@ export function DurableTruthView({
                         <dd>{canonicalView.humanProjection.itemCount}</dd>
                       </div>
                       <div>
+                        <dt>父版本</dt>
+                        <dd>{canonicalView.parentVersion ?? "首次版本"}</dd>
+                      </div>
+                      <div>
+                        <dt>最小来源</dt>
+                        <dd>{canonicalView.evidenceRefs.length} 条</dd>
+                      </div>
+                      <div>
+                        <dt>文档摘要</dt>
+                        <dd>{canonicalView.documentDigest}</dd>
+                      </div>
+                      <div>
                         <dt>投影摘要</dt>
                         <dd>{canonicalView.humanProjection.projectionDigest}</dd>
                       </div>
@@ -393,6 +420,19 @@ export function DurableTruthView({
                 onOpenReview={onOpenReviewCenter}
               />
             )}
+
+            {canonicalView ? (
+              <LifeModelV2ControlsPanel
+                canonical={canonicalView}
+                history={lifeModel?.versionHistory ?? []}
+                disabledReason={builderDisabledReason}
+                action={lifeModelAction}
+                onChange={onDraftLifeModelChange}
+                onRollback={onDraftLifeModelRollback}
+                onExport={onDraftLifeModelExport}
+                onOpenReview={onOpenReviewCenter}
+              />
+            ) : null}
 
             <section className="ol-durable-change" aria-labelledby="durable-change-title">
               <div className="ol-durable-section-heading">

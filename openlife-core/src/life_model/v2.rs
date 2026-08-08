@@ -28,7 +28,8 @@ const MAX_SOURCE_REFS_PER_ITEM: usize = 32;
 const MAX_SOURCE_REF_CHARS: usize = 256;
 const MAX_LEGACY_MIGRATION_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LEGACY_MIGRATION_ITEMS: usize = 4_096;
-const MAX_TYPED_DIFF_OPERATIONS: usize = 64;
+const MAX_TYPED_DIFF_OPERATIONS: usize = MAX_ITEMS_PER_SECTION * 10;
+const MAX_VERSION_HISTORY_ENTRIES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -157,7 +158,7 @@ pub enum LifeModelItemV2 {
 }
 
 impl LifeModelItemV2 {
-    fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         match self {
             Self::Statement(item) => &item.id,
             Self::LongTermGoal(item) => &item.id,
@@ -166,6 +167,36 @@ impl LifeModelItemV2 {
             Self::Resource(item) => &item.id,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum LifeModelUserValueV2 {
+    Statement {
+        statement: String,
+    },
+    LongTermGoal {
+        direction: String,
+        meaning: String,
+    },
+    Relationship {
+        person_label: String,
+        relationship: String,
+        significance: String,
+    },
+    Capability {
+        name: String,
+        description: String,
+    },
+    Resource {
+        name: String,
+        description: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +235,28 @@ pub struct LifeModelTypedDiffV2 {
 pub struct LifeModelPatchMaterializationResultV2 {
     pub version: LifeModelVersionV2,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelVersionChangeSummaryV2 {
+    pub added: usize,
+    pub replaced: usize,
+    pub removed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelVersionHistoryEntryV2 {
+    pub model_id: String,
+    pub model_version: u64,
+    pub parent_version: Option<u64>,
+    pub document_digest: String,
+    pub item_count: usize,
+    pub summary: String,
+    pub source_refs: Vec<String>,
+    pub created_at: String,
+    pub change_summary: LifeModelVersionChangeSummaryV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -903,6 +956,14 @@ fn migration_operation_id(operation: &LifeModelTypedOperationV2) -> &str {
     }
 }
 
+fn operation_section(operation: &LifeModelTypedOperationV2) -> LifeModelSectionV2 {
+    match operation {
+        LifeModelTypedOperationV2::Add { section, .. }
+        | LifeModelTypedOperationV2::Replace { section, .. }
+        | LifeModelTypedOperationV2::Remove { section, .. } => *section,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LegacyFieldClassification {
     disposition: LegacyLifeModelMigrationDispositionV2,
@@ -1547,6 +1608,110 @@ impl LifeModelDocumentV2 {
         serde_yaml::to_string(&self.normalized()).context("serialize_lifemodel_v2_yaml_projection")
     }
 
+    pub fn item(&self, section: LifeModelSectionV2, item_id: &str) -> Option<LifeModelItemV2> {
+        match section {
+            LifeModelSectionV2::Identity => statement_item(&self.identity, item_id),
+            LifeModelSectionV2::Values => statement_item(&self.values, item_id),
+            LifeModelSectionV2::LongTermGoals => self
+                .long_term_goals
+                .iter()
+                .find(|item| item.id == item_id)
+                .cloned()
+                .map(LifeModelItemV2::LongTermGoal),
+            LifeModelSectionV2::StablePreferences => {
+                statement_item(&self.stable_preferences, item_id)
+            }
+            LifeModelSectionV2::PersonalBoundaries => {
+                statement_item(&self.personal_boundaries, item_id)
+            }
+            LifeModelSectionV2::ImportantRelationships => self
+                .important_relationships
+                .iter()
+                .find(|item| item.id == item_id)
+                .cloned()
+                .map(LifeModelItemV2::Relationship),
+            LifeModelSectionV2::Capabilities => self
+                .capabilities
+                .iter()
+                .find(|item| item.id == item_id)
+                .cloned()
+                .map(LifeModelItemV2::Capability),
+            LifeModelSectionV2::Resources => self
+                .resources
+                .iter()
+                .find(|item| item.id == item_id)
+                .cloned()
+                .map(LifeModelItemV2::Resource),
+            LifeModelSectionV2::DecisionPrinciples => {
+                statement_item(&self.decision_principles, item_id)
+            }
+            LifeModelSectionV2::CollaborationPreferences => {
+                statement_item(&self.collaboration_preferences, item_id)
+            }
+        }
+    }
+
+    pub fn items(&self) -> Vec<(LifeModelSectionV2, LifeModelItemV2)> {
+        let mut items = Vec::with_capacity(self.total_item_count());
+        for (section, values) in [
+            (LifeModelSectionV2::Identity, &self.identity),
+            (LifeModelSectionV2::Values, &self.values),
+            (
+                LifeModelSectionV2::StablePreferences,
+                &self.stable_preferences,
+            ),
+            (
+                LifeModelSectionV2::PersonalBoundaries,
+                &self.personal_boundaries,
+            ),
+            (
+                LifeModelSectionV2::DecisionPrinciples,
+                &self.decision_principles,
+            ),
+            (
+                LifeModelSectionV2::CollaborationPreferences,
+                &self.collaboration_preferences,
+            ),
+        ] {
+            items.extend(
+                values
+                    .iter()
+                    .cloned()
+                    .map(|item| (section, LifeModelItemV2::Statement(item))),
+            );
+        }
+        items.extend(self.long_term_goals.iter().cloned().map(|item| {
+            (
+                LifeModelSectionV2::LongTermGoals,
+                LifeModelItemV2::LongTermGoal(item),
+            )
+        }));
+        items.extend(self.important_relationships.iter().cloned().map(|item| {
+            (
+                LifeModelSectionV2::ImportantRelationships,
+                LifeModelItemV2::Relationship(item),
+            )
+        }));
+        items.extend(self.capabilities.iter().cloned().map(|item| {
+            (
+                LifeModelSectionV2::Capabilities,
+                LifeModelItemV2::Capability(item),
+            )
+        }));
+        items.extend(self.resources.iter().cloned().map(|item| {
+            (
+                LifeModelSectionV2::Resources,
+                LifeModelItemV2::Resource(item),
+            )
+        }));
+        items.sort_by(|left, right| {
+            section_key(left.0)
+                .cmp(section_key(right.0))
+                .then_with(|| left.1.id().cmp(right.1.id()))
+        });
+        items
+    }
+
     fn normalized(&self) -> Self {
         let mut document = self.clone();
         normalize_statements(&mut document.identity);
@@ -1583,7 +1748,113 @@ impl LifeModelDocumentV2 {
     }
 }
 
+fn statement_item(values: &[LifeModelStatementV2], item_id: &str) -> Option<LifeModelItemV2> {
+    values
+        .iter()
+        .find(|item| item.id == item_id)
+        .cloned()
+        .map(LifeModelItemV2::Statement)
+}
+
+impl LifeModelUserValueV2 {
+    pub fn into_item(
+        self,
+        item_id: String,
+        source_refs: Vec<String>,
+        confirmed_at: String,
+    ) -> LifeModelItemV2 {
+        match self {
+            Self::Statement { statement } => LifeModelItemV2::Statement(LifeModelStatementV2 {
+                id: item_id,
+                statement,
+                source_refs,
+                confirmed_at,
+            }),
+            Self::LongTermGoal { direction, meaning } => {
+                LifeModelItemV2::LongTermGoal(LifeModelLongTermGoalV2 {
+                    id: item_id,
+                    direction,
+                    meaning,
+                    source_refs,
+                    confirmed_at,
+                })
+            }
+            Self::Relationship {
+                person_label,
+                relationship,
+                significance,
+            } => LifeModelItemV2::Relationship(LifeModelRelationshipV2 {
+                id: item_id,
+                person_label,
+                relationship,
+                significance,
+                source_refs,
+                confirmed_at,
+            }),
+            Self::Capability { name, description } => {
+                LifeModelItemV2::Capability(LifeModelCapabilityV2 {
+                    id: item_id,
+                    name,
+                    description,
+                    source_refs,
+                    confirmed_at,
+                })
+            }
+            Self::Resource { name, description } => {
+                LifeModelItemV2::Resource(LifeModelResourceV2 {
+                    id: item_id,
+                    name,
+                    description,
+                    source_refs,
+                    confirmed_at,
+                })
+            }
+        }
+    }
+}
+
 impl LifeModelTypedDiffV2 {
+    pub fn from_operations_for_review(
+        model_id: &str,
+        current: Option<&LifeModelVersionV2>,
+        operations: Vec<LifeModelTypedOperationV2>,
+        allow_empty_result: bool,
+    ) -> Result<Self> {
+        let mut document = match current {
+            Some(version) => {
+                if version.model_id != model_id {
+                    bail!("lifemodel_v2_typed_diff_model_mismatch");
+                }
+                version.document.validate()?;
+                version.document.clone()
+            }
+            None => LifeModelDocumentV2::empty(model_id),
+        };
+        let mut diff = Self {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: model_id.into(),
+            base_version: current.map(|version| version.model_version),
+            base_document_digest: current.map(|version| version.document_digest.clone()),
+            operations,
+            result_document_digest: LifeModelDocumentV2::empty(model_id).digest()?,
+        };
+        diff.validate_contract()?;
+        let mut value = serde_json::to_value(&document)
+            .context("serialize_lifemodel_v2_typed_diff_review_base")?;
+        for operation in &diff.operations {
+            apply_typed_operation(&mut value, operation)?;
+        }
+        document = serde_json::from_value(value)
+            .context("deserialize_lifemodel_v2_typed_diff_review_result")?;
+        document.validate()?;
+        if current.is_some() && document.is_empty() && !allow_empty_result {
+            bail!("lifemodel_v2_typed_diff_empty_result_requires_owner_cutover");
+        }
+        diff.result_document_digest = document.digest()?;
+        diff.apply_to_version_for_review(current, allow_empty_result)?;
+        Ok(diff)
+    }
+
     pub fn apply_to_version(
         &self,
         current: Option<&LifeModelVersionV2>,
@@ -1596,6 +1867,102 @@ impl LifeModelTypedDiffV2 {
         current: Option<&LifeModelVersionV2>,
     ) -> Result<LifeModelDocumentV2> {
         self.apply_to_version_with_empty_authority(current, true)
+    }
+
+    pub fn apply_to_version_for_review(
+        &self,
+        current: Option<&LifeModelVersionV2>,
+        allow_empty_result: bool,
+    ) -> Result<LifeModelDocumentV2> {
+        self.apply_to_version_with_empty_authority(current, allow_empty_result)
+    }
+
+    pub fn between_versions(
+        current: &LifeModelVersionV2,
+        target: &LifeModelVersionV2,
+    ) -> Result<Self> {
+        current.document.validate()?;
+        target.document.validate()?;
+        if current.model_id != target.model_id || current.model_id != current.document.model_id {
+            bail!("lifemodel_v2_rollback_model_mismatch");
+        }
+        let current_items = current
+            .document
+            .items()
+            .into_iter()
+            .map(|(section, item)| (item.id().to_string(), (section, item)))
+            .collect::<BTreeMap<_, _>>();
+        let target_items = target
+            .document
+            .items()
+            .into_iter()
+            .map(|(section, item)| (item.id().to_string(), (section, item)))
+            .collect::<BTreeMap<_, _>>();
+        let mut operations = Vec::new();
+        for (item_id, (section, current_item)) in &current_items {
+            match target_items.get(item_id) {
+                None => operations.push(LifeModelTypedOperationV2::Remove {
+                    section: *section,
+                    item_id: item_id.clone(),
+                    before_item_digest: life_model_item_digest_v2(current_item)?,
+                }),
+                Some((target_section, target_item))
+                    if target_section != section || target_item != current_item =>
+                {
+                    if target_section != section {
+                        operations.push(LifeModelTypedOperationV2::Remove {
+                            section: *section,
+                            item_id: item_id.clone(),
+                            before_item_digest: life_model_item_digest_v2(current_item)?,
+                        });
+                        operations.push(LifeModelTypedOperationV2::Add {
+                            section: *target_section,
+                            item: target_item.clone(),
+                        });
+                    } else {
+                        operations.push(LifeModelTypedOperationV2::Replace {
+                            section: *section,
+                            item_id: item_id.clone(),
+                            before_item_digest: life_model_item_digest_v2(current_item)?,
+                            item: target_item.clone(),
+                        });
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        for (item_id, (section, item)) in &target_items {
+            if !current_items.contains_key(item_id) {
+                operations.push(LifeModelTypedOperationV2::Add {
+                    section: *section,
+                    item: item.clone(),
+                });
+            }
+        }
+        if operations.is_empty() {
+            bail!("lifemodel_v2_rollback_target_matches_current");
+        }
+        operations.sort_by(|left, right| {
+            let left_key = (
+                section_key(operation_section(left)),
+                migration_operation_id(left),
+            );
+            let right_key = (
+                section_key(operation_section(right)),
+                migration_operation_id(right),
+            );
+            left_key.cmp(&right_key)
+        });
+        let diff = Self {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: current.model_id.clone(),
+            base_version: Some(current.model_version),
+            base_document_digest: Some(current.document_digest.clone()),
+            operations,
+            result_document_digest: target.document_digest.clone(),
+        };
+        diff.apply_to_version_for_review(Some(current), true)?;
+        Ok(diff)
     }
 
     fn apply_to_version_with_empty_authority(
@@ -2124,6 +2491,78 @@ impl LifeModelV2Store {
         load_current(&connection, model_id)
     }
 
+    pub(crate) fn version(
+        &self,
+        model_id: &str,
+        model_version: u64,
+    ) -> Result<Option<LifeModelVersionV2>> {
+        validate_identifier(model_id, "invalid_lifemodel_v2_model_id")?;
+        if model_version == 0 {
+            bail!("invalid_lifemodel_v2_model_version");
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+        load_version(&connection, model_id, model_version)
+    }
+
+    pub(crate) fn history(
+        &self,
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<LifeModelVersionHistoryEntryV2>> {
+        validate_identifier(model_id, "invalid_lifemodel_v2_model_id")?;
+        if limit == 0 || limit > MAX_VERSION_HISTORY_ENTRIES {
+            bail!("lifemodel_v2_history_limit_out_of_bounds");
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT model_version FROM life_model_v2_versions
+                 WHERE model_id = ?1 ORDER BY model_version DESC LIMIT ?2",
+            )
+            .context("prepare_lifemodel_v2_history")?;
+        let versions = statement
+            .query_map(params![model_id, limit as u64], |row| row.get::<_, u64>(0))
+            .context("query_lifemodel_v2_history")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect_lifemodel_v2_history")?;
+        drop(statement);
+        versions
+            .into_iter()
+            .map(|model_version| {
+                let version = load_version(&connection, model_id, model_version)?
+                    .ok_or_else(|| anyhow!("lifemodel_v2_history_version_missing"))?;
+                let parent = version
+                    .parent_version
+                    .map(|parent_version| load_version(&connection, model_id, parent_version))
+                    .transpose()?
+                    .flatten();
+                if version.parent_version.is_some() && parent.is_none() {
+                    bail!("lifemodel_v2_history_parent_missing");
+                }
+                Ok(LifeModelVersionHistoryEntryV2 {
+                    model_id: version.model_id.clone(),
+                    model_version: version.model_version,
+                    parent_version: version.parent_version,
+                    document_digest: version.document_digest.clone(),
+                    item_count: version.document.total_item_count(),
+                    summary: version.document.summary(),
+                    source_refs: version.source_refs.clone(),
+                    created_at: version.created_at.clone(),
+                    change_summary: version_change_summary(
+                        parent.as_ref().map(|parent| &parent.document),
+                        &version.document,
+                    )?,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn cutover(&self, model_id: &str) -> Result<Option<LifeModelV2CutoverReceipt>> {
         validate_identifier(model_id, "invalid_lifemodel_v2_model_id")?;
         let connection = self
@@ -2289,7 +2728,10 @@ impl LifeModelV2Store {
             });
         }
         let current = self.current(&diff.model_id)?;
-        let allow_empty_result = self.cutover(&diff.model_id)?.is_some();
+        // Once a v2 head exists, an authoritative empty document remains a v2
+        // head and cannot fall back to legacy data. Cutover is only needed for
+        // the initial legacy-to-v2 owner switch.
+        let allow_empty_result = current.is_some() || self.cutover(&diff.model_id)?.is_some();
         let document =
             diff.apply_to_version_with_empty_authority(current.as_ref(), allow_empty_result)?;
         let committed = self.commit(LifeModelCommitV2 {
@@ -2429,6 +2871,54 @@ impl LifeModelV2Store {
             replayed: false,
         })
     }
+}
+
+fn version_change_summary(
+    parent: Option<&LifeModelDocumentV2>,
+    current: &LifeModelDocumentV2,
+) -> Result<LifeModelVersionChangeSummaryV2> {
+    let parent_items = parent
+        .map(LifeModelDocumentV2::items)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(section, item)| {
+            Ok((
+                item.id().to_string(),
+                (section, life_model_item_digest_v2(&item)?),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let current_items = current
+        .items()
+        .into_iter()
+        .map(|(section, item)| {
+            Ok((
+                item.id().to_string(),
+                (section, life_model_item_digest_v2(&item)?),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let added = current_items
+        .keys()
+        .filter(|item_id| !parent_items.contains_key(*item_id))
+        .count();
+    let removed = parent_items
+        .keys()
+        .filter(|item_id| !current_items.contains_key(*item_id))
+        .count();
+    let replaced = current_items
+        .iter()
+        .filter(|(item_id, value)| {
+            parent_items
+                .get(*item_id)
+                .is_some_and(|parent_value| parent_value != *value)
+        })
+        .count();
+    Ok(LifeModelVersionChangeSummaryV2 {
+        added,
+        replaced,
+        removed,
+    })
 }
 
 #[expect(
@@ -3405,6 +3895,143 @@ goals:
         let current = store.current("primary").unwrap().unwrap();
         assert_eq!(current.model_version, 1);
         assert_eq!(current.version_digest, first.version.version_digest);
+    }
+
+    #[test]
+    fn reviewed_remove_last_appends_an_authoritative_empty_version() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let first = store
+            .materialize_typed_diff(
+                &initial_statement_diff(statement("value:1", "Autonomy matters.")),
+                "proposal:add-for-clear",
+                vec!["proposal:add-for-clear".into()],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap()
+            .version;
+        let remove = LifeModelTypedDiffV2::from_operations_for_review(
+            "primary",
+            Some(&first),
+            vec![LifeModelTypedOperationV2::Remove {
+                section: LifeModelSectionV2::Values,
+                item_id: "value:1".into(),
+                before_item_digest: life_model_item_digest_v2(&LifeModelItemV2::Statement(
+                    first.document.values[0].clone(),
+                ))
+                .unwrap(),
+            }],
+            true,
+        )
+        .unwrap();
+
+        let cleared = store
+            .materialize_typed_diff(
+                &remove,
+                "proposal:remove-last",
+                vec!["proposal:remove-last".into()],
+                "2026-08-08T10:02:00Z",
+            )
+            .unwrap()
+            .version;
+
+        assert_eq!(cleared.model_version, 2);
+        assert_eq!(cleared.parent_version, Some(1));
+        assert!(cleared.document.is_empty());
+        assert_eq!(store.current("primary").unwrap(), Some(cleared));
+    }
+
+    #[test]
+    fn version_history_is_bounded_and_rollback_diff_appends_without_moving_history() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let first = store
+            .materialize_typed_diff(
+                &initial_statement_diff(statement("value:1", "Autonomy matters.")),
+                "proposal:history-1",
+                vec!["proposal:history-1".into()],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap()
+            .version;
+        let add_second = LifeModelTypedDiffV2::from_operations_for_review(
+            "primary",
+            Some(&first),
+            vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: LifeModelItemV2::Statement(statement("value:2", "Clarity matters.")),
+            }],
+            false,
+        )
+        .unwrap();
+        let second = store
+            .materialize_typed_diff(
+                &add_second,
+                "proposal:history-2",
+                vec!["proposal:history-2".into()],
+                "2026-08-08T10:02:00Z",
+            )
+            .unwrap()
+            .version;
+
+        let rollback = LifeModelTypedDiffV2::between_versions(&second, &first).unwrap();
+        let third = store
+            .materialize_typed_diff(
+                &rollback,
+                "proposal:rollback-to-1",
+                vec![
+                    "proposal:rollback-to-1".into(),
+                    format!("lifemodel-version:primary:1:{}", first.document_digest),
+                ],
+                "2026-08-08T10:03:00Z",
+            )
+            .unwrap()
+            .version;
+
+        assert_eq!(third.model_version, 3);
+        assert_eq!(third.parent_version, Some(2));
+        assert_eq!(third.document, first.document);
+        assert_eq!(store.version("primary", 1).unwrap(), Some(first));
+        assert_eq!(store.version("primary", 2).unwrap(), Some(second));
+        let history = store.history("primary", 3).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].model_version, 3);
+        assert_eq!(history[0].change_summary.removed, 1);
+        assert_eq!(history[1].change_summary.added, 1);
+        assert!(store
+            .history("primary", MAX_VERSION_HISTORY_ENTRIES + 1)
+            .is_err());
+    }
+
+    #[test]
+    fn rollback_diff_rejects_same_content_and_corrupt_historical_version_fails_closed() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let first = store
+            .materialize_typed_diff(
+                &initial_statement_diff(statement("value:1", "Autonomy matters.")),
+                "proposal:rollback-corrupt-1",
+                vec!["proposal:rollback-corrupt-1".into()],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap()
+            .version;
+        assert!(LifeModelTypedDiffV2::between_versions(&first, &first)
+            .unwrap_err()
+            .to_string()
+            .contains("target_matches_current"));
+
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE life_model_v2_versions SET document_digest = ?1 WHERE model_id = ?2 AND model_version = 1",
+                params![
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "primary"
+                ],
+            )
+            .unwrap();
+        assert!(store.version("primary", 1).is_err());
+        assert!(store.history("primary", 1).is_err());
     }
 
     #[test]

@@ -201,6 +201,7 @@ export function createMockLifeModelViewModelEnvelope(
     data: {
       truthMode: "current_compatibility",
       canonicalSummary: null,
+      versionHistory: [],
       legacyMigrationPreview: null,
       currentViewSummary: null,
       dimensionSummaries: [
@@ -949,6 +950,33 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "get_life_model_view_model":
       return Promise.resolve(createMockLifeModelViewModelEnvelope() as T);
+    case "draft_lifemodel_v2_change":
+      return Promise.resolve({
+        proposalId: "proposal:lifemodel-v2-change:mock",
+        status: "review_required",
+        baseVersion: _args?.request?.baseVersion ?? null,
+        baseDocumentDigest: _args?.request?.baseDocumentDigest ?? null,
+        resultDocumentDigest: "sha256:result",
+        operationCount: 1,
+      } as T);
+    case "draft_lifemodel_v2_rollback":
+      return Promise.resolve({
+        proposalId: "proposal:lifemodel-v2-rollback:mock",
+        status: "review_required",
+        baseVersion: _args?.request?.baseVersion ?? null,
+        baseDocumentDigest: _args?.request?.baseDocumentDigest ?? null,
+        resultDocumentDigest: _args?.request?.targetDocumentDigest ?? null,
+        operationCount: 1,
+      } as T);
+    case "draft_lifemodel_v2_export":
+      return Promise.resolve({
+        proposalId: "proposal:lifemodel-v2-export:mock",
+        status: "review_required",
+        baseVersion: _args?.request?.modelVersion ?? null,
+        baseDocumentDigest: _args?.request?.documentDigest ?? null,
+        resultDocumentDigest: null,
+        operationCount: 0,
+      } as T);
     case "get_memory_view_model":
       return Promise.resolve(createMockMemoryViewModelEnvelope() as T);
     case "get_markdown_memory_view_model":

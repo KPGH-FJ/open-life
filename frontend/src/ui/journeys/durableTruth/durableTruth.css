@@ -112,11 +112,115 @@
 .ol-durable-current,
 .ol-durable-change,
 .ol-durable-memory,
-.ol-lifemodel-migration {
+.ol-lifemodel-migration,
+.ol-lifemodel-controls {
   display: grid;
   gap: var(--ol-space-5);
   padding: var(--ol-space-6) 0;
   border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-controls > p,
+.ol-lifemodel-controls__items p,
+.ol-lifemodel-controls__history p {
+  margin: 0;
+  color: var(--ol-ink-muted);
+  line-height: 1.6;
+}
+
+.ol-lifemodel-controls__editor,
+.ol-lifemodel-controls__items,
+.ol-lifemodel-controls__history,
+.ol-lifemodel-controls__export {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-controls h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.ol-lifemodel-controls label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--ol-ink-muted);
+  font-size: 0.8rem;
+}
+
+.ol-lifemodel-controls input,
+.ol-lifemodel-controls select,
+.ol-lifemodel-controls textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.65rem 0.75rem;
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: 0.65rem;
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  font: inherit;
+}
+
+.ol-lifemodel-controls textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.ol-lifemodel-controls button,
+.ol-lifemodel-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.7rem;
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: 0.6rem;
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  cursor: pointer;
+}
+
+.ol-lifemodel-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ol-lifemodel-controls__items ol,
+.ol-lifemodel-controls__history ol {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ol-lifemodel-controls__items li,
+.ol-lifemodel-controls__history li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: 0.7rem;
+}
+
+.ol-lifemodel-controls__items li > div,
+.ol-lifemodel-controls__history li > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.ol-lifemodel-controls__items li > div:last-child {
+  display: flex;
+  flex-shrink: 0;
 }
 
 .ol-durable-current {

@@ -1000,33 +1000,76 @@ pub(crate) async fn materialize_accepted_lifemodel_v2_typed_diff_with_state(
     let current_digest = current
         .as_ref()
         .map(|version| version.document_digest.clone());
-    if let Err(error) = diff.apply_to_version(current.as_ref()) {
-        return Ok(failed(
-            "lifemodel_v2_typed_diff_precondition_failed",
-            error.to_string(),
+    let allow_empty_result = current.is_some()
+        || manager
+            .load_v2_cutover(&diff.model_id)
+            .map_err(|error| error.to_string())?
+            .is_some();
+    let result_document =
+        match diff.apply_to_version_for_review(current.as_ref(), allow_empty_result) {
+            Ok(document) => document,
+            Err(error) => {
+                return Ok(failed(
+                    "lifemodel_v2_typed_diff_precondition_failed",
+                    error.to_string(),
+                ))
+            }
+        };
+    let mut additional_source_refs = Vec::new();
+    if let Some(detail) = proposal
+        .source_detail
+        .as_deref()
+        .and_then(|detail| detail.strip_prefix("lifemodel_v2_rollback:"))
+    {
+        let (target_version, target_digest) = detail
+            .split_once(':')
+            .ok_or_else(|| "lifemodel_v2_rollback_source_detail_invalid".to_string())?;
+        let target_version = target_version
+            .parse::<u64>()
+            .map_err(|_| "lifemodel_v2_rollback_target_version_invalid".to_string())?;
+        let target = manager
+            .load_v2_version(&diff.model_id, target_version)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "lifemodel_v2_rollback_target_missing".to_string())?;
+        if target.document_digest != target_digest
+            || target.document_digest != diff.result_document_digest
+            || target.document != result_document
+        {
+            return Ok(failed(
+                "lifemodel_v2_typed_diff_precondition_failed",
+                "lifemodel_v2_rollback_target_drift".into(),
+            ));
+        }
+        additional_source_refs.push(format!(
+            "lifemodel-version:{}:{}:{}",
+            diff.model_id, target_version, target.document_digest
         ));
     }
 
     let created_at = proposal.created_at.to_rfc3339();
-    let materialized =
-        match manager.materialize_reviewed_v2_typed_diff(diff, &proposal.id, &created_at) {
-            Ok(result) => result,
-            Err(error)
-                if [
-                    "lifemodel_v2_parent_version_conflict",
-                    "lifemodel_v2_parent_digest_conflict",
-                    "lifemodel_v2_materialization_identity_conflict",
-                ]
-                .iter()
-                .any(|code| error.to_string().contains(code)) =>
-            {
-                return Ok(failed(
-                    "lifemodel_v2_typed_diff_commit_conflict",
-                    error.to_string(),
-                ));
-            }
-            Err(error) => return Err(format!("lifemodel_v2_materialization_unknown:{error}")),
-        };
+    let materialized = match manager.materialize_reviewed_v2_typed_diff(
+        diff,
+        &proposal.id,
+        &additional_source_refs,
+        &created_at,
+    ) {
+        Ok(result) => result,
+        Err(error)
+            if [
+                "lifemodel_v2_parent_version_conflict",
+                "lifemodel_v2_parent_digest_conflict",
+                "lifemodel_v2_materialization_identity_conflict",
+            ]
+            .iter()
+            .any(|code| error.to_string().contains(code)) =>
+        {
+            return Ok(failed(
+                "lifemodel_v2_typed_diff_commit_conflict",
+                error.to_string(),
+            ));
+        }
+        Err(error) => return Err(format!("lifemodel_v2_materialization_unknown:{error}")),
+    };
     drop(manager);
     drop(coordinator_guard);
     drop(commit_permit);

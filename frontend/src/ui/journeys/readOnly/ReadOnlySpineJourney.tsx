@@ -1024,6 +1024,7 @@ export function ReadOnlySpineJourney({
         refreshing={durable.refreshing}
         memoryAction={durable.memoryAction}
         migrationAction={durable.migrationAction}
+        lifeModelAction={durable.lifeModelAction}
         onRefresh={() => void durable.load(true)}
         onSelectItem={item => {
           durable.selectItem(item);
@@ -1039,6 +1040,9 @@ export function ReadOnlySpineJourney({
         onRollbackMemory={durable.rollbackMemory}
         onPrivacyEraseMemory={durable.privacyEraseMemory}
         onDraftLegacyMigration={durable.draftLegacyMigration}
+        onDraftLifeModelChange={durable.draftLifeModelChange}
+        onDraftLifeModelRollback={durable.draftLifeModelRollback}
+        onDraftLifeModelExport={durable.draftLifeModelExport}
         builder={lifeModelBuilderDataSource ? lifeModelBuilder : undefined}
         onOpenReviewCenter={
           lifeModelBuilderDataSource ? () => navigateProduct("review", "life-model") : undefined

@@ -5,6 +5,9 @@ const tauriMocks = vi.hoisted(() => ({
   getMemoryViewModel: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
   draftLegacyLifeModelMigration: vi.fn(),
+  draftLifeModelV2Change: vi.fn(),
+  draftLifeModelV2Rollback: vi.fn(),
+  draftLifeModelV2Export: vi.fn(),
   draftMemoryCorrectionProposal: vi.fn(),
   draftMemoryArchiveProposal: vi.fn(),
   draftMemoryStopRecallProposal: vi.fn(),
@@ -149,6 +152,53 @@ describe("durable truth Tauri data source", () => {
     await expect(
       tauriDurableTruthDataSource.draftLegacyLifeModelMigration(request)
     ).rejects.toThrow("lifemodel_migration_proposal_receipt_unverified");
+  });
+
+  it("accepts only exact Review-required LifeModel v2 operation receipts", async () => {
+    const change = {
+      baseVersion: 4,
+      baseDocumentDigest: "sha256:base",
+      change: { operation: "clear" as const },
+    };
+    tauriMocks.draftLifeModelV2Change.mockResolvedValue({
+      proposalId: "proposal:change",
+      status: "review_required",
+      baseVersion: 4,
+    });
+    await expect(tauriDurableTruthDataSource.draftLifeModelChange(change)).resolves.toBe(
+      "proposal:change"
+    );
+
+    const rollback = {
+      baseVersion: 4,
+      baseDocumentDigest: "sha256:base",
+      targetVersion: 2,
+      targetDocumentDigest: "sha256:target",
+    };
+    tauriMocks.draftLifeModelV2Rollback.mockResolvedValue({
+      proposalId: "proposal:rollback",
+      status: "review_required",
+      baseVersion: 4,
+    });
+    await expect(tauriDurableTruthDataSource.draftLifeModelRollback(rollback)).resolves.toBe(
+      "proposal:rollback"
+    );
+
+    const exportRequest = {
+      modelVersion: 4,
+      documentDigest: "sha256:base",
+      projectionDigest: null,
+      format: "json" as const,
+      targetPath: "/safe/lifemodel.json",
+    };
+    tauriMocks.draftLifeModelV2Export.mockResolvedValue({
+      proposalId: "proposal:export",
+      status: "review_required",
+      baseVersion: 3,
+    });
+    await expect(tauriDurableTruthDataSource.draftLifeModelExport(exportRequest)).rejects.toThrow(
+      "lifemodel_v2_proposal_receipt_unverified"
+    );
   });
 
   it("does not report a direct Memory action as complete while its projection is pending", async () => {
