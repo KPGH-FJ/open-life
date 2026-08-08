@@ -366,7 +366,10 @@ async fn a2a_send_task_with_state(
 pub async fn a2a_local_agent_card(state: State<'_, Arc<AppState>>) -> Result<AgentCard, AppError> {
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
+        manager
+            .load_active_legacy_runtime_model()
+            .map_err(AppError::from)?
+            .unwrap_or_else(openlife_core::life_model::LifeModel::default_model)
     };
     Ok(A2AServerHandler::default_agent_card(
         crate::a2a_server::configured_a2a_port(),
@@ -382,7 +385,10 @@ pub async fn a2a_handle_task(
     let req: SendTaskRequest = serde_json::from_str(&request_json).map_err(AppError::from)?;
     let life_model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
+        manager
+            .load_active_legacy_runtime_model()
+            .map_err(AppError::from)?
+            .unwrap_or_else(openlife_core::life_model::LifeModel::default_model)
     };
     let privacy_engine = state.privacy_engine.lock().await.clone();
     let handler = A2AServerHandler {
@@ -409,7 +415,10 @@ pub async fn a2a_bridge_local(
     let a2a_req = reasoning_input_to_a2a_task(&req, skill.as_deref(), None);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
+        manager
+            .load_active_legacy_runtime_model()
+            .map_err(AppError::from)?
+            .unwrap_or_else(openlife_core::life_model::LifeModel::default_model)
     };
     let privacy_engine = state.privacy_engine.lock().await.clone();
     let handler = A2AServerHandler {

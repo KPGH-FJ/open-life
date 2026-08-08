@@ -161,7 +161,9 @@ pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
-use commands::life_model::{get_life_model, get_life_model_current_view};
+use commands::life_model::{
+    draft_legacy_lifemodel_migration, get_life_model, get_life_model_current_view,
+};
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
 use commands::mcp::{
@@ -960,6 +962,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_life_model,
             get_life_model_current_view,
+            draft_legacy_lifemodel_migration,
             get_life_state_projection,
             get_life_model_view_model,
             get_review_center_view_model,

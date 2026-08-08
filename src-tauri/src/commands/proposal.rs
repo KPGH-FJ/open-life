@@ -392,6 +392,12 @@ fn is_lifemodel_v2_typed_diff(proposal: &AgentProposal) -> bool {
         && proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
 }
 
+fn is_legacy_lifemodel_v2_migration(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path
+            == openlife_core::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
+}
+
 fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
     matches!(
         operation,
@@ -409,6 +415,11 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
             | "lifemodel_v2_typed_diff_validation_failed"
             | "lifemodel_v2_typed_diff_precondition_failed"
             | "lifemodel_v2_typed_diff_commit_conflict"
+            | "lifemodel_v2_migration_validation_failed"
+            | "lifemodel_v2_migration_source_changed"
+            | "lifemodel_v2_migration_backup_failed"
+            | "lifemodel_v2_migration_commit_conflict"
+            | "lifemodel_legacy_owner_retired"
             | "memory_write_not_committed"
             | "memory_write_duplicate_no_effect"
             | "scheduled_task_review_snapshot_missing"
@@ -2927,6 +2938,22 @@ fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), Stri
             return Err("lifemodel_v2_typed_diff_proposal_base_mismatch".into());
         }
     }
+    if is_legacy_lifemodel_v2_migration(proposal) {
+        if proposal.source != ProposalSource::Manual
+            || proposal.source_detail.as_deref() != Some("legacy_lifemodel_migration")
+        {
+            return Err("lifemodel_v2_migration_proposal_source_mismatch".into());
+        }
+        let plan = serde_json::from_value::<
+            openlife_core::life_model::v2::LegacyLifeModelMigrationPlanV2,
+        >(proposal.after.clone())
+        .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
+        plan.validate_contract()
+            .map_err(|error| error.to_string())?;
+        if proposal.base_hash.is_some() {
+            return Err("lifemodel_v2_migration_proposal_base_must_be_empty".into());
+        }
+    }
     if proposal.proposal_type == ProposalType::ToolPermission
         && tool_permission_scope_kind(&proposal.after)? == ToolPermissionScopeKind::ActionBound
         && tool_permission_scope_field(&proposal.after, "action_type") == Some("network")
@@ -3221,6 +3248,16 @@ async fn apply_proposal_to_state(
         | ProposalType::StateUpdate
         | ProposalType::PreferenceUpdate
         | ProposalType::CapabilityUpdate => {
+            if is_legacy_lifemodel_v2_migration(proposal) {
+                let plan = serde_json::from_value::<
+                    openlife_core::life_model::v2::LegacyLifeModelMigrationPlanV2,
+                >(after)
+                .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
+                return life_model_write_gateway::materialize_accepted_legacy_lifemodel_migration_with_state(
+                    state, proposal, &plan,
+                )
+                .await;
+            }
             if is_lifemodel_v2_typed_diff(proposal) {
                 let diff = serde_json::from_value::<
                     openlife_core::life_model::v2::LifeModelTypedDiffV2,
@@ -3230,6 +3267,31 @@ async fn apply_proposal_to_state(
                     state, proposal, &diff,
                 )
                 .await;
+            }
+            let legacy_owner_retired = {
+                let manager = state.life_model_manager.lock().await;
+                manager
+                    .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+                    || manager
+                        .load_v2_cutover(
+                            openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                        )
+                        .map_err(|error| error.to_string())?
+                        .is_some()
+            };
+            if legacy_owner_retired {
+                return Ok(openlife_core::life_model::patch::PatchApplyResult {
+                    patch_id: proposal.id.clone(),
+                    success: false,
+                    path: proposal.affected_path.clone(),
+                    operation: "lifemodel_legacy_owner_retired".into(),
+                    error: Some(
+                        "Canonical LifeModel v2 is active; legacy YAML product writes are retired."
+                            .into(),
+                    ),
+                });
             }
             let canonical_affected_path = canonical_lifemodel_path(&proposal.affected_path);
             let model = {
@@ -4692,6 +4754,12 @@ pub(crate) async fn reject_proposal_with_state(
             "[proposal] AgentRun rejection reconciliation pending for {}: {}",
             proposal.id,
             error
+        );
+    }
+    if is_lifemodel_v2_typed_diff(&proposal) || is_legacy_lifemodel_v2_migration(&proposal) {
+        return Err(
+            "LifeModel v2 Proposal requires its schema-aware editor; generic JSON edit is disabled."
+                .into(),
         );
     }
     record_maturation_proposal_outcome_evidence_with_state(
@@ -6826,6 +6894,139 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stale.status, ProposalStatus::Pending);
+    }
+
+    async fn draft_test_legacy_migration(state: &Arc<AppState>) -> String {
+        use openlife_core::life_model::v2::{
+            LegacyLifeModelMigrationDecisionV2, LegacyLifeModelMigrationPreviewV2,
+            LegacyLifeModelMigrationSelectionV2,
+        };
+
+        let source = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_existing_with_source()
+            .unwrap()
+            .unwrap()
+            .1;
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source).unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect();
+        crate::commands::life_model::draft_legacy_lifemodel_migration_with_state(
+            crate::commands::life_model::DraftLegacyLifeModelMigrationRequest {
+                source_digest: preview.source_digest,
+                selections,
+                non_lifemodel_items_acknowledged: true,
+            },
+            state,
+        )
+        .await
+        .unwrap()
+        .proposal_id
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_draft_has_no_effect_and_accept_atomically_switches_owner() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut legacy = manager.load().unwrap();
+            legacy.identity.name = "Alice".into();
+            manager.save(&legacy).unwrap();
+        }
+
+        let proposal_id = draft_test_legacy_migration(&state).await;
+        let manager = state.life_model_manager.lock().await;
+        assert!(manager.load_v2_current("primary").unwrap().is_none());
+        assert!(manager.load_v2_cutover("primary").unwrap().is_none());
+        assert!(!manager.v2_store_path().exists());
+        drop(manager);
+
+        let accepted = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["effect_status"], "confirmed");
+        let manager = state.life_model_manager.lock().await;
+        let version = manager.load_v2_current("primary").unwrap().unwrap();
+        let cutover = manager.load_v2_cutover("primary").unwrap().unwrap();
+        assert_eq!(version.model_version, 1);
+        assert_eq!(cutover.proposal_id, proposal_id);
+        assert_eq!(cutover.document_digest, version.document_digest);
+        assert!(manager
+            .load_active_legacy_runtime_model()
+            .unwrap()
+            .is_none());
+        let backup_dir = manager
+            .v2_store_path()
+            .parent()
+            .unwrap()
+            .join("legacy-backups");
+        assert_eq!(std::fs::read_dir(backup_dir).unwrap().count(), 1);
+        drop(manager);
+
+        let view = crate::read_models::life_model::get_life_model_view_model_with_state(&state)
+            .await
+            .unwrap();
+        let data = view.data.unwrap();
+        assert_eq!(
+            data.truth_mode,
+            openlife_core::agent::LifeModelTruthMode::Canonical
+        );
+        assert!(data.legacy_migration_preview.is_none());
+        assert!(data.current_view_summary.is_none());
+        assert!(
+            crate::commands::life_model::get_life_model_with_state(&state)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("legacy_lifemodel_read_owner_retired")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_source_drift_after_review_fails_before_cutover_and_stays_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut legacy = manager.load().unwrap();
+            legacy.identity.name = "Alice".into();
+            manager.save(&legacy).unwrap();
+        }
+        let proposal_id = draft_test_legacy_migration(&state).await;
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut changed = manager.load().unwrap();
+            changed.identity.name = "Bob".into();
+            manager.save(&changed).unwrap();
+        }
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Patch 应用前校验失败"), "{error}");
+        let manager = state.life_model_manager.lock().await;
+        assert!(manager.load_v2_current("primary").unwrap().is_none());
+        assert!(manager.load_v2_cutover("primary").unwrap().is_none());
+        drop(manager);
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal_id).unwrap().as_deref(),
+            Some("failed_before_effect")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal_id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
     }
 
     #[tokio::test]

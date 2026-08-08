@@ -10,7 +10,7 @@ use ring::digest::{digest, SHA256};
 use rusqlite::TransactionBehavior;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,7 +19,7 @@ use super::LifeModel;
 
 pub const LIFE_MODEL_V2_SCHEMA_VERSION: &str = "openlife.lifemodel.v2";
 pub const DEFAULT_LIFE_MODEL_V2_MODEL_ID: &str = "primary";
-const LIFE_MODEL_V2_STORE_SCHEMA_VERSION: i64 = 1;
+const LIFE_MODEL_V2_STORE_SCHEMA_VERSION: i64 = 2;
 const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 const MAX_ITEMS_PER_SECTION: usize = 512;
 const MAX_ITEM_ID_CHARS: usize = 160;
@@ -137,6 +137,9 @@ pub enum LifeModelSectionV2 {
 
 pub const LIFE_MODEL_V2_TYPED_DIFF_SCHEMA: &str = "openlife.lifemodel.v2.typed-diff.v1";
 pub const LIFE_MODEL_V2_TYPED_DIFF_PATH: &str = "$lifemodel_v2";
+pub const LIFE_MODEL_V2_LEGACY_MIGRATION_SCHEMA: &str = "openlife.lifemodel.v2.legacy-migration.v1";
+pub const LIFE_MODEL_V2_LEGACY_MIGRATION_PATH: &str = "$lifemodel_v2_migration";
+pub const LIFE_MODEL_V2_CUTOVER_SCHEMA: &str = "openlife.lifemodel.v2.cutover.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -204,6 +207,105 @@ pub struct LifeModelPatchMaterializationResultV2 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum LegacyLifeModelMigrationCandidateValueV2 {
+    Statement {
+        statement: String,
+    },
+    LongTermGoal {
+        direction: String,
+        meaning: String,
+    },
+    Relationship {
+        person_label: String,
+        relationship: String,
+        significance: String,
+    },
+    Capability {
+        name: String,
+        description: String,
+    },
+    Resource {
+        name: String,
+        description: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyLifeModelMigrationCandidateV2 {
+    pub candidate_id: String,
+    pub item_id: String,
+    pub source_paths: Vec<String>,
+    pub target_section: LifeModelSectionV2,
+    pub proposed_value: LegacyLifeModelMigrationCandidateValueV2,
+    pub sensitive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyLifeModelMigrationDecisionV2 {
+    Include,
+    Exclude,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyLifeModelMigrationSelectionV2 {
+    pub candidate_id: String,
+    pub decision: LegacyLifeModelMigrationDecisionV2,
+    pub edited_value: Option<LegacyLifeModelMigrationCandidateValueV2>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyLifeModelMigrationPlanV2 {
+    pub schema_version: String,
+    pub model_id: String,
+    pub legacy_source_digest: String,
+    pub included_candidate_ids: Vec<String>,
+    pub excluded_candidate_ids: Vec<String>,
+    pub non_lifemodel_item_count: usize,
+    pub non_lifemodel_items_acknowledged: bool,
+    pub typed_diff: Option<LifeModelTypedDiffV2>,
+    pub result_document_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelV2CutoverReceipt {
+    pub schema_version: String,
+    pub model_id: String,
+    pub legacy_source_digest: String,
+    pub backup_digest: String,
+    pub model_version: u64,
+    pub document_digest: String,
+    pub proposal_id: String,
+    pub cutover_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyLifeModelBackupReceiptV2 {
+    pub source_digest: String,
+    pub backup_digest: String,
+    pub backup_file_name: String,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelLegacyMigrationMaterializationResultV2 {
+    pub version: LifeModelVersionV2,
+    pub cutover: LifeModelV2CutoverReceipt,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyLifeModelMigrationItemV2 {
     pub source_path: String,
@@ -229,6 +331,7 @@ pub struct LegacyLifeModelMigrationPreviewV2 {
     pub not_migrated_count: usize,
     pub migration_metadata_count: usize,
     pub contains_sensitive_items: bool,
+    pub candidates: Vec<LegacyLifeModelMigrationCandidateV2>,
 }
 
 impl LegacyLifeModelMigrationPreviewV2 {
@@ -280,12 +383,14 @@ impl LegacyLifeModelMigrationPreviewV2 {
             .count();
         let contains_sensitive_items = items.iter().any(|item| item.sensitive);
 
+        let source_digest = format!(
+            "sha256:{}",
+            hex_digest(digest(&SHA256, source.as_bytes()).as_ref())
+        );
+        let candidates = build_legacy_migration_candidates(&value, &source_digest, &items)?;
         Ok(Self {
             schema_version: "openlife.lifemodel.legacy-migration-preview.v1".into(),
-            source_digest: format!(
-                "sha256:{}",
-                hex_digest(digest(&SHA256, source.as_bytes()).as_ref())
-            ),
+            source_digest,
             items,
             review_required_count,
             external_owner_count,
@@ -293,6 +398,7 @@ impl LegacyLifeModelMigrationPreviewV2 {
             not_migrated_count,
             migration_metadata_count,
             contains_sensitive_items,
+            candidates,
         })
     }
 
@@ -302,6 +408,498 @@ impl LegacyLifeModelMigrationPreviewV2 {
             + self.manual_classification_count
             + self.not_migrated_count
             > 0
+    }
+
+    pub fn build_migration_plan(
+        &self,
+        model_id: &str,
+        selections: &[LegacyLifeModelMigrationSelectionV2],
+        non_lifemodel_items_acknowledged: bool,
+        confirmed_at: &str,
+    ) -> Result<LegacyLifeModelMigrationPlanV2> {
+        validate_identifier(model_id, "invalid_lifemodel_v2_migration_model_id")?;
+        DateTime::parse_from_rfc3339(confirmed_at)
+            .map_err(|_| anyhow!("invalid_lifemodel_v2_migration_confirmed_at"))?;
+        let non_lifemodel_item_count = self.items.len() - self.review_required_count;
+        if non_lifemodel_item_count > 0 && !non_lifemodel_items_acknowledged {
+            bail!("lifemodel_v2_migration_non_lifemodel_items_not_acknowledged");
+        }
+        if selections.len() != self.candidates.len() {
+            bail!("lifemodel_v2_migration_candidate_decisions_incomplete");
+        }
+
+        let candidates = self
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.candidate_id.as_str(), candidate))
+            .collect::<BTreeMap<_, _>>();
+        let mut seen = BTreeSet::new();
+        let mut included_candidate_ids = Vec::new();
+        let mut excluded_candidate_ids = Vec::new();
+        let mut operations = Vec::new();
+        for selection in selections {
+            if !seen.insert(selection.candidate_id.as_str()) {
+                bail!("lifemodel_v2_migration_duplicate_candidate_decision");
+            }
+            let candidate = candidates
+                .get(selection.candidate_id.as_str())
+                .ok_or_else(|| anyhow!("lifemodel_v2_migration_unknown_candidate"))?;
+            match selection.decision {
+                LegacyLifeModelMigrationDecisionV2::Include => {
+                    let value = selection
+                        .edited_value
+                        .as_ref()
+                        .unwrap_or(&candidate.proposed_value);
+                    let item = migration_candidate_item(
+                        candidate,
+                        value,
+                        &self.source_digest,
+                        confirmed_at,
+                    )?;
+                    included_candidate_ids.push(candidate.candidate_id.clone());
+                    operations.push(LifeModelTypedOperationV2::Add {
+                        section: candidate.target_section,
+                        item,
+                    });
+                }
+                LegacyLifeModelMigrationDecisionV2::Exclude => {
+                    if selection.edited_value.is_some() {
+                        bail!("lifemodel_v2_migration_excluded_candidate_cannot_be_edited");
+                    }
+                    excluded_candidate_ids.push(candidate.candidate_id.clone());
+                }
+            }
+        }
+        included_candidate_ids.sort();
+        excluded_candidate_ids.sort();
+        operations
+            .sort_by(|left, right| migration_operation_id(left).cmp(migration_operation_id(right)));
+
+        let mut result = LifeModelDocumentV2::empty(model_id);
+        let typed_diff = if operations.is_empty() {
+            None
+        } else {
+            let mut value = serde_json::to_value(&result)
+                .context("serialize_lifemodel_v2_migration_empty_document")?;
+            for operation in &operations {
+                apply_typed_operation(&mut value, operation)?;
+            }
+            result = serde_json::from_value(value)
+                .context("deserialize_lifemodel_v2_migration_result")?;
+            result.validate()?;
+            Some(LifeModelTypedDiffV2 {
+                schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+                model_id: model_id.into(),
+                base_version: None,
+                base_document_digest: None,
+                operations,
+                result_document_digest: result.digest()?,
+            })
+        };
+        let plan = LegacyLifeModelMigrationPlanV2 {
+            schema_version: LIFE_MODEL_V2_LEGACY_MIGRATION_SCHEMA.into(),
+            model_id: model_id.into(),
+            legacy_source_digest: self.source_digest.clone(),
+            included_candidate_ids,
+            excluded_candidate_ids,
+            non_lifemodel_item_count,
+            non_lifemodel_items_acknowledged,
+            typed_diff,
+            result_document_digest: result.digest()?,
+        };
+        self.validate_migration_plan(&plan)?;
+        Ok(plan)
+    }
+
+    pub fn validate_migration_plan(&self, plan: &LegacyLifeModelMigrationPlanV2) -> Result<()> {
+        plan.validate_contract()?;
+        if plan.legacy_source_digest != self.source_digest
+            || plan.non_lifemodel_item_count != self.items.len() - self.review_required_count
+        {
+            bail!("lifemodel_v2_migration_preview_binding_mismatch");
+        }
+        let expected = self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let decided = plan
+            .included_candidate_ids
+            .iter()
+            .chain(&plan.excluded_candidate_ids)
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if expected != decided {
+            bail!("lifemodel_v2_migration_candidate_set_mismatch");
+        }
+        if let Some(diff) = plan.typed_diff.as_ref() {
+            let included = plan
+                .included_candidate_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if diff.operations.len() != included.len() {
+                bail!("lifemodel_v2_migration_operation_count_mismatch");
+            }
+            for operation in &diff.operations {
+                let LifeModelTypedOperationV2::Add { section, item } = operation else {
+                    bail!("lifemodel_v2_migration_only_add_operations_allowed");
+                };
+                let candidate = self
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.item_id == item.id())
+                    .ok_or_else(|| anyhow!("lifemodel_v2_migration_item_not_from_preview"))?;
+                if !included.contains(candidate.candidate_id.as_str())
+                    || *section != candidate.target_section
+                    || !migration_value_accepts_item(&candidate.proposed_value, item)
+                    || migration_item_source_refs(item)
+                        != migration_candidate_source_refs(candidate, &self.source_digest)
+                {
+                    bail!("lifemodel_v2_migration_item_binding_mismatch");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyLifeModelMigrationPlanV2 {
+    pub fn validate_contract(&self) -> Result<()> {
+        if self.schema_version != LIFE_MODEL_V2_LEGACY_MIGRATION_SCHEMA {
+            bail!("unsupported_lifemodel_v2_migration_schema");
+        }
+        validate_identifier(&self.model_id, "invalid_lifemodel_v2_migration_model_id")?;
+        if !is_sha256_digest(&self.legacy_source_digest)
+            || !is_sha256_digest(&self.result_document_digest)
+        {
+            bail!("invalid_lifemodel_v2_migration_digest");
+        }
+        if self.non_lifemodel_item_count > 0 && !self.non_lifemodel_items_acknowledged {
+            bail!("lifemodel_v2_migration_non_lifemodel_items_not_acknowledged");
+        }
+        let mut decisions = BTreeSet::new();
+        for candidate_id in self
+            .included_candidate_ids
+            .iter()
+            .chain(&self.excluded_candidate_ids)
+        {
+            validate_identifier(candidate_id, "invalid_lifemodel_v2_migration_candidate_id")?;
+            if !decisions.insert(candidate_id) {
+                bail!("lifemodel_v2_migration_duplicate_candidate_decision");
+            }
+        }
+        match self.typed_diff.as_ref() {
+            Some(diff) => {
+                diff.validate_contract()?;
+                if diff.model_id != self.model_id
+                    || diff.base_version.is_some()
+                    || diff.base_document_digest.is_some()
+                    || diff.result_document_digest != self.result_document_digest
+                    || diff.operations.len() != self.included_candidate_ids.len()
+                {
+                    bail!("lifemodel_v2_migration_typed_diff_mismatch");
+                }
+            }
+            None => {
+                if !self.included_candidate_ids.is_empty()
+                    || LifeModelDocumentV2::empty(&self.model_id).digest()?
+                        != self.result_document_digest
+                {
+                    bail!("lifemodel_v2_migration_empty_result_mismatch");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn result_document(&self) -> Result<LifeModelDocumentV2> {
+        self.validate_contract()?;
+        match self.typed_diff.as_ref() {
+            Some(diff) => diff.apply_to_version_allow_empty(None),
+            None => Ok(LifeModelDocumentV2::empty(&self.model_id)),
+        }
+    }
+}
+
+fn build_legacy_migration_candidates(
+    root: &serde_yaml::Value,
+    source_digest: &str,
+    items: &[LegacyLifeModelMigrationItemV2],
+) -> Result<Vec<LegacyLifeModelMigrationCandidateV2>> {
+    let review_items = items
+        .iter()
+        .filter(|item| item.disposition == LegacyLifeModelMigrationDispositionV2::ReviewRequired)
+        .collect::<Vec<_>>();
+    let mut groups: BTreeMap<(LifeModelSectionV2, String), Vec<&LegacyLifeModelMigrationItemV2>> =
+        BTreeMap::new();
+    for item in review_items {
+        let section = item
+            .target_section
+            .ok_or_else(|| anyhow!("lifemodel_v2_migration_review_item_without_section"))?;
+        let group = if matches!(
+            section,
+            LifeModelSectionV2::LongTermGoals
+                | LifeModelSectionV2::ImportantRelationships
+                | LifeModelSectionV2::Capabilities
+                | LifeModelSectionV2::Resources
+        ) {
+            item.source_path
+                .rsplit_once('.')
+                .map(|(prefix, _)| prefix.to_string())
+                .unwrap_or_else(|| item.source_path.clone())
+        } else {
+            item.source_path.clone()
+        };
+        groups.entry((section, group)).or_default().push(item);
+    }
+
+    let mut candidates = Vec::new();
+    for ((section, _group), mut fields) in groups {
+        fields.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+        let source_paths = fields
+            .iter()
+            .map(|field| field.source_path.clone())
+            .collect::<Vec<_>>();
+        let sensitive = fields.iter().any(|field| field.sensitive);
+        let values = fields
+            .iter()
+            .map(|field| {
+                Ok((
+                    field.source_path.as_str(),
+                    yaml_scalar_at_path(root, &field.source_path)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let value = migration_candidate_value(section, &values)?;
+        let identity = serde_json::to_vec(&serde_json::json!({
+            "sourceDigest": source_digest,
+            "section": section,
+            "sourcePaths": source_paths,
+        }))
+        .context("serialize_lifemodel_v2_migration_candidate_identity")?;
+        let candidate_digest = hex_digest(digest(&SHA256, &identity).as_ref());
+        candidates.push(LegacyLifeModelMigrationCandidateV2 {
+            candidate_id: format!("legacy-candidate:{}", &candidate_digest[..24]),
+            item_id: format!("legacy:{}", &candidate_digest[..24]),
+            source_paths,
+            target_section: section,
+            proposed_value: value,
+            sensitive,
+        });
+    }
+    candidates.sort_by(|left, right| left.candidate_id.cmp(&right.candidate_id));
+    let covered = candidates
+        .iter()
+        .flat_map(|candidate| candidate.source_paths.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let expected = items
+        .iter()
+        .filter(|item| item.disposition == LegacyLifeModelMigrationDispositionV2::ReviewRequired)
+        .map(|item| item.source_path.as_str())
+        .collect::<BTreeSet<_>>();
+    if covered != expected {
+        bail!("lifemodel_v2_migration_candidate_source_coverage_mismatch");
+    }
+    Ok(candidates)
+}
+
+fn migration_candidate_value(
+    section: LifeModelSectionV2,
+    values: &BTreeMap<&str, String>,
+) -> Result<LegacyLifeModelMigrationCandidateValueV2> {
+    let suffix = |name: &str| {
+        values
+            .iter()
+            .find(|(path, _)| path.rsplit('.').next() == Some(name))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    let first = || values.values().next().cloned().unwrap_or_default();
+    let value = match section {
+        LifeModelSectionV2::LongTermGoals => {
+            LegacyLifeModelMigrationCandidateValueV2::LongTermGoal {
+                direction: suffix("name"),
+                meaning: suffix("description"),
+            }
+        }
+        LifeModelSectionV2::ImportantRelationships => {
+            LegacyLifeModelMigrationCandidateValueV2::Relationship {
+                person_label: suffix("name"),
+                relationship: suffix("relationship_type"),
+                significance: suffix("notes"),
+            }
+        }
+        LifeModelSectionV2::Capabilities => LegacyLifeModelMigrationCandidateValueV2::Capability {
+            name: {
+                let name = suffix("name");
+                if name.is_empty() {
+                    suffix("domain")
+                } else {
+                    name
+                }
+            },
+            description: suffix("description"),
+        },
+        LifeModelSectionV2::Resources => LegacyLifeModelMigrationCandidateValueV2::Resource {
+            name: suffix("name"),
+            description: suffix("description"),
+        },
+        _ => LegacyLifeModelMigrationCandidateValueV2::Statement { statement: first() },
+    };
+    Ok(value)
+}
+
+fn yaml_scalar_at_path(root: &serde_yaml::Value, path: &str) -> Result<String> {
+    let mut current = root;
+    for segment in path.split('.') {
+        let key_end = segment.find('[').unwrap_or(segment.len());
+        let key = &segment[..key_end];
+        if !key.is_empty() {
+            current = current
+                .as_mapping()
+                .and_then(|mapping| mapping.get(serde_yaml::Value::String(key.into())))
+                .ok_or_else(|| anyhow!("lifemodel_v2_migration_source_path_missing:{path}"))?;
+        }
+        let mut remainder = &segment[key_end..];
+        while let Some(index_start) = remainder.strip_prefix('[') {
+            let (index, tail) = index_start
+                .split_once(']')
+                .ok_or_else(|| anyhow!("lifemodel_v2_migration_source_path_invalid:{path}"))?;
+            let index = index
+                .parse::<usize>()
+                .map_err(|_| anyhow!("lifemodel_v2_migration_source_path_invalid:{path}"))?;
+            current = current
+                .as_sequence()
+                .and_then(|sequence| sequence.get(index))
+                .ok_or_else(|| anyhow!("lifemodel_v2_migration_source_path_missing:{path}"))?;
+            remainder = tail;
+        }
+        if !remainder.is_empty() {
+            bail!("lifemodel_v2_migration_source_path_invalid:{path}");
+        }
+    }
+    match current {
+        serde_yaml::Value::Bool(value) => Ok(value.to_string()),
+        serde_yaml::Value::Number(value) => Ok(value.to_string()),
+        serde_yaml::Value::String(value) => Ok(value.clone()),
+        _ => bail!("lifemodel_v2_migration_source_value_not_scalar:{path}"),
+    }
+}
+
+fn migration_candidate_item(
+    candidate: &LegacyLifeModelMigrationCandidateV2,
+    value: &LegacyLifeModelMigrationCandidateValueV2,
+    source_digest: &str,
+    confirmed_at: &str,
+) -> Result<LifeModelItemV2> {
+    let source_refs = migration_candidate_source_refs(candidate, source_digest);
+    let item = match value {
+        LegacyLifeModelMigrationCandidateValueV2::Statement { statement } => {
+            LifeModelItemV2::Statement(LifeModelStatementV2 {
+                id: candidate.item_id.clone(),
+                statement: statement.clone(),
+                source_refs,
+                confirmed_at: confirmed_at.into(),
+            })
+        }
+        LegacyLifeModelMigrationCandidateValueV2::LongTermGoal { direction, meaning } => {
+            LifeModelItemV2::LongTermGoal(LifeModelLongTermGoalV2 {
+                id: candidate.item_id.clone(),
+                direction: direction.clone(),
+                meaning: meaning.clone(),
+                source_refs,
+                confirmed_at: confirmed_at.into(),
+            })
+        }
+        LegacyLifeModelMigrationCandidateValueV2::Relationship {
+            person_label,
+            relationship,
+            significance,
+        } => LifeModelItemV2::Relationship(LifeModelRelationshipV2 {
+            id: candidate.item_id.clone(),
+            person_label: person_label.clone(),
+            relationship: relationship.clone(),
+            significance: significance.clone(),
+            source_refs,
+            confirmed_at: confirmed_at.into(),
+        }),
+        LegacyLifeModelMigrationCandidateValueV2::Capability { name, description } => {
+            LifeModelItemV2::Capability(LifeModelCapabilityV2 {
+                id: candidate.item_id.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                source_refs,
+                confirmed_at: confirmed_at.into(),
+            })
+        }
+        LegacyLifeModelMigrationCandidateValueV2::Resource { name, description } => {
+            LifeModelItemV2::Resource(LifeModelResourceV2 {
+                id: candidate.item_id.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                source_refs,
+                confirmed_at: confirmed_at.into(),
+            })
+        }
+    };
+    if !section_accepts_item(candidate.target_section, &item) {
+        bail!("lifemodel_v2_migration_edited_value_kind_mismatch");
+    }
+    Ok(item)
+}
+
+fn migration_candidate_source_refs(
+    candidate: &LegacyLifeModelMigrationCandidateV2,
+    source_digest: &str,
+) -> Vec<String> {
+    candidate
+        .source_paths
+        .iter()
+        .map(|path| format!("legacy-yaml:{source_digest}#{path}"))
+        .collect()
+}
+
+fn migration_item_source_refs(item: &LifeModelItemV2) -> Vec<String> {
+    match item {
+        LifeModelItemV2::Statement(item) => item.source_refs.clone(),
+        LifeModelItemV2::LongTermGoal(item) => item.source_refs.clone(),
+        LifeModelItemV2::Relationship(item) => item.source_refs.clone(),
+        LifeModelItemV2::Capability(item) => item.source_refs.clone(),
+        LifeModelItemV2::Resource(item) => item.source_refs.clone(),
+    }
+}
+
+fn migration_value_accepts_item(
+    value: &LegacyLifeModelMigrationCandidateValueV2,
+    item: &LifeModelItemV2,
+) -> bool {
+    matches!(
+        (value, item),
+        (
+            LegacyLifeModelMigrationCandidateValueV2::Statement { .. },
+            LifeModelItemV2::Statement(_)
+        ) | (
+            LegacyLifeModelMigrationCandidateValueV2::LongTermGoal { .. },
+            LifeModelItemV2::LongTermGoal(_)
+        ) | (
+            LegacyLifeModelMigrationCandidateValueV2::Relationship { .. },
+            LifeModelItemV2::Relationship(_)
+        ) | (
+            LegacyLifeModelMigrationCandidateValueV2::Capability { .. },
+            LifeModelItemV2::Capability(_)
+        ) | (
+            LegacyLifeModelMigrationCandidateValueV2::Resource { .. },
+            LifeModelItemV2::Resource(_)
+        )
+    )
+}
+
+fn migration_operation_id(operation: &LifeModelTypedOperationV2) -> &str {
+    match operation {
+        LifeModelTypedOperationV2::Add { item, .. } => item.id(),
+        LifeModelTypedOperationV2::Replace { item_id, .. }
+        | LifeModelTypedOperationV2::Remove { item_id, .. } => item_id,
     }
 }
 
@@ -990,6 +1588,21 @@ impl LifeModelTypedDiffV2 {
         &self,
         current: Option<&LifeModelVersionV2>,
     ) -> Result<LifeModelDocumentV2> {
+        self.apply_to_version_with_empty_authority(current, false)
+    }
+
+    fn apply_to_version_allow_empty(
+        &self,
+        current: Option<&LifeModelVersionV2>,
+    ) -> Result<LifeModelDocumentV2> {
+        self.apply_to_version_with_empty_authority(current, true)
+    }
+
+    fn apply_to_version_with_empty_authority(
+        &self,
+        current: Option<&LifeModelVersionV2>,
+        allow_empty_result: bool,
+    ) -> Result<LifeModelDocumentV2> {
         self.validate_contract()?;
         let mut document = match current {
             Some(version) => {
@@ -1019,7 +1632,7 @@ impl LifeModelTypedDiffV2 {
         document =
             serde_json::from_value(value).context("deserialize_lifemodel_v2_typed_diff_result")?;
         document.validate()?;
-        if current.is_some() && document.is_empty() {
+        if current.is_some() && document.is_empty() && !allow_empty_result {
             bail!("lifemodel_v2_typed_diff_empty_result_requires_owner_cutover");
         }
         if document.model_id != self.model_id || document.digest()? != self.result_document_digest {
@@ -1481,6 +2094,16 @@ impl LifeModelV2Store {
                 CREATE TABLE IF NOT EXISTS life_model_v2_heads (
                     model_id TEXT PRIMARY KEY,
                     model_version INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS life_model_v2_cutovers (
+                    model_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    legacy_source_digest TEXT NOT NULL,
+                    backup_digest TEXT NOT NULL,
+                    model_version INTEGER NOT NULL,
+                    document_digest TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL UNIQUE,
+                    cutover_at TEXT NOT NULL
                 );",
             )
             .context("initialize_lifemodel_v2_store")?;
@@ -1499,6 +2122,15 @@ impl LifeModelV2Store {
             .lock()
             .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
         load_current(&connection, model_id)
+    }
+
+    pub(crate) fn cutover(&self, model_id: &str) -> Result<Option<LifeModelV2CutoverReceipt>> {
+        validate_identifier(model_id, "invalid_lifemodel_v2_model_id")?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+        load_cutover(&connection, model_id)
     }
 
     pub(crate) fn commit(&self, request: LifeModelCommitV2) -> Result<LifeModelCommitResultV2> {
@@ -1657,7 +2289,9 @@ impl LifeModelV2Store {
             });
         }
         let current = self.current(&diff.model_id)?;
-        let document = diff.apply_to_version(current.as_ref())?;
+        let allow_empty_result = self.cutover(&diff.model_id)?.is_some();
+        let document =
+            diff.apply_to_version_with_empty_authority(current.as_ref(), allow_empty_result)?;
         let committed = self.commit(LifeModelCommitV2 {
             document,
             expected_parent_version: diff.base_version,
@@ -1669,6 +2303,130 @@ impl LifeModelV2Store {
         Ok(LifeModelPatchMaterializationResultV2 {
             version: committed.version,
             replayed: committed.replayed,
+        })
+    }
+
+    pub(crate) fn materialize_legacy_migration(
+        &self,
+        plan: &LegacyLifeModelMigrationPlanV2,
+        proposal_id: &str,
+        backup_digest: &str,
+        cutover_at: &str,
+    ) -> Result<LifeModelLegacyMigrationMaterializationResultV2> {
+        plan.validate_contract()?;
+        validate_identifier(proposal_id, "invalid_lifemodel_v2_migration_proposal_id")?;
+        if !is_sha256_digest(backup_digest) || backup_digest != plan.legacy_source_digest {
+            bail!("lifemodel_v2_migration_backup_digest_mismatch");
+        }
+        DateTime::parse_from_rfc3339(cutover_at)
+            .map_err(|_| anyhow!("invalid_lifemodel_v2_migration_cutover_at"))?;
+        let document = plan.result_document()?;
+        if document.digest()? != plan.result_document_digest {
+            bail!("lifemodel_v2_migration_result_digest_mismatch");
+        }
+
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("begin_lifemodel_v2_migration_cutover")?;
+        if let Some(existing) = load_cutover(&transaction, &plan.model_id)? {
+            if existing.legacy_source_digest != plan.legacy_source_digest
+                || existing.backup_digest != backup_digest
+                || existing.document_digest != plan.result_document_digest
+                || existing.proposal_id != proposal_id
+                || existing.cutover_at != cutover_at
+            {
+                bail!("lifemodel_v2_migration_cutover_identity_conflict");
+            }
+            let version = load_version(&transaction, &plan.model_id, existing.model_version)?
+                .ok_or_else(|| anyhow!("lifemodel_v2_migration_cutover_version_missing"))?;
+            return Ok(LifeModelLegacyMigrationMaterializationResultV2 {
+                version,
+                cutover: existing,
+                replayed: true,
+            });
+        }
+        if load_current(&transaction, &plan.model_id)?.is_some() {
+            bail!("lifemodel_v2_migration_existing_canonical_head");
+        }
+
+        let materialization_id = format!("migration:{proposal_id}");
+        let source_refs = normalized_source_refs(&[
+            format!("proposal:{proposal_id}"),
+            format!("legacy-yaml:{}", plan.legacy_source_digest),
+        ]);
+        validate_version_source_refs(&source_refs)?;
+        let document_json = document.canonical_json()?;
+        let document_digest = document.digest()?;
+        let source_refs_json = serde_json::to_string(&source_refs)
+            .context("serialize_lifemodel_v2_migration_source_refs")?;
+        let version_digest = calculate_version_digest(
+            &plan.model_id,
+            1,
+            None,
+            None,
+            &document_digest,
+            &materialization_id,
+            &source_refs,
+            cutover_at,
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO life_model_v2_versions (
+                    model_id, model_version, parent_version, parent_digest,
+                    schema_version, document_json, document_digest, version_digest,
+                    materialization_id, source_refs_json, created_at
+                ) VALUES (?1, 1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    plan.model_id,
+                    LIFE_MODEL_V2_SCHEMA_VERSION,
+                    document_json,
+                    document_digest,
+                    version_digest,
+                    materialization_id,
+                    source_refs_json,
+                    cutover_at,
+                ],
+            )
+            .context("insert_lifemodel_v2_migration_version")?;
+        transaction
+            .execute(
+                "INSERT INTO life_model_v2_heads (model_id, model_version) VALUES (?1, 1)",
+                params![plan.model_id],
+            )
+            .context("advance_lifemodel_v2_migration_head")?;
+        transaction
+            .execute(
+                "INSERT INTO life_model_v2_cutovers (
+                    model_id, schema_version, legacy_source_digest, backup_digest,
+                    model_version, document_digest, proposal_id, cutover_at
+                ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7)",
+                params![
+                    plan.model_id,
+                    LIFE_MODEL_V2_CUTOVER_SCHEMA,
+                    plan.legacy_source_digest,
+                    backup_digest,
+                    document_digest,
+                    proposal_id,
+                    cutover_at,
+                ],
+            )
+            .context("insert_lifemodel_v2_cutover_receipt")?;
+        transaction
+            .commit()
+            .context("commit_lifemodel_v2_migration_cutover")?;
+
+        let version = load_version(&connection, &plan.model_id, 1)?
+            .ok_or_else(|| anyhow!("committed_lifemodel_v2_migration_version_missing"))?;
+        let cutover = load_cutover(&connection, &plan.model_id)?
+            .ok_or_else(|| anyhow!("committed_lifemodel_v2_cutover_missing"))?;
+        Ok(LifeModelLegacyMigrationMaterializationResultV2 {
+            version,
+            cutover,
+            replayed: false,
         })
     }
 }
@@ -1726,6 +2484,73 @@ fn normalized_source_refs(source_refs: &[String]) -> Vec<String> {
     let mut normalized = source_refs.to_vec();
     normalize_source_refs(&mut normalized);
     normalized
+}
+
+fn load_cutover(
+    connection: &Connection,
+    model_id: &str,
+) -> Result<Option<LifeModelV2CutoverReceipt>> {
+    let row = connection
+        .query_row(
+            "SELECT schema_version, legacy_source_digest, backup_digest, model_version,
+                    document_digest, proposal_id, cutover_at
+             FROM life_model_v2_cutovers WHERE model_id = ?1",
+            params![model_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .context("read_lifemodel_v2_cutover")?;
+    let Some((
+        schema_version,
+        legacy_source_digest,
+        backup_digest,
+        model_version,
+        document_digest,
+        proposal_id,
+        cutover_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    if schema_version != LIFE_MODEL_V2_CUTOVER_SCHEMA
+        || !is_sha256_digest(&legacy_source_digest)
+        || !is_sha256_digest(&backup_digest)
+        || !is_sha256_digest(&document_digest)
+        || model_version == 0
+    {
+        bail!("stored_lifemodel_v2_cutover_invalid");
+    }
+    validate_identifier(
+        &proposal_id,
+        "invalid_stored_lifemodel_v2_cutover_proposal_id",
+    )?;
+    DateTime::parse_from_rfc3339(&cutover_at)
+        .map_err(|_| anyhow!("invalid_stored_lifemodel_v2_cutover_at"))?;
+    let version = load_version(connection, model_id, model_version)?
+        .ok_or_else(|| anyhow!("stored_lifemodel_v2_cutover_version_missing"))?;
+    if version.document_digest != document_digest {
+        bail!("stored_lifemodel_v2_cutover_document_mismatch");
+    }
+    Ok(Some(LifeModelV2CutoverReceipt {
+        schema_version,
+        model_id: model_id.into(),
+        legacy_source_digest,
+        backup_digest,
+        model_version,
+        document_digest,
+        proposal_id,
+        cutover_at,
+    }))
 }
 
 fn load_current(connection: &Connection, model_id: &str) -> Result<Option<LifeModelVersionV2>> {
@@ -2084,6 +2909,208 @@ goals:
             .items
             .iter()
             .any(|item| item.value_preview == "private"));
+    }
+
+    #[test]
+    fn legacy_migration_requires_an_explicit_decision_for_every_candidate() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "metadata:\n  version: '0.1'\nidentity:\n  name: Alice\npreferences:\n  communication_style: concise\n",
+        )
+        .unwrap();
+        assert_eq!(preview.candidates.len(), 2);
+        let one = LegacyLifeModelMigrationSelectionV2 {
+            candidate_id: preview.candidates[0].candidate_id.clone(),
+            decision: LegacyLifeModelMigrationDecisionV2::Include,
+            edited_value: None,
+        };
+        let error = preview
+            .build_migration_plan(
+                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                &[one],
+                true,
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lifemodel_v2_migration_candidate_decisions_incomplete"));
+    }
+
+    #[test]
+    fn legacy_migration_atomically_materializes_version_and_cutover_and_replays() {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "metadata:\n  version: '0.1'\nidentity:\n  name: Alice\n",
+        )
+        .unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = preview
+            .build_migration_plan(
+                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                &selections,
+                true,
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap();
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let first = store
+            .materialize_legacy_migration(
+                &plan,
+                "proposal:migration-1",
+                &plan.legacy_source_digest,
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+        assert_eq!(first.version.model_version, 1);
+        assert_eq!(first.cutover.model_version, first.version.model_version);
+        assert_eq!(first.cutover.document_digest, first.version.document_digest);
+        assert!(!first.replayed);
+        let replay = store
+            .materialize_legacy_migration(
+                &plan,
+                "proposal:migration-1",
+                &plan.legacy_source_digest,
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(store.current("primary").unwrap(), Some(first.version));
+        assert_eq!(store.cutover("primary").unwrap(), Some(first.cutover));
+    }
+
+    #[test]
+    fn excluded_legacy_candidates_create_an_authoritative_empty_owner() {
+        let preview =
+            LegacyLifeModelMigrationPreviewV2::from_legacy_yaml("identity:\n  name: Alice\n")
+                .unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Exclude,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = preview
+            .build_migration_plan(
+                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                &selections,
+                false,
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap();
+        assert!(plan.typed_diff.is_none());
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let result = store
+            .materialize_legacy_migration(
+                &plan,
+                "proposal:empty-migration",
+                &plan.legacy_source_digest,
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+        assert!(result.version.document.is_empty());
+        assert!(store.cutover("primary").unwrap().is_some());
+    }
+
+    #[test]
+    fn migration_cutover_insert_failure_rolls_back_version_and_head() {
+        let preview =
+            LegacyLifeModelMigrationPreviewV2::from_legacy_yaml("identity:\n  name: Alice\n")
+                .unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = preview
+            .build_migration_plan(
+                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                &selections,
+                false,
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap();
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_cutover_insert
+                 BEFORE INSERT ON life_model_v2_cutovers
+                 BEGIN SELECT RAISE(ABORT, 'forced cutover failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .materialize_legacy_migration(
+                &plan,
+                "proposal:atomic-failure",
+                &plan.legacy_source_digest,
+                "2026-08-08T10:01:00Z",
+            )
+            .is_err());
+        assert!(store.current("primary").unwrap().is_none());
+        assert!(store.cutover("primary").unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_cutover_receipt_fails_closed_instead_of_selecting_an_owner() {
+        let preview =
+            LegacyLifeModelMigrationPreviewV2::from_legacy_yaml("identity:\n  name: Alice\n")
+                .unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Exclude,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = preview
+            .build_migration_plan(
+                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                &selections,
+                false,
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap();
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        store
+            .materialize_legacy_migration(
+                &plan,
+                "proposal:tamper",
+                &plan.legacy_source_digest,
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE life_model_v2_cutovers SET document_digest = ?1 WHERE model_id = ?2",
+                params![
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "primary"
+                ],
+            )
+            .unwrap();
+        assert!(store.cutover("primary").is_err());
     }
 
     fn statement(id: &str, value: &str) -> LifeModelStatementV2 {

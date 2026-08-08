@@ -4,6 +4,7 @@ const tauriMocks = vi.hoisted(() => ({
   getLifeModelViewModel: vi.fn(),
   getMemoryViewModel: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
+  draftLegacyLifeModelMigration: vi.fn(),
   draftMemoryCorrectionProposal: vi.fn(),
   draftMemoryArchiveProposal: vi.fn(),
   draftMemoryStopRecallProposal: vi.fn(),
@@ -109,6 +110,45 @@ describe("durable truth Tauri data source", () => {
     });
     expect(tauriMocks.rollbackMemoryAsset).toHaveBeenCalledWith("memory:one", "user correction");
     expect(tauriMocks.privacyEraseMemoryAsset).toHaveBeenCalledWith("memory:one");
+  });
+
+  it("accepts only an exact Review-required migration draft receipt", async () => {
+    const request = {
+      sourceDigest: "sha256:source",
+      selections: [
+        {
+          candidateId: "legacy-candidate:one",
+          decision: "exclude" as const,
+          editedValue: null,
+        },
+      ],
+      nonLifemodelItemsAcknowledged: true,
+    };
+    tauriMocks.draftLegacyLifeModelMigration.mockResolvedValue({
+      proposalId: "proposal:migration",
+      status: "review_required",
+      sourceDigest: "sha256:source",
+      includedCount: 0,
+      excludedCount: 1,
+      nonLifemodelItemCount: 2,
+    });
+
+    await expect(tauriDurableTruthDataSource.draftLegacyLifeModelMigration(request)).resolves.toBe(
+      "proposal:migration"
+    );
+    expect(tauriMocks.draftLegacyLifeModelMigration).toHaveBeenCalledWith(request);
+
+    tauriMocks.draftLegacyLifeModelMigration.mockResolvedValue({
+      proposalId: "proposal:forged",
+      status: "review_required",
+      sourceDigest: "sha256:other",
+      includedCount: 0,
+      excludedCount: 1,
+      nonLifemodelItemCount: 2,
+    });
+    await expect(
+      tauriDurableTruthDataSource.draftLegacyLifeModelMigration(request)
+    ).rejects.toThrow("lifemodel_migration_proposal_receipt_unverified");
   });
 
   it("does not report a direct Memory action as complete while its projection is pending", async () => {

@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1780,6 +1783,83 @@ impl LifeModelManager {
         v2::LifeModelV2Store::open(path)?.current(model_id)
     }
 
+    pub fn load_v2_cutover(&self, model_id: &str) -> Result<Option<v2::LifeModelV2CutoverReceipt>> {
+        let path = self.v2_store_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        v2::LifeModelV2Store::open(path)?.cutover(model_id)
+    }
+
+    pub fn prepare_legacy_v2_backup(
+        &self,
+        expected_source_digest: &str,
+    ) -> Result<v2::LegacyLifeModelBackupReceiptV2> {
+        let source_path = self.data_dir.join("life_model.yaml");
+        let source = fs::read(&source_path)
+            .with_context(|| format!("read_legacy_lifemodel_for_backup:{source_path:?}"))?;
+        let source_digest = format!("sha256:{}", sha256_hex(&source));
+        if source_digest != expected_source_digest {
+            anyhow::bail!("legacy_lifemodel_source_digest_changed");
+        }
+        let source_text =
+            std::str::from_utf8(&source).context("legacy_lifemodel_backup_source_not_utf8")?;
+        v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(source_text)?;
+
+        let digest_hex = expected_source_digest
+            .strip_prefix("sha256:")
+            .context("legacy_lifemodel_backup_digest_invalid")?;
+        let backup_dir = self.data_dir.join("legacy-backups");
+        fs::create_dir_all(&backup_dir)
+            .with_context(|| format!("create_legacy_lifemodel_backup_dir:{backup_dir:?}"))?;
+        let backup_file_name = format!("life_model.{digest_hex}.yaml");
+        let backup_path = backup_dir.join(&backup_file_name);
+        let replayed = if backup_path.exists() {
+            true
+        } else {
+            let mut options = fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            options.mode(0o400);
+            let mut backup = options
+                .open(&backup_path)
+                .with_context(|| format!("create_legacy_lifemodel_backup:{backup_path:?}"))?;
+            backup
+                .write_all(&source)
+                .with_context(|| format!("write_legacy_lifemodel_backup:{backup_path:?}"))?;
+            backup
+                .sync_all()
+                .with_context(|| format!("fsync_legacy_lifemodel_backup:{backup_path:?}"))?;
+            #[cfg(unix)]
+            fs::File::open(&backup_dir)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| format!("fsync_legacy_lifemodel_backup_dir:{backup_dir:?}"))?;
+            false
+        };
+        let backup = fs::read(&backup_path)
+            .with_context(|| format!("read_legacy_lifemodel_backup:{backup_path:?}"))?;
+        let backup_digest = format!("sha256:{}", sha256_hex(&backup));
+        if backup_digest != source_digest {
+            anyhow::bail!("legacy_lifemodel_backup_digest_mismatch");
+        }
+        Ok(v2::LegacyLifeModelBackupReceiptV2 {
+            source_digest,
+            backup_digest,
+            backup_file_name,
+            replayed,
+        })
+    }
+
+    pub fn verify_legacy_source_digest(&self, expected_source_digest: &str) -> Result<()> {
+        let source_path = self.data_dir.join("life_model.yaml");
+        let source = fs::read(&source_path)
+            .with_context(|| format!("reread_legacy_lifemodel_before_cutover:{source_path:?}"))?;
+        if format!("sha256:{}", sha256_hex(&source)) != expected_source_digest {
+            anyhow::bail!("legacy_lifemodel_source_digest_changed");
+        }
+        Ok(())
+    }
+
     /// Append one exact, already-reviewed typed diff to the canonical v2
     /// owner. The proposal id is both the idempotency identity and the sole
     /// version source reference; callers cannot relabel an accepted review as
@@ -1796,6 +1876,21 @@ impl LifeModelManager {
             &proposal_ref,
             vec![proposal_ref.clone()],
             created_at,
+        )
+    }
+
+    pub fn materialize_reviewed_legacy_v2_migration(
+        &self,
+        plan: &v2::LegacyLifeModelMigrationPlanV2,
+        proposal_id: &str,
+        backup_digest: &str,
+        cutover_at: &str,
+    ) -> Result<v2::LifeModelLegacyMigrationMaterializationResultV2> {
+        v2::LifeModelV2Store::open(self.v2_store_path())?.materialize_legacy_migration(
+            plan,
+            proposal_id,
+            backup_digest,
+            cutover_at,
         )
     }
 
@@ -1817,6 +1912,22 @@ impl LifeModelManager {
         let model: LifeModel =
             serde_yaml::from_str(&content).with_context(|| "解析人生模型 YAML 失败")?;
         Ok(Some((model, content)))
+    }
+
+    /// Return the legacy model only while it is still the active compatibility
+    /// owner. Once a v2 head/cutover exists, runtime callers must not keep
+    /// injecting stale YAML; v2 runtime enrichment is introduced separately.
+    pub fn load_active_legacy_runtime_model(&self) -> Result<Option<LifeModel>> {
+        if self
+            .load_v2_current(v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
+            .is_some()
+            || self
+                .load_v2_cutover(v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        self.load_existing()
     }
 
     pub fn load(&self) -> Result<LifeModel> {
@@ -2205,5 +2316,60 @@ mod tests {
         assert!(!yaml.contains("raw heuristic guidance should stay out"));
         assert!(!yaml.contains("raw condition should stay out"));
         assert!(!yaml.contains("opposing-evidence-raw"));
+    }
+
+    #[test]
+    fn legacy_v2_backup_is_exact_read_only_and_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = "identity:\n  name: Alice\n";
+        fs::write(directory.path().join("life_model.yaml"), source).unwrap();
+        let preview = v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(source).unwrap();
+        let manager = LifeModelManager::new(directory.path());
+
+        let first = manager
+            .prepare_legacy_v2_backup(&preview.source_digest)
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.source_digest, preview.source_digest);
+        assert_eq!(first.backup_digest, preview.source_digest);
+        let backup_path = directory
+            .path()
+            .join("legacy-backups")
+            .join(&first.backup_file_name);
+        assert_eq!(fs::read_to_string(&backup_path).unwrap(), source);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
+                0o400
+            );
+        }
+
+        let replay = manager
+            .prepare_legacy_v2_backup(&preview.source_digest)
+            .unwrap();
+        assert!(replay.replayed);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::write(&backup_path, "corrupt backup").unwrap();
+        assert!(manager
+            .prepare_legacy_v2_backup(&preview.source_digest)
+            .unwrap_err()
+            .to_string()
+            .contains("legacy_lifemodel_backup_digest_mismatch"));
+        fs::write(
+            directory.path().join("life_model.yaml"),
+            "identity:\n  name: Bob\n",
+        )
+        .unwrap();
+        assert!(manager
+            .verify_legacy_source_digest(&preview.source_digest)
+            .unwrap_err()
+            .to_string()
+            .contains("legacy_lifemodel_source_digest_changed"));
     }
 }

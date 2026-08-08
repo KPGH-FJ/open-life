@@ -562,9 +562,12 @@ async fn execute_scheduled_task(
             })?;
     let life_model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|error| {
-            ScheduledExecutionFailure::from_error("scheduled_lifemodel_load_failed", error)
-        })?
+        manager
+            .load_active_legacy_runtime_model()
+            .map_err(|error| {
+                ScheduledExecutionFailure::from_error("scheduled_lifemodel_load_failed", error)
+            })?
+            .unwrap_or_else(openlife_core::life_model::LifeModel::default_model)
     };
     let provider_runtime = state.provider_runtime_snapshot().await;
     if !provider_runtime.coherent {

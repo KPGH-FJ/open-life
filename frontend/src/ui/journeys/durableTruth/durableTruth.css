@@ -257,6 +257,46 @@
   overflow-wrap: anywhere;
 }
 
+.ol-lifemodel-migration-review {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-lifemodel-migration-review > ol {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ol-lifemodel-migration-review > ol > li {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: 12px;
+}
+
+.ol-lifemodel-migration-review header,
+.ol-lifemodel-migration-review [role="group"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.ol-lifemodel-migration-review textarea {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+  margin-top: 6px;
+  resize: vertical;
+}
+
 .ol-lifemodel-migration-details p {
   color: var(--ol-ink);
   font-size: var(--ol-type-body);

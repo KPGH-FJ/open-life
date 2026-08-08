@@ -23,8 +23,9 @@ pub(crate) async fn get_proactive_suggestions_with_state(
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager
-            .load()
+            .load_active_legacy_runtime_model()
             .map_err(|e| format!("Failed to load LifeModel: {}", e))?
+            .unwrap_or_else(openlife_core::life_model::LifeModel::default_model)
     };
 
     // Count pending proposals

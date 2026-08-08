@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReviewItem } from "@/tauri";
+import type { DraftLegacyLifeModelMigrationRequest, ReviewItem } from "@/tauri";
 import {
   buildDurableTruthErrorSnapshot,
   type DurableTruthDataSource,
@@ -30,6 +30,11 @@ export function useDurableTruthJourney(
     action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase";
     error?: string;
   } | null>(null);
+  const [migrationAction, setMigrationAction] = useState<{
+    status: "submitting" | "review_required" | "failed";
+    proposalId?: string;
+    error?: string;
+  } | null>(null);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -38,6 +43,7 @@ export function useDurableTruthJourney(
     setSelectedItemId(null);
     setRefreshing(false);
     setMemoryAction(null);
+    setMigrationAction(null);
     return () => {
       requestRef.current += 1;
     };
@@ -177,12 +183,40 @@ export function useDurableTruthJourney(
       ),
     [runMemoryAction]
   );
+  const draftLegacyMigration = useCallback(
+    async (request: DraftLegacyLifeModelMigrationRequest): Promise<boolean> => {
+      if (!dataSource || migrationAction?.status === "submitting") return false;
+      setMigrationAction({ status: "submitting" });
+      let proposalId: string;
+      try {
+        proposalId = await dataSource.draftLegacyLifeModelMigration(request);
+      } catch (error) {
+        const reason = errorText(error);
+        setMigrationAction({ status: "failed", error: reason });
+        announce(`迁移建议未创建：${reason}`);
+        return false;
+      }
+
+      const refreshed = await load(false);
+      setMigrationAction({ status: "review_required", proposalId });
+      if (refreshed.reviewEnvelope.status === "error") {
+        announce(
+          "迁移建议已经创建，但 Review 状态刷新未验证；旧 YAML 仍是当前来源，请在 Review 中重新核对。"
+        );
+      } else {
+        announce("迁移选择已进入 Review；旧 YAML 仍是当前来源，尚未发生切换。");
+      }
+      return true;
+    },
+    [announce, dataSource, load, migrationAction?.status]
+  );
 
   return {
     snapshot,
     selectedItem,
     refreshing,
     memoryAction,
+    migrationAction,
     load,
     selectItem,
     correctMemory,
@@ -191,5 +225,6 @@ export function useDurableTruthJourney(
     restoreMemory,
     rollbackMemory,
     privacyEraseMemory,
+    draftLegacyMigration,
   };
 }

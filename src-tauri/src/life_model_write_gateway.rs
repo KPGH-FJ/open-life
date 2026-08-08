@@ -12,7 +12,11 @@ use openlife_core::agent::AgentProposal;
 use openlife_core::life_model::patch::{
     ConflictResolution, ConflictType, LifeModelPatch, PatchApplyResult, PatchConflict,
 };
-use openlife_core::life_model::v2::{LifeModelTypedDiffV2, LIFE_MODEL_V2_TYPED_DIFF_PATH};
+use openlife_core::life_model::v2::{
+    LegacyLifeModelMigrationPlanV2, LegacyLifeModelMigrationPreviewV2, LifeModelTypedDiffV2,
+    DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+    LIFE_MODEL_V2_TYPED_DIFF_PATH,
+};
 use openlife_core::life_model::LifeModel;
 use openlife_core::life_model_write_gateway::{
     LifeModelWriteGateway, LifeModelWriteGatewayRequest, LifeModelWriteIntentKind,
@@ -1056,6 +1060,178 @@ pub(crate) async fn materialize_accepted_lifemodel_v2_typed_diff_with_state(
             "lifemodel_v2_materialization_replayed".into()
         } else {
             "lifemodel_v2_materialized".into()
+        },
+        error: None,
+    })
+}
+
+pub(crate) async fn materialize_accepted_legacy_lifemodel_migration_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    plan: &LegacyLifeModelMigrationPlanV2,
+) -> Result<PatchApplyResult, String> {
+    let failed = |operation: &str, error: String| PatchApplyResult {
+        patch_id: proposal.id.clone(),
+        success: false,
+        path: LIFE_MODEL_V2_LEGACY_MIGRATION_PATH.into(),
+        operation: operation.into(),
+        error: Some(error),
+    };
+    if proposal.proposal_type != openlife_core::agent::ProposalType::LifeModelUpdate
+        || proposal.affected_path != LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
+        || proposal.base_hash.is_some()
+        || proposal.source != openlife_core::agent::ProposalSource::Manual
+        || proposal.source_detail.as_deref() != Some("legacy_lifemodel_migration")
+    {
+        return Ok(failed(
+            "lifemodel_v2_migration_validation_failed",
+            "lifemodel_v2_migration_proposal_identity_mismatch".into(),
+        ));
+    }
+    if let Err(error) = plan.validate_contract() {
+        return Ok(failed(
+            "lifemodel_v2_migration_validation_failed",
+            error.to_string(),
+        ));
+    }
+    if plan.model_id != DEFAULT_LIFE_MODEL_V2_MODEL_ID {
+        return Ok(failed(
+            "lifemodel_v2_migration_validation_failed",
+            "lifemodel_v2_migration_model_id_mismatch".into(),
+        ));
+    }
+
+    let write_admission = state
+        .persistence_coordinator
+        .admit_normal_or_governed_data_import_writes(
+            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
+            None,
+            "",
+            "",
+            "",
+        )
+        .map_err(|error| error.to_string())?;
+    let commit_permit = state
+        .persistence_coordinator
+        .acquire_canonical_commit_permit(&write_admission)
+        .await
+        .map_err(|error| error.to_string())?;
+    let coordinator_guard = state.life_model_write_coordinator.lock().await;
+    let manager = state.life_model_manager.lock().await;
+
+    if manager
+        .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+        .map_err(|error| error.to_string())?
+        .is_some()
+        || manager
+            .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .map_err(|error| error.to_string())?
+            .is_some()
+    {
+        return Ok(failed(
+            "lifemodel_v2_migration_commit_conflict",
+            "lifemodel_v2_migration_existing_canonical_owner".into(),
+        ));
+    }
+
+    let Some((_, source)) = manager
+        .load_existing_with_source()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(failed(
+            "lifemodel_v2_migration_source_changed",
+            "legacy_lifemodel_source_missing".into(),
+        ));
+    };
+    let preview = match LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source) {
+        Ok(preview) => preview,
+        Err(error) => {
+            return Ok(failed(
+                "lifemodel_v2_migration_source_changed",
+                error.to_string(),
+            ))
+        }
+    };
+    if let Err(error) = preview.validate_migration_plan(plan) {
+        return Ok(failed(
+            "lifemodel_v2_migration_source_changed",
+            error.to_string(),
+        ));
+    }
+
+    let backup = match manager.prepare_legacy_v2_backup(&plan.legacy_source_digest) {
+        Ok(backup) => backup,
+        Err(error) => {
+            return Ok(failed(
+                "lifemodel_v2_migration_backup_failed",
+                error.to_string(),
+            ))
+        }
+    };
+    if let Err(error) = manager.verify_legacy_source_digest(&plan.legacy_source_digest) {
+        return Ok(failed(
+            "lifemodel_v2_migration_source_changed",
+            error.to_string(),
+        ));
+    }
+
+    let cutover_at = proposal.created_at.to_rfc3339();
+    let materialized = match manager.materialize_reviewed_legacy_v2_migration(
+        plan,
+        &proposal.id,
+        &backup.backup_digest,
+        &cutover_at,
+    ) {
+        Ok(result) => result,
+        Err(error)
+            if [
+                "lifemodel_v2_migration_existing_canonical_head",
+                "lifemodel_v2_migration_cutover_identity_conflict",
+                "lifemodel_v2_materialization_identity_conflict",
+            ]
+            .iter()
+            .any(|code| error.to_string().contains(code)) =>
+        {
+            return Ok(failed(
+                "lifemodel_v2_migration_commit_conflict",
+                error.to_string(),
+            ));
+        }
+        Err(error) => return Err(format!("lifemodel_v2_migration_commit_unknown:{error}")),
+    };
+    drop(manager);
+    drop(coordinator_guard);
+    drop(commit_permit);
+
+    let version = materialized.version.model_version.to_string();
+    record_lifemodel_gateway_audit(
+        state,
+        "lifemodel_v2_migration_materialized",
+        Some(proposal),
+        Some(&proposal.id),
+        Some(&version),
+        if materialized.replayed {
+            "lifemodel_v2_migration_replayed"
+        } else {
+            "lifemodel_v2_migration_cutover_committed"
+        },
+        None,
+        Some(&plan.legacy_source_digest),
+        Some(&plan.legacy_source_digest),
+        Some(&backup.backup_digest),
+        Some(&materialized.version.document_digest),
+        "canonical_lifemodel_v2_migration",
+    )
+    .await;
+
+    Ok(PatchApplyResult {
+        patch_id: proposal.id.clone(),
+        success: true,
+        path: LIFE_MODEL_V2_LEGACY_MIGRATION_PATH.into(),
+        operation: if materialized.replayed {
+            "lifemodel_v2_migration_replayed".into()
+        } else {
+            "lifemodel_v2_migration_materialized".into()
         },
         error: None,
     })

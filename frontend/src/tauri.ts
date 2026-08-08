@@ -2538,6 +2538,59 @@ export type LegacyLifeModelMigrationPreviewV2 = {
   notMigratedCount: number;
   migrationMetadataCount: number;
   containsSensitiveItems: boolean;
+  candidates: LegacyLifeModelMigrationCandidateV2[];
+};
+
+export type LifeModelSectionV2 =
+  | "identity"
+  | "values"
+  | "long_term_goals"
+  | "stable_preferences"
+  | "personal_boundaries"
+  | "important_relationships"
+  | "capabilities"
+  | "resources"
+  | "decision_principles"
+  | "collaboration_preferences";
+
+export type LegacyLifeModelMigrationCandidateValueV2 =
+  | { kind: "statement"; value: { statement: string } }
+  | { kind: "long_term_goal"; value: { direction: string; meaning: string } }
+  | {
+      kind: "relationship";
+      value: { person_label: string; relationship: string; significance: string };
+    }
+  | { kind: "capability"; value: { name: string; description: string } }
+  | { kind: "resource"; value: { name: string; description: string } };
+
+export type LegacyLifeModelMigrationCandidateV2 = {
+  candidateId: string;
+  itemId: string;
+  sourcePaths: string[];
+  targetSection: LifeModelSectionV2;
+  proposedValue: LegacyLifeModelMigrationCandidateValueV2;
+  sensitive: boolean;
+};
+
+export type LegacyLifeModelMigrationSelectionV2 = {
+  candidateId: string;
+  decision: "include" | "exclude";
+  editedValue: LegacyLifeModelMigrationCandidateValueV2 | null;
+};
+
+export type DraftLegacyLifeModelMigrationRequest = {
+  sourceDigest: string;
+  selections: LegacyLifeModelMigrationSelectionV2[];
+  nonLifemodelItemsAcknowledged: boolean;
+};
+
+export type DraftLegacyLifeModelMigrationReceipt = {
+  proposalId: string;
+  status: "review_required";
+  sourceDigest: string;
+  includedCount: number;
+  excludedCount: number;
+  nonLifemodelItemCount: number;
 };
 
 export type LifeModelCurrentViewSummary = {
@@ -4521,6 +4574,14 @@ export async function getReviewCenterViewModel(): Promise<
 
 export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeModelViewModel>> {
   return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
+}
+
+export async function draftLegacyLifeModelMigration(
+  request: DraftLegacyLifeModelMigrationRequest
+): Promise<DraftLegacyLifeModelMigrationReceipt> {
+  return safeInvoke<DraftLegacyLifeModelMigrationReceipt>("draft_legacy_lifemodel_migration", {
+    request,
+  });
 }
 
 export async function getMemoryViewModel(): Promise<ViewModelEnvelope<MemoryViewModel>> {

@@ -2,6 +2,7 @@ import {
   draftMemoryArchiveProposal,
   draftMemoryCorrectionProposal,
   draftMemoryStopRecallProposal,
+  draftLegacyLifeModelMigration,
   getLifeModelViewModel,
   getMemoryViewModel,
   getReviewCenterViewModel,
@@ -9,6 +10,7 @@ import {
   restoreArchivedMemory,
   rollbackMemoryAsset,
   type LifeModelViewModel,
+  type DraftLegacyLifeModelMigrationRequest,
   type MemoryViewModel,
   type ReviewCenterViewModel,
   type ViewModelEnvelope,
@@ -37,6 +39,7 @@ export interface DurableTruthDataSource {
   restoreMemory(memoryId: string): Promise<void>;
   rollbackMemory(memoryId: string, reason: string): Promise<void>;
   privacyEraseMemory(memoryId: string): Promise<void>;
+  draftLegacyLifeModelMigration(request: DraftLegacyLifeModelMigrationRequest): Promise<string>;
 }
 
 function requireReviewedMemoryProposal(
@@ -156,6 +159,17 @@ async function loadDurableTruth(): Promise<DurableTruthSnapshot> {
 
 export const tauriDurableTruthDataSource: DurableTruthDataSource = {
   loadDurableTruth,
+  async draftLegacyLifeModelMigration(request) {
+    const receipt = await draftLegacyLifeModelMigration(request);
+    if (
+      receipt.status !== "review_required" ||
+      receipt.sourceDigest !== request.sourceDigest ||
+      receipt.includedCount + receipt.excludedCount !== request.selections.length
+    ) {
+      throw new Error("lifemodel_migration_proposal_receipt_unverified");
+    }
+    return receipt.proposalId;
+  },
   async correctMemory(memoryId, content) {
     const receipt = await draftMemoryCorrectionProposal(memoryId, content);
     requireReviewedMemoryProposal(receipt, memoryId, "correct");

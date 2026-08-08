@@ -773,6 +773,9 @@ export function workbenchJourneyFixtureDataSource(
       );
       return buildDurableFixtureSnapshot(id, durableStage, builderReviewItems);
     },
+    async draftLegacyLifeModelMigration() {
+      return "fixture-lifemodel-migration-proposal";
+    },
     async correctMemory() {},
     async archiveMemory() {},
     async stopRecall() {},

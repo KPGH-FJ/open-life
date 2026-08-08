@@ -351,6 +351,9 @@ pub struct LifeModelCanonicalV2Input {
 #[derive(Debug, Clone, Default)]
 pub struct LifeModelViewModelBuildInput {
     pub canonical_v2: Option<LifeModelCanonicalV2Input>,
+    /// A fresh profile with neither legacy YAML nor a persisted v2 head has a
+    /// canonical empty owner without creating storage as a read side effect.
+    pub fresh_profile_canonical_empty: bool,
     pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
     pub life_model: Option<LifeModel>,
     pub current_view: Option<LifeModelCurrentViewInput>,
@@ -409,11 +412,12 @@ pub fn build_life_model_view_model_envelope(
         .life_model
         .as_ref()
         .is_some_and(|model| !model.is_effectively_empty());
-    let meaningful_canonical = input
+    let valid_canonical_version = input
         .canonical_v2
         .as_ref()
-        .is_some_and(canonical_v2_input_is_meaningful);
-    let status = loaded_status(&input, meaningful_life_model, meaningful_canonical);
+        .is_some_and(canonical_v2_input_is_authoritative);
+    let canonical_owner = valid_canonical_version || input.fresh_profile_canonical_empty;
+    let status = loaded_status(&input, meaningful_life_model, valid_canonical_version);
     let current_view_summary =
         build_current_view_summary(&input, &source_refs, meaningful_life_model);
     let dimension_summaries = build_dimension_summaries(
@@ -454,10 +458,10 @@ pub fn build_life_model_view_model_envelope(
             status,
             current_view_summary.as_ref(),
             meaningful_life_model,
-            meaningful_canonical,
+            canonical_owner,
         ),
-        canonical_summary: build_canonical_summary(&input, meaningful_canonical),
-        legacy_migration_preview: if meaningful_canonical {
+        canonical_summary: build_canonical_summary(&input, valid_canonical_version),
+        legacy_migration_preview: if canonical_owner {
             None
         } else {
             input.legacy_migration_preview.clone()
@@ -478,7 +482,7 @@ pub fn build_life_model_view_model_envelope(
         related_review_item_refs,
         memory_linkage: build_memory_linkage(&input, &source_refs),
         source_refs: source_refs.clone(),
-        contract_limitations: build_contract_limitations(meaningful_canonical),
+        contract_limitations: build_contract_limitations(canonical_owner),
     };
 
     let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(data));
@@ -515,6 +519,14 @@ fn loaded_status(
 ) -> ViewModelStatus {
     if input.stale {
         return ViewModelStatus::Stale;
+    }
+    if meaningful_canonical
+        && input
+            .canonical_v2
+            .as_ref()
+            .is_some_and(|canonical| canonical.item_count == 0)
+    {
+        return ViewModelStatus::Empty;
     }
     if !meaningful_canonical
         && input
@@ -597,9 +609,8 @@ fn build_canonical_summary(
     })
 }
 
-fn canonical_v2_input_is_meaningful(canonical: &LifeModelCanonicalV2Input) -> bool {
-    canonical.item_count > 0
-        && canonical.item_count == canonical.human_projection.item_count
+fn canonical_v2_input_is_authoritative(canonical: &LifeModelCanonicalV2Input) -> bool {
+    canonical.item_count == canonical.human_projection.item_count
         && canonical
             .human_projection
             .validate_binding(
@@ -610,16 +621,16 @@ fn canonical_v2_input_is_meaningful(canonical: &LifeModelCanonicalV2Input) -> bo
             .is_ok()
 }
 
-fn build_contract_limitations(meaningful_canonical: bool) -> Vec<String> {
+fn build_contract_limitations(authoritative_canonical: bool) -> Vec<String> {
     let mut limitations = vec![
         "Accepted proposal decisions remain approved-not-applied unless the canonical materializer proves an exact committed version.".into(),
         "Memory remains a separate owner and is not copied into the canonical LifeModel document.".into(),
         "Manual overrides are governed and separate from proposal-first review materialization.".into(),
     ];
-    if !meaningful_canonical {
+    if !authoritative_canonical {
         limitations.insert(
             0,
-            "No non-empty structured LifeModel v2 version is available; legacy YAML remains a compatibility owner until governed migration.".into(),
+            "No valid structured LifeModel v2 version is available; legacy YAML remains a compatibility owner until governed migration.".into(),
         );
     }
     limitations
@@ -1082,22 +1093,30 @@ fn build_warnings(
             source_refs.to_vec(),
         ),
     ];
-    if input
-        .canonical_v2
-        .as_ref()
-        .is_none_or(|canonical| !canonical_v2_input_is_meaningful(canonical))
+    if !input.fresh_profile_canonical_empty
+        && input
+            .canonical_v2
+            .as_ref()
+            .is_none_or(|canonical| !canonical_v2_input_is_authoritative(canonical))
     {
         warnings.push(warning(
             "lifemodel.canonical_summary_unavailable",
-            "No non-empty structured LifeModel v2 version is available; canonical truth is not inferred from compatibility data.",
+            "No valid structured LifeModel v2 version is available; canonical truth is not inferred from compatibility data.",
             ViewModelWarningSeverity::Info,
             source_refs.to_vec(),
         ));
     }
     if status == ViewModelStatus::Empty {
+        let authoritative_empty = input.canonical_v2.as_ref().is_some_and(|canonical| {
+            canonical_v2_input_is_authoritative(canonical) && canonical.item_count == 0
+        });
         warnings.push(warning(
             "lifemodel.empty",
-            "No confirmed LifeModel content was found; no fake canonical summary was generated.",
+            if authoritative_empty {
+                "The canonical LifeModel v2 owner is intentionally empty; legacy compatibility data is not substituted."
+            } else {
+                "No confirmed LifeModel content was found; no fake canonical summary was generated."
+            },
             ViewModelWarningSeverity::Info,
             source_refs.to_vec(),
         ));
@@ -1202,7 +1221,7 @@ fn collect_source_refs(input: &LifeModelViewModelBuildInput) -> Vec<EvidenceRef>
     if let Some(canonical) = input
         .canonical_v2
         .as_ref()
-        .filter(|canonical| canonical_v2_input_is_meaningful(canonical))
+        .filter(|canonical| canonical_v2_input_is_authoritative(canonical))
     {
         refs.push(EvidenceRef {
             id: format!(
@@ -1543,6 +1562,25 @@ mod tests {
     }
 
     #[test]
+    fn fresh_profile_has_a_canonical_empty_owner_without_a_fake_version() {
+        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            fresh_profile_canonical_empty: true,
+            now: Some("2026-08-08T10:00:00Z".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(envelope.status, ViewModelStatus::Empty);
+        let data = envelope.data.expect("fresh profile data");
+        assert_eq!(data.truth_mode, LifeModelTruthMode::Canonical);
+        assert!(data.canonical_summary.is_none());
+        assert!(data.legacy_migration_preview.is_none());
+        assert!(envelope
+            .warnings
+            .iter()
+            .all(|warning| warning.code != "lifemodel.canonical_summary_unavailable"));
+    }
+
+    #[test]
     fn legacy_migration_preview_is_visible_only_before_meaningful_canonical_v2() {
         let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
             "identity:\n  name: Test User\nstate:\n  current_focus: Current work\n",
@@ -1627,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_v2_version_does_not_create_canonical_truth() {
+    fn empty_v2_version_is_an_authoritative_empty_canonical_owner() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
             canonical_v2: Some(canonical_input(1, &[])),
             life_model: Some(LifeModel::default_model()),
@@ -1637,8 +1675,9 @@ mod tests {
 
         assert_eq!(envelope.status, ViewModelStatus::Empty);
         let data = envelope.data.expect("data");
-        assert_eq!(data.truth_mode, LifeModelTruthMode::Unknown);
-        assert!(data.canonical_summary.is_none());
+        assert_eq!(data.truth_mode, LifeModelTruthMode::Canonical);
+        let summary = data.canonical_summary.expect("canonical empty summary");
+        assert_eq!(summary.human_projection.item_count, 0);
     }
 
     #[test]

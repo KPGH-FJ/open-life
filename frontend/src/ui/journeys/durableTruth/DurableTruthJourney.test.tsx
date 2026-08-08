@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
@@ -7,6 +7,7 @@ import {
   durableReviewItem,
 } from "@/test/fixtures/workbench/durableTruth";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
+import { useDurableTruthJourney } from "./useDurableTruthJourney";
 
 function renderJourney(fixtureId: Parameters<typeof workbenchJourneyFixtureDataSource>[0]) {
   const dataSource = workbenchJourneyFixtureDataSource(fixtureId);
@@ -79,6 +80,7 @@ describe("Workbench durable truth journey", () => {
           notMigratedCount: 0,
           migrationMetadataCount: 0,
           containsSensitiveItems: false,
+          candidates: [],
         },
       };
     }
@@ -109,7 +111,7 @@ describe("Workbench durable truth journey", () => {
     expect(screen.queryByRole("button", { name: /保存|导入|应用/ })).not.toBeInTheDocument();
   });
 
-  it("shows a read-only field-complete legacy migration preview without claiming migration", async () => {
+  it("shows a field-complete legacy migration preview without claiming migration", async () => {
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
     if (snapshot.lifeModelEnvelope.data) {
@@ -122,6 +124,7 @@ describe("Workbench durable truth journey", () => {
         notMigratedCount: 1,
         migrationMetadataCount: 0,
         containsSensitiveItems: true,
+        candidates: [],
         items: [
           {
             sourcePath: "identity.values[0].name",
@@ -192,6 +195,113 @@ describe("Workbench durable truth journey", () => {
     expect(screen.getByText(/属于其他区域 · 目标：当前状态/)).toBeVisible();
     expect(screen.getByText(/需要人工判断 · 目标：尚未确定 · 仅显示摘要/)).toBeVisible();
     expect(screen.getByText(/不会迁移 · 目标：尚未确定/)).toBeVisible();
+  });
+
+  it("keeps migration candidates unselected and creates only a Review proposal", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    if (snapshot.lifeModelEnvelope.data) {
+      snapshot.lifeModelEnvelope.data.legacyMigrationPreview = {
+        schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1",
+        sourceDigest: "sha256:source",
+        reviewRequiredCount: 1,
+        externalOwnerCount: 0,
+        manualClassificationCount: 0,
+        notMigratedCount: 0,
+        migrationMetadataCount: 0,
+        containsSensitiveItems: true,
+        items: [
+          {
+            sourcePath: "identity.name",
+            valuePreview: "Alice",
+            valueDigest: "sha256:value",
+            valueTruncated: false,
+            disposition: "review_required",
+            targetOwner: "life_model_v2",
+            targetSection: "identity",
+            reasonCode: "legacy_identity_requires_user_confirmation",
+            sensitive: true,
+          },
+        ],
+        candidates: [
+          {
+            candidateId: "legacy-candidate:one",
+            itemId: "legacy:one",
+            sourcePaths: ["identity.name"],
+            targetSection: "identity",
+            proposedValue: { kind: "statement", value: { statement: "Alice" } },
+            sensitive: true,
+          },
+        ],
+      };
+    }
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
+    const draft = vi.spyOn(dataSource, "draftLegacyLifeModelMigration");
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    const submit = await screen.findByRole("button", { name: "提交到 Review" });
+    expect(submit).toBeDisabled();
+    expect(screen.getAllByText("敏感").length).toBeGreaterThan(0);
+    expect(screen.getByRole("radio", { name: "纳入" })).not.toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "纳入" }));
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+
+    await waitFor(() => expect(draft).toHaveBeenCalledOnce());
+    expect(draft).toHaveBeenCalledWith({
+      sourceDigest: "sha256:source",
+      selections: [
+        {
+          candidateId: "legacy-candidate:one",
+          decision: "include",
+          editedValue: { kind: "statement", value: { statement: "Alice" } },
+        },
+      ],
+      nonLifemodelItemsAcknowledged: false,
+    });
+    expect(await screen.findByText("等待 Review")).toBeVisible();
+    expect(screen.getByText(/接受前不会备份、写入 v2 或切换权威源/)).toBeVisible();
+  });
+
+  it("keeps the created migration proposal visible when Review refresh fails", async () => {
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    const refreshFailed = structuredClone(snapshot);
+    refreshFailed.reviewEnvelope = {
+      ...refreshFailed.reviewEnvelope,
+      data: null,
+      status: "error",
+      evidenceRefs: [],
+    };
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(refreshFailed);
+    vi.spyOn(dataSource, "draftLegacyLifeModelMigration").mockResolvedValue("proposal:migration");
+    const announce = vi.fn();
+    const { result } = renderHook(() => useDurableTruthJourney(dataSource, announce));
+
+    await act(async () => {
+      expect(
+        await result.current.draftLegacyMigration({
+          sourceDigest: "sha256:source",
+          selections: [],
+          nonLifemodelItemsAcknowledged: true,
+        })
+      ).toBe(true);
+    });
+
+    expect(result.current.migrationAction).toEqual({
+      status: "review_required",
+      proposalId: "proposal:migration",
+    });
+    expect(announce).toHaveBeenLastCalledWith(expect.stringContaining("已经创建"));
+    expect(announce).toHaveBeenLastCalledWith(expect.stringContaining("刷新未验证"));
   });
 
   it("keeps Agent Memory available when only LifeModel fails", async () => {

@@ -11,8 +11,14 @@ use crate::life_model_materializer_guard::{
 #[cfg(test)]
 use crate::life_model_write_gateway;
 use crate::AppState;
-use openlife_core::agent::{AgentProposal, ProposalStatus};
+use openlife_core::agent::{
+    AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
+};
 use openlife_core::life_model::patch::{LifeModelPatch, PatchStatus};
+use openlife_core::life_model::v2::{
+    LegacyLifeModelMigrationPreviewV2, LegacyLifeModelMigrationSelectionV2,
+    DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+};
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,6 +67,25 @@ pub struct LifeModelCurrentView {
     pub unavailable_reason: Option<String>,
     pub current_value_source: String,
     pub change: Option<LifeModelChangeView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DraftLegacyLifeModelMigrationRequest {
+    pub source_digest: String,
+    pub selections: Vec<LegacyLifeModelMigrationSelectionV2>,
+    pub non_lifemodel_items_acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DraftLegacyLifeModelMigrationReceipt {
+    pub proposal_id: String,
+    pub status: String,
+    pub source_digest: String,
+    pub included_count: usize,
+    pub excluded_count: usize,
+    pub non_lifemodel_item_count: usize,
 }
 
 #[cfg(test)]
@@ -291,12 +316,105 @@ pub(crate) async fn get_life_model_with_state(
         .require_trusted_read("LifeModelFileStore")
         .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let manager = state.life_model_manager.lock().await;
+    if manager
+        .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
+        .is_some()
+        || manager
+            .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
+            .is_some()
+    {
+        return Err(AppError::internal(
+            "legacy_lifemodel_read_owner_retired_use_lifemodel_view_model",
+        ));
+    }
     manager.load().map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn get_life_model(state: State<'_, Arc<AppState>>) -> Result<LifeModel, AppError> {
     get_life_model_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn draft_legacy_lifemodel_migration_with_state(
+    request: DraftLegacyLifeModelMigrationRequest,
+    state: &Arc<AppState>,
+) -> Result<DraftLegacyLifeModelMigrationReceipt, AppError> {
+    let created_at = chrono::Utc::now();
+    let preview = {
+        let manager = state.life_model_manager.lock().await;
+        if manager
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
+            .is_some()
+            || manager
+                .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
+                .is_some()
+        {
+            return Err(AppError::internal(
+                "lifemodel_v2_migration_existing_canonical_owner",
+            ));
+        }
+        let (_, source) = manager
+            .load_existing_with_source()?
+            .ok_or_else(|| AppError::not_found("legacy_lifemodel_source_missing"))?;
+        LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source)?
+    };
+    if preview.source_digest != request.source_digest {
+        return Err(AppError::internal("legacy_lifemodel_source_digest_changed"));
+    }
+    let plan = preview.build_migration_plan(
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        &request.selections,
+        request.non_lifemodel_items_acknowledged,
+        &created_at.to_rfc3339(),
+    )?;
+    let selected_sensitive = preview.candidates.iter().any(|candidate| {
+        candidate.sensitive
+            && plan
+                .included_candidate_ids
+                .contains(&candidate.candidate_id)
+    });
+    let mut proposal = AgentProposal::new(
+        ProposalType::LifeModelUpdate,
+        LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+        serde_json::to_value(&plan)?,
+        "Migrate explicitly reviewed legacy LifeModel fields into the canonical v2 owner.",
+        1.0,
+        if selected_sensitive {
+            RiskLevel::High
+        } else {
+            RiskLevel::Medium
+        },
+        ProposalSource::Manual,
+    );
+    proposal.created_at = created_at;
+    proposal.source_detail = Some("legacy_lifemodel_migration".into());
+    proposal.before = Some(serde_json::json!({
+        "legacySourceDigest": plan.legacy_source_digest,
+        "reviewRequiredCount": preview.review_required_count,
+        "nonLifeModelItemCount": plan.non_lifemodel_item_count,
+        "containsSensitiveItems": preview.contains_sensitive_items,
+    }));
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| AppError::db("proposal_store_unavailable"))?;
+    proposal_store.lock().await.create_proposal(&proposal)?;
+    Ok(DraftLegacyLifeModelMigrationReceipt {
+        proposal_id: proposal.id,
+        status: "review_required".into(),
+        source_digest: plan.legacy_source_digest,
+        included_count: plan.included_candidate_ids.len(),
+        excluded_count: plan.excluded_candidate_ids.len(),
+        non_lifemodel_item_count: plan.non_lifemodel_item_count,
+    })
+}
+
+#[tauri::command]
+pub async fn draft_legacy_lifemodel_migration(
+    request: DraftLegacyLifeModelMigrationRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DraftLegacyLifeModelMigrationReceipt, AppError> {
+    draft_legacy_lifemodel_migration_with_state(request, state.inner()).await
 }
 
 pub(crate) async fn get_life_model_current_view_with_state(

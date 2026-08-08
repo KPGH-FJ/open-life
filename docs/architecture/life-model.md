@@ -6,10 +6,11 @@ Source-backed description of the current LifeModel implementation and write
 governance under ADR 0016. LifeModel is the user-owned long-term model; it is
 not Agent Memory, business state, policy, audit, or a general heuristic system.
 
-The repository now contains a validated v2 document schema and append-only
-SQLite version owner alongside the legacy YAML compatibility owner. Canonical
-truth promotion remains proposal-first and gateway-bound; existing YAML data
-has not been migrated or switched to the v2 write path.
+The repository now contains a validated v2 document schema, append-only SQLite
+version owner, and a governed legacy-YAML migration path. Canonical truth
+promotion remains proposal-first and gateway-bound. Existing profiles are not
+silently migrated: the owner changes only after an exact reviewed proposal,
+verified backup, and atomic v2 version plus cutover receipt commit.
 
 ## Authority
 
@@ -21,7 +22,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-08 during Phase 5.2D typed diff materialization implementation.
+2026-08-08 during Phase 5.2E governed migration and owner-cutover implementation.
 
 ## Source map
 
@@ -72,12 +73,12 @@ source refs, and creation time. Commits require the exact current parent and are
 idempotent only for identical content. Reads revalidate schema and digest.
 Merely opening `/life-model` does not create the database or an empty model.
 
-`get_life_model_view_model` consumes an existing v2 head and gives canonical
-credit only to a non-empty validated version. Without one, existing YAML remains
-the compatibility owner. The v2 store accepts only an exact reviewed typed-diff
-proposal through the canonical proposal dispatch and write gateway. YAML has not
-been migrated and the legacy patch materializer remains isolated to legacy paths;
-owner cutover is a later 5.2 slice.
+`get_life_model_view_model` treats any validated v2 head, including an
+authoritative empty version, as the canonical owner. A fresh profile with no
+legacy source is canonical-empty without creating storage as a read side effect.
+Only a profile with legacy YAML and no v2 head/cutover remains in compatibility
+migration mode. A valid v2 owner suppresses legacy model, migration preview, and
+legacy current-view input; a corrupt cutover relation fails closed.
 
 Before cutover, `LegacyLifeModelMigrationPreviewV2` reads the exact YAML bytes
 that produced the compatibility model and classifies every non-empty source
@@ -86,8 +87,11 @@ tasks, Agent Memory, and Agent Runtime fields remain with their own owners;
 scores and ambiguous fields are not silently reshaped. Unknown fields,
 non-finite numbers, oversized sources, and unsupported YAML constructs make the
 preview unavailable without changing data. The product shows this classification
-only while no non-empty canonical v2 version exists. It does not create a v2
-version, proposal, backup, migration receipt, or owner cutover.
+only while no canonical v2 owner exists. The preview itself remains a pure read.
+The migration editor requires an explicit include/exclude decision for every
+candidate, leaves sensitive candidates unselected, and requires a separate
+acknowledgement for fields owned by another domain. Submitting the editor creates
+only a pending Review proposal.
 
 For a non-empty validated v2 version, `LifeModelHumanProjectionV2` carries the
 deterministic YAML plus its exact model id, model version, item count, document
@@ -154,10 +158,25 @@ reuse fail closed. A database error whose effect cannot be proven remains
 unknown and is not automatically retried.
 
 Until legacy owner cutover is complete, a typed remove may not produce an empty
-v2 head. Otherwise the current compatibility read policy could surface old YAML
-again after the user removed the last canonical item. Empty canonical/tombstone
-semantics therefore remain a cutover requirement rather than an implicit
-fallback.
+v2 head. After cutover, the persisted receipt authorizes an empty canonical head;
+the read model never falls back to old YAML based on item count.
+
+The `$lifemodel_v2_migration` proposal binds the exact legacy source digest,
+every candidate decision, the typed result, and its expected document digest.
+Acceptance reloads and reclassifies the exact source under the canonical write
+coordinator, creates an exact read-only byte backup, rechecks the source digest,
+then commits version 1 and an immutable cutover receipt in one SQLite transaction.
+The receipt binds model, legacy and backup digests, v2 version/document digest,
+proposal id, and cutover time. Source drift, an existing v2 owner, validation
+failure, or backup failure is a definite pre-effect failure; ambiguous database
+commit failures remain unknown and are not automatically retried. After a v2
+owner exists, shipped legacy read and proposal-write paths reject normal product
+use. The original YAML and verified backup are evidence only and are not queried
+by the normal product ViewModel. Main Chat, scheduled execution, proactive
+suggestions, and A2A also stop injecting the legacy model after cutover. They use
+no LifeModel enrichment until the v2 runtime-context integration planned for
+Phase 5.4; this prevents a hidden stale-YAML fallback without prematurely moving
+5.4 into migration work.
 
 `src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
 contexts. Governed manual override, restore/import, source-data compatibility,

@@ -15,6 +15,7 @@ import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from 
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 import { durableLifecyclePresentation, durableReviewItems } from "./durableTruthPresentation";
 import { LifeModelBuilderPanel } from "./LifeModelBuilderPanel";
+import { LifeModelMigrationPanel } from "./LifeModelMigrationPanel";
 import type { LifeModelBuilderController } from "./useLifeModelBuilder";
 
 const dimensionOrder = ["identity", "goals", "capabilities", "state"];
@@ -55,6 +56,8 @@ export function DurableTruthView({
   onRestoreMemory,
   onRollbackMemory,
   onPrivacyEraseMemory,
+  migrationAction,
+  onDraftLegacyMigration,
 }: {
   snapshot: DurableTruthSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -76,6 +79,12 @@ export function DurableTruthView({
   onRestoreMemory: (memoryId: string) => Promise<boolean>;
   onRollbackMemory: (memoryId: string, reason: string) => Promise<boolean>;
   onPrivacyEraseMemory: (memoryId: string) => Promise<boolean>;
+  migrationAction: {
+    status: "submitting" | "review_required" | "failed";
+    proposalId?: string;
+    error?: string;
+  } | null;
+  onDraftLegacyMigration: Parameters<typeof LifeModelMigrationPanel>[0]["onSubmit"];
 }) {
   const [activeDomain, setActiveDomain] = useState<"life_model" | "agent_memory">("life_model");
   const lifeModelTabRef = useRef<HTMLButtonElement>(null);
@@ -366,6 +375,14 @@ export function DurableTruthView({
                 <small className="ol-lifemodel-migration-digest">
                   来源摘要：{migrationPreview.sourceDigest}
                 </small>
+                <LifeModelMigrationPanel
+                  preview={migrationPreview}
+                  submitting={migrationAction?.status === "submitting"}
+                  proposalId={migrationAction?.proposalId}
+                  error={migrationAction?.error}
+                  onSubmit={onDraftLegacyMigration}
+                  onOpenReview={onOpenReviewCenter}
+                />
               </section>
             ) : null}
 

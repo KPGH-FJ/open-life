@@ -362,7 +362,10 @@ pub(crate) async fn preprocess_chat_input_with_options(
 > {
     let life_model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager
+            .load_active_legacy_runtime_model()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(LifeModel::default_model)
     };
 
     {
