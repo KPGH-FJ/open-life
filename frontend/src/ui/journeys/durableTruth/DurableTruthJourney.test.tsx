@@ -1,6 +1,7 @@
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { LifeModelLearningCandidate } from "@/tauri";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
 import {
   buildDurableFixtureSnapshot,
@@ -44,7 +45,7 @@ describe("Workbench durable truth journey", () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
-    const candidate = {
+    const candidate: LifeModelLearningCandidate = {
       id: "lmc_candidate_one",
       workspaceRef: "workspace:fixture",
       summary: "先给结论",
@@ -53,12 +54,14 @@ describe("Workbench durable truth journey", () => {
       targetKey: "collaboration_preferences.communication_style",
       suggestionClass: "collaboration_preferences",
       supportCount: 1,
+      oppositionCount: 0,
       independentSupportCount: 1,
       status: "reviewable" as const,
       explicitness: "explicit_user_request" as const,
       sensitivity: "internal" as const,
       observationIds: ["lmo_observation_one"],
       sourceRefs: ["message:fixture"],
+      sourceKinds: ["explicit_user_message"],
       createdAt: "2026-08-08T08:00:00Z",
       updatedAt: "2026-08-08T08:00:00Z",
       expiresAt: "2026-11-06T08:00:00Z",
@@ -70,6 +73,13 @@ describe("Workbench durable truth journey", () => {
       candidates: [candidate],
     };
     dataSource.loadDurableTruth = async () => snapshot;
+    dataSource.confirmLifeModelLearningCandidate = vi.fn(async candidateId => {
+      expect(candidateId).toBe(candidate.id);
+      candidate.status = "reviewable";
+      candidate.sourceKinds = ["explicit_user_message", "user_feedback"];
+      candidate.supportCount = 2;
+      candidate.independentSupportCount = 2;
+    });
     dataSource.deleteLifeModelLearningCandidate = vi.fn(async candidateId => {
       expect(candidateId).toBe(candidate.id);
       snapshot.lifeModelEnvelope.data!.learning = {
@@ -93,6 +103,9 @@ describe("Workbench durable truth journey", () => {
     expect(screen.getByText(/已具备审核条件 · 1 条证据 \/ 1 个独立来源/)).toBeVisible();
     expect(screen.getByRole("button", { name: "拒绝并不再建议类似内容" })).toBeVisible();
     expect(screen.getByRole("button", { name: "暂停这类建议" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "这条符合我" }));
+    await waitFor(() => expect(screen.getByText(/用户反馈/)).toBeVisible());
+    expect(screen.queryByRole("button", { name: "这条符合我" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "删除这条候选" }));
 
     await waitFor(() => expect(screen.queryByText("先给结论")).not.toBeInTheDocument());

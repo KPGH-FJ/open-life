@@ -19,6 +19,77 @@ pub enum LifeModelLearningExplicitness {
     PassiveInference,
 }
 
+/// The bounded product source that produced one learning observation.  This
+/// label is intentionally narrower than a generic provenance string: tool,
+/// web, and third-party text are not valid sources for a user-profile
+/// candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeModelLearningSourceKind {
+    ExplicitUserMessage,
+    TaskOutcome,
+    AgentReflection,
+    UserFeedback,
+    UserCorrection,
+    ModelExtraction,
+}
+
+impl LifeModelLearningSourceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitUserMessage => "explicit_user_message",
+            Self::TaskOutcome => "task_outcome",
+            Self::AgentReflection => "agent_reflection",
+            Self::UserFeedback => "user_feedback",
+            Self::UserCorrection => "user_correction",
+            Self::ModelExtraction => "model_extraction",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "explicit_user_message" => Ok(Self::ExplicitUserMessage),
+            "task_outcome" => Ok(Self::TaskOutcome),
+            "agent_reflection" => Ok(Self::AgentReflection),
+            "user_feedback" => Ok(Self::UserFeedback),
+            "user_correction" => Ok(Self::UserCorrection),
+            "model_extraction" => Ok(Self::ModelExtraction),
+            _ => bail!("invalid_lifemodel_learning_source_kind"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeModelLearningEvidencePolarity {
+    Supports,
+    Opposes,
+    Corrects,
+}
+
+impl LifeModelLearningEvidencePolarity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Supports => "supports",
+            Self::Opposes => "opposes",
+            Self::Corrects => "corrects",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "supports" => Ok(Self::Supports),
+            "opposes" => Ok(Self::Opposes),
+            "corrects" => Ok(Self::Corrects),
+            _ => bail!("invalid_lifemodel_learning_evidence_polarity"),
+        }
+    }
+
+    fn counts_as_support(self) -> bool {
+        matches!(self, Self::Supports | Self::Corrects)
+    }
+}
+
 impl LifeModelLearningExplicitness {
     fn as_str(self) -> &'static str {
         match self {
@@ -111,6 +182,15 @@ pub struct LifeModelLearningCapture {
     pub target_key: String,
     /// User-controllable suggestion family, such as `stable_preferences`.
     pub suggestion_class: String,
+    pub source_kind: LifeModelLearningSourceKind,
+    pub polarity: LifeModelLearningEvidencePolarity,
+    /// Only an authenticated, explicit correction may retire older candidates
+    /// for the same narrow target. It never changes canonical LifeModel state.
+    pub replaces_target: bool,
+    /// When set, this observation may only attach to that already-live
+    /// candidate. It prevents a concurrent delete from being resurrected by a
+    /// late user-feedback command.
+    pub attach_to_candidate_id: Option<String>,
     pub explicitness: LifeModelLearningExplicitness,
     pub sensitivity: LifeModelLearningSensitivity,
     pub observed_at: String,
@@ -129,6 +209,8 @@ pub struct LifeModelLearningObservation {
     pub summary: String,
     pub section: LifeModelSectionV2,
     pub value: LifeModelUserValueV2,
+    pub source_kind: LifeModelLearningSourceKind,
+    pub polarity: LifeModelLearningEvidencePolarity,
     pub explicitness: LifeModelLearningExplicitness,
     pub sensitivity: LifeModelLearningSensitivity,
     pub observed_at: String,
@@ -146,12 +228,14 @@ pub struct LifeModelLearningCandidate {
     pub target_key: String,
     pub suggestion_class: String,
     pub support_count: usize,
+    pub opposition_count: usize,
     pub independent_support_count: usize,
     pub status: LifeModelLearningCandidateStatus,
     pub explicitness: LifeModelLearningExplicitness,
     pub sensitivity: LifeModelLearningSensitivity,
     pub observation_ids: Vec<String>,
     pub source_refs: Vec<String>,
+    pub source_kinds: Vec<LifeModelLearningSourceKind>,
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: String,
@@ -251,6 +335,8 @@ impl LifeModelLearningStore {
                     summary TEXT NOT NULL,
                     section TEXT NOT NULL,
                     value_json TEXT NOT NULL,
+                    source_kind TEXT NOT NULL DEFAULT 'explicit_user_message',
+                    polarity TEXT NOT NULL DEFAULT 'supports',
                     explicitness TEXT NOT NULL,
                     sensitivity TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
@@ -309,11 +395,24 @@ impl LifeModelLearningStore {
             "body_scrubbed",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        crate::sqlite_migration::ensure_column(
+            &connection,
+            "life_model_learning_observations",
+            "source_kind",
+            "TEXT NOT NULL DEFAULT 'explicit_user_message'",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &connection,
+            "life_model_learning_observations",
+            "polarity",
+            "TEXT NOT NULL DEFAULT 'supports'",
+        )?;
         for (column, definition) in [
             ("target_key", "TEXT NOT NULL DEFAULT 'legacy.unspecified'"),
             ("suggestion_class", "TEXT NOT NULL DEFAULT 'legacy'"),
             ("semantic_digest", "TEXT NOT NULL DEFAULT ''"),
             ("support_count", "INTEGER NOT NULL DEFAULT 1"),
+            ("opposition_count", "INTEGER NOT NULL DEFAULT 0"),
             ("independent_support_count", "INTEGER NOT NULL DEFAULT 1"),
             ("body_scrubbed", "INTEGER NOT NULL DEFAULT 0"),
         ] {
@@ -336,19 +435,31 @@ impl LifeModelLearningStore {
         &self,
         capture: LifeModelLearningCapture,
     ) -> Result<LifeModelLearningCaptureReceipt> {
+        if capture.explicitness != LifeModelLearningExplicitness::ExplicitUserRequest {
+            bail!("lifemodel_learning_explicit_capture_requires_explicit_source");
+        }
+        self.capture_candidate(capture)
+    }
+
+    pub fn capture_candidate(
+        &self,
+        capture: LifeModelLearningCapture,
+    ) -> Result<LifeModelLearningCaptureReceipt> {
         validate_capture(&capture)?;
         let value_json =
             serde_json::to_string(&capture.value).context("serialize_lifemodel_learning_value")?;
         let semantic_digest = semantic_digest(&capture, &value_json);
         let identity_digest = sha256_prefixed(
             format!(
-                "{}\0{}\0{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
                 capture.workspace_ref,
                 capture.source_ref,
                 capture.source_digest,
                 capture.independence_ref,
                 section_name(capture.section),
-                value_json
+                value_json,
+                capture.source_kind.as_str(),
+                capture.polarity.as_str(),
             )
             .as_bytes(),
         );
@@ -447,8 +558,9 @@ impl LifeModelLearningStore {
                 "INSERT INTO life_model_learning_observations (
                     id, identity_digest, workspace_ref, source_ref, source_digest,
                     independence_ref, summary,
-                    section, value_json, explicitness, sensitivity, observed_at, expires_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    section, value_json, source_kind, polarity, explicitness, sensitivity,
+                    observed_at, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     observation_id,
                     identity_digest,
@@ -459,6 +571,8 @@ impl LifeModelLearningStore {
                     capture.summary,
                     section_name(capture.section),
                     value_json,
+                    capture.source_kind.as_str(),
+                    capture.polarity.as_str(),
                     capture.explicitness.as_str(),
                     capture.sensitivity.as_str(),
                     capture.observed_at,
@@ -477,6 +591,32 @@ impl LifeModelLearningStore {
             )
             .optional()
             .context("find_lifemodel_learning_semantic_candidate")?;
+        if let Some(expected_candidate_id) = capture.attach_to_candidate_id.as_deref() {
+            if existing_candidate_id.as_deref() != Some(expected_candidate_id) {
+                bail!("lifemodel_learning_feedback_candidate_changed");
+            }
+            let attached_status = transaction.query_row(
+                "SELECT status FROM life_model_learning_candidates
+                 WHERE id = ?1 AND workspace_ref = ?2 AND body_scrubbed = 0",
+                params![expected_candidate_id, capture.workspace_ref],
+                |row| row.get::<_, String>(0),
+            )?;
+            if attached_status == LifeModelLearningCandidateStatus::Conflicted.as_str()
+                || transaction
+                    .query_row(
+                        "SELECT 1 FROM life_model_learning_candidates
+                         WHERE workspace_ref = ?1 AND target_key = ?2
+                           AND semantic_digest <> ?3 AND body_scrubbed = 0
+                           AND status IN ('accumulating', 'reviewable', 'conflicted') LIMIT 1",
+                        params![capture.workspace_ref, capture.target_key, semantic_digest],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some()
+            {
+                bail!("lifemodel_learning_conflicted_candidate_requires_correction");
+            }
+        }
         let candidate_id = existing_candidate_id.unwrap_or(proposed_candidate_id);
         if transaction
             .query_row(
@@ -501,9 +641,9 @@ impl LifeModelLearningStore {
                         id, observation_id, workspace_ref, summary, section, value_json, status,
                         explicitness, sensitivity, source_ref, created_at, updated_at, expires_at,
                         target_key, suggestion_class, semantic_digest, support_count,
-                        independent_support_count, body_scrubbed
+                        opposition_count, independent_support_count, body_scrubbed
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12,
-                               ?13, ?14, ?15, 1, 1, 0)",
+                               ?13, ?14, ?15, ?16, ?17, ?18, 0)",
                     params![
                         candidate_id,
                         observation_id,
@@ -520,6 +660,9 @@ impl LifeModelLearningStore {
                         capture.target_key,
                         capture.suggestion_class,
                         semantic_digest,
+                        i64::from(capture.polarity.counts_as_support()),
+                        i64::from(capture.polarity == LifeModelLearningEvidencePolarity::Opposes),
+                        i64::from(capture.polarity.counts_as_support()),
                     ],
                 )
                 .context("insert_lifemodel_learning_candidate")?;
@@ -531,14 +674,24 @@ impl LifeModelLearningStore {
                 params![candidate_id, observation_id],
             )
             .context("link_lifemodel_learning_candidate_observation")?;
-        let (support_count, independent_support_count) = transaction
+        let (support_count, opposition_count, independent_support_count) = transaction
             .query_row(
-                "SELECT COUNT(*), COUNT(DISTINCT o.independence_ref)
+                "SELECT
+                    SUM(CASE WHEN o.polarity IN ('supports', 'corrects') THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.polarity = 'opposes' THEN 1 ELSE 0 END),
+                    COUNT(DISTINCT CASE WHEN o.polarity IN ('supports', 'corrects')
+                                        THEN o.independence_ref END)
                  FROM life_model_learning_candidate_observations co
                  JOIN life_model_learning_observations o ON o.id = co.observation_id
                  WHERE co.candidate_id = ?1",
                 [&candidate_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .context("count_lifemodel_learning_candidate_support")?;
         let current_status = transaction.query_row(
@@ -546,7 +699,8 @@ impl LifeModelLearningStore {
             [&candidate_id],
             |row| row.get::<_, String>(0),
         )?;
-        let next_status = if current_status == LifeModelLearningCandidateStatus::Conflicted.as_str()
+        let next_status = if opposition_count > 0
+            || current_status == LifeModelLearningCandidateStatus::Conflicted.as_str()
         {
             LifeModelLearningCandidateStatus::Conflicted
         } else if capture.explicitness == LifeModelLearningExplicitness::ExplicitUserRequest
@@ -559,19 +713,20 @@ impl LifeModelLearningStore {
         transaction.execute(
             "UPDATE life_model_learning_candidates
              SET status = ?2, support_count = ?3, independent_support_count = ?4,
-                 updated_at = ?5,
+                 opposition_count = ?5, updated_at = ?6,
                  explicitness = CASE WHEN ?7 = 'explicit_user_request'
                                      THEN 'explicit_user_request' ELSE explicitness END,
-                 expires_at = CASE WHEN expires_at < ?6 THEN ?6 ELSE expires_at END
+                 expires_at = CASE WHEN expires_at < ?8 THEN ?8 ELSE expires_at END
              WHERE id = ?1",
             params![
                 candidate_id,
                 next_status.as_str(),
                 support_count,
                 independent_support_count,
+                opposition_count,
                 capture.observed_at,
-                capture.candidate_expires_at,
                 capture.explicitness.as_str(),
+                capture.candidate_expires_at,
             ],
         )?;
 
@@ -589,7 +744,21 @@ impl LifeModelLearningStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             ids
         };
-        if !conflicting_ids.is_empty() {
+        if capture.replaces_target {
+            for conflicting_id in conflicting_ids {
+                scrub_candidate_body(
+                    &transaction,
+                    &conflicting_id,
+                    LifeModelLearningCandidateStatus::Rejected,
+                    &capture.observed_at,
+                )?;
+            }
+            transaction.execute(
+                "UPDATE life_model_learning_candidates
+                 SET status = 'reviewable', updated_at = ?2 WHERE id = ?1",
+                params![candidate_id, capture.observed_at],
+            )?;
+        } else if !conflicting_ids.is_empty() {
             transaction.execute(
                 "UPDATE life_model_learning_candidates SET status = 'conflicted', updated_at = ?2
                  WHERE id = ?1",
@@ -658,6 +827,49 @@ impl LifeModelLearningStore {
             .iter()
             .map(|id| load_candidate(&connection, id))
             .collect()
+    }
+
+    pub fn confirm_candidate_as_user_feedback(
+        &self,
+        workspace_ref: &str,
+        candidate_id: &str,
+        source_ref: &str,
+        now: &str,
+    ) -> Result<LifeModelLearningCaptureReceipt> {
+        validate_ref(workspace_ref, "invalid_lifemodel_learning_workspace_ref")?;
+        validate_ref(candidate_id, "invalid_lifemodel_learning_candidate_id")?;
+        validate_ref(source_ref, "invalid_lifemodel_learning_source_ref")?;
+        let observed_at = parse_time(now, "invalid_lifemodel_learning_feedback_time")?;
+        let candidate = self
+            .get_candidate(candidate_id)?
+            .filter(|candidate| candidate.workspace_ref == workspace_ref)
+            .ok_or_else(|| anyhow!("lifemodel_learning_candidate_not_found"))?;
+        if candidate.status == LifeModelLearningCandidateStatus::Conflicted {
+            bail!("lifemodel_learning_conflicted_candidate_requires_correction");
+        }
+        let source_digest = sha256_prefixed(
+            format!("{workspace_ref}\0{candidate_id}\0{source_ref}\0supports").as_bytes(),
+        );
+        self.capture_candidate(LifeModelLearningCapture {
+            workspace_ref: workspace_ref.into(),
+            source_ref: source_ref.into(),
+            source_digest,
+            independence_ref: source_ref.into(),
+            summary: candidate.summary,
+            section: candidate.section,
+            value: candidate.value,
+            target_key: candidate.target_key,
+            suggestion_class: candidate.suggestion_class,
+            source_kind: LifeModelLearningSourceKind::UserFeedback,
+            polarity: LifeModelLearningEvidencePolarity::Supports,
+            replaces_target: false,
+            attach_to_candidate_id: Some(candidate_id.into()),
+            explicitness: LifeModelLearningExplicitness::ExplicitUserRequest,
+            sensitivity: candidate.sensitivity,
+            observed_at: observed_at.to_rfc3339(),
+            observation_expires_at: (observed_at + chrono::Duration::days(30)).to_rfc3339(),
+            candidate_expires_at: (observed_at + chrono::Duration::days(90)).to_rfc3339(),
+        })
     }
 
     pub fn delete_candidate(&self, workspace_ref: &str, candidate_id: &str) -> Result<bool> {
@@ -998,6 +1210,36 @@ fn validate_capture(capture: &LifeModelLearningCapture) -> Result<()> {
     if observation_expires_at <= observed_at || candidate_expires_at <= observation_expires_at {
         bail!("invalid_lifemodel_learning_retention_window");
     }
+    if capture.replaces_target
+        && !(capture.source_kind == LifeModelLearningSourceKind::UserCorrection
+            && capture.polarity == LifeModelLearningEvidencePolarity::Corrects
+            && capture.explicitness == LifeModelLearningExplicitness::ExplicitUserRequest)
+    {
+        bail!("invalid_lifemodel_learning_target_replacement_authority");
+    }
+    if let Some(candidate_id) = capture.attach_to_candidate_id.as_deref() {
+        validate_ref(
+            candidate_id,
+            "invalid_lifemodel_learning_attached_candidate_id",
+        )?;
+        if capture.source_kind != LifeModelLearningSourceKind::UserFeedback
+            || capture.explicitness != LifeModelLearningExplicitness::ExplicitUserRequest
+            || capture.polarity != LifeModelLearningEvidencePolarity::Supports
+            || capture.replaces_target
+        {
+            bail!("invalid_lifemodel_learning_candidate_attachment_contract");
+        }
+    }
+    if matches!(
+        capture.source_kind,
+        LifeModelLearningSourceKind::TaskOutcome
+            | LifeModelLearningSourceKind::AgentReflection
+            | LifeModelLearningSourceKind::ModelExtraction
+    ) && (capture.explicitness != LifeModelLearningExplicitness::PassiveInference
+        || capture.polarity != LifeModelLearningEvidencePolarity::Supports)
+    {
+        bail!("invalid_lifemodel_learning_inferred_source_contract");
+    }
     Ok(())
 }
 
@@ -1042,13 +1284,13 @@ fn parse_section(value: &str) -> Result<LifeModelSectionV2> {
 
 fn observation_columns() -> &'static str {
     "id, workspace_ref, source_ref, source_digest, independence_ref, summary, section, value_json,
-     explicitness, sensitivity, observed_at, expires_at"
+     source_kind, polarity, explicitness, sensitivity, observed_at, expires_at"
 }
 
 fn candidate_columns() -> &'static str {
     "id, observation_id, workspace_ref, summary, section, value_json, status,
      explicitness, sensitivity, source_ref, created_at, updated_at, expires_at,
-     target_key, suggestion_class, support_count, independent_support_count"
+     target_key, suggestion_class, support_count, opposition_count, independent_support_count"
 }
 
 fn observation_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningObservation> {
@@ -1061,18 +1303,28 @@ fn observation_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningObse
         summary: row.get(5)?,
         section: parse_db_value(row.get::<_, String>(6)?, parse_section, 6)?,
         value: parse_json_value(row.get::<_, String>(7)?, 7)?,
-        explicitness: parse_db_value(
+        source_kind: parse_db_value(
             row.get::<_, String>(8)?,
-            LifeModelLearningExplicitness::parse,
+            LifeModelLearningSourceKind::parse,
             8,
         )?,
-        sensitivity: parse_db_value(
+        polarity: parse_db_value(
             row.get::<_, String>(9)?,
-            LifeModelLearningSensitivity::parse,
+            LifeModelLearningEvidencePolarity::parse,
             9,
         )?,
-        observed_at: row.get(10)?,
-        expires_at: row.get(11)?,
+        explicitness: parse_db_value(
+            row.get::<_, String>(10)?,
+            LifeModelLearningExplicitness::parse,
+            10,
+        )?,
+        sensitivity: parse_db_value(
+            row.get::<_, String>(11)?,
+            LifeModelLearningSensitivity::parse,
+            11,
+        )?,
+        observed_at: row.get(12)?,
+        expires_at: row.get(13)?,
     })
 }
 
@@ -1088,7 +1340,8 @@ fn candidate_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningCandid
         target_key: row.get(13)?,
         suggestion_class: row.get(14)?,
         support_count: row.get::<_, i64>(15)?.max(0) as usize,
-        independent_support_count: row.get::<_, i64>(16)?.max(0) as usize,
+        opposition_count: row.get::<_, i64>(16)?.max(0) as usize,
+        independent_support_count: row.get::<_, i64>(17)?.max(0) as usize,
         status: parse_db_value(
             row.get::<_, String>(6)?,
             LifeModelLearningCandidateStatus::parse,
@@ -1106,6 +1359,7 @@ fn candidate_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningCandid
         )?,
         observation_ids: vec![observation_id],
         source_refs: vec![source_ref],
+        source_kinds: Vec::new(),
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
         expires_at: row.get(12)?,
@@ -1124,7 +1378,7 @@ fn load_candidate(connection: &Connection, id: &str) -> Result<LifeModelLearning
         )
         .context("load_lifemodel_learning_candidate")?;
     let mut statement = connection.prepare(
-        "SELECT o.id, o.source_ref
+        "SELECT o.id, o.source_ref, o.source_kind
          FROM life_model_learning_candidate_observations co
          JOIN life_model_learning_observations o ON o.id = co.observation_id
          WHERE co.candidate_id = ?1
@@ -1132,12 +1386,20 @@ fn load_candidate(connection: &Connection, id: &str) -> Result<LifeModelLearning
     )?;
     let pairs = statement
         .query_map([id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     if !pairs.is_empty() {
         candidate.observation_ids = pairs.iter().map(|pair| pair.0.clone()).collect();
-        candidate.source_refs = pairs.into_iter().map(|pair| pair.1).collect();
+        candidate.source_refs = pairs.iter().map(|pair| pair.1.clone()).collect();
+        candidate.source_kinds = pairs
+            .into_iter()
+            .map(|pair| LifeModelLearningSourceKind::parse(&pair.2))
+            .collect::<Result<Vec<_>>>()?;
     }
     Ok(candidate)
 }
@@ -1175,7 +1437,8 @@ fn recompute_target_status(
 ) -> Result<()> {
     let active = {
         let mut statement = transaction.prepare(
-            "SELECT id, explicitness, independent_support_count, semantic_digest
+            "SELECT id, explicitness, independent_support_count, semantic_digest,
+                    opposition_count
              FROM life_model_learning_candidates
              WHERE workspace_ref = ?1 AND target_key = ?2 AND body_scrubbed = 0
                AND status IN ('accumulating', 'reviewable', 'conflicted')",
@@ -1187,6 +1450,7 @@ fn recompute_target_status(
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1194,11 +1458,11 @@ fn recompute_target_status(
     };
     let semantic_count = active
         .iter()
-        .map(|(_, _, _, digest)| digest)
+        .map(|(_, _, _, digest, _)| digest)
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    for (candidate_id, explicitness, independent_support_count, _) in active {
-        let status = if semantic_count > 1 {
+    for (candidate_id, explicitness, independent_support_count, _, opposition_count) in active {
+        let status = if semantic_count > 1 || opposition_count > 0 {
             LifeModelLearningCandidateStatus::Conflicted
         } else if explicitness == LifeModelLearningExplicitness::ExplicitUserRequest.as_str()
             || independent_support_count >= 2
@@ -1290,6 +1554,52 @@ fn migrate_5_3a_rows(connection: &Connection) -> Result<()> {
          SET independence_ref = source_ref WHERE independence_ref = 'legacy:unknown'",
         [],
     )?;
+    let observations = {
+        let mut statement = connection.prepare(
+            "SELECT id, workspace_ref, source_ref, source_digest, independence_ref, section,
+                    value_json, source_kind, polarity
+             FROM life_model_learning_observations",
+        )?;
+        let values = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        values
+    };
+    for (
+        id,
+        workspace_ref,
+        source_ref,
+        source_digest,
+        independence_ref,
+        section,
+        value_json,
+        source_kind,
+        polarity,
+    ) in observations
+    {
+        let identity_digest = sha256_prefixed(
+            format!(
+                "{workspace_ref}\0{source_ref}\0{source_digest}\0{independence_ref}\0{section}\0{value_json}\0{source_kind}\0{polarity}"
+            )
+            .as_bytes(),
+        );
+        connection.execute(
+            "UPDATE life_model_learning_observations SET identity_digest = ?2 WHERE id = ?1",
+            params![id, identity_digest],
+        )?;
+    }
     Ok(())
 }
 
@@ -1346,6 +1656,10 @@ mod tests {
             },
             target_key: "collaboration_preferences.communication_style".into(),
             suggestion_class: "collaboration_preferences".into(),
+            source_kind: LifeModelLearningSourceKind::ExplicitUserMessage,
+            polarity: LifeModelLearningEvidencePolarity::Supports,
+            replaces_target: false,
+            attach_to_candidate_id: None,
             explicitness: LifeModelLearningExplicitness::ExplicitUserRequest,
             sensitivity: LifeModelLearningSensitivity::Internal,
             observed_at: "2026-08-08T08:00:00Z".into(),
@@ -1485,6 +1799,16 @@ mod tests {
             candidates[0].target_key,
             "collaboration_preferences.communication_style"
         );
+        let mut replay = capture("workspace:one", "message:old");
+        replay.source_digest = format!("sha256:{}", "b".repeat(64));
+        replay.summary = "Prefer concise updates.".into();
+        replay.value = LifeModelUserValueV2::Statement {
+            statement: replay.summary.clone(),
+        };
+        let receipt = store.capture_explicit_candidate(replay).unwrap();
+        assert!(receipt.replayed);
+        assert_eq!(receipt.candidate.id, "lmc_old");
+        assert_eq!(receipt.candidate.support_count, 1);
     }
 
     #[test]
@@ -1518,12 +1842,38 @@ mod tests {
     }
 
     #[test]
+    fn stale_positive_feedback_cannot_resurrect_a_deleted_candidate() {
+        let store = LifeModelLearningStore::new_in_memory().unwrap();
+        let original = store
+            .capture_explicit_candidate(capture("workspace:one", "message:one"))
+            .unwrap();
+        let mut feedback = capture("workspace:one", "feedback:one");
+        feedback.source_digest = format!("sha256:{}", "b".repeat(64));
+        feedback.independence_ref = "feedback:one".into();
+        feedback.source_kind = LifeModelLearningSourceKind::UserFeedback;
+        feedback.attach_to_candidate_id = Some(original.candidate.id.clone());
+
+        assert!(store
+            .delete_candidate("workspace:one", &original.candidate.id)
+            .unwrap());
+        let error = store.capture_candidate(feedback).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("lifemodel_learning_feedback_candidate_changed"));
+        assert!(store
+            .list_active_candidates("workspace:one", 20)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn repeated_observations_merge_and_passive_support_requires_independent_boundaries() {
         let store = LifeModelLearningStore::new_in_memory().unwrap();
         let mut first = capture("workspace:one", "message:one");
         first.explicitness = LifeModelLearningExplicitness::PassiveInference;
         first.independence_ref = "session:one".into();
-        let first_receipt = store.capture_explicit_candidate(first.clone()).unwrap();
+        let first_receipt = store.capture_candidate(first.clone()).unwrap();
         assert_eq!(
             first_receipt.candidate.status,
             LifeModelLearningCandidateStatus::Accumulating
@@ -1532,9 +1882,7 @@ mod tests {
         let mut same_session = first.clone();
         same_session.source_ref = "message:two".into();
         same_session.source_digest = format!("sha256:{}", "b".repeat(64));
-        let same_session_receipt = store
-            .capture_explicit_candidate(same_session.clone())
-            .unwrap();
+        let same_session_receipt = store.capture_candidate(same_session.clone()).unwrap();
         assert_eq!(same_session_receipt.candidate.support_count, 2);
         assert_eq!(same_session_receipt.candidate.independent_support_count, 1);
         assert_eq!(
@@ -1545,7 +1893,7 @@ mod tests {
         same_session.source_ref = "message:three".into();
         same_session.source_digest = format!("sha256:{}", "c".repeat(64));
         same_session.independence_ref = "session:two".into();
-        let independent = store.capture_explicit_candidate(same_session).unwrap();
+        let independent = store.capture_candidate(same_session).unwrap();
         assert_eq!(independent.candidate.support_count, 3);
         assert_eq!(independent.candidate.independent_support_count, 2);
         assert_eq!(
@@ -1718,6 +2066,61 @@ mod tests {
         };
 
         assert!(store.capture_explicit_candidate(unsupported).is_err());
+        assert!(store
+            .list_active_candidates("workspace:one", 20)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn explicit_correction_retires_old_candidate_without_touching_canonical_state() {
+        let store = LifeModelLearningStore::new_in_memory().unwrap();
+        let original = store
+            .capture_explicit_candidate(capture("workspace:one", "message:one"))
+            .unwrap();
+        let mut correction = capture("workspace:one", "message:two");
+        correction.source_digest = format!("sha256:{}", "b".repeat(64));
+        correction.summary = "Prefer detailed progress updates.".into();
+        correction.value = LifeModelUserValueV2::Statement {
+            statement: correction.summary.clone(),
+        };
+        correction.source_kind = LifeModelLearningSourceKind::UserCorrection;
+        correction.polarity = LifeModelLearningEvidencePolarity::Corrects;
+        correction.replaces_target = true;
+
+        let corrected = store.capture_explicit_candidate(correction).unwrap();
+
+        assert_eq!(
+            corrected.candidate.status,
+            LifeModelLearningCandidateStatus::Reviewable
+        );
+        assert_eq!(
+            corrected.observation.source_kind,
+            LifeModelLearningSourceKind::UserCorrection
+        );
+        assert_eq!(
+            corrected.observation.polarity,
+            LifeModelLearningEvidencePolarity::Corrects
+        );
+        assert!(store
+            .get_candidate(&original.candidate.id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store.list_active_candidates("workspace:one", 20).unwrap(),
+            vec![corrected.candidate]
+        );
+        assert!(!corrected.proposal_created);
+        assert!(!corrected.canonical_life_model_changed);
+    }
+
+    #[test]
+    fn target_replacement_requires_exact_explicit_correction_authority() {
+        let store = LifeModelLearningStore::new_in_memory().unwrap();
+        let mut invalid = capture("workspace:one", "message:one");
+        invalid.replaces_target = true;
+
+        assert!(store.capture_explicit_candidate(invalid).is_err());
         assert!(store
             .list_active_candidates("workspace:one", 20)
             .unwrap()

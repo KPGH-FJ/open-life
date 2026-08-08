@@ -1025,6 +1025,7 @@ export function ReadOnlySpineJourney({
         onDraftLifeModelChange={durable.draftLifeModelChange}
         onDraftLifeModelRollback={durable.draftLifeModelRollback}
         onDraftLifeModelExport={durable.draftLifeModelExport}
+        onConfirmLearningCandidate={durable.confirmLifeModelLearningCandidate}
         onDeleteLearningCandidate={durable.deleteLifeModelLearningCandidate}
         onRejectLearningCandidate={durable.rejectLifeModelLearningCandidate}
         onPauseLearningSuggestionClass={durable.pauseLifeModelLearningSuggestionClass}

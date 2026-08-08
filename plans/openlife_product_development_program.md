@@ -1293,6 +1293,19 @@ Rust 格式、严格 Clippy 和全仓 Rust 测试均通过；browser-shell 证�
 - 5.3B 仍不接入 Reflection、任务结果或 Provider，不创建 Proposal、不写 canonical
   LifeModel。真实来源提取继续属于 5.3C，Proposal 与物化继续属于 5.3D—5.3E，完整
   原生学习闭环仍属于 5.3F。
+- 5.3B 已以提交 `a49258b` 形成独立基线。5.3C 已完成待审源码：确定性本地提取只读取
+  当前 authenticated user instruction；工具输出、网页内容和第三方文本没有进入用户
+  画像的入口。完成任务可以提供一份 task outcome 证据，只有真实写入任务记录的有界
+  Reflection 才获得 Reflection 来源标签；同一任务的两者共享一个独立边界，不能把
+  单次任务冒充为两次独立支持；
+- 用户可以对候选明确反馈“这条符合我”，也可以用明确纠正替换同一窄目标的旧候选；
+  这些动作仍只改变 Observation/Candidate。并发删除与迟到反馈由事务绑定防止候选
+  复活，冲突候选不能用普通正向反馈绕过纠正流程；
+- 当前没有单独获用户允许的模型提取隐私路由，因此可选模型提取明确显示为 skipped，
+  没有调用 Provider 或网络。5.3C 没有创建 Proposal，也没有修改 canonical LifeModel；
+  Rust 格式、严格 Clippy、全仓 Rust 测试，前端格式、类型、250 项测试、production
+  build/absence guard 和 8 项 browser-shell 验收均通过。browser-shell 不作为真实
+  Tauri 原生闭环证据；Proposal 与产品审核继续属于 5.3D，完整原生验收仍属于 5.3F。
 
 第四阶段实际完成：
 

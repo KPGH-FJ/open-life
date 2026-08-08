@@ -6,6 +6,7 @@ import {
   draftLifeModelV2Change,
   draftLifeModelV2Export,
   draftLifeModelV2Rollback,
+  confirmLifeModelLearningCandidate,
   deleteLifeModelLearningCandidate,
   pauseLifeModelLearningSuggestionClass,
   rejectLifeModelLearningCandidate,
@@ -52,6 +53,7 @@ export interface DurableTruthDataSource {
   draftLifeModelChange(request: DraftLifeModelV2ChangeRequest): Promise<string>;
   draftLifeModelRollback(request: DraftLifeModelV2RollbackRequest): Promise<string>;
   draftLifeModelExport(request: DraftLifeModelV2ExportRequest): Promise<string>;
+  confirmLifeModelLearningCandidate(candidateId: string): Promise<void>;
   deleteLifeModelLearningCandidate(candidateId: string): Promise<void>;
   rejectLifeModelLearningCandidate(candidateId: string): Promise<void>;
   pauseLifeModelLearningSuggestionClass(candidateId: string): Promise<void>;
@@ -188,6 +190,18 @@ async function loadDurableTruth(): Promise<DurableTruthSnapshot> {
 
 export const tauriDurableTruthDataSource: DurableTruthDataSource = {
   loadDurableTruth,
+  async confirmLifeModelLearningCandidate(candidateId) {
+    const receipt = await confirmLifeModelLearningCandidate(candidateId);
+    if (
+      receipt.candidateId !== candidateId ||
+      receipt.status !== "reviewable" ||
+      receipt.sourceKind !== "user_feedback" ||
+      receipt.proposalCreated ||
+      receipt.canonicalLifeModelChanged
+    ) {
+      throw new Error("lifemodel_learning_candidate_confirm_receipt_unverified");
+    }
+  },
   async deleteLifeModelLearningCandidate(candidateId) {
     const receipt = await deleteLifeModelLearningCandidate(candidateId);
     if (

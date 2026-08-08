@@ -8,6 +8,7 @@ const tauriMocks = vi.hoisted(() => ({
   draftLifeModelV2Change: vi.fn(),
   draftLifeModelV2Rollback: vi.fn(),
   draftLifeModelV2Export: vi.fn(),
+  confirmLifeModelLearningCandidate: vi.fn(),
   deleteLifeModelLearningCandidate: vi.fn(),
   rejectLifeModelLearningCandidate: vi.fn(),
   pauseLifeModelLearningSuggestionClass: vi.fn(),
@@ -89,6 +90,31 @@ describe("durable truth Tauri data source", () => {
     await expect(
       tauriDurableTruthDataSource.deleteLifeModelLearningCandidate("candidate:one")
     ).rejects.toThrow("lifemodel_learning_candidate_delete_receipt_unverified");
+  });
+
+  it("accepts explicit candidate feedback without Proposal or LifeModel credit", async () => {
+    tauriMocks.confirmLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      status: "reviewable",
+      sourceKind: "user_feedback",
+      proposalCreated: false,
+      canonicalLifeModelChanged: false,
+    });
+
+    await tauriDurableTruthDataSource.confirmLifeModelLearningCandidate("candidate:one");
+
+    expect(tauriMocks.confirmLifeModelLearningCandidate).toHaveBeenCalledWith("candidate:one");
+
+    tauriMocks.confirmLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      status: "reviewable",
+      sourceKind: "user_feedback",
+      proposalCreated: true,
+      canonicalLifeModelChanged: false,
+    });
+    await expect(
+      tauriDurableTruthDataSource.confirmLifeModelLearningCandidate("candidate:one")
+    ).rejects.toThrow("lifemodel_learning_candidate_confirm_receipt_unverified");
   });
 
   it("accepts candidate suppression only with scrubbed content and no Proposal or LifeModel change", async () => {

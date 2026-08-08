@@ -60,7 +60,7 @@ export function useDurableTruthJourney(
   } | null>(null);
   const [learningAction, setLearningAction] = useState<{
     candidateId: string;
-    kind: "delete" | "reject" | "pause_class";
+    kind: "confirm" | "delete" | "reject" | "pause_class";
     error?: string;
   } | null>(null);
   const requestRef = useRef(0);
@@ -322,6 +322,36 @@ export function useDurableTruthJourney(
     },
     [announce, dataSource, learningAction, load]
   );
+  const confirmLifeModelLearningCandidate = useCallback(
+    async (candidateId: string): Promise<boolean> => {
+      if (!dataSource || learningAction) return false;
+      setLearningAction({ candidateId, kind: "confirm" });
+      try {
+        await dataSource.confirmLifeModelLearningCandidate(candidateId);
+        const refreshed = await load(false);
+        const candidate = refreshed.lifeModelEnvelope.data?.learning.candidates.find(
+          item => item.id === candidateId
+        );
+        if (
+          refreshed.lifeModelEnvelope.status === "error" ||
+          !candidate ||
+          candidate.status !== "reviewable" ||
+          !candidate.sourceKinds.includes("user_feedback")
+        ) {
+          throw new Error("lifemodel_learning_candidate_confirm_refresh_unverified");
+        }
+        setLearningAction(null);
+        announce("已记录“这条符合我”；它仍只是候选，没有创建 Proposal 或修改 LifeModel。");
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setLearningAction({ candidateId, kind: "confirm", error: reason });
+        announce(`候选反馈未记录：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, learningAction, load]
+  );
   const rejectLifeModelLearningCandidate = useCallback(
     async (candidateId: string): Promise<boolean> => {
       if (!dataSource || learningAction) return false;
@@ -393,6 +423,7 @@ export function useDurableTruthJourney(
     draftLifeModelChange,
     draftLifeModelRollback,
     draftLifeModelExport,
+    confirmLifeModelLearningCandidate,
     deleteLifeModelLearningCandidate,
     rejectLifeModelLearningCandidate,
     pauseLifeModelLearningSuggestionClass,

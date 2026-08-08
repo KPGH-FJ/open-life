@@ -25,6 +25,14 @@ use std::sync::Arc;
 use tauri::State;
 
 #[tauri::command]
+pub async fn confirm_lifemodel_learning_candidate(
+    candidate_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::life_model_learning::ConfirmLifeModelLearningCandidateReceipt, String> {
+    crate::life_model_learning::confirm_candidate_with_state(state.inner(), &candidate_id).await
+}
+
+#[tauri::command]
 pub async fn delete_lifemodel_learning_candidate(
     candidate_id: String,
     state: State<'_, Arc<AppState>>,

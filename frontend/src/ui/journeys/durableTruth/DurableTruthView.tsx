@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowRight,
   Brain,
+  CircleCheck,
   CirclePause,
   Eye,
   RefreshCw,
@@ -58,6 +59,15 @@ const learningStatusLabel: Record<LifeModelLearningCandidate["status"], string> 
   expired: "已过期",
 };
 
+const learningSourceLabel: Record<LifeModelLearningCandidate["sourceKinds"][number], string> = {
+  explicit_user_message: "用户明确表达",
+  task_outcome: "已完成任务",
+  agent_reflection: "任务复盘",
+  user_feedback: "用户反馈",
+  user_correction: "用户纠正",
+  model_extraction: "模型辅助提取",
+};
+
 export function DurableTruthView({
   snapshot,
   selectedItem,
@@ -81,6 +91,7 @@ export function DurableTruthView({
   onDraftLifeModelRollback,
   onDraftLifeModelExport,
   learningAction,
+  onConfirmLearningCandidate,
   onDeleteLearningCandidate,
   onRejectLearningCandidate,
   onPauseLearningSuggestionClass,
@@ -116,9 +127,10 @@ export function DurableTruthView({
   onDraftLifeModelExport: Parameters<typeof LifeModelV2ControlsPanel>[0]["onExport"];
   learningAction: {
     candidateId: string;
-    kind: "delete" | "reject" | "pause_class";
+    kind: "confirm" | "delete" | "reject" | "pause_class";
     error?: string;
   } | null;
+  onConfirmLearningCandidate: (candidateId: string) => Promise<boolean>;
   onDeleteLearningCandidate: (candidateId: string) => Promise<boolean>;
   onRejectLearningCandidate: (candidateId: string) => Promise<boolean>;
   onPauseLearningSuggestionClass: (candidateId: string) => Promise<boolean>;
@@ -378,6 +390,29 @@ export function DurableTruthView({
                         {candidate.independentSupportCount} 个独立来源 · 到期时间：
                         {candidate.expiresAt}
                       </small>
+                      <small>
+                        来源：
+                        {[...new Set(candidate.sourceKinds)]
+                          .map(source => learningSourceLabel[source])
+                          .join("、") || "未知"}
+                        {candidate.oppositionCount > 0
+                          ? ` · ${candidate.oppositionCount} 条反向证据`
+                          : ""}
+                      </small>
+                      {candidate.status !== "conflicted" &&
+                      !candidate.sourceKinds.includes("user_feedback") ? (
+                        <FoundationActionButton
+                          label="这条符合我"
+                          icon={<CircleCheck size={16} aria-hidden="true" />}
+                          loading={
+                            learningAction?.candidateId === candidate.id &&
+                            learningAction.kind === "confirm" &&
+                            !learningAction.error
+                          }
+                          loadingLabel="正在记录"
+                          onClick={() => void onConfirmLearningCandidate(candidate.id)}
+                        />
+                      ) : null}
                       <FoundationActionButton
                         label="删除这条候选"
                         icon={<Trash2 size={16} aria-hidden="true" />}
@@ -414,11 +449,13 @@ export function DurableTruthView({
                       {learningAction?.candidateId === candidate.id && learningAction.error ? (
                         <FoundationNotice
                           title={
-                            learningAction.kind === "delete"
-                              ? "候选未删除"
-                              : learningAction.kind === "reject"
-                                ? "候选未拒绝"
-                                : "这类建议未暂停"
+                            learningAction.kind === "confirm"
+                              ? "反馈未记录"
+                              : learningAction.kind === "delete"
+                                ? "候选未删除"
+                                : learningAction.kind === "reject"
+                                  ? "候选未拒绝"
+                                  : "这类建议未暂停"
                           }
                           tone="error"
                           live

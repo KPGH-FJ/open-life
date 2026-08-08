@@ -7847,6 +7847,13 @@ async fn build_successful_kernel_command_surface_result(
             );
         }
     }
+    let task_outcome = if !pending_read_tool_blockers.is_empty() {
+        "blocked"
+    } else if !pending_proposal_ids.is_empty() {
+        "waiting_review"
+    } else {
+        "completed"
+    };
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
@@ -7890,33 +7897,72 @@ async fn build_successful_kernel_command_surface_result(
         )
         .await,
     );
-    execution_transcript.extend(
-        append_task_scoped_agent_reflection(
+    let reflection_entries = append_task_scoped_agent_reflection(
+        state,
+        task_session_id,
+        TaskScopedAgentReflection {
+            run_id: &agent_run.id,
+            outcome: task_outcome,
+            successful_action_count: tool_calls
+                .iter()
+                .filter(|call| matches!(call.status, ToolCallStatus::Success))
+                .count(),
+            failed_or_unknown_action_count: tool_calls
+                .iter()
+                .filter(|call| !matches!(call.status, ToolCallStatus::Success))
+                .count(),
+            proposal_count: visible_proposal_ids.len(),
+            business_fact_written: false,
+        },
+    )
+    .await;
+    let reflection_recorded = !reflection_entries.is_empty();
+    execution_transcript.extend(reflection_entries);
+    if task_outcome == "completed" {
+        match crate::life_model_learning::capture_completed_task_learning_evidence(
             state,
             task_session_id,
-            TaskScopedAgentReflection {
-                run_id: &agent_run.id,
-                outcome: if !pending_read_tool_blockers.is_empty() {
-                    "blocked"
-                } else if !pending_proposal_ids.is_empty() {
-                    "waiting_review"
-                } else {
-                    "completed"
-                },
-                successful_action_count: tool_calls
-                    .iter()
-                    .filter(|call| matches!(call.status, ToolCallStatus::Success))
-                    .count(),
-                failed_or_unknown_action_count: tool_calls
-                    .iter()
-                    .filter(|call| !matches!(call.status, ToolCallStatus::Success))
-                    .count(),
-                proposal_count: visible_proposal_ids.len(),
-                business_fact_written: false,
-            },
+            &agent_run.id,
+            user_text,
+            reflection_recorded,
         )
-        .await,
-    );
+        .await
+        {
+            Ok(receipt) if receipt.deterministic_candidate_found => {
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::Observation,
+                        "A completed task and any recorded bounded Reflection added evidence to a LifeModel learning candidate; no proposal or canonical LifeModel write occurred.",
+                        serde_json::json!({
+                            "artifactType": "life_model_learning_task_evidence",
+                            "candidateIds": receipt.candidate_ids,
+                            "observationIds": receipt.observation_ids,
+                            "sourceKinds": if reflection_recorded {
+                                vec!["task_outcome", "agent_reflection"]
+                            } else {
+                                vec!["task_outcome"]
+                            },
+                            "optionalModelExtractionStatus": receipt.optional_model_extraction_status,
+                            "proposalCreated": receipt.proposal_created,
+                            "directLifeModelWrite": receipt.canonical_life_model_changed,
+                            "directWritesExecuted": false,
+                            "acceptedDurableTruthWritten": false,
+                        }),
+                    )
+                    .await,
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "[MainChatKernel] optional LifeModel task learning evidence skipped: {}",
+                    error
+                );
+            }
+        }
+    }
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;

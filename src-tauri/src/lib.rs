@@ -153,9 +153,10 @@ pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{
-    delete_lifemodel_learning_candidate, draft_legacy_lifemodel_migration,
-    draft_lifemodel_v2_change, draft_lifemodel_v2_export, draft_lifemodel_v2_rollback,
-    pause_lifemodel_learning_suggestion_class, reject_lifemodel_learning_candidate,
+    confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
+    draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
+    draft_lifemodel_v2_rollback, pause_lifemodel_learning_suggestion_class,
+    reject_lifemodel_learning_candidate,
 };
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
@@ -942,6 +943,7 @@ pub fn run() {
             draft_lifemodel_v2_change,
             draft_lifemodel_v2_rollback,
             draft_lifemodel_v2_export,
+            confirm_lifemodel_learning_candidate,
             delete_lifemodel_learning_candidate,
             reject_lifemodel_learning_candidate,
             pause_lifemodel_learning_suggestion_class,

@@ -2703,6 +2703,7 @@ export type LifeModelLearningCandidate = {
   targetKey: string;
   suggestionClass: string;
   supportCount: number;
+  oppositionCount: number;
   independentSupportCount: number;
   status:
     | "accumulating"
@@ -2716,6 +2717,14 @@ export type LifeModelLearningCandidate = {
   sensitivity: "internal";
   observationIds: string[];
   sourceRefs: string[];
+  sourceKinds: Array<
+    | "explicit_user_message"
+    | "task_outcome"
+    | "agent_reflection"
+    | "user_feedback"
+    | "user_correction"
+    | "model_extraction"
+  >;
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
@@ -2731,6 +2740,14 @@ export type DeleteLifeModelLearningCandidateReceipt = {
   candidateId: string;
   deleted: boolean;
   proposalDeleted: false;
+  canonicalLifeModelChanged: false;
+};
+
+export type ConfirmLifeModelLearningCandidateReceipt = {
+  candidateId: string;
+  status: "reviewable";
+  sourceKind: "user_feedback";
+  proposalCreated: false;
   canonicalLifeModelChanged: false;
 };
 
@@ -4338,6 +4355,15 @@ export async function deleteLifeModelLearningCandidate(
 ): Promise<DeleteLifeModelLearningCandidateReceipt> {
   return safeInvoke<DeleteLifeModelLearningCandidateReceipt>(
     "delete_lifemodel_learning_candidate",
+    { candidateId, candidate_id: candidateId }
+  );
+}
+
+export async function confirmLifeModelLearningCandidate(
+  candidateId: string
+): Promise<ConfirmLifeModelLearningCandidateReceipt> {
+  return safeInvoke<ConfirmLifeModelLearningCandidateReceipt>(
+    "confirm_lifemodel_learning_candidate",
     { candidateId, candidate_id: candidateId }
   );
 }
