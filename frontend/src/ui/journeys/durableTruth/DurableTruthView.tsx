@@ -111,6 +111,7 @@ export function DurableTruthView({
 
   const currentView = lifeModel?.currentViewSummary;
   const canonical = lifeModel?.canonicalSummary;
+  const canonicalView = lifeModel?.truthMode === "canonical" ? (canonical ?? null) : null;
   const sortedDimensions = [...(lifeModel?.dimensionSummaries ?? [])].sort(
     (left, right) => dimensionOrder.indexOf(left.id) - dimensionOrder.indexOf(right.id)
   );
@@ -212,7 +213,9 @@ export function DurableTruthView({
                 <div>
                   <span>当前理解</span>
                   <h2 id="durable-current-title">
-                    {currentView?.label ?? canonical?.title ?? "长期理解尚未建立"}
+                    {canonicalView
+                      ? canonicalView.title
+                      : (currentView?.label ?? "长期理解尚未建立")}
                   </h2>
                 </div>
                 <FoundationStatusLabel
@@ -227,11 +230,20 @@ export function DurableTruthView({
                 />
               </header>
               <p>
-                {currentView?.summary ??
-                  canonical?.summary ??
-                  "后端没有提供可展示的当前或规范摘要；页面不会从旧 LifeModel 对象补造内容。"}
+                {canonicalView
+                  ? canonicalView.summary
+                  : (currentView?.summary ??
+                    "后端没有提供可展示的当前或规范摘要；页面不会从旧 LifeModel 对象补造内容。")}
               </p>
-              {sortedDimensions.length > 0 && (
+              {canonicalView ? (
+                <small>
+                  {canonicalView.versionLabel}
+                  {canonicalView.lastMaterializedAt
+                    ? ` · 确认于 ${canonicalView.lastMaterializedAt}`
+                    : " · 确认时间未知"}
+                </small>
+              ) : null}
+              {!canonicalView && sortedDimensions.length > 0 && (
                 <dl className="ol-durable-dimensions">
                   {sortedDimensions.map(dimension => (
                     <div key={dimension.id} data-stale={String(dimension.stale)}>

@@ -5,11 +5,12 @@ use crate::life_state_projection::{get_life_state_projection_with_state, LifeSta
 use crate::memory_gateway;
 use crate::state::AppState;
 use openlife_core::agent::{
-    build_life_model_view_model_envelope, AgentProposal, LifeModelCurrentChangeInput,
-    LifeModelCurrentViewInput, LifeModelMemoryTierStatsInput, LifeModelProjectionInput,
-    LifeModelViewModel, LifeModelViewModelBuildInput, ReviewItem, ViewModelEnvelope,
-    ViewModelWarning, ViewModelWarningSeverity,
+    build_life_model_view_model_envelope, AgentProposal, LifeModelCanonicalV2Input,
+    LifeModelCurrentChangeInput, LifeModelCurrentViewInput, LifeModelMemoryTierStatsInput,
+    LifeModelProjectionInput, LifeModelViewModel, LifeModelViewModelBuildInput, ReviewItem,
+    ViewModelEnvelope, ViewModelWarning, ViewModelWarningSeverity,
 };
+use openlife_core::life_model::v2::{LifeModelVersionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID};
 use std::sync::Arc;
 use tauri::State;
 
@@ -28,14 +29,38 @@ pub(crate) async fn get_life_model_view_model_with_state(
     let now = chrono::Utc::now().to_rfc3339();
     let mut warnings = Vec::new();
 
-    let life_model_result = {
+    let (life_model_result, canonical_v2_result) = {
         let manager = state.life_model_manager.lock().await;
-        manager.load_existing()
+        let legacy = manager.load_existing();
+        let canonical = manager.load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
+        (legacy, canonical)
     };
-    let (life_model, load_error) = match life_model_result {
+    let (life_model, legacy_load_error) = match life_model_result {
         Ok(model) => (model, None),
         Err(err) => (None, Some(format!("life_model_load_failed: {err}"))),
     };
+    let (canonical_v2, canonical_v2_error) = match canonical_v2_result {
+        Ok(version) => (version.map(canonical_v2_input), None),
+        Err(err) => (
+            None,
+            Some(format!("lifemodel_v2_canonical_load_failed: {err}")),
+        ),
+    };
+    let load_error = canonical_v2_error.or_else(|| {
+        if canonical_v2.is_none() {
+            legacy_load_error
+        } else {
+            if let Some(error) = legacy_load_error {
+                warnings.push(warning(
+                    "lifemodel_legacy_compatibility_unavailable",
+                    format!(
+                        "Canonical LifeModel v2 remains readable, but the legacy YAML compatibility view failed: {error}"
+                    ),
+                ));
+            }
+            None
+        }
+    });
 
     let current_view = match life_model.as_ref() {
         Some(model) => match get_life_model_current_view_for_model_with_state(state, model).await {
@@ -92,6 +117,7 @@ pub(crate) async fn get_life_model_view_model_with_state(
     };
 
     let mut envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+        canonical_v2,
         life_model,
         current_view,
         projection,
@@ -105,6 +131,20 @@ pub(crate) async fn get_life_model_view_model_with_state(
     });
     envelope.warnings.extend(warnings);
     Ok(envelope)
+}
+
+fn canonical_v2_input(version: LifeModelVersionV2) -> LifeModelCanonicalV2Input {
+    LifeModelCanonicalV2Input {
+        model_id: version.model_id,
+        schema_version: version.schema_version,
+        model_version: version.model_version,
+        parent_version: version.parent_version,
+        document_digest: version.document_digest,
+        summary: version.document.summary(),
+        item_count: version.document.total_item_count(),
+        updated_at: Some(version.created_at),
+        source_refs: version.source_refs,
+    }
 }
 
 async fn load_proposals(
@@ -201,5 +241,45 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
         message: message.into(),
         severity: ViewModelWarningSeverity::Warning,
         evidence_refs: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::life_model::v2::{
+        LifeModelDocumentV2, LifeModelStatementV2, LIFE_MODEL_V2_SCHEMA_VERSION,
+    };
+
+    #[test]
+    fn shipped_read_model_preserves_exact_canonical_version_identity() {
+        let mut document = LifeModelDocumentV2::empty(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
+        document.values.push(LifeModelStatementV2 {
+            id: "value:autonomy".into(),
+            statement: "User autonomy matters.".into(),
+            source_refs: vec!["proposal:accepted-2".into()],
+            confirmed_at: "2026-08-08T10:00:00Z".into(),
+        });
+        let version = LifeModelVersionV2 {
+            model_id: DEFAULT_LIFE_MODEL_V2_MODEL_ID.into(),
+            schema_version: LIFE_MODEL_V2_SCHEMA_VERSION.into(),
+            model_version: 2,
+            parent_version: Some(1),
+            parent_digest: Some("sha256:parent".into()),
+            document_digest: document.digest().unwrap(),
+            version_digest: "sha256:test-version".into(),
+            document,
+            materialization_id: "proposal:accepted-2".into(),
+            source_refs: vec!["proposal:accepted-2".into()],
+            created_at: "2026-08-08T10:01:00Z".into(),
+        };
+
+        let input = canonical_v2_input(version);
+
+        assert_eq!(input.model_id, DEFAULT_LIFE_MODEL_V2_MODEL_ID);
+        assert_eq!(input.model_version, 2);
+        assert_eq!(input.parent_version, Some(1));
+        assert_eq!(input.item_count, 1);
+        assert_eq!(input.source_refs, vec!["proposal:accepted-2"]);
     }
 }

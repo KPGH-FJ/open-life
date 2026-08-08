@@ -6,9 +6,10 @@ Source-backed description of the current LifeModel implementation and write
 governance under ADR 0016. LifeModel is the user-owned long-term model; it is
 not Agent Memory, business state, policy, audit, or a general heuristic system.
 
-The current repository still contains a YAML model and a governed
-proposal/write-gateway path. Canonical truth promotion remains proposal-first
-and gateway-bound.
+The repository now contains a validated v2 document schema and append-only
+SQLite version owner alongside the legacy YAML compatibility owner. Canonical
+truth promotion remains proposal-first and gateway-bound; existing YAML data
+has not been migrated or switched to the v2 write path.
 
 ## Authority
 
@@ -20,12 +21,13 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-06 during Phase 5 architecture-boundary implementation.
+2026-08-08 during Phase 5.2A structured canonical-owner implementation.
 
 ## Source map
 
 - `plans/adr/0016-agent-memory-lifemodel-domain-boundaries.md`
 - `openlife-core/src/life_model.rs`
+- `openlife-core/src/life_model/v2.rs`
 - `openlife-core/src/life_model/patch.rs`
 - `openlife-core/src/life_model/patch_store.rs`
 - `openlife-core/src/life_model_write_gateway.rs`
@@ -46,17 +48,35 @@ reviewed by its real owner and may be narrowed or removed in later slices.
 
 ## Current Model Shape
 
-`openlife-core/src/life_model.rs` defines the current LifeModel structure:
+`openlife-core/src/life_model.rs` defines the legacy LifeModel structure:
 metadata, identity, goals, capabilities, state, relationships, preferences, and
 evolution rules. It also defines a `LifeModelHSCompatibilityView` and provenance
 fields that explicitly mark the compatibility view as not accepted source of
 truth and not durable truth materialization.
 
-The manager still loads and saves `life_model.yaml`. Structured accepted change
-records and gateway checks govern mutations; YAML is the deterministic
-human-readable representation and must not become a second independently
-writable truth. The complete structured-store/YAML migration remains later
-Phase 5 work.
+New empty legacy skeletons no longer invent a focus, health state, mood, stress,
+fulfilment, or energy value. Existing YAML values continue to load exactly as
+stored and are not silently rewritten.
+
+`openlife-core/src/life_model/v2.rs` defines the narrower long-term user model:
+identity and self-definition, values, long-term goal direction and meaning,
+stable preferences, personal boundaries, important relationships, user
+capabilities and stable resources, decision principles, and collaboration
+preferences. Collection items have stable IDs, confirmation timestamps, and
+minimal source refs. Operational goal progress/deadlines and unknown fields are
+rejected by schema deserialization or validation.
+
+The v2 SQLite owner stores immutable JSON documents with schema version, model
+version, parent version/digest, document digest, materialization identity,
+source refs, and creation time. Commits require the exact current parent and are
+idempotent only for identical content. Reads revalidate schema and digest.
+Merely opening `/life-model` does not create the database or an empty model.
+
+`get_life_model_view_model` consumes an existing v2 head and gives canonical
+credit only to a non-empty validated version. Without one, existing YAML remains
+the compatibility owner. The v2 store does not yet accept product writes, YAML
+has not been migrated, and the current proposal materializer still targets the
+legacy governed gateway; those are later 5.2 slices.
 
 ## Patch And Proposal Path
 
@@ -97,6 +117,10 @@ non-truth compatibility. Automatic learning is blocked.
 It materializes accepted LifeModel proposals by checking base hash, applying the
 patch, saving the model through the gateway, recording patch state, and writing
 metadata-safe audit details.
+
+This gateway currently materializes the legacy YAML shape. It does not receive
+v2 canonical-store credit until a later slice replaces its patch allowlist and
+commit path with exact v2 document versions.
 
 `src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
 contexts. Governed manual override, restore/import, source-data compatibility,

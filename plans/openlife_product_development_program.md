@@ -689,6 +689,33 @@ summary 后可从 canonical transcript 重建。
 退出标准：结构化 store 与 YAML 不存在双写权威；用户能看懂、导出、修改和
 回滚自己的模型；State、Tasks、Memory 与 LifeModel 的职责没有重叠。
 
+###### 5.2A 空模型语义与版本化 canonical owner
+
+用户能力：新建或尚未建立 LifeModel 的用户看到 empty/unknown，不再获得虚构的
+健康、情绪、能量或当前目标；后端开始能够读取经过 schema 验证的结构化 LifeModel
+版本，并在已有 canonical version 时通过现有 `LifeModelViewModel` 展示版本与摘要。
+
+- 当前入口：`LifeModelManager`、`get_life_model_view_model` 与既有 `/life-model`；
+  新增的 SQLite version store 是 v2 结构化文档的唯一 owner，现有 YAML 在本切片
+  仍是尚未迁移用户的兼容 owner；
+- v2 文档只包含身份/自我定义、价值观、长期目标、稳定偏好、个人边界、重要关系、
+  用户长期能力与资源、决策原则和长期协作方式；所有集合元素使用稳定 ID，并携带
+  用户确认时间与最小 source ref；
+- store 只接受 schema 验证通过、摘要匹配、精确 parent version/digest 的 append-only
+  commit；同一 materialization identity 只能幂等重放同一内容；空 store 的读取不
+  自动创建画像或迁移数据；
+- 正常场景：空文档保持 empty；首个有效版本和后续精确父版本提交可跨 reopen 读取，
+  同一文档生成确定性 JSON digest 与 YAML；
+- 失败反例：旧/未知字段、短期进度/截止日期、无来源条目、重复稳定 ID、错误父版本、
+  错误父摘要、同 identity 不同内容、被篡改 document/digest 全部 fail-closed；
+- 本切片不迁移现有 YAML、不切换运行时读取、不开放 UI/YAML 编辑、不应用 proposal、
+  不实现 rollback，也不建立自动学习或候选系统；
+- 被替代路径：只移除新 profile 的虚构默认画像。旧 YAML manager、Builder 4D、旧 patch
+  materializer 因尚未完成迁移继续保留并明确为后续替换对象。
+
+退出标准：空模型无虚构事实；v2 schema/store 有真实 shipped read consumer；版本、
+父版本、摘要、来源和重放边界由自动化证明；未发生真实用户数据迁移或静默写入。
+
 ##### 5.3 建立真实学习闭环
 
 目标：从日常使用中稳定产生少量、高质量、可物化的 LifeModel proposal。
@@ -895,10 +922,10 @@ versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户�
 长上下文压缩”已于提交 `a21d9f4` 完成并经用户确认。5.1C“Workspace/Project
 Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显式跨会话 Memory
 生命周期”已于提交 `177b144` 完成并经用户确认。5.1E“混合检索与召回解释”已经
-于提交 `7110e99` 完成并经用户确认。5.1F“用户控制界面与原生验收”已完成实现、
-自动化门禁和精确 debug App 的只读原生界面核对，当前停在用户审阅与提交边界；
-尚未进入 5.2。原生核对没有执行真实 Memory 写动作，动作闭环信用来自隔离产品测试
-与后端命令测试，不把只读 UI 浏览冒充真实写入试用。**
+于提交 `7110e99` 完成并经用户确认。5.1F“用户控制界面与原生验收”已于提交
+`653693b` 完成并经用户确认。5.2A“空模型语义与版本化 canonical owner”已完成
+实现、自审和全量门禁，当前停在用户审阅与提交边界；尚未开始既有 YAML 数据迁移、
+v2 proposal materialization 或 5.2 后续切片。**
 
 第五阶段第一步实际完成：
 

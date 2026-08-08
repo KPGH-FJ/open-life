@@ -888,27 +888,10 @@ impl LifeModel {
                 tools: vec![],
                 knowledge_domains: vec![],
             },
-            state: State {
-                current_focus: "构建人生模型".to_string(),
-                health_status: HealthStatus {
-                    physical: "良好".to_string(),
-                    mental: "积极".to_string(),
-                    energy_level: 7,
-                },
-                emotional_state: EmotionalState {
-                    current_mood: "期待".to_string(),
-                    stress_level: 3,
-                    fulfillment_score: 6,
-                },
-                recent_reflections: vec![],
-                open_questions: vec![],
-                focus_areas: vec![],
-                recent_events: vec![],
-                habit_streaks: vec![],
-                custom_dimensions: vec![],
-                alerts: vec![],
-                last_updated: None,
-            },
+            // An unbuilt LifeModel is unknown, not a fictional healthy or
+            // optimistic user state. Existing legacy YAML values are still
+            // loaded as written; only new empty profiles use this skeleton.
+            state: State::default(),
             relationships: Relationships::default(),
             preferences: Preferences::default(),
             evolution_rules: vec![],
@@ -1781,6 +1764,22 @@ impl LifeModelManager {
         self.data_dir.join("hs_asset_authority.db")
     }
 
+    pub fn v2_store_path(&self) -> PathBuf {
+        self.data_dir.join("life_model_v2.db")
+    }
+
+    /// Open the append-only structured v2 owner. Merely opening or reading an
+    /// empty store does not create a LifeModel version or migrate legacy YAML.
+    /// Read the structured owner without creating a database as a side effect
+    /// of opening the product surface.
+    pub fn load_v2_current(&self, model_id: &str) -> Result<Option<v2::LifeModelVersionV2>> {
+        let path = self.v2_store_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        v2::LifeModelV2Store::open(path)?.current(model_id)
+    }
+
     pub fn load_existing(&self) -> Result<Option<LifeModel>> {
         let path = self.data_dir.join("life_model.yaml");
         if !path.exists() {
@@ -1857,6 +1856,7 @@ fn sort_dedup_lifemodel(values: &mut Vec<String>) {
 
 pub mod patch;
 pub mod patch_store;
+pub mod v2;
 
 #[cfg(test)]
 mod tests {
@@ -1890,6 +1890,13 @@ mod tests {
     fn default_model_is_effectively_empty() {
         let model = LifeModel::default_model();
         assert!(model.is_effectively_empty());
+        assert!(model.state.current_focus.is_empty());
+        assert!(model.state.health_status.physical.is_empty());
+        assert!(model.state.health_status.mental.is_empty());
+        assert_eq!(model.state.health_status.energy_level, 0);
+        assert!(model.state.emotional_state.current_mood.is_empty());
+        assert_eq!(model.state.emotional_state.stress_level, 0);
+        assert_eq!(model.state.emotional_state.fulfillment_score, 0);
     }
 
     #[test]
@@ -2020,6 +2027,15 @@ mod tests {
         mgr.save(&model).unwrap();
         let loaded = mgr.load().unwrap();
         assert_eq!(loaded.identity.name, "Test");
+    }
+
+    #[test]
+    fn manager_v2_read_does_not_create_a_store_or_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = LifeModelManager::new(directory.path());
+
+        assert!(manager.load_v2_current("primary").unwrap().is_none());
+        assert!(!manager.v2_store_path().exists());
     }
 
     #[test]

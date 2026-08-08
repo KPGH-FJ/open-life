@@ -332,7 +332,21 @@ pub struct LifeModelMemoryTierStatsInput {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct LifeModelCanonicalV2Input {
+    pub model_id: String,
+    pub schema_version: String,
+    pub model_version: u64,
+    pub parent_version: Option<u64>,
+    pub document_digest: String,
+    pub summary: String,
+    pub item_count: usize,
+    pub updated_at: Option<String>,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct LifeModelViewModelBuildInput {
+    pub canonical_v2: Option<LifeModelCanonicalV2Input>,
     pub life_model: Option<LifeModel>,
     pub current_view: Option<LifeModelCurrentViewInput>,
     pub projection: Option<LifeModelProjectionInput>,
@@ -390,7 +404,11 @@ pub fn build_life_model_view_model_envelope(
         .life_model
         .as_ref()
         .is_some_and(|model| !model.is_effectively_empty());
-    let status = loaded_status(&input, meaningful_life_model);
+    let meaningful_canonical = input
+        .canonical_v2
+        .as_ref()
+        .is_some_and(|canonical| canonical.item_count > 0);
+    let status = loaded_status(&input, meaningful_life_model, meaningful_canonical);
     let current_view_summary =
         build_current_view_summary(&input, &source_refs, meaningful_life_model);
     let dimension_summaries = build_dimension_summaries(
@@ -427,8 +445,13 @@ pub fn build_life_model_view_model_envelope(
     let risky_action_blocker = risky_action_blocker(&input, status);
 
     let data = LifeModelViewModel {
-        truth_mode: derive_truth_mode(status, current_view_summary.as_ref(), meaningful_life_model),
-        canonical_summary: None,
+        truth_mode: derive_truth_mode(
+            status,
+            current_view_summary.as_ref(),
+            meaningful_life_model,
+            meaningful_canonical,
+        ),
+        canonical_summary: build_canonical_summary(&input, meaningful_canonical),
         current_view_summary,
         dimension_summaries: dimension_summaries.clone(),
         trust_quality_state: build_trust_quality_state(
@@ -445,12 +468,7 @@ pub fn build_life_model_view_model_envelope(
         related_review_item_refs,
         memory_linkage: build_memory_linkage(&input, &source_refs),
         source_refs: source_refs.clone(),
-        contract_limitations: vec![
-            "Backend owns this R3 LifeModelViewModel, but canonical truth is not marked ready without materialized provenance.".into(),
-            "Accepted proposal decisions remain approved-not-applied unless patch, snapshot, and current-value evidence prove applied.".into(),
-            "Memory linkage remains partial until R5 MemoryViewModel owns the Memory/LifeModel relation.".into(),
-            "Manual overrides are governed and separate from proposal-first review materialization.".into(),
-        ],
+        contract_limitations: build_contract_limitations(meaningful_canonical),
     };
 
     let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(data));
@@ -483,19 +501,24 @@ pub fn build_life_model_view_model_envelope(
 fn loaded_status(
     input: &LifeModelViewModelBuildInput,
     meaningful_life_model: bool,
+    meaningful_canonical: bool,
 ) -> ViewModelStatus {
     if input.stale {
         return ViewModelStatus::Stale;
     }
-    if input
-        .projection
-        .as_ref()
-        .is_some_and(|projection| projection.model_empty)
+    if !meaningful_canonical
+        && input
+            .projection
+            .as_ref()
+            .is_some_and(|projection| projection.model_empty)
         && !current_view_has_value(input.current_view.as_ref())
     {
         return ViewModelStatus::Empty;
     }
-    if !meaningful_life_model && !current_view_has_value(input.current_view.as_ref()) {
+    if !meaningful_canonical
+        && !meaningful_life_model
+        && !current_view_has_value(input.current_view.as_ref())
+    {
         return ViewModelStatus::Empty;
     }
     ViewModelStatus::Ready
@@ -511,14 +534,71 @@ fn derive_truth_mode(
     status: ViewModelStatus,
     current_view_summary: Option<&LifeModelCurrentViewSummary>,
     meaningful_life_model: bool,
+    meaningful_canonical: bool,
 ) -> LifeModelTruthMode {
     if matches!(status, ViewModelStatus::Error) {
         return LifeModelTruthMode::Unavailable;
+    }
+    if meaningful_canonical {
+        return LifeModelTruthMode::Canonical;
     }
     if current_view_summary.is_some() || meaningful_life_model {
         return LifeModelTruthMode::CurrentCompatibility;
     }
     LifeModelTruthMode::Unknown
+}
+
+fn build_canonical_summary(
+    input: &LifeModelViewModelBuildInput,
+    meaningful_canonical: bool,
+) -> Option<LifeModelCanonicalSummary> {
+    let canonical = input
+        .canonical_v2
+        .as_ref()
+        .filter(|_| meaningful_canonical)?;
+    Some(LifeModelCanonicalSummary {
+        life_model_ref: BackendEntityRef {
+            id: format!(
+                "lifemodel-v2:{}:{}",
+                canonical.model_id, canonical.model_version
+            ),
+            kind: BackendEntityKind::LifeModel,
+            label: "Canonical LifeModel v2".into(),
+            href: None,
+        },
+        title: "已确认的长期个人模型".into(),
+        summary: canonical.summary.clone(),
+        version_label: format!(
+            "{} · version {}",
+            canonical.schema_version, canonical.model_version
+        ),
+        last_materialized_at: canonical.updated_at.clone(),
+        evidence_refs: canonical
+            .source_refs
+            .iter()
+            .map(|source_ref| EvidenceRef {
+                id: format!("lifemodel-v2-source:{source_ref}"),
+                label: source_ref.clone(),
+                source: EvidenceSource::LifeModel,
+                sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+            })
+            .collect(),
+    })
+}
+
+fn build_contract_limitations(meaningful_canonical: bool) -> Vec<String> {
+    let mut limitations = vec![
+        "Accepted proposal decisions remain approved-not-applied unless the canonical materializer proves an exact committed version.".into(),
+        "Memory remains a separate owner and is not copied into the canonical LifeModel document.".into(),
+        "Manual overrides are governed and separate from proposal-first review materialization.".into(),
+    ];
+    if !meaningful_canonical {
+        limitations.insert(
+            0,
+            "No non-empty structured LifeModel v2 version is available; legacy YAML remains a compatibility owner until governed migration.".into(),
+        );
+    }
+    limitations
 }
 
 fn build_current_view_summary(
@@ -954,7 +1034,7 @@ fn build_memory_linkage(
             .collect(),
         linkage_status,
         tier_summary,
-        owner_status: LifeModelOwnerStatus::Phase2Required,
+        owner_status: LifeModelOwnerStatus::Partial,
     }
 }
 
@@ -966,24 +1046,30 @@ fn build_warnings(
 ) -> Vec<ViewModelWarning> {
     let mut warnings = vec![
         warning(
-            "lifemodel.canonical_summary_unavailable",
-            "Canonical LifeModel summary remains unavailable because no refreshed materialized provenance proves canonical truth.",
-            ViewModelWarningSeverity::Info,
-            source_refs.to_vec(),
-        ),
-        warning(
             "lifemodel.materialization_fail_closed",
-            "Accepted LifeModel proposals are decision state only unless patch, snapshot, and current-value evidence prove materialization.",
+            "Accepted LifeModel proposals are decision state only unless an exact canonical version commit proves materialization.",
             ViewModelWarningSeverity::Warning,
             source_refs.to_vec(),
         ),
         warning(
             "lifemodel.memory_linkage_limited",
-            "Memory linkage is a backend-owned partial summary until R5 MemoryViewModel owns memory truth.",
+            "Memory linkage is a compatibility count only; MemoryViewModel remains the separate owner and its contents are not canonical LifeModel truth.",
             ViewModelWarningSeverity::Info,
             source_refs.to_vec(),
         ),
     ];
+    if input
+        .canonical_v2
+        .as_ref()
+        .is_none_or(|canonical| canonical.item_count == 0)
+    {
+        warnings.push(warning(
+            "lifemodel.canonical_summary_unavailable",
+            "No non-empty structured LifeModel v2 version is available; canonical truth is not inferred from compatibility data.",
+            ViewModelWarningSeverity::Info,
+            source_refs.to_vec(),
+        ));
+    }
     if status == ViewModelStatus::Empty {
         warnings.push(warning(
             "lifemodel.empty",
@@ -1089,6 +1175,23 @@ fn request_update_action(disabled_reason: Option<String>) -> ProductAction {
 
 fn collect_source_refs(input: &LifeModelViewModelBuildInput) -> Vec<EvidenceRef> {
     let mut refs = Vec::new();
+    if let Some(canonical) = &input.canonical_v2 {
+        refs.push(EvidenceRef {
+            id: format!(
+                "lifemodel-v2:{}:{}:{}",
+                canonical.model_id, canonical.model_version, canonical.document_digest
+            ),
+            label: format!("Canonical LifeModel v2 version {}", canonical.model_version),
+            source: EvidenceSource::LifeModel,
+            sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+        });
+        refs.extend(canonical.source_refs.iter().map(|source_ref| EvidenceRef {
+            id: format!("lifemodel-v2-source:{source_ref}"),
+            label: source_ref.clone(),
+            source: EvidenceSource::LifeModel,
+            sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+        }));
+    }
     if let Some(projection) = &input.projection {
         if projection.source_refs.is_empty() {
             refs.push(EvidenceRef {
@@ -1365,6 +1468,66 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code == "lifemodel.empty"));
+    }
+
+    #[test]
+    fn structured_v2_version_is_the_only_canonical_summary_credit() {
+        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            canonical_v2: Some(LifeModelCanonicalV2Input {
+                model_id: "primary".into(),
+                schema_version: "openlife.lifemodel.v2".into(),
+                model_version: 3,
+                parent_version: Some(2),
+                document_digest: "sha256:canonical".into(),
+                summary: "2 confirmed long-term items.".into(),
+                item_count: 2,
+                updated_at: Some("2026-08-08T10:00:00Z".into()),
+                source_refs: vec!["proposal:accepted-3".into()],
+            }),
+            life_model: Some(LifeModel::default_model()),
+            projection: Some(LifeModelProjectionInput {
+                model_empty: true,
+                ..Default::default()
+            }),
+            now: Some("2026-08-08T10:01:00Z".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(envelope.status, ViewModelStatus::Ready);
+        let data = envelope.data.expect("data");
+        assert_eq!(data.truth_mode, LifeModelTruthMode::Canonical);
+        let summary = data.canonical_summary.expect("canonical summary");
+        assert_eq!(summary.version_label, "openlife.lifemodel.v2 · version 3");
+        assert_eq!(summary.summary, "2 confirmed long-term items.");
+        assert!(envelope
+            .warnings
+            .iter()
+            .all(|warning| warning.code != "lifemodel.canonical_summary_unavailable"));
+    }
+
+    #[test]
+    fn empty_v2_version_does_not_create_canonical_truth() {
+        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            canonical_v2: Some(LifeModelCanonicalV2Input {
+                model_id: "primary".into(),
+                schema_version: "openlife.lifemodel.v2".into(),
+                model_version: 1,
+                parent_version: None,
+                document_digest: "sha256:empty".into(),
+                summary: "No confirmed long-term user information has been materialized.".into(),
+                item_count: 0,
+                updated_at: Some("2026-08-08T10:00:00Z".into()),
+                source_refs: vec!["proposal:empty".into()],
+            }),
+            life_model: Some(LifeModel::default_model()),
+            now: Some("2026-08-08T10:01:00Z".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(envelope.status, ViewModelStatus::Empty);
+        let data = envelope.data.expect("data");
+        assert_eq!(data.truth_mode, LifeModelTruthMode::Unknown);
+        assert!(data.canonical_summary.is_none());
     }
 
     #[test]

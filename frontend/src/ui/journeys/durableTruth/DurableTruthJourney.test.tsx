@@ -40,6 +40,48 @@ describe("Workbench durable truth journey", () => {
     expect(document.getElementById("intelligence-panel-life-model")).not.toBeVisible();
   });
 
+  it("shows a structured canonical version instead of the legacy compatibility summary", async () => {
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    if (snapshot.lifeModelEnvelope.data) {
+      snapshot.lifeModelEnvelope.data = {
+        ...snapshot.lifeModelEnvelope.data,
+        truthMode: "canonical",
+        canonicalSummary: {
+          lifeModelRef: {
+            id: "lifemodel-v2:primary:2",
+            kind: "lifemodel",
+            label: "Canonical LifeModel v2",
+          },
+          title: "已确认的长期个人模型",
+          summary: "2 条经过用户确认的长期信息。",
+          versionLabel: "openlife.lifemodel.v2 · version 2",
+          lastMaterializedAt: "2026-08-08T10:00:00Z",
+          evidenceRefs: [],
+        },
+      };
+    }
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "已确认的长期个人模型" })).toBeVisible();
+    expect(screen.getByText("2 条经过用户确认的长期信息。")).toBeVisible();
+    expect(
+      screen.getByText("openlife.lifemodel.v2 · version 2 · 确认于 2026-08-08T10:00:00Z")
+    ).toBeVisible();
+    expect(screen.queryByText("当前有来源的长期理解")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("负责产品与工程决策，需要保留连续的独立思考时间。")
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps Agent Memory available when only LifeModel fails", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
