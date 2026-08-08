@@ -6,6 +6,7 @@ import {
   draftLifeModelV2Change,
   draftLifeModelV2Export,
   draftLifeModelV2Rollback,
+  deleteLifeModelLearningCandidate,
   getLifeModelViewModel,
   getMemoryViewModel,
   getReviewCenterViewModel,
@@ -49,6 +50,7 @@ export interface DurableTruthDataSource {
   draftLifeModelChange(request: DraftLifeModelV2ChangeRequest): Promise<string>;
   draftLifeModelRollback(request: DraftLifeModelV2RollbackRequest): Promise<string>;
   draftLifeModelExport(request: DraftLifeModelV2ExportRequest): Promise<string>;
+  deleteLifeModelLearningCandidate(candidateId: string): Promise<void>;
 }
 
 function requireLifeModelProposalReceipt(
@@ -182,6 +184,17 @@ async function loadDurableTruth(): Promise<DurableTruthSnapshot> {
 
 export const tauriDurableTruthDataSource: DurableTruthDataSource = {
   loadDurableTruth,
+  async deleteLifeModelLearningCandidate(candidateId) {
+    const receipt = await deleteLifeModelLearningCandidate(candidateId);
+    if (
+      receipt.candidateId !== candidateId ||
+      !receipt.deleted ||
+      receipt.proposalDeleted ||
+      receipt.canonicalLifeModelChanged
+    ) {
+      throw new Error("lifemodel_learning_candidate_delete_receipt_unverified");
+    }
+  },
   async draftLegacyLifeModelMigration(request) {
     const receipt = await draftLegacyLifeModelMigration(request);
     if (

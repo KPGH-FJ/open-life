@@ -8,6 +8,7 @@ const tauriMocks = vi.hoisted(() => ({
   draftLifeModelV2Change: vi.fn(),
   draftLifeModelV2Rollback: vi.fn(),
   draftLifeModelV2Export: vi.fn(),
+  deleteLifeModelLearningCandidate: vi.fn(),
   draftMemoryCorrectionProposal: vi.fn(),
   draftMemoryArchiveProposal: vi.fn(),
   draftMemoryStopRecallProposal: vi.fn(),
@@ -63,6 +64,29 @@ describe("durable truth Tauri data source", () => {
       status: "failed",
       message: "memory unavailable",
     });
+  });
+
+  it("accepts candidate deletion only when the receipt proves Proposal and LifeModel stayed unchanged", async () => {
+    tauriMocks.deleteLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      deleted: true,
+      proposalDeleted: false,
+      canonicalLifeModelChanged: false,
+    });
+
+    await tauriDurableTruthDataSource.deleteLifeModelLearningCandidate("candidate:one");
+
+    expect(tauriMocks.deleteLifeModelLearningCandidate).toHaveBeenCalledWith("candidate:one");
+
+    tauriMocks.deleteLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      deleted: true,
+      proposalDeleted: false,
+      canonicalLifeModelChanged: true,
+    });
+    await expect(
+      tauriDurableTruthDataSource.deleteLifeModelLearningCandidate("candidate:one")
+    ).rejects.toThrow("lifemodel_learning_candidate_delete_receipt_unverified");
   });
 
   it("keeps correction and archive reviewed while restore, rollback, and erase use exact owners", async () => {

@@ -1006,6 +1006,7 @@ export function ReadOnlySpineJourney({
         memoryAction={durable.memoryAction}
         migrationAction={durable.migrationAction}
         lifeModelAction={durable.lifeModelAction}
+        learningAction={durable.learningAction}
         onRefresh={() => void durable.load(true)}
         onSelectItem={item => {
           durable.selectItem(item);
@@ -1024,6 +1025,7 @@ export function ReadOnlySpineJourney({
         onDraftLifeModelChange={durable.draftLifeModelChange}
         onDraftLifeModelRollback={durable.draftLifeModelRollback}
         onDraftLifeModelExport={durable.draftLifeModelExport}
+        onDeleteLearningCandidate={durable.deleteLifeModelLearningCandidate}
         onOpenReviewCenter={() => navigateProduct("review", "life-model")}
       />
     );

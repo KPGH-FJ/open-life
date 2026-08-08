@@ -12,6 +12,7 @@ pub mod governor;
 pub mod heuristic_store;
 pub mod hs_asset_authority;
 pub mod hs_selector;
+pub mod life_model_learning;
 pub mod life_model_runtime_context;
 pub mod life_model_view_model;
 pub mod lifemodel_backend_completion;
@@ -133,15 +134,20 @@ pub use hs_selector::{
     HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
     SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
 };
+pub use life_model_learning::{
+    LifeModelLearningCandidate, LifeModelLearningCandidateStatus, LifeModelLearningCapture,
+    LifeModelLearningCaptureReceipt, LifeModelLearningExplicitness, LifeModelLearningObservation,
+    LifeModelLearningSensitivity, LifeModelLearningStore,
+};
 pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntimeFact};
 pub use life_model_view_model::{
     build_life_model_view_model_envelope, LifeModelCandidateChange,
     LifeModelCandidateDecisionStatus, LifeModelCanonicalSummary, LifeModelCanonicalV2Input,
-    LifeModelChangeKind, LifeModelManualOverrideState, LifeModelMemoryLinkageStatus,
-    LifeModelMemoryLinkageSummary, LifeModelMemoryTierStatsInput, LifeModelOwnerStatus,
-    LifeModelPendingUpdateCounts, LifeModelProjectionInput, LifeModelReadiness,
-    LifeModelTierSummary, LifeModelTrustQualityState, LifeModelTruthMode, LifeModelViewModel,
-    LifeModelViewModelBuildInput,
+    LifeModelChangeKind, LifeModelLearningSummary, LifeModelManualOverrideState,
+    LifeModelMemoryLinkageStatus, LifeModelMemoryLinkageSummary, LifeModelMemoryTierStatsInput,
+    LifeModelOwnerStatus, LifeModelPendingUpdateCounts, LifeModelProjectionInput,
+    LifeModelReadiness, LifeModelTierSummary, LifeModelTrustQualityState, LifeModelTruthMode,
+    LifeModelViewModel, LifeModelViewModelBuildInput,
 };
 pub use lifemodel_backend_completion::{
     bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,

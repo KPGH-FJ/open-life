@@ -258,6 +258,11 @@ export function createMockLifeModelViewModelEnvelope(
         tierSummary: { total: 12, tier1: 5, tier2: 4, tier3: 3, archived: 0 },
         ownerStatus: "PHASE_2_REQUIRED",
       },
+      learning: {
+        available: true,
+        activeCount: 0,
+        candidates: [],
+      },
       sourceRefs: [
         {
           id: "projection:diagnostics",
@@ -863,6 +868,13 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "get_life_model_view_model":
       return Promise.resolve(createMockLifeModelViewModelEnvelope() as T);
+    case "delete_lifemodel_learning_candidate":
+      return Promise.resolve({
+        candidateId: _args?.candidateId ?? _args?.candidate_id ?? "",
+        deleted: true,
+        proposalDeleted: false,
+        canonicalLifeModelChanged: false,
+      } as T);
     case "draft_lifemodel_v2_change":
       return Promise.resolve({
         proposalId: "proposal:lifemodel-v2-change:mock",

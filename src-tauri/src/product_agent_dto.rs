@@ -949,6 +949,7 @@ fn product_state_action_type(value: &str) -> String {
         | "shell.destructive"
         | "plan_execute.create_session"
         | "memory.governance.plan"
+        | "lifemodel.learning_candidate.capture"
         | "builtin_tool" => value.into(),
         _ => "unknown_action_type".into(),
     }

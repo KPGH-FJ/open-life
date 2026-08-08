@@ -250,6 +250,11 @@ function lifeModel(stage: DurableFixtureStage): LifeModelViewModel {
       tierSummary: { total: 18, tier1: 6, tier2: 8, tier3: 4, archived: 2 },
       ownerStatus: "PHASE_2_REQUIRED",
     },
+    learning: {
+      available: true,
+      activeCount: 0,
+      candidates: [],
+    },
     sourceRefs: [lifeModelEvidence, memoryEvidence, conversationEvidence],
     contractLimitations: [
       "当前只提供兼容视图，不代表完整 canonical LifeModel。",
@@ -301,6 +306,11 @@ function emptyLifeModel(): LifeModelViewModel {
       linkageStatus: "unknown",
       tierSummary: { total: null, tier1: null, tier2: null, tier3: null, archived: null },
       ownerStatus: "UNKNOWN",
+    },
+    learning: {
+      available: true,
+      activeCount: 0,
+      candidates: [],
     },
     sourceRefs: [],
     contractLimitations: [

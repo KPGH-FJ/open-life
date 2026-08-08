@@ -2694,6 +2694,35 @@ export type LifeModelMemoryLinkageSummary = {
   ownerStatus: LifeModelOwnerStatus;
 };
 
+export type LifeModelLearningCandidate = {
+  id: string;
+  workspaceRef: string;
+  summary: string;
+  section: LifeModelSectionV2;
+  value: LifeModelUserValueV2;
+  status: "accumulating";
+  explicitness: "explicit_user_request";
+  sensitivity: "internal";
+  observationIds: string[];
+  sourceRefs: string[];
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+};
+
+export type LifeModelLearningSummary = {
+  available: boolean;
+  activeCount: number;
+  candidates: LifeModelLearningCandidate[];
+};
+
+export type DeleteLifeModelLearningCandidateReceipt = {
+  candidateId: string;
+  deleted: boolean;
+  proposalDeleted: false;
+  canonicalLifeModelChanged: false;
+};
+
 export type LifeModelViewModel = {
   truthMode: LifeModelTruthMode;
   canonicalSummary: LifeModelCanonicalSummary | null;
@@ -2707,6 +2736,7 @@ export type LifeModelViewModel = {
   manualOverrideState: LifeModelManualOverrideState | null;
   relatedReviewItemRefs: LifeModelReviewItemRef[];
   memoryLinkage: LifeModelMemoryLinkageSummary;
+  learning: LifeModelLearningSummary;
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };
@@ -4280,6 +4310,15 @@ export async function getReviewCenterViewModel(): Promise<
 
 export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeModelViewModel>> {
   return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
+}
+
+export async function deleteLifeModelLearningCandidate(
+  candidateId: string
+): Promise<DeleteLifeModelLearningCandidateReceipt> {
+  return safeInvoke<DeleteLifeModelLearningCandidateReceipt>(
+    "delete_lifemodel_learning_candidate",
+    { candidateId, candidate_id: candidateId }
+  );
 }
 
 export async function draftLegacyLifeModelMigration(

@@ -3365,6 +3365,12 @@ impl ExecutionPolicy {
                 "unselected_skill_not_injected",
             );
         }
+        if action.action_type == "lifemodel.learning_candidate.capture" {
+            return policy_decision(
+                MainChatPolicyLevel::L1GovernedProposalCreate,
+                "governed_learning_candidate_capture_allowed",
+            );
+        }
         if contains_any(
             &haystack,
             &[

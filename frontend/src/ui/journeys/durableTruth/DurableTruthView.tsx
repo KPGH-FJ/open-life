@@ -8,9 +8,14 @@ import {
   RotateCcw,
   ShieldX,
   SquarePen,
+  Trash2,
   UserRound,
 } from "lucide-react";
-import type { LegacyLifeModelMigrationItemV2, ReviewItem } from "@/tauri";
+import type {
+  LegacyLifeModelMigrationItemV2,
+  LifeModelLearningCandidate,
+  ReviewItem,
+} from "@/tauri";
 import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from "@/ui/foundation";
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 import { durableLifecyclePresentation, durableReviewItems } from "./durableTruthPresentation";
@@ -37,6 +42,11 @@ const migrationOwnerLabel: Record<LegacyLifeModelMigrationItemV2["targetOwner"],
   unassigned: "尚未确定",
 };
 
+const learningSectionLabel: Partial<Record<LifeModelLearningCandidate["section"], string>> = {
+  stable_preferences: "长期稳定偏好",
+  collaboration_preferences: "长期协作偏好",
+};
+
 export function DurableTruthView({
   snapshot,
   selectedItem,
@@ -59,6 +69,8 @@ export function DurableTruthView({
   onDraftLifeModelChange,
   onDraftLifeModelRollback,
   onDraftLifeModelExport,
+  learningAction,
+  onDeleteLearningCandidate,
 }: {
   snapshot: DurableTruthSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -89,6 +101,8 @@ export function DurableTruthView({
   onDraftLifeModelChange: Parameters<typeof LifeModelV2ControlsPanel>[0]["onChange"];
   onDraftLifeModelRollback: Parameters<typeof LifeModelV2ControlsPanel>[0]["onRollback"];
   onDraftLifeModelExport: Parameters<typeof LifeModelV2ControlsPanel>[0]["onExport"];
+  learningAction: { candidateId: string; error?: string } | null;
+  onDeleteLearningCandidate: (candidateId: string) => Promise<boolean>;
 }) {
   const [activeDomain, setActiveDomain] = useState<"life_model" | "agent_memory">("life_model");
   const lifeModelTabRef = useRef<HTMLButtonElement>(null);
@@ -305,6 +319,63 @@ export function DurableTruthView({
                   </details>
                 </>
               ) : null}
+            </section>
+
+            <section className="ol-durable-current" aria-labelledby="lifemodel-learning-title">
+              <header className="ol-durable-section-heading">
+                <div>
+                  <span>学习缓冲区</span>
+                  <h2 id="lifemodel-learning-title">待验证的长期信息</h2>
+                </div>
+                <FoundationStatusLabel
+                  label={
+                    lifeModel?.learning.available
+                      ? `${lifeModel.learning.activeCount} 条候选`
+                      : "暂时不可用"
+                  }
+                  status={lifeModel?.learning.available ? "neutral" : "unknown"}
+                />
+              </header>
+              <p>
+                这里只保存你明确表达、可能具有长期意义的信息。它们目前不是 Proposal，也没有写入
+                LifeModel；后续仍需质量判断与人工审核。
+              </p>
+              {!lifeModel?.learning.available ? (
+                <FoundationNotice title="学习候选暂时不可用" tone="protection">
+                  <p>这不会影响普通 Agent、Agent Memory 或当前 LifeModel 的读取和使用。</p>
+                </FoundationNotice>
+              ) : lifeModel.learning.candidates.length === 0 ? (
+                <p>目前没有待验证的长期信息。</p>
+              ) : (
+                <ol className="ol-lifemodel-migration-details" aria-label="待验证长期信息">
+                  {lifeModel.learning.candidates.map(candidate => (
+                    <li key={candidate.id}>
+                      <div>
+                        <strong>{candidate.summary}</strong>
+                        <span>{learningSectionLabel[candidate.section] ?? candidate.section}</span>
+                      </div>
+                      <small>
+                        明确用户请求 · {candidate.sourceRefs.length} 个来源 · 到期时间：
+                        {candidate.expiresAt}
+                      </small>
+                      <FoundationActionButton
+                        label="删除这条候选"
+                        icon={<Trash2 size={16} aria-hidden="true" />}
+                        loading={
+                          learningAction?.candidateId === candidate.id && !learningAction.error
+                        }
+                        loadingLabel="正在删除"
+                        onClick={() => void onDeleteLearningCandidate(candidate.id)}
+                      />
+                      {learningAction?.candidateId === candidate.id && learningAction.error ? (
+                        <FoundationNotice title="候选未删除" tone="error" live>
+                          <p>{learningAction.error}</p>
+                        </FoundationNotice>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+              )}
             </section>
 
             {migrationPreview ? (

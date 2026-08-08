@@ -306,6 +306,7 @@ pub struct MainChatKernelToolCall {
 pub enum MainChatKernelWriteOutcomeKind {
     MemoryProposal,
     LifeModelProposal,
+    LifeModelLearningCandidate,
     LifeModelTypedDiffBlocker,
     FileWriteProposal,
     CalendarEventProposal,
@@ -321,6 +322,7 @@ impl MainChatKernelWriteOutcomeKind {
         match self {
             Self::MemoryProposal => "memory_proposal",
             Self::LifeModelProposal => "lifemodel_proposal",
+            Self::LifeModelLearningCandidate => "lifemodel_learning_candidate",
             Self::LifeModelTypedDiffBlocker => "lifemodel_typed_diff_blocker",
             Self::FileWriteProposal => "file_write_proposal",
             Self::CalendarEventProposal => "calendar_event_proposal",
@@ -5446,7 +5448,7 @@ where
                 matches!(
                     outcome.kind,
                     MainChatKernelWriteOutcomeKind::MemoryProposal
-                        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+                        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
                 )
             })
         {
@@ -5529,7 +5531,7 @@ where
                 || !matches!(
                     outcome.kind,
                     MainChatKernelWriteOutcomeKind::MemoryProposal
-                        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+                        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
                 )
         }) {
             return self.run_write_outcome_turn(
@@ -7957,6 +7959,10 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
             "Create a ReviewWorkflow LifeModel item from MainChatKernel.".into()
         }
+        MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
+            "Stage an explicit long-term preference without creating a proposal or LifeModel version."
+                .into()
+        }
         MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             "Block an untyped LifeModel request without creating a fake review item.".into()
         }
@@ -7988,6 +7994,9 @@ fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'s
     match kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => "memory.write",
         MainChatKernelWriteOutcomeKind::LifeModelProposal => "life_model.update",
+        MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
+            "lifemodel.learning_candidate.capture"
+        }
         MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             "life_model.change_requires_typed_diff"
         }
@@ -8554,6 +8563,7 @@ async fn prepare_kernel_write_proposal(
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
         | MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
         | MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             return Err("kernel blocker outcome cannot create proposal".into());
         }
@@ -8645,6 +8655,7 @@ async fn prepare_kernel_write_proposal(
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
         | MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
         | MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             return Err("kernel blocker outcome cannot create proposal".into())
         }
@@ -8834,7 +8845,8 @@ async fn materialize_kernel_memory_governance(
 ) -> Result<MainChatMemoryGovernanceMaterialization, String> {
     let life_event_ids: Vec<String> = Vec::new();
     let mut memory_proposal_ids = Vec::new();
-    let mut lifemodel_proposal_ids = Vec::new();
+    let lifemodel_proposal_ids = Vec::new();
+    let mut lifemodel_learning_candidate_ids = Vec::new();
     let mut explicit_memory_receipts = Vec::new();
     let mut explicit_memory_rollback_receipts = Vec::new();
     let mut canonical_memory_noop_ids = Vec::new();
@@ -9095,6 +9107,109 @@ async fn materialize_kernel_memory_governance(
             }
             continue;
         }
+        if candidate.destination == MemoryDestination::LifeModelProposal {
+            let learning_authorized = source_kind
+                == IntentSourceKind::CurrentAuthenticatedUserMessage
+                && policy_decision.allows(AllowedCapability::LifeModelProposal)
+                && policy_decision.allows_memory_candidate(&candidate.candidate_id);
+            if !learning_authorized {
+                push_unique_string(&mut blockers, "lifemodel_learning_policy_authority_missing");
+                continue;
+            }
+            let queued = enqueue_main_chat_agent_action(
+                state,
+                task_session_id,
+                "lifemodel.learning_candidate.capture",
+                "Stage an explicit long-term user preference as a reviewable learning candidate.",
+                execution_transcript,
+            )
+            .await?;
+            transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+                .await?;
+            match crate::life_model_learning::capture_explicit_main_chat_candidate(
+                state,
+                candidate,
+                policy_decision,
+                source_user_message,
+            )
+            .await
+            {
+                Ok(receipt) => {
+                    let metadata = serde_json::json!({
+                        "memoryGovernanceArtifact": true,
+                        "artifactType": "life_model_learning_candidate",
+                        "candidateId": receipt.candidate.id,
+                        "observationId": receipt.observation.id,
+                        "section": receipt.candidate.section,
+                        "status": receipt.candidate.status,
+                        "sourceRefs": receipt.candidate.source_refs,
+                        "replayed": receipt.replayed,
+                        "proposalCreated": receipt.proposal_created,
+                        "directLifeModelWrite": receipt.canonical_life_model_changed,
+                        "directWritesExecuted": false,
+                        "acceptedDurableTruthWritten": false,
+                    });
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Observed,
+                        Some(metadata.clone()),
+                    )
+                    .await?;
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Completed,
+                        Some(metadata.clone()),
+                    )
+                    .await?;
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::Observation,
+                            "OpenLife staged an explicit long-term preference as a learning candidate; no proposal or LifeModel version was created.",
+                            metadata,
+                        )
+                        .await,
+                    );
+                    lifemodel_learning_candidate_ids.push(receipt.candidate.id);
+                }
+                Err(error) => {
+                    let blocker = error.split(':').next().unwrap_or(error.as_str());
+                    push_unique_string(&mut blockers, blocker);
+                    let metadata = serde_json::json!({
+                        "memoryGovernanceArtifact": true,
+                        "artifactType": "life_model_learning_candidate",
+                        "candidateId": candidate.candidate_id,
+                        "status": "not_staged",
+                        "reasonCode": blocker,
+                        "proposalCreated": false,
+                        "directLifeModelWrite": false,
+                        "directWritesExecuted": false,
+                        "acceptedDurableTruthWritten": false,
+                    });
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Failed,
+                        Some(metadata.clone()),
+                    )
+                    .await?;
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::Observation,
+                            "The LifeModel learning candidate was not staged; ordinary Agent capabilities remain available.",
+                            metadata,
+                        )
+                        .await,
+                    );
+                }
+            }
+            continue;
+        }
         let proposal_authorized = match candidate.destination {
             MemoryDestination::MemoryProposal => {
                 policy_decision.allows(AllowedCapability::MemoryProposal)
@@ -9107,14 +9222,6 @@ async fn materialize_kernel_memory_governance(
             .allows_memory_candidate(&candidate.candidate_id);
         if !proposal_authorized {
             push_unique_string(&mut blockers, "policy_memory_candidate_not_authorized");
-            continue;
-        }
-        if candidate.destination == MemoryDestination::LifeModelProposal
-            && main_chat_lifemodel_typed_change(&candidate.normalized_claim)
-                .or_else(|| main_chat_lifemodel_typed_change(&candidate.evidence_text))
-                .is_none()
-        {
-            push_unique_string(&mut blockers, "lifemodel_typed_diff_required");
             continue;
         }
         let queued = enqueue_main_chat_agent_action(
@@ -9186,12 +9293,7 @@ async fn materialize_kernel_memory_governance(
                 continue;
             }
         };
-        let is_lifemodel = candidate.destination == MemoryDestination::LifeModelProposal;
-        if is_lifemodel {
-            lifemodel_proposal_ids.push(proposal.id.clone());
-        } else {
-            memory_proposal_ids.push(proposal.id.clone());
-        }
+        memory_proposal_ids.push(proposal.id.clone());
         if created_for_turn {
             new_pending_proposal_ids.push(proposal.id.clone());
         } else {
@@ -9199,7 +9301,7 @@ async fn materialize_kernel_memory_governance(
         }
         let proposal_metadata = serde_json::json!({
             "memoryGovernanceArtifact": true,
-            "artifactType": if is_lifemodel { "life_model_proposal" } else { "memory_proposal" },
+            "artifactType": "memory_proposal",
             "proposalId": proposal.id,
             "proposalType": proposal.proposal_type,
             "affectedPath": proposal.affected_path,
@@ -9252,6 +9354,7 @@ async fn materialize_kernel_memory_governance(
         &life_event_ids,
         &memory_proposal_ids,
         &lifemodel_proposal_ids,
+        &lifemodel_learning_candidate_ids,
         &explicit_memory_receipts,
         &explicit_memory_rollback_receipts,
         &canonical_memory_noop_ids,
@@ -9343,23 +9446,7 @@ async fn create_kernel_memory_governance_proposal(
             )
         }
         MemoryDestination::LifeModelProposal => {
-            let change = main_chat_lifemodel_typed_change(&candidate.normalized_claim)
-                .or_else(|| main_chat_lifemodel_typed_change(&candidate.evidence_text))
-                .ok_or_else(|| "lifemodel_typed_diff_required".to_string())?;
-            (
-                change.proposal_type,
-                change.affected_path,
-                if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite {
-                    "The current authenticated user explicitly requested a typed LifeModel change; review is required before accepted LifeModel truth changes."
-                        .to_string()
-                } else {
-                    "OpenLife inferred a typed LifeModel candidate while answering; user review is required and the candidate is not an explicit write request."
-                        .to_string()
-                },
-                RiskLevel::High,
-                change.after,
-                None,
-            )
+            return Err("lifemodel_learning_candidate_must_not_create_proposal_in_5_3a".into())
         }
         _ => return Err("candidate destination cannot create proposal".into()),
     };
@@ -9441,6 +9528,7 @@ fn memory_governance_metadata(
     life_event_ids: &[String],
     memory_proposal_ids: &[String],
     lifemodel_proposal_ids: &[String],
+    lifemodel_learning_candidate_ids: &[String],
     explicit_memory_receipts: &[serde_json::Value],
     explicit_memory_rollback_receipts: &[serde_json::Value],
     canonical_memory_noop_ids: &[String],
@@ -9470,6 +9558,7 @@ fn memory_governance_metadata(
         "lifeEventIds": life_event_ids,
         "memoryProposalIds": memory_proposal_ids,
         "lifeModelProposalIds": lifemodel_proposal_ids,
+        "lifeModelLearningCandidateIds": lifemodel_learning_candidate_ids,
         "explicitMemoryReceipts": explicit_memory_receipts,
         "explicitMemoryRollbackReceipts": explicit_memory_rollback_receipts,
         "canonicalMemoryNoOpIds": canonical_memory_noop_ids,
@@ -9493,6 +9582,7 @@ fn empty_memory_governance_metadata() -> serde_json::Value {
         "lifeEventIds": [],
         "memoryProposalIds": [],
         "lifeModelProposalIds": [],
+        "lifeModelLearningCandidateIds": [],
         "explicitMemoryReceipts": [],
         "explicitMemoryRollbackReceipts": [],
         "canonicalMemoryNoOpIds": [],
@@ -9559,6 +9649,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
         .unwrap_or(0);
     let lifemodel_proposal_count = memory_governance
         .get("lifeModelProposalIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let lifemodel_learning_candidate_count = memory_governance
+        .get("lifeModelLearningCandidateIds")
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
@@ -9635,6 +9730,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
     }
     if lifemodel_proposal_count > 0 {
         lines.push(format!("待确认 LifeModel 更新：{lifemodel_proposal_count} 条，审批前不会写入 accepted LifeModel。"));
+    }
+    if lifemodel_learning_candidate_count > 0 {
+        lines.push(format!(
+            "已暂存待验证的长期信息：{lifemodel_learning_candidate_count} 条；目前还不是 Proposal，也没有写入 LifeModel。"
+        ));
     }
     if explicit_memory_write_count > 0 {
         lines.push(format!(
@@ -12284,7 +12384,7 @@ fn memory_governance_compatible_write_outcome(
             | (
                 false,
                 true,
-                MainChatKernelWriteOutcomeKind::LifeModelProposal
+                MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
             )
     );
     if !compatible {
@@ -12450,47 +12550,47 @@ fn plan_kernel_write_outcome(
         .policy_decision
         .allows(AllowedCapability::LifeModelProposal)
     {
-        if let Some(change) = main_chat_lifemodel_typed_change(user_text) {
+        if crate::life_model_learning::supports_explicit_user_text(user_text) {
             return Some(MainChatKernelWriteOutcome {
-                kind: MainChatKernelWriteOutcomeKind::LifeModelProposal,
-                action_type: "proposal.create".into(),
-                target: change.affected_path.clone(),
-                reason: "LifeModel-affecting request has a typed diff and requires governed review"
-                    .into(),
+                kind: MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate,
+                action_type: "lifemodel.learning_candidate.capture".into(),
+                target: "life_model.learning_candidates".into(),
+                reason:
+                    "An explicit long-term preference can be staged as a bounded learning candidate"
+                        .into(),
                 payload_summary: payload_summary.clone(),
                 governed_input: serde_json::json!({
                     "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
-                    "target": change.affected_path,
-                    "targetValue": change.after,
-                    "proposalType": change.proposal_type.to_string(),
-                    "governedInputSource": "kernel_lifemodel_update_proposal",
+                    "target": "life_model.learning_candidates",
+                    "governedInputSource": "kernel_lifemodel_learning_candidate",
+                    "proposalCreated": false,
                     "directLifeModelWrite": false,
                     "directWritesExecuted": false,
                     "modelArgumentsIgnored": model_arguments_ignored,
                 }),
-                proposal_type: Some(change.proposal_type.to_string()),
-                blocker_code: Some("proposal_review_required".into()),
+                proposal_type: None,
+                blocker_code: Some("lifemodel_learning_candidate_route_required".into()),
                 requires_confirmation: false,
-                hard_blocked: false,
-                replayable: true,
+                hard_blocked: true,
+                replayable: false,
             });
         }
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker,
             action_type: "life_model.change_requires_typed_diff".into(),
             target: "life_model.unresolved".into(),
-            reason: "LifeModel proposal was not created because the requested change has no exact materializable field diff"
+            reason: "LifeModel learning candidate was not staged because the request has no exact supported long-term preference"
                 .into(),
             payload_summary,
             governed_input: serde_json::json!({
                 "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
-                "governedInputSource": "kernel_lifemodel_typed_diff_blocker",
+                "governedInputSource": "kernel_lifemodel_learning_candidate_blocker",
                 "directLifeModelWrite": false,
                 "directWritesExecuted": false,
                 "modelArgumentsIgnored": model_arguments_ignored,
             }),
             proposal_type: None,
-            blocker_code: Some("lifemodel_typed_diff_required".into()),
+            blocker_code: Some("lifemodel_learning_typed_candidate_required".into()),
             requires_confirmation: false,
             hard_blocked: true,
             replayable: false,
@@ -13543,6 +13643,10 @@ fn synthesize_write_outcome_answer(outcome: &MainChatKernelWriteOutcome) -> Stri
         }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
             "I created a LifeModel proposal for review. I did not update accepted LifeModel truth."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
+            "I staged a long-term preference candidate. I did not create a proposal or update accepted LifeModel truth."
                 .into()
         }
         MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
@@ -20502,7 +20606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_learning_stays_proposal_only_with_hs_context() {
+    async fn main_chat_kernel_goal_6_routes_explicit_lifemodel_preference_to_learning_candidate() {
         let model = ScriptedModelClient::ok("model should not be called");
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
@@ -20576,7 +20680,7 @@ mod tests {
             .is_some_and(|hs| hs.available));
 
         let life_model_user_text =
-            "Update my life model: I am switching careers into design leadership.";
+            "Update my life model: communication style is concise and direct.";
         let life_model_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
             .decide(
                 "session-hs-lifemodel-learning",
@@ -20619,15 +20723,12 @@ mod tests {
             .expect("lifemodel write outcome");
         assert_eq!(
             life_model_outcome.kind,
-            MainChatKernelWriteOutcomeKind::LifeModelProposal
+            MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
         );
-        assert_eq!(
-            life_model_outcome.proposal_type.as_deref(),
-            Some("life_model_update")
-        );
+        assert_eq!(life_model_outcome.proposal_type, None);
         assert_eq!(
             life_model_outcome.blocker_code.as_deref(),
-            Some("proposal_review_required")
+            Some("lifemodel_learning_candidate_route_required")
         );
         assert_eq!(
             life_model_outcome
@@ -21107,20 +21208,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn kernel_lifemodel_proposal_persists_an_existing_field_value_not_a_placeholder() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    #[test]
+    fn kernel_lifemodel_preference_plans_candidate_not_legacy_scalar_proposal() {
         let task_session_id = "proposal-typed-lifemodel";
-        let registry = {
-            state
-                .main_chat_runtime_state
-                .lock()
-                .await
-                .cancellation_registry
-                .clone()
-        };
-        let registration = registry.register(task_session_id);
-        let user_text = "Update my life model: I am switching careers into design leadership.";
+        let user_text = "Update my life model: communication style is concise and direct.";
         let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
             task_session_id,
             user_text,
@@ -21139,34 +21230,20 @@ mod tests {
         };
         let outcome = plan_kernel_write_outcome(&input, false).expect("typed write outcome");
 
-        let proposal = match create_kernel_write_proposal_without_terminal_owner_for_unit_test(
-            &state,
-            task_session_id,
-            "run-proposal-typed-lifemodel",
-            &outcome,
-            user_text,
-            &decision.policy_decision,
-            &registration.execution_epoch(),
-        )
-        .await
-        .expect("typed LifeModel proposal")
-        {
-            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
-            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
-                panic!("LifeModel change must stage review")
-            }
-        };
-
         assert_eq!(
-            proposal.affected_path,
-            "identity.role_definition.primary_role"
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
         );
-        assert_eq!(proposal.after, serde_json::json!("design leadership"));
-        assert_ne!(
-            proposal.affected_path,
-            "lifemodel.pending.chat_conversation"
+        assert_eq!(outcome.action_type, "lifemodel.learning_candidate.capture");
+        assert_eq!(outcome.target, "life_model.learning_candidates");
+        assert!(outcome.proposal_type.is_none());
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("proposalCreated")
+                .and_then(Value::as_bool),
+            Some(false)
         );
-        assert!(proposal.base_hash.is_some());
     }
 
     #[test]
@@ -21195,7 +21272,7 @@ mod tests {
         );
         assert_eq!(
             outcome.blocker_code.as_deref(),
-            Some("lifemodel_typed_diff_required")
+            Some("lifemodel_learning_typed_candidate_required")
         );
         assert!(outcome.proposal_type.is_none());
         assert!(outcome.hard_blocked);

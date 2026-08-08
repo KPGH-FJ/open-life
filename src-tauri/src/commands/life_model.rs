@@ -24,6 +24,14 @@ use serde_json::Value;
 use std::sync::Arc;
 use tauri::State;
 
+#[tauri::command]
+pub async fn delete_lifemodel_learning_candidate(
+    candidate_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::life_model_learning::DeleteLifeModelLearningCandidateReceipt, String> {
+    crate::life_model_learning::delete_candidate_with_state(state.inner(), &candidate_id).await
+}
+
 #[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT: &str = "manual_lifemodel_override_audit";
 #[cfg(test)]
@@ -877,6 +885,9 @@ mod tests {
             ))),
             memory_lifecycle_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
+            ))),
+            life_model_learning_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
             plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),

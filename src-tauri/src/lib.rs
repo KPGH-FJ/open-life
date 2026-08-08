@@ -12,6 +12,7 @@ pub mod bootstrap;
 pub mod commands;
 pub(crate) mod danger_action_confirmation;
 pub mod errors;
+pub(crate) mod life_model_learning;
 #[allow(dead_code)]
 pub(crate) mod life_model_materializer_guard;
 pub(crate) mod life_model_write_gateway;
@@ -152,8 +153,8 @@ pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{
-    draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
-    draft_lifemodel_v2_rollback,
+    delete_lifemodel_learning_candidate, draft_legacy_lifemodel_migration,
+    draft_lifemodel_v2_change, draft_lifemodel_v2_export, draft_lifemodel_v2_rollback,
 };
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
@@ -940,6 +941,7 @@ pub fn run() {
             draft_lifemodel_v2_change,
             draft_lifemodel_v2_rollback,
             draft_lifemodel_v2_export,
+            delete_lifemodel_learning_candidate,
             get_life_state_projection,
             get_life_model_view_model,
             get_review_center_view_model,

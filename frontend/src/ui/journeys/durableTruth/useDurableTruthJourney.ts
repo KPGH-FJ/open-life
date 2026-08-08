@@ -58,6 +58,10 @@ export function useDurableTruthJourney(
     proposalId?: string;
     error?: string;
   } | null>(null);
+  const [learningAction, setLearningAction] = useState<{
+    candidateId: string;
+    error?: string;
+  } | null>(null);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -68,6 +72,7 @@ export function useDurableTruthJourney(
     setMemoryAction(null);
     setMigrationAction(null);
     setLifeModelAction(null);
+    setLearningAction(null);
     return () => {
       requestRef.current += 1;
     };
@@ -291,6 +296,31 @@ export function useDurableTruthJourney(
       draftLifeModelOperation("export", source => source.draftLifeModelExport(request)),
     [draftLifeModelOperation]
   );
+  const deleteLifeModelLearningCandidate = useCallback(
+    async (candidateId: string): Promise<boolean> => {
+      if (!dataSource || learningAction) return false;
+      setLearningAction({ candidateId });
+      try {
+        await dataSource.deleteLifeModelLearningCandidate(candidateId);
+        const refreshed = await load(false);
+        const stillPresent = refreshed.lifeModelEnvelope.data?.learning.candidates.some(
+          candidate => candidate.id === candidateId
+        );
+        if (refreshed.lifeModelEnvelope.status === "error" || stillPresent) {
+          throw new Error("lifemodel_learning_candidate_delete_refresh_unverified");
+        }
+        setLearningAction(null);
+        announce("这条待验证长期信息已删除；LifeModel 和 Review 没有改变。");
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setLearningAction({ candidateId, error: reason });
+        announce(`待验证长期信息未删除：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, learningAction, load]
+  );
 
   return {
     snapshot,
@@ -299,6 +329,7 @@ export function useDurableTruthJourney(
     memoryAction,
     migrationAction,
     lifeModelAction,
+    learningAction,
     load,
     selectItem,
     correctMemory,
@@ -311,5 +342,6 @@ export function useDurableTruthJourney(
     draftLifeModelChange,
     draftLifeModelRollback,
     draftLifeModelExport,
+    deleteLifeModelLearningCandidate,
   };
 }

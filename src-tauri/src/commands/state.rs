@@ -229,6 +229,9 @@ mod tests {
             memory_lifecycle_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
             ))),
+            life_model_learning_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
+            ))),
             plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
             ))),

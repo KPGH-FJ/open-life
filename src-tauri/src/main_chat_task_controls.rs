@@ -2540,6 +2540,10 @@ fn product_task_policy_reason(
         (MainChatPolicyLevel::L0PureAnswer, "pure_answer_allowed")
         | (MainChatPolicyLevel::L1ReadOnlyAuto, "read_only_action_allowed")
         | (MainChatPolicyLevel::L1GovernedProposalCreate, "governed_proposal_create_allowed")
+        | (
+            MainChatPolicyLevel::L1GovernedProposalCreate,
+            "governed_learning_candidate_capture_allowed",
+        )
         | (MainChatPolicyLevel::L2ProposalFirst, "write_like_action_requires_proposal")
         | (MainChatPolicyLevel::L3ConfirmedLocalWrite, "confirmed_local_write_required")
         | (MainChatPolicyLevel::L4ExternalWrite, "external_write_requires_confirmation")
@@ -2569,7 +2573,8 @@ fn product_task_action_type(value: &str) -> String {
         | "email.send"
         | "shell.destructive"
         | "plan_execute.create_session"
-        | "memory.governance.plan" => value.into(),
+        | "memory.governance.plan"
+        | "lifemodel.learning_candidate.capture" => value.into(),
         _ => "unknown_action_type".into(),
     }
 }
@@ -4390,6 +4395,20 @@ mod product_task_dto_tests {
         assert_eq!(
             product_task_action_type("d010secret123"),
             "unknown_action_type"
+        );
+        assert_eq!(
+            product_task_action_type("lifemodel.learning_candidate.capture"),
+            "lifemodel.learning_candidate.capture"
+        );
+        let learning_policy = openlife_core::agent::main_chat_agent_v1::ExecutionPolicy.classify(
+            &openlife_core::agent::main_chat_agent_v1::ExecutionAction::new(
+                "lifemodel.learning_candidate.capture",
+                "Stage a bounded learning candidate.",
+            ),
+        );
+        assert_eq!(
+            product_task_policy_reason(&learning_policy),
+            "governed_learning_candidate_capture_allowed"
         );
         assert!(product_route_provider("d010secret123").starts_with("provider:sha256:"));
         assert!(product_route_model_ref("d010secret123").starts_with("model:sha256:"));

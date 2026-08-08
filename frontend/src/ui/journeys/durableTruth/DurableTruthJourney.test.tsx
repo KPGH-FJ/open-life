@@ -40,6 +40,58 @@ describe("Workbench durable truth journey", () => {
     expect(document.getElementById("intelligence-panel-life-model")).not.toBeVisible();
   });
 
+  it("shows and deletes a learning candidate without presenting it as LifeModel or Review", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    const candidate = {
+      id: "lmc_candidate_one",
+      workspaceRef: "workspace:fixture",
+      summary: "先给结论",
+      section: "collaboration_preferences" as const,
+      value: { kind: "statement" as const, value: { statement: "先给结论" } },
+      status: "accumulating" as const,
+      explicitness: "explicit_user_request" as const,
+      sensitivity: "internal" as const,
+      observationIds: ["lmo_observation_one"],
+      sourceRefs: ["message:fixture"],
+      createdAt: "2026-08-08T08:00:00Z",
+      updatedAt: "2026-08-08T08:00:00Z",
+      expiresAt: "2026-11-06T08:00:00Z",
+    };
+    if (!snapshot.lifeModelEnvelope.data) throw new Error("fixture LifeModel missing");
+    snapshot.lifeModelEnvelope.data.learning = {
+      available: true,
+      activeCount: 1,
+      candidates: [candidate],
+    };
+    dataSource.loadDurableTruth = async () => snapshot;
+    dataSource.deleteLifeModelLearningCandidate = vi.fn(async candidateId => {
+      expect(candidateId).toBe(candidate.id);
+      snapshot.lifeModelEnvelope.data!.learning = {
+        available: true,
+        activeCount: 0,
+        candidates: [],
+      };
+    });
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    expect(await screen.findByText("先给结论")).toBeVisible();
+    expect(screen.getByText(/目前不是 Proposal/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "删除这条候选" }));
+
+    await waitFor(() => expect(screen.queryByText("先给结论")).not.toBeInTheDocument());
+    expect(screen.getByText("目前没有待验证的长期信息。")).toBeVisible();
+  });
+
   it("shows a structured canonical version instead of the legacy compatibility summary", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");

@@ -6,6 +6,7 @@ use crate::agent::product_read_model::{
 };
 use crate::agent::review_item::{ReviewItem, ReviewItemType};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType};
+use crate::agent::LifeModelLearningCandidate;
 use crate::life_model::v2::{
     LegacyLifeModelMigrationPreviewV2, LifeModelDocumentV2, LifeModelHumanProjectionV2,
     LifeModelVersionHistoryEntryV2,
@@ -173,6 +174,14 @@ pub struct LifeModelMemoryLinkageSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LifeModelLearningSummary {
+    pub available: bool,
+    pub active_count: usize,
+    pub candidates: Vec<LifeModelLearningCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LifeModelViewModel {
     pub truth_mode: LifeModelTruthMode,
     pub canonical_summary: Option<LifeModelCanonicalSummary>,
@@ -186,6 +195,7 @@ pub struct LifeModelViewModel {
     pub manual_override_state: Option<LifeModelManualOverrideState>,
     pub related_review_item_refs: Vec<BackendEntityRef>,
     pub memory_linkage: LifeModelMemoryLinkageSummary,
+    pub learning: LifeModelLearningSummary,
     pub source_refs: Vec<EvidenceRef>,
     pub contract_limitations: Vec<String>,
 }
@@ -239,6 +249,8 @@ pub struct LifeModelViewModelBuildInput {
     pub review_items: Vec<ReviewItem>,
     pub memory_count: Option<usize>,
     pub tier_stats: Option<LifeModelMemoryTierStatsInput>,
+    pub learning_available: bool,
+    pub learning_candidates: Vec<LifeModelLearningCandidate>,
     pub now: Option<String>,
     pub stale: bool,
     pub error: Option<String>,
@@ -333,6 +345,11 @@ pub fn build_life_model_view_model_envelope(
         manual_override_state: Some(build_manual_override_state(&source_refs)),
         related_review_item_refs,
         memory_linkage: build_memory_linkage(&input, &source_refs),
+        learning: LifeModelLearningSummary {
+            available: input.learning_available,
+            active_count: input.learning_candidates.len(),
+            candidates: input.learning_candidates.clone(),
+        },
         source_refs: source_refs.clone(),
         contract_limitations: build_contract_limitations(canonical_owner),
     };

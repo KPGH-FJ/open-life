@@ -3538,8 +3538,8 @@ async fn main_chat_kernel_chinese_arrange_today_work_not_lifemodel() {
 }
 
 #[tokio::test]
-async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_only() {
-    let user_text = "Update my life model: I am switching careers toward design lead.";
+async fn main_chat_explicit_lifemodel_preference_send_stream_creates_learning_candidate_only() {
+    let user_text = "Update my life model: communication style is concise and direct.";
 
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let model_before = {
@@ -3567,29 +3567,55 @@ async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_o
             .as_array()
             .expect("lifemodel proposal ids")
             .len(),
+        0
+    );
+    assert_eq!(
+        send_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["lifeModelLearningCandidateIds"]
+            .as_array()
+            .expect("lifemodel learning candidate ids")
+            .len(),
         1
     );
-    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
-        .as_str()
-        .expect("send lifemodel proposal task session id");
-    let proposal = find_command_surface_proposal_for_task(
-        &send_state,
-        send_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
     assert_eq!(
-        proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
+        send_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["directLifeModelWrite"],
+        false
     );
     assert_eq!(
-        proposal.affected_path,
-        "identity.role_definition.primary_role"
+        send_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["acceptedDurableTruthWritten"],
+        false
     );
+    assert!(list_command_surface_proposals(&send_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
+    let send_candidates = {
+        let store = send_state
+            .life_model_learning_store
+            .as_ref()
+            .expect("send learning store")
+            .lock()
+            .await;
+        store
+            .list_active_candidates("workspace:default", 20)
+            .expect("list send learning candidates")
+    };
+    assert_eq!(send_candidates.len(), 1);
     assert_eq!(
-        proposal.after,
-        serde_json::Value::String("design lead".into())
+        send_candidates[0].section,
+        openlife_core::life_model::v2::LifeModelSectionV2::CollaborationPreferences
     );
+    assert_eq!(send_candidates[0].summary, "concise and direct");
+    assert!(send_response["agent_state"]["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| {
+            action["actionType"] == "lifemodel.learning_candidate.capture"
+                && action["status"] == "succeeded"
+                && action["riskLevel"] == "local_low_risk"
+        })));
     let model_after = {
         let manager = send_state.life_model_manager.lock().await;
         manager.load().expect("load life model after")
@@ -3606,22 +3632,31 @@ async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_o
         user_text,
     )
     .await;
-    let stream_task_session_id = task_session_id_from_response(&stream_response);
-    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
     assert_eq!(
-        stream_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        stream_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["lifeModelLearningCandidateIds"]
+            .as_array()
+            .expect("stream lifemodel learning candidate ids")
+            .len(),
+        1
     );
-    let stream_proposal = find_command_surface_proposal_for_task(
-        &stream_state,
-        &stream_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
-    assert_eq!(
-        stream_proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
-    );
+    assert!(list_command_surface_proposals(&stream_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
+    let stream_candidates = {
+        let store = stream_state
+            .life_model_learning_store
+            .as_ref()
+            .expect("stream learning store")
+            .lock()
+            .await;
+        store
+            .list_active_candidates("workspace:default", 20)
+            .expect("list stream learning candidates")
+    };
+    assert_eq!(stream_candidates.len(), 1);
 }
 
 #[tokio::test]

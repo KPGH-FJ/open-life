@@ -957,6 +957,107 @@ Tauri 验收；fresh/v2 与 legacy migration 必须使用不同 profile，避免
 退出标准：真实产品路径完成“使用 -> Observation -> 候选 -> proposal -> 人审 ->
 版本化物化 -> 后续使用”，且没有静默长期画像写入和 proposal 疲劳。
 
+5.3 固定拆分为 5.3A 至 5.3F。不得默认增加 5.3G；新发现必须优先收敛进
+现有切片，只有产品范围发生实质变化时才停下并重新请求用户审批。
+
+###### 5.3A Observation 与 Candidate 边界
+
+目标：让当前 authenticated user message 中明确、低敏、可能具有长期意义的信息
+先成为可查看、可删除、不会自动写入 LifeModel 的暂存观察与候选。
+
+- 建立窄范围 LifeModel learning owner；它只拥有 Observation/Candidate 过渡状态，
+  不是第六套用户真相，也不拥有 Proposal 或 canonical LifeModel；
+- Observation 只保存完成候选判断所需的有界摘要、source ref、Workspace、显式程度、
+  敏感度、目标 section、状态和保留期，不复制完整对话、文件或工具输出；
+- Candidate 只能指向 LifeModel v2 支持的 section 和 typed value；无法准确分类的内容
+  保持 observation-only 或结束，不产生模糊 proposal；
+- 第一条产品入口只覆盖当前用户明确表达的长期偏好、协作偏好和明确纠正；任务结果、
+  Reflection 和 Provider 辅助提取留给 5.3C；
+- 用该路径替换 Main Chat 中已无 v2 物化合同的一次性 legacy scalar LifeModel
+  proposal caller，但本切片不生成新 proposal；
+- 用户可以在 Personal Intelligence 中查看来源、删除候选或关闭当前候选；
+- 学习 owner 不可用时只降级该能力，健康的普通 Agent、Agent Memory 和工具路径继续
+  工作；
+- 在进入被动学习 proposal 前解决 v2 item `confirmed_at` 的语义：Observation 或系统
+  推断发生时间不得冒充用户确认时间。
+
+退出标准：明确长期用户信息可以跨重启成为有来源的 Candidate，短期/敏感/不支持
+内容不进入 Candidate；ProposalStore 和 canonical LifeModel v2 均没有因此发生写入。
+
+###### 5.3B Candidate 累计与质量判断
+
+目标：在同一 Workspace 内累计、去重、冲突判断和过期候选，而不是每句话生成建议。
+
+- 使用可解释的显式陈述、重复来源、冲突和敏感度规则，不以单一神秘置信度授权；
+- 状态固定为 accumulating、reviewable、conflicted、proposed、rejected、materialized
+  和 expired；
+- 被动推断至少需要两个不同任务或会话的独立支持；明确用户 LifeModel 写入请求可以
+  直接进入 reviewable，但仍不能直接物化；
+- 身份、价值观、长期目标和个人边界要求明确用户来源；重要关系默认仅允许手动提出；
+- Candidate 正文有限保留，拒绝/过期后清除内容，只保留无内容 suppression digest；
+- 不跨 Workspace 聚合，用户可以删除、暂停一类建议或阻止相似建议重复出现。
+
+退出标准：重复观察合并，冲突停止 proposal，跨 Workspace 不泄漏，到期清理不留下
+可恢复正文。
+
+###### 5.3C 真实来源与可选模型提取
+
+目标：把任务结果、Reflection、用户纠正和反馈接入同一候选边界。
+
+- 工具输出、网页内容和第三方文本不能直接成为用户画像；
+- 明确语句优先使用本地确定性提取；模型辅助提取只接收有界摘要并返回严格 typed
+  candidate schema，输出仍是不可信 Candidate；
+- 外部提取沿用 Provider privacy route 和用户配置；无允许 Provider 或本地能力时跳过，
+  不阻塞任务、不静默外发；
+- task outcome 和 Reflection 只提供支持/反对证据，不自动升级为长期用户事实；
+- rejection、edited proposal 和用户纠正作为反向或修正来源进入同一生命周期。
+
+退出标准：核心明确语句路径无需外部 Provider；重复任务结果可形成候选；Provider
+失败不会影响普通任务。
+
+###### 5.3D Review-ready v2 proposal 与产品体验
+
+目标：把合格 Candidate 变成少量、精确、可理解的 LifeModel v2 审核项。
+
+- proposal 绑定 `$lifemodel_v2`、当前 base version/document digest、typed operation、
+  source refs、显式程度、稳定性、敏感度和冲突状态；
+- Review Center 单独分组展示 LifeModel 学习建议；最多一次展示五项，但逐项决定，
+  不提供 LifeModel 一键批量接受；
+- 支持 schema-aware 修改、确认、拒绝和稍后处理；不重新开放通用 JSON 编辑；
+- Main Chat 不弹出逐任务审批，只准确报告有多少建议等待 Review；
+- pending、deferred 和 accepted-but-not-applied 不得显示为已经记住或已经更新。
+
+退出标准：Review 显示值、来源和最终 typed diff 一致，未确认前 canonical v2 不变。
+
+###### 5.3E 决定反馈与版本化物化
+
+目标：让用户决定通过现有唯一 gateway 产生真实版本，并反向影响候选生命周期。
+
+- 接受继续使用现有 ReviewWorkflow、ProposalStore 和 LifeModel v2 materialization
+  gateway，不增加第二套 proposal 或物化权威；
+- materialized version 绑定 proposal、Candidate 和 Observation source refs；
+- rejected 进入冷却，edited 成为纠正证据，deferred 不算拒绝；
+- stale base 明确失败，不自动 rebase 或静默重放；不确定提交结果保持 unknown；
+- 删除、清空和回滚继续复用 5.2 已完成的 v2 用户控制。
+
+退出标准：接受、拒绝、修改、稍后、冲突和失败均有真实状态；只有成功 gateway receipt
+可以获得已物化信用。
+
+###### 5.3F 最小后续使用、原生验收与旧路径删除
+
+目标：证明新版本可以在后续会话被明确读取，同时不提前实现 5.4 的全面个性化注入。
+
+- 用户明确询问 LifeModel 时，Agent 可以读取刚物化的 v2 fact，并说明版本、来源和
+  使用原因；自动影响 planning、reasoning、retrieval 和 tool selection 留给 5.4；
+- 在替代 caller 激活的同一切片删除旧 scalar suggestion、ReviewMaturation blocker
+  和已被替代的 Maturation production caller/export；仍有真实消费者的 EvidenceStore
+  或 Proactive 路径继续保留到其替代完成；
+- 在同一精确构建和隔离 QA 中跨重启验证完整链路，不反复建立 finalN profile；
+- external-live 只作为可选提取能力的独立证据，不是 5.3 核心闭环的前置条件。
+
+退出标准：真实产品完成“使用 -> Observation -> Candidate -> proposal -> 人审 ->
+v2 物化 -> 下一会话明确读取”，且普通 Agent 在 learning/LifeModel 故障时仍可工作。
+
 ##### 5.4 让 LifeModel 真正增强 Agent
 
 目标：证明 LifeModel 不是静态档案或被动数据库。
@@ -1142,8 +1243,8 @@ Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显�
 “受限 typed diff 与原子 v2 物化”已于提交 `16572d6` 完成。5.2E“受治理迁移与
 canonical owner 切换”已于提交 `55c7805` 完成；未迁移真实用户 profile。5.2F
 “用户编辑、版本、删除、回滚与导出”已于提交 `47b5bd2` 完成。5.2G“旧 4D
-路径替换与阶段收口”已完成开发并停在用户审阅边界：v2 Builder 和旧 shipped 路径
-替换已进入源码；前端
+路径替换与阶段收口”已于提交 `552d52b` 完成，5.2 已关闭。v2 Builder 和旧 shipped
+路径替换已进入源码；前端
 格式、类型、246 项测试、production build/absence guard、Rust 格式、严格 Clippy
 和 `cargo test --all --locked` 已通过。`d1c18347...` 精确构建已分别在 fresh/v2 与
 legacy 隔离 profile 完成建立、迁移、编辑、冲突、删除、回滚、YAML、重启和 v2
@@ -1151,8 +1252,12 @@ legacy 隔离 profile 完成建立、迁移、编辑、冲突、删除、回滚�
 界面问题。包含该修复的最终精确构建 `d02e9dae...` 已完成主 QA 的凭据恢复、重启、
 v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy QA 的独立凭据恢复、
 重启、v2 version 1 保持和迁移终态复核。未调用外部 Provider 或网络，未迁移真实
-用户 profile。当前工作树尚未提交，等待用户审阅；5.2 已封顶为 A—G，不再默认
-增加 5.2H。**
+用户 profile。5.3A“Observation 与 Candidate 边界”已于 2026-08-08 完成源码与
+自动化产品验证，并停在用户审阅和提交边界：当前用户明确表达的低敏长期偏好和
+协作偏好会暂存为可查看、可删除、可跨存储重启恢复的 Candidate；该路径不会创建
+Proposal，也不会修改 canonical LifeModel v2。前端产品测试、browser-shell 路由验收、
+Rust 格式、严格 Clippy 和全仓 Rust 测试均通过；browser-shell 证据不冒充真实 Tauri
+原生验收，完整原生闭环仍按计划属于 5.3F。5.3 固定为 A—F，不默认增加 5.3G。**
 
 第五阶段第一步实际完成：
 
@@ -1164,12 +1269,21 @@ v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy 
 - 缺失 MemoryLifecycleStore 时，Main Chat 使用显式 degraded context marker，而
   不是中止基础上下文编译或把空结果冒充健康；
 - 程序性未来规则归入 Agent Memory proposal 候选，不再写入 LifeModel；
-- Main Chat 只为已支持的精确 LifeModel 字段和值创建 proposal。通用请求
-  返回 `lifemodel_typed_diff_required`，不再生成无法物化的
-  `lifemodel.pending.chat_conversation` 占位记录；Markdown 编辑则进入受治理的
-  file-write proposal 路径，不再被冒充为 LifeModel 变更；
-- 本切片没有实现完整 Agent Memory、没有重构完整 LifeModel schema、没有进入
-  自动候选证据与长期学习闭环。
+- 5.3A 已替换 Main Chat 的旧 scalar LifeModel proposal caller：受支持的明确长期
+  偏好先进入 learning Candidate；通用、身份、敏感或无法精确分类的请求保持 blocker，
+  不生成模糊 Proposal；Markdown 编辑继续进入受治理的 file-write proposal 路径，
+  不被冒充为 LifeModel 变更；
+- Candidate owner 只保存有界摘要、来源引用、Workspace、typed v2 section/value、
+  显式程度、敏感度与保留期；重复提交幂等，Workspace 隔离，删除会同时清除本条
+  Observation/Candidate，且删除回执不能声称 Proposal 或 LifeModel 被改动；
+- Personal Intelligence 的 Life Model 页面显示独立“待验证的长期信息”缓冲区；
+  learning store 故障只降级该区域，不关闭健康的 Agent、Memory 或 canonical
+  LifeModel 读取；
+- 自动化已经覆盖 send/stream 两条真实命令路径、ProposalStore 与 canonical v2
+  零写入、磁盘关闭重开和 read-only 重开、用户删除及恶意回执 fail-closed；本切片
+  没有调用外部 Provider、网络或真实用户数据；
+- 当前没有进入被动学习、Reflection/任务结果提取、Provider 辅助提取、Candidate
+  累计质量判断或 Proposal 物化；这些继续属于 5.3B—5.3F。
 
 第四阶段实际完成：
 

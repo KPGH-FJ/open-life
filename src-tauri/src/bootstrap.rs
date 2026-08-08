@@ -2482,6 +2482,32 @@ fn bootstrap_with_secret_store(
         &startup_warnings,
     );
 
+    let life_model_learning_db_path = data_dir.join("life_model_learning.db");
+    let life_model_learning_store = init_store(
+        || {
+            openlife_core::agent::LifeModelLearningStore::new(&life_model_learning_db_path)
+                .map_err(|error| error.to_string())
+        },
+        || {
+            openlife_core::agent::LifeModelLearningStore::open_read_only_existing(
+                &life_model_learning_db_path,
+            )
+            .map_err(|error| error.to_string())
+        },
+        || {
+            openlife_core::agent::LifeModelLearningStore::new_in_memory()
+                .map_err(|error| error.to_string())
+        },
+        "LifeModelLearningStore",
+        &startup_warnings,
+        &persistence,
+    );
+    let life_model_learning_store = optional_store(
+        life_model_learning_store,
+        "LifeModelLearningStore",
+        &startup_warnings,
+    );
+
     let plan_execute_sessions_db_path = data_dir.join("plan_execute_sessions.db");
     let plan_execute_session_store = init_store(
         || init_plan_execute_session_store(&plan_execute_sessions_db_path, &startup_warnings),
@@ -3263,6 +3289,8 @@ fn bootstrap_with_secret_store(
         policy_store: Arc::new(policy_store),
         proposal_store: proposal_store.map(|store| Arc::new(Mutex::new(store))),
         memory_lifecycle_store: memory_lifecycle_store.map(|store| Arc::new(Mutex::new(store))),
+        life_model_learning_store: life_model_learning_store
+            .map(|store| Arc::new(Mutex::new(store))),
         plan_execute_session_store: plan_execute_session_store
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_agent_session_store: main_chat_agent_session_store

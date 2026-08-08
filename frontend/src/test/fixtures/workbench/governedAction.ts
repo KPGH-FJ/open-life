@@ -554,6 +554,7 @@ export function workbenchJourneyFixtureDataSource(
     async draftLifeModelExport() {
       return "fixture-lifemodel-v2-export-proposal";
     },
+    async deleteLifeModelLearningCandidate() {},
     async correctMemory() {},
     async archiveMemory() {},
     async stopRecall() {},

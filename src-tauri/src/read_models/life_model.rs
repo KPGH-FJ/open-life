@@ -135,6 +135,34 @@ pub(crate) async fn get_life_model_view_model_with_state(
             None
         }
     };
+    let (learning_available, learning_candidates) = match state.life_model_learning_store.as_ref() {
+        Some(store) => {
+            let workspace_ref = crate::life_model_learning::current_workspace_ref(state).await;
+            match store
+                .lock()
+                .await
+                .list_active_candidates(&workspace_ref, 100)
+            {
+                Ok(candidates) => (true, candidates),
+                Err(err) => {
+                    warnings.push(warning(
+                            "lifemodel_learning_candidates_unavailable",
+                            format!(
+                                "LifeModel learning candidates could not be loaded; canonical LifeModel remains available: {err}"
+                            ),
+                        ));
+                    (false, Vec::new())
+                }
+            }
+        }
+        None => {
+            warnings.push(warning(
+                    "lifemodel_learning_store_unavailable",
+                    "LifeModel learning is unavailable; ordinary Agent and canonical LifeModel reads remain available.",
+                ));
+            (false, Vec::new())
+        }
+    };
 
     let mut envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
         canonical_v2,
@@ -146,6 +174,8 @@ pub(crate) async fn get_life_model_view_model_with_state(
         review_items,
         memory_count,
         tier_stats,
+        learning_available,
+        learning_candidates,
         now: Some(now),
         error: load_error,
         ..Default::default()
