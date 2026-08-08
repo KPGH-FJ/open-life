@@ -1001,6 +1001,122 @@ pub struct LifeModelVersionV2 {
     pub created_at: String,
 }
 
+pub const LIFE_MODEL_V2_YAML_PROJECTION_SCHEMA: &str = "openlife.lifemodel.v2.yaml-projection.v1";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelHumanProjectionV2 {
+    pub schema_version: String,
+    pub model_id: String,
+    pub model_version: u64,
+    pub item_count: usize,
+    pub document_digest: String,
+    pub yaml_content_digest: String,
+    pub projection_digest: String,
+    pub yaml: String,
+}
+
+impl LifeModelVersionV2 {
+    pub fn human_yaml_projection(&self) -> Result<LifeModelHumanProjectionV2> {
+        self.document.validate()?;
+        if self.model_version == 0
+            || self.schema_version != LIFE_MODEL_V2_SCHEMA_VERSION
+            || self.document.schema_version != self.schema_version
+            || self.document.model_id != self.model_id
+            || self.document.digest()? != self.document_digest
+        {
+            bail!("lifemodel_v2_yaml_projection_version_binding_mismatch");
+        }
+        let yaml = self.document.deterministic_yaml()?;
+        let yaml_content_digest = format!(
+            "sha256:{}",
+            hex_digest(digest(&SHA256, yaml.as_bytes()).as_ref())
+        );
+        let projection_digest = life_model_projection_digest(
+            &self.model_id,
+            self.model_version,
+            self.document.total_item_count(),
+            &self.document_digest,
+            &yaml_content_digest,
+        )?;
+        Ok(LifeModelHumanProjectionV2 {
+            schema_version: LIFE_MODEL_V2_YAML_PROJECTION_SCHEMA.into(),
+            model_id: self.model_id.clone(),
+            model_version: self.model_version,
+            item_count: self.document.total_item_count(),
+            document_digest: self.document_digest.clone(),
+            yaml_content_digest,
+            projection_digest,
+            yaml,
+        })
+    }
+}
+
+impl LifeModelHumanProjectionV2 {
+    pub fn validate_binding(
+        &self,
+        model_id: &str,
+        model_version: u64,
+        document_digest: &str,
+    ) -> Result<()> {
+        if self.schema_version != LIFE_MODEL_V2_YAML_PROJECTION_SCHEMA
+            || self.model_id != model_id
+            || self.model_version != model_version
+            || self.document_digest != document_digest
+            || self.yaml.trim().is_empty()
+        {
+            bail!("lifemodel_v2_yaml_projection_binding_mismatch");
+        }
+        let yaml_content_digest = format!(
+            "sha256:{}",
+            hex_digest(digest(&SHA256, self.yaml.as_bytes()).as_ref())
+        );
+        if yaml_content_digest != self.yaml_content_digest
+            || life_model_projection_digest(
+                model_id,
+                model_version,
+                self.item_count,
+                document_digest,
+                &yaml_content_digest,
+            )? != self.projection_digest
+        {
+            bail!("lifemodel_v2_yaml_projection_digest_mismatch");
+        }
+        let projected: LifeModelDocumentV2 = serde_yaml::from_str(&self.yaml)
+            .context("parse_lifemodel_v2_yaml_projection_for_validation")?;
+        projected.validate()?;
+        if projected.model_id != model_id
+            || projected.total_item_count() != self.item_count
+            || projected.digest()? != document_digest
+        {
+            bail!("lifemodel_v2_yaml_projection_document_mismatch");
+        }
+        Ok(())
+    }
+}
+
+fn life_model_projection_digest(
+    model_id: &str,
+    model_version: u64,
+    item_count: usize,
+    document_digest: &str,
+    yaml_content_digest: &str,
+) -> Result<String> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": LIFE_MODEL_V2_YAML_PROJECTION_SCHEMA,
+        "modelId": model_id,
+        "modelVersion": model_version,
+        "itemCount": item_count,
+        "documentDigest": document_digest,
+        "yamlContentDigest": yaml_content_digest,
+    }))
+    .context("serialize_lifemodel_v2_yaml_projection_digest")?;
+    Ok(format!(
+        "sha256:{}",
+        hex_digest(digest(&SHA256, &payload).as_ref())
+    ))
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct LifeModelCommitV2 {
@@ -1719,6 +1835,57 @@ goals:
             first.deterministic_yaml().unwrap(),
             second.deterministic_yaml().unwrap()
         );
+    }
+
+    #[test]
+    fn human_yaml_projection_is_deterministic_and_bound_to_exact_version() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let mut document = LifeModelDocumentV2::empty("primary");
+        document
+            .values
+            .push(statement("value:autonomy", "Autonomy matters."));
+        let version = store.commit(commit_request(document)).unwrap().version;
+
+        let first = version.human_yaml_projection().unwrap();
+        let second = version.human_yaml_projection().unwrap();
+        assert_eq!(first, second);
+        first
+            .validate_binding(
+                &version.model_id,
+                version.model_version,
+                &version.document_digest,
+            )
+            .unwrap();
+        assert!(first.yaml.contains("Autonomy matters."));
+        assert_eq!(first.model_version, 1);
+    }
+
+    #[test]
+    fn human_yaml_projection_rejects_content_tamper_and_version_transplant() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let mut document = LifeModelDocumentV2::empty("primary");
+        document
+            .values
+            .push(statement("value:clarity", "Clarity matters."));
+        let version = store.commit(commit_request(document)).unwrap().version;
+        let projection = version.human_yaml_projection().unwrap();
+
+        let mut tampered = projection.clone();
+        tampered.yaml.push_str("\n# changed\n");
+        assert!(tampered
+            .validate_binding(
+                &version.model_id,
+                version.model_version,
+                &version.document_digest,
+            )
+            .is_err());
+        assert!(projection
+            .validate_binding(
+                &version.model_id,
+                version.model_version + 1,
+                &version.document_digest,
+            )
+            .is_err());
     }
 
     #[test]

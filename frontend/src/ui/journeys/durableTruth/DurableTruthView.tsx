@@ -256,12 +256,38 @@ export function DurableTruthView({
                     "后端没有提供可展示的当前或规范摘要；页面不会从旧 LifeModel 对象补造内容。")}
               </p>
               {canonicalView ? (
-                <small>
-                  {canonicalView.versionLabel}
-                  {canonicalView.lastMaterializedAt
-                    ? ` · 确认于 ${canonicalView.lastMaterializedAt}`
-                    : " · 确认时间未知"}
-                </small>
+                <>
+                  <small>
+                    {canonicalView.versionLabel}
+                    {canonicalView.lastMaterializedAt
+                      ? ` · 确认于 ${canonicalView.lastMaterializedAt}`
+                      : " · 确认时间未知"}
+                  </small>
+                  <details className="ol-lifemodel-yaml">
+                    <summary>查看 YAML 人类视图</summary>
+                    <p>
+                      这是由当前规范版本确定性生成的只读表达。SQLite 中的版本化 JSON
+                      才是权威；此处不能直接编辑或保存。
+                    </p>
+                    <dl>
+                      <div>
+                        <dt>版本</dt>
+                        <dd>{canonicalView.humanProjection.modelVersion}</dd>
+                      </div>
+                      <div>
+                        <dt>内容数量</dt>
+                        <dd>{canonicalView.humanProjection.itemCount}</dd>
+                      </div>
+                      <div>
+                        <dt>投影摘要</dt>
+                        <dd>{canonicalView.humanProjection.projectionDigest}</dd>
+                      </div>
+                    </dl>
+                    <pre aria-label="LifeModel YAML 人类视图">
+                      <code>{canonicalView.humanProjection.yaml}</code>
+                    </pre>
+                  </details>
+                </>
               ) : null}
               {!canonicalView && sortedDimensions.length > 0 && (
                 <dl className="ol-durable-dimensions">

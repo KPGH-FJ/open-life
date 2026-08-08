@@ -2478,6 +2478,18 @@ export type LifeModelCanonicalSummary = {
   versionLabel: string;
   lastMaterializedAt: string | null;
   evidenceRefs: EvidenceRef[];
+  humanProjection: LifeModelHumanProjectionV2;
+};
+
+export type LifeModelHumanProjectionV2 = {
+  schemaVersion: "openlife.lifemodel.v2.yaml-projection.v1";
+  modelId: string;
+  modelVersion: number;
+  itemCount: number;
+  documentDigest: string;
+  yamlContentDigest: string;
+  projectionDigest: string;
+  yaml: string;
 };
 
 export type LegacyLifeModelMigrationItemV2 = {

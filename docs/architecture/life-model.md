@@ -21,7 +21,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-08 during Phase 5.2B legacy migration-preview implementation.
+2026-08-08 during Phase 5.2C canonical YAML projection implementation.
 
 ## Source map
 
@@ -87,6 +87,16 @@ non-finite numbers, oversized sources, and unsupported YAML constructs make the
 preview unavailable without changing data. The product shows this classification
 only while no non-empty canonical v2 version exists. It does not create a v2
 version, proposal, backup, migration receipt, or owner cutover.
+
+For a non-empty validated v2 version, `LifeModelHumanProjectionV2` carries the
+deterministic YAML plus its exact model id, model version, item count, document
+digest, YAML content digest, and projection digest. The backend regenerates and
+validates this binding before granting canonical `LifeModelViewModel` credit;
+the frontend only renders the backend-owned projection. A changed YAML body,
+version transplant, item-count drift, or document mismatch fails closed rather
+than falling back to the legacy YAML. The product view is collapsed and
+read-only: no YAML editor, import, proposal, or v2 write path is introduced by
+this slice.
 
 ## Patch And Proposal Path
 

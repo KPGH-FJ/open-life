@@ -42,13 +42,14 @@ pub(crate) async fn get_life_model_view_model_with_state(
         Ok(None) => (None, None, None),
         Err(err) => (None, None, Some(format!("life_model_load_failed: {err}"))),
     };
-    let (canonical_v2, canonical_v2_error) = match canonical_v2_result {
-        Ok(version) => (version.map(canonical_v2_input), None),
-        Err(err) => (
-            None,
-            Some(format!("lifemodel_v2_canonical_load_failed: {err}")),
-        ),
-    };
+    let (canonical_v2, canonical_v2_error) =
+        match canonical_v2_result.and_then(|version| version.map(canonical_v2_input).transpose()) {
+            Ok(version) => (version, None),
+            Err(err) => (
+                None,
+                Some(format!("lifemodel_v2_canonical_load_failed: {err}")),
+            ),
+        };
     let meaningful_canonical = canonical_v2
         .as_ref()
         .is_some_and(|canonical| canonical.item_count > 0);
@@ -159,8 +160,9 @@ pub(crate) async fn get_life_model_view_model_with_state(
     Ok(envelope)
 }
 
-fn canonical_v2_input(version: LifeModelVersionV2) -> LifeModelCanonicalV2Input {
-    LifeModelCanonicalV2Input {
+fn canonical_v2_input(version: LifeModelVersionV2) -> anyhow::Result<LifeModelCanonicalV2Input> {
+    let human_projection = version.human_yaml_projection()?;
+    Ok(LifeModelCanonicalV2Input {
         model_id: version.model_id,
         schema_version: version.schema_version,
         model_version: version.model_version,
@@ -170,7 +172,8 @@ fn canonical_v2_input(version: LifeModelVersionV2) -> LifeModelCanonicalV2Input 
         item_count: version.document.total_item_count(),
         updated_at: Some(version.created_at),
         source_refs: version.source_refs,
-    }
+        human_projection,
+    })
 }
 
 async fn load_proposals(
@@ -300,12 +303,17 @@ mod tests {
             created_at: "2026-08-08T10:01:00Z".into(),
         };
 
-        let input = canonical_v2_input(version);
+        let input = canonical_v2_input(version).unwrap();
 
         assert_eq!(input.model_id, DEFAULT_LIFE_MODEL_V2_MODEL_ID);
         assert_eq!(input.model_version, 2);
         assert_eq!(input.parent_version, Some(1));
         assert_eq!(input.item_count, 1);
         assert_eq!(input.source_refs, vec!["proposal:accepted-2"]);
+        assert_eq!(input.human_projection.model_version, 2);
+        assert!(input
+            .human_projection
+            .yaml
+            .contains("User autonomy matters."));
     }
 }

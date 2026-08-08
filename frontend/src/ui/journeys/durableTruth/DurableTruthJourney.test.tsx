@@ -58,6 +58,16 @@ describe("Workbench durable truth journey", () => {
           versionLabel: "openlife.lifemodel.v2 · version 2",
           lastMaterializedAt: "2026-08-08T10:00:00Z",
           evidenceRefs: [],
+          humanProjection: {
+            schemaVersion: "openlife.lifemodel.v2.yaml-projection.v1",
+            modelId: "primary",
+            modelVersion: 2,
+            itemCount: 2,
+            documentDigest: "sha256:document",
+            yamlContentDigest: "sha256:yaml",
+            projectionDigest: "sha256:projection",
+            yaml: "schemaVersion: openlife.lifemodel.v2\nmodelId: primary\nvalues:\n  - id: value:1\n    statement: Autonomy matters.\n",
+          },
         },
         legacyMigrationPreview: {
           schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1",
@@ -92,6 +102,11 @@ describe("Workbench durable truth journey", () => {
       screen.queryByText("负责产品与工程决策，需要保留连续的独立思考时间。")
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "迁移前预览" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByText("查看 YAML 人类视图"));
+    expect(screen.getByText(/SQLite 中的版本化 JSON 才是权威/)).toBeVisible();
+    expect(screen.getByLabelText("LifeModel YAML 人类视图")).toHaveTextContent("Autonomy matters.");
+    expect(screen.queryByRole("button", { name: /保存|导入|应用/ })).not.toBeInTheDocument();
   });
 
   it("shows a read-only field-complete legacy migration preview without claiming migration", async () => {

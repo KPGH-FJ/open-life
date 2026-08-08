@@ -741,6 +741,26 @@ summary 后可从 canonical transcript 重建。
 安全展示的值 fail-closed；用户能区分“可审核迁移”“属于其他 owner”“需要人工判断”
 和“不会迁移”，且产品没有发生任何持久化变更。
 
+###### 5.2C Canonical YAML 人类投影
+
+用户能力：当系统已有非空 canonical LifeModel v2 时，用户可以在“关于我”中查看与
+精确 canonical version 绑定的只读 YAML，理解自己的长期模型，而不把 YAML 变成第二
+写权威。
+
+- YAML 必须完全由已验证的 v2 document 确定性生成，并携带 model id、model version、
+  document digest 和 projection digest；同一 canonical document 永远得到同一投影；
+- `LifeModelViewModel` 只在 non-empty canonical v2 有效时返回 YAML；兼容 YAML、空 v2、
+  migration preview、旧 4D summary 或前端 fixture 不得获得 canonical YAML 信用；
+- `/life-model` 明确说明 SQLite/versioned JSON 是权威，YAML 是人类可读视图；投影默认
+  折叠、保持只读，不提供保存、导入、复制即写入或任意 YAML 编辑入口；
+- YAML 生成、digest 或版本绑定失败时，canonical read fail-closed，不能回退为旧 YAML
+  或由前端重新序列化；
+- 本切片不创建 proposal、不迁移旧数据、不增加 v2 writer，也不实现 YAML 编辑转 typed
+  diff；后者必须在 exact patch/materialization gateway 完成后再开放。
+
+退出标准：用户能读取与精确 canonical version 一致的 YAML；JSON/SQLite 与 YAML 不存在
+双写权威；自动化证明确定性、摘要绑定、兼容路径隔离和只读界面。
+
 ##### 5.3 建立真实学习闭环
 
 目标：从日常使用中稳定产生少量、高质量、可物化的 LifeModel proposal。
@@ -949,9 +969,10 @@ Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显�
 生命周期”已于提交 `177b144` 完成并经用户确认。5.1E“混合检索与召回解释”已经
 于提交 `7110e99` 完成并经用户确认。5.1F“用户控制界面与原生验收”已于提交
 `653693b` 完成并经用户确认。5.2A“空模型语义与版本化 canonical owner”已于提交
-`3a6c2bb` 完成并经用户确认。5.2B“旧 YAML 迁移预览与字段归属”已完成实现、
-本地自审和全量门禁，当前停在用户审阅与提交边界；尚未开始真实数据迁移、v2
-proposal materialization 或 canonical owner cutover。**
+`3a6c2bb` 完成并经用户确认。5.2B“旧 YAML 迁移预览与字段归属”已于提交
+`39e8fe9` 完成。5.2C“Canonical YAML 人类投影”已完成实现、本地自审和全量门禁，
+当前停在用户审阅与提交边界；尚未开始真实数据迁移、v2 proposal materialization、
+YAML 编辑或 canonical owner cutover。**
 
 第五阶段第一步实际完成：
 

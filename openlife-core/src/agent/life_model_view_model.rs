@@ -6,7 +6,7 @@ use crate::agent::product_read_model::{
 };
 use crate::agent::review_item::{ReviewItem, ReviewItemType};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType};
-use crate::life_model::v2::LegacyLifeModelMigrationPreviewV2;
+use crate::life_model::v2::{LegacyLifeModelMigrationPreviewV2, LifeModelHumanProjectionV2};
 use crate::life_model::{LifeModel, Model4DCompletion};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -140,6 +140,7 @@ pub struct LifeModelCanonicalSummary {
     pub version_label: String,
     pub last_materialized_at: Option<String>,
     pub evidence_refs: Vec<EvidenceRef>,
+    pub human_projection: LifeModelHumanProjectionV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,6 +345,7 @@ pub struct LifeModelCanonicalV2Input {
     pub item_count: usize,
     pub updated_at: Option<String>,
     pub source_refs: Vec<String>,
+    pub human_projection: LifeModelHumanProjectionV2,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -410,7 +412,7 @@ pub fn build_life_model_view_model_envelope(
     let meaningful_canonical = input
         .canonical_v2
         .as_ref()
-        .is_some_and(|canonical| canonical.item_count > 0);
+        .is_some_and(canonical_v2_input_is_meaningful);
     let status = loaded_status(&input, meaningful_life_model, meaningful_canonical);
     let current_view_summary =
         build_current_view_summary(&input, &source_refs, meaningful_life_model);
@@ -591,7 +593,21 @@ fn build_canonical_summary(
                 sensitivity: Some(EvidenceSensitivity::LocalPrivate),
             })
             .collect(),
+        human_projection: canonical.human_projection.clone(),
     })
+}
+
+fn canonical_v2_input_is_meaningful(canonical: &LifeModelCanonicalV2Input) -> bool {
+    canonical.item_count > 0
+        && canonical.item_count == canonical.human_projection.item_count
+        && canonical
+            .human_projection
+            .validate_binding(
+                &canonical.model_id,
+                canonical.model_version,
+                &canonical.document_digest,
+            )
+            .is_ok()
 }
 
 fn build_contract_limitations(meaningful_canonical: bool) -> Vec<String> {
@@ -1069,7 +1085,7 @@ fn build_warnings(
     if input
         .canonical_v2
         .as_ref()
-        .is_none_or(|canonical| canonical.item_count == 0)
+        .is_none_or(|canonical| !canonical_v2_input_is_meaningful(canonical))
     {
         warnings.push(warning(
             "lifemodel.canonical_summary_unavailable",
@@ -1183,7 +1199,11 @@ fn request_update_action(disabled_reason: Option<String>) -> ProductAction {
 
 fn collect_source_refs(input: &LifeModelViewModelBuildInput) -> Vec<EvidenceRef> {
     let mut refs = Vec::new();
-    if let Some(canonical) = &input.canonical_v2 {
+    if let Some(canonical) = input
+        .canonical_v2
+        .as_ref()
+        .filter(|canonical| canonical_v2_input_is_meaningful(canonical))
+    {
         refs.push(EvidenceRef {
             id: format!(
                 "lifemodel-v2:{}:{}:{}",
@@ -1426,6 +1446,9 @@ mod tests {
     use super::*;
     use crate::agent::review_item::{build_review_item, ReviewCenterBuildInput};
     use crate::agent::types::{ProposalSource, RiskLevel};
+    use crate::life_model::v2::{
+        LifeModelDocumentV2, LifeModelStatementV2, LifeModelVersionV2, LIFE_MODEL_V2_SCHEMA_VERSION,
+    };
     use serde_json::json;
 
     fn model_with_content() -> LifeModel {
@@ -1442,6 +1465,47 @@ mod tests {
         });
         model.state.focus_areas.push("OpenLife".into());
         model
+    }
+
+    fn canonical_input(model_version: u64, statements: &[&str]) -> LifeModelCanonicalV2Input {
+        let mut document = LifeModelDocumentV2::empty("primary");
+        for (index, statement) in statements.iter().enumerate() {
+            document.values.push(LifeModelStatementV2 {
+                id: format!("value:{}", index + 1),
+                statement: (*statement).into(),
+                source_refs: vec![format!("proposal:accepted-{}", index + 1)],
+                confirmed_at: "2026-08-08T10:00:00Z".into(),
+            });
+        }
+        let document_digest = document.digest().unwrap();
+        let version = LifeModelVersionV2 {
+            model_id: "primary".into(),
+            schema_version: LIFE_MODEL_V2_SCHEMA_VERSION.into(),
+            model_version,
+            parent_version: model_version.checked_sub(1).filter(|version| *version > 0),
+            parent_digest: model_version
+                .checked_sub(1)
+                .filter(|version| *version > 0)
+                .map(|_| "sha256:parent".into()),
+            document_digest: document_digest.clone(),
+            version_digest: "sha256:test-version".into(),
+            document,
+            materialization_id: "proposal:accepted".into(),
+            source_refs: vec!["proposal:accepted".into()],
+            created_at: "2026-08-08T10:00:00Z".into(),
+        };
+        LifeModelCanonicalV2Input {
+            model_id: version.model_id.clone(),
+            schema_version: version.schema_version.clone(),
+            model_version,
+            parent_version: version.parent_version,
+            document_digest,
+            summary: version.document.summary(),
+            item_count: version.document.total_item_count(),
+            updated_at: Some(version.created_at.clone()),
+            source_refs: version.source_refs.clone(),
+            human_projection: version.human_yaml_projection().unwrap(),
+        }
     }
 
     fn proposal(id: &str, status: ProposalStatus) -> AgentProposal {
@@ -1499,15 +1563,7 @@ mod tests {
         );
 
         let canonical = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            canonical_v2: Some(LifeModelCanonicalV2Input {
-                model_id: "primary".into(),
-                schema_version: "openlife.lifemodel.v2".into(),
-                model_version: 1,
-                document_digest: "sha256:canonical".into(),
-                summary: "One confirmed item".into(),
-                item_count: 1,
-                ..Default::default()
-            }),
+            canonical_v2: Some(canonical_input(1, &["One confirmed item"])),
             legacy_migration_preview: Some(preview),
             now: Some("2026-08-08T10:00:00Z".into()),
             ..Default::default()
@@ -1522,17 +1578,10 @@ mod tests {
     #[test]
     fn structured_v2_version_is_the_only_canonical_summary_credit() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            canonical_v2: Some(LifeModelCanonicalV2Input {
-                model_id: "primary".into(),
-                schema_version: "openlife.lifemodel.v2".into(),
-                model_version: 3,
-                parent_version: Some(2),
-                document_digest: "sha256:canonical".into(),
-                summary: "2 confirmed long-term items.".into(),
-                item_count: 2,
-                updated_at: Some("2026-08-08T10:00:00Z".into()),
-                source_refs: vec!["proposal:accepted-3".into()],
-            }),
+            canonical_v2: Some(canonical_input(
+                3,
+                &["Autonomy matters.", "Clarity matters."],
+            )),
             life_model: Some(LifeModel::default_model()),
             projection: Some(LifeModelProjectionInput {
                 model_empty: true,
@@ -1547,7 +1596,9 @@ mod tests {
         assert_eq!(data.truth_mode, LifeModelTruthMode::Canonical);
         let summary = data.canonical_summary.expect("canonical summary");
         assert_eq!(summary.version_label, "openlife.lifemodel.v2 · version 3");
-        assert_eq!(summary.summary, "2 confirmed long-term items.");
+        assert!(summary.summary.starts_with("2 confirmed long-term items:"));
+        assert_eq!(summary.human_projection.model_version, 3);
+        assert!(summary.human_projection.yaml.contains("Autonomy matters."));
         assert!(envelope
             .warnings
             .iter()
@@ -1555,19 +1606,30 @@ mod tests {
     }
 
     #[test]
+    fn tampered_yaml_projection_cannot_receive_canonical_credit() {
+        let mut canonical = canonical_input(2, &["Autonomy matters."]);
+        canonical.human_projection.yaml.push_str("\n# drift\n");
+        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            canonical_v2: Some(canonical),
+            life_model: Some(LifeModel::default_model()),
+            now: Some("2026-08-08T10:01:00Z".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(envelope.status, ViewModelStatus::Empty);
+        let data = envelope.data.expect("data");
+        assert_eq!(data.truth_mode, LifeModelTruthMode::Unknown);
+        assert!(data.canonical_summary.is_none());
+        assert!(envelope
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "lifemodel.canonical_summary_unavailable"));
+    }
+
+    #[test]
     fn empty_v2_version_does_not_create_canonical_truth() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            canonical_v2: Some(LifeModelCanonicalV2Input {
-                model_id: "primary".into(),
-                schema_version: "openlife.lifemodel.v2".into(),
-                model_version: 1,
-                parent_version: None,
-                document_digest: "sha256:empty".into(),
-                summary: "No confirmed long-term user information has been materialized.".into(),
-                item_count: 0,
-                updated_at: Some("2026-08-08T10:00:00Z".into()),
-                source_refs: vec!["proposal:empty".into()],
-            }),
+            canonical_v2: Some(canonical_input(1, &[])),
             life_model: Some(LifeModel::default_model()),
             now: Some("2026-08-08T10:01:00Z".into()),
             ..Default::default()
