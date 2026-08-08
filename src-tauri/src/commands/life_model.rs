@@ -1,10 +1,6 @@
 use crate::artifact_materializer::{
     capture_artifact_target_precondition, ArtifactTargetPrecondition,
 };
-use crate::commands::proposal::{
-    canonical_lifemodel_path, is_communication_style_lifemodel_path,
-    COMMUNICATION_STYLE_CANONICAL_PATH,
-};
 use crate::errors::AppError;
 #[cfg(test)]
 use crate::life_model_materializer_guard::{
@@ -14,16 +10,14 @@ use crate::life_model_materializer_guard::{
 #[cfg(test)]
 use crate::life_model_write_gateway;
 use crate::AppState;
-use openlife_core::agent::{
-    AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
-};
-use openlife_core::life_model::patch::{LifeModelPatch, PatchStatus};
+use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::life_model::v2::{
     life_model_item_digest_v2, LegacyLifeModelMigrationPreviewV2,
     LegacyLifeModelMigrationSelectionV2, LifeModelSectionV2, LifeModelTypedDiffV2,
     LifeModelTypedOperationV2, LifeModelUserValueV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
     LIFE_MODEL_V2_LEGACY_MIGRATION_PATH, LIFE_MODEL_V2_TYPED_DIFF_PATH,
 };
+#[cfg(test)]
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,41 +32,6 @@ const MANUAL_LIFEMODEL_OVERRIDE_SOURCE: &str = "manual_lifemodel_editor";
 const MANUAL_LIFEMODEL_OVERRIDE_COMMAND: &str = "save_life_model";
 #[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS: &str = "GovernedManualOverride";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelChangeView {
-    pub path: String,
-    pub proposal_id: String,
-    pub proposal_status: String,
-    pub proposal_source: String,
-    pub proposal_source_detail: Option<String>,
-    pub proposal_run_id: Option<String>,
-    pub source_excerpt: Option<String>,
-    pub source_unavailable_reason: Option<String>,
-    pub confidence: f32,
-    pub risk_level: String,
-    pub before: Option<Value>,
-    pub after: Value,
-    pub patch_id: Option<String>,
-    pub patch_status: Option<String>,
-    pub patch_path: Option<String>,
-    pub patch_unavailable_reason: Option<String>,
-    pub snapshot_versions: Vec<String>,
-    pub snapshot_unavailable_reason: Option<String>,
-    pub current_matches_accepted_after: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelCurrentView {
-    pub path: String,
-    pub label: String,
-    pub value: Option<String>,
-    pub unavailable_reason: Option<String>,
-    pub current_value_source: String,
-    pub change: Option<LifeModelChangeView>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -199,160 +158,6 @@ fn require_governed_manual_lifemodel_override_request(
     }
 }
 
-fn value_as_trimmed_string(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn compact_source_excerpt(value: &str) -> Option<String> {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        None
-    } else if compact.chars().count() > 160 {
-        Some(format!(
-            "{}...",
-            compact.chars().take(157).collect::<String>()
-        ))
-    } else {
-        Some(compact)
-    }
-}
-
-fn proposal_source_excerpt(proposal: &AgentProposal) -> (Option<String>, Option<String>) {
-    if let Some(excerpt) = compact_source_excerpt(&proposal.reason) {
-        return (Some(excerpt), None);
-    }
-    if let Some(source_detail) = proposal
-        .source_detail
-        .as_deref()
-        .and_then(compact_source_excerpt)
-    {
-        return (Some(source_detail), None);
-    }
-    (None, Some("source_excerpt_unavailable".into()))
-}
-
-fn latest_matching_communication_style_proposal(
-    proposals: Vec<AgentProposal>,
-    current_value: Option<&str>,
-) -> Option<AgentProposal> {
-    let mut candidates: Vec<AgentProposal> = proposals
-        .into_iter()
-        .filter(|proposal| {
-            proposal.status == ProposalStatus::Accepted
-                && is_communication_style_lifemodel_path(&proposal.affected_path)
-        })
-        .collect();
-    candidates.sort_by(|left, right| {
-        let left_time = left.resolved_at.unwrap_or(left.created_at);
-        let right_time = right.resolved_at.unwrap_or(right.created_at);
-        right_time.cmp(&left_time)
-    });
-
-    if let Some(current) = current_value {
-        if let Some(index) = candidates.iter().position(|proposal| {
-            value_as_trimmed_string(&proposal.after).as_deref() == Some(current)
-        }) {
-            return Some(candidates.remove(index));
-        }
-    }
-    candidates.into_iter().next()
-}
-
-fn communication_style_patch_for_proposal(patches: Vec<LifeModelPatch>) -> Option<LifeModelPatch> {
-    patches.into_iter().find(|patch| {
-        canonical_lifemodel_path(&patch.path_pointer) == COMMUNICATION_STYLE_CANONICAL_PATH
-            && patch.status == PatchStatus::Applied
-    })
-}
-
-async fn communication_style_patch_view(
-    state: &Arc<AppState>,
-    proposal_id: &str,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
-    let Some(patch_store) = state.patch_store.as_ref() else {
-        return (None, None, None, Some("patch_store_unavailable".into()));
-    };
-    let patches = {
-        let store = patch_store.lock().await;
-        match store.list_patches_by_proposal(proposal_id) {
-            Ok(patches) => patches,
-            Err(_) => return (None, None, None, Some("patch_read_failed".into())),
-        }
-    };
-    match communication_style_patch_for_proposal(patches) {
-        Some(patch) => (
-            Some(patch.id),
-            Some(patch.status.to_string()),
-            Some(COMMUNICATION_STYLE_CANONICAL_PATH.into()),
-            None,
-        ),
-        None => (None, None, None, Some("patch_missing".into())),
-    }
-}
-
-async fn communication_style_snapshot_view(
-    state: &Arc<AppState>,
-    proposal_id: &str,
-) -> (Vec<String>, Option<String>) {
-    let snapshots = {
-        let version_manager = state.version_manager.lock().await;
-        match version_manager.get_patch_snapshots(proposal_id) {
-            Ok(snapshots) => snapshots,
-            Err(_) => return (Vec::new(), Some("snapshot_read_failed".into())),
-        }
-    };
-    if snapshots.is_empty() {
-        return (Vec::new(), Some("snapshot_missing".into()));
-    }
-    let has_before = snapshots
-        .iter()
-        .any(|snapshot| snapshot.tag == format!("patch:{proposal_id}:before"));
-    let has_after = snapshots
-        .iter()
-        .any(|snapshot| snapshot.tag == format!("patch:{proposal_id}:after"));
-    let mut versions: Vec<String> = snapshots
-        .into_iter()
-        .map(|snapshot| snapshot.version)
-        .collect();
-    versions.sort();
-    versions.dedup();
-    let unavailable = if has_before && has_after {
-        None
-    } else {
-        Some("snapshot_incomplete".into())
-    };
-    (versions, unavailable)
-}
-
-async fn accepted_communication_style_proposal(
-    state: &Arc<AppState>,
-    current_value: Option<&str>,
-) -> (Option<AgentProposal>, Option<String>) {
-    let Some(proposal_store) = state.proposal_store.as_ref() else {
-        return (None, Some("proposal_store_unavailable".into()));
-    };
-    let proposals = {
-        let store = proposal_store.lock().await;
-        match store.list_proposals_filtered(Some(ProposalStatus::Accepted), None, None, 200) {
-            Ok(proposals) => proposals,
-            Err(_) => return (None, Some("proposal_read_failed".into())),
-        }
-    };
-    match latest_matching_communication_style_proposal(proposals, current_value) {
-        Some(proposal) => (Some(proposal), None),
-        None => (None, Some("accepted_proposal_missing".into())),
-    }
-}
-
 #[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManualLifeModelOverrideAuditReport {
@@ -377,7 +182,8 @@ pub struct ManualLifeModelOverrideAuditReport {
     pub audit_detail_json: String,
 }
 
-pub(crate) async fn get_life_model_with_state(
+#[cfg(test)]
+pub(crate) async fn load_legacy_lifemodel_for_test(
     state: &Arc<AppState>,
 ) -> Result<LifeModel, AppError> {
     state
@@ -397,11 +203,6 @@ pub(crate) async fn get_life_model_with_state(
         ));
     }
     manager.load().map_err(AppError::from)
-}
-
-#[tauri::command]
-pub async fn get_life_model(state: State<'_, Arc<AppState>>) -> Result<LifeModel, AppError> {
-    get_life_model_with_state(&state.inner().clone()).await
 }
 
 pub(crate) async fn draft_legacy_lifemodel_migration_with_state(
@@ -837,95 +638,6 @@ pub async fn draft_lifemodel_v2_export(
     draft_lifemodel_v2_export_with_state(request, state.inner()).await
 }
 
-pub(crate) async fn get_life_model_current_view_with_state(
-    state: &Arc<AppState>,
-) -> Result<LifeModelCurrentView, AppError> {
-    let model = get_life_model_with_state(state).await?;
-    get_life_model_current_view_for_model_with_state(state, &model).await
-}
-
-pub(crate) async fn get_life_model_current_view_for_model_with_state(
-    state: &Arc<AppState>,
-    model: &LifeModel,
-) -> Result<LifeModelCurrentView, AppError> {
-    let current_value = model.preferences.communication_style.trim().to_string();
-    let current_value = if current_value.is_empty() {
-        None
-    } else {
-        Some(current_value)
-    };
-    let (proposal, proposal_unavailable_reason) =
-        accepted_communication_style_proposal(state, current_value.as_deref()).await;
-
-    let change = if let Some(proposal) = proposal {
-        let (source_excerpt, source_unavailable_reason) = proposal_source_excerpt(&proposal);
-        let (patch_id, patch_status, patch_path, patch_unavailable_reason) =
-            communication_style_patch_view(state, &proposal.id).await;
-        let (snapshot_versions, snapshot_unavailable_reason) =
-            communication_style_snapshot_view(state, &proposal.id).await;
-        let current_matches_accepted_after =
-            current_value.as_deref() == value_as_trimmed_string(&proposal.after).as_deref();
-        Some(LifeModelChangeView {
-            path: COMMUNICATION_STYLE_CANONICAL_PATH.into(),
-            proposal_id: proposal.id,
-            proposal_status: proposal.status.to_string(),
-            proposal_source: proposal.source.to_string(),
-            proposal_source_detail: proposal.source_detail,
-            proposal_run_id: proposal.run_id,
-            source_excerpt,
-            source_unavailable_reason,
-            confidence: proposal.confidence,
-            risk_level: proposal.risk_level.to_string(),
-            before: proposal.before,
-            after: proposal.after,
-            patch_id,
-            patch_status,
-            patch_path,
-            patch_unavailable_reason,
-            snapshot_versions,
-            snapshot_unavailable_reason,
-            current_matches_accepted_after,
-        })
-    } else {
-        None
-    };
-
-    let unavailable_reason = if current_value.is_none() {
-        Some("current_value_empty".into())
-    } else {
-        None
-    };
-    let current_value_source = if current_value.is_some()
-        && change
-            .as_ref()
-            .is_some_and(|change| change.current_matches_accepted_after)
-    {
-        "accepted_proposal".into()
-    } else if current_value.is_some() && change.is_some() {
-        "accepted_proposal_mismatch".into()
-    } else if current_value.is_some() {
-        proposal_unavailable_reason.unwrap_or_else(|| "current_life_model_only".into())
-    } else {
-        "unavailable".into()
-    };
-
-    Ok(LifeModelCurrentView {
-        path: COMMUNICATION_STYLE_CANONICAL_PATH.into(),
-        label: "沟通偏好".into(),
-        value: current_value,
-        unavailable_reason,
-        current_value_source,
-        change,
-    })
-}
-
-#[tauri::command]
-pub async fn get_life_model_current_view(
-    state: State<'_, Arc<AppState>>,
-) -> Result<LifeModelCurrentView, AppError> {
-    get_life_model_current_view_with_state(&state.inner().clone()).await
-}
-
 #[cfg(test)]
 pub(crate) async fn save_life_model_with_state(
     life_model: LifeModel,
@@ -1087,9 +799,6 @@ fn changed_life_model_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::agent::{
-        AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
-    };
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
@@ -1141,11 +850,6 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_session_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::builder::BuilderSessionStore::new(
-                    temp_dir.path().join("builder_sessions.json"),
-                ),
-            )),
             a2a_sidecar: Arc::new(tokio::sync::Mutex::new(
                 crate::a2a_sidecar::A2ASidecar::new(crate::a2a_server::configured_a2a_port()),
             )),
@@ -1222,7 +926,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
 
-        let result = get_life_model_with_state(&state).await;
+        let result = load_legacy_lifemodel_for_test(&state).await;
         assert!(result.is_ok());
         let model = result.unwrap();
         assert!(model.is_effectively_empty());
@@ -1444,272 +1148,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifemodel_closed_loop_current_view_shows_accepted_communication_style_with_trace() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "/preferences/communication",
-            serde_json::json!("先共情，再给结构化建议"),
-            "用户接受低风险沟通偏好。",
-            0.92,
-            RiskLevel::Low,
-            ProposalSource::FeedbackEvolution,
-        );
-        proposal.run_id = Some("run-communication-style-1".into());
-        proposal.source_detail = Some("maturation:preference.communication".into());
-        crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
-            &state,
-            &mut proposal,
-        )
-        .await
-        .unwrap();
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
-            .await
-            .unwrap();
-
-        let view = get_life_model_current_view_with_state(&state)
-            .await
-            .unwrap();
-        assert_eq!(view.path, COMMUNICATION_STYLE_CANONICAL_PATH);
-        assert_eq!(view.value.as_deref(), Some("先共情，再给结构化建议"));
-        assert_eq!(view.unavailable_reason, None);
-        assert_eq!(view.current_value_source, "accepted_proposal");
-        let change = view.change.expect("accepted preference has trace");
-        assert_eq!(change.path, COMMUNICATION_STYLE_CANONICAL_PATH);
-        assert_eq!(change.proposal_id, proposal_id);
-        assert_eq!(change.proposal_status, "accepted");
-        assert_eq!(change.proposal_source, "feedback_evolution");
-        assert_eq!(
-            change.proposal_source_detail.as_deref(),
-            Some("maturation:preference.communication")
-        );
-        assert_eq!(
-            change.proposal_run_id.as_deref(),
-            Some("run-communication-style-1")
-        );
-        assert_eq!(
-            change.source_excerpt.as_deref(),
-            Some("用户接受低风险沟通偏好。")
-        );
-        assert_eq!(change.source_unavailable_reason, None);
-        assert_eq!(change.patch_unavailable_reason, None);
-        assert!(change.patch_id.is_some());
-        assert_eq!(change.patch_status.as_deref(), Some("applied"));
-        assert_eq!(
-            change.patch_path.as_deref(),
-            Some(COMMUNICATION_STYLE_CANONICAL_PATH)
-        );
-        assert_eq!(change.snapshot_unavailable_reason, None);
-        assert_eq!(change.snapshot_versions.len(), 2);
-        assert!(change.current_matches_accepted_after);
-    }
-
-    #[tokio::test]
-    async fn lifemodel_closed_loop_current_view_reports_missing_patch_and_snapshot_reasons() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut model = LifeModel::default();
-        model.preferences.communication_style = "直接一点，先给结论".into();
-        state.life_model_manager.lock().await.save(&model).unwrap();
-        let mut proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!("直接一点，先给结论"),
-            "用户曾接受沟通偏好。",
-            0.88,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        proposal.accept();
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        let view = get_life_model_current_view_with_state(&state)
-            .await
-            .unwrap();
-
-        assert_eq!(view.value.as_deref(), Some("直接一点，先给结论"));
-        let change = view.change.expect("accepted proposal still traced");
-        assert_eq!(change.proposal_id, proposal_id);
-        assert_eq!(
-            change.patch_unavailable_reason.as_deref(),
-            Some("patch_missing")
-        );
-        assert_eq!(
-            change.snapshot_unavailable_reason.as_deref(),
-            Some("snapshot_missing")
-        );
-    }
-
-    #[tokio::test]
-    async fn lifemodel_closed_loop_reject_and_postpone_do_not_write_current_preference() {
-        for action in ["reject", "postpone"] {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let state = test_app_state(&temp_dir);
-            let proposal = AgentProposal::new(
-                ProposalType::PreferenceUpdate,
-                "preferences.communication",
-                serde_json::json!(format!("{action} should not write")),
-                "用户还没有接受。",
-                0.8,
-                RiskLevel::Low,
-                ProposalSource::FeedbackEvolution,
-            );
-            let proposal_id = proposal.id.clone();
-            state
-                .proposal_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .create_proposal(&proposal)
-                .unwrap();
-            if action == "reject" {
-                crate::commands::proposal::reject_proposal_with_state(proposal_id.clone(), &state)
-                    .await
-                    .unwrap();
-            } else {
-                crate::commands::proposal::postpone_proposal_with_state(
-                    proposal_id.clone(),
-                    &state,
-                )
-                .await
-                .unwrap();
-            }
-
-            let model = state.life_model_manager.lock().await.load().unwrap();
-            assert_ne!(
-                model.preferences.communication_style,
-                format!("{action} should not write")
-            );
-            let view = get_life_model_current_view_with_state(&state)
-                .await
-                .unwrap();
-            assert_eq!(view.value, None);
-            assert_eq!(
-                view.unavailable_reason.as_deref(),
-                Some("current_value_empty")
-            );
-            assert!(view.change.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn lifemodel_closed_loop_failed_accept_does_not_become_visible_current_preference() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!({ "style": "object values are invalid for this field" }),
-            "坏数据不应显示为已接受偏好。",
-            0.8,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        let err =
-            crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
-                .await
-                .expect_err("invalid preference payload must fail accept");
-        assert!(!err.trim().is_empty());
-
-        let stored = state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .get_proposal(&proposal_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ProposalStatus::Pending);
-        let view = get_life_model_current_view_with_state(&state)
-            .await
-            .unwrap();
-        assert_eq!(view.value, None);
-        assert_eq!(
-            view.unavailable_reason.as_deref(),
-            Some("current_value_empty")
-        );
-        assert!(view.change.is_none());
-    }
-
-    #[tokio::test]
-    async fn lifemodel_closed_loop_current_view_deduplicates_old_slash_and_dot_paths() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut model = LifeModel::default();
-        model.preferences.communication_style = "新的 canonical 沟通偏好".into();
-        state.life_model_manager.lock().await.save(&model).unwrap();
-
-        let mut old = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "/preferences/communication",
-            serde_json::json!("旧 slash 沟通偏好"),
-            "旧 alias proposal。",
-            0.7,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        old.accept();
-        let old_id = old.id.clone();
-        let mut current = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!("新的 canonical 沟通偏好"),
-            "当前 accepted proposal。",
-            0.9,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        current.accept();
-        let current_id = current.id.clone();
-        {
-            let store = state.proposal_store.as_ref().unwrap().lock().await;
-            store.create_proposal(&old).unwrap();
-            store.create_proposal(&current).unwrap();
-        }
-
-        let view = get_life_model_current_view_with_state(&state)
-            .await
-            .unwrap();
-        let change = view.change.expect("current matching accepted proposal");
-        assert_eq!(view.path, COMMUNICATION_STYLE_CANONICAL_PATH);
-        assert_eq!(change.path, COMMUNICATION_STYLE_CANONICAL_PATH);
-        assert_eq!(change.proposal_id, current_id);
-        assert_ne!(change.proposal_id, old_id);
-        assert!(change.current_matches_accepted_after);
-    }
-
-    #[tokio::test]
     async fn save_and_get_life_model_roundtrip() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -1736,7 +1174,7 @@ mod tests {
         assert!(save_result.is_ok());
 
         // Get back
-        let result = get_life_model_with_state(&state).await;
+        let result = load_legacy_lifemodel_for_test(&state).await;
         assert!(result.is_ok());
         let retrieved = result.unwrap();
         assert_eq!(retrieved.identity.name, "TestUser");
@@ -1759,7 +1197,7 @@ mod tests {
         assert!(err.message().contains("save_life_model"));
         assert!(err.message().contains("governed manual override request"));
         assert!(err.message().contains("riskAcknowledged=true"));
-        assert!(get_life_model_with_state(&state)
+        assert!(load_legacy_lifemodel_for_test(&state)
             .await
             .unwrap()
             .is_effectively_empty());
@@ -1769,7 +1207,9 @@ mod tests {
     async fn required_pre_change_snapshot_failure_blocks_manual_canonical_overwrite() {
         let temp_dir = tempfile::tempdir().unwrap();
         let original_state = test_app_state(&temp_dir);
-        let baseline = get_life_model_with_state(&original_state).await.unwrap();
+        let baseline = load_legacy_lifemodel_for_test(&original_state)
+            .await
+            .unwrap();
         let versions_path = temp_dir.path().join("versions-is-a-file");
         std::fs::write(&versions_path, b"not a directory").unwrap();
         let mut state_with_fault = (*original_state).clone();
@@ -1789,7 +1229,7 @@ mod tests {
         .expect_err("required pre-change snapshot failure must block overwrite");
         assert!(error.message().contains("投影版本文件") || error.message().contains("directory"));
         assert_eq!(
-            get_life_model_with_state(&state)
+            load_legacy_lifemodel_for_test(&state)
                 .await
                 .unwrap()
                 .identity
@@ -1803,7 +1243,7 @@ mod tests {
     ) {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let before = get_life_model_with_state(&state).await.unwrap();
+        let before = load_legacy_lifemodel_for_test(&state).await.unwrap();
         let before_audit_count = manual_override_audit_count_today(&state).await;
         let heuristic_count_before = heuristic_record_count(&state).await;
 
@@ -1816,7 +1256,7 @@ mod tests {
         .await
         .unwrap();
 
-        let after = get_life_model_with_state(&state).await.unwrap();
+        let after = load_legacy_lifemodel_for_test(&state).await.unwrap();
         assert_eq!(after.identity.name, "RAW_IDENTITY_SECRET");
         assert_eq!(
             manual_override_audit_count_today(&state).await,
@@ -1865,7 +1305,7 @@ mod tests {
     async fn manual_lifemodel_override_audit_report_and_detail_are_metadata_safe() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let before = get_life_model_with_state(&state).await.unwrap();
+        let before = load_legacy_lifemodel_for_test(&state).await.unwrap();
         let mut after = raw_marker_life_model();
         after.state.health_status.physical = "RAW_HEALTH_PRIVACY_SECRET".to_string();
 

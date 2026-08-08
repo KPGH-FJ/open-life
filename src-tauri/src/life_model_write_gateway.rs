@@ -9,9 +9,7 @@ use crate::persistence_coordinator::{
 };
 use crate::AppState;
 use openlife_core::agent::AgentProposal;
-use openlife_core::life_model::patch::{
-    ConflictResolution, ConflictType, LifeModelPatch, PatchApplyResult, PatchConflict,
-};
+use openlife_core::life_model::patch::{LifeModelPatch, PatchApplyResult};
 use openlife_core::life_model::v2::{
     LegacyLifeModelMigrationPlanV2, LegacyLifeModelMigrationPreviewV2, LifeModelTypedDiffV2,
     DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
@@ -86,20 +84,6 @@ fn validate_lifemodel_field_authority(
         }
     }
     Ok(())
-}
-
-fn field_authority_block_reason(path: &str) -> Option<&'static str> {
-    match openlife_core::life_model_write_gateway::life_model_field_authority(path) {
-        openlife_core::life_model_write_gateway::LifeModelFieldAuthority::CanonicalLifeModel => {
-            None
-        }
-        openlife_core::life_model_write_gateway::LifeModelFieldAuthority::StateStoreCanonical => {
-            Some("statestore_owned_lifemodel_path")
-        }
-        openlife_core::life_model_write_gateway::LifeModelFieldAuthority::DerivedProjection => {
-            Some("derived_projection_lifemodel_path")
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -702,248 +686,6 @@ async fn persist_life_model_with_gateway_expected_inner(
     Ok(written)
 }
 
-pub(crate) async fn materialize_accepted_lifemodel_proposal_with_state(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-    patch: LifeModelPatch,
-) -> Result<PatchApplyResult, String> {
-    let write_admission = state
-        .persistence_coordinator
-        .admit_normal_or_governed_data_import_writes(
-            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-            None,
-            "",
-            "",
-            "",
-        )
-        .map_err(|error| error.to_string())?;
-    let commit_permit = state
-        .persistence_coordinator
-        .acquire_canonical_commit_permit(&write_admission)
-        .await
-        .map_err(|error| error.to_string())?;
-    let _coordinator = state.life_model_write_coordinator.lock().await;
-    ensure_no_lifemodel_file_backlog_unlocked(state).await?;
-    let before_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
-    };
-    let current_file_hash = hash_life_model(&before_model).map_err(|e| e.to_string())?;
-    let current_semantic_hash =
-        hash_canonical_lifemodel_semantics(&before_model).map_err(|e| e.to_string())?;
-    if let Some(reason) = field_authority_block_reason(&patch.path_pointer) {
-        return Ok(PatchApplyResult {
-            patch_id: patch.id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_field_authority_blocked".into(),
-            error: Some(reason.into()),
-        });
-    }
-    let proposal_base_hash = proposal.base_hash.clone();
-    let stale_check = LifeModelWriteGatewayRequest::accepted_proposal(
-        proposal.id.clone(),
-        proposal.run_id.clone(),
-        proposal_evidence_id(proposal),
-        proposal_base_hash.clone(),
-        Some(current_semantic_hash.clone()),
-        current_semantic_hash.clone(),
-        current_semantic_hash.clone(),
-    );
-    let stale_decision = LifeModelWriteGateway::decide(stale_check);
-    if stale_decision.status
-        == openlife_core::life_model_write_gateway::LifeModelWriteGatewayStatus::StaleConflict
-        || !stale_decision.allowed
-    {
-        record_patch_conflict(state, &patch, proposal).await;
-        record_lifemodel_gateway_audit(
-            state,
-            "lifemodel_gateway_stale_conflict",
-            Some(proposal),
-            Some(&patch.id),
-            None,
-            &stale_decision.reason_code,
-            stale_decision.conflict_status.as_deref(),
-            stale_decision.base_hash.as_deref(),
-            stale_decision.current_hash.as_deref(),
-            Some(&current_semantic_hash),
-            stale_decision.after_hash.as_deref(),
-            &stale_decision.lane,
-        )
-        .await;
-        return Ok(PatchApplyResult {
-            patch_id: patch.id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_gateway_stale_conflict".into(),
-            error: Some(stale_decision.reason_code),
-        });
-    }
-    let before_snapshot = {
-        let vm = state.version_manager.lock().await;
-        vm.ensure_projection_snapshot(
-            &before_model,
-            &format!("precommit:{}:{}", proposal.id, current_file_hash),
-            &format!("patch:{}:before", proposal.id),
-            &format!("Snapshot before patch {}", proposal.id),
-        )
-        .map_err(|e| e.to_string())?
-    };
-
-    let mut after_model = before_model.clone();
-    let apply_result = match after_model.apply_patch(&patch) {
-        Ok(result) => result,
-        Err(err) => {
-            record_patch_conflict(state, &patch, proposal).await;
-            record_lifemodel_gateway_audit(
-                state,
-                "lifemodel_gateway_conflict",
-                Some(proposal),
-                Some(&patch.id),
-                Some(&before_snapshot.version),
-                "accepted_proposal_patch_before_mismatch",
-                Some("patch_before_mismatch"),
-                proposal_base_hash.as_deref(),
-                Some(&current_semantic_hash),
-                Some(&current_semantic_hash),
-                None,
-                "canonical_lifemodel_truth",
-            )
-            .await;
-            return Ok(PatchApplyResult {
-                patch_id: patch.id,
-                success: false,
-                path: proposal.affected_path.clone(),
-                operation: "lifemodel_patch_conflict".into(),
-                error: Some(err.to_string()),
-            });
-        }
-    };
-
-    if !apply_result.success {
-        return Ok(apply_result);
-    }
-    if let Err(error) = validate_lifemodel_field_authority(&before_model, &after_model, false) {
-        return Ok(PatchApplyResult {
-            patch_id: patch.id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_field_authority_blocked".into(),
-            error: Some(error),
-        });
-    }
-
-    openlife_core::versioning::prepare_model_for_save(Some(&before_model), &mut after_model);
-    let after_semantic_hash =
-        hash_canonical_lifemodel_semantics(&after_model).map_err(|e| e.to_string())?;
-    let request = LifeModelWriteGatewayRequest::accepted_proposal(
-        proposal.id.clone(),
-        proposal.run_id.clone(),
-        proposal_evidence_id(proposal),
-        proposal_base_hash,
-        Some(current_semantic_hash.clone()),
-        current_semantic_hash.clone(),
-        after_semantic_hash,
-    );
-    let decision = LifeModelWriteGateway::decide(request);
-    if !decision.allowed {
-        record_lifemodel_gateway_audit(
-            state,
-            "lifemodel_gateway_blocked",
-            Some(proposal),
-            Some(&patch.id),
-            Some(&before_snapshot.version),
-            &decision.reason_code,
-            decision.conflict_status.as_deref(),
-            decision.base_hash.as_deref(),
-            decision.current_hash.as_deref(),
-            decision.before_hash.as_deref(),
-            decision.after_hash.as_deref(),
-            &decision.lane,
-        )
-        .await;
-        return Ok(PatchApplyResult {
-            patch_id: patch.id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_gateway_blocked".into(),
-            error: Some(decision.reason_code),
-        });
-    }
-
-    let projection_plan = LifeModelProjectionPlan {
-        create_daily_snapshot: true,
-        create_patch_after_snapshot: true,
-        patches: vec![patch.clone()],
-    };
-    let Some(commit) = write_prepared_life_model_compare_and_swap(
-        state,
-        &current_file_hash,
-        after_model,
-        projection_plan,
-        commit_permit,
-        FileWriteFaultInjection::None,
-        DailySnapshotFaultInjection::None,
-        LifeModelFilePostCommitPolicy::ReconcileProjections,
-    )
-    .await?
-    else {
-        record_patch_conflict(state, &patch, proposal).await;
-        record_lifemodel_gateway_audit(
-            state,
-            "lifemodel_gateway_commit_conflict",
-            Some(proposal),
-            Some(&patch.id),
-            Some(&before_snapshot.version),
-            "lifemodel_compare_and_swap_conflict",
-            Some("concurrent_write_conflict"),
-            decision.base_hash.as_deref(),
-            decision.current_hash.as_deref(),
-            decision.before_hash.as_deref(),
-            decision.after_hash.as_deref(),
-            &decision.lane,
-        )
-        .await;
-        return Ok(PatchApplyResult {
-            patch_id: patch.id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_compare_and_swap_conflict".into(),
-            error: Some("lifemodel_compare_and_swap_conflict".into()),
-        });
-    };
-
-    let projection_degraded = commit.projection_degraded;
-
-    record_lifemodel_gateway_audit(
-        state,
-        "lifemodel_gateway_materialized",
-        Some(proposal),
-        Some(&patch.id),
-        Some(&before_snapshot.version),
-        &decision.reason_code,
-        None,
-        decision.base_hash.as_deref(),
-        decision.current_hash.as_deref(),
-        decision.before_hash.as_deref(),
-        decision.after_hash.as_deref(),
-        &decision.lane,
-    )
-    .await;
-
-    if projection_degraded {
-        Ok(PatchApplyResult {
-            patch_id: patch.id,
-            success: true,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_materialized_projection_degraded".into(),
-            error: Some("projection_degraded_after_canonical_commit".into()),
-        })
-    } else {
-        Ok(apply_result)
-    }
-}
-
 pub(crate) async fn materialize_accepted_lifemodel_v2_typed_diff_with_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -1280,235 +1022,6 @@ pub(crate) async fn materialize_accepted_legacy_lifemodel_migration_with_state(
     })
 }
 
-pub(crate) async fn materialize_accepted_lifemodel_patch_batch_with_state(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-    patches: Vec<LifeModelPatch>,
-) -> Result<PatchApplyResult, String> {
-    let write_admission = state
-        .persistence_coordinator
-        .admit_normal_or_governed_data_import_writes(
-            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-            None,
-            "",
-            "",
-            "",
-        )
-        .map_err(|error| error.to_string())?;
-    let commit_permit = state
-        .persistence_coordinator
-        .acquire_canonical_commit_permit(&write_admission)
-        .await
-        .map_err(|error| error.to_string())?;
-    let _coordinator = state.life_model_write_coordinator.lock().await;
-    ensure_no_lifemodel_file_backlog_unlocked(state).await?;
-    let batch_patch_id = format!("batch:{}", proposal.id);
-    if patches.is_empty() {
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_patch_batch_validation_failed".into(),
-            error: Some("lifemodel_patch_batch_empty".into()),
-        });
-    }
-    if !openlife_core::life_model::patch::detect_conflicts(&patches).is_empty() {
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_patch_batch_validation_failed".into(),
-            error: Some("lifemodel_patch_batch_contains_overlapping_paths".into()),
-        });
-    }
-    if let Some((patch, reason)) = patches.iter().find_map(|patch| {
-        field_authority_block_reason(&patch.path_pointer).map(|reason| (patch, reason))
-    }) {
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: patch.path_pointer.clone(),
-            operation: "lifemodel_patch_batch_field_authority_blocked".into(),
-            error: Some(reason.into()),
-        });
-    }
-
-    let before_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|error| error.to_string())?
-    };
-    let current_file_hash = hash_life_model(&before_model).map_err(|error| error.to_string())?;
-    let current_semantic_hash =
-        hash_canonical_lifemodel_semantics(&before_model).map_err(|error| error.to_string())?;
-    let proposal_base_hash = proposal.base_hash.clone();
-    let stale_decision =
-        LifeModelWriteGateway::decide(LifeModelWriteGatewayRequest::accepted_proposal(
-            proposal.id.clone(),
-            proposal.run_id.clone(),
-            proposal_evidence_id(proposal),
-            proposal_base_hash.clone(),
-            Some(current_semantic_hash.clone()),
-            current_semantic_hash.clone(),
-            current_semantic_hash.clone(),
-        ));
-    if stale_decision.status
-        == openlife_core::life_model_write_gateway::LifeModelWriteGatewayStatus::StaleConflict
-        || !stale_decision.allowed
-    {
-        record_patch_conflict(state, &patches[0], proposal).await;
-        record_lifemodel_gateway_audit(
-            state,
-            "lifemodel_gateway_batch_stale_conflict",
-            Some(proposal),
-            Some(&batch_patch_id),
-            None,
-            &stale_decision.reason_code,
-            stale_decision.conflict_status.as_deref(),
-            stale_decision.base_hash.as_deref(),
-            stale_decision.current_hash.as_deref(),
-            Some(&current_semantic_hash),
-            stale_decision.after_hash.as_deref(),
-            &stale_decision.lane,
-        )
-        .await;
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_gateway_batch_stale_conflict".into(),
-            error: Some(stale_decision.reason_code),
-        });
-    }
-
-    let before_snapshot = {
-        let versions = state.version_manager.lock().await;
-        versions
-            .ensure_projection_snapshot(
-                &before_model,
-                &format!("precommit:{}:{}", proposal.id, current_file_hash),
-                &format!("patch:{}:before", proposal.id),
-                &format!("Snapshot before patch {}", proposal.id),
-            )
-            .map_err(|error| error.to_string())?
-    };
-    let mut after_model = before_model.clone();
-    for patch in &patches {
-        if let Err(error) = after_model.apply_patch(patch) {
-            record_patch_conflict(state, patch, proposal).await;
-            record_lifemodel_gateway_audit(
-                state,
-                "lifemodel_gateway_batch_conflict",
-                Some(proposal),
-                Some(&batch_patch_id),
-                Some(&before_snapshot.version),
-                "accepted_proposal_batch_patch_before_mismatch",
-                Some("patch_before_mismatch"),
-                proposal_base_hash.as_deref(),
-                Some(&current_semantic_hash),
-                Some(&current_semantic_hash),
-                None,
-                "canonical_lifemodel_truth",
-            )
-            .await;
-            return Ok(PatchApplyResult {
-                patch_id: batch_patch_id,
-                success: false,
-                path: proposal.affected_path.clone(),
-                operation: "lifemodel_patch_batch_conflict".into(),
-                error: Some(error.to_string()),
-            });
-        }
-    }
-    if let Err(error) = validate_lifemodel_field_authority(&before_model, &after_model, false) {
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_patch_batch_field_authority_blocked".into(),
-            error: Some(error),
-        });
-    }
-
-    openlife_core::versioning::prepare_model_for_save(Some(&before_model), &mut after_model);
-    let after_semantic_hash =
-        hash_canonical_lifemodel_semantics(&after_model).map_err(|error| error.to_string())?;
-    let decision = LifeModelWriteGateway::decide(LifeModelWriteGatewayRequest::accepted_proposal(
-        proposal.id.clone(),
-        proposal.run_id.clone(),
-        proposal_evidence_id(proposal),
-        proposal_base_hash,
-        Some(current_semantic_hash.clone()),
-        current_semantic_hash.clone(),
-        after_semantic_hash,
-    ));
-    if !decision.allowed {
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_gateway_batch_blocked".into(),
-            error: Some(decision.reason_code),
-        });
-    }
-
-    let projection_plan = LifeModelProjectionPlan {
-        create_daily_snapshot: true,
-        create_patch_after_snapshot: true,
-        patches: patches.clone(),
-    };
-    let Some(commit) = write_prepared_life_model_compare_and_swap(
-        state,
-        &current_file_hash,
-        after_model,
-        projection_plan,
-        commit_permit,
-        FileWriteFaultInjection::None,
-        DailySnapshotFaultInjection::None,
-        LifeModelFilePostCommitPolicy::ReconcileProjections,
-    )
-    .await?
-    else {
-        record_patch_conflict(state, &patches[0], proposal).await;
-        return Ok(PatchApplyResult {
-            patch_id: batch_patch_id,
-            success: false,
-            path: proposal.affected_path.clone(),
-            operation: "lifemodel_compare_and_swap_conflict".into(),
-            error: Some("lifemodel_compare_and_swap_conflict".into()),
-        });
-    };
-
-    let projection_degraded = commit.projection_degraded;
-    record_lifemodel_gateway_audit(
-        state,
-        "lifemodel_gateway_batch_materialized",
-        Some(proposal),
-        Some(&batch_patch_id),
-        Some(&before_snapshot.version),
-        &decision.reason_code,
-        None,
-        decision.base_hash.as_deref(),
-        decision.current_hash.as_deref(),
-        decision.before_hash.as_deref(),
-        decision.after_hash.as_deref(),
-        &decision.lane,
-    )
-    .await;
-
-    Ok(PatchApplyResult {
-        patch_id: batch_patch_id,
-        success: true,
-        path: proposal.affected_path.clone(),
-        operation: if projection_degraded {
-            "lifemodel_patch_batch_projection_degraded".into()
-        } else {
-            "lifemodel_patch_batch".into()
-        },
-        error: projection_degraded
-            .then(|| "projection_degraded_after_canonical_commit".to_string()),
-    })
-}
-
 pub(crate) async fn restore_life_model_with_gateway(
     state: &Arc<AppState>,
     restored_model: &LifeModel,
@@ -1714,7 +1227,7 @@ async fn write_life_model(
         create_daily_snapshot,
         ..LifeModelProjectionPlan::default()
     };
-    write_prepared_life_model_compare_and_swap(
+    let commit = write_prepared_life_model_compare_and_swap(
         state,
         &expected_hash,
         life_model,
@@ -1725,8 +1238,13 @@ async fn write_life_model(
         post_commit_policy,
     )
     .await?
-    .map(|commit| commit.life_model)
-    .ok_or_else(|| "LifeModel compare-and-swap conflict".to_string())
+    .ok_or_else(|| "LifeModel compare-and-swap conflict".to_string())?;
+    if commit.projection_degraded {
+        log::warn!(
+            "[LifeModelWriteGateway] canonical LifeModel commit succeeded with degraded projections"
+        );
+    }
+    Ok(commit.life_model)
 }
 
 #[cfg(test)]
@@ -2150,7 +1668,7 @@ fn gateway_request_for_caller(
             LifeModelMaterializerCallerPurpose::AcceptedProposalApplySourceSpecificPatchMappingComplete,
         ) => {
             return Err(AppError::permission(
-                "accepted proposal LifeModel writes must use materialize_accepted_lifemodel_proposal_with_state",
+                "accepted proposal LifeModel writes must use the v2 typed-diff or governed migration materializer",
             ))
         }
         _ => {
@@ -2161,31 +1679,6 @@ fn gateway_request_for_caller(
         }
     };
     Ok(request)
-}
-
-async fn record_patch_conflict(
-    state: &Arc<AppState>,
-    patch: &LifeModelPatch,
-    proposal: &AgentProposal,
-) {
-    let Some(ref patch_store_arc) = state.patch_store else {
-        return;
-    };
-    let patch_store = patch_store_arc.lock().await;
-    let conflict = PatchConflict {
-        patch_id_1: patch.id.clone(),
-        patch_id_2: format!("current_lifemodel:{}", proposal.id),
-        conflict_type: ConflictType::SamePath,
-        resolution: Some(ConflictResolution::Manual),
-        resolved_at: None,
-    };
-    if let Err(e) = patch_store.record_conflict(&conflict) {
-        log::warn!(
-            "[LifeModelWriteGateway] failed to record stale proposal conflict {}: {}",
-            proposal.id,
-            e
-        );
-    }
 }
 
 #[expect(
@@ -2228,10 +1721,6 @@ async fn record_lifemodel_gateway_audit(
     if let Err(e) = feedback.log_event(event_name, None, Some(&detail_text)) {
         log::warn!("[LifeModelWriteGateway] audit log failed: {}", e);
     }
-}
-
-fn proposal_evidence_id(proposal: &AgentProposal) -> Option<String> {
-    proposal_evidence_id_ref(proposal).map(ToOwned::to_owned)
 }
 
 fn proposal_evidence_id_ref(proposal: &AgentProposal) -> Option<&str> {
@@ -3292,145 +2781,6 @@ mod tests {
         assert_ne!(
             hash_canonical_lifemodel_semantics(&projected).unwrap(),
             expected
-        );
-    }
-
-    #[tokio::test]
-    async fn daily_compatibility_projection_does_not_stale_unrelated_lifemodel_proposal() {
-        use openlife_core::agent::{ProposalSource, ProposalType};
-
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
-            "identity.name",
-            serde_json::json!("semantic proposal"),
-            "unrelated to the daily compatibility projection",
-            1.0,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        stamp_lifemodel_proposal_base_hash_with_state(&state, &mut proposal)
-            .await
-            .unwrap();
-
-        let mut projection = baseline.clone();
-        projection
-            .goals
-            .daily
-            .push(openlife_core::life_model::DailyGoal {
-                name: "projected task".into(),
-                operation_id: Some(uuid::Uuid::new_v4().to_string()),
-                operation_digest: Some("state-asset-v1:semantic-test".into()),
-                ..Default::default()
-            });
-        persist_life_model_with_gateway_expected(
-            &state,
-            projection,
-            false,
-            LifeModelMaterializerCallerContext::new(
-                STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID,
-                LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-            ),
-            Some(&hash_life_model(&baseline).unwrap()),
-        )
-        .await
-        .unwrap();
-
-        let patch = LifeModelPatch::from_proposal(
-            &proposal.id,
-            "/identity/name",
-            "Identity > Name",
-            PatchOp::Replace,
-            Some(serde_json::json!("")),
-            proposal.after.clone(),
-            &proposal.reason,
-            proposal.confidence,
-            proposal.risk_level,
-            PatchSource::Manual,
-        );
-        let result = materialize_accepted_lifemodel_proposal_with_state(&state, &proposal, patch)
-            .await
-            .unwrap();
-
-        assert!(result.success, "{:?}", result.error);
-        let current = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(current.identity.name, "semantic proposal");
-        assert_eq!(current.goals.daily.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn accepted_proposal_cannot_materialize_a_statestore_owned_path() {
-        use openlife_core::agent::{ProposalSource, ProposalType};
-
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
-            "goals.daily",
-            serde_json::json!([{"name": "must be rejected", "done": false}]),
-            "attempted transient-state write through LifeModel",
-            1.0,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        proposal.base_hash = Some(baseline_hash);
-        let patch = LifeModelPatch::from_proposal(
-            &proposal.id,
-            "/goals/daily",
-            "Goals > Daily",
-            PatchOp::Replace,
-            Some(serde_json::json!([])),
-            proposal.after.clone(),
-            &proposal.reason,
-            proposal.confidence,
-            proposal.risk_level,
-            PatchSource::Manual,
-        );
-
-        let result = materialize_accepted_lifemodel_proposal_with_state(&state, &proposal, patch)
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert_eq!(result.operation, "lifemodel_field_authority_blocked");
-        assert_eq!(
-            result.error.as_deref(),
-            Some("statestore_owned_lifemodel_path")
-        );
-        assert!(state
-            .life_model_manager
-            .lock()
-            .await
-            .load()
-            .unwrap()
-            .goals
-            .daily
-            .is_empty());
-        assert_eq!(
-            state
-                .patch_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .patch_count()
-                .unwrap(),
-            0
         );
     }
 

@@ -22,7 +22,6 @@ use openlife_core::agent::{
     DurableWriteSubject, HSAssetAuthorityRegistry, MemoryLifecycleStore, PlanExecuteSessionStore,
     ProposalSource, ProposalStore, ProposalType, ReviewWorkflow, RiskLevel,
 };
-use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
@@ -2111,7 +2110,12 @@ fn bootstrap_with_secret_store(
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
-    match life_model_manager.load() {
+    // Bootstrap must remain read-only for an absent legacy model. Calling
+    // `load()` here used to manufacture a default-filled YAML document on the
+    // first launch, which then looked like user-authored migration input to the
+    // v2 product path. Canonical creation is owned by an explicitly reviewed
+    // v2 proposal, never by application startup.
+    match life_model_manager.load_existing() {
         Ok(_) => persistence.register_read_write("LifeModelFileStore"),
         Err(error) => persistence.register_unavailable(
             "LifeModelFileStore",
@@ -2382,11 +2386,18 @@ fn bootstrap_with_secret_store(
             persistence.register_read_write("HSAssetAuthorityRegistry");
             let hs_reconciliation = if persistence.bootstrap_mutations_safe() {
                 (|| -> Result<(), String> {
-                    let hs_authority_model = life_model_manager.load().map_err(|error| {
-                        format!(
+                    let Some(hs_authority_model) =
+                        life_model_manager.load_existing().map_err(|error| {
+                            format!(
                     "LifeModel could not be loaded for HS asset authority reconciliation: {error}"
                 )
-                    })?;
+                        })?
+                    else {
+                        // A fresh profile has no legacy authority to reconcile.
+                        // In particular, do not manufacture an empty YAML
+                        // compatibility owner during bootstrap.
+                        return Ok(());
+                    };
                     let hs_cutover = reconcile_collaboration_guidance_authority(
                         &hs_authority_registry,
                         &hs_authority_model,
@@ -2875,9 +2886,9 @@ fn bootstrap_with_secret_store(
     };
 
     let hot_cache: SharedHotCache = {
-        let initial_cache = match life_model_manager.load() {
-            Ok(model) => HotMemoryCache::from_life_model(&model),
-            Err(_) => HotMemoryCache::default(),
+        let initial_cache = match life_model_manager.load_existing() {
+            Ok(Some(model)) => HotMemoryCache::from_life_model(&model),
+            Ok(None) | Err(_) => HotMemoryCache::default(),
         };
         Arc::new(tokio::sync::RwLock::new(initial_cache))
     };
@@ -3073,16 +3084,6 @@ fn bootstrap_with_secret_store(
         },
     }
 
-    let builder_session_store = BuilderSessionStore::new(data_dir.join("builder_sessions.json"));
-    match builder_session_store.list_unfinished_sessions() {
-        Ok(_) => persistence.register_read_write("BuilderSessionStore"),
-        Err(error) => persistence.register_unavailable(
-            "BuilderSessionStore",
-            "builder_session_store_read_failed",
-            &error.to_string(),
-        ),
-    }
-
     let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
     match plugin_registry.reload() {
         Ok(_) => persistence.register_read_write("PluginRegistry"),
@@ -3148,20 +3149,18 @@ fn bootstrap_with_secret_store(
             Ok(store) => {
                 persistence.register_read_write("StateStore");
                 if persistence.bootstrap_mutations_safe() {
-                    let daily_task_cutover_result = life_model_manager
-                        .load()
-                        .map_err(|error| {
-                            format!(
-                                "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
-                            )
-                        })
-                        .and_then(|model| {
-                            crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+                    let daily_task_cutover_result = match life_model_manager.load_existing() {
+                        Ok(Some(model)) => crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
                                 &store,
                                 &model,
                                 chrono::Utc::now(),
                             )
-                        });
+                            .map(|_| ()),
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(format!(
+                            "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
+                        )),
+                    };
                     if let Err(error) = daily_task_cutover_result {
                         // Shipped product reads require the import receipt and
                         // fail closed. Never merge a partial StateStore view
@@ -3252,7 +3251,6 @@ fn bootstrap_with_secret_store(
         feedback_store: Arc::new(Mutex::new(feedback_store)),
         vector_store: Arc::new(Mutex::new(vector_store)),
         vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-        builder_session_store: Arc::new(Mutex::new(builder_session_store)),
         a2a_sidecar: Arc::new(Mutex::new(a2a_sidecar::A2ASidecar::new(
             crate::a2a_server::configured_a2a_port(),
         ))),
@@ -3712,6 +3710,13 @@ mod tests {
         assert_eq!(secrets.operation_counts(), (0, 0));
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
         assert!(!directory.path().join("mcp_audit.db").exists());
+        assert!(
+            !directory
+                .path()
+                .join("life-model/current/life_model.yaml")
+                .exists(),
+            "fresh bootstrap must not manufacture a legacy LifeModel YAML"
+        );
         assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 6);
         assert!(result.state.credential_bootstrap_snapshot.purposes[..5]
             .iter()

@@ -1,14 +1,11 @@
-use crate::commands::life_model::{
-    get_life_model_current_view_for_model_with_state, LifeModelChangeView, LifeModelCurrentView,
-};
 use crate::life_state_projection::{get_life_state_projection_with_state, LifeStateProjection};
 use crate::memory_gateway;
 use crate::state::AppState;
 use openlife_core::agent::{
     build_life_model_view_model_envelope, AgentProposal, LifeModelCanonicalV2Input,
-    LifeModelCurrentChangeInput, LifeModelCurrentViewInput, LifeModelMemoryTierStatsInput,
-    LifeModelProjectionInput, LifeModelViewModel, LifeModelViewModelBuildInput, ReviewItem,
-    ViewModelEnvelope, ViewModelWarning, ViewModelWarningSeverity,
+    LifeModelMemoryTierStatsInput, LifeModelProjectionInput, LifeModelViewModel,
+    LifeModelViewModelBuildInput, ReviewItem, ViewModelEnvelope, ViewModelWarning,
+    ViewModelWarningSeverity,
 };
 use openlife_core::life_model::v2::{
     LegacyLifeModelMigrationPreviewV2, LifeModelVersionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
@@ -58,17 +55,17 @@ pub(crate) async fn get_life_model_view_model_with_state(
         ),
     };
     let canonical_owner = canonical_v2.is_some();
-    let (life_model, legacy_yaml_source, legacy_load_error) = if canonical_owner {
-        (None, None, None)
+    let (legacy_model_present, legacy_yaml_source, legacy_load_error) = if canonical_owner {
+        (false, None, None)
     } else {
         let legacy_result = {
             let manager = state.life_model_manager.lock().await;
             manager.load_existing_with_source()
         };
         match legacy_result {
-            Ok(Some((model, source))) => (Some(model), Some(source), None),
-            Ok(None) => (None, None, None),
-            Err(err) => (None, None, Some(format!("life_model_load_failed: {err}"))),
+            Ok(Some((_model, source))) => (true, Some(source), None),
+            Ok(None) => (false, None, None),
+            Err(err) => (false, None, Some(format!("life_model_load_failed: {err}"))),
         }
     };
     let legacy_migration_preview = if canonical_owner {
@@ -91,27 +88,13 @@ pub(crate) async fn get_life_model_view_model_with_state(
         }
     };
     let fresh_profile_canonical_empty = !canonical_owner
-        && life_model.is_none()
+        && !legacy_model_present
         && legacy_yaml_source.is_none()
         && legacy_load_error.is_none();
     let load_error = canonical_v2_error
         .or(cutover_error)
         .or(history_error)
         .or(legacy_load_error);
-
-    let current_view = match life_model.as_ref() {
-        Some(model) => match get_life_model_current_view_for_model_with_state(state, model).await {
-            Ok(view) => Some(view.into()),
-            Err(err) => {
-                warnings.push(warning(
-                    "lifemodel_current_view_unavailable",
-                    format!("LifeModel current compatibility view could not be loaded: {err}"),
-                ));
-                None
-            }
-        },
-        None => None,
-    };
 
     let projection = match get_life_state_projection_with_state(state).await {
         Ok(projection) => Some(projection.into()),
@@ -158,8 +141,6 @@ pub(crate) async fn get_life_model_view_model_with_state(
         version_history,
         fresh_profile_canonical_empty,
         legacy_migration_preview,
-        life_model,
-        current_view,
         projection,
         proposals,
         review_items,
@@ -241,40 +222,6 @@ impl From<LifeStateProjection> for LifeModelProjectionInput {
             readiness_issues: value.readiness.readiness_issues,
             usage_readiness_issues: value.readiness.usage_readiness_issues,
             source_refs: value.source_refs,
-        }
-    }
-}
-
-impl From<LifeModelCurrentView> for LifeModelCurrentViewInput {
-    fn from(value: LifeModelCurrentView) -> Self {
-        Self {
-            path: value.path,
-            label: value.label,
-            value: value.value,
-            unavailable_reason: value.unavailable_reason,
-            current_value_source: value.current_value_source,
-            change: value.change.map(Into::into),
-        }
-    }
-}
-
-impl From<LifeModelChangeView> for LifeModelCurrentChangeInput {
-    fn from(value: LifeModelChangeView) -> Self {
-        Self {
-            path: value.path,
-            proposal_id: value.proposal_id,
-            proposal_status: value.proposal_status,
-            proposal_source: value.proposal_source,
-            proposal_run_id: value.proposal_run_id,
-            source_excerpt_available: value.source_excerpt.is_some(),
-            source_unavailable_reason: value.source_unavailable_reason,
-            patch_id: value.patch_id,
-            patch_status: value.patch_status,
-            patch_path: value.patch_path,
-            patch_unavailable_reason: value.patch_unavailable_reason,
-            snapshot_versions: value.snapshot_versions,
-            snapshot_unavailable_reason: value.snapshot_unavailable_reason,
-            current_matches_accepted_after: value.current_matches_accepted_after,
         }
     }
 }

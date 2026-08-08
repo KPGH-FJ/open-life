@@ -3,7 +3,6 @@
 //! store handles, registries, configuration, and lifecycle signals.
 
 use crate::a2a_sidecar;
-use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
@@ -255,7 +254,6 @@ pub struct AppState {
     pub feedback_store: Arc<Mutex<FeedbackStore>>,
     pub vector_store: Arc<Mutex<VectorStore>>,
     pub vector_persistence_mode: VectorPersistenceMode,
-    pub builder_session_store: Arc<Mutex<BuilderSessionStore>>,
     pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,

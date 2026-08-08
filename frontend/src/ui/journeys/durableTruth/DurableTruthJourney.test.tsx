@@ -16,7 +16,6 @@ function renderJourney(fixtureId: Parameters<typeof workbenchJourneyFixtureDataS
       dataSource={dataSource}
       governedActionDataSource={dataSource}
       durableTruthDataSource={dataSource}
-      lifeModelBuilderDataSource={dataSource}
       initialSurface="life-model"
     />
   );
@@ -31,7 +30,7 @@ describe("Workbench durable truth journey", () => {
     const lifeModelTab = await screen.findByRole("tab", { name: /关于我.*LifeModel/ });
     const memoryTab = screen.getByRole("tab", { name: /Agent 记忆.*工作连续性/ });
     expect(lifeModelTab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("heading", { name: "当前有来源的长期理解" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "长期理解尚未建立" })).toBeVisible();
 
     lifeModelTab.focus();
     await user.keyboard("{ArrowRight}");
@@ -152,7 +151,7 @@ describe("Workbench durable truth journey", () => {
     expect(
       screen.getByText("openlife.lifemodel.v2 · version 2 · 确认于 2026-08-08T10:00:00Z")
     ).toBeVisible();
-    expect(screen.queryByText("当前有来源的长期理解")).not.toBeInTheDocument();
+    expect(screen.queryByText("长期理解尚未建立")).not.toBeInTheDocument();
     expect(
       screen.queryByText("负责产品与工程决策，需要保留连续的独立思考时间。")
     ).not.toBeInTheDocument();
@@ -403,6 +402,81 @@ describe("Workbench durable truth journey", () => {
     expect(announce).toHaveBeenLastCalledWith(expect.stringContaining("刷新未验证"));
   });
 
+  it("clears a local LifeModel review banner after the backend reports a terminal decision", async () => {
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const pending = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    const applied = buildDurableFixtureSnapshot("fixture-ready", "applied");
+    vi.spyOn(dataSource, "loadDurableTruth")
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(applied);
+    vi.spyOn(dataSource, "draftLifeModelChange").mockResolvedValue("proposal-focus-morning");
+    const announce = vi.fn();
+    const { result } = renderHook(() => useDurableTruthJourney(dataSource, announce));
+
+    await act(async () => {
+      expect(
+        await result.current.draftLifeModelChange({
+          baseVersion: 1,
+          baseDocumentDigest: "sha256:base",
+          change: {
+            operation: "add",
+            section: "values",
+            value: {
+              kind: "statement",
+              value: { statement: "Clarity matters." },
+            },
+          },
+        })
+      ).toBe(true);
+    });
+
+    expect(result.current.lifeModelAction).toEqual({
+      kind: "change",
+      status: "review_required",
+      proposalId: "proposal-focus-morning",
+    });
+
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    expect(result.current.lifeModelAction).toBeNull();
+  });
+
+  it("selects the exact newly created LifeModel review when older items remain", async () => {
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const created = structuredClone(durableReviewItem("pending"));
+    created.id = "review-new-lifemodel-change";
+    created.source.proposalId = "proposal-new-lifemodel-change";
+    created.decisionContext.reviewItemId = created.id;
+    created.decisionContext.title = "新创建的长期信息建议";
+    const refreshed = buildDurableFixtureSnapshot("fixture-ready", "pending", [created]);
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(refreshed);
+    vi.spyOn(dataSource, "draftLifeModelChange").mockResolvedValue("proposal-new-lifemodel-change");
+    const announce = vi.fn();
+    const { result } = renderHook(() => useDurableTruthJourney(dataSource, announce));
+
+    await act(async () => {
+      expect(
+        await result.current.draftLifeModelChange({
+          baseVersion: 1,
+          baseDocumentDigest: "sha256:base",
+          change: {
+            operation: "add",
+            section: "values",
+            value: {
+              kind: "statement",
+              value: { statement: "Clarity matters." },
+            },
+          },
+        })
+      ).toBe(true);
+    });
+
+    expect(result.current.selectedItem?.id).toBe("review-new-lifemodel-change");
+    expect(result.current.selectedItem?.source.proposalId).toBe("proposal-new-lifemodel-change");
+  });
+
   it("keeps Agent Memory available when only LifeModel fails", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
@@ -488,7 +562,7 @@ describe("Workbench durable truth journey", () => {
       />
     );
 
-    expect(await screen.findByRole("heading", { name: "当前有来源的长期理解" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "长期理解尚未建立" })).toBeVisible();
     expect(screen.queryByText("Add a memory")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "查看并决定" }));
@@ -525,9 +599,7 @@ describe("Workbench durable truth journey", () => {
     const dataSource = renderJourney("fixture-ready");
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
-    expect(
-      await screen.findByRole("heading", { name: "当前有来源的长期理解" })
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "长期理解尚未建立" })).toBeInTheDocument();
     expect(screen.getAllByText("等待决定").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
       "aria-current",
@@ -554,7 +626,7 @@ describe("Workbench durable truth journey", () => {
     ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "返回个人智能" }));
-    await screen.findByRole("heading", { name: "当前有来源的长期理解" });
+    await screen.findByRole("heading", { name: "长期理解尚未建立" });
     expect(screen.getAllByText("已批准，尚未应用").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "应用变更" })).toBeDisabled();
     expect(
@@ -609,54 +681,50 @@ describe("Workbench durable truth journey", () => {
     const user = userEvent.setup();
     renderJourney("fixture-ready");
 
-    await screen.findByRole("heading", { name: "当前有来源的长期理解" });
+    await screen.findByRole("heading", { name: "长期理解尚未建立" });
     await user.click(screen.getByRole("button", { name: "查看并决定" }));
     await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 });
     await user.click(screen.getByRole("button", { name: /读取本地客户访谈记录\s+等待决定/ }));
 
     expect(screen.getByRole("button", { name: "返回个人智能" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回个人智能" }));
-    expect(
-      await screen.findByRole("heading", { name: "当前有来源的长期理解" })
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "长期理解尚未建立" })).toBeInTheDocument();
   });
 
-  it("builds first-time candidates into exact review items without claiming durable completion", async () => {
+  it("builds the first v2 item from an explicitly selected long-term answer", async () => {
     const user = userEvent.setup();
     const dataSource = renderJourney("fixture-empty");
-    const createProposals = vi.spyOn(dataSource, "createProposals");
+    const draft = vi.spyOn(dataSource, "draftLifeModelChange");
 
-    expect(await screen.findByRole("heading", { name: "从真实情况开始" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "开始建立 LifeModel" }));
-    expect(
-      await screen.findByRole("heading", { name: "接下来三个月，你最希望推进什么？" })
-    ).toBeInTheDocument();
-    await user.type(screen.getByLabelText("你的回答"), "先完成三次访谈分析，再确定下一轮验证重点");
-    await user.click(screen.getByRole("button", { name: "继续" }));
+    expect(await screen.findByRole("heading", { name: "从一条长期信息开始" })).toBeVisible();
+    expect(screen.getByText(/近期任务、当前状态、工作过程和工具能力不会进入/)).toBeVisible();
+    const submit = screen.getByRole("button", { name: "创建首条 LifeModel 建议" });
+    expect(submit).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText("长期信息类别"), "long_term_goals");
+    await user.type(screen.getByLabelText("长期方向"), "建立可信赖的个人 Agent OS");
+    await user.type(screen.getByLabelText("长期意义"), "让个人长期知识真正由自己拥有");
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: "将这条内容纳入本次审核" }));
+    await user.click(submit);
 
-    expect(
-      await screen.findByRole("heading", { name: "逐项决定哪些内容进入审核" })
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "创建审核建议" })).toBeDisabled();
-    const acceptChoices = screen.getAllByRole("radio", { name: "纳入审核" });
-    await user.click(acceptChoices[0]);
-    await user.click(acceptChoices[1]);
-    await user.click(screen.getByRole("button", { name: "创建审核建议" }));
-
-    await waitFor(() => expect(createProposals).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(draft).toHaveBeenCalledWith({
+        baseVersion: null,
+        baseDocumentDigest: null,
+        change: {
+          operation: "add",
+          section: "long_term_goals",
+          value: {
+            kind: "long_term_goal",
+            value: {
+              direction: "建立可信赖的个人 Agent OS",
+              meaning: "让个人长期知识真正由自己拥有",
+            },
+          },
+        },
+      })
+    );
     expect(await screen.findByText("审核建议已创建")).toBeInTheDocument();
-    expect(screen.getByText(/尚未批准，也尚未应用到 LifeModel/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "前往审核中心" }));
-
-    expect(
-      await screen.findByRole("heading", { name: "将客户研究设为近期目标", level: 2 })
-    ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "批准变更" }));
-    await user.click(screen.getByRole("button", { name: "确认批准" }));
-    expect(
-      await screen.findByText("已批准，尚未应用", { selector: ".ol-notice__title" })
-    ).toBeInTheDocument();
-    expect(screen.queryByText("已应用", { selector: ".ol-status-label" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "返回个人智能" })).toBeInTheDocument();
+    expect(screen.getByText(/当前仍是空模型/)).toBeVisible();
   });
 });

@@ -117,9 +117,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
         )),
         vector_persistence_mode: crate::state::VectorPersistenceMode::EvalDisabled,
-        builder_session_store: Arc::new(Mutex::new(
-            openlife_core::builder::BuilderSessionStore::new(base.join("builder_sessions.json")),
-        )),
         a2a_sidecar: Arc::new(Mutex::new(crate::a2a_sidecar::A2ASidecar::new(
             crate::a2a_server::configured_a2a_port(),
         ))),

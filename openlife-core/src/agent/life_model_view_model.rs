@@ -10,7 +10,6 @@ use crate::life_model::v2::{
     LegacyLifeModelMigrationPreviewV2, LifeModelDocumentV2, LifeModelHumanProjectionV2,
     LifeModelVersionHistoryEntryV2,
 };
-use crate::life_model::{LifeModel, Model4DCompletion};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -20,7 +19,6 @@ const LIFE_MODEL_TARGET_REF: &str = "lifemodel";
 #[serde(rename_all = "snake_case")]
 pub enum LifeModelTruthMode {
     Canonical,
-    CurrentCompatibility,
     Candidate,
     PendingReview,
     ManualOverride,
@@ -30,68 +28,12 @@ pub enum LifeModelTruthMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LifeModelDimensionId {
-    Identity,
-    Goals,
-    Capabilities,
-    State,
-}
-
-impl LifeModelDimensionId {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Identity => "identity",
-            Self::Goals => "goals",
-            Self::Capabilities => "capabilities",
-            Self::State => "state",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Identity => "Identity",
-            Self::Goals => "Goals",
-            Self::Capabilities => "Capabilities",
-            Self::State => "State",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifeModelConfidence {
-    Low,
-    Medium,
-    High,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LifeModelOwnerStatus {
     #[serde(rename = "PARTIAL")]
     Partial,
     #[serde(rename = "PHASE_2_REQUIRED")]
     Phase2Required,
     #[serde(rename = "UNKNOWN")]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LifeModelProvenance {
-    #[serde(rename = "limited")]
-    Limited,
-    #[serde(rename = "unknown")]
-    Unknown,
-    #[serde(rename = "PHASE_2_REQUIRED")]
-    Phase2Required,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifeModelDivergence {
-    None,
-    Minor,
-    Material,
     Unknown,
 }
 
@@ -153,37 +95,8 @@ pub struct LifeModelCanonicalSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LifeModelCurrentViewSummary {
-    pub current_view_ref: BackendEntityRef,
-    pub compatibility_mode: bool,
-    pub label: String,
-    pub summary: String,
-    pub divergence_from_canonical: LifeModelDivergence,
-    pub evidence_refs: Vec<EvidenceRef>,
-    pub owner_status: LifeModelOwnerStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelDimensionSummary {
-    pub id: LifeModelDimensionId,
-    pub label: String,
-    pub summary: String,
-    pub confidence: LifeModelConfidence,
-    pub stale: bool,
-    pub pending_review_item_refs: Vec<BackendEntityRef>,
-    pub evidence_refs: Vec<EvidenceRef>,
-    pub provenance: LifeModelProvenance,
-    pub owner_status: LifeModelOwnerStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LifeModelTrustQualityState {
     pub readiness: LifeModelReadiness,
-    pub completion_score: Option<u8>,
-    pub missing_dimension_count: usize,
-    pub stale_dimension_count: usize,
     pub warning_refs: Vec<EvidenceRef>,
     pub owner_status: LifeModelOwnerStatus,
 }
@@ -265,8 +178,6 @@ pub struct LifeModelViewModel {
     pub canonical_summary: Option<LifeModelCanonicalSummary>,
     pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
     pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
-    pub current_view_summary: Option<LifeModelCurrentViewSummary>,
-    pub dimension_summaries: Vec<LifeModelDimensionSummary>,
     pub trust_quality_state: LifeModelTrustQualityState,
     pub pending_update_counts: LifeModelPendingUpdateCounts,
     pub provenance_refs: Vec<EvidenceRef>,
@@ -277,49 +188,6 @@ pub struct LifeModelViewModel {
     pub memory_linkage: LifeModelMemoryLinkageSummary,
     pub source_refs: Vec<EvidenceRef>,
     pub contract_limitations: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct LifeModelCurrentChangeInput {
-    pub path: String,
-    pub proposal_id: String,
-    pub proposal_status: String,
-    pub proposal_source: String,
-    pub proposal_run_id: Option<String>,
-    pub source_excerpt_available: bool,
-    pub source_unavailable_reason: Option<String>,
-    pub patch_id: Option<String>,
-    pub patch_status: Option<String>,
-    pub patch_path: Option<String>,
-    pub patch_unavailable_reason: Option<String>,
-    pub snapshot_versions: Vec<String>,
-    pub snapshot_unavailable_reason: Option<String>,
-    pub current_matches_accepted_after: bool,
-}
-
-impl LifeModelCurrentChangeInput {
-    pub fn has_materialization_proof(&self) -> bool {
-        self.proposal_status == "accepted"
-            && self.patch_status.as_deref() == Some("applied")
-            && self
-                .patch_id
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-            && self.patch_unavailable_reason.is_none()
-            && self.snapshot_unavailable_reason.is_none()
-            && !self.snapshot_versions.is_empty()
-            && self.current_matches_accepted_after
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct LifeModelCurrentViewInput {
-    pub path: String,
-    pub label: String,
-    pub value: Option<String>,
-    pub unavailable_reason: Option<String>,
-    pub current_value_source: String,
-    pub change: Option<LifeModelCurrentChangeInput>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -366,8 +234,6 @@ pub struct LifeModelViewModelBuildInput {
     /// canonical empty owner without creating storage as a read side effect.
     pub fresh_profile_canonical_empty: bool,
     pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
-    pub life_model: Option<LifeModel>,
-    pub current_view: Option<LifeModelCurrentViewInput>,
     pub projection: Option<LifeModelProjectionInput>,
     pub proposals: Vec<AgentProposal>,
     pub review_items: Vec<ReviewItem>,
@@ -416,34 +282,16 @@ pub fn build_life_model_view_model_envelope(
         .filter(|item| item.item_type == ReviewItemType::LifeModelUpdate)
         .cloned()
         .collect::<Vec<_>>();
-    let materialized_proposal_ids =
-        materialized_lifemodel_proposal_ids(input.current_view.as_ref(), &life_model_review_items);
+    let materialized_proposal_ids = materialized_lifemodel_proposal_ids(&life_model_review_items);
     let failed_materialization_ids = failed_lifemodel_proposal_ids(&life_model_review_items);
-    let meaningful_life_model = input
-        .life_model
-        .as_ref()
-        .is_some_and(|model| !model.is_effectively_empty());
     let valid_canonical_version = input
         .canonical_v2
         .as_ref()
         .is_some_and(canonical_v2_input_is_authoritative);
     let canonical_owner = valid_canonical_version || input.fresh_profile_canonical_empty;
-    let status = loaded_status(&input, meaningful_life_model, valid_canonical_version);
-    let current_view_summary =
-        build_current_view_summary(&input, &source_refs, meaningful_life_model);
-    let dimension_summaries = build_dimension_summaries(
-        input.life_model.as_ref(),
-        input
-            .life_model
-            .as_ref()
-            .map(LifeModel::calculate_4d_completion),
-        &life_model_proposals,
-        &source_refs,
-        status == ViewModelStatus::Stale,
-    );
+    let status = loaded_status(&input, valid_canonical_version);
     let materialized_changes = build_materialized_changes(
         &life_model_proposals,
-        input.current_view.as_ref(),
         &life_model_review_items,
         &materialized_proposal_ids,
     );
@@ -465,12 +313,7 @@ pub fn build_life_model_view_model_envelope(
     let risky_action_blocker = risky_action_blocker(&input, status);
 
     let data = LifeModelViewModel {
-        truth_mode: derive_truth_mode(
-            status,
-            current_view_summary.as_ref(),
-            meaningful_life_model,
-            canonical_owner,
-        ),
+        truth_mode: derive_truth_mode(status, canonical_owner),
         canonical_summary: build_canonical_summary(&input, valid_canonical_version),
         version_history: if canonical_owner {
             input.version_history.clone()
@@ -482,14 +325,7 @@ pub fn build_life_model_view_model_envelope(
         } else {
             input.legacy_migration_preview.clone()
         },
-        current_view_summary,
-        dimension_summaries: dimension_summaries.clone(),
-        trust_quality_state: build_trust_quality_state(
-            status,
-            &input,
-            &dimension_summaries,
-            &source_refs,
-        ),
+        trust_quality_state: build_trust_quality_state(status, &input, &source_refs),
         pending_update_counts,
         provenance_refs: source_refs.clone(),
         candidate_changes: build_candidate_changes(&life_model_proposals),
@@ -530,7 +366,6 @@ pub fn build_life_model_view_model_envelope(
 
 fn loaded_status(
     input: &LifeModelViewModelBuildInput,
-    meaningful_life_model: bool,
     meaningful_canonical: bool,
 ) -> ViewModelStatus {
     if input.stale {
@@ -544,44 +379,21 @@ fn loaded_status(
     {
         return ViewModelStatus::Empty;
     }
-    if !meaningful_canonical
-        && input
-            .projection
-            .as_ref()
-            .is_some_and(|projection| projection.model_empty)
-        && !current_view_has_value(input.current_view.as_ref())
-    {
-        return ViewModelStatus::Empty;
+    if input.legacy_migration_preview.is_some() {
+        return ViewModelStatus::Ready;
     }
-    if !meaningful_canonical
-        && !meaningful_life_model
-        && !current_view_has_value(input.current_view.as_ref())
-    {
+    if !meaningful_canonical {
         return ViewModelStatus::Empty;
     }
     ViewModelStatus::Ready
 }
 
-fn current_view_has_value(current_view: Option<&LifeModelCurrentViewInput>) -> bool {
-    current_view
-        .and_then(|view| view.value.as_deref())
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-fn derive_truth_mode(
-    status: ViewModelStatus,
-    current_view_summary: Option<&LifeModelCurrentViewSummary>,
-    meaningful_life_model: bool,
-    meaningful_canonical: bool,
-) -> LifeModelTruthMode {
+fn derive_truth_mode(status: ViewModelStatus, meaningful_canonical: bool) -> LifeModelTruthMode {
     if matches!(status, ViewModelStatus::Error) {
         return LifeModelTruthMode::Unavailable;
     }
     if meaningful_canonical {
         return LifeModelTruthMode::Canonical;
-    }
-    if current_view_summary.is_some() || meaningful_life_model {
-        return LifeModelTruthMode::CurrentCompatibility;
     }
     LifeModelTruthMode::Unknown
 }
@@ -664,231 +476,9 @@ fn build_contract_limitations(authoritative_canonical: bool) -> Vec<String> {
     limitations
 }
 
-fn build_current_view_summary(
-    input: &LifeModelViewModelBuildInput,
-    source_refs: &[EvidenceRef],
-    meaningful_life_model: bool,
-) -> Option<LifeModelCurrentViewSummary> {
-    if let Some(current_view) = input.current_view.as_ref() {
-        if let Some(value) = current_view
-            .value
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        {
-            return Some(LifeModelCurrentViewSummary {
-                current_view_ref: BackendEntityRef {
-                    id: format!("lifemodel-current:{}", current_view.path),
-                    kind: BackendEntityKind::LifeModel,
-                    label: current_view.label.clone(),
-                    href: None,
-                },
-                compatibility_mode: true,
-                label: current_view.label.clone(),
-                summary: value.to_string(),
-                divergence_from_canonical: LifeModelDivergence::Unknown,
-                evidence_refs: source_refs.to_vec(),
-                owner_status: LifeModelOwnerStatus::Partial,
-            });
-        }
-    }
-
-    if meaningful_life_model {
-        let version = input
-            .life_model
-            .as_ref()
-            .map(|model| model.metadata.version.trim())
-            .filter(|version| !version.is_empty())
-            .unwrap_or("unknown");
-        return Some(LifeModelCurrentViewSummary {
-            current_view_ref: BackendEntityRef {
-                id: format!("lifemodel-current:{version}"),
-                kind: BackendEntityKind::LifeModel,
-                label: "Existing LifeModel primitive".into(),
-                href: None,
-            },
-            compatibility_mode: true,
-            label: "Existing LifeModel primitive".into(),
-            summary: "A LifeModel primitive is available, but this read model does not label it canonical truth without materialized provenance.".into(),
-            divergence_from_canonical: LifeModelDivergence::Unknown,
-            evidence_refs: source_refs.to_vec(),
-            owner_status: LifeModelOwnerStatus::Partial,
-        });
-    }
-    None
-}
-
-fn build_dimension_summaries(
-    life_model: Option<&LifeModel>,
-    completion: Option<Model4DCompletion>,
-    proposals: &[AgentProposal],
-    source_refs: &[EvidenceRef],
-    stale: bool,
-) -> Vec<LifeModelDimensionSummary> {
-    let Some(model) = life_model.filter(|model| !model.is_effectively_empty()) else {
-        return Vec::new();
-    };
-
-    [
-        LifeModelDimensionId::Identity,
-        LifeModelDimensionId::Goals,
-        LifeModelDimensionId::Capabilities,
-        LifeModelDimensionId::State,
-    ]
-    .into_iter()
-    .map(|dimension| {
-        let dimension_proposals = proposals
-            .iter()
-            .filter(|proposal| {
-                affected_dimension_ids(proposal)
-                    .iter()
-                    .any(|id| id == dimension.as_str())
-            })
-            .collect::<Vec<_>>();
-        let mut evidence_refs = source_refs.to_vec();
-        evidence_refs.extend(
-            dimension_proposals
-                .iter()
-                .map(|proposal| evidence_ref_from_proposal(proposal)),
-        );
-        LifeModelDimensionSummary {
-            id: dimension,
-            label: dimension.label().into(),
-            summary: dimension_summary(model, dimension),
-            confidence: confidence_for_dimension(completion.as_ref(), dimension),
-            stale,
-            pending_review_item_refs: dimension_proposals
-                .iter()
-                .filter(|proposal| {
-                    matches!(
-                        proposal.status,
-                        ProposalStatus::Pending
-                            | ProposalStatus::Edited
-                            | ProposalStatus::Postponed
-                    )
-                })
-                .map(|proposal| review_item_ref_from_proposal(proposal))
-                .collect(),
-            evidence_refs: dedupe_evidence_refs(evidence_refs),
-            provenance: LifeModelProvenance::Limited,
-            owner_status: LifeModelOwnerStatus::Partial,
-        }
-    })
-    .collect()
-}
-
-fn dimension_summary(model: &LifeModel, dimension: LifeModelDimensionId) -> String {
-    let items = match dimension {
-        LifeModelDimensionId::Identity => compact_items([
-            nonempty(model.identity.name.as_str()),
-            nonempty(model.identity.role_definition.primary_role.as_str()),
-            model
-                .identity
-                .values
-                .first()
-                .map(|value| value.name.as_str()),
-            nonempty(model.identity.mission_statement.as_str()),
-        ]),
-        LifeModelDimensionId::Goals => compact_items([
-            model.goals.daily.first().map(|goal| goal.name.as_str()),
-            model
-                .goals
-                .short_term
-                .first()
-                .map(|goal| goal.name.as_str()),
-            model
-                .goals
-                .medium_term
-                .first()
-                .map(|goal| goal.name.as_str()),
-            model.goals.long_term.first().map(|goal| goal.name.as_str()),
-        ]),
-        LifeModelDimensionId::Capabilities => compact_items([
-            model
-                .capabilities
-                .skills
-                .first()
-                .map(|skill| skill.name.as_str()),
-            model
-                .capabilities
-                .knowledge_domains
-                .first()
-                .map(|domain| domain.domain.as_str()),
-            model
-                .capabilities
-                .resources
-                .first()
-                .map(|resource| resource.name.as_str()),
-            model
-                .capabilities
-                .tools
-                .first()
-                .map(|tool| tool.name.as_str()),
-        ]),
-        LifeModelDimensionId::State => compact_items([
-            nonempty(model.state.current_focus.as_str()),
-            model.state.focus_areas.first().map(String::as_str),
-            nonempty(model.state.health_status.physical.as_str()),
-            nonempty(model.state.emotional_state.current_mood.as_str()),
-        ]),
-    };
-    if items.is_empty() {
-        format!("{} has no confirmed summary items.", dimension.label())
-    } else {
-        items.join(" / ")
-    }
-}
-
-fn compact_items<const N: usize>(items: [Option<&str>; N]) -> Vec<String> {
-    items
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .take(3)
-        .map(|value| {
-            if value.chars().count() > 80 {
-                format!("{}...", value.chars().take(77).collect::<String>())
-            } else {
-                value.to_string()
-            }
-        })
-        .collect()
-}
-
-fn nonempty(value: &str) -> Option<&str> {
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn confidence_for_dimension(
-    completion: Option<&Model4DCompletion>,
-    dimension: LifeModelDimensionId,
-) -> LifeModelConfidence {
-    let Some(completion) = completion else {
-        return LifeModelConfidence::Unknown;
-    };
-    let score = match dimension {
-        LifeModelDimensionId::Identity => completion.identity,
-        LifeModelDimensionId::Goals => completion.goals,
-        LifeModelDimensionId::Capabilities => completion.capabilities,
-        LifeModelDimensionId::State => completion.state,
-    };
-    match score {
-        75..=100 => LifeModelConfidence::High,
-        40..=74 => LifeModelConfidence::Medium,
-        1..=39 => LifeModelConfidence::Low,
-        _ => LifeModelConfidence::Unknown,
-    }
-}
-
 fn build_trust_quality_state(
     status: ViewModelStatus,
     input: &LifeModelViewModelBuildInput,
-    dimension_summaries: &[LifeModelDimensionSummary],
     source_refs: &[EvidenceRef],
 ) -> LifeModelTrustQualityState {
     let readiness = if status == ViewModelStatus::Stale {
@@ -907,16 +497,6 @@ fn build_trust_quality_state(
 
     LifeModelTrustQualityState {
         readiness,
-        completion_score: input
-            .life_model
-            .as_ref()
-            .map(LifeModel::calculate_4d_completion)
-            .map(|completion| completion.overall),
-        missing_dimension_count: 4usize.saturating_sub(dimension_summaries.len()),
-        stale_dimension_count: dimension_summaries
-            .iter()
-            .filter(|dimension| dimension.stale)
-            .count(),
         warning_refs: source_refs.to_vec(),
         owner_status: LifeModelOwnerStatus::Partial,
     }
@@ -979,7 +559,6 @@ fn build_candidate_changes(proposals: &[AgentProposal]) -> Vec<LifeModelCandidat
 
 fn build_materialized_changes(
     proposals: &[AgentProposal],
-    current_view: Option<&LifeModelCurrentViewInput>,
     review_items: &[ReviewItem],
     materialized_proposal_ids: &BTreeSet<String>,
 ) -> Vec<LifeModelMaterializedChange> {
@@ -997,27 +576,6 @@ fn build_materialized_changes(
         }
         if let Some(item) = review_item {
             evidence_refs.extend(item.evidence_refs.clone());
-        }
-        if let Some(change) = current_view
-            .and_then(|view| view.change.as_ref())
-            .filter(|change| &change.proposal_id == proposal_id)
-        {
-            if let Some(patch_id) = &change.patch_id {
-                evidence_refs.push(EvidenceRef {
-                    id: format!("lifemodel-patch:{patch_id}"),
-                    label: "Applied LifeModel patch".into(),
-                    source: EvidenceSource::LifeModel,
-                    sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-                });
-            }
-            for version in &change.snapshot_versions {
-                evidence_refs.push(EvidenceRef {
-                    id: format!("lifemodel-snapshot:{version}"),
-                    label: "LifeModel materialization snapshot".into(),
-                    source: EvidenceSource::Audit,
-                    sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-                });
-            }
         }
         changes.push(LifeModelMaterializedChange {
             change_ref: BackendEntityRef {
@@ -1290,25 +848,6 @@ fn collect_source_refs(input: &LifeModelViewModelBuildInput) -> Vec<EvidenceRef>
             );
         }
     }
-    if let Some(model) = &input.life_model {
-        refs.push(EvidenceRef {
-            id: format!(
-                "lifemodel:{}",
-                empty_to_unknown(model.metadata.version.as_str())
-            ),
-            label: "LifeModel primitive".into(),
-            source: EvidenceSource::LifeModel,
-            sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-        });
-    }
-    if let Some(current_view) = &input.current_view {
-        refs.push(EvidenceRef {
-            id: format!("lifemodel-current:{}", current_view.path),
-            label: "LifeModel current compatibility view".into(),
-            source: EvidenceSource::LifeModel,
-            sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-        });
-    }
     if input.memory_count.is_some() {
         refs.push(EvidenceRef {
             id: "memory:count".into(),
@@ -1388,22 +927,12 @@ fn affected_dimension_ids(proposal: &AgentProposal) -> Vec<String> {
     ids
 }
 
-fn materialized_lifemodel_proposal_ids(
-    current_view: Option<&LifeModelCurrentViewInput>,
-    review_items: &[ReviewItem],
-) -> BTreeSet<String> {
-    let mut ids = review_items
+fn materialized_lifemodel_proposal_ids(review_items: &[ReviewItem]) -> BTreeSet<String> {
+    review_items
         .iter()
         .filter(|item| item.materialization_status == ReviewItemMaterializationStatus::Applied)
         .map(|item| item.source.proposal_id.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some(change) = current_view
-        .and_then(|view| view.change.as_ref())
-        .filter(|change| change.has_materialization_proof())
-    {
-        ids.insert(change.proposal_id.clone());
-    }
-    ids
+        .collect::<BTreeSet<_>>()
 }
 
 fn failed_lifemodel_proposal_ids(review_items: &[ReviewItem]) -> BTreeSet<String> {
@@ -1473,14 +1002,6 @@ fn decision_status_from_proposal(status: ProposalStatus) -> LifeModelCandidateDe
     }
 }
 
-fn empty_to_unknown(value: &str) -> &str {
-    if value.trim().is_empty() {
-        "unknown"
-    } else {
-        value
-    }
-}
-
 fn dedupe_evidence_refs(refs: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
     let mut seen = BTreeSet::new();
     refs.into_iter()
@@ -1497,22 +1018,6 @@ mod tests {
         LifeModelDocumentV2, LifeModelStatementV2, LifeModelVersionV2, LIFE_MODEL_V2_SCHEMA_VERSION,
     };
     use serde_json::json;
-
-    fn model_with_content() -> LifeModel {
-        let mut model = LifeModel::default_model();
-        model.identity.name = "Test User".into();
-        model.goals.short_term.push(crate::life_model::GoalItem {
-            name: "Ship backend read models".into(),
-            ..Default::default()
-        });
-        model.capabilities.skills.push(crate::life_model::Skill {
-            name: "Rust".into(),
-            proficiency: 80,
-            description: "Backend development".into(),
-        });
-        model.state.focus_areas.push("OpenLife".into());
-        model
-    }
 
     fn canonical_input(model_version: u64, statements: &[&str]) -> LifeModelCanonicalV2Input {
         let mut document = LifeModelDocumentV2::empty("primary");
@@ -1574,7 +1079,6 @@ mod tests {
     #[test]
     fn empty_lifemodel_has_no_fake_canonical_summary() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(LifeModel::default_model()),
             now: Some("2026-07-09T00:00:00Z".into()),
             ..Default::default()
         });
@@ -1583,7 +1087,6 @@ mod tests {
         let data = envelope.data.expect("data");
         assert_eq!(data.truth_mode, LifeModelTruthMode::Unknown);
         assert!(data.canonical_summary.is_none());
-        assert!(data.dimension_summaries.is_empty());
         assert!(envelope
             .warnings
             .iter()
@@ -1617,7 +1120,6 @@ mod tests {
         .expect("preview");
         let compatibility = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
             legacy_migration_preview: Some(preview.clone()),
-            life_model: Some(model_with_content()),
             now: Some("2026-08-08T10:00:00Z".into()),
             ..Default::default()
         });
@@ -1649,7 +1151,6 @@ mod tests {
                 3,
                 &["Autonomy matters.", "Clarity matters."],
             )),
-            life_model: Some(LifeModel::default_model()),
             projection: Some(LifeModelProjectionInput {
                 model_empty: true,
                 ..Default::default()
@@ -1678,7 +1179,6 @@ mod tests {
         canonical.human_projection.yaml.push_str("\n# drift\n");
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
             canonical_v2: Some(canonical),
-            life_model: Some(LifeModel::default_model()),
             now: Some("2026-08-08T10:01:00Z".into()),
             ..Default::default()
         });
@@ -1697,7 +1197,6 @@ mod tests {
     fn empty_v2_version_is_an_authoritative_empty_canonical_owner() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
             canonical_v2: Some(canonical_input(1, &[])),
-            life_model: Some(LifeModel::default_model()),
             now: Some("2026-08-08T10:01:00Z".into()),
             ..Default::default()
         });
@@ -1713,7 +1212,6 @@ mod tests {
     fn accepted_lifemodel_proposal_without_materialization_stays_approved_not_applied() {
         let accepted = proposal("proposal-accepted-1", ProposalStatus::Accepted);
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(model_with_content()),
             proposals: vec![accepted],
             now: Some("2026-07-09T00:00:00Z".into()),
             ..Default::default()
@@ -1729,77 +1227,9 @@ mod tests {
     }
 
     #[test]
-    fn applied_materialization_requires_patch_snapshot_and_current_match_evidence() {
-        let accepted = proposal("proposal-applied-1", ProposalStatus::Accepted);
-        let current_view = LifeModelCurrentViewInput {
-            path: "preferences.communication_style".into(),
-            label: "Communication style".into(),
-            value: Some("Direct and structured".into()),
-            current_value_source: "accepted_proposal".into(),
-            change: Some(LifeModelCurrentChangeInput {
-                proposal_id: accepted.id.clone(),
-                proposal_status: "accepted".into(),
-                patch_id: Some("patch-1".into()),
-                patch_status: Some("applied".into()),
-                snapshot_versions: vec!["before-v1".into(), "after-v1".into()],
-                current_matches_accepted_after: true,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(model_with_content()),
-            current_view: Some(current_view),
-            proposals: vec![accepted],
-            now: Some("2026-07-09T00:00:00Z".into()),
-            ..Default::default()
-        });
-
-        let data = envelope.data.expect("data");
-        assert_eq!(data.pending_update_counts.approved_not_applied, 0);
-        assert_eq!(data.materialized_changes.len(), 1);
-        assert_eq!(
-            data.materialized_changes[0].materialization_status,
-            ReviewItemMaterializationStatus::Applied
-        );
-    }
-
-    #[test]
-    fn accepted_current_view_without_snapshot_stays_unapplied() {
-        let accepted = proposal("proposal-missing-snapshot", ProposalStatus::Accepted);
-        let current_view = LifeModelCurrentViewInput {
-            path: "preferences.communication_style".into(),
-            label: "Communication style".into(),
-            value: Some("Direct and structured".into()),
-            change: Some(LifeModelCurrentChangeInput {
-                proposal_id: accepted.id.clone(),
-                proposal_status: "accepted".into(),
-                patch_id: Some("patch-1".into()),
-                patch_status: Some("applied".into()),
-                snapshot_unavailable_reason: Some("snapshot_missing".into()),
-                current_matches_accepted_after: true,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(model_with_content()),
-            current_view: Some(current_view),
-            proposals: vec![accepted],
-            now: Some("2026-07-09T00:00:00Z".into()),
-            ..Default::default()
-        });
-
-        let data = envelope.data.expect("data");
-        assert_eq!(data.pending_update_counts.approved_not_applied, 1);
-        assert!(data.materialized_changes.is_empty());
-    }
-
-    #[test]
     fn pending_lifemodel_proposal_maps_to_candidate_not_materialization() {
         let pending = proposal("proposal-pending-1", ProposalStatus::Pending);
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(model_with_content()),
             proposals: vec![pending],
             now: Some("2026-07-09T00:00:00Z".into()),
             ..Default::default()
@@ -1817,7 +1247,6 @@ mod tests {
         let mut item = build_review_item(&accepted, &ReviewCenterBuildInput::default());
         item.materialization_status = ReviewItemMaterializationStatus::Applied;
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(model_with_content()),
             proposals: vec![accepted],
             review_items: vec![item],
             now: Some("2026-07-09T00:00:00Z".into()),
@@ -1833,7 +1262,6 @@ mod tests {
     #[test]
     fn whole_model_manual_save_is_unavailable_and_points_to_proposals() {
         let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            life_model: Some(model_with_content()),
             now: Some("2026-07-09T00:00:00Z".into()),
             ..Default::default()
         });

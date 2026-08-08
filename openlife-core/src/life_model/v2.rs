@@ -396,7 +396,7 @@ impl LegacyLifeModelMigrationPreviewV2 {
         if source.len() > MAX_LEGACY_MIGRATION_SOURCE_BYTES {
             bail!("legacy_lifemodel_migration_source_too_large");
         }
-        let _: LifeModel =
+        let legacy_model: LifeModel =
             serde_yaml::from_str(source).context("parse_legacy_lifemodel_for_migration")?;
         let value: serde_yaml::Value =
             serde_yaml::from_str(source).context("parse_legacy_lifemodel_yaml_tree")?;
@@ -406,6 +406,15 @@ impl LegacyLifeModelMigrationPreviewV2 {
 
         let mut items = Vec::new();
         collect_legacy_yaml_items(&value, "", &mut items)?;
+        if legacy_model.is_effectively_empty() {
+            // Older startup code persisted a fully expanded default document
+            // even though the user had supplied no LifeModel information.
+            // Keep only provenance metadata from that compatibility skeleton;
+            // enum defaults and zero-valued state are not evidence of intent.
+            items.retain(|item| {
+                item.disposition == LegacyLifeModelMigrationDispositionV2::MigrationMetadata
+            });
+        }
         items.sort_by(|left, right| left.source_path.cmp(&right.source_path));
 
         let review_required_count = items
@@ -3212,6 +3221,20 @@ mod tests {
         assert!(paths
             .iter()
             .all(|path| !path.starts_with("identity.voice_style")));
+    }
+
+    #[test]
+    fn legacy_preview_does_not_treat_persisted_default_skeleton_as_user_content() {
+        let source = serde_yaml::to_string(&LifeModel::default_model()).unwrap();
+
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source)
+            .expect("default compatibility skeleton preview");
+
+        assert!(!preview.has_user_content());
+        assert!(preview.candidates.is_empty());
+        assert!(preview.items.iter().all(|item| {
+            item.disposition == LegacyLifeModelMigrationDispositionV2::MigrationMetadata
+        }));
     }
 
     #[test]

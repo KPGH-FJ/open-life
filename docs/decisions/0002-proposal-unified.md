@@ -5,11 +5,16 @@
 
 ## 状态
 
-- **状态**: 已接受；实现边界以后续治理文档为准
+- **状态**: 已被 ADR 0016 与当前 v2 Proposal 路径取代；仅保留历史背景
 - **日期**: 2026-04-24
 - **作者**: OpenLife Team
 
 ## 上下文
+
+以下内容描述 2026-04-24 的历史问题与当时决策，不是当前 Builder、Calibration
+或 LifeModel 写入接口。当前产品只允许 v2 typed diff 或受治理 legacy migration
+Proposal 写入 LifeModel；旧 Builder/Calibration command、4D patch batch 和直接
+应用路径已经退役。
 
 OpenLife 有多个模块会产生 LifeModel 更新：
 
@@ -68,7 +73,7 @@ OpenLife 有多个模块会产生 LifeModel 更新：
    - `list_proposals`
    - `batch_accept_low_risk_proposals`
 
-### 接入规则
+### 历史接入规则（已退役）
 
 | 模块 | 接入方式 | 默认路径 |
 |------|---------|----------|
@@ -87,11 +92,11 @@ OpenLife 有多个模块会产生 LifeModel 更新：
 - ✅ 高风险字段默认必须经过确认
 - ✅ Safe Mode 下自动阻止 apply/edit
 
-### 负面
+### 当时已知负面
 
 - ⚠️ Builder/Calibration 需要额外步骤（发送到 Review Center）
 - ⚠️ 需要维护 proposals.db 的迁移兼容
-- ⚠️ Builder legacy direct apply 后端命令仍保留，但必须通过日志、返回值和测试明确标记为 migration/debug-only；正常 UI 不应调用
+- ⚠️ 当时仍保留 Builder legacy direct apply；当前实现已经删除该产品路径
 
 ## 相关
 

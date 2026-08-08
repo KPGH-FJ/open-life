@@ -19,7 +19,6 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "LifeModelFileJournal",
     "GovernedDataImportJournal",
     "HSAssetAuthorityRegistry",
-    "BuilderSessionStore",
     "PluginRegistry",
     "PrivacyPolicyStore",
     "McpAuditKeyReferenceStore",
@@ -50,7 +49,6 @@ const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
     "LifeModelFileStore",
     "LifeModelFileJournal",
     "HSAssetAuthorityRegistry",
-    "BuilderSessionStore",
     "FeedbackStore",
     "VectorStore",
     "EvidenceStore",
@@ -1674,7 +1672,6 @@ mod tests {
             "LifeModelFileJournal",
             "GovernedDataImportJournal",
             "HSAssetAuthorityRegistry",
-            "BuilderSessionStore",
             "PluginRegistry",
         ] {
             assert!(expected.contains(required));

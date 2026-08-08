@@ -133,16 +133,6 @@ use commands::agent_runtime::{
     skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
-use commands::builder::{
-    builder_create_proposals, builder_delete_session, builder_get_pending_signals,
-    builder_list_unfinished, builder_start, builder_step, get_model_4d_completion,
-    goal_capability_gap_analysis, goal_capability_gap_report, identity_goal_alignment_check,
-    identity_goal_alignment_report,
-};
-use commands::calibration::{
-    calibration_create_proposals, generate_calibration_report, generate_micro_evolution_changes,
-    mark_calibration_shown, should_show_calibration,
-};
 use commands::chat::{
     create_chat_session, delete_chat_session, get_chat_history, list_chat_sessions,
     rename_chat_session, save_chat_message,
@@ -163,13 +153,13 @@ pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{
     draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
-    draft_lifemodel_v2_rollback, get_life_model, get_life_model_current_view,
+    draft_lifemodel_v2_rollback,
 };
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
-    list_mcp_tools, recommend_mcp_manifests, register_mcp_server, unregister_mcp_server,
+    list_mcp_tools, register_mcp_server, unregister_mcp_server,
 };
 use commands::memory::{
     archive_low_access_memories, count_memory_chunks, create_knowledge_note,
@@ -194,7 +184,6 @@ use commands::settings::{
 #[cfg(feature = "dev-extensions")]
 use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
 use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
-use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_memory_proposals::draft_edit_memory_proposal;
@@ -350,16 +339,6 @@ impl std::fmt::Debug for SendMessageResult {
 }
 
 #[derive(serde::Serialize)]
-pub struct BuilderCompletion {
-    pub identity: f32,
-    pub goals: f32,
-    pub capabilities: f32,
-    pub state: f32,
-    pub overall: f32,
-    pub lowest_dimension: Option<String>,
-}
-
-#[derive(serde::Serialize)]
 pub struct OllamaModelInfo {
     pub name: String,
     pub size_mb: u64,
@@ -377,8 +356,6 @@ pub struct SystemDiagnostics {
     pub vector_corrupt_embedding_count: usize,
     pub vector_unknown_profile_count: usize,
     pub vector_profile_dimension_mismatch_count: usize,
-    pub unfinished_builder_sessions: usize,
-    pub pending_builder_review_sessions: usize,
     pub ollama_service_online: bool,
     pub ollama_online: bool,
     pub local_model: String,
@@ -398,14 +375,12 @@ pub struct SystemDiagnostics {
     pub active_data_dir: String,
     pub database_status: String,
     pub startup_warnings: Vec<String>,
-    pub snapshot_count: usize,
     pub life_model_ready: bool,
     pub app_version: String,
     pub model_empty: bool,
     pub chat_session_count: usize,
     pub usage_ready: bool,
     pub usage_readiness_issues: Vec<String>,
-    pub builder_completion: BuilderCompletion,
     pub ollama_models: Vec<OllamaModelInfo>,
     pub agent_run_count: usize,
     pub agent_run_store_status: String,
@@ -961,8 +936,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_life_model,
-            get_life_model_current_view,
             draft_legacy_lifemodel_migration,
             draft_lifemodel_v2_change,
             draft_lifemodel_v2_rollback,
@@ -1048,8 +1021,6 @@ pub fn run() {
             list_mcp_tools,
             #[cfg(feature = "dev-extensions")]
             list_mcp_templates,
-            #[cfg(feature = "dev-extensions")]
-            recommend_mcp_manifests,
             list_tool_manifests,
             #[cfg(feature = "dev-extensions")]
             list_mcp_audit_logs,
@@ -1061,10 +1032,6 @@ pub fn run() {
             get_policy_router_status,
             get_model_router_status,
             set_scheduler_config,
-            create_snapshot,
-            list_snapshots,
-            restore_snapshot,
-            diff_snapshots,
             save_feedback,
             get_feedback_summary,
             generate_evolution_report,
@@ -1087,17 +1054,6 @@ pub fn run() {
             a2a_restart_sidecar,
             #[cfg(feature = "dev-extensions")]
             a2a_stop_sidecar,
-            builder_start,
-            builder_step,
-            builder_list_unfinished,
-            builder_delete_session,
-            builder_get_pending_signals,
-            builder_create_proposals,
-            get_model_4d_completion,
-            goal_capability_gap_analysis,
-            goal_capability_gap_report,
-            identity_goal_alignment_check,
-            identity_goal_alignment_report,
             export_all_data,
             get_danger_action_preflight,
             import_all_data,
@@ -1112,11 +1068,6 @@ pub fn run() {
             get_state_history,
             get_state_alerts,
             get_daily_goals,
-            generate_calibration_report,
-            generate_micro_evolution_changes,
-            calibration_create_proposals,
-            should_show_calibration,
-            mark_calibration_shown,
             get_hot_cache,
             archive_low_access_memories,
             restore_archived_chunks,
@@ -1202,6 +1153,49 @@ mod external_source_tests {
             assert!(
                 validated_external_https_source(rejected).is_err(),
                 "URL should be rejected: {rejected}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod retired_lifemodel_surface_tests {
+    #[test]
+    fn shipped_handler_contains_only_the_v2_lifemodel_product_surface() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("shipped Tauri handler start");
+        let end = source[start..]
+            .find("])\n        .build(")
+            .map(|offset| start + offset)
+            .expect("shipped Tauri handler end");
+        let handler = &source[start..end];
+
+        for required in [
+            "get_life_model_view_model",
+            "draft_lifemodel_v2_change",
+            "draft_legacy_lifemodel_migration",
+        ] {
+            assert!(
+                handler.contains(required),
+                "missing current command {required}"
+            );
+        }
+        for retired in [
+            "get_life_model,",
+            "get_life_model_current_view",
+            "builder_start",
+            "builder_create_proposals",
+            "get_model_4d_completion",
+            "recommend_mcp_manifests",
+            "create_snapshot",
+            "restore_snapshot",
+            "calibration_create_proposals",
+        ] {
+            assert!(
+                !handler.contains(retired),
+                "retired LifeModel command is still shipped: {retired}"
             );
         }
     }

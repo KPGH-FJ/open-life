@@ -137,13 +137,11 @@ pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntime
 pub use life_model_view_model::{
     build_life_model_view_model_envelope, LifeModelCandidateChange,
     LifeModelCandidateDecisionStatus, LifeModelCanonicalSummary, LifeModelCanonicalV2Input,
-    LifeModelChangeKind, LifeModelConfidence, LifeModelCurrentChangeInput,
-    LifeModelCurrentViewInput, LifeModelCurrentViewSummary, LifeModelDimensionId,
-    LifeModelDimensionSummary, LifeModelDivergence, LifeModelManualOverrideState,
-    LifeModelMemoryLinkageStatus, LifeModelMemoryLinkageSummary, LifeModelMemoryTierStatsInput,
-    LifeModelOwnerStatus, LifeModelPendingUpdateCounts, LifeModelProjectionInput,
-    LifeModelProvenance, LifeModelReadiness, LifeModelTierSummary, LifeModelTrustQualityState,
-    LifeModelTruthMode, LifeModelViewModel, LifeModelViewModelBuildInput,
+    LifeModelChangeKind, LifeModelManualOverrideState, LifeModelMemoryLinkageStatus,
+    LifeModelMemoryLinkageSummary, LifeModelMemoryTierStatsInput, LifeModelOwnerStatus,
+    LifeModelPendingUpdateCounts, LifeModelProjectionInput, LifeModelReadiness,
+    LifeModelTierSummary, LifeModelTrustQualityState, LifeModelTruthMode, LifeModelViewModel,
+    LifeModelViewModelBuildInput,
 };
 pub use lifemodel_backend_completion::{
     bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,

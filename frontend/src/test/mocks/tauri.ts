@@ -1,12 +1,5 @@
 import { vi } from "vitest";
-import type {
-  LifeModel,
-  ChatMessage,
-  DailyGoal,
-  StateHistoryEntry,
-  StateAlert,
-  LifeModelVersion,
-} from "@/types";
+import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "@/types";
 import type {
   LifeModelViewModel,
   MemoryViewModel,
@@ -199,64 +192,12 @@ export function createMockLifeModelViewModelEnvelope(
   const now = new Date().toISOString();
   const base: ViewModelEnvelope<LifeModelViewModel> = {
     data: {
-      truthMode: "current_compatibility",
+      truthMode: "unknown",
       canonicalSummary: null,
       versionHistory: [],
       legacyMigrationPreview: null,
-      currentViewSummary: null,
-      dimensionSummaries: [
-        {
-          id: "identity",
-          label: "Identity",
-          summary: "测试用户 / 开发者 / 健康",
-          confidence: "high",
-          stale: false,
-          pendingReviewItemRefs: [],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-        {
-          id: "goals",
-          label: "Goals",
-          summary: "完成项目 / 早起",
-          confidence: "medium",
-          stale: false,
-          pendingReviewItemRefs: [
-            { id: "proposal-life-model-1", kind: "review_item", label: "Review item" },
-          ],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-        {
-          id: "capabilities",
-          label: "Capabilities",
-          summary: "编程 / 写作 / AI",
-          confidence: "medium",
-          stale: false,
-          pendingReviewItemRefs: [],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-        {
-          id: "state",
-          label: "State",
-          summary: "工作 / 学习 / 良好",
-          confidence: "medium",
-          stale: false,
-          pendingReviewItemRefs: [],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-      ],
       trustQualityState: {
         readiness: "usable_with_limits",
-        completionScore: 72.5,
-        missingDimensionCount: 0,
-        staleDimensionCount: 0,
         warningRefs: [],
         ownerStatus: "PARTIAL",
       },
@@ -829,23 +770,6 @@ const mockPlanExecuteSession = {
   metadataSafeSummary: {},
 };
 
-export const mockLifeModelVersions: LifeModelVersion[] = [
-  {
-    version: "0.1.0",
-    timestamp: new Date().toISOString(),
-    tag: "auto",
-    note: "自动保存",
-    yaml_content: "",
-  },
-  {
-    version: "0.2.0",
-    timestamp: new Date(Date.now() - 3600000).toISOString(),
-    tag: "manual",
-    note: "手动调整目标与状态",
-    yaml_content: "",
-  },
-];
-
 function mockStage5PreflightFixture() {
   return {
     reportKind: "main_chat_stage5_release_debug_preflight",
@@ -936,17 +860,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
         prefer_local_model: false,
         local_model: "llama3",
-      } as T);
-    case "get_life_model":
-      return Promise.resolve(mockLifeModel as T);
-    case "get_life_model_current_view":
-      return Promise.resolve({
-        path: "preferences.communication_style",
-        label: "沟通偏好",
-        value: null,
-        unavailableReason: "current_value_empty",
-        currentValueSource: "unavailable",
-        change: null,
       } as T);
     case "get_life_model_view_model":
       return Promise.resolve(createMockLifeModelViewModelEnvelope() as T);
@@ -2282,18 +2195,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           tags: ["file", "filesystem", "local"],
         },
       ] as T);
-    case "recommend_mcp_manifests":
-      return Promise.resolve([
-        {
-          name: "filesystem",
-          description: "适合当前阶段进行本地文件读写",
-          parameters: {},
-          permission_level: "high",
-          version: "1.0.0",
-          source: { type: "Mcp", server_name: "filesystem" },
-          tags: ["file", "filesystem", "local"],
-        },
-      ] as T);
     case "list_tool_manifests":
       return Promise.resolve([
         {
@@ -2823,8 +2724,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
         checkedAt: "2026-05-31T06:08:00Z",
       } as T);
-    case "list_snapshots":
-      return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
       if (_args?.runId === "run-preview-1") {
         return Promise.resolve(mockPreviewAgentRun as T);
@@ -3072,52 +2971,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "enable_plugin":
     case "disable_plugin":
       return Promise.resolve(undefined as T);
-    case "diff_snapshots":
-      return Promise.resolve(
-        [
-          "-identity:",
-          "-  mission_statement: 成为更好的自己",
-          "+identity:",
-          "+  mission_statement: 成为更稳定的自己",
-          "-goals:",
-          "+goals:",
-          "+  daily:",
-          "+    - name: 复盘",
-          "-state:",
-          "+state:",
-          "+  current_focus: 深度工作",
-        ].join("\n") as T
-      );
-    case "create_snapshot":
-      return Promise.resolve(mockLifeModelVersions[0] as T);
-    case "restore_snapshot":
-      return Promise.resolve({
-        success: true,
-        legacy: false,
-        governed_operation: true,
-        warning: "metadata-safe",
-        metadata_safe: true,
-        durable_lifemodel_write: true,
-        restored_snapshot_version: args?.version ?? "0.1.0",
-        pre_restore_snapshot_created: true,
-      } as T);
-    case "goal_capability_gap_analysis":
-      return Promise.resolve(["需要提升编程技能", "需要更多学习时间"] as T);
-    case "goal_capability_gap_report":
-      return Promise.resolve([
-        {
-          goal_name: "完成 AI 项目",
-          skill_name: "编程",
-          current_level: 4,
-          target_level: 7,
-          severity: "high",
-          suggestion: "安排 2 周刻意练习，并补一个可验证里程碑",
-        },
-      ] as T);
-    case "identity_goal_alignment_check":
-      return Promise.resolve([] as T);
-    case "identity_goal_alignment_report":
-      return Promise.resolve([] as T);
     case "count_memory_chunks":
       return Promise.resolve(42 as T);
     case "rebuild_memory_index":
@@ -3199,8 +3052,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         mcp_recent_pii_count: 1,
         memory_chunk_count: 42,
         vector_corrupt_embedding_count: 0,
-        unfinished_builder_sessions: 0,
-        pending_builder_review_sessions: 0,
         ollama_online: true,
         local_model: "llama3",
         resolved_local_model: "llama3:latest",
@@ -3215,21 +3066,12 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         active_data_dir: "/tmp/openlife-test",
         database_status: "ok",
         startup_warnings: [],
-        snapshot_count: 2,
         life_model_ready: true,
         app_version: "0.1.0",
         model_empty: false,
         chat_session_count: 3,
         usage_ready: true,
         usage_readiness_issues: [],
-        builder_completion: {
-          identity: 80,
-          goals: 75,
-          capabilities: 70,
-          state: 65,
-          overall: 72.5,
-          lowest_dimension: "state",
-        },
         data_files: {
           messages_db_exists: true,
           messages_db_size_mb: 1.2,
@@ -3263,8 +3105,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           usageReady: true,
           lifeModelReady: true,
           modelEmpty: false,
-          pendingBuilderReviewSessions: 0,
-          unfinishedBuilderSessions: 0,
           databaseStatus: "ok",
           readinessIssues: [],
           usageReadinessIssues: [],
@@ -3338,62 +3178,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         findings: [{ path: "$.query", privacy_type: "Email", matched: "test@example.com" }],
         sanitized_arguments: { query: "帮我搜索 <EMAIL_0> 的公开信息" },
         requires_confirmation: true,
-      } as T);
-    case "get_model_4d_completion":
-      return Promise.resolve({
-        identity: 0.7,
-        goals: 0.6,
-        capabilities: 0.5,
-        state: 0.8,
-      } as T);
-    case "builder_list_unfinished":
-      return Promise.resolve([] as T);
-    case "builder_start":
-      return Promise.resolve({
-        prompt: "请描述你的价值观",
-        finished: false,
-        progress: { progress: 0.2, current_step_label: "价值观", step_index: 1, total_steps: 5 },
-        review: null,
-      } as T);
-    case "builder_step":
-      return Promise.resolve({
-        prompt: "下一步问题",
-        finished: false,
-        progress: {
-          progress: 0.4,
-          current_step_label: "目标",
-          step_index: 2,
-          total_steps: 5,
-          waiting_phase_confirmation: false,
-        },
-        mode: "Quick",
-        review: null,
-      } as T);
-    case "builder_get_pending_signals":
-      return Promise.resolve({
-        session_id: "test-session",
-        signals: [],
-        summary: {
-          identity_summary: "基于 0 个信号",
-          goals_summary: "基于 0 个信号",
-          capabilities_summary: "基于 0 个信号",
-          state_summary: "基于 0 个信号",
-          assumptions: ["用户通过快速构建流程提供"],
-          unresolved_questions: [],
-          recommended_next_steps: ["审阅并确认信号", "可选择进入渐进构建继续完善"],
-        },
-        finished: true,
-      } as T);
-    case "builder_create_proposals":
-      return Promise.resolve({
-        success: true,
-        created_count: 1,
-        reused_count: 0,
-        updated_count: 0,
-        rejected_count: 0,
-        proposal_ids: ["proposal-1"],
-        run_id: "run-1",
-        warnings: [],
       } as T);
     case "search_memory":
       return Promise.resolve({

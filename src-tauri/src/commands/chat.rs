@@ -169,11 +169,6 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_session_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::builder::BuilderSessionStore::new(
-                    temp_dir.path().join("builder_sessions.json"),
-                ),
-            )),
             a2a_sidecar: Arc::new(tokio::sync::Mutex::new(
                 crate::a2a_sidecar::A2ASidecar::new(crate::a2a_server::configured_a2a_port()),
             )),

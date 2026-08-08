@@ -6,6 +6,20 @@ const distRoot = join(frontendRoot, "dist");
 const sourceRoot = join(frontendRoot, "src");
 const appPath = join(sourceRoot, "App.tsx");
 const routeContractPath = join(sourceRoot, "ui", "productRouteContract.ts");
+const lifeModelBuilderPath = join(
+  sourceRoot,
+  "ui",
+  "journeys",
+  "durableTruth",
+  "LifeModelBuilderPanel.tsx"
+);
+const retiredLifeModelBuilderDataSourcePath = join(
+  sourceRoot,
+  "ui",
+  "journeys",
+  "durableTruth",
+  "lifeModelBuilderDataSource.ts"
+);
 
 if (!existsSync(distRoot)) {
   throw new Error("Production dist is missing; run the normal frontend build first.");
@@ -26,6 +40,7 @@ const forbiddenOldOwners = [
   "src/pages/BuilderPage.tsx",
   "src/pages/AgentRunDetail.tsx",
   "src/pages/TodayV2PreviewPage.tsx",
+  "src/ui/journeys/durableTruth/lifeModelBuilderDataSource.ts",
 ];
 
 for (const directory of ["src/pages", "src/components"]) {
@@ -48,10 +63,23 @@ for (const requiredOwner of [
   "tauriDurableTruthDataSource",
   "tauriSettingsPrivacyDataSource",
   "tauriWorkspaceConversationDataSource",
-  "tauriLifeModelBuilderDataSource",
 ]) {
   if (!appSource.includes(requiredOwner)) {
     throw new Error(`src/App.tsx is missing production owner ${requiredOwner}`);
+  }
+}
+if (existsSync(retiredLifeModelBuilderDataSourcePath)) {
+  throw new Error("The retired 4D LifeModel Builder data source must stay absent.");
+}
+const lifeModelBuilderSource = readFileSync(lifeModelBuilderPath, "utf8");
+for (const requiredMarker of ["DraftLifeModelV2ChangeRequest", 'operation: "add"']) {
+  if (!lifeModelBuilderSource.includes(requiredMarker)) {
+    throw new Error(`The v2 LifeModel Builder is missing ${requiredMarker}`);
+  }
+}
+for (const retiredMarker of ["BuilderSession", "goals.short_term", "state.current_focus"]) {
+  if (lifeModelBuilderSource.includes(retiredMarker)) {
+    throw new Error(`The v2 LifeModel Builder contains retired marker ${retiredMarker}`);
   }
 }
 if (/ProductShell|productShellContract|LEGACY_PRODUCT_REDIRECTS/.test(appSource)) {
@@ -83,7 +111,13 @@ function sourceFiles(directory) {
   });
 }
 
-const forbiddenSourceMarkers = ["src/dev/"];
+const forbiddenSourceMarkers = [
+  "src/dev/",
+  "currentViewSummary",
+  "dimensionSummaries",
+  '"current_compatibility"',
+  "recommend_mcp_manifests",
+];
 
 for (const filePath of sourceFiles(sourceRoot)) {
   if (!/\.(?:ts|tsx|css)$/.test(filePath) || /\.test\.(?:ts|tsx)$/.test(filePath)) continue;

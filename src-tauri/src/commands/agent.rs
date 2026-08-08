@@ -1632,48 +1632,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_run_preflight_read_failure_degrades_runtime_before_effects() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("agent-runs.db");
-        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
-        let run = AgentRun::new_builder_run("agent-run-preflight-read-failure");
-        store.create_run(&run).unwrap();
-
-        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        Arc::get_mut(&mut state)
-            .expect("test state has one outer owner")
-            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
-        install_release_like_persistence_coordinator(&mut state);
-
-        let fault = rusqlite::Connection::open(&path).unwrap();
-        fault.execute_batch("DROP TABLE agent_runs;").unwrap();
-        drop(fault);
-
-        let error = crate::terminal_owner_write_gateway::project_agent_run_from_proposal_staging(
-            &state,
-            &run.id,
-            &[],
-            crate::terminal_owner_write_gateway::AgentRunProposalStagingReceipt {
-                kind: crate::terminal_owner_write_gateway::AgentRunProposalStagingKind::Builder,
-                requested_count: 0,
-                failed_count: 0,
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert!(
-            error.to_ascii_lowercase().contains("no such table"),
-            "{error}"
-        );
-        assert_eq!(
-            state.persistence_coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded,
-            "a canonical owner read failure must fail closed before more effects"
-        );
-    }
-
-    #[tokio::test]
     async fn shipped_get_and_list_classify_durable_read_failure_without_degrading_not_found() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent-run-shipped-reads.db");

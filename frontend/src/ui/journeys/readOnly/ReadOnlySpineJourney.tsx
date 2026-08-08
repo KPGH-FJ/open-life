@@ -65,10 +65,8 @@ import {
   durableTruthContext,
   durableTruthInspector,
   DurableTruthView,
-  useLifeModelBuilder,
   useDurableTruthJourney,
   type DurableTruthDataSource,
-  type LifeModelBuilderDataSource,
 } from "@/ui/journeys/durableTruth";
 import {
   settingsPrivacyContext,
@@ -466,7 +464,6 @@ export function ReadOnlySpineJourney({
   durableTruthDataSource,
   settingsPrivacyDataSource,
   workspaceConversationDataSource,
-  lifeModelBuilderDataSource,
   initialSurface = "today",
   initialMode = "product",
   onRouteChange,
@@ -476,7 +473,6 @@ export function ReadOnlySpineJourney({
   durableTruthDataSource?: DurableTruthDataSource;
   settingsPrivacyDataSource?: SettingsPrivacyDataSource;
   workspaceConversationDataSource?: WorkspaceConversationDataSource;
-  lifeModelBuilderDataSource?: LifeModelBuilderDataSource;
   initialSurface?: ReadOnlyProductSurfaceId;
   initialMode?: ReadOnlySpineRouteState["mode"];
   onRouteChange?: (route: ReadOnlySpineRouteState) => void;
@@ -520,7 +516,6 @@ export function ReadOnlySpineJourney({
     preferredWorkspaceConversationId
   );
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
-  const lifeModelBuilder = useLifeModelBuilder(lifeModelBuilderDataSource, setAnnouncement);
   const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, announceSettings);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
@@ -644,12 +639,6 @@ export function ReadOnlySpineJourney({
   }, [conversation.ensureLoaded, initialSurface, workspaceConversationDataSource]);
 
   useEffect(() => {
-    if (initialSurface === "life-model" && lifeModelBuilderDataSource) {
-      lifeModelBuilder.ensureLoaded();
-    }
-  }, [initialSurface, lifeModelBuilder.ensureLoaded, lifeModelBuilderDataSource]);
-
-  useEffect(() => {
     if (mode !== "settings" || !settingsPrivacyDataSource) return;
     let cancelled = false;
     setAnnouncement("已进入设置上下文，正在核对清理后的配置与模型传输边界。 ");
@@ -708,7 +697,6 @@ export function ReadOnlySpineJourney({
       }
     } else if (next === "life-model" && durableTruthDataSource) {
       void durable.load(false);
-      if (lifeModelBuilderDataSource) lifeModelBuilder.ensureLoaded();
     } else {
       setAnnouncement(`“${unavailableCopy[next].title}”，当前没有替代数据或重定向。`);
     }
@@ -847,12 +835,7 @@ export function ReadOnlySpineJourney({
       return reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
     }
     if (activeSurface === "life-model" && durableTruthDataSource) {
-      return durableTruthInspector(
-        durable.snapshot,
-        durable.selectedItem,
-        selectedEvidence,
-        lifeModelBuilderDataSource ? lifeModelBuilder.error : null
-      );
+      return durableTruthInspector(durable.snapshot, durable.selectedItem, selectedEvidence, null);
     }
     return unavailableInspector(unavailableCopy[activeSurface].title);
   }, [
@@ -868,8 +851,6 @@ export function ReadOnlySpineJourney({
     governed.selectedItem,
     governed.snapshot,
     governedActionDataSource,
-    lifeModelBuilder.error,
-    lifeModelBuilderDataSource,
     settingsPrivacy,
     settingsPrivacyDataSource,
     todaySnapshot,
@@ -1043,10 +1024,7 @@ export function ReadOnlySpineJourney({
         onDraftLifeModelChange={durable.draftLifeModelChange}
         onDraftLifeModelRollback={durable.draftLifeModelRollback}
         onDraftLifeModelExport={durable.draftLifeModelExport}
-        builder={lifeModelBuilderDataSource ? lifeModelBuilder : undefined}
-        onOpenReviewCenter={
-          lifeModelBuilderDataSource ? () => navigateProduct("review", "life-model") : undefined
-        }
+        onOpenReviewCenter={() => navigateProduct("review", "life-model")}
       />
     );
   } else {

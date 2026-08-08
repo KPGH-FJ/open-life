@@ -17,9 +17,6 @@ import { durableLifecyclePresentation, durableReviewItems } from "./durableTruth
 import { LifeModelBuilderPanel } from "./LifeModelBuilderPanel";
 import { LifeModelMigrationPanel } from "./LifeModelMigrationPanel";
 import { LifeModelV2ControlsPanel } from "./LifeModelV2ControlsPanel";
-import type { LifeModelBuilderController } from "./useLifeModelBuilder";
-
-const dimensionOrder = ["identity", "goals", "capabilities", "state"];
 
 const migrationDispositionLabel: Record<LegacyLifeModelMigrationItemV2["disposition"], string> = {
   review_required: "需要你审核",
@@ -48,7 +45,6 @@ export function DurableTruthView({
   onSelectItem,
   onOpenReview,
   onOpenInspector,
-  builder,
   onOpenReviewCenter,
   memoryAction,
   onCorrectMemory,
@@ -71,7 +67,6 @@ export function DurableTruthView({
   onSelectItem: (item: ReviewItem) => void;
   onOpenReview: (item: ReviewItem) => void;
   onOpenInspector: () => void;
-  builder?: LifeModelBuilderController;
   onOpenReviewCenter?: () => void;
   memoryAction: {
     memoryId: string;
@@ -146,17 +141,11 @@ export function DurableTruthView({
     );
   }
 
-  const currentView = lifeModel?.currentViewSummary;
   const canonical = lifeModel?.canonicalSummary;
   const canonicalView = lifeModel?.truthMode === "canonical" ? (canonical ?? null) : null;
   const migrationPreview = canonicalView ? null : lifeModel?.legacyMigrationPreview;
-  const sortedDimensions = [...(lifeModel?.dimensionSummaries ?? [])].sort(
-    (left, right) => dimensionOrder.indexOf(left.id) - dimensionOrder.indexOf(right.id)
-  );
   const applyAction = lifeModelItem?.allowedActions.find(action => action.kind === "apply");
-  const hasEstablishedView = Boolean(
-    currentView || canonical || (lifeModel?.dimensionSummaries.length ?? 0) > 0
-  );
+  const hasEstablishedView = Boolean(canonical || migrationPreview);
   const builderDisabledReason = (() => {
     const statuses = [snapshot.lifeModelEnvelope.status, snapshot.reviewEnvelope.status];
     if (statuses.includes("error")) return "LifeModel 或 Review Center 当前不可用。";
@@ -257,27 +246,18 @@ export function DurableTruthView({
                 <div>
                   <span>当前理解</span>
                   <h2 id="durable-current-title">
-                    {canonicalView
-                      ? canonicalView.title
-                      : (currentView?.label ?? "长期理解尚未建立")}
+                    {canonicalView ? canonicalView.title : "长期理解尚未建立"}
                   </h2>
                 </div>
                 <FoundationStatusLabel
-                  label={
-                    lifeModel?.truthMode === "canonical"
-                      ? "规范状态"
-                      : lifeModel?.truthMode === "current_compatibility"
-                        ? "兼容视图"
-                        : "来源受限"
-                  }
+                  label={lifeModel?.truthMode === "canonical" ? "规范状态" : "来源受限"}
                   status={lifeModel?.truthMode === "canonical" ? "neutral" : "unknown"}
                 />
               </header>
               <p>
                 {canonicalView
                   ? canonicalView.summary
-                  : (currentView?.summary ??
-                    "后端没有提供可展示的当前或规范摘要；页面不会从旧 LifeModel 对象补造内容。")}
+                  : "尚未建立规范 LifeModel；旧 YAML 只会出现在下方迁移预览中。"}
               </p>
               {canonicalView ? (
                 <>
@@ -325,20 +305,6 @@ export function DurableTruthView({
                   </details>
                 </>
               ) : null}
-              {!canonicalView && sortedDimensions.length > 0 && (
-                <dl className="ol-durable-dimensions">
-                  {sortedDimensions.map(dimension => (
-                    <div key={dimension.id} data-stale={String(dimension.stale)}>
-                      <dt>{dimension.label}</dt>
-                      <dd>{dimension.summary}</dd>
-                      <small>
-                        {dimension.stale ? "已陈旧" : `可信度 ${dimension.confidence}`} · 来源
-                        {dimension.provenance === "limited" ? "受限" : "未知"}
-                      </small>
-                    </div>
-                  ))}
-                </dl>
-              )}
             </section>
 
             {migrationPreview ? (
@@ -413,10 +379,11 @@ export function DurableTruthView({
               </section>
             ) : null}
 
-            {!hasEstablishedView && builder && onOpenReviewCenter && (
+            {!hasEstablishedView && onOpenReviewCenter && (
               <LifeModelBuilderPanel
-                controller={builder}
                 disabledReason={builderDisabledReason}
+                action={lifeModelAction}
+                onChange={onDraftLifeModelChange}
                 onOpenReview={onOpenReviewCenter}
               />
             )}

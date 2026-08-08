@@ -215,17 +215,6 @@ export interface LifeModel {
   evolution_rules: string[];
 }
 
-export interface BuilderProgress {
-  progress: number;
-  current_step_label: string;
-  step_index: number;
-  total_steps: number;
-  current_session?: number;
-  waiting_pairwise?: boolean;
-  waiting_phase_confirmation?: boolean;
-  phase_summary?: string;
-}
-
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;

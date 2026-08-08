@@ -1966,9 +1966,9 @@ impl LifeModelManager {
                 serde_yaml::from_str(&content).with_context(|| "解析人生模型 YAML 失败")?;
             Ok(model)
         } else {
-            let model = LifeModel::default_model();
-            self.save(&model)?;
-            Ok(model)
+            // A read of an absent legacy model must not create durable state.
+            // Explicit governed writers own every persisted LifeModel change.
+            Ok(LifeModel::default())
         }
     }
 
@@ -2192,6 +2192,17 @@ mod tests {
         mgr.save(&model).unwrap();
         let loaded = mgr.load().unwrap();
         assert_eq!(loaded.identity.name, "Test");
+    }
+
+    #[test]
+    fn manager_load_of_absent_legacy_model_is_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = LifeModelManager::new(directory.path());
+
+        let model = manager.load().unwrap();
+
+        assert!(model.is_effectively_empty());
+        assert!(!directory.path().join("life_model.yaml").exists());
     }
 
     #[test]

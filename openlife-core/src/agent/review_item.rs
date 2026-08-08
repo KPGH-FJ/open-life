@@ -519,9 +519,15 @@ fn edit_blocker(
     if is_unsupported_type(proposal.proposal_type) {
         return Some("This review item type has no backend edit/apply pathway yet.".into());
     }
-    if is_builder_lifemodel_patch_batch(proposal) {
+    if is_lifemodel_v2_governed_change(proposal) {
         return Some(
-            "Builder batch review requires a typed Builder editor; generic edit is unavailable."
+            "LifeModel v2 review requires its schema-aware editor; generic edit is unavailable."
+                .into(),
+        );
+    }
+    if is_retired_lifemodel_patch_batch(proposal) {
+        return Some(
+            "Legacy Builder batch editing is retired; reject it and create a v2 typed LifeModel proposal."
                 .into(),
         );
     }
@@ -541,7 +547,16 @@ fn edit_blocker(
     None
 }
 
-fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
+fn is_lifemodel_v2_governed_change(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && matches!(
+            proposal.affected_path.as_str(),
+            crate::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+                | crate::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
+        )
+}
+
+fn is_retired_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
     proposal.proposal_type == ProposalType::LifeModelUpdate
         && proposal.source == ProposalSource::BuilderReview
         && proposal.affected_path == crate::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
@@ -566,6 +581,12 @@ fn approve_blocker(
     }
     if is_unsupported_type(proposal.proposal_type) {
         return Some("This review item type has no backend apply pathway yet.".into());
+    }
+    if is_retired_lifemodel_patch_batch(proposal) {
+        return Some(
+            "Legacy Builder batch approval is retired; reject it and create a v2 typed LifeModel proposal."
+                .into(),
+        );
     }
     if proposal.proposal_type == ProposalType::ToolPermission
         && !decision_context
@@ -1102,12 +1123,12 @@ mod tests {
     }
 
     #[test]
-    fn builder_batch_read_model_disables_the_unimplemented_generic_editor() {
+    fn retired_builder_batch_read_model_disables_edit_and_approve_but_keeps_reject() {
         let mut proposal = proposal(ProposalType::LifeModelUpdate);
         proposal.source = ProposalSource::BuilderReview;
         proposal.affected_path = crate::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH.into();
         proposal.after = json!({
-            "schemaVersion": crate::life_model::patch::LIFEMODEL_PATCH_BATCH_SCHEMA_V1,
+            "schemaVersion": "lifemodel_patch_batch_v1",
             "operations": [{
                 "candidateId": "candidate-1",
                 "path": "identity.name",
@@ -1124,8 +1145,9 @@ mod tests {
         assert!(edit
             .disabled_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("typed Builder editor")));
-        assert!(find_action(&model.items[0], ReviewActionKind::Approve).enabled);
+            .is_some_and(|reason| reason.contains("editing is retired")));
+        assert!(!find_action(&model.items[0], ReviewActionKind::Approve).enabled);
+        assert!(find_action(&model.items[0], ReviewActionKind::Reject).enabled);
     }
 
     #[test]

@@ -24,6 +24,17 @@ function preferredDurableItem(items: ReviewItem[]): ReviewItem | null {
   );
 }
 
+function reviewStillAwaitingDecision(item: ReviewItem): boolean {
+  return item.status === "pending" || item.status === "edited" || item.status === "deferred";
+}
+
+function reviewItemForProposal(
+  snapshot: DurableTruthSnapshot,
+  proposalId: string
+): ReviewItem | null {
+  return durableReviewItems(snapshot).find(item => item.source.proposalId === proposalId) ?? null;
+}
+
 export function useDurableTruthJourney(
   dataSource: DurableTruthDataSource | undefined,
   announce: Announce
@@ -82,6 +93,16 @@ export function useDurableTruthJourney(
             ? current
             : (preferredDurableItem(items)?.id ?? null)
         );
+        setMigrationAction(current => {
+          if (!current?.proposalId) return current;
+          const item = items.find(candidate => candidate.source.proposalId === current.proposalId);
+          return item && !reviewStillAwaitingDecision(item) ? null : current;
+        });
+        setLifeModelAction(current => {
+          if (!current?.proposalId) return current;
+          const item = items.find(candidate => candidate.source.proposalId === current.proposalId);
+          return item && !reviewStillAwaitingDecision(item) ? null : current;
+        });
         setRefreshing(false);
         if (announceResult) {
           const failed = [
@@ -211,6 +232,8 @@ export function useDurableTruthJourney(
       }
 
       const refreshed = await load(false);
+      const createdReviewItem = reviewItemForProposal(refreshed, proposalId);
+      if (createdReviewItem) setSelectedItemId(createdReviewItem.id);
       setMigrationAction({ status: "review_required", proposalId });
       if (refreshed.reviewEnvelope.status === "error") {
         announce(
@@ -234,6 +257,8 @@ export function useDurableTruthJourney(
       try {
         const proposalId = await operation(dataSource);
         const refreshed = await load(false);
+        const createdReviewItem = reviewItemForProposal(refreshed, proposalId);
+        if (createdReviewItem) setSelectedItemId(createdReviewItem.id);
         setLifeModelAction({ kind, status: "review_required", proposalId });
         announce(
           refreshed.reviewEnvelope.status === "error"

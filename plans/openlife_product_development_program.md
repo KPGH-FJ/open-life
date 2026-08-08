@@ -912,17 +912,21 @@ Identity/Goals/Capabilities/State 旧分类、旧快照和新 v2 同时声称权
 - 更新稳定架构文档，使 SQLite/versioned JSON、YAML projection、Review typed diff、
   cutover state 和 legacy migration reader 各自只有一个明确职责；不新增第二份计划、
   迁移账本或治理 JSON；
-- 使用同一隔离 QA profile 完成真实 Tauri 验收，不调用外部 Provider：fresh empty ->
-  用户建立 -> Review -> v2 materialization -> YAML；legacy preview -> 审核迁移 ->
-  cutover -> 重启；编辑 -> 冲突 -> 删除 -> 回滚 -> 导出；v2 故障时普通 Agent 保持
-  可用，但 LifeModel 能力明确 unavailable。
+- 使用同一精确构建、两个起点互斥的隔离 QA profile 完成真实 Tauri 验收，不调用
+  外部 Provider：fresh/v2 profile 覆盖 empty -> 用户建立 -> Review -> v2
+  materialization -> YAML、编辑 -> 冲突 -> 删除 -> 回滚 -> 导出和 v2 故障降级；
+  legacy profile 覆盖 preview -> 审核迁移 -> cutover -> 重启。不得把 fresh 与 legacy
+  起点复制进同一 profile 后声称完成两种启动事实；v2 故障时普通 Agent 保持可用，
+  但 LifeModel 能力明确 unavailable。
 
 阶段失败条件：仍有 shipped 旧写入口、已切换 profile 可以回退到 YAML、Builder 仍
 产生 4D/State/Agent 能力字段、前端从原始 store 猜测应用状态、回滚改写历史，或只靠
 自动化测试而没有真实 Tauri 产品闭环。任一成立都不能宣布 5.2 完成。
 
 退出标准：5.2 顶层退出标准逐项成立；A—G 的产品路径和失败边界通过比例适当的
-自动化门禁，E—G 在一个精确构建和同一隔离 QA profile 中完成真实 Tauri 验收；
+自动化门禁，E—G 在一个精确构建和与起点相匹配的隔离 QA profile 中完成真实
+Tauri 验收；fresh/v2 与 legacy migration 必须使用不同 profile，避免互斥初始状态
+互相污染；
 工作树停在用户审阅边界。至此必须进入 5.3，不再追加新的 5.2 切片。
 
 ##### 5.3 建立真实学习闭环
@@ -1137,9 +1141,18 @@ Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显�
 `39e8fe9` 完成。5.2C“Canonical YAML 人类投影”已于提交 `22708f9` 完成。5.2D
 “受限 typed diff 与原子 v2 物化”已于提交 `16572d6` 完成。5.2E“受治理迁移与
 canonical owner 切换”已于提交 `55c7805` 完成；未迁移真实用户 profile。5.2F
-“用户编辑、版本、删除、回滚与导出”已完成源码实现和自动化验证，当前停在用户
-审阅与提交边界；尚未进行真实 Tauri 隔离 QA。5.2 已封顶为 A—G；5.2G 的旧路径
-收敛尚未实施，不再默认增加 5.2H。**
+“用户编辑、版本、删除、回滚与导出”已于提交 `47b5bd2` 完成。5.2G“旧 4D
+路径替换与阶段收口”已完成开发并停在用户审阅边界：v2 Builder 和旧 shipped 路径
+替换已进入源码；前端
+格式、类型、246 项测试、production build/absence guard、Rust 格式、严格 Clippy
+和 `cargo test --all --locked` 已通过。`d1c18347...` 精确构建已分别在 fresh/v2 与
+legacy 隔离 profile 完成建立、迁移、编辑、冲突、删除、回滚、YAML、重启和 v2
+故障降级的真实 Tauri 验收；随后发现并修复“新建议创建后可能仍选中旧审核项”的
+界面问题。包含该修复的最终精确构建 `d02e9dae...` 已完成主 QA 的凭据恢复、重启、
+v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy QA 的独立凭据恢复、
+重启、v2 version 1 保持和迁移终态复核。未调用外部 Provider 或网络，未迁移真实
+用户 profile。当前工作树尚未提交，等待用户审阅；5.2 已封顶为 A—G，不再默认
+增加 5.2H。**
 
 第五阶段第一步实际完成：
 

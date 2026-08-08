@@ -22,7 +22,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-08 during Phase 5.2E governed migration and owner-cutover implementation.
+2026-08-08 during Phase 5.2G v2 Builder replacement and legacy product-path retirement.
 
 ## Source map
 
@@ -59,6 +59,11 @@ New empty legacy skeletons no longer invent a focus, health state, mood, stress,
 fulfilment, or energy value. Existing YAML values continue to load exactly as
 stored and are not silently rewritten.
 
+Startup and read paths do not create a missing legacy YAML file. A legacy YAML
+that was previously manufactured from the fully expanded default model carries
+no proven user content: migration preview retains only its provenance metadata
+and does not turn default enum values or zero-valued state into user facts.
+
 `openlife-core/src/life_model/v2.rs` defines the narrower long-term user model:
 identity and self-definition, values, long-term goal direction and meaning,
 stable preferences, personal boundaries, important relationships, user
@@ -76,9 +81,11 @@ Merely opening `/life-model` does not create the database or an empty model.
 `get_life_model_view_model` treats any validated v2 head, including an
 authoritative empty version, as the canonical owner. A fresh profile with no
 legacy source is canonical-empty without creating storage as a read side effect.
-Only a profile with legacy YAML and no v2 head/cutover remains in compatibility
-migration mode. A valid v2 owner suppresses legacy model, migration preview, and
-legacy current-view input; a corrupt cutover relation fails closed.
+Only a profile with legacy YAML and no v2 head/cutover remains in bounded
+migration mode. That profile exposes the migration preview, not the old 4D
+current view, completion score, dimension cards, or MCP capability-gap
+recommendation. A valid v2 owner suppresses the migration preview entirely; a
+corrupt cutover relation fails closed.
 
 Before cutover, `LegacyLifeModelMigrationPreviewV2` reads the exact YAML bytes
 that produced the compatibility model and classifies every non-empty source
@@ -99,8 +106,9 @@ digest, YAML content digest, and projection digest. The backend regenerates and
 validates this binding before granting canonical `LifeModelViewModel` credit;
 the frontend only renders the backend-owned projection. A changed YAML body,
 version transplant, item-count drift, or document mismatch fails closed rather
-than falling back to the legacy YAML. The product view is collapsed and
-read-only: 5.2C introduced no YAML editor, import, proposal, or v2 write path.
+than falling back to the legacy YAML. User add, replace, remove, rollback,
+clear, and export actions create reviewed v2 proposals; the YAML body is never
+saved as a second owner.
 
 `LifeModelTypedDiffV2` is the only v2 mutation contract. It allows item-level
 add, replace, and remove operations in schema-owned sections; it does not expose
@@ -124,10 +132,15 @@ Those caller-shaped proposals were subsequently submitted to ReviewWorkflow,
 but ReviewWorkflow had no observation-bound policy proof to validate. The
 engine, its product consumers, and its public exports were therefore deleted
 together. Main Chat proposals must now carry current PolicyRouter admission
-into ReviewWorkflow. Builder, Calibration, ToolPermission, PlanExecute,
-Maturation, and other remaining proposal writers are still tracked as separate
-convergence work; their existence is not evidence that the single proposal
-authority is complete.
+into ReviewWorkflow. ToolPermission, PlanExecute, learning candidates, and
+other proposal producers remain separate domains and must carry their own
+policy and source evidence.
+
+The shipped legacy Builder and Calibration command modules are retired. A fresh
+profile now uses the `/life-model` v2 schema-aware establishment panel. It asks
+for one explicitly selected long-term user fact, defaults that fact out of the
+review set, and creates only a typed-diff proposal. It does not collect current
+state, task progress, Agent tool capability, or procedural work experience.
 
 `openlife-core/src/agent/proposal_store.rs` persists proposal lifecycle state,
 including pending, accepted, rejected, edited, and postponed records.
@@ -145,17 +158,26 @@ override evidence. Source-data compatibility writes are allowed only as
 non-truth compatibility. Automatic learning is blocked.
 
 `src-tauri/src/life_model_write_gateway.rs` is the Tauri-side enforcement path.
-It materializes accepted LifeModel proposals by checking base hash, applying the
-patch, saving the model through the gateway, recording patch state, and writing
-metadata-safe audit details.
-
-Legacy proposal paths continue to materialize the legacy YAML shape. The exact
-`$lifemodel_v2` path instead parses a `LifeModelTypedDiffV2`, verifies proposal
+The exact `$lifemodel_v2` path parses a `LifeModelTypedDiffV2`, verifies proposal
 `base_hash`, acquires the existing canonical-write admission, checks the current
 v2 head, and appends one SQLite version before reporting success. Stale base,
 before-item drift, result-digest drift, section mismatch, and materialization-id
 reuse fail closed. A database error whose effect cannot be proven remains
 unknown and is not automatically retried.
+
+Legacy 4D proposal and patch-batch materializers are no longer shipped. A
+persisted old proposal remains visible so the user can reject it, but approval
+and generic editing are disabled or fail before effect with an explicit retired
+path result. The old YAML manager is read only for a not-yet-migrated profile's
+bounded migration preview and for governed recovery; it is not a normal product
+write owner.
+
+The former patch/snapshot-backed current-view DTO and its frontend 4D dimension
+contract are deleted. Materialization credit now comes from the current Review
+item and canonical v2 version evidence. Legacy 4D analysis helpers that remain
+inside unshipped historical evolution code do not have a Tauri command or
+frontend caller and receive no product capability credit; their broader removal
+belongs to the Phase 5.5 replacement of that historical subsystem.
 
 Until legacy owner cutover is complete, a typed remove may not produce an empty
 v2 head. After cutover, the persisted receipt authorizes an empty canonical head;
@@ -186,9 +208,11 @@ are blocked.
 ## Review Center Application
 
 `src-tauri/src/commands/proposal.rs` accepts, rejects, edits, and postpones
-proposals. Accepting a LifeModel-affecting proposal calls the Tauri write
-gateway materialization path. Editing a proposal keeps it pending and reports
-that no durable write was executed.
+proposals. Accepted v2 typed diffs and governed migration proposals call their
+exact materializer. Generic JSON editing is blocked for these schema-bound
+proposals. Persisted old 4D and Builder proposals also cannot be edited or
+approved; they may only be rejected. Editing another currently supported
+proposal keeps it pending and reports that no durable write was executed.
 
 ToolPermission and Memory proposal acceptance have their own application paths.
 They do not imply that LifeModel truth was updated unless the proposal type and
