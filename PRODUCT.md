@@ -21,8 +21,9 @@ improve that context over time without taking ownership away from the user.
 - **Workspace**: conversation and task execution.
 - **Tasks**: task state, blockers, retry, resume, and cancellation.
 - **Review**: approval, rejection, postponement, and evidence.
-- **Life Model**: user-owned long-term understanding and proposal-backed
-  construction.
+- **Personal Intelligence** (`/life-model`): two peer areas with separate
+  backend owners: user-owned long-term understanding in LifeModel, and
+  user-controlled Agent Memory for work continuity.
 - **Settings**: model configuration, privacy boundaries, and credential state.
 
 ## Non-Negotiable Boundaries

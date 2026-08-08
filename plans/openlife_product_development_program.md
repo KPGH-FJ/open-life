@@ -636,6 +636,23 @@ summary 后可从 canonical transcript 重建。
 召回、纠正、停止召回、归档、恢复、擦除”闭环；错误作用域、过期或冲突 Memory
 不会冒充当前事实；工作记忆不需要塞入 LifeModel。
 
+本切片实施边界（2026-08-06）：
+
+- 保留规范路由 `/life-model`，把产品标签收敛为“个人智能”，以可访问的平级切换
+  分别呈现“关于我 / LifeModel”和“Agent 记忆”；不新增路由或第二套设置页面；
+- 两侧分别消费 `LifeModelViewModel` 与 `MemoryViewModel`。单侧读取失败不遮蔽另一侧，
+  但 stale/error owner 对应的写动作必须关闭；创建 Memory Review 还要求当前
+  `ReviewCenterViewModel` 可用；
+- 单条 Memory 展示 canonical lifecycle/recall state、为什么记住、每回合如何参与
+  召回及 backend-owned source refs；没有独立 receipt 时不得声称某次 prompt 实际
+  使用了它；
+- 纠正、停止召回、归档继续创建 Review proposal；恢复、回滚和隐私擦除必须核对
+  exact owner 与 projection receipt，隐私擦除保留原生确认；
+- 复用 5.1A—5.1E 已有跨重启、scope、降级、恢复和命令级失败反例，再增加少量
+  用户旅程与真实 Tauri 验收；不建立新的验收平台或持久化测试账本；
+- 非目标：本切片不开始 LifeModel v2 数据迁移，不新增学习候选系统，也不把
+  Memory 控制动作解释为 LifeModel 更新。
+
 ##### 5.2 重建 LifeModel 核心
 
 目标：让 LifeModel 只描述长期的用户，而不是 Agent Runtime、Memory、业务数据
@@ -878,8 +895,10 @@ versioned JSON + SQLite canonical store 与 YAML projection 关系已经用户�
 长上下文压缩”已于提交 `a21d9f4` 完成并经用户确认。5.1C“Workspace/Project
 Markdown Memory”已于提交 `b88e879` 完成并经用户确认。5.1D“显式跨会话 Memory
 生命周期”已于提交 `177b144` 完成并经用户确认。5.1E“混合检索与召回解释”已经
-完成实现、本地代码审阅、失败反例、前端完整门禁、严格 Clippy 与全量 Rust 测试；
-当前停在 5.1E 用户审阅边界，尚未提交，也未进入 5.1F。**
+于提交 `7110e99` 完成并经用户确认。5.1F“用户控制界面与原生验收”已完成实现、
+自动化门禁和精确 debug App 的只读原生界面核对，当前停在用户审阅与提交边界；
+尚未进入 5.2。原生核对没有执行真实 Memory 写动作，动作闭环信用来自隔离产品测试
+与后端命令测试，不把只读 UI 浏览冒充真实写入试用。**
 
 第五阶段第一步实际完成：
 

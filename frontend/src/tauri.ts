@@ -2800,8 +2800,10 @@ export type MemoryItemView = {
   recallState: "active" | "paused" | "archived" | "historical" | "erased" | "unavailable";
   sensitivity: string;
   whyRemembered: string;
+  recallExplanation: string;
   acceptedAt?: string;
   evidenceIds: string[];
+  sourceRefs: EvidenceRef[];
   supersedesMemoryId?: string;
   replacementMemoryId?: string;
   privacyErased: boolean;

@@ -96,7 +96,7 @@ function routeEntryAnnouncement(surface: ReadOnlyProductSurfaceId): string {
     case "review":
       return "已进入审核中心；决定状态与后续应用结果分别核对。";
     case "life-model":
-      return "已进入 LifeModel；长期状态只显示后端已经证明的结果。";
+      return "已进入个人智能；LifeModel 与 Agent Memory 分别显示各自后端已经证明的结果。";
   }
 }
 
@@ -105,7 +105,7 @@ const productNavigation: readonly WorkbenchNavigationItem[] = [
   { id: "workspace", label: "工作区", meta: "当前执行", icon: Monitor },
   { id: "tasks", label: "任务", meta: "队列与连续性", icon: ListTodo },
   { id: "review", label: "审核中心", meta: "建议与权限决定", icon: ShieldCheck },
-  { id: "life-model", label: "LifeModel", meta: "长期状态", icon: UserRound },
+  { id: "life-model", label: "个人智能", meta: "关于我与记忆", icon: UserRound },
 ];
 
 const settingsNavigation: readonly WorkbenchNavigationItem[] = [
@@ -173,8 +173,8 @@ const unavailableCopy: Record<
     reason: "后端没有提供可确认的待决定项；页面不会用旧建议列表代替，也不会把查看解释成批准。",
   },
   "life-model": {
-    title: "LifeModel 状态源不可用",
-    reason: "后端没有同时提供长期理解、记忆与审核状态；页面不会从旧记录补造当前结论。",
+    title: "个人智能状态源不可用",
+    reason: "后端没有提供可用的 LifeModel 或 Agent Memory 读模型；页面不会从旧记录补造当前结论。",
   },
 };
 
@@ -994,7 +994,7 @@ export function ReadOnlySpineJourney({
         onCancelConfirmation={governed.cancelReviewConfirmation}
         backLabel={
           reviewReturnSurface === "life-model"
-            ? "返回 LifeModel"
+            ? "返回个人智能"
             : reviewReturnSurface === "settings"
               ? "返回模型与供应商"
               : undefined

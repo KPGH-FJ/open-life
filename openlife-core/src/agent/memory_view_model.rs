@@ -113,10 +113,13 @@ pub struct MemoryItemView {
     pub recall_state: String,
     pub sensitivity: String,
     pub why_remembered: String,
+    pub recall_explanation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_at: Option<String>,
     #[serde(default)]
     pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub source_refs: Vec<EvidenceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supersedes_memory_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -302,11 +305,23 @@ fn memory_item(
         } else {
             "The user approved a reviewed Memory proposal supported by the listed evidence.".into()
         },
+        recall_explanation: match recall_state {
+            "active" => "This Memory is eligible only when the current task and exact scope match; hybrid retrieval still reranks it for every turn.".into(),
+            "paused" => "This Memory is retained but excluded from normal runtime recall until the user restores it.".into(),
+            "archived" => "This Memory is archived and excluded from normal runtime recall until the user restores it.".into(),
+            "erased" => "The original content can no longer be recalled because it was privacy-erased.".into(),
+            _ => "This historical Memory is not eligible for normal runtime recall.".into(),
+        },
         accepted_at: record.accepted_at.map(|time| time.to_rfc3339()),
         evidence_ids: if privacy_erased {
             Vec::new()
         } else {
             record.evidence_ids.clone()
+        },
+        source_refs: if privacy_erased {
+            vec![memory_lifecycle_evidence_ref(record)]
+        } else {
+            evidence_refs_for_record(record)
         },
         supersedes_memory_id: record.supersedes_memory_id.clone(),
         replacement_memory_id: record.replacement_memory_id.clone(),
@@ -547,12 +562,7 @@ fn memory_ref(record: &MemoryLifecycleRecord) -> BackendEntityRef {
 }
 
 fn evidence_refs_for_record(record: &MemoryLifecycleRecord) -> Vec<EvidenceRef> {
-    let mut refs = vec![EvidenceRef {
-        id: format!("memory_lifecycle:{}", record.memory_id),
-        label: format!("Memory lifecycle {}", record.status),
-        source: EvidenceSource::Memory,
-        sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-    }];
+    let mut refs = vec![memory_lifecycle_evidence_ref(record)];
     refs.extend(record.evidence_ids.iter().map(|id| EvidenceRef {
         id: format!("evidence:{id}"),
         label: "Memory evidence".into(),
@@ -560,6 +570,15 @@ fn evidence_refs_for_record(record: &MemoryLifecycleRecord) -> Vec<EvidenceRef> 
         sensitivity: Some(EvidenceSensitivity::LocalPrivate),
     }));
     refs
+}
+
+fn memory_lifecycle_evidence_ref(record: &MemoryLifecycleRecord) -> EvidenceRef {
+    EvidenceRef {
+        id: format!("memory_lifecycle:{}", record.memory_id),
+        label: format!("Memory lifecycle {}", record.status),
+        source: EvidenceSource::Memory,
+        sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+    }
 }
 
 fn lane_for_record(record: &MemoryLifecycleRecord) -> MemoryLane {
@@ -735,6 +754,32 @@ mod tests {
     }
 
     #[test]
+    fn privacy_erased_memory_does_not_expose_prior_evidence_ids() {
+        let mut erased = record(
+            "memory:1",
+            "proposal:1",
+            MemoryLifecycleCategory::Fact,
+            MemoryLifecycleStatus::RolledBack,
+            MemoryMaterializationStatus::NotRequired,
+        );
+        erased.content.clear();
+        erased.runtime_context_excluded_at = Some(Utc::now());
+
+        let model = build_memory_view_model(MemoryViewModelBuildInput {
+            lifecycle_records: vec![erased],
+            ..MemoryViewModelBuildInput::default()
+        });
+
+        assert!(model.items[0].privacy_erased);
+        assert!(model.items[0].evidence_ids.is_empty());
+        assert_eq!(model.items[0].source_refs.len(), 1);
+        assert_eq!(
+            model.items[0].source_refs[0].id,
+            "memory_lifecycle:memory:1"
+        );
+    }
+
+    #[test]
     fn review_items_are_linked_by_proposal_id_without_claiming_materialization() {
         let model = build_memory_view_model(MemoryViewModelBuildInput {
             lifecycle_records: vec![record(
@@ -774,6 +819,15 @@ mod tests {
         assert_eq!(model.lifecycle_summary.materialized_count, 1);
         assert_eq!(model.summary.active_memory_count, 1);
         assert_eq!(model.life_model_linkage.materialized_memory_count, 1);
+        assert!(model.items[0].recall_explanation.contains("exact scope"));
+        assert_eq!(
+            model.items[0].source_refs[0].id,
+            "memory_lifecycle:memory:1"
+        );
+        assert!(model.items[0]
+            .source_refs
+            .iter()
+            .any(|source| source.id == "evidence:evidence-1"));
     }
 
     #[test]

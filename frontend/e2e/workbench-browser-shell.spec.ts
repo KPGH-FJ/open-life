@@ -7,7 +7,7 @@ const CANONICAL_ROUTES = [
   { path: "/workspace", heading: "工作区", mode: "product" },
   { path: "/tasks", heading: "任务", mode: "product" },
   { path: "/review", heading: "审核中心", mode: "product" },
-  { path: "/life-model", heading: "LifeModel", mode: "product" },
+  { path: "/life-model", heading: "关于我与 Agent 记忆", mode: "product" },
   { path: "/settings", heading: "模型与供应商", mode: "settings" },
 ] as const;
 

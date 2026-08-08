@@ -10,6 +10,14 @@ import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 
 type Announce = (message: string) => void;
 
+function preferredDurableItem(items: ReviewItem[]): ReviewItem | null {
+  return (
+    items.find(item => item.type !== "memory_write" && item.type !== "memory_archive") ??
+    items[0] ??
+    null
+  );
+}
+
 export function useDurableTruthJourney(
   dataSource: DurableTruthDataSource | undefined,
   announce: Announce
@@ -51,7 +59,9 @@ export function useDurableTruthJourney(
         setSnapshot(next);
         const items = durableReviewItems(next);
         setSelectedItemId(current =>
-          current && items.some(item => item.id === current) ? current : (items[0]?.id ?? null)
+          current && items.some(item => item.id === current)
+            ? current
+            : (preferredDurableItem(items)?.id ?? null)
         );
         setRefreshing(false);
         if (announceResult) {
@@ -74,7 +84,7 @@ export function useDurableTruthJourney(
 
   const selectedItem = useMemo(() => {
     const items = durableReviewItems(snapshot);
-    return items.find(item => item.id === selectedItemId) ?? items[0] ?? null;
+    return items.find(item => item.id === selectedItemId) ?? preferredDurableItem(items);
   }, [selectedItemId, snapshot]);
 
   const selectItem = useCallback((item: ReviewItem) => setSelectedItemId(item.id), []);

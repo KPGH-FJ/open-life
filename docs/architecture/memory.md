@@ -17,7 +17,7 @@ accepted through the governed bridge.
 
 ## Last verified
 
-2026-08-06 during Phase 5.1E scoped hybrid retrieval implementation.
+2026-08-06 during Phase 5.1F user-control and native interface verification.
 
 ## Source map
 
@@ -136,6 +136,21 @@ injects at most four Memory blocks and 4,800 body characters. Embedding failure,
 unknown profile, rebuild or Vector query failure keeps FTS results and adds an
 explicit degraded marker; it never reports text fallback as complete hybrid
 retrieval.
+
+## User control surface
+
+The `/life-model` route is the Personal Intelligence workspace, not a claim
+that Agent Memory belongs to LifeModel. It presents `LifeModelViewModel` and
+`MemoryViewModel` as peer domains. Each domain remains readable when only the
+other owner fails; reviewed Memory actions also require a current
+`ReviewCenterViewModel` before the UI enables them.
+
+Each Memory item exposes its canonical lifecycle state, why it was remembered,
+how it is eligible for per-turn recall, and backend-owned source references.
+Correction, pause and archive create Review proposals. Restore and rollback
+require exact canonical owners and verified projection receipts. Privacy erase
+also requires native confirmation. UI counts never prove a single action was
+materialized.
 
 `openlife-core/src/memory_cache.rs` builds a hot cache from the current
 LifeModel for identity, values, current goals, recent state, refresh time, and

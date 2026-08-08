@@ -504,8 +504,10 @@ function memory(stage: DurableFixtureStage): MemoryViewModel {
         recallState: rolledBack ? "historical" : "active",
         sensitivity: "internal",
         whyRemembered: "用户在 Review 中确认了这条工作偏好。",
+        recallExplanation: "只有当前项目与任务相关时才会参与混合检索，并在每个回合重新排序。",
         acceptedAt: generatedAt,
         evidenceIds: [conversationEvidence.id],
+        sourceRefs: [memoryEvidence, conversationEvidence],
         privacyErased: false,
         canCorrect: !rolledBack,
         canStopRecall: !rolledBack,
@@ -517,7 +519,7 @@ function memory(stage: DurableFixtureStage): MemoryViewModel {
     ],
     sourceRefs: [memoryEvidence, conversationEvidence],
     contractLimitations: [
-      "MemoryViewModel 只提供汇总和 lane 级读取，不提供单条回滚动作。",
+      "MemoryViewModel 的单条动作能力来自后端字段；fixture 不证明真实原生确认。",
       "汇总数量不能证明某个建议已经应用。",
     ],
   };

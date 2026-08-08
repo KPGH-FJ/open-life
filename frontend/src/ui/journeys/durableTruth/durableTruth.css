@@ -15,6 +15,100 @@
   width: min(100%, 640px);
 }
 
+.ol-intelligence-header {
+  display: grid;
+  gap: var(--ol-space-2);
+  padding-bottom: var(--ol-space-5);
+}
+
+.ol-intelligence-header > span {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  font-weight: 650;
+}
+
+.ol-intelligence-header h2 {
+  margin: 0;
+  color: var(--ol-ink);
+  font-size: var(--ol-type-display);
+  line-height: var(--ol-line-display);
+  font-weight: 650;
+}
+
+.ol-intelligence-header p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-reading);
+  line-height: var(--ol-line-reading);
+}
+
+.ol-intelligence-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ol-space-3);
+  padding-bottom: var(--ol-space-5);
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-intelligence-tabs button {
+  display: grid;
+  min-width: 0;
+  min-height: 72px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: var(--ol-space-3);
+  align-items: start;
+  padding: var(--ol-space-3) var(--ol-space-4);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface);
+  color: var(--ol-ink-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ol-intelligence-tabs button:hover {
+  border-color: var(--ol-control-boundary);
+  background: var(--ol-surface-sunken);
+}
+
+.ol-intelligence-tabs button[aria-selected="true"] {
+  border-color: var(--ol-ink);
+  background: var(--ol-surface-sunken);
+  color: var(--ol-ink);
+}
+
+.ol-intelligence-tabs button:focus-visible {
+  outline: var(--ol-focus-width) solid var(--ol-focus);
+  outline-offset: var(--ol-focus-offset);
+}
+
+.ol-intelligence-tabs button > span {
+  display: grid;
+  min-width: 0;
+  gap: var(--ol-space-1);
+}
+
+.ol-intelligence-tabs strong {
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+.ol-intelligence-tabs small {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-intelligence-domain {
+  display: grid;
+}
+
+.ol-intelligence-domain[hidden] {
+  display: none;
+}
+
 .ol-durable-current,
 .ol-durable-change,
 .ol-durable-memory {
@@ -678,5 +772,11 @@
 
   .ol-lifemodel-builder__progress {
     grid-template-columns: minmax(0, 1fr) 144px;
+  }
+}
+
+@media (max-width: 620px) {
+  .ol-intelligence-tabs {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

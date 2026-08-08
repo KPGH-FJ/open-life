@@ -2,6 +2,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
+import {
+  buildDurableFixtureSnapshot,
+  durableReviewItem,
+} from "@/test/fixtures/workbench/durableTruth";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
 
 function renderJourney(fixtureId: Parameters<typeof workbenchJourneyFixtureDataSource>[0]) {
@@ -19,6 +23,140 @@ function renderJourney(fixtureId: Parameters<typeof workbenchJourneyFixtureDataS
 }
 
 describe("Workbench durable truth journey", () => {
+  it("presents LifeModel and Agent Memory as keyboard-accessible peer domains", async () => {
+    const user = userEvent.setup();
+    renderJourney("fixture-ready");
+
+    const lifeModelTab = await screen.findByRole("tab", { name: /关于我.*LifeModel/ });
+    const memoryTab = screen.getByRole("tab", { name: /Agent 记忆.*工作连续性/ });
+    expect(lifeModelTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "当前有来源的长期理解" })).toBeVisible();
+
+    lifeModelTab.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(memoryTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "Agent 记忆" })).toBeVisible();
+    expect(screen.getByText("输出建议时先给结论，再补充依据。")).toBeVisible();
+    expect(document.getElementById("intelligence-panel-life-model")).not.toBeVisible();
+  });
+
+  it("keeps Agent Memory available when only LifeModel fails", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    snapshot.lifeModelEnvelope = {
+      ...snapshot.lifeModelEnvelope,
+      data: null,
+      status: "error",
+      evidenceRefs: [],
+    };
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    expect(await screen.findByText("关于我暂时不可用")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /Agent 记忆.*工作连续性/ }));
+    expect(screen.getByRole("heading", { name: "Agent 记忆" })).toBeVisible();
+    expect(screen.getByText("输出建议时先给结论，再补充依据。")).toBeVisible();
+    expect(screen.queryByText("个人智能暂时不可用")).not.toBeInTheDocument();
+  });
+
+  it("keeps Memory readable but closes reviewed controls when Review Center fails", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    snapshot.reviewEnvelope = {
+      ...snapshot.reviewEnvelope,
+      data: null,
+      status: "error",
+      evidenceRefs: [],
+    };
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    await user.click(await screen.findByRole("tab", { name: /Agent 记忆.*工作连续性/ }));
+    expect(screen.getByText("输出建议时先给结论，再补充依据。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "纠正" })).toBeDisabled();
+    expect(
+      screen.getAllByText("Review Center 状态不可用；不能创建无法核对的审核建议。").length
+    ).toBeGreaterThan(0);
+  });
+
+  it("keeps Memory review items out of the LifeModel change list", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    const memoryItem = {
+      ...durableReviewItem("pending"),
+      id: "review-memory-write",
+      type: "memory_write" as const,
+      decisionContext: {
+        ...durableReviewItem("pending").decisionContext,
+        reviewItemId: "review-memory-write",
+        title: "Add a memory",
+      },
+    };
+    if (snapshot.reviewEnvelope.data) {
+      snapshot.reviewEnvelope.data = {
+        ...snapshot.reviewEnvelope.data,
+        items: [memoryItem, ...snapshot.reviewEnvelope.data.items],
+      };
+    }
+    vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "当前有来源的长期理解" })).toBeVisible();
+    expect(screen.queryByText("Add a memory")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看并决定" }));
+    expect(
+      await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 })
+    ).toBeInTheDocument();
+  });
+
+  it("submits Memory corrections for Review without changing LifeModel", async () => {
+    const user = userEvent.setup();
+    const dataSource = renderJourney("fixture-ready");
+    const correctMemory = vi.spyOn(dataSource, "correctMemory");
+
+    await user.click(await screen.findByRole("tab", { name: /Agent 记忆.*工作连续性/ }));
+    await user.click(screen.getByRole("button", { name: "纠正" }));
+    const editor = screen.getByLabelText("纠正后的完整内容");
+    await user.clear(editor);
+    await user.type(editor, "先给结论，再按需补充依据。");
+    await user.click(screen.getByRole("button", { name: "提交 Review" }));
+
+    await waitFor(() =>
+      expect(correctMemory).toHaveBeenCalledWith(
+        "memory:writing-feedback:conclusion-first",
+        "先给结论，再按需补充依据。"
+      )
+    );
+    expect(
+      screen.getByText("Memory 纠正已进入 Review；旧记忆仍保持当前状态。")
+    ).toBeInTheDocument();
+  });
+
   it("opens the exact review without deciding and returns approved-not-applied after refresh", async () => {
     const user = userEvent.setup();
     const dataSource = renderJourney("fixture-ready");
@@ -28,7 +166,7 @@ describe("Workbench durable truth journey", () => {
       await screen.findByRole("heading", { name: "当前有来源的长期理解" })
     ).toBeInTheDocument();
     expect(screen.getAllByText("等待决定").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: /^LifeModel\s+长期状态/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
       "aria-current",
       "page"
     );
@@ -52,7 +190,7 @@ describe("Workbench durable truth journey", () => {
       screen.queryByText("变更已应用", { selector: ".ol-notice__title" })
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回 LifeModel" }));
+    await user.click(screen.getByRole("button", { name: "返回个人智能" }));
     await screen.findByRole("heading", { name: "当前有来源的长期理解" });
     expect(screen.getAllByText("已批准，尚未应用").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "应用变更" })).toBeDisabled();
@@ -113,8 +251,8 @@ describe("Workbench durable truth journey", () => {
     await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 });
     await user.click(screen.getByRole("button", { name: /读取本地客户访谈记录\s+等待决定/ }));
 
-    expect(screen.getByRole("button", { name: "返回 LifeModel" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "返回 LifeModel" }));
+    expect(screen.getByRole("button", { name: "返回个人智能" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回个人智能" }));
     expect(
       await screen.findByRole("heading", { name: "当前有来源的长期理解" })
     ).toBeInTheDocument();
@@ -156,6 +294,6 @@ describe("Workbench durable truth journey", () => {
       await screen.findByText("已批准，尚未应用", { selector: ".ol-notice__title" })
     ).toBeInTheDocument();
     expect(screen.queryByText("已应用", { selector: ".ol-status-label" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "返回 LifeModel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回个人智能" })).toBeInTheDocument();
   });
 });
