@@ -1,6 +1,7 @@
 import {
   acceptProposal,
   cancelMainChatAgentTask,
+  editLifeModelLearningProposal,
   getReviewCenterViewModel,
   getTasksViewModel,
   getWorkspaceViewModel,
@@ -35,6 +36,7 @@ export type GovernedActionSnapshot = {
 export interface GovernedActionDataSource {
   load(): Promise<GovernedActionSnapshot>;
   dispatchReviewAction(action: ReviewAction): Promise<void>;
+  editLifeModelLearningProposal(proposalId: string, statement: string): Promise<void>;
   resumeTask(control: TaskControl): Promise<void>;
   dispatchTaskControl(control: TaskControl): Promise<void>;
 }
@@ -178,6 +180,17 @@ async function dispatchTaskControl(control: TaskControl): Promise<void> {
 export const tauriGovernedActionDataSource: GovernedActionDataSource = {
   load: loadGovernedActionSnapshot,
   dispatchReviewAction,
+  async editLifeModelLearningProposal(proposalId, statement) {
+    const receipt = await editLifeModelLearningProposal(proposalId, statement);
+    if (
+      receipt.proposalId !== proposalId ||
+      receipt.status !== "edited_pending_review" ||
+      !receipt.resultDocumentDigest ||
+      receipt.durableWriteExecuted
+    ) {
+      throw new Error("lifemodel_learning_edit_receipt_unverified");
+    }
+  },
   resumeTask,
   dispatchTaskControl,
 };

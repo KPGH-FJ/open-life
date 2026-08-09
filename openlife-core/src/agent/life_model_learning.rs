@@ -236,6 +236,10 @@ pub struct LifeModelLearningCandidate {
     pub observation_ids: Vec<String>,
     pub source_refs: Vec<String>,
     pub source_kinds: Vec<LifeModelLearningSourceKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: String,
@@ -415,6 +419,7 @@ impl LifeModelLearningStore {
             ("opposition_count", "INTEGER NOT NULL DEFAULT 0"),
             ("independent_support_count", "INTEGER NOT NULL DEFAULT 1"),
             ("body_scrubbed", "INTEGER NOT NULL DEFAULT 0"),
+            ("proposal_id", "TEXT"),
         ] {
             crate::sqlite_migration::ensure_column(
                 &connection,
@@ -829,6 +834,73 @@ impl LifeModelLearningStore {
             .collect()
     }
 
+    pub fn count_active_candidates(&self, workspace_ref: &str) -> Result<usize> {
+        validate_ref(workspace_ref, "invalid_lifemodel_learning_workspace_ref")?;
+        let connection = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
+        let now = Utc::now().to_rfc3339();
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM life_model_learning_candidates
+             WHERE workspace_ref = ?1
+               AND status IN ('accumulating', 'reviewable', 'conflicted')
+               AND body_scrubbed = 0 AND expires_at > ?2",
+            params![workspace_ref, now],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn link_review_proposal(
+        &self,
+        workspace_ref: &str,
+        candidate_id: &str,
+        expected_snapshot_digest: &str,
+        proposal_id: &str,
+        now: &str,
+    ) -> Result<LifeModelLearningCandidate> {
+        validate_ref(workspace_ref, "invalid_lifemodel_learning_workspace_ref")?;
+        validate_ref(candidate_id, "invalid_lifemodel_learning_candidate_id")?;
+        validate_ref(proposal_id, "invalid_lifemodel_learning_proposal_id")?;
+        let mut connection = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
+        let candidate = load_candidate(&connection, candidate_id)?;
+        if candidate.workspace_ref != workspace_ref {
+            bail!("lifemodel_learning_candidate_not_found");
+        }
+        if candidate.proposal_id.as_deref() == Some(proposal_id)
+            && candidate.status == LifeModelLearningCandidateStatus::Proposed
+        {
+            return Ok(candidate);
+        }
+        if candidate.status != LifeModelLearningCandidateStatus::Reviewable
+            || candidate.opposition_count > 0
+            || candidate.confirmed_at.is_none()
+            || candidate.proposal_id.is_some()
+        {
+            bail!("lifemodel_learning_candidate_not_review_ready");
+        }
+        if life_model_learning_candidate_snapshot_digest(&candidate)? != expected_snapshot_digest {
+            bail!("lifemodel_learning_candidate_snapshot_changed");
+        }
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE life_model_learning_candidates
+             SET status = 'proposed', proposal_id = ?3, updated_at = ?4
+             WHERE id = ?1 AND workspace_ref = ?2 AND status = 'reviewable'
+               AND proposal_id IS NULL AND body_scrubbed = 0",
+            params![candidate_id, workspace_ref, proposal_id, now],
+        )?;
+        if changed != 1 {
+            bail!("lifemodel_learning_candidate_proposal_link_conflict");
+        }
+        transaction.commit()?;
+        load_candidate(&connection, candidate_id)
+    }
+
     pub fn confirm_candidate_as_user_feedback(
         &self,
         workspace_ref: &str,
@@ -885,7 +957,8 @@ impl LifeModelLearningStore {
         let target_key = transaction
             .query_row(
                 "SELECT target_key FROM life_model_learning_candidates
-                 WHERE id = ?1 AND workspace_ref = ?2",
+                 WHERE id = ?1 AND workspace_ref = ?2
+                   AND status IN ('accumulating', 'reviewable', 'conflicted')",
                 params![candidate_id, workspace_ref],
                 |row| row.get::<_, String>(0),
             )
@@ -1048,7 +1121,8 @@ impl LifeModelLearningStore {
             .query_row(
                 "SELECT semantic_digest, suggestion_class, target_key
                  FROM life_model_learning_candidates
-                 WHERE id = ?1 AND workspace_ref = ?2 AND body_scrubbed = 0",
+                 WHERE id = ?1 AND workspace_ref = ?2 AND body_scrubbed = 0
+                   AND status IN ('accumulating', 'reviewable', 'conflicted')",
                 params![candidate_id, workspace_ref],
                 |row| {
                     Ok((
@@ -1143,6 +1217,18 @@ impl LifeModelLearningStore {
             )
             .optional()
             .context("read_lifemodel_learning_observation")
+    }
+
+    pub fn get_candidate_for_workspace(
+        &self,
+        workspace_ref: &str,
+        id: &str,
+    ) -> Result<Option<LifeModelLearningCandidate>> {
+        validate_ref(workspace_ref, "invalid_lifemodel_learning_workspace_ref")?;
+        validate_ref(id, "invalid_lifemodel_learning_candidate_id")?;
+        Ok(self
+            .get_candidate(id)?
+            .filter(|candidate| candidate.workspace_ref == workspace_ref))
     }
 
     fn get_candidate(&self, id: &str) -> Result<Option<LifeModelLearningCandidate>> {
@@ -1290,7 +1376,8 @@ fn observation_columns() -> &'static str {
 fn candidate_columns() -> &'static str {
     "id, observation_id, workspace_ref, summary, section, value_json, status,
      explicitness, sensitivity, source_ref, created_at, updated_at, expires_at,
-     target_key, suggestion_class, support_count, opposition_count, independent_support_count"
+     target_key, suggestion_class, support_count, opposition_count, independent_support_count,
+     proposal_id"
 }
 
 fn observation_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningObservation> {
@@ -1360,6 +1447,8 @@ fn candidate_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningCandid
         observation_ids: vec![observation_id],
         source_refs: vec![source_ref],
         source_kinds: Vec::new(),
+        confirmed_at: None,
+        proposal_id: row.get(18)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
         expires_at: row.get(12)?,
@@ -1378,7 +1467,7 @@ fn load_candidate(connection: &Connection, id: &str) -> Result<LifeModelLearning
         )
         .context("load_lifemodel_learning_candidate")?;
     let mut statement = connection.prepare(
-        "SELECT o.id, o.source_ref, o.source_kind
+        "SELECT o.id, o.source_ref, o.source_kind, o.explicitness, o.observed_at
          FROM life_model_learning_candidate_observations co
          JOIN life_model_learning_observations o ON o.id = co.observation_id
          WHERE co.candidate_id = ?1
@@ -1390,6 +1479,8 @@ fn load_candidate(connection: &Connection, id: &str) -> Result<LifeModelLearning
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1397,11 +1488,39 @@ fn load_candidate(connection: &Connection, id: &str) -> Result<LifeModelLearning
         candidate.observation_ids = pairs.iter().map(|pair| pair.0.clone()).collect();
         candidate.source_refs = pairs.iter().map(|pair| pair.1.clone()).collect();
         candidate.source_kinds = pairs
-            .into_iter()
+            .iter()
             .map(|pair| LifeModelLearningSourceKind::parse(&pair.2))
             .collect::<Result<Vec<_>>>()?;
+        candidate.confirmed_at = pairs
+            .iter()
+            .filter(|pair| pair.3 == LifeModelLearningExplicitness::ExplicitUserRequest.as_str())
+            .map(|pair| pair.4.clone())
+            .max();
     }
     Ok(candidate)
+}
+
+pub fn life_model_learning_candidate_snapshot_digest(
+    candidate: &LifeModelLearningCandidate,
+) -> Result<String> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "id": candidate.id,
+        "workspaceRef": candidate.workspace_ref,
+        "section": candidate.section,
+        "value": candidate.value,
+        "targetKey": candidate.target_key,
+        "status": candidate.status,
+        "supportCount": candidate.support_count,
+        "oppositionCount": candidate.opposition_count,
+        "independentSupportCount": candidate.independent_support_count,
+        "explicitness": candidate.explicitness,
+        "sensitivity": candidate.sensitivity,
+        "observationIds": candidate.observation_ids,
+        "sourceRefs": candidate.source_refs,
+        "sourceKinds": candidate.source_kinds,
+        "confirmedAt": candidate.confirmed_at,
+    }))?;
+    Ok(sha256_prefixed(&bytes))
 }
 
 fn scrub_candidate_body(
@@ -1703,6 +1822,30 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn active_count_remains_exact_when_product_read_model_shows_only_five() {
+        let store = LifeModelLearningStore::new_in_memory().unwrap();
+        for index in 0..6 {
+            let mut item = capture("workspace:one", &format!("message:{index}"));
+            item.summary = format!("Preference {index}");
+            item.value = LifeModelUserValueV2::Statement {
+                statement: item.summary.clone(),
+            };
+            item.target_key = format!("stable_preferences.claim:{index}");
+            item.suggestion_class = "stable_preferences".into();
+            store.capture_explicit_candidate(item).unwrap();
+        }
+
+        assert_eq!(store.count_active_candidates("workspace:one").unwrap(), 6);
+        assert_eq!(
+            store
+                .list_active_candidates("workspace:one", 5)
+                .unwrap()
+                .len(),
+            5
         );
     }
 

@@ -1,12 +1,18 @@
 use crate::AppState;
 use chrono::{Duration, Utc};
 use openlife_core::agent::main_chat_agent_v1::PolicyDecision;
+use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::agent::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     LifeModelLearningCapture, LifeModelLearningCaptureReceipt, LifeModelLearningDecisionReceipt,
     LifeModelLearningEvidencePolarity, LifeModelLearningExplicitness, LifeModelLearningSensitivity,
     LifeModelLearningSourceKind, MainChatMemoryCandidate, MemoryCandidateKind, MemoryDestination,
+    ProposalStatus, ReviewWorkflow,
 };
-use openlife_core::life_model::v2::{LifeModelSectionV2, LifeModelUserValueV2};
+use openlife_core::life_model::v2::{
+    LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
+    DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_TYPED_DIFF_PATH,
+};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -50,6 +56,219 @@ pub struct ConfirmLifeModelLearningCandidateReceipt {
     pub source_kind: LifeModelLearningSourceKind,
     pub proposal_created: bool,
     pub canonical_life_model_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StageLifeModelLearningCandidateReceipt {
+    pub candidate_id: String,
+    pub proposal_id: String,
+    pub status: &'static str,
+    pub base_version: Option<u64>,
+    pub base_document_digest: Option<String>,
+    pub result_document_digest: String,
+    pub canonical_life_model_changed: bool,
+}
+
+pub(crate) async fn stage_candidate_for_review_with_state(
+    state: &Arc<AppState>,
+    candidate_id: &str,
+) -> Result<StageLifeModelLearningCandidateReceipt, String> {
+    let learning_store = state
+        .life_model_learning_store
+        .as_ref()
+        .ok_or_else(|| "lifemodel_learning_store_unavailable".to_string())?;
+    let workspace_ref = current_workspace_ref(state).await;
+    let learning_store = learning_store.lock().await;
+    let candidate = learning_store
+        .get_candidate_for_workspace(&workspace_ref, candidate_id)
+        .map_err(|error| format!("read_lifemodel_learning_candidate_failed:{error}"))?
+        .ok_or_else(|| "lifemodel_learning_candidate_not_found".to_string())?;
+    if candidate.status == openlife_core::agent::LifeModelLearningCandidateStatus::Proposed {
+        let proposal_id = candidate
+            .proposal_id
+            .clone()
+            .ok_or_else(|| "lifemodel_learning_proposed_candidate_missing_proposal".to_string())?;
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal_store_unavailable".to_string())?;
+        let proposal = proposal_store
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "lifemodel_learning_linked_proposal_missing".to_string())?;
+        if !matches!(
+            proposal.status,
+            ProposalStatus::Pending | ProposalStatus::Edited | ProposalStatus::Postponed
+        ) {
+            return Err("lifemodel_learning_linked_proposal_not_active".into());
+        }
+        let diff: LifeModelTypedDiffV2 = serde_json::from_value(proposal.after)
+            .map_err(|_| "lifemodel_learning_linked_proposal_invalid".to_string())?;
+        return Ok(StageLifeModelLearningCandidateReceipt {
+            candidate_id: candidate.id,
+            proposal_id,
+            status: "review_required",
+            base_version: diff.base_version,
+            base_document_digest: diff.base_document_digest,
+            result_document_digest: diff.result_document_digest,
+            canonical_life_model_changed: false,
+        });
+    }
+    if candidate.status != openlife_core::agent::LifeModelLearningCandidateStatus::Reviewable
+        || candidate.opposition_count > 0
+        || candidate.confirmed_at.is_none()
+    {
+        return Err("lifemodel_learning_candidate_not_review_ready".into());
+    }
+    let candidate_snapshot_digest =
+        openlife_core::agent::life_model_learning_candidate_snapshot_digest(&candidate)
+            .map_err(|error| error.to_string())?;
+
+    let manager = state.life_model_manager.lock().await;
+    let current = manager
+        .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+        .map_err(|error| error.to_string())?;
+    if current.is_none()
+        && manager
+            .load_existing()
+            .map_err(|error| error.to_string())?
+            .is_some()
+    {
+        return Err("lifemodel_learning_requires_legacy_migration".into());
+    }
+    let allow_empty_result = current.is_some()
+        || manager
+            .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .map_err(|error| error.to_string())?
+            .is_some();
+    let mut proposal = AgentProposal::new(
+        ProposalType::LifeModelUpdate,
+        LIFE_MODEL_V2_TYPED_DIFF_PATH,
+        serde_json::Value::Null,
+        "Review one user-confirmed long-term fact before adding it to LifeModel v2.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    proposal.source_detail = Some(format!(
+        "lifemodel_learning:{}:{}",
+        candidate.id, candidate_snapshot_digest
+    ));
+    proposal.base_hash = current
+        .as_ref()
+        .map(|version| version.document_digest.clone());
+    let confirmed_at = candidate
+        .confirmed_at
+        .clone()
+        .ok_or_else(|| "lifemodel_learning_candidate_confirmation_missing".to_string())?;
+    let item_id = format!("learning:{}", candidate.id);
+    let mut source_refs = vec![
+        format!("proposal:{}", proposal.id),
+        format!("lifemodel-learning-candidate:{}", candidate.id),
+    ];
+    for source_ref in candidate.source_refs.iter().take(8) {
+        if !source_refs.contains(source_ref) {
+            source_refs.push(source_ref.clone());
+        }
+    }
+    let item = candidate
+        .value
+        .clone()
+        .into_item(item_id, source_refs, confirmed_at.clone());
+    let diff = LifeModelTypedDiffV2::from_operations_for_review(
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        current.as_ref(),
+        vec![LifeModelTypedOperationV2::Add {
+            section: candidate.section,
+            item,
+        }],
+        allow_empty_result,
+    )
+    .map_err(|error| error.to_string())?;
+    proposal.before = Some(serde_json::json!({
+        "schema": "openlife.lifemodel.learning.review.v1",
+        "candidateId": candidate.id,
+        "candidateSnapshotDigest": candidate_snapshot_digest,
+        "section": candidate.section,
+        "proposedValue": candidate.value,
+        "explicitness": candidate.explicitness,
+        "stability": if candidate.independent_support_count >= 2 { "repeated" } else { "user_confirmed" },
+        "sensitivity": candidate.sensitivity,
+        "conflictStatus": "none",
+        "supportCount": candidate.support_count,
+        "independentSupportCount": candidate.independent_support_count,
+        "sourceRefs": candidate.source_refs.iter().take(8).cloned().collect::<Vec<_>>(),
+        "sourceRefsOmitted": candidate.source_refs.len().saturating_sub(8),
+        "sourceKinds": candidate.source_kinds,
+        "confirmedAt": confirmed_at,
+    }));
+    proposal.after = serde_json::to_value(&diff).map_err(|error| error.to_string())?;
+    drop(manager);
+
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?;
+    let proposal_store = proposal_store.lock().await;
+    let competing = proposal_store
+        .list_all_proposals(200, 0)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|existing| {
+            existing.affected_path == LIFE_MODEL_V2_TYPED_DIFF_PATH
+                && matches!(
+                    existing.status,
+                    ProposalStatus::Pending | ProposalStatus::Edited | ProposalStatus::Postponed
+                )
+                && existing.source_detail.as_deref() != proposal.source_detail.as_deref()
+        });
+    if competing.is_some() {
+        return Err("lifemodel_learning_another_v2_review_is_active".into());
+    }
+    let idempotency_key = format!(
+        "lifemodel_learning_review:{}:{}:{}",
+        candidate.id,
+        candidate_snapshot_digest,
+        diff.base_document_digest.as_deref().unwrap_or("empty")
+    );
+    let outcome = ReviewWorkflow::new(&proposal_store)
+        .submit(
+            DurableWriteRequest::from_agent_proposal(
+                DurableWriteSource::MainChat,
+                DurableWriteSubject::LifeModel,
+                proposal,
+                "One LifeModel learning suggestion is pending individual review.",
+            )
+            .with_idempotency_key(idempotency_key)
+            .with_evidence_refs(candidate.source_refs.iter().take(8).cloned().collect())
+            .with_final_delivery_wording_contract(
+                FinalDeliveryWordingContract::ApprovalRequiredBeforeDurableWrite,
+            ),
+        )
+        .map_err(|error| format!("stage_lifemodel_learning_review_failed:{error}"))?;
+    let proposal_id = outcome.proposal_id().to_string();
+    drop(proposal_store);
+    learning_store
+        .link_review_proposal(
+            &workspace_ref,
+            candidate_id,
+            &candidate_snapshot_digest,
+            &proposal_id,
+            &Utc::now().to_rfc3339(),
+        )
+        .map_err(|error| format!("link_lifemodel_learning_review_failed:{error}"))?;
+    Ok(StageLifeModelLearningCandidateReceipt {
+        candidate_id: candidate.id,
+        proposal_id,
+        status: "review_required",
+        base_version: diff.base_version,
+        base_document_digest: diff.base_document_digest,
+        result_document_digest: diff.result_document_digest,
+        canonical_life_model_changed: false,
+    })
 }
 
 pub(crate) async fn current_workspace_ref(state: &Arc<AppState>) -> String {
@@ -468,6 +687,44 @@ fn value_after_marker(value: &str, markers: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn establish_empty_v2_owner(state: &Arc<AppState>) {
+        let (_, source) = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_existing_with_source()
+            .unwrap()
+            .expect("isolated evaluation has a legacy source");
+        let preview =
+            openlife_core::life_model::v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+                &source,
+            )
+            .unwrap();
+        let request = crate::commands::life_model::DraftLegacyLifeModelMigrationRequest {
+            source_digest: preview.source_digest.clone(),
+            selections: preview
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    openlife_core::life_model::v2::LegacyLifeModelMigrationSelectionV2 {
+                        candidate_id: candidate.candidate_id.clone(),
+                        decision: openlife_core::life_model::v2::LegacyLifeModelMigrationDecisionV2::Exclude,
+                        edited_value: None,
+                    }
+                })
+                .collect(),
+            non_lifemodel_items_acknowledged: true,
+        };
+        let migration = crate::commands::life_model::draft_legacy_lifemodel_migration_with_state(
+            request, state,
+        )
+        .await
+        .unwrap();
+        crate::commands::proposal::accept_proposal_with_state(migration.proposal_id, state)
+            .await
+            .unwrap();
+    }
 
     fn candidate(claim: &str) -> MainChatMemoryCandidate {
         MainChatMemoryCandidate {
@@ -960,6 +1217,269 @@ mod tests {
                 .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
                 .unwrap(),
             canonical_before
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_candidate_stages_one_exact_review_without_canonical_write() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        let user_text = "Update my life model: communication style is concise and direct.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "lifemodel-learning-review",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
+        let candidate = routing
+            .candidates
+            .iter()
+            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+            .unwrap();
+        let captured = capture_explicit_main_chat_candidate(
+            &state,
+            candidate,
+            &decision.policy_decision,
+            user_text,
+        )
+        .await
+        .unwrap();
+        assert!(captured.candidate.confirmed_at.is_some());
+        let canonical_before = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap();
+
+        let receipt = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+            .await
+            .unwrap();
+        let replay = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+            .await
+            .unwrap();
+
+        assert_eq!(receipt, replay);
+        assert_eq!(receipt.status, "review_required");
+        assert!(!receipt.canonical_life_model_changed);
+        let proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&receipt.proposal_id)
+            .unwrap()
+            .unwrap();
+        let context = openlife_core::agent::review_decision_context::build_review_decision_context(
+            &proposal,
+            &[],
+        );
+        let learning = context.life_model_learning.unwrap();
+        assert_eq!(learning.candidate_id, captured.candidate.id);
+        assert_eq!(learning.proposed_statement, "concise and direct");
+        assert_eq!(learning.conflict_status, "none");
+        assert!(state
+            .life_model_learning_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_candidates("workspace:default", 5)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .life_model_manager
+                .lock()
+                .await
+                .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+                .unwrap(),
+            canonical_before
+        );
+
+        let proposal_store = state.proposal_store.as_ref().unwrap();
+        let mut terminal_proposal = proposal_store
+            .lock()
+            .await
+            .get_proposal(&receipt.proposal_id)
+            .unwrap()
+            .unwrap();
+        terminal_proposal.reject();
+        proposal_store
+            .lock()
+            .await
+            .update_proposal(&terminal_proposal)
+            .unwrap();
+        assert_eq!(
+            stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+                .await
+                .unwrap_err(),
+            "lifemodel_learning_linked_proposal_not_active"
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_candidate_requires_explicit_confirmation_before_review() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        for (task, run) in [("passive-one", "run-one"), ("passive-two", "run-two")] {
+            capture_completed_task_learning_evidence(
+                &state,
+                task,
+                run,
+                "请先给结论，再说明依据",
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        let candidate_id = state
+            .life_model_learning_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_candidates("workspace:default", 5)
+            .unwrap()[0]
+            .id
+            .clone();
+        let error = stage_candidate_for_review_with_state(&state, &candidate_id)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "lifemodel_learning_candidate_not_review_ready");
+        confirm_candidate_with_state(&state, &candidate_id)
+            .await
+            .unwrap();
+        assert!(stage_candidate_for_review_with_state(&state, &candidate_id)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn learning_review_uses_schema_aware_edit_without_materializing() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        let user_text = "Update my life model: communication style is concise and direct.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "lifemodel-learning-edit",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
+        let candidate = routing
+            .candidates
+            .iter()
+            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+            .unwrap();
+        let captured = capture_explicit_main_chat_candidate(
+            &state,
+            candidate,
+            &decision.policy_decision,
+            user_text,
+        )
+        .await
+        .unwrap();
+        let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+            .await
+            .unwrap();
+        let canonical_before = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap();
+
+        let edit = crate::commands::proposal::edit_lifemodel_learning_proposal_with_state(
+            staged.proposal_id.clone(),
+            "简洁、直接，并先给结论".into(),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(edit["status"], "edited_pending_review");
+        assert_eq!(edit["durableWriteExecuted"], false);
+        let proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Edited);
+        let context = openlife_core::agent::review_decision_context::build_review_decision_context(
+            &proposal,
+            &[],
+        );
+        assert_eq!(
+            context.life_model_learning.unwrap().proposed_statement,
+            "简洁、直接，并先给结论"
+        );
+        assert_eq!(
+            state
+                .life_model_manager
+                .lock()
+                .await
+                .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+                .unwrap(),
+            canonical_before
+        );
+    }
+
+    #[tokio::test]
+    async fn second_v2_learning_review_waits_for_the_active_item() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        let mut candidate_ids = Vec::new();
+        for (session, user_text) in [
+            (
+                "learning-first",
+                "Update my life model: my long-term preference is morning planning.",
+            ),
+            (
+                "learning-second",
+                "Update my life model: my long-term preference is weekly reviews.",
+            ),
+        ] {
+            let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+                .decide(
+                    session,
+                    user_text,
+                    None,
+                    openlife_core::agent::AgentTaskKind::Conversation,
+                );
+            let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
+            let candidate = routing
+                .candidates
+                .iter()
+                .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+                .unwrap();
+            candidate_ids.push(
+                capture_explicit_main_chat_candidate(
+                    &state,
+                    candidate,
+                    &decision.policy_decision,
+                    user_text,
+                )
+                .await
+                .unwrap()
+                .candidate
+                .id,
+            );
+        }
+
+        stage_candidate_for_review_with_state(&state, &candidate_ids[0])
+            .await
+            .unwrap();
+        assert_eq!(
+            stage_candidate_for_review_with_state(&state, &candidate_ids[1])
+                .await
+                .unwrap_err(),
+            "lifemodel_learning_another_v2_review_is_active"
         );
     }
 }

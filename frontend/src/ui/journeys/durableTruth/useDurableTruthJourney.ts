@@ -60,7 +60,7 @@ export function useDurableTruthJourney(
   } | null>(null);
   const [learningAction, setLearningAction] = useState<{
     candidateId: string;
-    kind: "confirm" | "delete" | "reject" | "pause_class";
+    kind: "confirm" | "stage" | "delete" | "reject" | "pause_class";
     error?: string;
   } | null>(null);
   const requestRef = useRef(0);
@@ -352,6 +352,39 @@ export function useDurableTruthJourney(
     },
     [announce, dataSource, learningAction, load]
   );
+  const stageLifeModelLearningCandidate = useCallback(
+    async (candidateId: string): Promise<boolean> => {
+      if (!dataSource || learningAction) return false;
+      setLearningAction({ candidateId, kind: "stage" });
+      try {
+        const proposalId = await dataSource.stageLifeModelLearningCandidate(candidateId);
+        const refreshed = await load(false);
+        const candidateStillActive = refreshed.lifeModelEnvelope.data?.learning.candidates.some(
+          candidate => candidate.id === candidateId
+        );
+        const reviewItem = reviewItemForProposal(refreshed, proposalId);
+        if (
+          refreshed.lifeModelEnvelope.status === "error" ||
+          refreshed.reviewEnvelope.status === "error" ||
+          candidateStillActive ||
+          !reviewItem ||
+          !reviewStillAwaitingDecision(reviewItem)
+        ) {
+          throw new Error("lifemodel_learning_stage_refresh_unverified");
+        }
+        setSelectedItemId(reviewItem.id);
+        setLearningAction(null);
+        announce("这条长期信息已进入 Review Center；确认应用前，LifeModel 仍保持不变。");
+        return true;
+      } catch (error) {
+        const reason = errorText(error);
+        setLearningAction({ candidateId, kind: "stage", error: reason });
+        announce(`长期信息未进入审核：${reason}`);
+        return false;
+      }
+    },
+    [announce, dataSource, learningAction, load]
+  );
   const rejectLifeModelLearningCandidate = useCallback(
     async (candidateId: string): Promise<boolean> => {
       if (!dataSource || learningAction) return false;
@@ -424,6 +457,7 @@ export function useDurableTruthJourney(
     draftLifeModelRollback,
     draftLifeModelExport,
     confirmLifeModelLearningCandidate,
+    stageLifeModelLearningCandidate,
     deleteLifeModelLearningCandidate,
     rejectLifeModelLearningCandidate,
     pauseLifeModelLearningSuggestionClass,

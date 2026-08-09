@@ -92,6 +92,7 @@ export function DurableTruthView({
   onDraftLifeModelExport,
   learningAction,
   onConfirmLearningCandidate,
+  onStageLearningCandidate,
   onDeleteLearningCandidate,
   onRejectLearningCandidate,
   onPauseLearningSuggestionClass,
@@ -127,10 +128,11 @@ export function DurableTruthView({
   onDraftLifeModelExport: Parameters<typeof LifeModelV2ControlsPanel>[0]["onExport"];
   learningAction: {
     candidateId: string;
-    kind: "confirm" | "delete" | "reject" | "pause_class";
+    kind: "confirm" | "stage" | "delete" | "reject" | "pause_class";
     error?: string;
   } | null;
   onConfirmLearningCandidate: (candidateId: string) => Promise<boolean>;
+  onStageLearningCandidate: (candidateId: string) => Promise<boolean>;
   onDeleteLearningCandidate: (candidateId: string) => Promise<boolean>;
   onRejectLearningCandidate: (candidateId: string) => Promise<boolean>;
   onPauseLearningSuggestionClass: (candidateId: string) => Promise<boolean>;
@@ -368,8 +370,8 @@ export function DurableTruthView({
                 />
               </header>
               <p>
-                这里只保存你明确表达、可能具有长期意义的信息。它们目前不是 Proposal，也没有写入
-                LifeModel；后续仍需质量判断与人工审核。
+                这里只显示最近五条候选。确认“这条符合我”后，你可以逐条送去 Review Center；
+                审核通过并成功应用前，它仍没有写入 LifeModel。
               </p>
               {!lifeModel?.learning.available ? (
                 <FoundationNotice title="学习候选暂时不可用" tone="protection">
@@ -399,8 +401,7 @@ export function DurableTruthView({
                           ? ` · ${candidate.oppositionCount} 条反向证据`
                           : ""}
                       </small>
-                      {candidate.status !== "conflicted" &&
-                      !candidate.sourceKinds.includes("user_feedback") ? (
+                      {candidate.status !== "conflicted" && !candidate.confirmedAt ? (
                         <FoundationActionButton
                           label="这条符合我"
                           icon={<CircleCheck size={16} aria-hidden="true" />}
@@ -411,6 +412,19 @@ export function DurableTruthView({
                           }
                           loadingLabel="正在记录"
                           onClick={() => void onConfirmLearningCandidate(candidate.id)}
+                        />
+                      ) : null}
+                      {candidate.status === "reviewable" && candidate.confirmedAt ? (
+                        <FoundationActionButton
+                          label="送去审核中心"
+                          icon={<ArrowRight size={16} aria-hidden="true" />}
+                          loading={
+                            learningAction?.candidateId === candidate.id &&
+                            learningAction.kind === "stage" &&
+                            !learningAction.error
+                          }
+                          loadingLabel="正在创建审核项"
+                          onClick={() => void onStageLearningCandidate(candidate.id)}
                         />
                       ) : null}
                       <FoundationActionButton
@@ -451,11 +465,13 @@ export function DurableTruthView({
                           title={
                             learningAction.kind === "confirm"
                               ? "反馈未记录"
-                              : learningAction.kind === "delete"
-                                ? "候选未删除"
-                                : learningAction.kind === "reject"
-                                  ? "候选未拒绝"
-                                  : "这类建议未暂停"
+                              : learningAction.kind === "stage"
+                                ? "未进入审核"
+                                : learningAction.kind === "delete"
+                                  ? "候选未删除"
+                                  : learningAction.kind === "reject"
+                                    ? "候选未拒绝"
+                                    : "这类建议未暂停"
                           }
                           tone="error"
                           live

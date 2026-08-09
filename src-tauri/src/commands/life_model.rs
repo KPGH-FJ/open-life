@@ -56,6 +56,35 @@ pub async fn pause_lifemodel_learning_suggestion_class(
     crate::life_model_learning::pause_candidate_class_with_state(state.inner(), &candidate_id).await
 }
 
+#[tauri::command]
+pub async fn stage_lifemodel_learning_candidate(
+    candidate_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::life_model_learning::StageLifeModelLearningCandidateReceipt, String> {
+    crate::life_model_learning::stage_candidate_for_review_with_state(state.inner(), &candidate_id)
+        .await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditLifeModelLearningProposalRequest {
+    pub proposal_id: String,
+    pub statement: String,
+}
+
+#[tauri::command]
+pub async fn edit_lifemodel_learning_proposal(
+    request: EditLifeModelLearningProposalRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    crate::commands::proposal::edit_lifemodel_learning_proposal_with_state(
+        request.proposal_id,
+        request.statement,
+        state.inner(),
+    )
+    .await
+}
+
 #[cfg(test)]
 const MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT: &str = "manual_lifemodel_override_audit";
 #[cfg(test)]

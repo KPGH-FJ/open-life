@@ -9,6 +9,7 @@ const tauriMocks = vi.hoisted(() => ({
   draftLifeModelV2Rollback: vi.fn(),
   draftLifeModelV2Export: vi.fn(),
   confirmLifeModelLearningCandidate: vi.fn(),
+  stageLifeModelLearningCandidate: vi.fn(),
   deleteLifeModelLearningCandidate: vi.fn(),
   rejectLifeModelLearningCandidate: vi.fn(),
   pauseLifeModelLearningSuggestionClass: vi.fn(),
@@ -115,6 +116,33 @@ describe("durable truth Tauri data source", () => {
     await expect(
       tauriDurableTruthDataSource.confirmLifeModelLearningCandidate("candidate:one")
     ).rejects.toThrow("lifemodel_learning_candidate_confirm_receipt_unverified");
+  });
+
+  it("credits candidate staging only when Review exists and canonical LifeModel stayed unchanged", async () => {
+    tauriMocks.stageLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      proposalId: "proposal:one",
+      status: "review_required",
+      baseVersion: 2,
+      baseDocumentDigest: "sha256:base",
+      resultDocumentDigest: "sha256:result",
+      canonicalLifeModelChanged: false,
+    });
+
+    await expect(
+      tauriDurableTruthDataSource.stageLifeModelLearningCandidate("candidate:one")
+    ).resolves.toBe("proposal:one");
+
+    tauriMocks.stageLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      proposalId: "proposal:two",
+      status: "review_required",
+      resultDocumentDigest: "sha256:result",
+      canonicalLifeModelChanged: true,
+    });
+    await expect(
+      tauriDurableTruthDataSource.stageLifeModelLearningCandidate("candidate:one")
+    ).rejects.toThrow("lifemodel_learning_stage_receipt_unverified");
   });
 
   it("accepts candidate suppression only with scrubbed content and no Proposal or LifeModel change", async () => {

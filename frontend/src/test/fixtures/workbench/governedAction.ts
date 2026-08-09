@@ -555,6 +555,9 @@ export function workbenchJourneyFixtureDataSource(
       return "fixture-lifemodel-v2-export-proposal";
     },
     async confirmLifeModelLearningCandidate() {},
+    async stageLifeModelLearningCandidate() {
+      return "fixture-lifemodel-learning-proposal";
+    },
     async deleteLifeModelLearningCandidate() {},
     async rejectLifeModelLearningCandidate() {},
     async pauseLifeModelLearningSuggestionClass() {},
@@ -696,6 +699,7 @@ export function workbenchJourneyFixtureDataSource(
       else if (reviewAction.kind === "later") stage = "deferred";
       else throw new Error("fixture_review_action_unsupported");
     },
+    async editLifeModelLearningProposal() {},
     async resumeTask(control) {
       await applyTaskControl(control);
     },

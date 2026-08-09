@@ -135,11 +135,11 @@ pub use hs_selector::{
     SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use life_model_learning::{
-    LifeModelLearningCandidate, LifeModelLearningCandidateStatus, LifeModelLearningCapture,
-    LifeModelLearningCaptureReceipt, LifeModelLearningDecisionReceipt,
-    LifeModelLearningEvidencePolarity, LifeModelLearningExplicitness, LifeModelLearningObservation,
-    LifeModelLearningSensitivity, LifeModelLearningSourceKind, LifeModelLearningStore,
-    LifeModelLearningSuppressionKind,
+    life_model_learning_candidate_snapshot_digest, LifeModelLearningCandidate,
+    LifeModelLearningCandidateStatus, LifeModelLearningCapture, LifeModelLearningCaptureReceipt,
+    LifeModelLearningDecisionReceipt, LifeModelLearningEvidencePolarity,
+    LifeModelLearningExplicitness, LifeModelLearningObservation, LifeModelLearningSensitivity,
+    LifeModelLearningSourceKind, LifeModelLearningStore, LifeModelLearningSuppressionKind,
 };
 pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntimeFact};
 pub use life_model_view_model::{

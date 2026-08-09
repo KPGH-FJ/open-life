@@ -2330,6 +2330,21 @@ export type ReviewDecisionContext = {
     terminalEvidenceSummary: string;
     effectBoundary: string;
   };
+  lifeModelLearning?: {
+    candidateId: string;
+    candidateSnapshotDigest: string;
+    section: string;
+    proposedStatement: string;
+    explicitness: string;
+    stability: string;
+    sensitivity: string;
+    conflictStatus: string;
+    supportCount: number;
+    independentSupportCount: number;
+    confirmedAt: string;
+    sourceRefs: string[];
+    sourceKinds: string[];
+  };
   evidenceRefs: EvidenceRef[];
 };
 
@@ -2725,6 +2740,8 @@ export type LifeModelLearningCandidate = {
     | "user_correction"
     | "model_extraction"
   >;
+  confirmedAt?: string;
+  proposalId?: string;
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
@@ -2748,6 +2765,16 @@ export type ConfirmLifeModelLearningCandidateReceipt = {
   status: "reviewable";
   sourceKind: "user_feedback";
   proposalCreated: false;
+  canonicalLifeModelChanged: false;
+};
+
+export type StageLifeModelLearningCandidateReceipt = {
+  candidateId: string;
+  proposalId: string;
+  status: "review_required";
+  baseVersion: number | null;
+  baseDocumentDigest: string | null;
+  resultDocumentDigest: string;
   canonicalLifeModelChanged: false;
 };
 
@@ -4366,6 +4393,29 @@ export async function confirmLifeModelLearningCandidate(
     "confirm_lifemodel_learning_candidate",
     { candidateId, candidate_id: candidateId }
   );
+}
+
+export async function stageLifeModelLearningCandidate(
+  candidateId: string
+): Promise<StageLifeModelLearningCandidateReceipt> {
+  return safeInvoke<StageLifeModelLearningCandidateReceipt>("stage_lifemodel_learning_candidate", {
+    candidateId,
+    candidate_id: candidateId,
+  });
+}
+
+export async function editLifeModelLearningProposal(
+  proposalId: string,
+  statement: string
+): Promise<{
+  proposalId: string;
+  status: "edited_pending_review";
+  resultDocumentDigest: string;
+  durableWriteExecuted: false;
+}> {
+  return safeInvoke("edit_lifemodel_learning_proposal", {
+    request: { proposalId, statement },
+  });
 }
 
 export async function rejectLifeModelLearningCandidate(

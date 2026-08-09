@@ -520,6 +520,9 @@ fn edit_blocker(
         return Some("This review item type has no backend edit/apply pathway yet.".into());
     }
     if is_lifemodel_v2_governed_change(proposal) {
+        if crate::agent::review_decision_context::is_lifemodel_learning_review(proposal) {
+            return None;
+        }
         return Some(
             "LifeModel v2 review requires its schema-aware editor; generic edit is unavailable."
                 .into(),

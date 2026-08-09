@@ -250,6 +250,7 @@ pub struct LifeModelViewModelBuildInput {
     pub memory_count: Option<usize>,
     pub tier_stats: Option<LifeModelMemoryTierStatsInput>,
     pub learning_available: bool,
+    pub learning_active_count: Option<usize>,
     pub learning_candidates: Vec<LifeModelLearningCandidate>,
     pub now: Option<String>,
     pub stale: bool,
@@ -347,7 +348,9 @@ pub fn build_life_model_view_model_envelope(
         memory_linkage: build_memory_linkage(&input, &source_refs),
         learning: LifeModelLearningSummary {
             available: input.learning_available,
-            active_count: input.learning_candidates.len(),
+            active_count: input
+                .learning_active_count
+                .unwrap_or(input.learning_candidates.len()),
             candidates: input.learning_candidates.clone(),
         },
         source_refs: source_refs.clone(),

@@ -10,6 +10,7 @@ import {
   deleteLifeModelLearningCandidate,
   pauseLifeModelLearningSuggestionClass,
   rejectLifeModelLearningCandidate,
+  stageLifeModelLearningCandidate,
   getLifeModelViewModel,
   getMemoryViewModel,
   getReviewCenterViewModel,
@@ -57,6 +58,7 @@ export interface DurableTruthDataSource {
   deleteLifeModelLearningCandidate(candidateId: string): Promise<void>;
   rejectLifeModelLearningCandidate(candidateId: string): Promise<void>;
   pauseLifeModelLearningSuggestionClass(candidateId: string): Promise<void>;
+  stageLifeModelLearningCandidate(candidateId: string): Promise<string>;
 }
 
 function requireLifeModelProposalReceipt(
@@ -201,6 +203,19 @@ export const tauriDurableTruthDataSource: DurableTruthDataSource = {
     ) {
       throw new Error("lifemodel_learning_candidate_confirm_receipt_unverified");
     }
+  },
+  async stageLifeModelLearningCandidate(candidateId) {
+    const receipt = await stageLifeModelLearningCandidate(candidateId);
+    if (
+      receipt.candidateId !== candidateId ||
+      !receipt.proposalId ||
+      receipt.status !== "review_required" ||
+      !receipt.resultDocumentDigest ||
+      receipt.canonicalLifeModelChanged
+    ) {
+      throw new Error("lifemodel_learning_stage_receipt_unverified");
+    }
+    return receipt.proposalId;
   },
   async deleteLifeModelLearningCandidate(candidateId) {
     const receipt = await deleteLifeModelLearningCandidate(candidateId);

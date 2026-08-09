@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { ArrowLeft, Eye, RefreshCw, ShieldCheck } from "lucide-react";
 import type { ReviewAction, ReviewItem } from "@/tauri";
 import {
@@ -223,6 +224,7 @@ export function ReviewGovernedView({
   onRequestAction,
   onConfirmAction,
   onCancelConfirmation,
+  onEditLifeModelLearning,
   onBackWorkspace,
   backLabel = "返回工作区",
   onOpenInspector,
@@ -236,10 +238,13 @@ export function ReviewGovernedView({
   onRequestAction: (action: ReviewAction) => void;
   onConfirmAction: () => void;
   onCancelConfirmation: () => void;
+  onEditLifeModelLearning: (statement: string) => Promise<boolean>;
   onBackWorkspace: () => void;
   backLabel?: string;
   onOpenInspector: () => void;
 }) {
+  const [learningDraft, setLearningDraft] = useState("");
+  const [learningEditBusy, setLearningEditBusy] = useState(false);
   const envelope = snapshot?.reviewEnvelope;
   const items =
     envelope && (envelope.status === "ready" || envelope.status === "stale")
@@ -253,12 +258,21 @@ export function ReviewGovernedView({
       : null;
   const confirmingAction = dispatchState.phase === "confirming" ? dispatchState.action : null;
   const decisionBusy =
-    dispatchState.phase === "dispatching" || dispatchState.phase === "refreshing";
+    dispatchState.phase === "dispatching" ||
+    dispatchState.phase === "refreshing" ||
+    learningEditBusy;
   const supportedActions =
     selectedItem?.allowedActions.filter(action =>
       ["approve", "reject", "later", "apply", "view_evidence"].includes(action.kind)
     ) ?? [];
   const hasEvidenceAction = supportedActions.some(action => action.kind === "view_evidence");
+  const learningContext = selectedItem?.decisionContext.lifeModelLearning;
+  const learningEditAction = selectedItem?.allowedActions.find(action => action.kind === "edit");
+
+  useEffect(() => {
+    setLearningDraft(learningContext?.proposedStatement ?? "");
+    setLearningEditBusy(false);
+  }, [learningContext?.candidateSnapshotDigest, learningContext?.proposedStatement]);
 
   if (!snapshot || !envelope || envelope.status === "loading") {
     return (
@@ -354,7 +368,11 @@ export function ReviewGovernedView({
             <header className="ol-review-detail__header">
               <div>
                 <span className="ol-governed-kicker">
-                  {selectedItem.type === "tool_permission" ? "一次性权限" : "变更建议"}
+                  {selectedItem.type === "tool_permission"
+                    ? "一次性权限"
+                    : learningContext
+                      ? "LifeModel 学习建议"
+                      : "变更建议"}
                 </span>
                 <h2>{selectedItem.decisionContext.title}</h2>
                 <p>{selectedItem.decisionContext.summary}</p>
@@ -453,6 +471,93 @@ export function ReviewGovernedView({
                     <pre>{selectedItem.decisionContext.after.detail}</pre>
                   </details>
                 )}
+              </section>
+            )}
+
+            {learningContext && (
+              <section
+                className="ol-review-rationale"
+                aria-labelledby="lifemodel-learning-review-title"
+              >
+                <div className="ol-governed-section-heading">
+                  <span>长期信息证据</span>
+                  <h3 id="lifemodel-learning-review-title">逐条核对后再决定</h3>
+                </div>
+                <dl>
+                  <div>
+                    <dt>位置</dt>
+                    <dd>{learningContext.section}</dd>
+                  </div>
+                  <div>
+                    <dt>证据</dt>
+                    <dd>
+                      {learningContext.supportCount} 条，来自{" "}
+                      {learningContext.independentSupportCount} 个独立来源
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>稳定性</dt>
+                    <dd>{learningContext.stability}</dd>
+                  </div>
+                  <div>
+                    <dt>确认时间</dt>
+                    <dd>{learningContext.confirmedAt}</dd>
+                  </div>
+                  <div>
+                    <dt>来源类型</dt>
+                    <dd>{learningContext.sourceKinds.join("、") || "未知"}</dd>
+                  </div>
+                  <div>
+                    <dt>来源记录</dt>
+                    <dd>{learningContext.sourceRefs.join("、") || "未知"}</dd>
+                  </div>
+                  <div>
+                    <dt>冲突</dt>
+                    <dd>
+                      {learningContext.conflictStatus === "none"
+                        ? "未发现冲突"
+                        : learningContext.conflictStatus}
+                    </dd>
+                  </div>
+                </dl>
+                <label>
+                  审核后的表述
+                  <textarea
+                    value={learningDraft}
+                    maxLength={500}
+                    disabled={
+                      learningEditBusy ||
+                      envelope.status === "stale" ||
+                      !learningEditAction?.enabled
+                    }
+                    onChange={event => setLearningDraft(event.target.value)}
+                  />
+                </label>
+                <FoundationActionButton
+                  label="保存修改，继续审核"
+                  variant="secondary"
+                  loading={learningEditBusy}
+                  loadingLabel="正在核对"
+                  disabled={
+                    !learningEditAction?.enabled ||
+                    envelope.status === "stale" ||
+                    learningDraft.trim() === learningContext.proposedStatement
+                  }
+                  disabledReason={
+                    (envelope.status === "stale"
+                      ? "审核状态已陈旧；请先重新读取。"
+                      : learningEditAction?.disabledReason) ??
+                    (learningDraft.trim() === learningContext.proposedStatement
+                      ? "内容尚未改变。"
+                      : undefined)
+                  }
+                  onClick={() => {
+                    setLearningEditBusy(true);
+                    void onEditLifeModelLearning(learningDraft).finally(() =>
+                      setLearningEditBusy(false)
+                    );
+                  }}
+                />
               </section>
             )}
 

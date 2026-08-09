@@ -57,11 +57,11 @@ describe("Workbench durable truth journey", () => {
       oppositionCount: 0,
       independentSupportCount: 1,
       status: "reviewable" as const,
-      explicitness: "explicit_user_request" as const,
+      explicitness: "passive_inference" as const,
       sensitivity: "internal" as const,
       observationIds: ["lmo_observation_one"],
       sourceRefs: ["message:fixture"],
-      sourceKinds: ["explicit_user_message"],
+      sourceKinds: ["task_outcome"],
       createdAt: "2026-08-08T08:00:00Z",
       updatedAt: "2026-08-08T08:00:00Z",
       expiresAt: "2026-11-06T08:00:00Z",
@@ -76,7 +76,8 @@ describe("Workbench durable truth journey", () => {
     dataSource.confirmLifeModelLearningCandidate = vi.fn(async candidateId => {
       expect(candidateId).toBe(candidate.id);
       candidate.status = "reviewable";
-      candidate.sourceKinds = ["explicit_user_message", "user_feedback"];
+      candidate.sourceKinds = ["task_outcome", "user_feedback"];
+      candidate.confirmedAt = "2026-08-08T09:00:00Z";
       candidate.supportCount = 2;
       candidate.independentSupportCount = 2;
     });
@@ -99,7 +100,7 @@ describe("Workbench durable truth journey", () => {
     );
 
     expect(await screen.findByText("先给结论")).toBeVisible();
-    expect(screen.getByText(/目前不是 Proposal/)).toBeVisible();
+    expect(screen.getByText(/逐条送去 Review Center/)).toBeVisible();
     expect(screen.getByText(/已具备审核条件 · 1 条证据 \/ 1 个独立来源/)).toBeVisible();
     expect(screen.getByRole("button", { name: "拒绝并不再建议类似内容" })).toBeVisible();
     expect(screen.getByRole("button", { name: "暂停这类建议" })).toBeVisible();

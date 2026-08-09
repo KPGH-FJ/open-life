@@ -4246,6 +4246,102 @@ pub(crate) async fn edit_proposal_with_state(
     }))
 }
 
+pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
+    proposal_id: String,
+    statement: String,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, String> {
+    require_persistence_write(state)?;
+    check_safe_mode(state)?;
+    let statement = statement.trim();
+    if statement.is_empty() || statement.chars().count() > 500 {
+        return Err("LifeModel learning statement must contain 1 to 500 characters.".into());
+    }
+    let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
+    ensure_pending_or_postponed(&proposal)?;
+    ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
+    if !proposal
+        .source_detail
+        .as_deref()
+        .is_some_and(|detail| detail.starts_with("lifemodel_learning:"))
+        || !openlife_core::agent::review_decision_context::is_lifemodel_learning_review(&proposal)
+    {
+        return Err("Only a validated LifeModel learning proposal supports this editor.".into());
+    }
+    let original: openlife_core::life_model::v2::LifeModelTypedDiffV2 =
+        serde_json::from_value(proposal.after.clone())
+            .map_err(|_| "LifeModel learning typed diff is invalid.".to_string())?;
+    let operation = original
+        .operations
+        .first()
+        .cloned()
+        .ok_or_else(|| "LifeModel learning typed operation is missing.".to_string())?;
+    let (section, mut item) = match operation {
+        openlife_core::life_model::v2::LifeModelTypedOperationV2::Add {
+            section,
+            item: openlife_core::life_model::v2::LifeModelItemV2::Statement(item),
+        } if original.operations.len() == 1 => (section, item),
+        _ => return Err("LifeModel learning editor only supports one statement add.".into()),
+    };
+    item.statement = statement.to_string();
+    let manager = state.life_model_manager.lock().await;
+    let current = manager
+        .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+        .map_err(|error| error.to_string())?;
+    if current.as_ref().map(|version| version.model_version) != original.base_version
+        || current
+            .as_ref()
+            .map(|version| version.document_digest.as_str())
+            != original.base_document_digest.as_deref()
+    {
+        return Err(
+            "LifeModel learning proposal base is stale; create a fresh review item.".into(),
+        );
+    }
+    let allow_empty_result = current.is_some()
+        || manager
+            .load_v2_cutover(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .map_err(|error| error.to_string())?
+            .is_some();
+    let revised = openlife_core::life_model::v2::LifeModelTypedDiffV2::from_operations_for_review(
+        openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        current.as_ref(),
+        vec![
+            openlife_core::life_model::v2::LifeModelTypedOperationV2::Add {
+                section,
+                item: openlife_core::life_model::v2::LifeModelItemV2::Statement(item),
+            },
+        ],
+        allow_empty_result,
+    )
+    .map_err(|error| error.to_string())?;
+    drop(manager);
+    let before = proposal
+        .before
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "LifeModel learning review metadata is missing.".to_string())?;
+    before.insert(
+        "proposedValue".into(),
+        serde_json::to_value(
+            openlife_core::life_model::v2::LifeModelUserValueV2::Statement {
+                statement: statement.to_string(),
+            },
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    before.insert("editedByUser".into(), Value::Bool(true));
+    let expected_status = proposal.status;
+    proposal.edit(serde_json::to_value(&revised).map_err(|error| error.to_string())?);
+    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    Ok(serde_json::json!({
+        "proposalId": proposal.id,
+        "status": "edited_pending_review",
+        "resultDocumentDigest": revised.result_document_digest,
+        "durableWriteExecuted": false,
+    }))
+}
+
 pub(crate) async fn postpone_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,

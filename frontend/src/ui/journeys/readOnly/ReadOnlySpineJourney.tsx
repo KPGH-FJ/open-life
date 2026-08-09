@@ -973,6 +973,7 @@ export function ReadOnlySpineJourney({
         onRequestAction={governed.requestReviewAction}
         onConfirmAction={governed.confirmReviewAction}
         onCancelConfirmation={governed.cancelReviewConfirmation}
+        onEditLifeModelLearning={governed.editLifeModelLearning}
         backLabel={
           reviewReturnSurface === "life-model"
             ? "返回个人智能"
@@ -1026,6 +1027,7 @@ export function ReadOnlySpineJourney({
         onDraftLifeModelRollback={durable.draftLifeModelRollback}
         onDraftLifeModelExport={durable.draftLifeModelExport}
         onConfirmLearningCandidate={durable.confirmLifeModelLearningCandidate}
+        onStageLearningCandidate={durable.stageLifeModelLearningCandidate}
         onDeleteLearningCandidate={durable.deleteLifeModelLearningCandidate}
         onRejectLearningCandidate={durable.rejectLifeModelLearningCandidate}
         onPauseLearningSuggestionClass={durable.pauseLifeModelLearningSuggestionClass}
