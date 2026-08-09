@@ -1,4 +1,4 @@
-use openlife_core::{layer::Layer, life_model::LifeModel, llm::ChatMessage};
+use openlife_core::{layer::Layer, llm::ChatMessage};
 
 use crate::main_chat_hs_runtime::{
     build_chat_runtime_hs_packet, classify_hs_policy_topic, hs_tool_requirements,
@@ -94,9 +94,6 @@ fn main_chat_hs_runtime_helpers_are_extracted_from_lib_rs() {
 #[tokio::test]
 async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let mut life_model = LifeModel::default();
-    life_model.state.health_status.energy_level = 2;
-
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Planning,
         session_id: "session-chat-hs".into(),
@@ -111,7 +108,6 @@ async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
     let packet = build_chat_runtime_hs_packet(
         &state,
         &task,
-        &life_model,
         "file.write(path, content)",
         Some("run-chat-hs".into()),
     )
@@ -123,7 +119,7 @@ async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
         .selected_policies
         .iter()
         .any(|policy| policy.route == Some(openlife_core::agent::ModelRoutePolicy::LocalOnly)));
-    assert!(packet
+    assert!(!packet
         .audit
         .selected_heuristic_ids
         .contains(&openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.to_string()));
@@ -137,7 +133,6 @@ async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
 #[tokio::test]
 async fn tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_policy() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let life_model = LifeModel::default();
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
         session_id: "session-read-only-tools-catalog".into(),
@@ -166,7 +161,7 @@ async fn tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_pol
         .iter()
         .any(|requirement| requirement == "external_side_effect"));
 
-    let packet = build_chat_runtime_hs_packet(&state, &task, &life_model, tools_prompt, None)
+    let packet = build_chat_runtime_hs_packet(&state, &task, tools_prompt, None)
         .await
         .unwrap();
     if let Some(packet) = packet {
@@ -179,7 +174,6 @@ async fn tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_pol
 #[tokio::test]
 async fn hs_runtime_topic_keywords_select_sensitive_local_only_policy() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let life_model = LifeModel::default();
     let text = "最近用药、债务、身份证和分手这些事情让我压力很大";
     let topic = classify_hs_policy_topic(text, "");
     assert_ne!(topic, openlife_core::agent::PolicyTopic::General);
@@ -195,7 +189,7 @@ async fn hs_runtime_topic_keywords_select_sensitive_local_only_policy() {
         layer: Layer::L2,
     };
 
-    let packet = build_chat_runtime_hs_packet(&state, &task, &life_model, "", None)
+    let packet = build_chat_runtime_hs_packet(&state, &task, "", None)
         .await
         .unwrap()
         .expect("Chinese sensitive keywords should select HS assets");

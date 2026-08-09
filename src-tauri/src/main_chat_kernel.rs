@@ -5,7 +5,7 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
-use chrono::TimeZone;
+use chrono::{TimeZone, Utc};
 use futures::StreamExt;
 #[cfg(test)]
 use once_cell::sync::Lazy as LazyLock;
@@ -11506,11 +11506,11 @@ async fn command_surface_kernel_hs_context(
         let manager = state.life_model_manager.lock().await;
         manager.load_existing()
     };
-    let (life_model, life_model_available) = match maybe_life_model {
-        Ok(Some(model)) => (model, true),
+    let life_model = match maybe_life_model {
+        Ok(Some(model)) => model,
         Ok(None) => {
             warnings.push("hs_lifemodel_missing".to_string());
-            (LifeModel::default(), false)
+            LifeModel::default()
         }
         Err(error) => {
             log::warn!(
@@ -11518,7 +11518,22 @@ async fn command_surface_kernel_hs_context(
                 error
             );
             warnings.push("hs_lifemodel_malformed".to_string());
-            (LifeModel::default(), false)
+            LifeModel::default()
+        }
+    };
+    let canonical_life_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+    };
+    let canonical_life_model = match canonical_life_model {
+        Ok(version) => version,
+        Err(error) => {
+            log::warn!(
+                "[MainChatKernel] canonical LifeModel v2 load failed: {}",
+                error
+            );
+            warnings.push("lifemodel_v2_unavailable".to_string());
+            None
         }
     };
 
@@ -11532,26 +11547,20 @@ async fn command_surface_kernel_hs_context(
         }],
         layer: Layer::L2,
     };
-    let hs_packet = match build_chat_runtime_hs_packet(
-        state,
-        &task,
-        &life_model,
-        "",
-        Some(task_session_id.to_string()),
-    )
-    .await
-    {
-        Ok(packet) => packet,
-        Err(error) => {
-            log::warn!("[MainChatKernel] bounded HS packet build failed: {}", error);
-            warnings.push("hs_packet_build_failed".to_string());
-            None
-        }
-    };
+    let hs_packet =
+        match build_chat_runtime_hs_packet(state, &task, "", Some(task_session_id.to_string()))
+            .await
+        {
+            Ok(packet) => packet,
+            Err(error) => {
+                log::warn!("[MainChatKernel] bounded HS packet build failed: {}", error);
+                warnings.push("hs_packet_build_failed".to_string());
+                None
+            }
+        };
 
     let context = build_kernel_hs_context(
-        &life_model,
-        life_model_available,
+        canonical_life_model.as_ref(),
         hs_packet.as_ref(),
         user_text,
         warnings,
@@ -11598,21 +11607,40 @@ async fn command_surface_kernel_context_candidates(
 }
 
 fn build_kernel_hs_context(
-    life_model: &LifeModel,
-    life_model_available: bool,
+    life_model: Option<&openlife_core::life_model::v2::LifeModelVersionV2>,
     packet: Option<&RuntimeHSPacket>,
     task_text: &str,
     mut warning_codes: Vec<String>,
 ) -> MainChatKernelHsContext {
+    let life_model_runtime_packet = match life_model {
+        Some(version) => match openlife_core::agent::LifeModelRuntimeContextV2::build(
+            version,
+            task_text,
+            Utc::now(),
+        ) {
+            Ok(packet) => packet,
+            Err(error) => {
+                log::warn!(
+                    "[MainChatKernel] canonical LifeModel v2 runtime packet rejected: {}",
+                    error
+                );
+                warning_codes.push("lifemodel_v2_runtime_packet_rejected".into());
+                None
+            }
+        },
+        None => None,
+    };
     warning_codes.sort();
     warning_codes.dedup();
-
-    let life_model_runtime_packet = life_model_available
-        .then(|| openlife_core::agent::LifeModelRuntimeContextV1::build(life_model, task_text))
-        .flatten();
     let included_sections = life_model_runtime_packet
         .as_ref()
-        .map(|packet| packet.selected_sections.clone())
+        .map(|packet| {
+            packet
+                .selected_sections
+                .iter()
+                .map(|section| format!("{section:?}").to_ascii_lowercase())
+                .collect()
+        })
         .unwrap_or_default();
     let selected_policy_ids = packet
         .map(|packet| packet.audit.selected_policy_ids.clone())
@@ -11658,26 +11686,23 @@ fn build_kernel_hs_context(
         .unwrap_or(true);
     let freshness = life_model_runtime_packet
         .as_ref()
-        .map(|packet| bounded_label(&packet.source_updated_at, MAX_ROUTE_LABEL_CHARS))
-        .filter(|value| !value.is_empty())
-        .or_else(|| life_model_runtime_packet.as_ref().map(|_| "unknown".into()));
+        .map(|packet| format!("canonical_version:{}", packet.model_version));
     let source_provenance = Some(match packet {
         Some(packet) => format!(
-            "life_model_manager.load_existing + lifemodel_runtime_context.v1 + hs_selector.audit:{}",
+            "life_model_manager.load_v2_current + lifemodel_runtime_context.v2; hs_selector.audit:{}",
             bounded_label(&packet.audit.input_digest, MAX_ROUTE_LABEL_CHARS)
         ),
-        None => "life_model_manager.load_existing + lifemodel_runtime_context.v1 + hs_selector.none".into(),
+        None => "life_model_manager.load_v2_current + lifemodel_runtime_context.v2; hs_selector.none".into(),
     });
     let privacy_class = Some("private".to_string());
     let summary_source_id = life_model_runtime_packet
         .as_ref()
-        .map(|_| "hs.summary.lifemodel".to_string());
+        .map(|_| "lifemodel.v2.runtime".to_string());
 
     let summary_content = life_model_runtime_packet.as_ref().map(|runtime_packet| {
         bounded_text(
             &render_kernel_hs_summary(
                 runtime_packet,
-                packet,
                 source_provenance.as_deref().unwrap_or("unknown"),
                 freshness.as_deref().unwrap_or("unknown"),
                 privacy_class.as_deref().unwrap_or("private"),
@@ -11771,21 +11796,14 @@ fn build_kernel_hs_context(
 }
 
 fn render_kernel_hs_summary(
-    runtime_packet: &openlife_core::agent::LifeModelRuntimeContextV1,
-    packet: Option<&RuntimeHSPacket>,
+    runtime_packet: &openlife_core::agent::LifeModelRuntimeContextV2,
     provenance: &str,
     freshness: &str,
     privacy_class: &str,
     warning_codes: &[String],
 ) -> String {
-    let selected_policy_ids = packet
-        .map(|packet| packet.audit.selected_policy_ids.join(","))
-        .unwrap_or_else(|| "none".into());
-    let accepted_guidance_count = packet
-        .map(|packet| packet.guidance_refs.len())
-        .unwrap_or_default();
     format!(
-        "{}\nselection_freshness: {freshness}\nprovenance: {provenance}\nprivacy: {privacy_class}\nselected_policy_ids: {selected_policy_ids}\naccepted_guidance_count: {accepted_guidance_count}\nwarnings: {}",
+        "{}\nselection_freshness: {freshness}\nprovenance: {provenance}\nprivacy: {privacy_class}\nwarnings: {}",
         runtime_packet.render_prompt(),
         if warning_codes.is_empty() {
             "none".into()
@@ -20314,181 +20332,75 @@ mod tests {
         assert!(!result.direct_writes_executed);
     }
 
-    #[test]
-    fn main_chat_kernel_lifemodel_packet_is_task_relevant_and_excludes_state_compatibility() {
-        let mut life_model = sample_hs_life_model();
-        life_model.state.current_focus = "stale compatibility focus".into();
-        life_model
-            .goals
-            .daily
-            .push(openlife_core::life_model::DailyGoal {
-                name: "stale compatibility daily task".into(),
-                ..Default::default()
-            });
-        let runtime_packet = openlife_core::agent::LifeModelRuntimeContextV1::build(
-            &life_model,
-            "Help me Ship Goal 6",
+    #[tokio::test]
+    async fn command_surface_uses_canonical_v2_lifemodel_and_not_legacy_yaml_context() {
+        use openlife_core::life_model::v2::{
+            LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
+            LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
+        };
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let item = LifeModelStatementV2 {
+            id: "communication-direct".into(),
+            statement: "沟通保持简洁直接".into(),
+            source_refs: vec!["message:user:runtime-v2".into()],
+            confirmed_at: "2026-08-09T00:00:00Z".into(),
+        };
+        let mut result = LifeModelDocumentV2::empty("primary");
+        result.collaboration_preferences.push(item.clone());
+        let diff = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: None,
+            base_document_digest: None,
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::CollaborationPreferences,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        };
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager
+                .materialize_reviewed_v2_typed_diff(
+                    &diff,
+                    "runtime-v2-test",
+                    &[],
+                    "2026-08-09T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let (_legacy_model, context) = command_surface_kernel_hs_context(
+            &state,
+            "task-runtime-v2",
+            "请写一封简洁的项目邮件",
+            openlife_core::agent::AgentTaskKind::Conversation,
         )
-        .expect("task-relevant LifeModel packet");
-        let summary = render_kernel_hs_summary(
-            &runtime_packet,
-            None,
-            "hs_selector.audit:none",
-            "unknown",
-            "private",
-            &[],
-        );
-
-        assert!(summary.contains("goals.short_term"));
-        assert!(!summary.contains("stale compatibility focus"));
-        assert!(!summary.contains("stale compatibility daily task"));
-        assert!(summary.contains("permissions_granted: false"));
-    }
-
-    #[tokio::test]
-    async fn main_chat_kernel_goal_6_bounded_hs_summary_context_is_inspectable() {
-        let model = ScriptedModelClient::ok("HS-aware direct answer.");
-        let life_model = sample_hs_life_model();
-        let packet = hs_packet(false, false);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
-        let mut events = BufferedMainChatEventSink::default();
-
-        let result = kernel
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-hs-summary".into(),
-                    provider_authorization: policy_allowed_authorization("hs-summary"),
-                    messages: vec![user_message("Use my HS context for a short answer.")],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut events,
-            )
-            .await;
-
-        let context = result.context_metadata.as_ref().expect("context metadata");
-        let hs = context.hs_context.as_ref().expect("hs metadata");
-        assert!(hs.available);
-        assert_eq!(
-            hs.summary_source_id.as_deref(),
-            Some("hs.summary.lifemodel")
-        );
-        assert!(hs.summary_digest.as_deref().is_some_and(|digest| {
-            digest.starts_with("bytes:") && digest.contains(" hash:sha256:")
-        }));
-        assert!(hs.summary_chars <= MAX_CONTEXT_CONTENT_CHARS);
-        assert_eq!(hs.privacy_class.as_deref(), Some("private"));
-        assert!(hs
-            .source_provenance
-            .as_deref()
-            .is_some_and(|value| value.contains("hs_selector.audit")));
-        assert!(hs
-            .included_life_model_sections
-            .contains(&"goals".to_string()));
-        assert!(context
-            .selected_source_ids
-            .contains(&"hs.summary.lifemodel".to_string()));
-        assert!(!hs.raw_life_model_yaml_included);
-        assert!(!hs.raw_unbounded_memory_included);
-        assert!(events.events().iter().any(|event| {
-            matches!(
-                event,
-                MainChatKernelEvent::HsContextLoaded {
-                    available: true,
-                    warning_count: 0,
-                    ..
-                }
-            )
-        }));
-    }
-
-    #[tokio::test]
-    async fn confirmed_lifemodel_context_changes_the_direct_answer_product_path() {
-        let user_text = "Write a project status confirmation email for Friday.";
-        let mut life_model = LifeModel::default_model();
-        life_model.preferences.communication_style = "简洁直接".into();
-        let hs_context = build_kernel_hs_context(&life_model, true, None, user_text, Vec::new());
-        let with_context_model =
-            ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
-        let without_context_model =
-            ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
-        let mut with_context_events = BufferedMainChatEventSink::default();
-        let mut without_context_events = BufferedMainChatEventSink::default();
-
-        let with_context = test_kernel_with_hs(with_context_model.clone(), hs_context, Vec::new())
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-lifemodel-ab-with".into(),
-                    provider_authorization: policy_allowed_authorization("lifemodel-ab-with"),
-                    messages: vec![user_message(user_text)],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut with_context_events,
-            )
-            .await;
-        let without_context = test_kernel(without_context_model.clone(), Vec::new())
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-lifemodel-ab-without".into(),
-                    provider_authorization: policy_allowed_authorization("lifemodel-ab-without"),
-                    messages: vec![user_message(user_text)],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut without_context_events,
-            )
-            .await;
+        .await;
+        let context = context.expect("bounded context");
 
         assert_eq!(
-            with_context
-                .assistant_message
-                .as_ref()
-                .expect("LifeModel-aware answer")
-                .content,
-            "简洁版：周五前请确认项目状态。"
+            context.metadata.summary_source_id.as_deref(),
+            Some("lifemodel.v2.runtime")
         );
-        assert_eq!(
-            without_context
-                .assistant_message
-                .as_ref()
-                .expect("generic answer")
-                .content,
-            "通用版：这里是一封完整的项目状态确认邮件。"
-        );
-        assert_ne!(
-            with_context.assistant_message.as_ref().unwrap().content,
-            without_context.assistant_message.as_ref().unwrap().content
-        );
-        assert!(with_context
-            .context_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata
-                .selected_source_ids
-                .contains(&"hs.summary.lifemodel".to_string())));
-        assert!(without_context
-            .context_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata
-                .selected_source_ids
-                .contains(&"hs.summary.lifemodel".to_string())));
+        let prompt = context
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "lifemodel.v2.runtime")
+            .map(|candidate| candidate.content.as_str())
+            .expect("canonical v2 candidate");
+        assert!(prompt.contains("沟通保持简洁直接"));
+        assert!(prompt.contains("LifeModel v2"));
+        assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
+        assert!(!context.metadata.raw_life_model_yaml_included);
     }
 
     #[tokio::test]
     async fn main_chat_kernel_goal_6_accepted_guidance_can_influence_without_policy_override() {
         let model = ScriptedModelClient::ok("Guided answer.");
-        let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
+        let hs_context = build_kernel_hs_context(None, Some(&packet), "Ship Goal 6", Vec::new());
         let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
@@ -20529,10 +20441,8 @@ mod tests {
     #[tokio::test]
     async fn main_chat_kernel_goal_6_routes_explicit_lifemodel_preference_to_learning_candidate() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
+        let hs_context = build_kernel_hs_context(None, Some(&packet), "Ship Goal 6", Vec::new());
         let memory_user_text =
             "Please remember this private health fact: coffee causes heart palpitations.";
         let memory_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
@@ -20598,7 +20508,7 @@ mod tests {
             .context_metadata
             .as_ref()
             .and_then(|metadata| metadata.hs_context.as_ref())
-            .is_some_and(|hs| hs.available));
+            .is_some_and(|hs| hs.accepted_guidance_count == 1));
 
         let life_model_user_text =
             "Update my life model: communication style is concise and direct.";
@@ -20673,10 +20583,8 @@ mod tests {
     #[tokio::test]
     async fn main_chat_kernel_goal_6_hs_policy_can_surface_blocker_or_proposal_outcome() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let life_model = sample_hs_life_model();
         let packet = hs_packet(true, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
+        let hs_context = build_kernel_hs_context(None, Some(&packet), "Ship Goal 6", Vec::new());
         let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
@@ -20726,8 +20634,7 @@ mod tests {
     async fn main_chat_kernel_goal_6_missing_or_malformed_hs_degrades_to_warning_metadata() {
         let model = ScriptedModelClient::ok("Basic answer still works.");
         let hs_context = build_kernel_hs_context(
-            &LifeModel::default(),
-            false,
+            None,
             None,
             "Give a basic direct answer.",
             vec![
@@ -20777,10 +20684,8 @@ mod tests {
     #[tokio::test]
     async fn main_chat_kernel_goal_6_no_raw_lifemodel_yaml_or_unbounded_memory_dump() {
         let model = ScriptedModelClient::ok("No raw prompt dump.");
-        let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
+        let hs_context = build_kernel_hs_context(None, Some(&packet), "Ship Goal 6", Vec::new());
         let raw_candidates = vec![
             ContextSourceCandidate::new(
                 ContextSourceKind::LifeModelYaml,
@@ -20818,7 +20723,7 @@ mod tests {
             .await;
 
         let prompt = model.observed_prompts().join("\n");
-        assert!(prompt.contains("Task-relevant confirmed LifeModel context"));
+        assert!(prompt.contains("Accepted HS guidance summary"));
         assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
         assert!(!prompt.contains("RAW_MEMORY_DUMP_SECRET"));
         let context = result.context_metadata.as_ref().expect("context metadata");

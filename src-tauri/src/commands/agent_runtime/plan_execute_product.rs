@@ -295,16 +295,10 @@ async fn create_plan_execute_session_with_source_run(
         }],
         layer: Layer::L2,
     };
-    let hs_packet = build_chat_runtime_hs_packet(
-        state,
-        &task,
-        &life_model,
-        &tools_prompt,
-        Some(run_id.clone()),
-    )
-    .await
-    .ok()
-    .flatten();
+    let hs_packet = build_chat_runtime_hs_packet(state, &task, &tools_prompt, Some(run_id.clone()))
+        .await
+        .ok()
+        .flatten();
     let behavior_checks = hs_packet
         .as_ref()
         .map(behavior_checks_for_packet)

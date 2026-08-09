@@ -147,7 +147,7 @@ pub use life_model_learning::{
     LifeModelLearningSensitivity, LifeModelLearningSourceKind, LifeModelLearningStore,
     LifeModelLearningSuppressionKind,
 };
-pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntimeFact};
+pub use life_model_runtime_context::{LifeModelRuntimeContextV2, LifeModelRuntimeFactV2};
 pub use life_model_view_model::{
     build_life_model_view_model_envelope, LifeModelCandidateChange,
     LifeModelCandidateDecisionStatus, LifeModelCanonicalSummary, LifeModelCanonicalV2Input,

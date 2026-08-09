@@ -805,15 +805,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         messages: agent_loop_messages,
         layer: Layer::L2,
     };
-    let hs_packet = match build_chat_runtime_hs_packet(
-        state,
-        &task,
-        life_model,
-        &tools_prompt,
-        None,
-    )
-    .await
-    {
+    let hs_packet = match build_chat_runtime_hs_packet(state, &task, &tools_prompt, None).await {
         Ok(packet) => packet,
         Err(err) => {
             let model_error_digest =

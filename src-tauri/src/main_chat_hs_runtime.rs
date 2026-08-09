@@ -4,7 +4,6 @@ use openlife_core::agent::{
     AgentTask, AgentTaskKind, HSAssetAuthorityRegistry, HSAssetCategory, HSAssetOwner, PolicyTopic,
     RiskLevel, RuntimeHSPacket,
 };
-use openlife_core::life_model::LifeModel;
 use openlife_core::privacy::{PrivacyEngine, PrivacyType};
 
 use crate::AppState;
@@ -12,7 +11,6 @@ use crate::AppState;
 pub(crate) async fn build_chat_runtime_hs_packet(
     state: &Arc<AppState>,
     task: &AgentTask,
-    life_model: &LifeModel,
     tools_prompt: &str,
     agent_run_id: Option<String>,
 ) -> Result<Option<RuntimeHSPacket>, String> {
@@ -31,9 +29,9 @@ pub(crate) async fn build_chat_runtime_hs_packet(
     let topic = classify_hs_policy_topic(&task.user_text, tools_prompt);
     let tool_requirements = hs_tool_requirements(&task.user_text, tools_prompt);
     let risk_level = hs_risk_level(topic, &tool_requirements);
-    let state_hints = serde_json::json!({
-        "energy": life_model.state.health_status.energy_level,
-    });
+    // Current state is not owned by LifeModel v2. Until a typed StateStore
+    // fact is supplied here, omit state hints rather than reading legacy YAML.
+    let state_hints = serde_json::json!({});
     let sanitized_intent_summary =
         sanitized_hs_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
 

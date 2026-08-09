@@ -2298,7 +2298,12 @@ pub struct LifeModelHumanProjectionV2 {
 }
 
 impl LifeModelVersionV2 {
-    pub fn human_yaml_projection(&self) -> Result<LifeModelHumanProjectionV2> {
+    /// Verifies that an in-memory version is bound to the canonical document
+    /// and to every persisted version identity field. Store loads perform the
+    /// same checks, but runtime consumers use this method to preserve the
+    /// boundary when a version is passed across modules or reconstructed in a
+    /// test.
+    pub fn validate_integrity(&self) -> Result<()> {
         self.document.validate()?;
         if self.model_version == 0
             || self.schema_version != LIFE_MODEL_V2_SCHEMA_VERSION
@@ -2306,8 +2311,47 @@ impl LifeModelVersionV2 {
             || self.document.model_id != self.model_id
             || self.document.digest()? != self.document_digest
         {
-            bail!("lifemodel_v2_yaml_projection_version_binding_mismatch");
+            bail!("lifemodel_v2_version_binding_mismatch");
         }
+        validate_identifier(
+            &self.materialization_id,
+            "invalid_lifemodel_v2_materialization_id",
+        )?;
+        validate_version_source_refs(&self.source_refs)?;
+        DateTime::parse_from_rfc3339(&self.created_at)
+            .map_err(|_| anyhow!("invalid_lifemodel_v2_created_at"))?;
+        match self.model_version {
+            1 if self.parent_version.is_some() || self.parent_digest.is_some() => {
+                bail!("lifemodel_v2_initial_parent_mismatch");
+            }
+            1 => {}
+            version => {
+                if self.parent_version != Some(version - 1)
+                    || self.parent_digest.as_deref().is_none_or(str::is_empty)
+                {
+                    bail!("lifemodel_v2_parent_binding_mismatch");
+                }
+            }
+        }
+        let expected = calculate_version_digest(
+            &self.model_id,
+            self.model_version,
+            self.parent_version,
+            self.parent_digest.as_deref(),
+            &self.document_digest,
+            &self.materialization_id,
+            &self.source_refs,
+            &self.created_at,
+        )?;
+        if expected != self.version_digest {
+            bail!("lifemodel_v2_version_digest_mismatch");
+        }
+        Ok(())
+    }
+
+    pub fn human_yaml_projection(&self) -> Result<LifeModelHumanProjectionV2> {
+        self.validate_integrity()
+            .context("lifemodel_v2_yaml_projection_version_binding_mismatch")?;
         let yaml = self.document.deterministic_yaml()?;
         let yaml_content_digest = format!(
             "sha256:{}",
@@ -2934,7 +2978,7 @@ fn version_change_summary(
     clippy::too_many_arguments,
     reason = "this digest must bind every persisted LifeModel version identity field"
 )]
-fn calculate_version_digest(
+pub(crate) fn calculate_version_digest(
     model_id: &str,
     model_version: u64,
     parent_version: Option<u64>,
