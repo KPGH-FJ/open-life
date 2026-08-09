@@ -3354,6 +3354,31 @@ pub(crate) async fn accept_proposal_with_state(
     accept_proposal_with_state_and_confirmation(proposal_id, state, None).await
 }
 
+async fn reconcile_lifemodel_learning_materialization_response(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    warnings: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    match crate::life_model_learning::reconcile_lifemodel_learning_materialization_with_state(
+        state, proposal,
+    )
+    .await
+    {
+        Ok(Some(receipt)) => serde_json::to_value(receipt).ok(),
+        Ok(None) => None,
+        Err(error) => {
+            warnings.push(format!(
+                "LifeModel 已由 gateway 处理，但学习候选状态尚待 reconciliation: {error}"
+            ));
+            Some(serde_json::json!({
+                "proposalId": proposal.id,
+                "status": "reconciliation_required",
+                "canonicalLifeModelChanged": true,
+            }))
+        }
+    }
+}
+
 async fn accept_proposal_with_state_and_confirmation(
     proposal_id: String,
     state: &Arc<AppState>,
@@ -3391,12 +3416,22 @@ async fn accept_proposal_with_state_and_confirmation(
                 if let Err(error) = reconcile_agent_runs_for_proposal(state, &accepted).await {
                     warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
                 }
-                Ok(confirmed_effect_reconciliation_response(
+                let learning = reconcile_lifemodel_learning_materialization_response(
+                    state,
+                    &accepted,
+                    &mut warnings,
+                )
+                .await;
+                let mut response = confirmed_effect_reconciliation_response(
                     &accepted,
                     true,
                     warnings,
                     artifact_receipt.clone(),
-                ))
+                );
+                if let Some(learning) = learning {
+                    response["lifeModelLearning"] = learning;
+                }
+                Ok(response)
             }
             Err(error) => Ok(confirmed_effect_reconciliation_response(
                 &proposal,
@@ -3420,12 +3455,15 @@ async fn accept_proposal_with_state_and_confirmation(
         if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
             warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
         }
-        return Ok(confirmed_effect_reconciliation_response(
-            &proposal,
-            true,
-            warnings,
-            artifact_receipt,
-        ));
+        let learning =
+            reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
+                .await;
+        let mut response =
+            confirmed_effect_reconciliation_response(&proposal, true, warnings, artifact_receipt);
+        if let Some(learning) = learning {
+            response["lifeModelLearning"] = learning;
+        }
+        return Ok(response);
     }
     ensure_pending_or_postponed(&proposal)?;
     validate_proposal_for_acceptance(&proposal)?;
@@ -3701,6 +3739,9 @@ async fn accept_proposal_with_state_and_confirmation(
         };
     }
     let mut warnings = Vec::new();
+    let learning_materialization =
+        reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
+            .await;
     let effect_receipt_persisted = if artifact_materialization.is_some() {
         true
     } else {
@@ -3865,6 +3906,9 @@ async fn accept_proposal_with_state_and_confirmation(
     }
     if let Some(transition) = terminal_owner_transition_response {
         response["terminalOwnerTransition"] = transition;
+    }
+    if let Some(learning) = learning_materialization {
+        response["lifeModelLearning"] = learning;
     }
     if proposal.proposal_type == ProposalType::MemoryWrite {
         let decision = memory_gateway::memory_gateway_decision_for_proposal(
@@ -4116,9 +4160,12 @@ pub(crate) async fn reject_proposal_with_state(
 ) -> Result<(), String> {
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
-    if proposal.status == ProposalStatus::Rejected
-        && sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?
-    {
+    if proposal.status == ProposalStatus::Rejected {
+        crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
+            state, &proposal,
+        )
+        .await?;
+        let _ = sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?;
         if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
             log::warn!(
                 "[proposal] AgentRun rejection replay reconciliation pending for {}: {}",
@@ -4133,6 +4180,10 @@ pub(crate) async fn reject_proposal_with_state(
     let expected_status = proposal.status;
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
+        state, &proposal,
+    )
+    .await?;
     let _task_cancelled =
         sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?;
     if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
@@ -4334,11 +4385,17 @@ pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
     let expected_status = proposal.status;
     proposal.edit(serde_json::to_value(&revised).map_err(|error| error.to_string())?);
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    let learning = crate::life_model_learning::record_lifemodel_learning_review_edit_with_state(
+        state, &proposal, statement,
+    )
+    .await?
+    .ok_or_else(|| "LifeModel learning review context disappeared after edit.".to_string())?;
     Ok(serde_json::json!({
         "proposalId": proposal.id,
         "status": "edited_pending_review",
         "resultDocumentDigest": revised.result_document_digest,
         "durableWriteExecuted": false,
+        "learning": learning,
     }))
 }
 

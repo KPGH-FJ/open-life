@@ -2742,6 +2742,9 @@ export type LifeModelLearningCandidate = {
   >;
   confirmedAt?: string;
   proposalId?: string;
+  decidedAt?: string;
+  materializedVersion?: number;
+  materializedDocumentDigest?: string;
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
@@ -2786,6 +2789,19 @@ export type LifeModelLearningDecisionReceipt = {
   contentScrubbed: boolean;
   proposalChanged: false;
   canonicalLifeModelChanged: false;
+};
+
+export type LifeModelLearningReviewDecisionReceipt = {
+  candidateId: string;
+  proposalId: string;
+  changed: boolean;
+  status: "proposed" | "rejected" | "materialized";
+  contentScrubbed: boolean;
+  correctionObservationId?: string;
+  cooldownUntil?: string;
+  materializedVersion?: number;
+  materializedDocumentDigest?: string;
+  canonicalLifeModelChanged: boolean;
 };
 
 export type LifeModelViewModel = {
@@ -4412,6 +4428,7 @@ export async function editLifeModelLearningProposal(
   status: "edited_pending_review";
   resultDocumentDigest: string;
   durableWriteExecuted: false;
+  learning: LifeModelLearningReviewDecisionReceipt;
 }> {
   return safeInvoke("edit_lifemodel_learning_proposal", {
     request: { proposalId, statement },
@@ -4697,6 +4714,13 @@ export interface ConfirmedAcceptProposalResult {
     errorDigest?: string;
   };
   artifactMaterialization?: ArtifactMaterializationReceipt;
+  lifeModelLearning?:
+    | LifeModelLearningReviewDecisionReceipt
+    | {
+        proposalId: string;
+        status: "reconciliation_required";
+        canonicalLifeModelChanged: true;
+      };
   blockedAction?: unknown;
   canContinue?: boolean;
 }

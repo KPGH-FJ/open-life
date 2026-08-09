@@ -5,13 +5,14 @@ use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLeve
 use openlife_core::agent::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     LifeModelLearningCapture, LifeModelLearningCaptureReceipt, LifeModelLearningDecisionReceipt,
-    LifeModelLearningEvidencePolarity, LifeModelLearningExplicitness, LifeModelLearningSensitivity,
-    LifeModelLearningSourceKind, MainChatMemoryCandidate, MemoryCandidateKind, MemoryDestination,
-    ProposalStatus, ReviewWorkflow,
+    LifeModelLearningEvidencePolarity, LifeModelLearningExplicitness,
+    LifeModelLearningMaterializationEvidence, LifeModelLearningReviewDecisionReceipt,
+    LifeModelLearningSensitivity, LifeModelLearningSourceKind, MainChatMemoryCandidate,
+    MemoryCandidateKind, MemoryDestination, ProposalStatus, ReviewWorkflow,
 };
 use openlife_core::life_model::v2::{
-    LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
-    DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_TYPED_DIFF_PATH,
+    LifeModelItemV2, LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2,
+    LifeModelUserValueV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_TYPED_DIFF_PATH,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -165,10 +166,7 @@ pub(crate) async fn stage_candidate_for_review_with_state(
         .clone()
         .ok_or_else(|| "lifemodel_learning_candidate_confirmation_missing".to_string())?;
     let item_id = format!("learning:{}", candidate.id);
-    let mut source_refs = vec![
-        format!("proposal:{}", proposal.id),
-        format!("lifemodel-learning-candidate:{}", candidate.id),
-    ];
+    let mut source_refs = vec![format!("lifemodel-learning-candidate:{}", candidate.id)];
     for source_ref in candidate.source_refs.iter().take(8) {
         if !source_refs.contains(source_ref) {
             source_refs.push(source_ref.clone());
@@ -202,6 +200,8 @@ pub(crate) async fn stage_candidate_for_review_with_state(
         "independentSupportCount": candidate.independent_support_count,
         "sourceRefs": candidate.source_refs.iter().take(8).cloned().collect::<Vec<_>>(),
         "sourceRefsOmitted": candidate.source_refs.len().saturating_sub(8),
+        "observationIds": candidate.observation_ids.iter().take(8).cloned().collect::<Vec<_>>(),
+        "observationIdsOmitted": candidate.observation_ids.len().saturating_sub(8),
         "sourceKinds": candidate.source_kinds,
         "confirmedAt": confirmed_at,
     }));
@@ -269,6 +269,149 @@ pub(crate) async fn stage_candidate_for_review_with_state(
         result_document_digest: diff.result_document_digest,
         canonical_life_model_changed: false,
     })
+}
+
+pub(crate) async fn record_lifemodel_learning_review_edit_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    statement: &str,
+) -> Result<Option<LifeModelLearningReviewDecisionReceipt>, String> {
+    let context =
+        openlife_core::agent::review_decision_context::build_review_decision_context(proposal, &[])
+            .life_model_learning;
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let store = state
+        .life_model_learning_store
+        .as_ref()
+        .ok_or_else(|| "lifemodel_learning_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .record_review_edit(
+            &proposal.id,
+            &context.candidate_id,
+            statement,
+            &Utc::now().to_rfc3339(),
+        )
+        .map(Some)
+        .map_err(|error| format!("record_lifemodel_learning_review_edit_failed:{error}"))
+}
+
+pub(crate) async fn record_lifemodel_learning_review_rejected_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Option<LifeModelLearningReviewDecisionReceipt>, String> {
+    let context =
+        openlife_core::agent::review_decision_context::build_review_decision_context(proposal, &[])
+            .life_model_learning;
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let store = state
+        .life_model_learning_store
+        .as_ref()
+        .ok_or_else(|| "lifemodel_learning_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .record_review_rejected(
+            &proposal.id,
+            &context.candidate_id,
+            &Utc::now().to_rfc3339(),
+        )
+        .map(Some)
+        .map_err(|error| format!("record_lifemodel_learning_review_rejection_failed:{error}"))
+}
+
+pub(crate) async fn reconcile_lifemodel_learning_materialization_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Option<LifeModelLearningReviewDecisionReceipt>, String> {
+    let context =
+        openlife_core::agent::review_decision_context::build_review_decision_context(proposal, &[])
+            .life_model_learning;
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let diff: LifeModelTypedDiffV2 = serde_json::from_value(proposal.after.clone())
+        .map_err(|_| "lifemodel_learning_materialized_diff_invalid".to_string())?;
+    let (section, value) = match diff.operations.as_slice() {
+        [LifeModelTypedOperationV2::Add {
+            section,
+            item: LifeModelItemV2::Statement(item),
+        }] => (
+            *section,
+            LifeModelUserValueV2::Statement {
+                statement: item.statement.clone(),
+            },
+        ),
+        _ => return Err("lifemodel_learning_materialized_operation_invalid".into()),
+    };
+    let expected_version = diff
+        .base_version
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "lifemodel_learning_materialized_version_overflow".to_string())?;
+    let store = state
+        .life_model_learning_store
+        .as_ref()
+        .ok_or_else(|| "lifemodel_learning_store_unavailable".to_string())?;
+    let candidate = store
+        .lock()
+        .await
+        .get_candidate_by_proposal_id(&proposal.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "lifemodel_learning_materialized_candidate_missing".to_string())?;
+    if candidate.id != context.candidate_id {
+        return Err("lifemodel_learning_materialized_candidate_mismatch".into());
+    }
+    let version = state
+        .life_model_manager
+        .lock()
+        .await
+        .load_v2_version(&diff.model_id, expected_version)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "lifemodel_learning_materialized_version_missing".to_string())?;
+    let proposal_ref = format!("proposal:{}", proposal.id);
+    let candidate_ref = format!("lifemodel-learning-candidate:{}", context.candidate_id);
+    let mut reviewed_observation_ids = context.observation_ids.clone();
+    if let Some(latest) = candidate.observation_ids.last() {
+        if !reviewed_observation_ids.contains(latest) {
+            reviewed_observation_ids.push(latest.clone());
+        }
+    }
+    let observation_refs = reviewed_observation_ids
+        .iter()
+        .map(|id| format!("lifemodel-learning-observation:{id}"))
+        .collect::<Vec<_>>();
+    if version.document_digest != diff.result_document_digest
+        || version.materialization_id != proposal_ref
+        || !version.source_refs.contains(&proposal_ref)
+        || !version.source_refs.contains(&candidate_ref)
+        || observation_refs
+            .iter()
+            .any(|reference| !version.source_refs.contains(reference))
+    {
+        return Err("lifemodel_learning_materialized_version_binding_mismatch".into());
+    }
+    store
+        .lock()
+        .await
+        .record_review_materialized(
+            &proposal.id,
+            &context.candidate_id,
+            section,
+            &value,
+            LifeModelLearningMaterializationEvidence {
+                model_version: version.model_version,
+                document_digest: &version.document_digest,
+            },
+            &Utc::now().to_rfc3339(),
+        )
+        .map(Some)
+        .map_err(|error| format!("record_lifemodel_learning_materialization_failed:{error}"))
 }
 
 pub(crate) async fn current_workspace_ref(state: &Arc<AppState>) -> String {
@@ -1401,6 +1544,8 @@ mod tests {
         .unwrap();
         assert_eq!(edit["status"], "edited_pending_review");
         assert_eq!(edit["durableWriteExecuted"], false);
+        assert_eq!(edit["learning"]["status"], "proposed");
+        assert_eq!(edit["learning"]["canonicalLifeModelChanged"], false);
         let proposal = state
             .proposal_store
             .as_ref()
@@ -1427,6 +1572,259 @@ mod tests {
                 .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
                 .unwrap(),
             canonical_before
+        );
+
+        let accepted = crate::commands::proposal::accept_proposal_with_state(
+            staged.proposal_id.clone(),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted["lifeModelLearning"]["status"], "materialized");
+        assert_eq!(
+            accepted["lifeModelLearning"]["canonicalLifeModelChanged"],
+            true
+        );
+        let version = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(version.model_version, 2);
+        assert_eq!(
+            version.materialization_id,
+            format!("proposal:{}", staged.proposal_id)
+        );
+        assert!(version.source_refs.contains(&format!(
+            "lifemodel-learning-candidate:{}",
+            captured.candidate.id
+        )));
+        let materialized = state
+            .life_model_learning_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_candidate_by_proposal_id(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialized.status,
+            openlife_core::agent::LifeModelLearningCandidateStatus::Materialized
+        );
+        assert_eq!(materialized.materialized_version, Some(2));
+        assert!(materialized
+            .source_kinds
+            .contains(&LifeModelLearningSourceKind::UserCorrection));
+        for observation_id in materialized.observation_ids {
+            assert!(version
+                .source_refs
+                .contains(&format!("lifemodel-learning-observation:{observation_id}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn postponed_learning_review_is_not_rejection_and_reject_enters_cooldown_without_write() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        let user_text = "Update my life model: communication style is concise and direct.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "lifemodel-learning-decisions",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
+        let candidate = routing
+            .candidates
+            .iter()
+            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+            .unwrap();
+        let captured = capture_explicit_main_chat_candidate(
+            &state,
+            candidate,
+            &decision.policy_decision,
+            user_text,
+        )
+        .await
+        .unwrap();
+        let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+            .await
+            .unwrap();
+        let canonical_before = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap();
+
+        crate::commands::proposal::postpone_proposal_with_state(staged.proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        let deferred_candidate = state
+            .life_model_learning_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_candidate_by_proposal_id(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            deferred_candidate.status,
+            openlife_core::agent::LifeModelLearningCandidateStatus::Proposed
+        );
+
+        crate::commands::proposal::reject_proposal_with_state(staged.proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        let rejected_proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        let replay =
+            record_lifemodel_learning_review_rejected_with_state(&state, &rejected_proposal)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(!replay.changed);
+        assert_eq!(
+            replay.status,
+            openlife_core::agent::LifeModelLearningCandidateStatus::Rejected
+        );
+        assert!(replay.content_scrubbed);
+        assert!(replay.cooldown_until.is_some());
+        assert_eq!(
+            state
+                .life_model_manager
+                .lock()
+                .await
+                .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+                .unwrap(),
+            canonical_before
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_learning_review_never_marks_candidate_materialized_or_rebases() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        let user_text = "Update my life model: communication style is concise and direct.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "lifemodel-learning-stale",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
+        let candidate = routing
+            .candidates
+            .iter()
+            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+            .unwrap();
+        let captured = capture_explicit_main_chat_candidate(
+            &state,
+            candidate,
+            &decision.policy_decision,
+            user_text,
+        )
+        .await
+        .unwrap();
+        let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+            .await
+            .unwrap();
+
+        let current = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap()
+            .unwrap();
+        let manual_item = LifeModelUserValueV2::Statement {
+            statement: "A separate reviewed fact".into(),
+        }
+        .into_item(
+            "manual:separate-fact".into(),
+            vec!["manual:separate-review".into()],
+            "2026-08-09T10:00:00Z".into(),
+        );
+        let manual_diff = LifeModelTypedDiffV2::from_operations_for_review(
+            DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+            Some(&current),
+            vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::StablePreferences,
+                item: manual_item,
+            }],
+            true,
+        )
+        .unwrap();
+        let mut manual_proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            serde_json::to_value(&manual_diff).unwrap(),
+            "Separate reviewed LifeModel change.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        manual_proposal.base_hash = manual_diff.base_document_digest.clone();
+        let manual_id = manual_proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&manual_proposal)
+            .unwrap();
+        crate::commands::proposal::accept_proposal_with_state(manual_id, &state)
+            .await
+            .unwrap();
+
+        let error = crate::commands::proposal::accept_proposal_with_state(
+            staged.proposal_id.clone(),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("lifemodel_v2_typed_diff_stale_base"),
+            "unexpected stale learning proposal error: {error}"
+        );
+        let candidate = state
+            .life_model_learning_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_candidate_by_proposal_id(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            candidate.status,
+            openlife_core::agent::LifeModelLearningCandidateStatus::Proposed
+        );
+        assert_eq!(candidate.materialized_version, None);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_proposal(&staged.proposal_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Pending
         );
     }
 

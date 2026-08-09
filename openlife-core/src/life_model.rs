@@ -1898,6 +1898,8 @@ impl LifeModelManager {
         let proposal_ref = format!("proposal:{proposal_id}");
         let mut source_refs = vec![proposal_ref.clone()];
         source_refs.extend(additional_source_refs.iter().cloned());
+        source_refs.sort();
+        source_refs.dedup();
         v2::LifeModelV2Store::open(self.v2_store_path())?.materialize_typed_diff(
             diff,
             &proposal_ref,

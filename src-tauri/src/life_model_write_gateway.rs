@@ -758,6 +758,59 @@ pub(crate) async fn materialize_accepted_lifemodel_v2_typed_diff_with_state(
             }
         };
     let mut additional_source_refs = Vec::new();
+    if let Some(learning) =
+        openlife_core::agent::review_decision_context::build_review_decision_context(proposal, &[])
+            .life_model_learning
+    {
+        additional_source_refs.push(format!(
+            "lifemodel-learning-candidate:{}",
+            learning.candidate_id
+        ));
+        additional_source_refs.extend(
+            learning
+                .observation_ids
+                .into_iter()
+                .map(|id| format!("lifemodel-learning-observation:{id}")),
+        );
+        additional_source_refs.extend(learning.source_refs);
+        let Some(store) = state.life_model_learning_store.as_ref() else {
+            return Ok(failed(
+                "lifemodel_v2_typed_diff_precondition_failed",
+                "lifemodel_learning_store_unavailable".into(),
+            ));
+        };
+        let candidate = match store
+            .lock()
+            .await
+            .get_candidate_by_proposal_id(&proposal.id)
+        {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => {
+                return Ok(failed(
+                    "lifemodel_v2_typed_diff_precondition_failed",
+                    "lifemodel_learning_materialization_candidate_missing".into(),
+                ))
+            }
+            Err(error) => {
+                return Ok(failed(
+                    "lifemodel_v2_typed_diff_precondition_failed",
+                    format!("lifemodel_learning_materialization_candidate_unavailable:{error}"),
+                ))
+            }
+        };
+        if candidate.id != learning.candidate_id {
+            return Ok(failed(
+                "lifemodel_v2_typed_diff_precondition_failed",
+                "lifemodel_learning_materialization_candidate_mismatch".into(),
+            ));
+        }
+        if let Some(id) = candidate.observation_ids.last() {
+            additional_source_refs.push(format!("lifemodel-learning-observation:{id}"));
+        }
+        if let Some(source_ref) = candidate.source_refs.last() {
+            additional_source_refs.push(source_ref.clone());
+        }
+    }
     if let Some(detail) = proposal
         .source_detail
         .as_deref()

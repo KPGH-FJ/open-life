@@ -186,7 +186,14 @@ export const tauriGovernedActionDataSource: GovernedActionDataSource = {
       receipt.proposalId !== proposalId ||
       receipt.status !== "edited_pending_review" ||
       !receipt.resultDocumentDigest ||
-      receipt.durableWriteExecuted
+      receipt.durableWriteExecuted ||
+      !receipt.learning ||
+      !receipt.learning.candidateId ||
+      receipt.learning.proposalId !== proposalId ||
+      receipt.learning.status !== "proposed" ||
+      receipt.learning.contentScrubbed ||
+      !receipt.learning.correctionObservationId ||
+      receipt.learning.canonicalLifeModelChanged
     ) {
       throw new Error("lifemodel_learning_edit_receipt_unverified");
     }

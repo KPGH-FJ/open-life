@@ -138,8 +138,10 @@ pub use life_model_learning::{
     life_model_learning_candidate_snapshot_digest, LifeModelLearningCandidate,
     LifeModelLearningCandidateStatus, LifeModelLearningCapture, LifeModelLearningCaptureReceipt,
     LifeModelLearningDecisionReceipt, LifeModelLearningEvidencePolarity,
-    LifeModelLearningExplicitness, LifeModelLearningObservation, LifeModelLearningSensitivity,
-    LifeModelLearningSourceKind, LifeModelLearningStore, LifeModelLearningSuppressionKind,
+    LifeModelLearningExplicitness, LifeModelLearningMaterializationEvidence,
+    LifeModelLearningObservation, LifeModelLearningReviewDecisionReceipt,
+    LifeModelLearningSensitivity, LifeModelLearningSourceKind, LifeModelLearningStore,
+    LifeModelLearningSuppressionKind,
 };
 pub use life_model_runtime_context::{LifeModelRuntimeContextV1, LifeModelRuntimeFact};
 pub use life_model_view_model::{

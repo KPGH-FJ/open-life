@@ -11,6 +11,7 @@ const MAX_SUMMARY_CHARS: usize = 240;
 const MAX_VALUE_CHARS: usize = 512;
 const MAX_REF_CHARS: usize = 256;
 const MAX_LIST_LIMIT: usize = 100;
+const REJECTED_REVIEW_COOLDOWN_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -240,6 +241,12 @@ pub struct LifeModelLearningCandidate {
     pub confirmed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_document_digest: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: String,
@@ -271,6 +278,31 @@ pub struct LifeModelLearningDecisionReceipt {
     pub content_scrubbed: bool,
     pub proposal_changed: bool,
     pub canonical_life_model_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelLearningReviewDecisionReceipt {
+    pub candidate_id: String,
+    pub proposal_id: String,
+    pub changed: bool,
+    pub status: LifeModelLearningCandidateStatus,
+    pub content_scrubbed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correction_observation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_document_digest: Option<String>,
+    pub canonical_life_model_changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifeModelLearningMaterializationEvidence<'a> {
+    pub model_version: u64,
+    pub document_digest: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +413,7 @@ impl LifeModelLearningStore {
                     suppression_digest TEXT NOT NULL,
                     suggestion_class TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    expires_at TEXT,
                     UNIQUE(workspace_ref, suppression_kind, suppression_digest)
                  );
                  CREATE INDEX IF NOT EXISTS idx_lifemodel_learning_suppression_workspace
@@ -420,6 +453,9 @@ impl LifeModelLearningStore {
             ("independent_support_count", "INTEGER NOT NULL DEFAULT 1"),
             ("body_scrubbed", "INTEGER NOT NULL DEFAULT 0"),
             ("proposal_id", "TEXT"),
+            ("decided_at", "TEXT"),
+            ("materialized_version", "INTEGER"),
+            ("materialized_document_digest", "TEXT"),
         ] {
             crate::sqlite_migration::ensure_column(
                 &connection,
@@ -428,6 +464,12 @@ impl LifeModelLearningStore {
                 definition,
             )?;
         }
+        crate::sqlite_migration::ensure_column(
+            &connection,
+            "life_model_learning_suppressions",
+            "expires_at",
+            "TEXT",
+        )?;
         migrate_5_3a_rows(&connection)?;
         let store = Self {
             conn: Mutex::new(connection),
@@ -532,8 +574,9 @@ impl LifeModelLearningStore {
             .query_row(
                 "SELECT 1 FROM life_model_learning_suppressions
                  WHERE workspace_ref = ?1 AND suppression_kind = 'exact_candidate'
-                   AND suppression_digest = ?2 LIMIT 1",
-                params![capture.workspace_ref, semantic_digest],
+                   AND suppression_digest = ?2
+                   AND (expires_at IS NULL OR julianday(expires_at) > julianday(?3)) LIMIT 1",
+                params![capture.workspace_ref, semantic_digest, capture.observed_at],
                 |_| Ok(()),
             )
             .optional()
@@ -544,8 +587,9 @@ impl LifeModelLearningStore {
             .query_row(
                 "SELECT 1 FROM life_model_learning_suppressions
                  WHERE workspace_ref = ?1 AND suppression_kind = 'suggestion_class'
-                   AND suppression_digest = ?2 LIMIT 1",
-                params![capture.workspace_ref, class_digest],
+                   AND suppression_digest = ?2
+                   AND (expires_at IS NULL OR julianday(expires_at) > julianday(?3)) LIMIT 1",
+                params![capture.workspace_ref, class_digest, capture.observed_at],
                 |_| Ok(()),
             )
             .optional()
@@ -622,7 +666,25 @@ impl LifeModelLearningStore {
                 bail!("lifemodel_learning_conflicted_candidate_requires_correction");
             }
         }
-        let candidate_id = existing_candidate_id.unwrap_or(proposed_candidate_id);
+        let candidate_id = match existing_candidate_id {
+            Some(candidate_id) => candidate_id,
+            None if transaction
+                .query_row(
+                    "SELECT 1 FROM life_model_learning_candidates WHERE id = ?1",
+                    [&proposed_candidate_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some() =>
+            {
+                format!(
+                    "lmc_{}_{}",
+                    &semantic_digest[7..23],
+                    &identity_digest[7..15]
+                )
+            }
+            None => proposed_candidate_id,
+        };
         if transaction
             .query_row(
                 "SELECT 1 FROM life_model_learning_candidates WHERE id = ?1",
@@ -901,6 +963,369 @@ impl LifeModelLearningStore {
         load_candidate(&connection, candidate_id)
     }
 
+    pub fn get_candidate_by_proposal_id(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<LifeModelLearningCandidate>> {
+        validate_ref(proposal_id, "invalid_lifemodel_learning_proposal_id")?;
+        let connection = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
+        let candidate_id = connection
+            .query_row(
+                "SELECT id FROM life_model_learning_candidates
+                 WHERE proposal_id = ?1 AND body_scrubbed = 0 LIMIT 1",
+                [proposal_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        candidate_id
+            .map(|candidate_id| load_candidate(&connection, &candidate_id))
+            .transpose()
+    }
+
+    pub fn record_review_edit(
+        &self,
+        proposal_id: &str,
+        expected_candidate_id: &str,
+        statement: &str,
+        now: &str,
+    ) -> Result<LifeModelLearningReviewDecisionReceipt> {
+        validate_ref(proposal_id, "invalid_lifemodel_learning_proposal_id")?;
+        validate_ref(
+            expected_candidate_id,
+            "invalid_lifemodel_learning_candidate_id",
+        )?;
+        let statement = statement.trim();
+        if statement.is_empty() || statement.chars().count() > MAX_VALUE_CHARS {
+            bail!("invalid_lifemodel_learning_review_edit_statement");
+        }
+        let now = parse_time(now, "invalid_lifemodel_learning_decision_time")?;
+        let value = LifeModelUserValueV2::Statement {
+            statement: statement.to_string(),
+        };
+        let value_json = serde_json::to_string(&value)?;
+        let value_digest = sha256_prefixed(value_json.as_bytes());
+        let source_ref = format!("review-edit:{proposal_id}:{}", &value_digest[7..23]);
+        let source_digest = sha256_prefixed(
+            format!("{proposal_id}\0{expected_candidate_id}\0{value_json}").as_bytes(),
+        );
+        let identity_digest = sha256_prefixed(
+            format!(
+                "{proposal_id}\0{expected_candidate_id}\0{source_ref}\0{source_digest}\0{value_json}"
+            )
+            .as_bytes(),
+        );
+        let observation_id = format!("lmo_{}", &identity_digest[7..31]);
+        let mut connection = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
+        let transaction = connection.transaction()?;
+        let (workspace_ref, section, sensitivity) = transaction
+            .query_row(
+                "SELECT workspace_ref, section, sensitivity
+                 FROM life_model_learning_candidates
+                 WHERE id = ?1 AND proposal_id = ?2 AND status = 'proposed'
+                   AND body_scrubbed = 0",
+                params![expected_candidate_id, proposal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("lifemodel_learning_review_candidate_not_proposed"))?;
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO life_model_learning_observations (
+                id, identity_digest, workspace_ref, source_ref, source_digest,
+                independence_ref, summary, section, value_json, source_kind, polarity,
+                explicitness, sensitivity, observed_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'user_correction',
+                       'corrects', 'explicit_user_request', ?10, ?11, ?12)",
+            params![
+                observation_id,
+                identity_digest,
+                workspace_ref,
+                source_ref,
+                source_digest,
+                format!("review:{proposal_id}"),
+                statement,
+                section,
+                value_json,
+                sensitivity,
+                now.to_rfc3339(),
+                (now + chrono::Duration::days(30)).to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO life_model_learning_candidate_observations
+                (candidate_id, observation_id) VALUES (?1, ?2)",
+            params![expected_candidate_id, observation_id],
+        )?;
+        if inserted == 1 {
+            transaction.execute(
+                "UPDATE life_model_learning_candidates
+                 SET support_count = support_count + 1, updated_at = ?3
+                 WHERE id = ?1 AND proposal_id = ?2 AND status = 'proposed'",
+                params![expected_candidate_id, proposal_id, now.to_rfc3339()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(LifeModelLearningReviewDecisionReceipt {
+            candidate_id: expected_candidate_id.into(),
+            proposal_id: proposal_id.into(),
+            changed: inserted == 1,
+            status: LifeModelLearningCandidateStatus::Proposed,
+            content_scrubbed: false,
+            correction_observation_id: Some(observation_id),
+            cooldown_until: None,
+            materialized_version: None,
+            materialized_document_digest: None,
+            canonical_life_model_changed: false,
+        })
+    }
+
+    pub fn record_review_rejected(
+        &self,
+        proposal_id: &str,
+        expected_candidate_id: &str,
+        now: &str,
+    ) -> Result<LifeModelLearningReviewDecisionReceipt> {
+        validate_ref(proposal_id, "invalid_lifemodel_learning_proposal_id")?;
+        validate_ref(
+            expected_candidate_id,
+            "invalid_lifemodel_learning_candidate_id",
+        )?;
+        let now = parse_time(now, "invalid_lifemodel_learning_decision_time")?;
+        let cooldown_until =
+            (now + chrono::Duration::days(REJECTED_REVIEW_COOLDOWN_DAYS)).to_rfc3339();
+        let mut connection = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
+        let transaction = connection.transaction()?;
+        let owner = transaction
+            .query_row(
+                "SELECT workspace_ref, semantic_digest, suggestion_class, status, body_scrubbed
+                 FROM life_model_learning_candidates
+                 WHERE id = ?1 AND proposal_id = ?2",
+                params![expected_candidate_id, proposal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("lifemodel_learning_review_candidate_missing"))?;
+        if owner.3 == LifeModelLearningCandidateStatus::Rejected.as_str() && owner.4 != 0 {
+            let persisted_cooldown_until = transaction
+                .query_row(
+                    "SELECT expires_at FROM life_model_learning_suppressions
+                     WHERE workspace_ref = ?1
+                       AND suppression_kind = 'exact_candidate'
+                       AND suppression_digest = ?2",
+                    params![owner.0, owner.1],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            transaction.commit()?;
+            return Ok(LifeModelLearningReviewDecisionReceipt {
+                candidate_id: expected_candidate_id.into(),
+                proposal_id: proposal_id.into(),
+                changed: false,
+                status: LifeModelLearningCandidateStatus::Rejected,
+                content_scrubbed: true,
+                correction_observation_id: None,
+                cooldown_until: persisted_cooldown_until,
+                materialized_version: None,
+                materialized_document_digest: None,
+                canonical_life_model_changed: false,
+            });
+        }
+        if owner.3 != LifeModelLearningCandidateStatus::Proposed.as_str() || owner.4 != 0 {
+            bail!("lifemodel_learning_review_candidate_not_proposed");
+        }
+        let suppression_identity =
+            sha256_prefixed(format!("{}\0exact_candidate\0{}", owner.0, owner.1).as_bytes());
+        transaction.execute(
+            "INSERT INTO life_model_learning_suppressions
+                (id, workspace_ref, suppression_kind, suppression_digest,
+                 suggestion_class, created_at, expires_at)
+             VALUES (?1, ?2, 'exact_candidate', ?3, ?4, ?5, ?6)
+             ON CONFLICT(workspace_ref, suppression_kind, suppression_digest) DO UPDATE SET
+                created_at = excluded.created_at,
+                expires_at = CASE
+                    WHEN life_model_learning_suppressions.expires_at IS NULL THEN NULL
+                    ELSE excluded.expires_at
+                END",
+            params![
+                format!("lms_{}", &suppression_identity[7..31]),
+                owner.0,
+                owner.1,
+                owner.2,
+                now.to_rfc3339(),
+                cooldown_until,
+            ],
+        )?;
+        scrub_candidate_body(
+            &transaction,
+            expected_candidate_id,
+            LifeModelLearningCandidateStatus::Rejected,
+            &now.to_rfc3339(),
+        )?;
+        transaction.execute(
+            "UPDATE life_model_learning_candidates SET decided_at = ?2 WHERE id = ?1",
+            params![expected_candidate_id, now.to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(LifeModelLearningReviewDecisionReceipt {
+            candidate_id: expected_candidate_id.into(),
+            proposal_id: proposal_id.into(),
+            changed: true,
+            status: LifeModelLearningCandidateStatus::Rejected,
+            content_scrubbed: true,
+            correction_observation_id: None,
+            cooldown_until: Some(cooldown_until),
+            materialized_version: None,
+            materialized_document_digest: None,
+            canonical_life_model_changed: false,
+        })
+    }
+
+    pub fn record_review_materialized(
+        &self,
+        proposal_id: &str,
+        expected_candidate_id: &str,
+        section: LifeModelSectionV2,
+        value: &LifeModelUserValueV2,
+        evidence: LifeModelLearningMaterializationEvidence<'_>,
+        now: &str,
+    ) -> Result<LifeModelLearningReviewDecisionReceipt> {
+        validate_ref(proposal_id, "invalid_lifemodel_learning_proposal_id")?;
+        validate_ref(
+            expected_candidate_id,
+            "invalid_lifemodel_learning_candidate_id",
+        )?;
+        validate_digest(evidence.document_digest)?;
+        if evidence.model_version == 0 {
+            bail!("invalid_lifemodel_learning_materialized_version");
+        }
+        let now = parse_time(now, "invalid_lifemodel_learning_decision_time")?.to_rfc3339();
+        let statement = match value {
+            LifeModelUserValueV2::Statement { statement }
+                if !statement.trim().is_empty() && statement.chars().count() <= MAX_VALUE_CHARS =>
+            {
+                statement.trim()
+            }
+            _ => bail!("unsupported_lifemodel_learning_materialized_value"),
+        };
+        let value_json = serde_json::to_string(value)?;
+        let mut connection = self
+            .conn
+            .lock()
+            .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
+        let transaction = connection.transaction()?;
+        let owner = transaction
+            .query_row(
+                "SELECT workspace_ref, target_key, status, materialized_version,
+                        materialized_document_digest, section, body_scrubbed
+                 FROM life_model_learning_candidates
+                 WHERE id = ?1 AND proposal_id = ?2",
+                params![expected_candidate_id, proposal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("lifemodel_learning_review_candidate_missing"))?;
+        if owner.5 != section_name(section) || owner.6 != 0 {
+            bail!("lifemodel_learning_materialized_candidate_identity_mismatch");
+        }
+        if owner.2 == LifeModelLearningCandidateStatus::Materialized.as_str()
+            && owner.3 == Some(evidence.model_version as i64)
+            && owner.4.as_deref() == Some(evidence.document_digest)
+        {
+            transaction.commit()?;
+            return Ok(LifeModelLearningReviewDecisionReceipt {
+                candidate_id: expected_candidate_id.into(),
+                proposal_id: proposal_id.into(),
+                changed: false,
+                status: LifeModelLearningCandidateStatus::Materialized,
+                content_scrubbed: false,
+                correction_observation_id: None,
+                cooldown_until: None,
+                materialized_version: Some(evidence.model_version),
+                materialized_document_digest: Some(evidence.document_digest.into()),
+                canonical_life_model_changed: true,
+            });
+        }
+        if owner.2 != LifeModelLearningCandidateStatus::Proposed.as_str() {
+            bail!("lifemodel_learning_review_candidate_not_proposed");
+        }
+        let semantic_digest = sha256_prefixed(
+            format!(
+                "{}\0{}\0{}\0{}",
+                owner.0,
+                owner.1,
+                section_name(section),
+                normalize_semantic_value(&value_json)
+            )
+            .as_bytes(),
+        );
+        let changed = transaction.execute(
+            "UPDATE life_model_learning_candidates
+             SET summary = ?3, value_json = ?4, semantic_digest = ?5,
+                 status = 'materialized', decided_at = ?6, materialized_version = ?7,
+                 materialized_document_digest = ?8, updated_at = ?6
+             WHERE id = ?1 AND proposal_id = ?2 AND status = 'proposed' AND body_scrubbed = 0",
+            params![
+                expected_candidate_id,
+                proposal_id,
+                statement,
+                value_json,
+                semantic_digest,
+                now,
+                evidence.model_version as i64,
+                evidence.document_digest,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("lifemodel_learning_materialized_candidate_transition_conflict");
+        }
+        transaction.commit()?;
+        Ok(LifeModelLearningReviewDecisionReceipt {
+            candidate_id: expected_candidate_id.into(),
+            proposal_id: proposal_id.into(),
+            changed: true,
+            status: LifeModelLearningCandidateStatus::Materialized,
+            content_scrubbed: false,
+            correction_observation_id: None,
+            cooldown_until: None,
+            materialized_version: Some(evidence.model_version),
+            materialized_document_digest: Some(evidence.document_digest.into()),
+            canonical_life_model_changed: true,
+        })
+    }
+
     pub fn confirm_candidate_as_user_feedback(
         &self,
         workspace_ref: &str,
@@ -1043,6 +1468,11 @@ impl LifeModelLearningStore {
             .lock()
             .map_err(|error| anyhow!("lifemodel_learning_store_lock_poisoned:{error}"))?;
         let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM life_model_learning_suppressions
+             WHERE expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?1)",
+            [&now],
+        )?;
         transaction.execute(
             "UPDATE life_model_learning_observations
              SET summary = '', value_json = '{\"statement\":\"\"}', body_scrubbed = 1
@@ -1377,7 +1807,7 @@ fn candidate_columns() -> &'static str {
     "id, observation_id, workspace_ref, summary, section, value_json, status,
      explicitness, sensitivity, source_ref, created_at, updated_at, expires_at,
      target_key, suggestion_class, support_count, opposition_count, independent_support_count,
-     proposal_id"
+     proposal_id, decided_at, materialized_version, materialized_document_digest"
 }
 
 fn observation_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningObservation> {
@@ -1449,6 +1879,11 @@ fn candidate_from_row(row: &Row<'_>) -> rusqlite::Result<LifeModelLearningCandid
         source_kinds: Vec::new(),
         confirmed_at: None,
         proposal_id: row.get(18)?,
+        decided_at: row.get(19)?,
+        materialized_version: row
+            .get::<_, Option<i64>>(20)?
+            .map(|value| value.max(0) as u64),
+        materialized_document_digest: row.get(21)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
         expires_at: row.get(12)?,
@@ -2130,6 +2565,161 @@ mod tests {
         recurrence.source_digest = format!("sha256:{}", "d".repeat(64));
         recurrence.independence_ref = "message:later".into();
         assert!(store.capture_explicit_candidate(recurrence).is_err());
+    }
+
+    #[test]
+    fn review_edit_and_materialization_preserve_exact_lifecycle_binding() {
+        let store = LifeModelLearningStore::new_in_memory().unwrap();
+        let captured = store
+            .capture_explicit_candidate(capture("workspace:one", "message:one"))
+            .unwrap();
+        let snapshot = life_model_learning_candidate_snapshot_digest(&captured.candidate).unwrap();
+        let proposal_id = "proposal:learning-one";
+        store
+            .link_review_proposal(
+                "workspace:one",
+                &captured.candidate.id,
+                &snapshot,
+                proposal_id,
+                "2026-08-09T08:00:00Z",
+            )
+            .unwrap();
+
+        let edit = store
+            .record_review_edit(
+                proposal_id,
+                &captured.candidate.id,
+                "Prefer concise updates with the conclusion first.",
+                "2026-08-09T09:00:00Z",
+            )
+            .unwrap();
+        assert!(edit.changed);
+        assert_eq!(edit.status, LifeModelLearningCandidateStatus::Proposed);
+        let edited_candidate = store
+            .get_candidate_by_proposal_id(proposal_id)
+            .unwrap()
+            .unwrap();
+        assert!(edited_candidate
+            .source_kinds
+            .contains(&LifeModelLearningSourceKind::UserCorrection));
+
+        let final_value = LifeModelUserValueV2::Statement {
+            statement: "Prefer concise updates with the conclusion first.".into(),
+        };
+        let document_digest = format!("sha256:{}", "b".repeat(64));
+        let materialized = store
+            .record_review_materialized(
+                proposal_id,
+                &captured.candidate.id,
+                LifeModelSectionV2::CollaborationPreferences,
+                &final_value,
+                LifeModelLearningMaterializationEvidence {
+                    model_version: 2,
+                    document_digest: &document_digest,
+                },
+                "2026-08-09T10:00:00Z",
+            )
+            .unwrap();
+        assert!(materialized.changed);
+        assert!(materialized.canonical_life_model_changed);
+        let replay = store
+            .record_review_materialized(
+                proposal_id,
+                &captured.candidate.id,
+                LifeModelSectionV2::CollaborationPreferences,
+                &final_value,
+                LifeModelLearningMaterializationEvidence {
+                    model_version: 2,
+                    document_digest: &document_digest,
+                },
+                "2026-08-09T10:01:00Z",
+            )
+            .unwrap();
+        assert!(!replay.changed);
+        let candidate = store
+            .get_candidate_by_proposal_id(proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            candidate.status,
+            LifeModelLearningCandidateStatus::Materialized
+        );
+        assert_eq!(candidate.value, final_value);
+        assert_eq!(candidate.materialized_version, Some(2));
+    }
+
+    #[test]
+    fn rejected_review_uses_a_finite_cooldown_before_a_new_generation() {
+        let store = LifeModelLearningStore::new_in_memory().unwrap();
+        let original_capture = capture("workspace:one", "message:one");
+        let captured = store
+            .capture_explicit_candidate(original_capture.clone())
+            .unwrap();
+        let snapshot = life_model_learning_candidate_snapshot_digest(&captured.candidate).unwrap();
+        let proposal_id = "proposal:learning-rejected";
+        store
+            .link_review_proposal(
+                "workspace:one",
+                &captured.candidate.id,
+                &snapshot,
+                proposal_id,
+                "2026-08-09T08:00:00Z",
+            )
+            .unwrap();
+        let rejected = store
+            .record_review_rejected(proposal_id, &captured.candidate.id, "2026-08-09T09:00:00Z")
+            .unwrap();
+        assert!(rejected.changed);
+        assert!(rejected.content_scrubbed);
+        assert_eq!(
+            rejected.cooldown_until.as_deref(),
+            Some("2026-09-08T09:00:00+00:00")
+        );
+        let replayed = store
+            .record_review_rejected(proposal_id, &captured.candidate.id, "2026-08-10T09:00:00Z")
+            .unwrap();
+        assert!(!replayed.changed);
+        assert_eq!(replayed.cooldown_until, rejected.cooldown_until);
+
+        let mut during_cooldown = original_capture.clone();
+        during_cooldown.source_ref = "message:during-cooldown".into();
+        during_cooldown.source_digest = format!("sha256:{}", "c".repeat(64));
+        during_cooldown.independence_ref = during_cooldown.source_ref.clone();
+        during_cooldown.observed_at = "2026-08-20T08:00:00Z".into();
+        during_cooldown.observation_expires_at = "2026-09-19T08:00:00Z".into();
+        during_cooldown.candidate_expires_at = "2026-11-18T08:00:00Z".into();
+        assert!(store
+            .capture_explicit_candidate(during_cooldown)
+            .unwrap_err()
+            .to_string()
+            .contains("lifemodel_learning_candidate_suppressed"));
+
+        let mut offset_during_cooldown = original_capture.clone();
+        offset_during_cooldown.source_ref = "message:offset-during-cooldown".into();
+        offset_during_cooldown.source_digest = format!("sha256:{}", "e".repeat(64));
+        offset_during_cooldown.independence_ref = offset_during_cooldown.source_ref.clone();
+        offset_during_cooldown.observed_at = "2026-09-08T09:30:00+01:00".into();
+        offset_during_cooldown.observation_expires_at = "2026-10-08T09:30:00+01:00".into();
+        offset_during_cooldown.candidate_expires_at = "2026-12-07T09:30:00+01:00".into();
+        assert!(store
+            .capture_explicit_candidate(offset_during_cooldown)
+            .unwrap_err()
+            .to_string()
+            .contains("lifemodel_learning_candidate_suppressed"));
+
+        let mut after_cooldown = original_capture;
+        after_cooldown.source_ref = "message:after-cooldown".into();
+        after_cooldown.source_digest = format!("sha256:{}", "d".repeat(64));
+        after_cooldown.independence_ref = after_cooldown.source_ref.clone();
+        after_cooldown.observed_at = "2026-09-09T08:00:00Z".into();
+        after_cooldown.observation_expires_at = "2026-10-09T08:00:00Z".into();
+        after_cooldown.candidate_expires_at = "2026-12-08T08:00:00Z".into();
+        let next = store.capture_explicit_candidate(after_cooldown).unwrap();
+        assert_ne!(next.candidate.id, captured.candidate.id);
+        assert_eq!(
+            next.candidate.status,
+            LifeModelLearningCandidateStatus::Reviewable
+        );
     }
 
     #[test]

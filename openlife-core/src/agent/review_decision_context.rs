@@ -153,6 +153,8 @@ pub struct LifeModelLearningReviewContext {
     #[serde(default)]
     pub source_refs: Vec<String>,
     #[serde(default)]
+    pub observation_ids: Vec<String>,
+    #[serde(default)]
     pub source_kinds: Vec<String>,
 }
 
@@ -331,6 +333,7 @@ fn reviewed_lifemodel_learning_context(
         independent_support_count: before.get("independentSupportCount")?.as_u64()? as usize,
         confirmed_at: before.get("confirmedAt")?.as_str()?.to_string(),
         source_refs: strings("sourceRefs"),
+        observation_ids: strings("observationIds"),
         source_kinds: strings("sourceKinds"),
     })
 }
