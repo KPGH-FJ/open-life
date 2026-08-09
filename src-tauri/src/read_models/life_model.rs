@@ -273,38 +273,74 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 mod tests {
     use super::*;
     use openlife_core::life_model::v2::{
-        LifeModelDocumentV2, LifeModelStatementV2, LIFE_MODEL_V2_SCHEMA_VERSION,
+        LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
     };
 
     #[test]
     fn shipped_read_model_preserves_exact_canonical_version_identity() {
-        let mut document = LifeModelDocumentV2::empty(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
-        document.values.push(LifeModelStatementV2 {
-            id: "value:autonomy".into(),
+        let directory = tempfile::tempdir().unwrap();
+        let manager = openlife_core::life_model::LifeModelManager::new(directory.path());
+        let first_item = LifeModelUserValueV2::Statement {
+            statement: "Initial confirmed value.".into(),
+        }
+        .into_item(
+            "value:initial".into(),
+            vec!["proposal:accepted-1".into()],
+            "2026-08-08T09:59:00Z".into(),
+        );
+        let first_diff = LifeModelTypedDiffV2::from_operations_for_review(
+            DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+            None,
+            vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: first_item,
+            }],
+            false,
+        )
+        .unwrap();
+        let first = manager
+            .materialize_reviewed_v2_typed_diff(
+                &first_diff,
+                "accepted-1",
+                &[],
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap()
+            .version;
+        let second_item = LifeModelUserValueV2::Statement {
             statement: "User autonomy matters.".into(),
-            source_refs: vec!["proposal:accepted-2".into()],
-            confirmed_at: "2026-08-08T10:00:00Z".into(),
-        });
-        let version = LifeModelVersionV2 {
-            model_id: DEFAULT_LIFE_MODEL_V2_MODEL_ID.into(),
-            schema_version: LIFE_MODEL_V2_SCHEMA_VERSION.into(),
-            model_version: 2,
-            parent_version: Some(1),
-            parent_digest: Some("sha256:parent".into()),
-            document_digest: document.digest().unwrap(),
-            version_digest: "sha256:test-version".into(),
-            document,
-            materialization_id: "proposal:accepted-2".into(),
-            source_refs: vec!["proposal:accepted-2".into()],
-            created_at: "2026-08-08T10:01:00Z".into(),
-        };
+        }
+        .into_item(
+            "value:autonomy".into(),
+            vec!["proposal:accepted-2".into()],
+            "2026-08-08T10:00:00Z".into(),
+        );
+        let second_diff = LifeModelTypedDiffV2::from_operations_for_review(
+            DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+            Some(&first),
+            vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: second_item,
+            }],
+            false,
+        )
+        .unwrap();
+        let version = manager
+            .materialize_reviewed_v2_typed_diff(
+                &second_diff,
+                "accepted-2",
+                &[],
+                "2026-08-08T10:01:00Z",
+            )
+            .unwrap()
+            .version;
 
         let input = canonical_v2_input(version).unwrap();
 
         assert_eq!(input.model_id, DEFAULT_LIFE_MODEL_V2_MODEL_ID);
         assert_eq!(input.model_version, 2);
         assert_eq!(input.parent_version, Some(1));
-        assert_eq!(input.item_count, 1);
+        assert_eq!(input.item_count, 2);
         assert_eq!(input.source_refs, vec!["proposal:accepted-2"]);
         assert_eq!(input.human_projection.model_version, 2);
         assert!(input
