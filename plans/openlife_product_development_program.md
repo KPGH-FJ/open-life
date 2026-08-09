@@ -1266,6 +1266,120 @@ LifeModel 的作用是帮助 Agent 在多个合法方案之间作出更符合用
 退出标准：阶段五主路径不存在并行旧权威；保留的历史兼容均有真实消费者、明确
 退出条件和测试，未使用路径从源码而不是仅从索引中消失。
 
+###### 5.5 固定范围与当前源码事实
+
+5.5 固定拆分为 5.5A 至 5.5F，不默认增加 5.5G。它只做替代完成后的 caller、数据与
+authority 收敛，不建设新学习平台，也不重新实现 5.1—5.4 已有能力。
+
+2026-08-09 的源码核对表明：`MaturationEngine`、runtime `RegressionSuite` 和
+`golden_paths` 没有 shipped product caller，主要在彼此和测试中互相调用；旧 backend
+completion/readiness report 也没有产品消费者。另一方面，不能按名称整包删除：
+`EvidenceStore` 仍被 Proactive 与来源证据使用；`LifeEventStore` 仍在启动和 Memory
+gateway 中有真实 owner；`HeuristicStore`、`RuntimeHSPacket` 和
+`HSAssetAuthorityRegistry` 仍被 Main Chat、PlanExecute、scheduler 和启动流程调用；
+generic runtime、A2A 与 Proactive 仍读取 legacy `LifeModel`。因此每个切片必须先证明
+替代，再删除 caller 和 store，不能把“看起来历史”当成无调用证据。
+
+###### 5.5A 删除零产品调用的验证与成熟化平台
+
+目标：先移除不会改变当前产品行为、但持续增加认知和编译成本的明确死平台。
+
+- 删除只由测试或彼此调用的 Maturation readiness/engine、runtime RegressionSuite、
+  golden path orchestration 和旧 backend completion gate/report exports；
+- `lifemodel_backend_completion.rs` 中仍有真实 caller 的 `LifeEventStore` 与必要来源类型
+  先迁入明确 owner，再删除仅服务旧 readiness/evolution 的 extractor/bridge；
+- 删除相应 re-export、测试 fixture 和以“类型存在”冒充产品就绪的测试，不触及
+  canonical LifeModel v2、Agent Memory、Policy、Proposal、Evidence 或真实工具路径；
+- 用 shipped handler/runtime caller scan、全仓编译和现有产品行为测试证明删除无影响。
+
+退出标准：上述零调用平台从源码消失，普通 Main Chat、Memory、LifeModel 学习与 Review
+行为不变；没有新增替代平台或治理账本。
+
+###### 5.5B 收敛 Main Chat 与 PlanExecute 的 HS/Heuristic 平行个性化
+
+目标：Main Chat 只保留一条个人化主路径——Agent Memory + canonical LifeModel v2。
+
+- 将 `main_chat_hs_runtime` 中真正属于安全 Policy 的 topic/risk 决策迁回明确 Policy
+  owner，Policy 不得因删除 HS 包装而放宽；
+- 用 5.4 已完成的 v2 planning、communication、retrieval 和 tool preference 路径替代
+  accepted guidance/Heuristic 对 Main Chat 与 PlanExecute 的重复加权；
+- 删除 Main Chat `hs_context`、`HsContextLoaded`、accepted-guidance prompt source 和
+  对应 metadata；不得把它们改名后继续并行存在；
+- 正常、当前指令覆盖、LocalOnly、proposal-first、无 LifeModel 与 LifeModel 故障反例
+  必须证明 Policy 不变且普通 Agent 可继续工作。
+
+退出标准：Main Chat/PlanExecute 不再读取 HeuristicStore 或 RuntimeHSPacket 来完成个人化，
+但 LocalOnly、风险、权限和写入治理逐项保持原有或更严格结果。
+
+###### 5.5C 收敛 generic runtime、scheduler、A2A 与 Proactive 的旧个人模型输入
+
+目标：旧 `LifeModel`/RuntimeHSPacket 不再作为通用 Agent runtime 的隐形第二画像。
+
+- 从 generic AgentLoop/runtime/preprocess/scheduler 的函数合同中移除 legacy
+  `LifeModel` 个性化输入；需要 Policy provenance 的地方改接 typed Policy 结果，而不是
+  携带整个 HS packet；
+- A2A、scheduled task 与 Proactive 分别按真实产品边界处理：仍需的能力保留，但只能
+  读取各自明确的任务、Policy、Memory 或 canonical v2 输入；没有当前产品入口的能力
+  标为 dev-only 或删除，不因未来可能有用而保持 shipped command；
+- Proactive 仍依赖的 EvidenceStore 只保留提醒来源/拒绝证据职责，不获得 LifeModel 或
+  通用学习平台权威；A2A 外发继续走现有权限与网络治理；
+- 每移除一个输入都用同一路径的正常、缺失、敏感、本地优先和故障反例验证，不一次性
+  改写全部 runtime。
+
+退出标准：运行中的 Agent 路径不再加载 legacy YAML `LifeModel` 或 HS 个性化 packet；
+保留的 A2A/Proactive/scheduler 功能有明确 owner、调用入口和失败边界。
+
+###### 5.5D 删除退役 command、bridge 与前端合同
+
+目标：让 shipped API 只暴露当前六个产品区域真实使用的能力。
+
+- 对照 `frontend/src/tauri.ts` 实际 import、Tauri `generate_handler!` 和 Rust caller，删除
+  无消费者的 calibration、feedback evolution、旧 LifeModel direct-save、历史
+  maturation/heuristic、旧 A2A/Proactive wrapper；有 dev-only 真实用途的接口必须迁入
+  明确 feature gate，不能混在 release handler；
+- 保留当前 v2 Builder/Review/rollback/export、Agent Memory、PlanExecute、工具权限和
+  Provider 边界；历史数据迁移 command 只有在仍有可识别旧 profile 时保留；
+- 同步删除 TypeScript 类型、safeInvoke wrapper、Rust export、command 注册和对应死测试，
+  不留下“前端不可达但后端仍 shipped”的半退役状态；
+- 六个规范路由和旧路由 unavailable guard 继续通过。
+
+退出标准：每个 release Tauri command 都有当前产品 caller 或稳定系统职责；无调用接口
+从前后端同时消失，不能只从导航隐藏。
+
+###### 5.5E 收敛启动存储、兼容数据与 authority registry
+
+目标：停止为已退役平台初始化数据库和恢复权威，同时不破坏用户数据。
+
+- 只有在 5.5B—5.5D 已清零真实 caller 后，才移除 HeuristicStore seed/init、
+  HSAssetAuthorityRegistry reconciliation、相关 persistence manifest 项和无消费者 store；
+- 不自动删除用户磁盘上的旧数据库或 YAML。旧文件在不再参与 runtime 后保持 inert，
+  由明确导出/迁移兼容边界读取；如仍有未迁移数据，保留只读迁移入口和退出条件；
+- EvidenceStore、LifeEventStore 中仍被产品使用的来源/冲突/提醒证据迁入窄 owner 后再
+  删除旧表或模块；不把它们整体并入 LifeModel；
+- fresh、已有 v2、legacy 未迁移、只读恢复和损坏存储五类启动场景必须分别验证，任何
+  无法确定的数据状态保持 unknown，不静默丢弃或伪造迁移完成。
+
+退出标准：启动只初始化当前产品 owner；旧数据不影响 runtime 且没有被自动删除；保留
+兼容均有真实数据条件、只读边界和明确退出标准。
+
+###### 5.5F 最终 caller/authority 收口与原生验收
+
+目标：证明阶段五主路径已经没有平行旧权威，并形成 5.6 可复用的干净基线。
+
+- 做最终 source/import/handler/store scan，检查 legacy LifeModel runtime、HS/Heuristic
+  个性化、Maturation/Regression/Golden Path、Calibration/Evolution 和无消费者 command；
+- 只拆分本阶段实际触及且仍有多个领域职责的巨型文件，不为文件大小机械搬家；
+- 更新现有 Architecture/ADR 与本 Program 的实际完成记录，不新建 JSON ledger、任务包、
+  evidence registry 或自进化平台；
+- 通过 Rust/前端全仓门禁后，在同一既有隔离 QA 做一次真实 Tauri 回归：普通对话、
+  Agent Memory、LifeModel 学习与使用、Planning、Review、Policy/权限反例和跨重启；
+  不要求 external-live Provider，不反复初始化同类凭据；
+- 对仍保留的兼容路径逐项记录真实 caller 和退出条件。若无法证明可删，则保持并明确
+  `UNKNOWN`，不得为完成清理而猜测。
+
+退出标准：阶段五产品路径不存在并行旧个性化/学习 authority；release handler、启动
+store、文档与源码一致；全仓门禁和一轮真实原生回归通过，工作树停在用户审阅边界。
+
 ##### 5.6 原生闭环验收
 
 最后用真实 Tauri 和隔离 QA profile 完成：
@@ -1430,6 +1544,9 @@ canonical v2、Main Chat、ContextCompiler、PlanExecute、Memory retrieval 和 
 ranking 源码固定规划为 A—F 六个切片。5.4A—5.4F 已按该固定范围完成实现、自动化
 反例、全仓门禁和同一隔离 QA 的真实 Tauri A/B；2026-08-09 的阶段代码 Review 又
 修复了三项证据与用户控制缺口并重跑全仓门禁，阶段已关闭。**
+
+下一板块：**5.5 已基于当前真实 caller 固定为 A—F 六个收敛切片，等待用户审阅后
+再开始 5.5A；当前尚未删除任何 5.5 生产路径。**
 
 第五阶段第一步实际完成：
 
