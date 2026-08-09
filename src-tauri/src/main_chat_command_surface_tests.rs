@@ -9643,13 +9643,15 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let confirmed_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    let item_id = format!("communication-{}", "x".repeat(120));
+    let source_ref = format!("message:user:{}", "s".repeat(140));
     for state in [&send_state, &stream_state] {
         let item = LifeModelUserValueV2::Statement {
             statement: "沟通保持简洁直接".into(),
         }
         .into_item(
-            "communication-direct".into(),
-            vec!["message:user:send-stream-parity".into()],
+            item_id.clone(),
+            vec![source_ref.clone()],
             confirmed_at.clone(),
         );
         let diff = LifeModelTypedDiffV2::from_operations_for_review(
@@ -9748,7 +9750,7 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     );
     assert_eq!(
         send_value["life_model_influence"]["selectedItems"][0]["itemRef"],
-        "collaboration_preferences:communication-direct"
+        format!("collaboration_preferences:{item_id}")
     );
     assert_eq!(
         send_value["life_model_influence"]["selectedItems"][0]["statement"],
@@ -9756,7 +9758,7 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     );
     assert_eq!(
         send_value["life_model_influence"]["selectedItems"][0]["sourceRefs"][0],
-        "message:user:send-stream-parity"
+        source_ref
     );
     assert_eq!(
         send_value["life_model_influence"]["permissionGranted"],

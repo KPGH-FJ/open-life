@@ -15,7 +15,13 @@ import {
 } from "lucide-react";
 import type {
   LegacyLifeModelMigrationItemV2,
+  LifeModelDocumentV2,
   LifeModelLearningCandidate,
+  LifeModelLongTermGoalV2,
+  LifeModelNamedItemV2,
+  LifeModelRelationshipV2,
+  LifeModelSectionV2,
+  LifeModelStatementV2,
   ReviewItem,
 } from "@/tauri";
 import { FoundationActionButton, FoundationNotice, FoundationStatusLabel } from "@/ui/foundation";
@@ -68,8 +74,61 @@ const learningSourceLabel: Record<LifeModelLearningCandidate["sourceKinds"][numb
   model_extraction: "模型辅助提取",
 };
 
+type CanonicalLifeModelSectionKey =
+  | "identity"
+  | "values"
+  | "longTermGoals"
+  | "stablePreferences"
+  | "personalBoundaries"
+  | "importantRelationships"
+  | "capabilities"
+  | "resources"
+  | "decisionPrinciples"
+  | "collaborationPreferences";
+
+type CanonicalLifeModelItem =
+  | LifeModelStatementV2
+  | LifeModelLongTermGoalV2
+  | LifeModelRelationshipV2
+  | LifeModelNamedItemV2;
+
+const canonicalSectionKey: Record<LifeModelSectionV2, CanonicalLifeModelSectionKey> = {
+  identity: "identity",
+  values: "values",
+  long_term_goals: "longTermGoals",
+  stable_preferences: "stablePreferences",
+  personal_boundaries: "personalBoundaries",
+  important_relationships: "importantRelationships",
+  capabilities: "capabilities",
+  resources: "resources",
+  decision_principles: "decisionPrinciples",
+  collaboration_preferences: "collaborationPreferences",
+};
+
+function findCanonicalLifeModelItem(document: LifeModelDocumentV2, itemRef: string) {
+  const separator = itemRef.indexOf(":");
+  if (separator <= 0) return null;
+  const section = itemRef.slice(0, separator) as LifeModelSectionV2;
+  const itemId = itemRef.slice(separator + 1);
+  const key = canonicalSectionKey[section];
+  if (!key || !itemId) return null;
+  const items = document[key] as CanonicalLifeModelItem[];
+  const item = items.find(candidate => candidate.id === itemId);
+  if (!item) return null;
+  const statement =
+    "statement" in item
+      ? item.statement
+      : "direction" in item
+        ? `${item.direction}：${item.meaning}`
+        : "personLabel" in item
+          ? `${item.personLabel}：${item.relationship}（${item.significance}）`
+          : `${item.name}：${item.description}`;
+  return { itemRef, statement, sourceRefs: item.sourceRefs, confirmedAt: item.confirmedAt };
+}
+
 export function DurableTruthView({
   snapshot,
+  focusedLifeModelItemRef,
   selectedItem,
   refreshing,
   onRefresh,
@@ -98,6 +157,7 @@ export function DurableTruthView({
   onPauseLearningSuggestionClass,
 }: {
   snapshot: DurableTruthSnapshot | null;
+  focusedLifeModelItemRef?: string | null;
   selectedItem: ReviewItem | null;
   refreshing: boolean;
   onRefresh: () => void;
@@ -190,6 +250,10 @@ export function DurableTruthView({
 
   const canonical = lifeModel?.canonicalSummary;
   const canonicalView = lifeModel?.truthMode === "canonical" ? (canonical ?? null) : null;
+  const focusedLifeModelItem =
+    canonicalView && focusedLifeModelItemRef
+      ? findCanonicalLifeModelItem(canonicalView.document, focusedLifeModelItemRef)
+      : null;
   const migrationPreview = canonicalView ? null : lifeModel?.legacyMigrationPreview;
   const applyAction = lifeModelItem?.allowedActions.find(action => action.kind === "apply");
   const hasEstablishedView = Boolean(canonical || migrationPreview);
@@ -282,6 +346,25 @@ export function DurableTruthView({
         aria-labelledby="intelligence-tab-life-model"
         hidden={activeDomain !== "life_model"}
       >
+        {focusedLifeModelItemRef &&
+          (focusedLifeModelItem ? (
+            <FoundationNotice title="本次影响使用的长期信息" tone="neutral">
+              <p data-lifemodel-item-ref={focusedLifeModelItem.itemRef}>
+                <strong>{focusedLifeModelItem.statement}</strong>
+                <br />
+                <code>{focusedLifeModelItem.itemRef}</code> · 确认于
+                {` ${focusedLifeModelItem.confirmedAt}`}
+              </p>
+              <p>来源：{focusedLifeModelItem.sourceRefs.join("、")}</p>
+            </FoundationNotice>
+          ) : (
+            <FoundationNotice title="无法定位这条长期信息" tone="error" live>
+              <p>
+                当前规范版本中没有 <code>{focusedLifeModelItemRef}</code>
+                ；页面不会用旧回执补造内容。
+              </p>
+            </FoundationNotice>
+          ))}
         {snapshot.lifeModelEnvelope.status === "error" ? (
           <FoundationNotice title="关于我暂时不可用" tone="error" live>
             <p>LifeModelViewModel 读取失败；Agent Memory 仍可在相邻区域独立查看。</p>

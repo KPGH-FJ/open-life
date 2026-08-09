@@ -416,6 +416,123 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
+  it("opens Personal Intelligence from a durable Life Model influence receipt", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      loadDurableTruth: async () => {
+        const snapshot = await fixture.loadDurableTruth();
+        return {
+          ...snapshot,
+          lifeModelEnvelope: {
+            ...snapshot.lifeModelEnvelope,
+            status: "ready" as const,
+            data: {
+              ...snapshot.lifeModelEnvelope.data!,
+              truthMode: "canonical" as const,
+              canonicalSummary: {
+                lifeModelRef: {
+                  id: "lifemodel:primary:v8",
+                  kind: "lifemodel" as const,
+                  label: "LifeModel v2 version 8",
+                },
+                title: "已确认的长期个人模型",
+                summary: "1 条已确认信息",
+                versionLabel: "v8",
+                parentVersion: 7,
+                documentDigest: "sha256:document-v8",
+                lastMaterializedAt: "2026-08-09T00:00:00Z",
+                freshnessStatus: "current",
+                conflictStatus: "none",
+                evidenceRefs: [],
+                document: {
+                  schemaVersion: "openlife.lifemodel.v2" as const,
+                  modelId: "primary",
+                  identity: [],
+                  values: [],
+                  longTermGoals: [],
+                  stablePreferences: [],
+                  personalBoundaries: [],
+                  importantRelationships: [],
+                  capabilities: [],
+                  resources: [],
+                  decisionPrinciples: [],
+                  collaborationPreferences: [
+                    {
+                      id: "communication-direct",
+                      statement: "沟通保持简洁直接",
+                      sourceRefs: ["message:user:confirmed-preference"],
+                      confirmedAt: "2026-08-09T00:00:00Z",
+                    },
+                  ],
+                },
+                humanProjection: {
+                  schemaVersion: "openlife.lifemodel.v2.yaml-projection.v1" as const,
+                  modelId: "primary",
+                  modelVersion: 8,
+                  itemCount: 1,
+                  documentDigest: "sha256:document-v8",
+                  yamlContentDigest: "sha256:yaml-v8",
+                  projectionDigest: "sha256:projection-v8",
+                  yaml: "collaboration_preferences:\n  - id: communication-direct",
+                },
+              },
+            },
+          },
+        };
+      },
+      loadLifeModelInfluence: vi.fn().mockResolvedValue({
+        status: "completed" as const,
+        lifeModelInfluence: {
+          status: "applied_context_building",
+          sourceId: "lifemodel.v2.runtime",
+          modelVersion: 8,
+          selectedItems: [
+            {
+              itemRef: "collaboration_preferences:communication-direct",
+              statement: "沟通保持简洁直接",
+              sourceRefs: ["message:user:confirmed-preference"],
+              confirmedAt: "2026-08-09T00:00:00Z",
+              reasonCode: "task intent matches collaboration_preferences",
+            },
+          ],
+          appliedSurfaces: ["context_building", "communication_style"],
+          currentInstructionPriorityPreserved: true,
+          policyPriorityPreserved: true,
+          permissionGranted: false,
+          durableWriteAuthorized: false,
+        },
+      }),
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByText("本轮参考了你的 Life Model")).toBeInTheDocument();
+    await user.click(screen.getByText("查看使用依据"));
+    await user.click(screen.getByRole("button", { name: "在个人智能中查看：沟通保持简洁直接" }));
+
+    expect(await screen.findByRole("tab", { name: /关于我.*LifeModel/ })).toBeInTheDocument();
+    expect(screen.getByText("本次影响使用的长期信息")).toBeInTheDocument();
+    expect(
+      screen
+        .getByText("collaboration_preferences:communication-direct")
+        .closest("[data-lifemodel-item-ref]")
+    ).toHaveAttribute("data-lifemodel-item-ref", "collaboration_preferences:communication-direct");
+    expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+  });
+
   it("fails closed when an active task points to a missing conversation", async () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const initial = await fixture.load();

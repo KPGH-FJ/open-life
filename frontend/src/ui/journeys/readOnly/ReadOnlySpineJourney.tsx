@@ -496,6 +496,7 @@ export function ReadOnlySpineJourney({
   const [selectedTask, setSelectedTask] = useState<TaskViewModelItem | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedEvidence, setSelectedEvidence] = useState("");
+  const [focusedLifeModelItemRef, setFocusedLifeModelItemRef] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState(() => routeEntryAnnouncement(initialSurface));
   const [focusKey, setFocusKey] = useState("initial");
   const modeRef = useRef(mode);
@@ -669,8 +670,13 @@ export function ReadOnlySpineJourney({
     };
   }, [mode, settingsPrivacy.ensureLoaded, settingsPrivacyDataSource]);
 
-  function navigateProduct(id: string, reviewOrigin?: "workspace" | "life-model"): void {
+  function navigateProduct(
+    id: string,
+    reviewOrigin?: "workspace" | "life-model",
+    lifeModelItemRef?: string
+  ): void {
     const next = id as ReadOnlyProductSurfaceId;
+    setFocusedLifeModelItemRef(next === "life-model" ? (lifeModelItemRef ?? null) : null);
     if (next === "review") {
       setReviewReturnSurface(
         reviewOrigin ?? (activeSurface === "life-model" ? "life-model" : "workspace")
@@ -954,6 +960,7 @@ export function ReadOnlySpineJourney({
         onConfirmResume={governed.confirmResume}
         onCancelResume={governed.cancelResumeConfirmation}
         onOpenInspector={openInspector}
+        onOpenLifeModel={itemRef => navigateProduct("life-model", undefined, itemRef)}
         conversation={workspaceConversationDataSource ? conversation : undefined}
       />
     );
@@ -1002,6 +1009,7 @@ export function ReadOnlySpineJourney({
     content = (
       <DurableTruthView
         snapshot={durable.snapshot}
+        focusedLifeModelItemRef={focusedLifeModelItemRef}
         selectedItem={durable.selectedItem}
         refreshing={durable.refreshing}
         memoryAction={durable.memoryAction}

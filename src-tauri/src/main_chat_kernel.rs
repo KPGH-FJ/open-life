@@ -2470,9 +2470,7 @@ where
         )
         .await;
     if use_agent_loop {
-        let (plan, life_model_tool_preference_applied) =
-            build_main_chat_react_action_plan(session_id, &user_text)?
-                .apply_life_model_tool_preferences(&react_tool_preference_hints, &user_text);
+        let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
         let mut react_messages = messages.clone();
         if let Some(prompt) = react_life_model_prompt {
             react_messages.insert(
@@ -2485,33 +2483,12 @@ where
         }
         let (mut react_context_metadata, _) =
             kernel.compile_context(session_id, sanitized_selected_skill_id.clone(), &user_text);
-        if life_model_tool_preference_applied {
-            if let Some(metadata) = react_context_metadata.life_model_context.as_mut() {
-                metadata.influence_receipt.status = "applied_equivalent_tool_preference".into();
-                metadata
-                    .influence_receipt
-                    .applied_surfaces
-                    .push("equivalent_tool_ranking".into());
-            }
-        }
         event_sink.emit(MainChatKernelEvent::ContextLoaded {
             context_snapshot_ref: react_context_metadata.context_snapshot_ref.clone(),
             selected_source_count: react_context_metadata.selected_source_count,
             selected_skill_instruction_loaded: react_context_metadata
                 .selected_skill_instruction_loaded,
         });
-        if let Some(metadata) = react_context_metadata.life_model_context.as_ref() {
-            event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
-                available: metadata.available,
-                model_version: metadata.model_version,
-                selected_item_count: metadata.selected_item_refs.len(),
-                status: metadata.influence_receipt.status.clone(),
-                source_id: metadata.source_id.clone(),
-                selected_item_refs: metadata.selected_item_refs.clone(),
-                reason_codes: metadata.influence_receipt.reason_codes.clone(),
-                receipt: metadata.product_receipt(),
-            });
-        }
         let (_, privacy_map) = privacy_engine.desensitize_batch(
             &messages
                 .iter()
@@ -2538,6 +2515,7 @@ where
                 &privacy_engine,
                 &privacy_map,
                 &plan,
+                &react_tool_preference_hints,
                 &provider_authorization,
                 provider_runtime,
                 execution_epoch,
@@ -2545,6 +2523,32 @@ where
             )
             .await?
         };
+        let life_model_tool_preference_applied = agent_loop_attempt
+            .metadata
+            .get("lifeModelToolPreferenceApplied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if life_model_tool_preference_applied {
+            if let Some(metadata) = react_context_metadata.life_model_context.as_mut() {
+                metadata.influence_receipt.status = "applied_equivalent_tool_preference".into();
+                metadata
+                    .influence_receipt
+                    .applied_surfaces
+                    .push("equivalent_tool_ranking".into());
+            }
+        }
+        if let Some(metadata) = react_context_metadata.life_model_context.as_ref() {
+            event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
+                available: metadata.available,
+                model_version: metadata.model_version,
+                selected_item_count: metadata.selected_item_refs.len(),
+                status: metadata.influence_receipt.status.clone(),
+                source_id: metadata.source_id.clone(),
+                selected_item_refs: metadata.selected_item_refs.clone(),
+                reason_codes: metadata.influence_receipt.reason_codes.clone(),
+                receipt: metadata.product_receipt(),
+            });
+        }
         for receipt in &agent_loop_attempt.provider_receipts {
             emit_provider_receipt(receipt, event_sink)?;
         }
@@ -11911,7 +11915,7 @@ fn build_kernel_lifemodel_context(
                     format!(
                         "{}:{}",
                         life_model_section_label(fact.section),
-                        bounded_label(&fact.item_id, MAX_ROUTE_LABEL_CHARS)
+                        fact.item_id
                     )
                 })
                 .collect::<Vec<_>>()
@@ -11927,14 +11931,10 @@ fn build_kernel_lifemodel_context(
                     item_ref: format!(
                         "{}:{}",
                         life_model_section_label(fact.section),
-                        bounded_label(&fact.item_id, MAX_ROUTE_LABEL_CHARS)
+                        fact.item_id
                     ),
                     statement: bounded_label(&fact.value, MAX_LIFEMODEL_STATEMENT_CHARS),
-                    source_refs: fact
-                        .source_refs
-                        .iter()
-                        .map(|source_ref| bounded_label(source_ref, MAX_ROUTE_LABEL_CHARS))
-                        .collect(),
+                    source_refs: fact.source_refs.to_vec(),
                     confirmed_at: fact.confirmed_at.clone(),
                     reason_code: bounded_label(&fact.selected_reason, MAX_REASON_CHARS),
                 })

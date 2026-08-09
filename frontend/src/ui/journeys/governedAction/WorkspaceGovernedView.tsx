@@ -80,6 +80,7 @@ export function WorkspaceGovernedView({
   onConfirmResume,
   onCancelResume,
   onOpenInspector,
+  onOpenLifeModel,
   conversation,
 }: {
   snapshot: GovernedActionSnapshot | null;
@@ -91,6 +92,7 @@ export function WorkspaceGovernedView({
   onConfirmResume: () => void;
   onCancelResume: () => void;
   onOpenInspector: () => void;
+  onOpenLifeModel: (itemRef: string) => void;
   conversation?: WorkspaceConversationController;
 }) {
   const envelope = snapshot?.workspaceEnvelope;
@@ -217,6 +219,7 @@ export function WorkspaceGovernedView({
         {conversation && (
           <WorkspaceConversationPanel
             controller={conversation}
+            onOpenLifeModel={onOpenLifeModel}
             disabledReason={conversationDisabledReason}
           />
         )}
@@ -384,6 +387,7 @@ export function WorkspaceGovernedView({
       {conversation && (
         <WorkspaceConversationPanel
           controller={conversation}
+          onOpenLifeModel={onOpenLifeModel}
           disabledReason={conversationDisabledReason}
         />
       )}

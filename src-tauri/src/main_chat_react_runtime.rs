@@ -481,6 +481,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     privacy_engine: &PrivacyEngine,
     privacy_map: &HashMap<String, String>,
     plan: &MainChatReactActionPlan,
+    life_model_tool_preferences: &[String],
     provider_authorization: &MainChatProviderAuthorization,
     provider_runtime: &crate::state::ProviderRuntimeSnapshot,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
@@ -521,7 +522,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         &resources.execution.governed.shared.registry,
         plan,
     );
-    let (agent_loop_plan, tool_selection_ranking) =
+    let (provider_ranked_plan, tool_selection_ranking) =
         rank_main_chat_react_tool_candidates_with_authorization_and_progress(
             &scheduler,
             messages_for_generation,
@@ -532,6 +533,12 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             emit_progress,
         )
         .await;
+    // Provider ranking may only order the already governed candidate set.
+    // Apply the user's confirmed LifeModel preference last so the product
+    // receipt describes the actual order used by AgentLoop, while the current
+    // instruction and the eligible set remain authoritative.
+    let (agent_loop_plan, life_model_tool_preference_applied) = provider_ranked_plan
+        .apply_life_model_tool_preferences(life_model_tool_preferences, user_text);
     // OpenLifeTurnRuntime installs one fresh receipt collector on the captured
     // provider generation. Ranking and AgentLoop must keep sharing that exact
     // collector so a dropped kernel future does not also drop the only
@@ -580,6 +587,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments),
         "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
         "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
+        "lifeModelToolPreferenceApplied": life_model_tool_preference_applied,
         "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
         "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
         "toolSelectionContractDigest": tool_selection_contract_digest,

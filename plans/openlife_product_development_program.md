@@ -1428,7 +1428,8 @@ v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy 
 同阶段短收口提交 `a4b5e0b` 中修复，没有增加 5.3G。5.3 已关闭。5.4 已根据当前
 canonical v2、Main Chat、ContextCompiler、PlanExecute、Memory retrieval 和 tool
 ranking 源码固定规划为 A—F 六个切片。5.4A—5.4F 已按该固定范围完成实现、自动化
-反例、全仓门禁和同一隔离 QA 的真实 Tauri A/B；阶段已关闭，等待用户审阅。**
+反例、全仓门禁和同一隔离 QA 的真实 Tauri A/B；2026-08-09 的阶段代码 Review 又
+修复了三项证据与用户控制缺口并重跑全仓门禁，阶段已关闭。**
 
 第五阶段第一步实际完成：
 
@@ -1531,6 +1532,15 @@ ranking 源码固定规划为 A—F 六个切片。5.4A—5.4F 已按该固定�
   production build/absence guard 与 browser-shell 均已通过。真实验证使用本地 `llama3`，
   没有调用外部 Provider 或网络；模型回复质量仍只代表本次小规模 A/B，不冒充普遍模型
   质量结论。
+- 阶段 Review 发现并修复三项不能留到 5.5 的缺口：合法的长 item/source ref 不再因
+  展示标签上限被截断而导致重启后无法重建回执；LifeModel 等价工具偏好改为在可选
+  Provider 排序之后作用于同一已治理候选集，最终顺序与影响回执保持一致；Workspace
+  影响回执可以携带精确 `section:item_id` 进入个人智能，并从当前 canonical v2 文档
+  重新核对对应项，缺失时明确失败而不借旧回执补造内容。
+- Review 修复后再次通过严格 Clippy、`cargo test --all --locked`、前端格式、类型、
+  258 项 Vitest、production build/absence guard 和 8 项 browser-shell。该收口没有调用
+  外部 Provider、网络或真实用户数据，也没有因小范围修复重复创建 QA profile；原有
+  同一精确构建真实 Tauri A/B 证据继续只支持其已验证范围。
 
 第四阶段实际完成：
 

@@ -72,7 +72,10 @@ function turnFeedback(controller: WorkspaceConversationController) {
   ) : null;
 }
 
-function lifeModelInfluenceFeedback(controller: WorkspaceConversationController) {
+function lifeModelInfluenceFeedback(
+  controller: WorkspaceConversationController,
+  onOpenLifeModel: (itemRef: string) => void
+) {
   const state = controller.turnState;
   if (state.phase !== "resolved" || !state.lifeModelInfluence) return null;
   const receipt = state.lifeModelInfluence;
@@ -112,6 +115,12 @@ function lifeModelInfluenceFeedback(controller: WorkspaceConversationController)
                     <span>来源：{item.sourceRefs.join("、")}</span>
                   </>
                 )}
+                <br />
+                <FoundationActionButton
+                  label={`在个人智能中查看：${item.statement}`}
+                  variant="quiet"
+                  onClick={() => onOpenLifeModel(item.itemRef)}
+                />
               </li>
             ))}
           </ul>
@@ -331,9 +340,11 @@ function MarkdownMemoryPanel({ controller }: { controller: WorkspaceConversation
 
 export function WorkspaceConversationPanel({
   controller,
+  onOpenLifeModel,
   disabledReason,
 }: {
   controller: WorkspaceConversationController;
+  onOpenLifeModel: (itemRef: string) => void;
   disabledReason?: string;
 }) {
   const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
@@ -456,7 +467,7 @@ export function WorkspaceConversationPanel({
       )}
 
       {turnFeedback(controller)}
-      {lifeModelInfluenceFeedback(controller)}
+      {lifeModelInfluenceFeedback(controller, onOpenLifeModel)}
 
       {controller.sessionMutation.phase === "failed" && (
         <FoundationNotice title="会话操作未完成" tone="error" live>
