@@ -299,6 +299,34 @@ pub(crate) async fn record_lifemodel_learning_review_edit_with_state(
         .map_err(|error| format!("record_lifemodel_learning_review_edit_failed:{error}"))
 }
 
+pub(crate) async fn reconcile_lifemodel_learning_review_edit_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Option<LifeModelLearningReviewDecisionReceipt>, String> {
+    if proposal.status != ProposalStatus::Edited {
+        return Ok(None);
+    }
+    let context =
+        openlife_core::agent::review_decision_context::build_review_decision_context(proposal, &[])
+            .life_model_learning;
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let diff: LifeModelTypedDiffV2 = serde_json::from_value(proposal.after.clone())
+        .map_err(|_| "lifemodel_learning_edited_diff_invalid".to_string())?;
+    let statement = match diff.operations.as_slice() {
+        [LifeModelTypedOperationV2::Add {
+            item: LifeModelItemV2::Statement(item),
+            ..
+        }] => item.statement.trim(),
+        _ => return Err("lifemodel_learning_edited_operation_invalid".into()),
+    };
+    if statement.is_empty() || statement != context.proposed_statement.trim() {
+        return Err("lifemodel_learning_edited_statement_binding_mismatch".into());
+    }
+    record_lifemodel_learning_review_edit_with_state(state, proposal, statement).await
+}
+
 pub(crate) async fn record_lifemodel_learning_review_rejected_with_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -1618,6 +1646,100 @@ mod tests {
         assert!(materialized
             .source_kinds
             .contains(&LifeModelLearningSourceKind::UserCorrection));
+        for observation_id in materialized.observation_ids {
+            assert!(version
+                .source_refs
+                .contains(&format!("lifemodel-learning-observation:{observation_id}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_learning_review_reconciles_a_persisted_edit_after_candidate_write_failure() {
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        establish_empty_v2_owner(&state).await;
+        let user_text = "Update my life model: communication style is concise and direct.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "lifemodel-learning-edit-recovery",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
+        let candidate = routing
+            .candidates
+            .iter()
+            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+            .unwrap();
+        let captured = capture_explicit_main_chat_candidate(
+            &state,
+            candidate,
+            &decision.policy_decision,
+            user_text,
+        )
+        .await
+        .unwrap();
+        let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
+            .await
+            .unwrap();
+        let healthy_learning_store = state.life_model_learning_store.clone().unwrap();
+        Arc::get_mut(&mut state).unwrap().life_model_learning_store = None;
+
+        let error = crate::commands::proposal::edit_lifemodel_learning_proposal_with_state(
+            staged.proposal_id.clone(),
+            "简洁、直接，并先给结论".into(),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("lifemodel_learning_store_unavailable"));
+        let persisted = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, ProposalStatus::Edited);
+        assert_eq!(
+            openlife_core::agent::review_decision_context::build_review_decision_context(
+                &persisted,
+                &[],
+            )
+            .life_model_learning
+            .unwrap()
+            .proposed_statement,
+            "简洁、直接，并先给结论"
+        );
+
+        Arc::get_mut(&mut state).unwrap().life_model_learning_store = Some(healthy_learning_store);
+        let accepted = crate::commands::proposal::accept_proposal_with_state(
+            staged.proposal_id.clone(),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted["lifeModelLearning"]["status"], "materialized");
+        let materialized = state
+            .life_model_learning_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_candidate_by_proposal_id(&staged.proposal_id)
+            .unwrap()
+            .unwrap();
+        assert!(materialized
+            .source_kinds
+            .contains(&LifeModelLearningSourceKind::UserCorrection));
+        let version = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap()
+            .unwrap();
         for observation_id in materialized.observation_ids {
             assert!(version
                 .source_refs

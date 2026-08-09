@@ -10,6 +10,48 @@ import {
 import type { ReviewDispatchState } from "@/contracts/reviewDispatchContract";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 
+const MAX_VISIBLE_LIFEMODEL_LEARNING_REVIEWS = 5;
+
+export type ReviewQueueSection = {
+  id: "lifemodel_learning" | "other";
+  label: string;
+  items: ReviewItem[];
+  totalCount: number;
+  hiddenCount: number;
+};
+
+export function reviewQueueSections(items: ReviewItem[]): ReviewQueueSection[] {
+  const learning = items.filter(item => item.decisionContext.lifeModelLearning);
+  const learningAwaitingDecision = learning.filter(item =>
+    ["pending", "edited", "deferred"].includes(item.status)
+  );
+  const learningHistory = learning.filter(
+    item => !["pending", "edited", "deferred"].includes(item.status)
+  );
+  const orderedLearning = [...learningAwaitingDecision, ...learningHistory];
+  const other = items.filter(item => !item.decisionContext.lifeModelLearning);
+  const sections: ReviewQueueSection[] = [];
+  if (learning.length > 0) {
+    sections.push({
+      id: "lifemodel_learning",
+      label: "LifeModel 学习建议",
+      items: orderedLearning.slice(0, MAX_VISIBLE_LIFEMODEL_LEARNING_REVIEWS),
+      totalCount: learning.length,
+      hiddenCount: Math.max(0, learning.length - MAX_VISIBLE_LIFEMODEL_LEARNING_REVIEWS),
+    });
+  }
+  if (other.length > 0) {
+    sections.push({
+      id: "other",
+      label: "其他建议与权限",
+      items: other,
+      totalCount: other.length,
+      hiddenCount: 0,
+    });
+  }
+  return sections;
+}
+
 function actionOperation(item: ReviewItem): string | undefined {
   return item.decisionContext.actionContract?.operation;
 }
@@ -250,6 +292,7 @@ export function ReviewGovernedView({
     envelope && (envelope.status === "ready" || envelope.status === "stale")
       ? (envelope.data?.items ?? [])
       : [];
+  const queueSections = reviewQueueSections(items);
   const permission = selectedItem?.decisionContext.permission;
   const dispatchAction = dispatchState.phase === "idle" ? null : dispatchState.action;
   const feedback =
@@ -336,23 +379,40 @@ export function ReviewGovernedView({
           <h2>建议与权限</h2>
         </header>
         <div className="ol-review-queue__items">
-          {items.map(item => {
-            const status = reviewItemStatus(item);
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className="ol-review-queue-item"
-                data-current={selectedItem?.id === item.id ? "true" : "false"}
-                aria-current={selectedItem?.id === item.id ? "true" : undefined}
-                disabled={decisionBusy}
-                onClick={() => onSelectItem(item)}
-              >
-                <span>{item.decisionContext.title}</span>
-                <small>{status.label}</small>
-              </button>
-            );
-          })}
+          {queueSections.map(section => (
+            <section
+              key={section.id}
+              className="ol-review-queue-section"
+              aria-labelledby={`review-queue-${section.id}`}
+            >
+              <div className="ol-review-queue-section__heading">
+                <span id={`review-queue-${section.id}`}>{section.label}</span>
+                <small>{section.totalCount} 项 · 逐项决定</small>
+              </div>
+              {section.items.map(item => {
+                const status = reviewItemStatus(item);
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="ol-review-queue-item"
+                    data-current={selectedItem?.id === item.id ? "true" : "false"}
+                    aria-current={selectedItem?.id === item.id ? "true" : undefined}
+                    disabled={decisionBusy}
+                    onClick={() => onSelectItem(item)}
+                  >
+                    <span>{item.decisionContext.title}</span>
+                    <small>{status.label}</small>
+                  </button>
+                );
+              })}
+              {section.hiddenCount > 0 && (
+                <p className="ol-review-queue-section__overflow">
+                  其余 {section.hiddenCount} 项 LifeModel 学习记录暂不在当前队列展示。
+                </p>
+              )}
+            </section>
+          ))}
         </div>
       </aside>
 

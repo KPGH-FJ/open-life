@@ -1252,11 +1252,11 @@ legacy 隔离 profile 完成建立、迁移、编辑、冲突、删除、回滚�
 界面问题。包含该修复的最终精确构建 `d02e9dae...` 已完成主 QA 的凭据恢复、重启、
 v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy QA 的独立凭据恢复、
 重启、v2 version 1 保持和迁移终态复核。未调用外部 Provider 或网络，未迁移真实
-用户 profile。5.3A—5.3E 已按固定顺序完成并分别形成提交 `aa7ac1b`、`a49258b`、
-`e797955`、`30c44b9` 和 `3c6fd58`。5.3F 的源码、自动化门禁与真实 Tauri 闭环已经
-完成，当前保持未提交供用户审阅；最终精确构建 `ae9f467f...` 已在既有
+用户 profile。5.3A—5.3F 已按固定顺序完成并分别形成提交 `aa7ac1b`、`a49258b`、
+`e797955`、`30c44b9`、`3c6fd58` 和 `8e3e85b`；最终精确构建 `ae9f467f...` 已在既有
 `phase5-lifemodel-v2` 隔离 QA 中完成候选、审核、v8 物化、跨重启持久化和显式读取。
-5.3 固定为 A—F，不增加 5.3G；用户确认 5.3F 提交后，下一既定板块为 5.4。**
+5.3 提交后源码 Review 发现的 Review Center 学习分组与编辑部分失败恢复缺口已经在
+同阶段短收口中修复，没有增加 5.3G。5.3 已关闭，下一既定板块为 5.4。**
 
 第五阶段第一步实际完成：
 
@@ -1311,7 +1311,7 @@ v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy 
 - 5.3E 已以提交 `3c6fd58` 完成决定反馈与版本化物化：批准后的精确 typed diff 通过
   canonical LifeModel v2 owner 原子生成新版本，并把 Proposal、Candidate、版本号与
   document digest 绑定；拒绝、编辑、并发漂移和重放不会获得错误物化信用。
-- 5.3F 已完成待审源码：Main Chat 可以从 canonical LifeModel v2 进行确定性显式只读，
+- 5.3F 已于提交 `8e3e85b` 完成：Main Chat 可以从 canonical LifeModel v2 进行确定性显式只读，
   回答会列出版本、来源和选择原因，不把 Conversation Memory 或待审核 Candidate 当成
   已确认画像，也不会因此获得写入或 Provider 权限；旧 scalar LifeModel proposal、
   ReviewMaturation 产品 blocker 和已被替代的生产 maturation outcome 入口已删除，仍有
@@ -1328,6 +1328,10 @@ v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy 
   v7 保持不变；批准后读模型确认 v8 已应用；完全重启后 v8 与该事实仍存在；新会话显式
   读取返回 v8、Candidate 与原消息来源以及选择原因。全过程没有调用外部 Provider 或
   网络。严格 Clippy、全仓 Rust 测试、前端 production build 和 absence guard 均通过。
+- 5.3 提交后短收口没有扩展阶段范围：Review Center 现在把 LifeModel 学习建议作为独立
+  队列展示并一次最多呈现五项；ProposalStore 已落盘修改但 Candidate 纠正证据暂时失败
+  时，接受、拒绝、稍后处理或再次编辑前会从精确 typed proposal 幂等补齐证据，补齐失败
+  则继续禁止最终决定和物化。
 
 第四阶段实际完成：
 

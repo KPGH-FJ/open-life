@@ -791,7 +791,35 @@
 
 .ol-review-queue__items {
   display: grid;
+  gap: var(--ol-space-4);
+}
+
+.ol-review-queue-section {
+  display: grid;
   gap: var(--ol-space-1);
+  min-width: 0;
+}
+
+.ol-review-queue-section__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ol-space-2);
+  padding: 0 var(--ol-space-2) var(--ol-space-1);
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-review-queue-section__heading > span {
+  font-weight: 650;
+}
+
+.ol-review-queue-section__overflow {
+  margin: var(--ol-space-1) var(--ol-space-2) 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
 }
 
 .ol-review-queue-item {

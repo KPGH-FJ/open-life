@@ -4,9 +4,76 @@ import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
 import type { ReviewAction, ReviewItem } from "@/tauri";
-import { reviewDecisionFeedback, reviewItemStatus } from "./ReviewGovernedView";
+import {
+  reviewDecisionFeedback,
+  reviewItemStatus,
+  reviewQueueSections,
+} from "./ReviewGovernedView";
 
 describe("Workbench governed action journey", () => {
+  it("groups LifeModel learning reviews separately and shows at most five at once", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const template = snapshot.reviewEnvelope.data!.items[1];
+    const learningItems = Array.from(
+      { length: 7 },
+      (_, index): ReviewItem => ({
+        ...template,
+        id: `learning-${index + 1}`,
+        status: index < 2 ? "approved" : "pending",
+        source: {
+          ...template.source,
+          proposalId: `learning-${index + 1}`,
+        },
+        decisionContext: {
+          ...template.decisionContext,
+          reviewItemId: `learning-${index + 1}`,
+          title: `学习建议 ${index + 1}`,
+          lifeModelLearning: {
+            candidateId: `candidate-${index + 1}`,
+            candidateSnapshotDigest: `sha256:${String(index + 1).padStart(64, "0")}`,
+            section: "stable_preferences",
+            proposedStatement: `偏好 ${index + 1}`,
+            explicitness: "explicit_user_request",
+            stability: "user_confirmed",
+            sensitivity: "internal",
+            conflictStatus: "none",
+            supportCount: 1,
+            independentSupportCount: 1,
+            confirmedAt: "2026-08-09T00:00:00Z",
+            sourceRefs: [`message:${index + 1}`],
+            sourceKinds: ["explicit_user_message"],
+          },
+        },
+      })
+    );
+    const ordinaryItem = snapshot.reviewEnvelope.data!.items[0];
+
+    const sections = reviewQueueSections([...learningItems, ordinaryItem]);
+
+    expect(sections).toHaveLength(2);
+    expect(sections[0]).toMatchObject({
+      id: "lifemodel_learning",
+      label: "LifeModel 学习建议",
+      totalCount: 7,
+      hiddenCount: 2,
+    });
+    expect(sections[0].items.map(item => item.id)).toEqual([
+      "learning-3",
+      "learning-4",
+      "learning-5",
+      "learning-6",
+      "learning-7",
+    ]);
+    expect(sections[1]).toMatchObject({
+      id: "other",
+      label: "其他建议与权限",
+      totalCount: 1,
+      hiddenCount: 0,
+    });
+    expect(sections[1].items).toEqual([ordinaryItem]);
+  });
+
   it("keeps view, approval, refresh, resume, and completion as separate states", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");

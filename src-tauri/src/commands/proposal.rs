@@ -3433,6 +3433,10 @@ async fn accept_proposal_with_state_and_confirmation(
     require_persistence_write(state)?;
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
 
     let (confirmed_projection_claim, dispatch_state) = {
         let store = state
@@ -4214,6 +4218,10 @@ pub(crate) async fn reject_proposal_with_state(
         return Ok(());
     }
     ensure_pending_or_postponed(&proposal)?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     let expected_status = proposal.status;
     proposal.reject();
@@ -4317,6 +4325,10 @@ pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
     }
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     if !proposal
         .source_detail
@@ -4413,6 +4425,10 @@ pub(crate) async fn postpone_proposal_with_state(
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     let expected_status = proposal.status;
     proposal.postpone();
