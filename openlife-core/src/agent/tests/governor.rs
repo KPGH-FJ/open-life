@@ -2,33 +2,12 @@ use crate::agent::policy_store::{ModelRoutePolicy, BUILTIN_POLICY_SENSITIVE_TOPI
 use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, ExternalWriteGovernanceInput,
     GovernanceDecisionClassification, GovernanceDecisionKind, HSSelectionAudit, LifeModelGovernor,
-    MaturationProposalCandidate, MemoryWriteGovernanceInput, ModelRouteGovernanceInput,
-    ProposalType, RiskLevel, RuntimeHSPacket, RuntimeInput, SelectedPolicyRef, ToolGovernanceInput,
+    MemoryWriteGovernanceInput, ModelRouteGovernanceInput, RiskLevel, RuntimeHSPacket,
+    RuntimeInput, SelectedPolicyRef, ToolGovernanceInput,
 };
 use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
-
-fn candidate(
-    proposal_type: ProposalType,
-    risk_level: RiskLevel,
-    proposal_only: bool,
-) -> MaturationProposalCandidate {
-    MaturationProposalCandidate {
-        proposal_type,
-        affected_path: "/identity/values".into(),
-        payload: serde_json::json!({
-            "summary": "raw life event summary must not be copied",
-            "content": "raw user_text raw assistant_output alice@example.com",
-        }),
-        reason: "raw user_text raw assistant_output should not be copied".into(),
-        confidence: 0.91,
-        risk_level,
-        source_run_id: Some("run-governor".into()),
-        source_event_type: "identity.values".into(),
-        proposal_only,
-    }
-}
 
 fn sensitive_packet() -> RuntimeHSPacket {
     RuntimeHSPacket {
@@ -77,49 +56,6 @@ fn runtime_input(tools_prompt: &str) -> RuntimeInput {
         None,
         AgentExecutionBudget::default(),
     )
-}
-
-#[test]
-fn high_risk_lifemodel_candidate_requires_confirmation() {
-    let governor = LifeModelGovernor;
-    let decision = governor.govern_maturation_candidate(&candidate(
-        ProposalType::LifeModelUpdate,
-        RiskLevel::High,
-        true,
-    ));
-
-    assert_eq!(decision.kind, GovernanceDecisionKind::RequireConfirmation);
-    assert_eq!(decision.risk_level, RiskLevel::High);
-    assert_eq!(
-        decision.metadata_safe_summary["proposalType"],
-        serde_json::json!("life_model_update")
-    );
-}
-
-#[test]
-fn memory_write_candidate_requires_proposal() {
-    let governor = LifeModelGovernor;
-    let decision = governor.govern_maturation_candidate(&candidate(
-        ProposalType::MemoryWrite,
-        RiskLevel::Low,
-        true,
-    ));
-
-    assert_eq!(decision.kind, GovernanceDecisionKind::RequireProposal);
-    assert_eq!(decision.risk_level, RiskLevel::Low);
-}
-
-#[test]
-fn proposal_only_false_candidate_is_blocked() {
-    let governor = LifeModelGovernor;
-    let decision = governor.govern_maturation_candidate(&candidate(
-        ProposalType::PreferenceUpdate,
-        RiskLevel::Medium,
-        false,
-    ));
-
-    assert_eq!(decision.kind, GovernanceDecisionKind::Block);
-    assert!(decision.reason.contains("proposal_only=false"));
 }
 
 #[test]
@@ -179,38 +115,8 @@ fn sensitive_runtime_requires_local_only() {
 }
 
 #[test]
-fn governance_decision_summary_is_metadata_safe() {
-    let governor = LifeModelGovernor;
-    let decision = governor.govern_maturation_candidate(&candidate(
-        ProposalType::LifeModelUpdate,
-        RiskLevel::High,
-        true,
-    ));
-    let serialized = serde_json::to_string(&decision).unwrap();
-
-    assert!(serialized.contains("maturation_candidate"));
-    assert!(!serialized.contains("raw user_text"));
-    assert!(!serialized.contains("raw assistant_output"));
-    assert!(!serialized.contains("raw life event summary"));
-    assert!(!serialized.contains("alice@example.com"));
-}
-
-#[test]
 fn unified_governor_report_classifies_core_decision_types_without_raw_payloads() {
     let governor = LifeModelGovernor;
-
-    let maturation = governor
-        .govern_maturation_candidate(&candidate(
-            ProposalType::LifeModelUpdate,
-            RiskLevel::High,
-            true,
-        ))
-        .to_report();
-    assert_eq!(
-        maturation.classification,
-        GovernanceDecisionClassification::Confirm
-    );
-    assert!(maturation.requires_confirmation);
 
     let model_route = governor
         .govern_model_route(ModelRouteGovernanceInput {
@@ -270,13 +176,7 @@ fn unified_governor_report_classifies_core_decision_types_without_raw_payloads()
         Some("external_write_action")
     );
 
-    for report in [
-        maturation,
-        model_route,
-        read_tool,
-        memory_write,
-        external_write,
-    ] {
+    for report in [model_route, read_tool, memory_write, external_write] {
         assert_eq!(report.report_kind, "governor_decision_report");
         assert!(report.metadata_safe);
         assert!(!report.contains_raw_content);

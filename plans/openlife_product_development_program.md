@@ -1545,8 +1545,16 @@ ranking 源码固定规划为 A—F 六个切片。5.4A—5.4F 已按该固定�
 反例、全仓门禁和同一隔离 QA 的真实 Tauri A/B；2026-08-09 的阶段代码 Review 又
 修复了三项证据与用户控制缺口并重跑全仓门禁，阶段已关闭。**
 
-下一板块：**5.5 已基于当前真实 caller 固定为 A—F 六个收敛切片，等待用户审阅后
-再开始 5.5A；当前尚未删除任何 5.5 生产路径。**
+5.5A“删除零产品调用的验证与成熟化平台”已于 2026-08-09 完成：旧 backend
+completion/readiness report、Maturation engine/readiness、runtime RegressionSuite、golden
+path orchestration、LifeSignal extractor/bridge 和只服务这些路径的 proposal outcome 已从
+源码及测试入口删除；原文件中仍有真实产品职责的 `LifeEventStore` 已迁入独立
+`life_event_store` owner，受治理创建、持久化、恢复、投影与兼容数据边界保持不变。
+删除前后的测试数量差异已与 81 项退役平台测试逐项闭合，全仓 Rust、前端和浏览器壳
+门禁通过，没有新增替代平台、治理账本或产品行为。
+
+下一板块：**按既定顺序进入 5.5B，收敛 Main Chat 与 PlanExecute 的 HS/Heuristic
+平行个性化；5.5C—5.5F 的范围与顺序保持不变。**
 
 第五阶段第一步实际完成：
 

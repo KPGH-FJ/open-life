@@ -1,8 +1,3 @@
-use crate::agent::evidence_graph::EvidenceGraphReport;
-use crate::agent::evidence_store::{
-    EvidenceDraft, EvidencePrivacyLevel, EvidenceSourceRef, EvidenceSourceType, EvidenceStore,
-    EvidenceType,
-};
 use crate::agent::runtime_contract::LifeEventDraft;
 use crate::agent::types::{AgentRunReceiptKey, RiskLevel};
 use anyhow::{anyhow, Context, Result};
@@ -11,143 +6,16 @@ use ring::digest::{digest, SHA256};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-const DEFAULT_CHAT_KERNEL_PATH: &str = "main_chat_kernel";
-const BACKEND_COMPLETION_REPORT_KIND: &str = "lifemodel_governed_backend_completion_readiness";
-const SIGNAL_EXTRACTOR_ID: &str = "deterministic.low_energy_planning";
-const SIGNAL_EXTRACTOR_VERSION: &str = "1";
-const MIN_SIGNAL_EVIDENCE_CONFIDENCE: f32 = 0.65;
-const LOW_ENERGY_EVIDENCE_PATH: &str = "/preferences/planning/low_energy_intensity";
-const LOW_ENERGY_SIGNAL_SUMMARY: &str =
-    "User prefers low-pressure planning with small next steps when energy is low.";
 const LIFE_EVENT_PAYLOAD_VERSION: i64 = 3;
 const LIFE_EVENT_V2_PHYSICAL_PURGE_MARKER: &str = "life_event_v2_physical_purge_complete";
+#[cfg(any(test, feature = "test-utils"))]
 const MAX_LIFE_EVENT_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_LIFE_EVENT_SOURCE_REFS: usize = 512;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelBackendCompletionReadinessReport {
-    pub report_kind: String,
-    pub report_ready: bool,
-    pub metadata_safe: bool,
-    pub contains_raw_content: bool,
-    pub default_chat_isolated: bool,
-    pub default_chat_selected_adapter_path: String,
-    pub ordinary_chat_route_unchanged: bool,
-    pub migration_permission: bool,
-    pub runtime_execution_allowed: bool,
-    pub model_execution_allowed: bool,
-    pub tool_execution_allowed: bool,
-    pub business_writes_allowed: bool,
-    pub tauri_command_required: bool,
-    pub current_prerequisites: LifeModelBackendPrerequisites,
-    pub governance_readiness: LifeModelBackendGovernanceReadiness,
-    pub next_required_schemas: Vec<String>,
-    pub blockers: Vec<String>,
-    pub master_spec_gate_blockers: Vec<LifeModelBackendGateBlocker>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelBackendPrerequisites {
-    pub w123_react_beta_execution_hardening_complete: bool,
-    pub legacy_direct_write_convergence_complete: bool,
-    pub default_chat_kernel_path: bool,
-    pub evidence_store_present: bool,
-    pub evidence_graph_present: bool,
-    pub heuristic_store_present: bool,
-    pub policy_store_present: bool,
-    pub proposal_store_present: bool,
-    pub patch_store_present: bool,
-    pub runtime_hs_packet_present: bool,
-    pub react_present: bool,
-    pub plan_execute_present: bool,
-    pub model_router_present: bool,
-    pub action_executor_present: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelBackendGovernanceReadiness {
-    pub evidence_store_present: bool,
-    pub evidence_graph_present: bool,
-    pub heuristic_store_present: bool,
-    pub policy_store_present: bool,
-    pub proposal_store_present: bool,
-    pub patch_store_present: bool,
-    pub source_lineage_required: bool,
-    pub metadata_safe_reports_required: bool,
-    pub proposal_first_required_for_truth: bool,
-    pub direct_lifemodel_truth_write_allowed: bool,
-    pub raw_content_allowed_in_reports: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeModelBackendGateBlocker {
-    pub gate: String,
-    pub blockers: Vec<String>,
-}
-
-pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendCompletionReadinessReport
-{
-    let current_prerequisites = LifeModelBackendPrerequisites {
-        w123_react_beta_execution_hardening_complete: true,
-        legacy_direct_write_convergence_complete: true,
-        default_chat_kernel_path: true,
-        evidence_store_present: type_available::<EvidenceStore>(),
-        evidence_graph_present: type_available::<EvidenceGraphReport>(),
-        heuristic_store_present: type_available::<crate::agent::heuristic_store::HeuristicStore>(),
-        policy_store_present: type_available::<crate::agent::policy_store::PolicyStore>(),
-        proposal_store_present: type_available::<crate::agent::proposal_store::ProposalStore>(),
-        patch_store_present: type_available::<crate::life_model::patch_store::PatchStore>(),
-        runtime_hs_packet_present: type_available::<crate::agent::hs_selector::RuntimeHSPacket>(),
-        react_present: type_available::<crate::agent::agent_loop::AgentLoop>(),
-        plan_execute_present: type_available::<crate::agent::plan_execute::PlanExecuteService>(),
-        model_router_present: type_available::<crate::agent::model_router::ModelRouter>(),
-        action_executor_present: type_available::<crate::agent::action_executor::ActionExecutor>(),
-    };
-    let governance_readiness = LifeModelBackendGovernanceReadiness {
-        evidence_store_present: current_prerequisites.evidence_store_present,
-        evidence_graph_present: current_prerequisites.evidence_graph_present,
-        heuristic_store_present: current_prerequisites.heuristic_store_present,
-        policy_store_present: current_prerequisites.policy_store_present,
-        proposal_store_present: current_prerequisites.proposal_store_present,
-        patch_store_present: current_prerequisites.patch_store_present,
-        source_lineage_required: true,
-        metadata_safe_reports_required: true,
-        proposal_first_required_for_truth: true,
-        direct_lifemodel_truth_write_allowed: false,
-        raw_content_allowed_in_reports: false,
-    };
-    let next_required_schemas = Vec::new();
-    let blockers = Vec::new();
-    LifeModelBackendCompletionReadinessReport {
-        report_kind: BACKEND_COMPLETION_REPORT_KIND.to_string(),
-        report_ready: true,
-        metadata_safe: true,
-        contains_raw_content: false,
-        default_chat_isolated: true,
-        default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.to_string(),
-        ordinary_chat_route_unchanged: true,
-        migration_permission: false,
-        runtime_execution_allowed: false,
-        model_execution_allowed: false,
-        tool_execution_allowed: false,
-        business_writes_allowed: false,
-        tauri_command_required: false,
-        current_prerequisites,
-        governance_readiness,
-        next_required_schemas,
-        blockers,
-        master_spec_gate_blockers: Vec::new(),
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -638,6 +506,7 @@ fn canonical_life_event_json_material(value: &Value) -> String {
 /// release builds reject the legacy source-proof create path, and the new
 /// gateway accepts only `LifeEventCreatePermit`.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "test-utils"))]
 pub struct CanonicalLifeEventSourceProof {
     source_type: LifeEventSourceType,
     source_id: String,
@@ -648,6 +517,7 @@ pub struct CanonicalLifeEventSourceProof {
     _runtime_nonce: Uuid,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl CanonicalLifeEventSourceProof {
     pub(crate) fn from_agent_run_lookup(
         seal: crate::agent::store::CanonicalAgentRunLifeEventSourceSeal,
@@ -1236,6 +1106,7 @@ impl LifeEventStore {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     fn persisted_source_ref(
         &self,
         proof: CanonicalLifeEventSourceProof,
@@ -1482,6 +1353,7 @@ impl LifeEventStore {
         )
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn create_event_from_canonical_sources(
         &self,
         draft: LifeEventDraft,
@@ -2028,393 +1900,6 @@ fn life_event_hidden(tombstones: &HashSet<(String, String)>, event: &LifeEvent) 
         })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifeSignalType {
-    PlanningIntensityPreference,
-    StateEnergyPattern,
-    WorkStylePreference,
-    CommunicationPreference,
-    Unsupported,
-}
-
-impl std::fmt::Display for LifeSignalType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LifeSignalType::PlanningIntensityPreference => {
-                write!(f, "planning_intensity_preference")
-            }
-            LifeSignalType::StateEnergyPattern => write!(f, "state_energy_pattern"),
-            LifeSignalType::WorkStylePreference => write!(f, "work_style_preference"),
-            LifeSignalType::CommunicationPreference => write!(f, "communication_preference"),
-            LifeSignalType::Unsupported => write!(f, "unsupported"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifeSignalPolarity {
-    Supporting,
-    Opposing,
-    Corrective,
-    Uncertain,
-}
-
-impl std::fmt::Display for LifeSignalPolarity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LifeSignalPolarity::Supporting => write!(f, "supporting"),
-            LifeSignalPolarity::Opposing => write!(f, "opposing"),
-            LifeSignalPolarity::Corrective => write!(f, "corrective"),
-            LifeSignalPolarity::Uncertain => write!(f, "uncertain"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeSignal {
-    pub id: String,
-    pub signal_type: LifeSignalType,
-    pub domain: LifeDomain,
-    pub claim_summary: String,
-    pub polarity: LifeSignalPolarity,
-    pub confidence: f32,
-    pub risk_level: RiskLevel,
-    pub privacy_level: LifeEventPrivacyLevel,
-    pub source_event_ids: Vec<String>,
-    pub extractor_id: String,
-    pub extractor_version: String,
-    pub uncertainty_reasons: Vec<String>,
-    pub dedupe_key: String,
-    pub metadata: Value,
-    pub contains_raw_content: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct LifeSignalExtractorInput {
-    pub events: Vec<LifeEvent>,
-}
-
-impl LifeSignalExtractorInput {
-    pub fn new(events: Vec<LifeEvent>) -> Self {
-        Self { events }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeSignalExtractorReport {
-    pub extractor_id: String,
-    pub extractor_version: String,
-    pub metadata_safe: bool,
-    pub contains_raw_content: bool,
-    pub ran_runtime: bool,
-    pub ran_model: bool,
-    pub ran_tool: bool,
-    pub accepted_signals: Vec<LifeSignal>,
-    pub dropped_signals: Vec<DroppedLifeSignal>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DroppedLifeSignal {
-    pub event_id: String,
-    pub event_digest: String,
-    pub reasons: Vec<String>,
-}
-
-pub fn extract_life_signals(input: LifeSignalExtractorInput) -> LifeSignalExtractorReport {
-    let mut accepted_signals = Vec::new();
-    let mut dropped_signals = Vec::new();
-    for event in input.events {
-        let mut reasons = Vec::new();
-        if event.contains_raw_content || value_contains_raw_content(&event.metadata) {
-            push_unique(&mut reasons, "event_contains_raw_content");
-        }
-        if !matches!(event.risk_level, RiskLevel::Low) {
-            push_unique(&mut reasons, "high_risk_event");
-        }
-        if !matches!(
-            event.privacy_level,
-            LifeEventPrivacyLevel::Public | LifeEventPrivacyLevel::Internal
-        ) {
-            push_unique(&mut reasons, "event_privacy_not_allowed");
-        }
-        if event.source_refs.is_empty() {
-            push_unique(&mut reasons, "source_lineage_missing");
-        }
-        if !event.has_canonical_source_authority() {
-            push_unique(&mut reasons, "source_lineage_legacy_unverified");
-        }
-        if event.domain != LifeDomain::LowEnergyPlanning {
-            push_unique(&mut reasons, "unsupported_domain");
-        }
-        if !is_low_energy_planning_event(&event) {
-            push_unique(&mut reasons, "unsupported_event_type");
-        }
-
-        if !reasons.is_empty() {
-            dropped_signals.push(DroppedLifeSignal {
-                event_id: event.id,
-                event_digest: event.payload_digest,
-                reasons,
-            });
-            continue;
-        }
-
-        let confidence = confidence_from_metadata(&event.metadata).unwrap_or(0.78);
-        let mut uncertainty_reasons = Vec::new();
-        if confidence < 0.75 {
-            push_unique(&mut uncertainty_reasons, "below_preferred_confidence");
-        }
-        accepted_signals.push(LifeSignal {
-            id: format!("ls_{}", Uuid::new_v4().simple()),
-            signal_type: LifeSignalType::PlanningIntensityPreference,
-            domain: LifeDomain::LowEnergyPlanning,
-            claim_summary: LOW_ENERGY_SIGNAL_SUMMARY.to_string(),
-            polarity: LifeSignalPolarity::Supporting,
-            confidence: confidence.clamp(0.0, 1.0),
-            risk_level: RiskLevel::Low,
-            privacy_level: LifeEventPrivacyLevel::Internal,
-            source_event_ids: vec![event.id.clone()],
-            extractor_id: SIGNAL_EXTRACTOR_ID.to_string(),
-            extractor_version: SIGNAL_EXTRACTOR_VERSION.to_string(),
-            uncertainty_reasons,
-            dedupe_key: format!(
-                "signal:low_energy_planning:{}",
-                short_hash(&event.dedupe_key)
-            ),
-            metadata: json!({
-                "sourceEventDigest": event.payload_digest,
-                "sourceEventDedupeKeyDigest": sha256_hex(event.dedupe_key.as_bytes()),
-                "deterministic": true,
-                "metadataSafe": true
-            }),
-            contains_raw_content: false,
-        });
-    }
-
-    LifeSignalExtractorReport {
-        extractor_id: SIGNAL_EXTRACTOR_ID.to_string(),
-        extractor_version: SIGNAL_EXTRACTOR_VERSION.to_string(),
-        metadata_safe: true,
-        contains_raw_content: false,
-        ran_runtime: false,
-        ran_model: false,
-        ran_tool: false,
-        accepted_signals,
-        dropped_signals,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct LifeSignalBridgeInput {
-    pub signal: LifeSignal,
-    pub source_events: Vec<LifeEvent>,
-}
-
-impl LifeSignalBridgeInput {
-    pub fn new(signal: LifeSignal, source_events: Vec<LifeEvent>) -> Self {
-        Self {
-            signal,
-            source_events,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeSignalEvidenceBridgeReport {
-    pub bridged: bool,
-    pub metadata_safe: bool,
-    pub contains_raw_content: bool,
-    pub evidence_ids: Vec<String>,
-    pub wrote_evidence_count: u32,
-    pub wrote_life_model_count: u32,
-    pub wrote_memory_count: u32,
-    pub wrote_heuristic_count: u32,
-    pub wrote_chat_message_count: u32,
-    pub wrote_agent_run_count: u32,
-    pub wrote_mcp_audit_count: u32,
-    pub wrote_external_count: u32,
-    pub ran_runtime: bool,
-    pub ran_model: bool,
-    pub ran_tool: bool,
-    pub blocking_reasons: Vec<String>,
-}
-
-pub fn bridge_life_signal_to_evidence(
-    input: LifeSignalBridgeInput,
-    evidence_store: &EvidenceStore,
-) -> Result<LifeSignalEvidenceBridgeReport> {
-    let mut blocking_reasons = Vec::new();
-    if input.signal.contains_raw_content || value_contains_raw_content(&input.signal.metadata) {
-        push_unique(&mut blocking_reasons, "signal_contains_raw_content");
-    }
-    if input.signal.confidence < MIN_SIGNAL_EVIDENCE_CONFIDENCE {
-        push_unique(&mut blocking_reasons, "signal_confidence_too_low");
-    }
-    if !matches!(input.signal.risk_level, RiskLevel::Low) {
-        push_unique(&mut blocking_reasons, "signal_risk_not_allowed");
-    }
-    if !matches!(
-        input.signal.privacy_level,
-        LifeEventPrivacyLevel::Public | LifeEventPrivacyLevel::Internal
-    ) {
-        push_unique(&mut blocking_reasons, "signal_privacy_not_allowed");
-    }
-    if input.signal.domain != LifeDomain::LowEnergyPlanning {
-        push_unique(&mut blocking_reasons, "unsupported_signal_domain");
-    }
-    if input.signal.signal_type != LifeSignalType::PlanningIntensityPreference {
-        push_unique(&mut blocking_reasons, "unsupported_signal_type");
-    }
-    if input.signal.source_event_ids.is_empty() {
-        push_unique(&mut blocking_reasons, "source_event_lineage_missing");
-    }
-
-    let event_by_id: HashMap<String, LifeEvent> = input
-        .source_events
-        .into_iter()
-        .map(|event| (event.id.clone(), event))
-        .collect();
-    let mut lineage_events = Vec::new();
-    for event_id in &input.signal.source_event_ids {
-        match event_by_id.get(event_id) {
-            Some(event) => {
-                if event.contains_raw_content || value_contains_raw_content(&event.metadata) {
-                    push_unique(&mut blocking_reasons, "source_event_contains_raw_content");
-                }
-                if event.source_refs.is_empty() {
-                    push_unique(&mut blocking_reasons, "source_event_lineage_missing");
-                }
-                if !event.has_canonical_source_authority() {
-                    push_unique(
-                        &mut blocking_reasons,
-                        "source_event_lineage_legacy_unverified",
-                    );
-                }
-                if !matches!(event.risk_level, RiskLevel::Low) {
-                    push_unique(&mut blocking_reasons, "source_event_risk_not_allowed");
-                }
-                if event.domain != LifeDomain::LowEnergyPlanning {
-                    push_unique(&mut blocking_reasons, "source_event_domain_not_allowed");
-                }
-                lineage_events.push(event.clone());
-            }
-            None => push_unique(&mut blocking_reasons, "source_event_lineage_missing"),
-        }
-    }
-
-    if !blocking_reasons.is_empty() {
-        return Ok(blocked_bridge_report(blocking_reasons));
-    }
-
-    let mut source_refs = vec![EvidenceSourceRef::from_digest(
-        EvidenceSourceType::RunMetadata,
-        input.signal.id.clone(),
-        Some(SIGNAL_EXTRACTOR_ID),
-        signal_digest(&input.signal),
-    )];
-    let mut linked_agent_run_ids = Vec::new();
-    for event in &lineage_events {
-        for source in &event.source_refs {
-            let evidence_source_type = evidence_source_type_from_life_source(source.source_type);
-            if evidence_source_type == EvidenceSourceType::AgentRun {
-                push_unique(&mut linked_agent_run_ids, source.source_id.clone());
-            }
-            source_refs.push(EvidenceSourceRef::from_digest(
-                evidence_source_type,
-                source.source_id.clone(),
-                Some(&format!(
-                    "life_event:{}:{}",
-                    event.id,
-                    source.source_detail.as_deref().unwrap_or("source")
-                )),
-                source.digest.clone(),
-            ));
-        }
-    }
-
-    let mut draft = EvidenceDraft::new(
-        EvidenceType::Preference,
-        LOW_ENERGY_EVIDENCE_PATH,
-        input.signal.confidence,
-        RiskLevel::Low,
-        EvidencePrivacyLevel::Internal,
-    )
-    .with_summary(LOW_ENERGY_SIGNAL_SUMMARY);
-    for source_ref in source_refs {
-        draft = draft.with_source_ref(source_ref);
-    }
-    for run_id in linked_agent_run_ids {
-        draft = draft.with_linked_agent_run(run_id);
-    }
-    draft.run_metadata = json!({
-        "bridgeKind": "life_signal_to_evidence",
-        "signalId": input.signal.id,
-        "signalDedupeKeyDigest": sha256_hex(input.signal.dedupe_key.as_bytes()),
-        "sourceEventIds": input.signal.source_event_ids,
-        "extractorId": input.signal.extractor_id,
-        "extractorVersion": input.signal.extractor_version,
-        "metadataSafe": true
-    });
-
-    let evidence = evidence_store.create_evidence(draft)?;
-    Ok(LifeSignalEvidenceBridgeReport {
-        bridged: true,
-        metadata_safe: true,
-        contains_raw_content: false,
-        evidence_ids: vec![evidence.id],
-        wrote_evidence_count: 1,
-        wrote_life_model_count: 0,
-        wrote_memory_count: 0,
-        wrote_heuristic_count: 0,
-        wrote_chat_message_count: 0,
-        wrote_agent_run_count: 0,
-        wrote_mcp_audit_count: 0,
-        wrote_external_count: 0,
-        ran_runtime: false,
-        ran_model: false,
-        ran_tool: false,
-        blocking_reasons: Vec::new(),
-    })
-}
-
-fn blocked_bridge_report(blocking_reasons: Vec<String>) -> LifeSignalEvidenceBridgeReport {
-    LifeSignalEvidenceBridgeReport {
-        bridged: false,
-        metadata_safe: true,
-        contains_raw_content: false,
-        evidence_ids: Vec::new(),
-        wrote_evidence_count: 0,
-        wrote_life_model_count: 0,
-        wrote_memory_count: 0,
-        wrote_heuristic_count: 0,
-        wrote_chat_message_count: 0,
-        wrote_agent_run_count: 0,
-        wrote_mcp_audit_count: 0,
-        wrote_external_count: 0,
-        ran_runtime: false,
-        ran_model: false,
-        ran_tool: false,
-        blocking_reasons,
-    }
-}
-
-fn is_low_energy_planning_event(event: &LifeEvent) -> bool {
-    event.domain == LifeDomain::LowEnergyPlanning
-        && (event.event_type.contains("low_energy")
-            || event
-                .metadata
-                .get("domain")
-                .and_then(Value::as_str)
-                .map(|domain| domain == "low_energy_planning")
-                .unwrap_or(false))
-}
-
 fn sanitize_event_metadata(
     value: &Value,
     receipt_key: &AgentRunReceiptKey,
@@ -2908,76 +2393,6 @@ fn add_life_event_column_if_missing(
     Ok(())
 }
 
-fn confidence_from_metadata(metadata: &Value) -> Option<f32> {
-    metadata
-        .get("confidence")
-        .and_then(Value::as_f64)
-        .map(|value| (value as f32).clamp(0.0, 1.0))
-}
-
-fn value_contains_raw_content(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            let normalized = key
-                .chars()
-                .filter(|character| character.is_ascii_alphanumeric())
-                .flat_map(char::to_lowercase)
-                .collect::<String>();
-            let raw_field = matches!(
-                normalized.as_str(),
-                "rawcontent"
-                    | "rawevidencepreview"
-                    | "rawusertextpreview"
-                    | "contentpreview"
-                    | "outputpreview"
-                    | "observationcontent"
-            );
-            (raw_field && matches!(value, Value::String(_) | Value::Array(_) | Value::Object(_)))
-                || value_contains_raw_content(value)
-        }),
-        Value::Array(values) => values.iter().any(value_contains_raw_content),
-        _ => false,
-    }
-}
-
-fn evidence_source_type_from_life_source(source_type: LifeEventSourceType) -> EvidenceSourceType {
-    match source_type {
-        LifeEventSourceType::ChatMessage => EvidenceSourceType::ChatMessage,
-        LifeEventSourceType::AgentRun => EvidenceSourceType::AgentRun,
-        LifeEventSourceType::Proposal => EvidenceSourceType::Proposal,
-        LifeEventSourceType::Feedback => EvidenceSourceType::Feedback,
-        LifeEventSourceType::UserEdit | LifeEventSourceType::ManualCorrection => {
-            EvidenceSourceType::UserEdit
-        }
-        LifeEventSourceType::RuntimeObservation | LifeEventSourceType::ToolResult => {
-            EvidenceSourceType::RunMetadata
-        }
-        LifeEventSourceType::Other => EvidenceSourceType::Other,
-    }
-}
-
-fn signal_digest(signal: &LifeSignal) -> String {
-    sha256_hex(
-        json!({
-            "signalType": signal.signal_type.to_string(),
-            "domain": signal.domain.to_string(),
-            "polarity": signal.polarity.to_string(),
-            "confidence": signal.confidence,
-            "sourceEventIds": signal.source_event_ids,
-            "extractorId": signal.extractor_id,
-            "extractorVersion": signal.extractor_version,
-            "dedupeKey": signal.dedupe_key,
-        })
-        .to_string()
-        .as_bytes(),
-    )
-}
-
-fn type_available<T: 'static>() -> bool {
-    let _ = std::any::TypeId::of::<T>();
-    true
-}
-
 fn canonical_json_column<T>(row: &Row<'_>, idx: usize, reason: &str) -> rusqlite::Result<T>
 where
     T: DeserializeOwned + Serialize,
@@ -3048,6 +2463,7 @@ fn short_hash(value: &str) -> String {
     sha256_hex(value.as_bytes()).chars().take(16).collect()
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn push_unique(reasons: &mut Vec<String>, reason: impl Into<String>) {
     let reason = reason.into();
     if !reasons.iter().any(|existing| existing == &reason) {

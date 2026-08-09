@@ -1,5 +1,4 @@
 use crate::agent::hs_selector::RuntimeHSPacket;
-use crate::agent::maturation::MaturationProposalCandidate;
 use crate::agent::policy_store::{
     ModelRoutePolicy, BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
     BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
@@ -15,7 +14,6 @@ use serde_json::{json, Value};
 pub enum GovernanceSubject {
     RuntimeInput,
     ToolAction,
-    MaturationCandidate,
     ModelRoute,
     MemoryWrite,
     ExternalWrite,
@@ -26,7 +24,6 @@ impl GovernanceSubject {
         match self {
             GovernanceSubject::RuntimeInput => "runtime_input",
             GovernanceSubject::ToolAction => "tool_action",
-            GovernanceSubject::MaturationCandidate => "maturation_candidate",
             GovernanceSubject::ModelRoute => "model_route",
             GovernanceSubject::MemoryWrite => "memory_write",
             GovernanceSubject::ExternalWrite => "external_write",
@@ -185,69 +182,6 @@ pub struct ModelRouteGovernanceInput {
 pub struct LifeModelGovernor;
 
 impl LifeModelGovernor {
-    pub fn govern_maturation_candidate(
-        &self,
-        candidate: &MaturationProposalCandidate,
-    ) -> GovernanceDecision {
-        let subject = GovernanceSubject::MaturationCandidate;
-
-        if !candidate.proposal_only {
-            return decision(
-                subject,
-                GovernanceDecisionKind::Block,
-                candidate.risk_level,
-                "maturation candidate has proposal_only=false; direct LifeModel/Memory writes are blocked",
-                maturation_summary(candidate, "proposal_only_false"),
-                vec!["candidate must be regenerated as proposal-only before review".into()],
-            );
-        }
-
-        let kind = if is_high_or_critical(candidate.risk_level)
-            && is_lifemodel_update(candidate.proposal_type)
-        {
-            GovernanceDecisionKind::RequireConfirmation
-        } else if requires_proposal_first(candidate.proposal_type) {
-            GovernanceDecisionKind::RequireProposal
-        } else if is_high_or_critical(candidate.risk_level) {
-            GovernanceDecisionKind::RequireConfirmation
-        } else {
-            GovernanceDecisionKind::Allow
-        };
-
-        let reason_code = match kind {
-            GovernanceDecisionKind::RequireConfirmation => "high_risk_lifemodel_confirmation",
-            GovernanceDecisionKind::RequireProposal => "proposal_first_required",
-            GovernanceDecisionKind::Allow => "maturation_candidate_allowed",
-            GovernanceDecisionKind::RequireLocalOnly | GovernanceDecisionKind::Block => {
-                "maturation_candidate_blocked"
-            }
-        };
-
-        let reason = match kind {
-            GovernanceDecisionKind::RequireConfirmation => {
-                "high-risk maturation candidate requires explicit user confirmation before apply"
-            }
-            GovernanceDecisionKind::RequireProposal => {
-                "maturation candidate must enter proposal-first review before any write"
-            }
-            GovernanceDecisionKind::Allow => {
-                "maturation candidate is eligible for proposal drafting"
-            }
-            GovernanceDecisionKind::RequireLocalOnly | GovernanceDecisionKind::Block => {
-                "maturation candidate cannot proceed"
-            }
-        };
-
-        decision(
-            subject,
-            kind,
-            candidate.risk_level,
-            reason,
-            maturation_summary(candidate, reason_code),
-            Vec::new(),
-        )
-    }
-
     pub fn govern_tool_action(&self, input: ToolGovernanceInput) -> GovernanceDecision {
         let action_kind = input.action_kind.trim().to_ascii_lowercase();
         let write_like =
@@ -518,18 +452,6 @@ fn decision(
     }
 }
 
-fn maturation_summary(candidate: &MaturationProposalCandidate, reason_code: &str) -> Value {
-    summary(
-        GovernanceSubject::MaturationCandidate,
-        Some(candidate.proposal_type),
-        Some(candidate.affected_path.as_str()),
-        candidate.risk_level,
-        candidate.source_run_id.as_deref(),
-        Some(candidate.source_event_type.as_str()),
-        reason_code,
-    )
-}
-
 fn summary(
     subject: GovernanceSubject,
     proposal_type: Option<ProposalType>,
@@ -557,31 +479,6 @@ fn insert_selected_policy_ids(summary: &mut Value, selected_policy_ids: Vec<Stri
             Value::Array(selected_policy_ids.into_iter().map(Value::String).collect()),
         );
     }
-}
-
-fn requires_proposal_first(proposal_type: ProposalType) -> bool {
-    matches!(
-        proposal_type,
-        ProposalType::LifeModelUpdate
-            | ProposalType::GoalUpdate
-            | ProposalType::StateUpdate
-            | ProposalType::PreferenceUpdate
-            | ProposalType::MemoryWrite
-    )
-}
-
-fn is_lifemodel_update(proposal_type: ProposalType) -> bool {
-    matches!(
-        proposal_type,
-        ProposalType::LifeModelUpdate
-            | ProposalType::GoalUpdate
-            | ProposalType::StateUpdate
-            | ProposalType::PreferenceUpdate
-    )
-}
-
-fn is_high_or_critical(risk_level: RiskLevel) -> bool {
-    matches!(risk_level, RiskLevel::High | RiskLevel::Critical)
 }
 
 fn is_write_like_action(tool_name: &str, action_kind: &str) -> bool {

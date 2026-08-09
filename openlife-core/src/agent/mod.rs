@@ -1,28 +1,24 @@
 pub mod accepted_guidance;
 pub mod action_executor;
 pub mod agent_loop;
-pub mod backend_contract_freeze;
 pub mod canonical_write_admission;
 pub mod context_assembler;
 pub mod conversation_context;
 pub mod evidence_graph;
 pub mod evidence_store;
-pub mod golden_paths;
 pub mod governor;
 pub mod heuristic_store;
 pub mod hs_asset_authority;
 pub mod hs_selector;
+pub mod life_event_store;
 pub mod life_model_explicit_read;
 pub mod life_model_learning;
 pub mod life_model_runtime_context;
 pub mod life_model_view_model;
-pub mod lifemodel_backend_completion;
 pub mod main_chat_agent_v1;
 pub mod main_chat_governance_intent;
 pub mod main_chat_memory_candidate;
 pub mod main_chat_runtime_contract;
-pub mod maturation;
-mod maturation_domain;
 pub mod memory_lifecycle;
 pub mod memory_service;
 pub mod memory_view_model;
@@ -32,11 +28,9 @@ pub mod model_router;
 pub mod plan_execute;
 pub mod policy_store;
 pub mod product_read_model;
-mod proposal_outcome;
 pub mod proposal_store;
 pub mod provider_privacy_boundary;
 pub mod reasoning;
-pub mod regression_suite;
 pub mod review_decision_context;
 pub mod review_item;
 pub mod review_workflow;
@@ -75,17 +69,6 @@ pub use agent_loop::{
     AgentLoop, AgentLoopAllowedToolAction, AgentLoopConfig, AgentLoopResult, AgentLoopRunRequest,
     AgentLoopTerminalDisposition, StreamingCallback,
 };
-pub use backend_contract_freeze::{
-    evaluate_final_backend_completion_gate, freeze_pre_ui_backend_read_model_contracts,
-    BackendCompletionAcceptanceGateStatus, BackendCompletionGateEvidence,
-    DefaultChatIsolationProof, FinalBackendCompletionGateInput, FinalBackendCompletionGateReport,
-    GoldenPathCoverageProof, LearningInboxItem, LearningInboxReadModel, LifeModelOverviewReadModel,
-    LocalOnlyPrivacyProof, PreUiBackendContractFreezeInput, PreUiBackendContractFreezeReport,
-    PrivacyControlsReadModel, PrivacyDecisionSummary, ProposalFirstBoundaryProof,
-    ProposalReviewItem, ProposalReviewReadModel, RawContentExclusionProof, RuntimeTraceHsInfluence,
-    RuntimeTraceReadModel, RuntimeTraceRunItem, ToolGovernanceProof, UiReadModelGateProof,
-    UiReadModelSurfaceContract,
-};
 pub use canonical_write_admission::{
     CanonicalWriteAdmission, CanonicalWriteAdmissionRejection, CanonicalWriteAdmissionRequest,
     CanonicalWritePermit,
@@ -103,13 +86,6 @@ pub use evidence_graph::{
 pub use evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
     EvidenceSourceType, EvidenceStatus, EvidenceStore, EvidenceTombstone, EvidenceType,
-};
-pub use golden_paths::{
-    run_low_energy_support_golden_path, run_preference_correction_golden_path,
-    run_weekly_planning_golden_path, LowEnergySupportGoldenPathInput,
-    LowEnergySupportGoldenPathReport, PreferenceCorrectionGoldenPathInput,
-    PreferenceCorrectionGoldenPathReport, WeeklyPlanningGoldenPathInput,
-    WeeklyPlanningGoldenPathReport,
 };
 pub use governor::{
     ExternalWriteGovernanceInput, GovernanceDecision, GovernanceDecisionClassification,
@@ -135,6 +111,13 @@ pub use hs_selector::{
     HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
     SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use life_event_store::CanonicalLifeEventSourceProof;
+pub use life_event_store::{
+    CanonicalLifeEventOwnerKind, CanonicalLifeEventOwnerRef, LifeDomain, LifeEvent,
+    LifeEventPrivacyLevel, LifeEventSourceRef, LifeEventSourceType, LifeEventSourceVerification,
+    LifeEventStore,
+};
 pub use life_model_explicit_read::{
     is_explicit_lifemodel_read_intent, LifeModelExplicitReadAnswer, LifeModelExplicitReadFact,
 };
@@ -157,16 +140,6 @@ pub use life_model_view_model::{
     LifeModelReadiness, LifeModelTierSummary, LifeModelTrustQualityState, LifeModelTruthMode,
     LifeModelViewModel, LifeModelViewModelBuildInput,
 };
-pub use lifemodel_backend_completion::{
-    bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,
-    extract_life_signals, CanonicalLifeEventOwnerKind, CanonicalLifeEventOwnerRef,
-    CanonicalLifeEventSourceProof, DroppedLifeSignal, LifeDomain, LifeEvent, LifeEventPrivacyLevel,
-    LifeEventSourceRef, LifeEventSourceType, LifeEventSourceVerification, LifeEventStore,
-    LifeModelBackendCompletionReadinessReport, LifeModelBackendGateBlocker,
-    LifeModelBackendGovernanceReadiness, LifeModelBackendPrerequisites, LifeSignal,
-    LifeSignalBridgeInput, LifeSignalEvidenceBridgeReport, LifeSignalExtractorInput,
-    LifeSignalExtractorReport, LifeSignalPolarity, LifeSignalType,
-};
 pub use main_chat_governance_intent::{
     extract_main_chat_intent_signals, MainChatBlockerRequirement, MainChatDurableWriteRequirement,
     MainChatExternalReadRequirement, MainChatIntentSignals,
@@ -174,26 +147,6 @@ pub use main_chat_governance_intent::{
 pub use main_chat_memory_candidate::{
     extract_main_chat_memory_candidates, plan_main_chat_memory_routing, route_memory_candidates,
     MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
-};
-pub use maturation::{
-    ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,
-    ensure_lifemodel_maturation_readiness, ensure_low_energy_rule_trace_visibility,
-    evaluate_accepted_low_energy_rule_selection, evaluate_lifemodel_maturation_readiness,
-    evaluate_low_energy_collaboration_rule_candidate, evaluate_low_energy_rule_trace_visibility,
-    evaluate_maturation_engine_v1, propose_low_energy_collaboration_rule_candidate,
-    run_lifemodel_maturation_non_default_invocation,
-    AcceptedLowEnergyRuleSelectionHSPacketAuditProof, AcceptedLowEnergyRuleSelectionInput,
-    AcceptedLowEnergyRuleSelectionReport, LifeModelMaturationNonDefaultInvocationInput,
-    LifeModelMaturationNonDefaultInvocationReport, LifeModelMaturationReadinessInput,
-    LifeModelMaturationReadinessReport, LifeModelMaturationReadinessSideEffectBudget,
-    LifeModelMaturationService, LowEnergyCollaborationRuleCandidateInput,
-    LowEnergyCollaborationRuleCandidateReport, LowEnergyRuleTraceLineageItem,
-    LowEnergyRuleTraceLineageSummary, LowEnergyRuleTraceMetadata,
-    LowEnergyRuleTraceVisibilityInput, LowEnergyRuleTraceVisibilityReport,
-    MaturationCandidateDomain, MaturationCandidateSuppressionReport, MaturationDropReason,
-    MaturationEngineCandidate, MaturationEngineV1Input, MaturationEngineV1Report,
-    MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
-    MaturationProposalCandidate, MaturationReport, MaturationService,
 };
 pub use memory_lifecycle::{
     bind_memory_fact_scope_owner, memory_lifecycle_category_for_candidate_kind,
@@ -243,11 +196,6 @@ pub use product_read_model::{
     ReviewActionKind, ReviewItemMaterializationStatus, ViewModelActions, ViewModelEnvelope,
     ViewModelSource, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
-#[cfg(test)]
-pub use proposal_outcome::{
-    evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
-    MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
-};
 pub use proposal_store::{
     ArtifactEffectRecord, ArtifactEffectState, ProposalStore, ProposalTerminalRelationKind,
     ProposalTerminalRelationProjectionProof, TerminalOwnerOriginBinding,
@@ -259,9 +207,6 @@ pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
     ReasoningOutput, ReasoningPhaseKind, ReasoningStrategy, ReasoningTrace,
-};
-pub use regression_suite::{
-    RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
 pub use review_decision_context::{
     build_review_decision_context, GovernedActionReviewContract, PermissionDecisionContext,

@@ -89,7 +89,7 @@ pub(crate) struct DeterministicLifeEventPolicyProof {
     normalized_claim: String,
     confidence: f32,
     risk_level: crate::agent::RiskLevel,
-    sensitivity: crate::agent::lifemodel_backend_completion::LifeEventSensitivity,
+    sensitivity: crate::agent::life_event_store::LifeEventSensitivity,
     runtime_binding_digest: String,
     runtime_nonce: Uuid,
 }
@@ -143,9 +143,7 @@ impl DeterministicLifeEventPolicyProof {
         self.risk_level
     }
 
-    pub(crate) fn sensitivity(
-        &self,
-    ) -> crate::agent::lifemodel_backend_completion::LifeEventSensitivity {
+    pub(crate) fn sensitivity(&self) -> crate::agent::life_event_store::LifeEventSensitivity {
         self.sensitivity
     }
 
@@ -153,7 +151,7 @@ impl DeterministicLifeEventPolicyProof {
     pub(crate) fn with_policy_for_test(
         mut self,
         risk_level: crate::agent::RiskLevel,
-        sensitivity: crate::agent::lifemodel_backend_completion::LifeEventSensitivity,
+        sensitivity: crate::agent::life_event_store::LifeEventSensitivity,
     ) -> Self {
         self.risk_level = risk_level;
         self.sensitivity = sensitivity;
@@ -205,7 +203,7 @@ pub(crate) fn issue_deterministic_life_event_policy_proof(
         normalized_claim: candidate.normalized_claim,
         confidence: candidate.confidence,
         risk_level: crate::agent::RiskLevel::Low,
-        sensitivity: crate::agent::lifemodel_backend_completion::LifeEventSensitivity::Low,
+        sensitivity: crate::agent::life_event_store::LifeEventSensitivity::Low,
         runtime_binding_digest: String::new(),
         runtime_nonce: Uuid::new_v4(),
     };

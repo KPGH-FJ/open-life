@@ -2524,6 +2524,7 @@ impl RawAgentRunToolExecutionRecord {
 /// Owner-module-only lookup seal for LifeEvent lineage. Its fields are
 /// private to AgentRunStore and it has no serde implementation.
 #[derive(Debug)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) struct CanonicalAgentRunLifeEventSourceSeal {
     run_id: String,
     canonical_store_identity: String,
@@ -2532,6 +2533,7 @@ pub(crate) struct CanonicalAgentRunLifeEventSourceSeal {
     _lookup_nonce: uuid::Uuid,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl CanonicalAgentRunLifeEventSourceSeal {
     pub(crate) fn run_id(&self) -> &str {
         &self.run_id
@@ -3164,13 +3166,12 @@ impl AgentRunStore {
             canonical_content_digest,
             owner_revision,
         );
-        let (permit, draft) =
-            crate::agent::lifemodel_backend_completion::issue_life_event_create_permit(
-                message_proof,
-                policy_proof,
-                &execution_proof,
-                operation_id,
-            )?;
+        let (permit, draft) = crate::agent::life_event_store::issue_life_event_create_permit(
+            message_proof,
+            policy_proof,
+            &execution_proof,
+            operation_id,
+        )?;
         permit.matches_current_agent_run_owner(
             execution_proof.canonical_store_identity(),
             execution_proof.canonical_ref(),
@@ -3230,7 +3231,7 @@ impl AgentRunStore {
     pub(crate) fn commit_prepared_life_event_for_test(
         &self,
         life_event_store: &crate::agent::LifeEventStore,
-        permit: crate::agent::lifemodel_backend_completion::LifeEventCreatePermit,
+        permit: crate::agent::life_event_store::LifeEventCreatePermit,
         draft: crate::agent::LifeEventDraft,
     ) -> Result<crate::agent::LifeEvent> {
         if !permit.runtime_seal_is_valid() || !permit.matches_draft(&draft) {
@@ -3339,6 +3340,7 @@ impl AgentRunStore {
         clippy::too_many_arguments,
         reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
     )]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn create_life_event_from_active_run(
         &self,
         life_event_store: &crate::agent::LifeEventStore,

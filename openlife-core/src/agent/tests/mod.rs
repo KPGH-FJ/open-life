@@ -1,31 +1,20 @@
 //! Agent module tests
 
 mod accepted_guidance_materialization;
-mod accepted_low_energy_rule_selection;
-mod backend_contract_freeze;
-mod backend_golden_paths;
 mod evidence_graph;
 mod evidence_store;
 mod governor;
 mod heuristic_store;
 mod hs_asset_authority;
 mod integration;
-mod lifemodel_backend_completion;
-mod lifemodel_maturation_non_default_invocation;
-mod lifemodel_maturation_readiness;
-mod low_energy_collaboration_rule_candidate;
+mod life_event_store;
 mod main_chat_agent_v1;
 mod main_chat_runtime_contract;
-mod maturation_engine_v1;
-mod maturation_loop;
 mod plan_execute;
 mod policy_store;
-mod proposal_outcome;
-mod regression_suite;
 mod runtime_contract;
 mod runtime_convergence;
 mod runtime_guidance_integration;
 mod runtime_integration;
 mod selector;
 mod strategy;
-mod trace_visibility;
