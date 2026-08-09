@@ -577,6 +577,9 @@ export function workbenchJourneyFixtureDataSource(
       if (!history) throw new Error("fixture_conversation_session_missing");
       return history.map(message => ({ ...message }));
     },
+    async loadLifeModelInfluence() {
+      return null;
+    },
     async createSession(sessionId, title) {
       if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
       const timestamp = "2026-07-20T09:35:00.000Z";

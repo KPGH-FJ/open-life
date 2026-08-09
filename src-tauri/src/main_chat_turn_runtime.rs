@@ -7258,6 +7258,72 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "requiresProvider": route_decision.requires_provider,
             "requiresToolLoop": route_decision.requires_tool_loop,
     });
+    if let Some(receipt) = result.life_model_influence.as_ref() {
+        let selected_item_refs = receipt
+            .selected_items
+            .iter()
+            .map(|item| item.item_ref.clone())
+            .collect::<Vec<_>>();
+        let selection_reason_codes = receipt
+            .selected_items
+            .iter()
+            .map(|item| item.reason_code.clone())
+            .collect::<Vec<_>>();
+        let payload = final_receipt_payload
+            .as_object_mut()
+            .ok_or_else(|| "turn_final_receipt_payload_not_object".to_string())?;
+        payload.insert(
+            "lifeModelInfluenceStatus".into(),
+            serde_json::json!(receipt.status),
+        );
+        payload.insert(
+            "lifeModelSourceId".into(),
+            serde_json::json!(receipt.source_id),
+        );
+        if let Some(model_version) = receipt.model_version {
+            payload.insert("lifeModelVersion".into(), serde_json::json!(model_version));
+        }
+        if let Some(version_digest) = receipt.version_digest.as_ref() {
+            payload.insert(
+                "lifeModelVersionDigest".into(),
+                serde_json::json!(version_digest),
+            );
+        }
+        if let Some(document_digest) = receipt.document_digest.as_ref() {
+            payload.insert(
+                "lifeModelDocumentDigest".into(),
+                serde_json::json!(document_digest),
+            );
+        }
+        payload.insert(
+            "lifeModelSelectedItemRefs".into(),
+            serde_json::json!(selected_item_refs),
+        );
+        payload.insert(
+            "lifeModelSelectionReasonCodes".into(),
+            serde_json::json!(selection_reason_codes),
+        );
+        payload.insert(
+            "lifeModelAppliedSurfaces".into(),
+            serde_json::json!(receipt.applied_surfaces),
+        );
+        payload.insert(
+            "lifeModelCurrentInstructionPriorityPreserved".into(),
+            serde_json::json!(receipt.current_instruction_priority_preserved),
+        );
+        payload.insert(
+            "lifeModelPolicyPriorityPreserved".into(),
+            serde_json::json!(receipt.policy_priority_preserved),
+        );
+        payload.insert(
+            "lifeModelPermissionGranted".into(),
+            serde_json::json!(receipt.permission_granted),
+        );
+        payload.insert(
+            "lifeModelDurableWriteAuthorized".into(),
+            serde_json::json!(receipt.durable_write_authorized),
+        );
+    }
     let owner_graph_fields = [
         (
             "taskOwnerStatus",
@@ -8295,6 +8361,10 @@ async fn recover_openlife_turn_from_durable_final(
     let direct_writes_executed = final_event_bool(&final_event, "directWritesExecuted")?;
     let model_invoked = final_event_bool(&final_event, "modelInvoked")?;
     let tool_invoked = final_event_bool(&final_event, "toolInvoked")?;
+    let life_model_influence =
+        crate::commands::chat::life_model_influence_for_final_event_with_state(&final_event, state)
+            .await
+            .map_err(|error| format!("recover Life Model influence receipt failed: {error}"))?;
     let mut result = SendMessageResult {
         reply: answer.clone(),
         status: status.clone(),
@@ -8322,7 +8392,7 @@ async fn recover_openlife_turn_from_durable_final(
         provider_invocation_status,
         model_invoked,
         tool_invoked,
-        life_model_influence: None,
+        life_model_influence,
         turn_terminal: None,
     };
     let proposals_created = canonical_proposals_created(&proposals);

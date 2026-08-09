@@ -384,9 +384,29 @@ export function useWorkspaceConversation(
     async (sessionId: string, requestId: number): Promise<void> => {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
       const history = await dataSource.loadHistory(sessionId);
+      let influence = null;
+      let influenceError: string | null = null;
+      try {
+        influence = await dataSource.loadLifeModelInfluence(sessionId);
+      } catch (error) {
+        influenceError = errorText(error);
+      }
       if (requestId !== requestRef.current) return;
       setSelectedSessionId(sessionId);
       setMessages(history);
+      setTurnState(
+        influenceError
+          ? { phase: "failed", stage: "refresh", reason: influenceError }
+          : influence
+            ? {
+                phase: "resolved",
+                sessionId,
+                status: influence.status,
+                blockers: [],
+                lifeModelInfluence: influence.lifeModelInfluence,
+              }
+            : { phase: "idle" }
+      );
     },
     [dataSource]
   );

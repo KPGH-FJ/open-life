@@ -658,12 +658,19 @@ export interface MainChatLifeModelProductReceipt {
   status: string;
   sourceId?: string | null;
   modelVersion?: number | null;
+  versionDigest?: string | null;
+  documentDigest?: string | null;
   selectedItems: MainChatLifeModelSelectedItemReceipt[];
   appliedSurfaces: string[];
   currentInstructionPriorityPreserved: boolean;
   policyPriorityPreserved: boolean;
   permissionGranted: boolean;
   durableWriteAuthorized: boolean;
+}
+
+export interface ChatLifeModelInfluenceSnapshot {
+  status: MainChatTurnStatus;
+  lifeModelInfluence: MainChatLifeModelProductReceipt;
 }
 
 export interface ImportedResourceReceipt {
@@ -1719,6 +1726,15 @@ export async function detachResourceFromTurn(
 
 export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
   return safeInvoke<ChatMessage[]>("get_chat_history", sessionArgs(sessionId));
+}
+
+export async function getChatLifeModelInfluence(
+  sessionId: string
+): Promise<ChatLifeModelInfluenceSnapshot | null> {
+  return safeInvoke<ChatLifeModelInfluenceSnapshot | null>(
+    "get_chat_life_model_influence",
+    sessionArgs(sessionId)
+  );
 }
 
 export async function saveChatMessage(

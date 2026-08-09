@@ -135,8 +135,8 @@ use commands::agent_runtime::{
 };
 
 use commands::chat::{
-    create_chat_session, delete_chat_session, get_chat_history, list_chat_sessions,
-    rename_chat_session, save_chat_message,
+    create_chat_session, delete_chat_session, get_chat_history, get_chat_life_model_influence,
+    list_chat_sessions, rename_chat_session, save_chat_message,
 };
 use commands::diagnostics::{
     check_ollama_status, get_policy_router_status, get_runtime_build_info, get_system_diagnostics,
@@ -1018,6 +1018,7 @@ pub fn run() {
             cancel_main_chat_agent_task,
             retry_main_chat_agent_action,
             get_chat_history,
+            get_chat_life_model_influence,
             save_chat_message,
             #[cfg(feature = "dev-extensions")]
             execute_tool_call,

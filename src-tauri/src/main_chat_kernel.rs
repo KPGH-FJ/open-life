@@ -435,6 +435,8 @@ pub struct MainChatLifeModelProductReceipt {
     pub status: String,
     pub source_id: Option<String>,
     pub model_version: Option<u64>,
+    pub version_digest: Option<String>,
+    pub document_digest: Option<String>,
     pub selected_items: Vec<MainChatLifeModelSelectedItemReceipt>,
     pub applied_surfaces: Vec<String>,
     pub current_instruction_priority_preserved: bool,
@@ -468,6 +470,8 @@ impl MainChatKernelLifeModelContextMetadata {
             status: self.influence_receipt.status.clone(),
             source_id: self.source_id.clone(),
             model_version: self.model_version,
+            version_digest: self.version_digest.clone(),
+            document_digest: self.document_digest.clone(),
             selected_items: self.selected_items.clone(),
             applied_surfaces: self.influence_receipt.applied_surfaces.clone(),
             current_instruction_priority_preserved: self

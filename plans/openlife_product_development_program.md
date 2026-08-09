@@ -1427,8 +1427,8 @@ v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy 
 5.3 提交后源码 Review 发现的 Review Center 学习分组与编辑部分失败恢复缺口已经在
 同阶段短收口提交 `a4b5e0b` 中修复，没有增加 5.3G。5.3 已关闭。5.4 已根据当前
 canonical v2、Main Chat、ContextCompiler、PlanExecute、Memory retrieval 和 tool
-ranking 源码固定规划为 A—F 六个切片；当前只完成规划，尚未开始 5.4A 实现，等待
-用户审阅。**
+ranking 源码固定规划为 A—F 六个切片。5.4A—5.4F 已按该固定范围完成实现、自动化
+反例、全仓门禁和同一隔离 QA 的真实 Tauri A/B；阶段已关闭，等待用户审阅。**
 
 第五阶段第一步实际完成：
 
@@ -1504,6 +1504,33 @@ ranking 源码固定规划为 A—F 六个切片；当前只完成规划，尚�
   队列展示并一次最多呈现五项；ProposalStore 已落盘修改但 Candidate 纠正证据暂时失败
   时，接受、拒绝、稍后处理或再次编辑前会从精确 typed proposal 幂等补齐证据，补齐失败
   则继续禁止最终决定和物化。
+
+5.4 实际完成：
+
+- 5.4A—5.4F 分别由 `04c3900`、`d27050c`、`6b39dfa`、`24a8dad`、`0fa992a`
+  和 `503eb18` 建立 canonical v2 runtime packet、用户可见影响回执、planning hint、
+  Memory 合格候选内有界重排、沟通风格/等价工具排序和对照验收；后续 focused 修复只
+  收敛真实产品反例，没有增加 5.4G 或另一套 runtime owner；
+- canonical LifeModel v2 现在只在任务相关时进入统一 Main Chat 上下文，并绑定来源、
+  版本、document/version digest、选中 item ref、相关原因和实际影响 surface；当前指令、
+  Policy、权限、凭据和写入 admission 始终优先，LifeModel 不增加工具候选或能力；
+- 代码 Review 与首轮原生 A/B 发现影响说明曾只保存在前端瞬时状态，切换对话后消失。
+  修复后 final delivery 只持久化有界 refs、原因码、surface 和 digest；重新展示正文时
+  必须从精确历史 v2 version 校验并重建，旧事件或损坏绑定保持无证据/失败，不伪造回执；
+- 精确构建 `6f9ae93aad4c400e9a1f253e511dae6a6a3e71c0796b7e9443db63ea0f976fe4`
+  已在既有 `phase5-lifemodel-v2` 隔离 QA 恢复 5 类既有凭据并完成真实本地模型验证：
+  相关邮件任务显示 `context_building` 与 `communication_style` 影响，切换对话和完整
+  重启后仍能恢复；明确“忽略 Life Model”显示 current-instruction override；无关
+  `2 + 2` 任务只返回 `4`，不显示画像影响；
+- 三个新原生 Run `2871cca9-099c-416d-8ce6-ce72bce5588c`、
+  `e23091fc-d44a-4b8f-97a5-9c94c0e7741e` 和
+  `f1131cd5-2a4e-4f39-b930-1451be333d9d` 均为 completed，工具调用、Proposal 和 durable
+  change 均为 0。A 组持久事件绑定 v8 与两个 digest；override 和 irrelevant 组没有
+  source/version/item 绑定，三组均记录当前指令与 Policy 优先、未授予权限且未授权写入；
+- 自动化合同和失败反例、严格 Clippy、全仓 Rust 测试、前端格式/typecheck/Vitest、
+  production build/absence guard 与 browser-shell 均已通过。真实验证使用本地 `llama3`，
+  没有调用外部 Provider 或网络；模型回复质量仍只代表本次小规模 A/B，不冒充普遍模型
+  质量结论。
 
 第四阶段实际完成：
 

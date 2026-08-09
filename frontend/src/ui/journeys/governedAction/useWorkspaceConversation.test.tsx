@@ -35,6 +35,7 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
       },
     ]),
     loadHistory: vi.fn().mockResolvedValue(existingMessages),
+    loadLifeModelInfluence: vi.fn().mockResolvedValue(null),
     createSession: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -121,6 +122,87 @@ describe("workspace conversation journey", () => {
         permissionGranted: false,
         durableWriteAuthorized: false,
       },
+    });
+  });
+
+  it("restores the durable Life Model influence receipt after switching conversations", async () => {
+    const receipt = {
+      status: "applied_context_building",
+      sourceId: "lifemodel.v2.runtime",
+      modelVersion: 3,
+      selectedItems: [
+        {
+          itemRef: "collaboration_preferences:communication-direct",
+          statement: "沟通保持简洁直接",
+          sourceRefs: ["message:user:send-stream-parity"],
+          confirmedAt: "2026-08-09T00:00:00Z",
+          reasonCode: "task intent matches collaboration_preferences",
+        },
+      ],
+      appliedSurfaces: ["context_building", "communication_style"],
+      currentInstructionPriorityPreserved: true,
+      policyPriorityPreserved: true,
+      permissionGranted: false,
+      durableWriteAuthorized: false,
+    };
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-1",
+          title: "有个性化说明",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:02:00Z",
+        },
+        {
+          session_id: "conversation-2",
+          title: "普通对话",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+        },
+      ]),
+      loadLifeModelInfluence: vi.fn(async sessionId =>
+        sessionId === "conversation-1"
+          ? { status: "completed" as const, lifeModelInfluence: receipt }
+          : null
+      ),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+
+    await act(async () => expect(await result.current.reload()).toBe(true));
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      lifeModelInfluence: receipt,
+    });
+
+    act(() => result.current.selectSession("conversation-2"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-2"));
+    expect(result.current.turnState).toEqual({ phase: "idle" });
+
+    act(() => result.current.selectSession("conversation-1"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      lifeModelInfluence: receipt,
+    });
+  });
+
+  it("keeps canonical chat history visible when the influence receipt cannot be verified", async () => {
+    const dataSource = source({
+      loadLifeModelInfluence: vi.fn().mockRejectedValue(new Error("canonical_state_unknown")),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+
+    await act(async () => expect(await result.current.reload()).toBe(true));
+
+    expect(result.current.messages).toEqual(existingMessages);
+    expect(result.current.loadStatus).toBe("ready");
+    expect(result.current.turnState).toMatchObject({
+      phase: "failed",
+      stage: "refresh",
     });
   });
 

@@ -9707,6 +9707,18 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     assert!(!send_terminal.single_step_fallback_used);
     assert!(!send_terminal.direct_writes_executed);
     let send_value = serde_json::to_value(&send_result).expect("serialize send parity result");
+    let reloaded_influence = crate::commands::chat::get_chat_life_model_influence_with_state(
+        "command-surface-kernel-parity-send",
+        &send_state,
+    )
+    .await
+    .expect("reload durable Life Model influence")
+    .expect("durable Life Model influence receipt");
+    assert_eq!(reloaded_influence.status, "completed");
+    assert_eq!(
+        Some(reloaded_influence.life_model_influence),
+        send_result.life_model_influence
+    );
 
     let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
     crate::main_chat_streaming::start_stream_message_with_state(

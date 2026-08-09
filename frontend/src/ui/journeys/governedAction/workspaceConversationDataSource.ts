@@ -7,6 +7,7 @@ import {
   detachResourceFromTurn,
   draftMarkdownMemoryFileProposal,
   getChatHistory,
+  getChatLifeModelInfluence,
   getMarkdownMemoryViewModel,
   listChatSessions,
   listMainChatSkills,
@@ -18,6 +19,7 @@ import {
   clearMainChatSkill,
   startStreamMessage,
   type ChatSession,
+  type ChatLifeModelInfluenceSnapshot,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
   type MainChatAgentTaskState,
@@ -43,6 +45,7 @@ export type WorkspaceStreamEvents = {
 export interface WorkspaceConversationDataSource {
   listSessions(): Promise<ChatSession[]>;
   loadHistory(sessionId: string): Promise<ChatMessage[]>;
+  loadLifeModelInfluence(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
   createSession(sessionId: string, title: string): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
@@ -120,6 +123,7 @@ async function streamTurn(
 export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSource = {
   listSessions: listChatSessions,
   loadHistory: getChatHistory,
+  loadLifeModelInfluence: getChatLifeModelInfluence,
   createSession: createChatSession,
   renameSession: renameChatSession,
   deleteSession: deleteChatSession,

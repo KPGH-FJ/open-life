@@ -2244,6 +2244,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       ] as T);
     case "get_chat_history":
       return Promise.resolve(mockChatMessages as T);
+    case "get_chat_life_model_influence":
+      return Promise.resolve(null as T);
     case "run_multi_strategy_agent_preview":
       return Promise.resolve({
         runId: "run-preview-1",

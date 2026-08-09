@@ -29,6 +29,7 @@ vi.mock("@/tauri", () => ({
   createChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
   getChatHistory: vi.fn(),
+  getChatLifeModelInfluence: vi.fn(),
   listChatSessions: vi.fn(),
   renameChatSession: vi.fn(),
   startStreamMessage: mocks.startStreamMessage,
