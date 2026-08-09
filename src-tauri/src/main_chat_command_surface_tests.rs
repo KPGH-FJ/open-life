@@ -113,6 +113,7 @@ fn shipped_main_chat_debug_contract_redacts_message_reasoning_and_tool_bodies() 
         provider_invocation_status: crate::main_chat_turn_runtime::ProviderInvocationState::Failed,
         model_invoked: true,
         tool_invoked: true,
+        life_model_influence: None,
         turn_terminal: None,
     };
     let result_debug = format!("{result:?}");
@@ -175,6 +176,7 @@ fn shipped_execution_transcript_projects_timeline_without_keyed_authority() {
             crate::main_chat_turn_runtime::ProviderInvocationState::NotAttempted,
         model_invoked: false,
         tool_invoked: false,
+        life_model_influence: None,
         turn_terminal: None,
     };
 
@@ -9633,9 +9635,44 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
 
 #[tokio::test]
 async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
+    use openlife_core::life_model::v2::{
+        LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+    };
+
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let confirmed_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
     for state in [&send_state, &stream_state] {
+        let item = LifeModelUserValueV2::Statement {
+            statement: "沟通保持简洁直接".into(),
+        }
+        .into_item(
+            "communication-direct".into(),
+            vec!["message:user:send-stream-parity".into()],
+            confirmed_at.clone(),
+        );
+        let diff = LifeModelTypedDiffV2::from_operations_for_review(
+            DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+            None,
+            vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::CollaborationPreferences,
+                item,
+            }],
+            true,
+        )
+        .unwrap();
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .materialize_reviewed_v2_typed_diff(
+                &diff,
+                "review-send-stream-parity",
+                &[],
+                &confirmed_at,
+            )
+            .unwrap();
         set_command_surface_scripted_generation_response(
             state,
             "gpt-kernel-parity",
@@ -9645,7 +9682,7 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     }
     let messages = vec![openlife_core::llm::ChatMessage {
         role: "user".into(),
-        content: "Explain focused work in one concise paragraph for a teammate.".into(),
+        content: "Write a concise project status email for a teammate.".into(),
     }];
 
     let send_result = crate::main_chat_send::send_message_with_state(
@@ -9689,6 +9726,34 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
         .expect("stream parity done event");
 
     assert_eq!(send_value["reply"], stream_done["reply"]);
+    assert_eq!(
+        send_value["life_model_influence"],
+        stream_done["life_model_influence"]
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["status"],
+        "applied_context_building"
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["selectedItems"][0]["itemRef"],
+        "collaboration_preferences:communication-direct"
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["selectedItems"][0]["statement"],
+        "沟通保持简洁直接"
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["selectedItems"][0]["sourceRefs"][0],
+        "message:user:send-stream-parity"
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["permissionGranted"],
+        false
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["durableWriteAuthorized"],
+        false
+    );
     assert_eq!(send_value["legacy_fallback_used"], false);
     assert_eq!(stream_done["legacy_fallback_used"], false);
     assert_eq!(

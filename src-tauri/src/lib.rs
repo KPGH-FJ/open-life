@@ -310,6 +310,8 @@ pub struct SendMessageResult {
     pub model_invoked: bool,
     pub tool_invoked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_terminal: Option<crate::main_chat_turn_runtime::OpenLifeTurnTerminal>,
 }
 

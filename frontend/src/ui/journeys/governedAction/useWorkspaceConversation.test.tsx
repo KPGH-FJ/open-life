@@ -76,6 +76,54 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
 }
 
 describe("workspace conversation journey", () => {
+  it("keeps the backend-owned Life Model influence receipt after a completed turn", async () => {
+    const response = turnResult("completed");
+    response.life_model_influence = {
+      status: "applied_context_building",
+      sourceId: "lifemodel.v2.runtime",
+      modelVersion: 3,
+      selectedItems: [
+        {
+          itemRef: "collaboration_preferences:communication-direct",
+          statement: "沟通保持简洁直接",
+          sourceRefs: ["message:user:send-stream-parity"],
+          confirmedAt: "2026-08-09T00:00:00Z",
+          reasonCode: "task intent matches collaboration_preferences",
+        },
+      ],
+      appliedSurfaces: ["context_building", "communication_style"],
+      currentInstructionPriorityPreserved: true,
+      policyPriorityPreserved: true,
+      permissionGranted: false,
+      durableWriteAuthorized: false,
+    };
+    const dataSource = source({ streamTurn: vi.fn().mockResolvedValue(response) });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("请写一封项目邮件"));
+
+    await act(async () => result.current.send());
+
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      status: "completed",
+      lifeModelInfluence: {
+        status: "applied_context_building",
+        modelVersion: 3,
+        selectedItems: [
+          {
+            itemRef: "collaboration_preferences:communication-direct",
+            statement: "沟通保持简洁直接",
+          },
+        ],
+        permissionGranted: false,
+        durableWriteAuthorized: false,
+      },
+    });
+  });
+
   it("keeps Markdown Memory changes pending until the backend returns a Review receipt", async () => {
     const loadMarkdownMemory = vi.fn().mockResolvedValue({
       roots: [

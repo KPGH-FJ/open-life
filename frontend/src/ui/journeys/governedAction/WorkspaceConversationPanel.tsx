@@ -72,6 +72,60 @@ function turnFeedback(controller: WorkspaceConversationController) {
   ) : null;
 }
 
+function lifeModelInfluenceFeedback(controller: WorkspaceConversationController) {
+  const state = controller.turnState;
+  if (state.phase !== "resolved" || !state.lifeModelInfluence) return null;
+  const receipt = state.lifeModelInfluence;
+  if (receipt.permissionGranted || receipt.durableWriteAuthorized) {
+    return (
+      <FoundationNotice title="Life Model 影响凭据无效" tone="error" live>
+        <p>Life Model 不能授予权限或批准持久写入；本轮不会把该凭据解释为有效授权。</p>
+      </FoundationNotice>
+    );
+  }
+  if (receipt.selectedItems.length === 0 && receipt.status !== "current_instruction_override") {
+    return null;
+  }
+  const applied = receipt.appliedSurfaces.length > 0;
+  return (
+    <FoundationNotice
+      title={applied ? "本轮参考了你的 Life Model" : "本轮以当前指令为准"}
+      tone="neutral"
+    >
+      <p>
+        {applied
+          ? `影响范围：${receipt.appliedSurfaces.join("、")}。它没有增加工具、权限或写入能力。`
+          : "相关长期信息未覆盖你在本轮给出的明确要求。"}
+      </p>
+      {receipt.selectedItems.length > 0 && (
+        <details>
+          <summary>查看使用依据</summary>
+          <ul>
+            {receipt.selectedItems.map(item => (
+              <li key={item.itemRef}>
+                <strong>{item.statement}</strong>
+                <br />
+                <code>{item.itemRef}</code> · 确认于 {item.confirmedAt} · {item.reasonCode}
+                {item.sourceRefs.length > 0 && (
+                  <>
+                    <br />
+                    <span>来源：{item.sourceRefs.join("、")}</span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+          <p>
+            Life Model v{receipt.modelVersion ?? "未知"} · 当前指令优先：
+            {receipt.currentInstructionPriorityPreserved ? "是" : "未确认"} · 安全策略优先：
+            {receipt.policyPriorityPreserved ? "是" : "未确认"}
+          </p>
+        </details>
+      )}
+    </FoundationNotice>
+  );
+}
+
 function resourceFailureText(code: string): string {
   if (code.includes("file_count_exceeded")) return "本轮最多只能读取 5 个文件。";
   if (code.includes("bytes_exceeded")) return "所选文件超过了当前允许的大小。";
@@ -402,6 +456,7 @@ export function WorkspaceConversationPanel({
       )}
 
       {turnFeedback(controller)}
+      {lifeModelInfluenceFeedback(controller)}
 
       {controller.sessionMutation.phase === "failed" && (
         <FoundationNotice title="会话操作未完成" tone="error" live>

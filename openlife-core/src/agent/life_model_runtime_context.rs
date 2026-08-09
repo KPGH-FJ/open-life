@@ -450,7 +450,11 @@ pub fn task_explicitly_disables_lifemodel(task_text: &str) -> bool {
             "不要使用我的 life model",
             "不要参考我的 life model",
             "忽略我的 life model",
+            "忽略 life model",
+            "不使用 life model",
+            "不参考 life model",
             "不要使用个人模型",
+            "忽略个人模型",
             "不要参考长期目标",
         ],
     )
@@ -576,13 +580,16 @@ mod tests {
 
     #[test]
     fn current_instruction_can_disable_lifemodel_context() {
-        assert!(LifeModelRuntimeContextV2::build(
-            &version(),
+        for instruction in [
             "Ignore my Life Model and plan this OpenLife task only from this message.",
-            now(),
-        )
-        .unwrap()
-        .is_none());
+            "忽略 Life Model，本轮只按当前要求规划 OpenLife。",
+        ] {
+            assert!(
+                LifeModelRuntimeContextV2::build(&version(), instruction, now())
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

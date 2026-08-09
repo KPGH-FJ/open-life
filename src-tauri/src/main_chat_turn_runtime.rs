@@ -3118,6 +3118,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                             provider_invocation_status,
                             model_invoked: provider_invocation_status.observed_adapter_start(),
                             tool_invoked: false,
+                            life_model_influence: None,
                             turn_terminal: None,
                         },
                         Some(cancellation_run_id),
@@ -3170,6 +3171,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                             provider_invocation_status: ProviderInvocationState::Invalid,
                             model_invoked: ProviderInvocationState::Invalid.observed_adapter_start(),
                             tool_invoked: false,
+                            life_model_influence: None,
                             turn_terminal: None,
                         },
                         Some(failed_run_id),
@@ -8320,6 +8322,7 @@ async fn recover_openlife_turn_from_durable_final(
         provider_invocation_status,
         model_invoked,
         tool_invoked,
+        life_model_influence: None,
         turn_terminal: None,
     };
     let proposals_created = canonical_proposals_created(&proposals);
@@ -8697,6 +8700,7 @@ fn emit_stream_send_message_result(
         "legacy_runtime_invoked": legacy_runtime_invoked,
         "model_invoked": model_invoked,
         "tool_invoked": tool_invoked,
+        "life_model_influence": result.life_model_influence,
         "turn_terminal": result.turn_terminal,
         "stream_delivery_mode": if recovered_from_durable_final {
             "recovered_replace"
@@ -12324,6 +12328,7 @@ mod product_receipt_ipc_tests {
             provider_invocation_status: ProviderInvocationState::NotAttempted,
             model_invoked: false,
             tool_invoked: true,
+            life_model_influence: None,
             turn_terminal: Some(OpenLifeTurnTerminal {
                 runtime_owner: OPENLIFE_TURN_RUNTIME_OWNER.into(),
                 status: "completed".into(),

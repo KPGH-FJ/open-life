@@ -3,6 +3,7 @@ import type {
   ChatSession,
   ImportedResourceReceipt,
   MainChatSkillSummary,
+  MainChatLifeModelProductReceipt,
   MainChatToolCandidateList,
   MainChatTurnStatus,
   MarkdownMemoryProposalReceipt,
@@ -57,6 +58,7 @@ export type WorkspaceTurnState =
       sessionId: string;
       status: MainChatTurnStatus;
       blockers: string[];
+      lifeModelInfluence?: MainChatLifeModelProductReceipt;
     }
   | { phase: "failed"; stage: "create" | "send" | "refresh"; reason: string };
 
@@ -817,6 +819,7 @@ export function useWorkspaceConversation(
           sessionId,
           status,
           blockers: result.blockers ?? result.turn_terminal?.blockers ?? [],
+          lifeModelInfluence: result.life_model_influence,
         });
         await onAfterTurn();
         announce(turnAnnouncement(status));

@@ -642,7 +642,28 @@ export interface SendMessageResult {
   provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
+  life_model_influence?: MainChatLifeModelProductReceipt;
   turn_terminal?: OpenLifeTurnTerminal;
+}
+
+export interface MainChatLifeModelSelectedItemReceipt {
+  itemRef: string;
+  statement: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+  reasonCode: string;
+}
+
+export interface MainChatLifeModelProductReceipt {
+  status: string;
+  sourceId?: string | null;
+  modelVersion?: number | null;
+  selectedItems: MainChatLifeModelSelectedItemReceipt[];
+  appliedSurfaces: string[];
+  currentInstructionPriorityPreserved: boolean;
+  policyPriorityPreserved: boolean;
+  permissionGranted: boolean;
+  durableWriteAuthorized: boolean;
 }
 
 export interface ImportedResourceReceipt {
@@ -775,6 +796,7 @@ export interface StreamMessageDonePayload {
   provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
+  life_model_influence?: MainChatLifeModelProductReceipt;
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
@@ -804,6 +826,7 @@ export type MainChatKernelEvent =
       source_id?: string | null;
       selected_item_refs: string[];
       reason_codes: string[];
+      receipt: MainChatLifeModelProductReceipt;
     }
   | {
       type: "hs_context_loaded";

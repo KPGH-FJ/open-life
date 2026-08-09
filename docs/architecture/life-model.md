@@ -7,10 +7,11 @@ governance under ADR 0016. LifeModel is the user-owned long-term model; it is
 not Agent Memory, business state, policy, audit, or a general heuristic system.
 
 The repository now contains a validated v2 document schema, append-only SQLite
-version owner, and a governed legacy-YAML migration path. Canonical truth
-promotion remains proposal-first and gateway-bound. Existing profiles are not
-silently migrated: the owner changes only after an exact reviewed proposal,
-verified backup, and atomic v2 version plus cutover receipt commit.
+version owner, a governed legacy-YAML migration path, and a bounded Main Chat
+runtime projection. Canonical truth promotion remains proposal-first and
+gateway-bound. Existing profiles are not silently migrated: the owner changes
+only after an exact reviewed proposal, verified backup, and atomic v2 version
+plus cutover receipt commit.
 
 ## Authority
 
@@ -22,13 +23,14 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-08 during Phase 5.2G v2 Builder replacement and legacy product-path retirement.
+2026-08-09 during Phase 5.4F runtime-influence closeout.
 
 ## Source map
 
 - `plans/adr/0016-agent-memory-lifemodel-domain-boundaries.md`
 - `openlife-core/src/life_model.rs`
 - `openlife-core/src/life_model/v2.rs`
+- `openlife-core/src/agent/life_model_runtime_context.rs`
 - `openlife-core/src/life_model/patch.rs`
 - `openlife-core/src/life_model/patch_store.rs`
 - `openlife-core/src/life_model_write_gateway.rs`
@@ -39,6 +41,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 - `src-tauri/src/life_model_materializer_guard.rs`
 - `src-tauri/src/commands/life_model.rs`
 - `src-tauri/src/commands/proposal.rs`
+- `src-tauri/src/main_chat_kernel.rs`
 
 ## Current boundary
 
@@ -194,11 +197,34 @@ failure, or backup failure is a definite pre-effect failure; ambiguous database
 commit failures remain unknown and are not automatically retried. After a v2
 owner exists, shipped legacy read and proposal-write paths reject normal product
 use. The original YAML and verified backup are evidence only and are not queried
-by the normal product ViewModel. Main Chat, scheduled execution, proactive
-suggestions, and A2A also stop injecting the legacy model after cutover. They use
-no LifeModel enrichment until the v2 runtime-context integration planned for
-Phase 5.4; this prevents a hidden stale-YAML fallback without prematurely moving
-5.4 into migration work.
+by the normal product ViewModel. Main Chat no longer reads legacy YAML for
+personalization. Scheduled execution, proactive suggestions, A2A, and generic
+AgentRuntime compatibility consumers remain separate caller-convergence work;
+they do not receive Main Chat v2 capability credit merely because the v2 owner
+exists.
+
+## Main Chat Runtime Influence
+
+`LifeModelRuntimeContextV2` validates the current canonical version and selects
+at most four task-relevant confirmed facts. The packet binds model and version
+digests, stable item IDs, source references, confirmation times, selection
+reasons, and an exact content digest. It contains no raw model and grants no
+permission.
+
+Both Main Chat send and stream enter `OpenLifeTurnRuntime` and use the same
+packet builder. The packet is a distinct ContextCompiler source; it is not an
+HS summary or Agent Memory. Confirmed goals and boundaries can add bounded
+planning hints, eligible Memory results can receive a capped rerank bonus, and
+confirmed collaboration preferences can affect communication style or order
+already-legal equivalent tool candidates. Scope, lifecycle, privacy, Policy,
+ToolGateway eligibility, risk and permission decisions remain owned by their
+existing domains.
+
+The turn result includes a product-facing influence receipt with model version,
+selected item IDs, confirmation times, reasons and affected surfaces. It exposes
+no hidden reasoning. An explicit current instruction can disable LifeModel use;
+irrelevant, unavailable, invalid or tampered models contribute no facts, and
+ordinary Agent work continues without personalization.
 
 `src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
 contexts. Governed manual override, restore/import, source-data compatibility,
