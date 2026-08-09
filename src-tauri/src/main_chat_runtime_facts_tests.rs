@@ -1118,6 +1118,22 @@ fn main_chat_provider_route_classifier_is_bounded_and_separates_previous_turn() 
         Some(MainChatProviderRouteIntent::AskPreviousTurnModelRoute)
     );
     assert_eq!(classify_provider_route_query("我想比较几个模型"), None);
+    assert_eq!(
+        classify_provider_route_query(
+            "忽略 Life Model。本轮请写一封详细的项目状态邮件，包含四个小节，每节两句话。不要调用工具，不要写入任何长期状态。"
+        ),
+        None,
+        "Life Model plus a negated tool-call instruction is not a provider route truth query"
+    );
+    assert_eq!(
+        classify_provider_route_query("请使用模型总结这段材料，但不要调用工具。"),
+        None,
+        "a generic model task is not a provider route truth query"
+    );
+    assert_eq!(
+        classify_provider_route_query("请先说明当前实际使用的模型，然后写一段摘要。"),
+        Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
+    );
 }
 
 #[test]
