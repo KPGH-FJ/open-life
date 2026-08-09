@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 const MAX_SELECTED_FACTS: usize = 4;
 const MAX_FACT_CHARS: usize = 320;
 const MAX_REASON_CHARS: usize = 120;
+const MAX_RENDERED_PROMPT_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,26 +116,38 @@ impl LifeModelRuntimeContextV2 {
     }
 
     pub fn render_prompt(&self) -> String {
-        let facts = self
+        let has_communication_preference = self.facts.iter().any(|fact| {
+            matches!(
+                fact.section,
+                LifeModelSectionV2::StablePreferences
+                    | LifeModelSectionV2::CollaborationPreferences
+            )
+        });
+        let mut prompt = format!(
+            "Confirmed LifeModel v2 context (model {}, version {}; permissions=false).\nPriority: policy, current instruction, and verified task facts override this context. Never infer tools, credentials, actions, or durable writes.\nUse each fact only for its named role; never invent task facts from it.",
+            self.model_id, self.model_version,
+        );
+        if has_communication_preference {
+            prompt.push_str(
+                "\nCommunication preferences constrain response tone, brevity, structure, and wording only.",
+            );
+        }
+
+        let line_overhead = self
             .facts
             .iter()
-            .map(|fact| {
-                format!(
-                    "- {:?}/{} = {} (confirmed {}, sources: {}; {})",
-                    fact.section,
-                    fact.item_id,
-                    fact.value,
-                    fact.confirmed_at,
-                    fact.source_refs.join(","),
-                    fact.selected_reason,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "Task-relevant confirmed LifeModel v2 context\nmodel: {} version: {}\ndocument_digest: {}\npermissions_granted: false\nUse this only as long-term user context. Current user instructions, verified task facts, product policy, capability, risk, and permission checks have higher priority. Never infer a tool permission, credential, or durable-write approval from it.\n{}",
-            self.model_id, self.model_version, self.document_digest, facts,
-        )
+            .map(|fact| section_label(fact.section).chars().count() + 5)
+            .sum::<usize>();
+        let remaining =
+            MAX_RENDERED_PROMPT_CHARS.saturating_sub(prompt.chars().count() + line_overhead);
+        let value_budget = remaining.checked_div(self.facts.len()).unwrap_or_default();
+        for fact in &self.facts {
+            prompt.push_str("\n- ");
+            prompt.push_str(section_label(fact.section));
+            prompt.push_str(": ");
+            prompt.push_str(&bounded(&fact.value, value_budget));
+        }
+        bounded(&prompt, MAX_RENDERED_PROMPT_CHARS)
     }
 }
 
@@ -174,14 +187,52 @@ impl Candidate {
                     | LifeModelSectionV2::CollaborationPreferences
             )
             && contains_any(&value, &["tool", "mcp", "local", "工具", "本地"]);
-        let intent_match = intents.matches(self.section) || tool_preference_match;
-        self.relevant = direct_match || token_matches > 0 || intent_match;
-        self.score =
-            token_matches * 20 + usize::from(direct_match) * 60 + usize::from(intent_match) * 35;
+        let stable_communication_match = intents.communication
+            && self.section == LifeModelSectionV2::StablePreferences
+            && contains_any(
+                &value,
+                &[
+                    "brief",
+                    "concise",
+                    "detailed",
+                    "direct",
+                    "formal",
+                    "casual",
+                    "tone",
+                    "style",
+                    "wording",
+                    "communication",
+                    "response",
+                    "email",
+                    "message",
+                    "简洁",
+                    "直接",
+                    "详细",
+                    "正式",
+                    "语气",
+                    "风格",
+                    "措辞",
+                    "表达",
+                    "沟通",
+                    "回复",
+                    "邮件",
+                ],
+            );
+        let intent_match =
+            intents.matches(self.section) || tool_preference_match || stable_communication_match;
+        let effective_token_matches = if intents.allows_keyword_match(self.section) {
+            token_matches
+        } else {
+            0
+        };
+        self.relevant = direct_match || effective_token_matches > 0 || intent_match;
+        self.score = effective_token_matches * 20
+            + usize::from(direct_match) * 60
+            + usize::from(intent_match) * 35;
         self.reason = if direct_match {
             "direct task match".into()
-        } else if token_matches > 0 {
-            format!("task keyword matches: {token_matches}")
+        } else if effective_token_matches > 0 {
+            format!("task keyword matches: {effective_token_matches}")
         } else if intent_match {
             format!("task intent matches {}", section_label(self.section))
         } else {
@@ -195,6 +246,7 @@ struct TaskIntents {
     planning: bool,
     explicit_lifemodel: bool,
     communication: bool,
+    identity: bool,
     boundary_or_decision: bool,
     capability_or_resource: bool,
     tool_selection: bool,
@@ -224,8 +276,34 @@ impl TaskIntents {
             communication: contains_any(
                 task,
                 &[
-                    "write", "draft", "email", "message", "reply", "tone", "写", "邮件", "回复",
+                    "write a",
+                    "write an",
+                    "draft",
+                    "email",
+                    "message",
+                    "reply",
+                    "tone",
+                    "写一封",
+                    "写邮件",
+                    "撰写",
+                    "邮件",
+                    "回复",
                     "表达",
+                ],
+            ),
+            identity: contains_any(
+                task,
+                &[
+                    "introduce me",
+                    "about me",
+                    "biography",
+                    "personal profile",
+                    "self description",
+                    "自我介绍",
+                    "介绍我",
+                    "关于我",
+                    "个人简介",
+                    "我的身份",
                 ],
             ),
             boundary_or_decision: contains_any(
@@ -237,24 +315,25 @@ impl TaskIntents {
             ),
             capability_or_resource: contains_any(
                 task,
-                &[
-                    "tool",
-                    "ability",
-                    "resource",
-                    "available",
-                    "工具",
-                    "能力",
-                    "资源",
-                    "可用",
-                ],
-            ),
+                &["ability", "resource", "available", "能力", "资源", "可用"],
+            ) || (contains_any(task, &["tool", "工具"])
+                && !explicitly_disables_tools(task)),
             tool_selection: contains_any(
                 task,
                 &[
-                    "tool", "mcp", "read", "source", "search", "file", "工具", "读取", "来源",
-                    "搜索", "文件",
+                    "mcp", "read", "source", "search", "file", "读取", "来源", "搜索", "文件",
                 ],
-            ),
+            ) || (contains_any(
+                task,
+                &[
+                    "use tool",
+                    "choose tool",
+                    "call tool",
+                    "使用工具",
+                    "选择工具",
+                    "调用工具",
+                ],
+            ) && !explicitly_disables_tools(task)),
             relationship: contains_any(
                 task,
                 &[
@@ -274,8 +353,8 @@ impl TaskIntents {
     fn matches(self, section: LifeModelSectionV2) -> bool {
         match section {
             LifeModelSectionV2::LongTermGoals => self.planning && self.explicit_lifemodel,
-            LifeModelSectionV2::StablePreferences
-            | LifeModelSectionV2::CollaborationPreferences => self.communication,
+            LifeModelSectionV2::StablePreferences => false,
+            LifeModelSectionV2::CollaborationPreferences => self.communication,
             LifeModelSectionV2::Values
             | LifeModelSectionV2::PersonalBoundaries
             | LifeModelSectionV2::DecisionPrinciples => self.boundary_or_decision,
@@ -283,7 +362,23 @@ impl TaskIntents {
                 self.capability_or_resource
             }
             LifeModelSectionV2::ImportantRelationships => self.relationship,
-            LifeModelSectionV2::Identity => false,
+            LifeModelSectionV2::Identity => self.identity,
+        }
+    }
+
+    fn allows_keyword_match(self, section: LifeModelSectionV2) -> bool {
+        match section {
+            LifeModelSectionV2::Identity => self.identity,
+            LifeModelSectionV2::LongTermGoals => self.planning,
+            LifeModelSectionV2::StablePreferences => false,
+            LifeModelSectionV2::CollaborationPreferences => self.communication,
+            LifeModelSectionV2::Values
+            | LifeModelSectionV2::PersonalBoundaries
+            | LifeModelSectionV2::DecisionPrinciples => self.boundary_or_decision,
+            LifeModelSectionV2::Capabilities | LifeModelSectionV2::Resources => {
+                self.capability_or_resource
+            }
+            LifeModelSectionV2::ImportantRelationships => self.relationship,
         }
     }
 }
@@ -437,6 +532,24 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
+fn explicitly_disables_tools(task: &str) -> bool {
+    contains_any(
+        task,
+        &[
+            "do not call tools",
+            "do not use tools",
+            "don't call tools",
+            "don't use tools",
+            "without tools",
+            "不要调用工具",
+            "不要使用工具",
+            "不调用工具",
+            "不使用工具",
+            "无需工具",
+        ],
+    )
+}
+
 pub fn task_explicitly_disables_lifemodel(task_text: &str) -> bool {
     let task = normalize(task_text);
     contains_any(
@@ -524,11 +637,26 @@ mod tests {
         "2026-08-09T00:00:00Z".parse().unwrap()
     }
 
+    fn reseal(version: &mut LifeModelVersionV2) {
+        version.document_digest = version.document.digest().unwrap();
+        version.version_digest = calculate_version_digest(
+            &version.model_id,
+            version.model_version,
+            version.parent_version,
+            version.parent_digest.as_deref(),
+            &version.document_digest,
+            &version.materialization_id,
+            &version.source_refs,
+            &version.created_at,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn selects_only_relevant_confirmed_v2_items() {
         let packet = LifeModelRuntimeContextV2::build(
             &version(),
-            "请为 OpenLife 项目写一封简洁的状态邮件",
+            "请为 OpenLife 项目制定计划，并写一封简洁的状态邮件",
             now(),
         )
         .unwrap()
@@ -536,6 +664,11 @@ mod tests {
         let prompt = packet.render_prompt();
         assert!(prompt.contains("OpenLife"));
         assert!(prompt.contains("简洁直接"));
+        assert!(prompt.contains(
+            "Communication preferences constrain response tone, brevity, structure, and wording only"
+        ));
+        assert!(prompt.contains("never invent task facts from it"));
+        assert!(prompt.chars().count() <= MAX_RENDERED_PROMPT_CHARS);
         assert!(!prompt.contains("户外徒步"));
         assert!(!packet.permissions_granted);
         assert!(!packet.raw_model_included);
@@ -579,6 +712,29 @@ mod tests {
     }
 
     #[test]
+    fn negative_write_and_tool_constraints_do_not_activate_preferences() {
+        let mut version = version();
+        version
+            .document
+            .stable_preferences
+            .push(LifeModelStatementV2 {
+                id: "prefer-local-tool".into(),
+                statement: "等价任务优先使用本地工具".into(),
+                source_refs: vec!["proposal:prefer-local-tool".into()],
+                confirmed_at: "2026-08-03T00:00:00Z".into(),
+            });
+        reseal(&mut version);
+
+        assert!(LifeModelRuntimeContextV2::build(
+            &version,
+            "计算 2 + 2，只回答结果。不要调用工具，不要写入任何长期状态。",
+            now(),
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
     fn current_instruction_can_disable_lifemodel_context() {
         for instruction in [
             "Ignore my Life Model and plan this OpenLife task only from this message.",
@@ -589,6 +745,74 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn communication_task_excludes_unrelated_identity_and_schedule_preferences() {
+        let mut version = version();
+        version.document.identity.push(LifeModelStatementV2 {
+            id: "identity-method".into(),
+            statement: "我长期重视清晰、诚实、可验证并持续复盘的工作方式。".into(),
+            source_refs: vec!["proposal:identity-method".into()],
+            confirmed_at: "2026-08-03T00:00:00Z".into(),
+        });
+        version
+            .document
+            .stable_preferences
+            .push(LifeModelStatementV2 {
+                id: "focus-before-lunch".into(),
+                statement: "focused work before lunch".into(),
+                source_refs: vec!["proposal:focus-before-lunch".into()],
+                confirmed_at: "2026-08-03T00:00:00Z".into(),
+            });
+        reseal(&mut version);
+
+        let packet = LifeModelRuntimeContextV2::build(
+            &version,
+            "请写一封项目状态邮件：说明本周完成了阶段 5.4，并请对方在周五前确认。不要调用工具，不要写入任何长期状态。",
+            now(),
+        )
+        .unwrap()
+        .expect("communication preference packet");
+
+        assert_eq!(packet.facts.len(), 1, "{:#?}", packet.facts);
+        assert_eq!(packet.facts[0].item_id, "communication-direct");
+    }
+
+    #[test]
+    fn rendered_prompt_keeps_all_selected_facts_inside_runtime_budget() {
+        let mut version = version();
+        for (id, marker) in [
+            ("communication-alpha", "ALPHA"),
+            ("communication-beta", "BETA"),
+            ("communication-gamma", "GAMMA"),
+        ] {
+            version
+                .document
+                .collaboration_preferences
+                .push(LifeModelStatementV2 {
+                    id: id.into(),
+                    statement: format!("{marker} concise {}", "x".repeat(MAX_FACT_CHARS)),
+                    source_refs: vec![format!("proposal:{id}")],
+                    confirmed_at: "2026-08-03T00:00:00Z".into(),
+                });
+        }
+        reseal(&mut version);
+
+        let packet = LifeModelRuntimeContextV2::build(
+            &version,
+            "Please draft a concise project email.",
+            now(),
+        )
+        .unwrap()
+        .expect("four communication preferences");
+        let prompt = packet.render_prompt();
+
+        assert_eq!(packet.facts.len(), MAX_SELECTED_FACTS);
+        assert!(prompt.chars().count() <= MAX_RENDERED_PROMPT_CHARS);
+        for marker in ["ALPHA", "BETA", "GAMMA", "沟通保持简洁直接"] {
+            assert!(prompt.contains(marker), "missing {marker}: {prompt}");
         }
     }
 

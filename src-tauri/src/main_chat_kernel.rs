@@ -20888,6 +20888,10 @@ mod tests {
             .map(|candidate| candidate.content.as_str())
             .expect("canonical v2 candidate");
         assert!(prompt.contains("沟通保持简洁直接"));
+        assert!(prompt.contains(
+            "Communication preferences constrain response tone, brevity, structure, and wording only"
+        ));
+        assert!(prompt.contains("never invent task facts from it"));
         assert!(prompt.contains("LifeModel v2"));
         assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
         assert!(!context.metadata.influence_receipt.permission_granted);
