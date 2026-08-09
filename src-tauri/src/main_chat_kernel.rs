@@ -442,6 +442,7 @@ pub struct MainChatKernelLifeModelContext {
     pub metadata: MainChatKernelLifeModelContextMetadata,
     pub candidates: Vec<ContextSourceCandidate>,
     pub planning_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
+    pub memory_rerank_terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -2292,7 +2293,7 @@ where
         main_chat_policy_direct_reflex_response(&main_chat_agent_turn.decision, &user_text)
             .map(CommandSurfaceDirectReply::direct_reflex)
     };
-    let (life_model, life_model_context, hs_context) = command_surface_kernel_runtime_contexts(
+    let (life_model, mut life_model_context, hs_context) = command_surface_kernel_runtime_contexts(
         state,
         &task_session_id,
         &user_text,
@@ -2305,8 +2306,29 @@ where
         sanitized_selected_skill_id.as_deref(),
         &task_session_id,
         &user_text,
+        life_model_context
+            .as_ref()
+            .map(|context| context.memory_rerank_terms.as_slice())
+            .unwrap_or_default(),
     )
     .await?;
+    if extra_candidates.iter().any(|candidate| {
+        candidate
+            .inclusion_reason
+            .contains("lifemodel_rerank_bonus=0.0")
+            && !candidate
+                .inclusion_reason
+                .contains("lifemodel_rerank_bonus=0.000")
+    }) {
+        if let Some(context) = life_model_context.as_mut() {
+            context.metadata.influence_receipt.status = "applied_memory_rerank".into();
+            context
+                .metadata
+                .influence_receipt
+                .applied_surfaces
+                .push("memory_retrieval_rerank".into());
+        }
+    }
     if direct_reply
         .as_ref()
         .is_some_and(|reply| reply.route_model != "lifemodel_v2_explicit_read")
@@ -6981,12 +7003,35 @@ where
                             .any(|source| source.source_id == *source_id)
                     });
             if life_model_context.available {
-                life_model_context.influence_receipt.status = "applied_context_building".into();
-                life_model_context.influence_receipt.applied_surfaces =
-                    vec!["context_building".into()];
+                if !life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"context_building".to_string())
+                {
+                    life_model_context
+                        .influence_receipt
+                        .applied_surfaces
+                        .push("context_building".into());
+                }
+                life_model_context.influence_receipt.status = if life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"memory_retrieval_rerank".to_string())
+                {
+                    "applied_context_and_memory_rerank".into()
+                } else {
+                    "applied_context_building".into()
+                };
             } else if life_model_context.source_id.is_some() {
-                life_model_context.influence_receipt.status =
-                    "eligible_not_selected_by_context_budget".into();
+                life_model_context.influence_receipt.status = if life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"memory_retrieval_rerank".to_string())
+                {
+                    "applied_memory_rerank_without_direct_context".into()
+                } else {
+                    "eligible_not_selected_by_context_budget".into()
+                };
             }
         }
 
@@ -11675,10 +11720,17 @@ async fn command_surface_kernel_context_candidates(
     selected_skill_id: Option<&str>,
     conversation_owner_id: &str,
     task_text: &str,
+    life_model_rerank_terms: &[String],
 ) -> Result<Vec<ContextSourceCandidate>, String> {
     let mut candidates = Vec::new();
     candidates.extend(
-        retrievable_lifecycle_context_candidates(state, conversation_owner_id, task_text).await?,
+        retrievable_lifecycle_context_candidates(
+            state,
+            conversation_owner_id,
+            task_text,
+            life_model_rerank_terms,
+        )
+        .await?,
     );
     candidates.extend(load_configured_knowledge_context_candidates(
         configured_knowledge_roots,
@@ -11874,10 +11926,15 @@ fn build_kernel_lifemodel_context(
                 .collect()
         })
         .unwrap_or_default();
+    let memory_rerank_terms = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| packet.facts.iter().map(|fact| fact.value.clone()).collect())
+        .unwrap_or_default();
     MainChatKernelLifeModelContext {
         metadata,
         candidates,
         planning_hints,
+        memory_rerank_terms,
     }
 }
 

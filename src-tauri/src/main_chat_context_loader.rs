@@ -92,8 +92,9 @@ pub(crate) async fn compile_main_chat_context(
         )
     });
     let (current_context, configured_context) = tokio::join!(current_context, configured_context);
-    candidates
-        .extend(retrievable_lifecycle_context_candidates(state, task_session_id, user_text).await?);
+    candidates.extend(
+        retrievable_lifecycle_context_candidates(state, task_session_id, user_text, &[]).await?,
+    );
     candidates.extend(current_context.unwrap_or_default());
     candidates.extend(configured_context.unwrap_or_default());
     candidates.extend(load_configured_markdown_memory_context_candidates(state, user_text).await?);
@@ -134,6 +135,7 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
     state: &Arc<AppState>,
     conversation_owner_id: &str,
     query: &str,
+    life_model_rerank_terms: &[String],
 ) -> Result<Vec<ContextSourceCandidate>, String> {
     let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() else {
         return Ok(vec![ContextSourceCandidate::new(
@@ -195,8 +197,10 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
                 return None;
             }
             let freshness = memory_freshness(&record);
-            let score = retrieval_rank(relevance, &record, freshness);
-            Some((record, score, freshness))
+            let life_model_bonus =
+                life_model_memory_rerank_bonus(query, &record.content, life_model_rerank_terms);
+            let score = retrieval_rank(relevance, &record, freshness) + life_model_bonus;
+            Some((record, score, freshness, life_model_bonus))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
@@ -210,7 +214,7 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
 
     let mut selected = Vec::new();
     let mut selected_chars = 0usize;
-    for (record, score, freshness) in ranked.into_iter().take(4) {
+    for (record, score, freshness, life_model_bonus) in ranked.into_iter().take(4) {
         let remaining = 4_800usize.saturating_sub(selected_chars);
         if remaining < 80 {
             break;
@@ -219,7 +223,7 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
         selected_chars = selected_chars.saturating_add(content.chars().count());
         let scope_owner = record.scope_owner_ref.as_deref().unwrap_or("global");
         let selected_reason = format!(
-            "mode={retrieval_mode}; relevance_rank={score:.3}; freshness={}; source_quality={}; conflict=none",
+            "mode={retrieval_mode}; relevance_rank={score:.3}; lifemodel_rerank_bonus={life_model_bonus:.3}; freshness={}; source_quality={}; conflict=none",
             freshness.as_str(),
             memory_source_quality(&record)
         );
@@ -249,6 +253,50 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
         );
     }
     Ok(selected)
+}
+
+fn life_model_memory_rerank_bonus(
+    query: &str,
+    memory_content: &str,
+    life_model_terms: &[String],
+) -> f32 {
+    if life_model_terms.is_empty() {
+        return 0.0;
+    }
+    let query = query.to_lowercase();
+    let memory = memory_content.to_lowercase();
+    let mut matched = 0usize;
+    for term in life_model_terms {
+        let term = term.to_lowercase();
+        let overlaps_current_task = retrieval_tokens(&term)
+            .into_iter()
+            .any(|token| query.contains(&token) && memory.contains(&token));
+        if overlaps_current_task {
+            matched += 1;
+        }
+    }
+    (matched.min(2) as f32) * 0.04
+}
+
+fn retrieval_tokens(value: &str) -> Vec<String> {
+    let mut tokens = value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| token.chars().count() >= 3)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let cjk = value
+        .chars()
+        .filter(|character| {
+            matches!(character, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
+        })
+        .collect::<Vec<_>>();
+    tokens.extend(
+        cjk.windows(2)
+            .map(|window| window.iter().collect::<String>()),
+    );
+    tokens.sort();
+    tokens.dedup();
+    tokens
 }
 
 #[derive(Debug)]
@@ -1234,9 +1282,10 @@ mod tests {
             .await
             .expect("project lifecycle memory before retrieval");
 
-        let before = retrievable_lifecycle_context_candidates(&state, "conversation-a", SENTINEL)
-            .await
-            .expect("canonical lifecycle reader");
+        let before =
+            retrievable_lifecycle_context_candidates(&state, "conversation-a", SENTINEL, &[])
+                .await
+                .expect("canonical lifecycle reader");
         assert!(before
             .iter()
             .any(|candidate| candidate.source_id == accepted.record.memory_id));
@@ -1272,9 +1321,10 @@ mod tests {
         };
         assert!(archive.changed);
 
-        let after = retrievable_lifecycle_context_candidates(&state, "conversation-a", SENTINEL)
-            .await
-            .expect("canonical lifecycle reader");
+        let after =
+            retrievable_lifecycle_context_candidates(&state, "conversation-a", SENTINEL, &[])
+                .await
+                .expect("canonical lifecycle reader");
         assert!(!after
             .iter()
             .any(|candidate| candidate.source_id == accepted.record.memory_id));
@@ -1320,6 +1370,7 @@ mod tests {
             &state,
             "conversation-a",
             "PROJECT SCOPE RELEASE CHECKLIST",
+            &[],
         )
         .await
         .expect("scoped lifecycle retrieval");
@@ -1398,10 +1449,14 @@ mod tests {
         .await;
 
         for query in [CONFLICTED, UNBOUND] {
-            let candidates =
-                retrievable_lifecycle_context_candidates(&state, "conversation-a", query)
-                    .await
-                    .expect("fail-closed lifecycle retrieval");
+            let candidates = retrievable_lifecycle_context_candidates(
+                &state,
+                "conversation-a",
+                query,
+                &[query.to_string()],
+            )
+            .await
+            .expect("fail-closed lifecycle retrieval");
             assert!(!candidates
                 .iter()
                 .any(|candidate| candidate.content.contains(query)));
@@ -1419,6 +1474,7 @@ mod tests {
             &state,
             "conversation-a",
             "发布检查包括哪些本地化工作",
+            &[],
         )
         .await
         .expect("Chinese lifecycle retrieval");
@@ -1448,6 +1504,7 @@ mod tests {
             &state,
             "conversation-a",
             "bounded recall checklist product evidence",
+            &[],
         )
         .await
         .expect("bounded lifecycle retrieval");
@@ -1514,6 +1571,68 @@ mod tests {
     }
 
     #[test]
+    fn lifemodel_memory_bonus_is_bounded_and_requires_current_task_overlap() {
+        let hints = vec!["OpenLife personal Agent OS product".to_string()];
+        assert_eq!(
+            life_model_memory_rerank_bonus(
+                "Plan the OpenLife release",
+                "Past OpenLife release checklist",
+                &hints,
+            ),
+            0.04
+        );
+        assert_eq!(
+            life_model_memory_rerank_bonus(
+                "Plan a family vacation",
+                "Past OpenLife release checklist",
+                &hints,
+            ),
+            0.0
+        );
+        let many = vec![
+            "OpenLife release".to_string(),
+            "OpenLife product".to_string(),
+            "OpenLife Agent OS".to_string(),
+        ];
+        assert_eq!(
+            life_model_memory_rerank_bonus(
+                "Plan the OpenLife release",
+                "OpenLife release product Agent OS",
+                &many,
+            ),
+            0.08
+        );
+    }
+
+    #[tokio::test]
+    async fn eligible_memory_candidate_records_lifemodel_rerank_without_new_admission() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let accepted = accept_and_project_memory(
+            &state,
+            &accepted_lifecycle_memory_proposal("OpenLife release checklist from the last sprint"),
+        )
+        .await;
+        let candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            "conversation-a",
+            "Plan the OpenLife release",
+            &["OpenLife personal Agent OS product".into()],
+        )
+        .await
+        .expect("eligible lifecycle memory retrieval");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.source_id == accepted.memory_id)
+            .expect("already-eligible memory candidate");
+
+        assert!(candidate
+            .inclusion_reason
+            .contains("lifemodel_rerank_bonus=0.040"));
+        assert!(candidate.content.contains("scope=global"));
+        assert!(candidate.content.contains("conflict=none"));
+    }
+
+    #[test]
     fn embedding_failure_marker_does_not_claim_complete_retrieval() {
         let candidate = memory_retrieval_degraded_candidate("embedding_failed", "fts_fallback");
         assert_eq!(candidate.source_kind, ContextSourceKind::RuntimePolicy);
@@ -1533,6 +1652,7 @@ mod tests {
             &state,
             "conversation-a",
             "find remembered context",
+            &[],
         )
         .await
         .expect("optional lifecycle memory must not disable the base Agent");
