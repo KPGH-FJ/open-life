@@ -467,7 +467,7 @@ fn contains_cjk(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::life_model::v2::{
-        LifeModelDocumentV2, LifeModelStatementV2, LIFE_MODEL_V2_SCHEMA_VERSION,
+        LifeModelCommitV2, LifeModelDocumentV2, LifeModelStatementV2, LifeModelV2Store,
     };
 
     fn version() -> LifeModelVersionV2 {
@@ -484,20 +484,29 @@ mod tests {
                 ],
                 confirmed_at: "2026-08-09T08:00:00Z".into(),
             });
-        let document_digest = document.digest().unwrap();
-        LifeModelVersionV2 {
-            model_id: "primary".into(),
-            schema_version: LIFE_MODEL_V2_SCHEMA_VERSION.into(),
-            model_version: 2,
-            parent_version: Some(1),
-            parent_digest: Some(format!("sha256:{}", "a".repeat(64))),
-            document_digest: document_digest.clone(),
-            version_digest: format!("sha256:{}", "b".repeat(64)),
-            document,
-            materialization_id: "proposal:review-1".into(),
-            source_refs: vec!["proposal:review-1".into()],
-            created_at: "2026-08-09T08:00:01Z".into(),
-        }
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let first = store
+            .commit(LifeModelCommitV2 {
+                document: LifeModelDocumentV2::empty("primary"),
+                expected_parent_version: None,
+                expected_parent_digest: None,
+                materialization_id: "proposal:review-base".into(),
+                source_refs: vec!["proposal:review-base".into()],
+                created_at: "2026-08-09T07:59:59Z".into(),
+            })
+            .unwrap()
+            .version;
+        store
+            .commit(LifeModelCommitV2 {
+                document,
+                expected_parent_version: Some(first.model_version),
+                expected_parent_digest: Some(first.document_digest),
+                materialization_id: "proposal:review-1".into(),
+                source_refs: vec!["proposal:review-1".into()],
+                created_at: "2026-08-09T08:00:01Z".into(),
+            })
+            .unwrap()
+            .version
     }
 
     #[test]

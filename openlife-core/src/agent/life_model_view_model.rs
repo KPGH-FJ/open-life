@@ -1035,7 +1035,7 @@ mod tests {
     use crate::agent::review_item::{build_review_item, ReviewCenterBuildInput};
     use crate::agent::types::{ProposalSource, RiskLevel};
     use crate::life_model::v2::{
-        LifeModelDocumentV2, LifeModelStatementV2, LifeModelVersionV2, LIFE_MODEL_V2_SCHEMA_VERSION,
+        LifeModelCommitV2, LifeModelDocumentV2, LifeModelStatementV2, LifeModelV2Store,
     };
     use serde_json::json;
 
@@ -1049,29 +1049,38 @@ mod tests {
                 confirmed_at: "2026-08-08T10:00:00Z".into(),
             });
         }
-        let document_digest = document.digest().unwrap();
-        let version = LifeModelVersionV2 {
-            model_id: "primary".into(),
-            schema_version: LIFE_MODEL_V2_SCHEMA_VERSION.into(),
-            model_version,
-            parent_version: model_version.checked_sub(1).filter(|version| *version > 0),
-            parent_digest: model_version
-                .checked_sub(1)
-                .filter(|version| *version > 0)
-                .map(|_| "sha256:parent".into()),
-            document_digest: document_digest.clone(),
-            version_digest: "sha256:test-version".into(),
-            document,
-            materialization_id: "proposal:accepted".into(),
-            source_refs: vec!["proposal:accepted".into()],
-            created_at: "2026-08-08T10:00:00Z".into(),
-        };
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let mut current = None;
+        for version_number in 1..=model_version {
+            let version_document = if version_number == model_version {
+                document.clone()
+            } else {
+                LifeModelDocumentV2::empty("primary")
+            };
+            let committed = store
+                .commit(LifeModelCommitV2 {
+                    document: version_document,
+                    expected_parent_version: current.as_ref().map(
+                        |version: &crate::life_model::v2::LifeModelVersionV2| version.model_version,
+                    ),
+                    expected_parent_digest: current
+                        .as_ref()
+                        .map(|version| version.document_digest.clone()),
+                    materialization_id: format!("proposal:accepted-version-{version_number}"),
+                    source_refs: vec![format!("proposal:accepted-version-{version_number}")],
+                    created_at: format!("2026-08-08T10:00:{version_number:02}Z"),
+                })
+                .unwrap()
+                .version;
+            current = Some(committed);
+        }
+        let version = current.expect("at least one canonical version");
         LifeModelCanonicalV2Input {
             model_id: version.model_id.clone(),
             schema_version: version.schema_version.clone(),
             model_version,
             parent_version: version.parent_version,
-            document_digest,
+            document_digest: version.document_digest.clone(),
             summary: version.document.summary(),
             item_count: version.document.total_item_count(),
             updated_at: Some(version.created_at.clone()),
