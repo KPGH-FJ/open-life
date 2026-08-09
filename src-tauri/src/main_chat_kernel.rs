@@ -305,7 +305,6 @@ pub struct MainChatKernelToolCall {
 #[serde(rename_all = "snake_case")]
 pub enum MainChatKernelWriteOutcomeKind {
     MemoryProposal,
-    LifeModelProposal,
     LifeModelLearningCandidate,
     LifeModelTypedDiffBlocker,
     FileWriteProposal,
@@ -321,7 +320,6 @@ impl MainChatKernelWriteOutcomeKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::MemoryProposal => "memory_proposal",
-            Self::LifeModelProposal => "lifemodel_proposal",
             Self::LifeModelLearningCandidate => "lifemodel_learning_candidate",
             Self::LifeModelTypedDiffBlocker => "lifemodel_typed_diff_blocker",
             Self::FileWriteProposal => "file_write_proposal",
@@ -2094,7 +2092,7 @@ where
                 "silentWritesAllowed": false,
                 "kernelBackedDirectAnswer": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::DirectAnswer,
                 "kernelBackedReadOnlyToolLoop": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReActToolExecution,
-                "kernelBackedGovernedBlocker": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation,
+                "kernelBackedGovernedBlocker": main_chat_agent_turn.decision.policy_decision.route_kind == PolicyRouteKind::GovernedBlocker,
                 "kernelSupportDisposition": main_chat_kernel_support_disposition(
                     &main_chat_agent_turn.decision.selected_strategy,
                     &messages,
@@ -2180,16 +2178,6 @@ where
                 .await,
             );
         }
-        MainChatAgentStrategy::ReviewMaturation => {
-            execution_transcript.extend(
-                append_main_chat_kernel_review_maturation_blocker_transcript(
-                    state,
-                    main_chat_agent_turn,
-                    sanitized_selected_skill_id.as_deref(),
-                )
-                .await,
-            );
-        }
     }
 
     if main_chat_agent_turn.decision.selected_strategy
@@ -2240,7 +2228,12 @@ where
             provider_generation_path: RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
         })
         .await;
-    let mut direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
+    let life_model_explicit_read =
+        resolve_lifemodel_v2_explicit_read_direct_reply(state, main_chat_agent_turn, &user_text)
+            .await;
+    let mut direct_reply = if let Some(reply) = life_model_explicit_read {
+        Some(reply)
+    } else if let Some(answer) = runtime_fact_answer.as_ref() {
         Some(CommandSurfaceDirectReply::runtime_fact(answer))
     } else if user_text.trim().is_empty() {
         None
@@ -2263,7 +2256,9 @@ where
         &user_text,
     )
     .await?;
-    if direct_reply.is_some()
+    if direct_reply
+        .as_ref()
+        .is_some_and(|reply| reply.route_model != "lifemodel_v2_explicit_read")
         && state
             .resource_runtime
             .as_ref()
@@ -2437,7 +2432,7 @@ where
                 selected_skill_id: sanitized_selected_skill_id.clone(),
                 policy_decision: main_chat_agent_turn.decision.policy_decision.clone(),
                 model_supplied_tool_arguments: None,
-                runtime_fact_direct_answer: runtime_fact_answer.is_some(),
+                runtime_fact_direct_answer: direct_reply.is_some(),
             },
             event_sink,
         )
@@ -3542,9 +3537,6 @@ pub(crate) fn main_chat_kernel_support_disposition(
         | MainChatAgentStrategy::BlockedConfirmation => {
             MainChatKernelSupportDisposition::KernelSupported
         }
-        MainChatAgentStrategy::ReviewMaturation => {
-            MainChatKernelSupportDisposition::GovernedBlocker
-        }
     }
 }
 
@@ -3815,39 +3807,6 @@ async fn append_task_scoped_agent_reflection(
             "promotionStatus": "not_proposed",
             "memoryWritten": false,
             "lifeModelWritten": false,
-        }),
-    )
-    .await
-}
-
-async fn append_main_chat_kernel_review_maturation_blocker_transcript(
-    state: &Arc<AppState>,
-    main_chat_agent_turn: &MainChatAgentTurn,
-    selected_skill_id: Option<&str>,
-) -> Vec<ExecutionTranscriptEntry> {
-    let Some(task_session_id) = main_chat_agent_turn
-        .decision
-        .agent_task_session_id
-        .as_deref()
-    else {
-        return Vec::new();
-    };
-    append_main_chat_agent_transcript(
-        state,
-        Some(task_session_id),
-        ExecutionTranscriptEntryKind::Plan,
-        "MainChatKernel ReviewMaturation disposition was prepared.",
-        serde_json::json!({
-            "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-            "promptContract": "kernel_review_maturation_governed_blocker",
-            "toolExecutionAllowed": false,
-            "writeExecutionAllowed": false,
-            "silentWritesAllowed": false,
-            "legacyFallbackUsed": false,
-            "kernelBackedGovernedBlocker": true,
-            "kernelSupportDisposition": MainChatKernelSupportDisposition::GovernedBlocker.as_str(),
-            "blockerReason": "review_maturation_kernel_executor_unavailable",
-            "selectedSkillId": selected_skill_id,
         }),
     )
     .await
@@ -5126,6 +5085,78 @@ struct CommandSurfaceDirectReply {
     route_reason: String,
 }
 
+async fn resolve_lifemodel_v2_explicit_read_direct_reply(
+    state: &Arc<AppState>,
+    turn: &MainChatAgentTurn,
+    user_text: &str,
+) -> Option<CommandSurfaceDirectReply> {
+    if turn.decision.policy_route != PolicyRouteKind::DirectAnswer
+        || !openlife_core::agent::is_explicit_lifemodel_read_intent(user_text)
+    {
+        return None;
+    }
+
+    let loaded = state
+        .life_model_manager
+        .lock()
+        .await
+        .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID);
+    let (content, reason) = match loaded {
+        Ok(Some(version)) => {
+            match openlife_core::agent::LifeModelExplicitReadAnswer::build(&version, user_text) {
+                Ok(answer) => (
+                    answer.render_for_user(user_text),
+                    "lifemodel_v2_explicit_read_confirmed",
+                ),
+                Err(error) => (
+                    lifemodel_v2_explicit_read_unavailable_reply(user_text),
+                    if error
+                        .to_string()
+                        .contains("lifemodel_v2_explicit_read_intent_required")
+                    {
+                        "lifemodel_v2_explicit_read_intent_changed"
+                    } else {
+                        "lifemodel_v2_explicit_read_binding_invalid"
+                    },
+                ),
+            }
+        }
+        Ok(None) => (
+            lifemodel_v2_explicit_read_empty_reply(user_text),
+            "lifemodel_v2_explicit_read_empty",
+        ),
+        Err(_) => (
+            lifemodel_v2_explicit_read_unavailable_reply(user_text),
+            "lifemodel_v2_explicit_read_unavailable",
+        ),
+    };
+    Some(CommandSurfaceDirectReply::lifemodel_explicit_read(
+        content, reason,
+    ))
+}
+
+fn lifemodel_v2_explicit_read_empty_reply(user_text: &str) -> String {
+    if user_text
+        .chars()
+        .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+    {
+        "当前还没有可验证的 Life Model v2 版本，因此我不能声称已经了解你的长期画像。本次只进行了读取，没有写入任何内容。".into()
+    } else {
+        "There is no verifiable Life Model v2 version yet, so I cannot claim confirmed long-term knowledge about you. This was read-only and wrote nothing.".into()
+    }
+}
+
+fn lifemodel_v2_explicit_read_unavailable_reply(user_text: &str) -> String {
+    if user_text
+        .chars()
+        .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+    {
+        "我目前无法验证 canonical Life Model v2，因此相关内容保持未知；我不会改用会话记忆或旧 YAML 来冒充答案。本次没有写入任何内容。".into()
+    } else {
+        "I cannot currently verify canonical Life Model v2, so the requested personal context remains unknown. I will not substitute conversation memory or legacy YAML. Nothing was written.".into()
+    }
+}
+
 fn main_chat_policy_direct_reflex_response(
     decision: &AgentIngressDecision,
     user_text: &str,
@@ -5185,6 +5216,14 @@ impl CommandSurfaceDirectReply {
             content,
             route_model: "L1_reflex".into(),
             route_reason: "main_chat_kernel_direct_reflex".into(),
+        }
+    }
+
+    fn lifemodel_explicit_read(content: String, reason: &str) -> Self {
+        Self {
+            content,
+            route_model: "lifemodel_v2_explicit_read".into(),
+            route_reason: reason.into(),
         }
     }
 }
@@ -5478,10 +5517,11 @@ where
 
         if input
             .policy_decision
-            .allows(AllowedCapability::ReviewMaturationBlocker)
+            .allows(AllowedCapability::GovernedBlocker)
         {
+            let blocker_code = input.policy_decision.reason_code.clone();
             return self.governed_blocker(
-                "review_maturation_kernel_executor_unavailable",
+                &blocker_code,
                 context_metadata,
                 route_metadata,
                 event_sink,
@@ -5739,7 +5779,7 @@ where
 
     fn governed_blocker<S>(
         &self,
-        code: &'static str,
+        code: &str,
         context_metadata: MainChatKernelContextMetadata,
         route_metadata: MainChatRouteMetadata,
         event_sink: &mut S,
@@ -7988,7 +8028,6 @@ fn is_kernel_proposal_outcome(kind: MainChatKernelWriteOutcomeKind) -> bool {
     matches!(
         kind,
         MainChatKernelWriteOutcomeKind::MemoryProposal
-            | MainChatKernelWriteOutcomeKind::LifeModelProposal
             | MainChatKernelWriteOutcomeKind::FileWriteProposal
             | MainChatKernelWriteOutcomeKind::CalendarEventProposal
             | MainChatKernelWriteOutcomeKind::EmailDraftProposal
@@ -8001,9 +8040,6 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
     match outcome.kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => {
             "Create a ReviewWorkflow Memory item from MainChatKernel.".into()
-        }
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            "Create a ReviewWorkflow LifeModel item from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
             "Stage an explicit long-term preference without creating a proposal or LifeModel version."
@@ -8039,7 +8075,6 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
 fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'static str {
     match kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => "memory.write",
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => "life_model.update",
         MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
             "lifemodel.learning_candidate.capture"
         }
@@ -8442,22 +8477,6 @@ async fn prepare_kernel_write_proposal(
                 Some(fact),
             )
         }
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            let change = main_chat_lifemodel_typed_change(user_text)
-                .ok_or_else(|| "lifemodel_typed_diff_required".to_string())?;
-            if outcome.target != change.affected_path {
-                return Err("lifemodel_typed_diff_target_mismatch".into());
-            }
-            (
-                change.proposal_type,
-                change.affected_path,
-                "User requested a typed, proposal-first LifeModel update from MainChatKernel."
-                    .to_string(),
-                RiskLevel::High,
-                change.after,
-                None,
-            )
-        }
         MainChatKernelWriteOutcomeKind::CalendarEventProposal => (
             ProposalType::ScheduledTask,
             "calendar.events".into(),
@@ -8679,13 +8698,11 @@ async fn prepare_kernel_write_proposal(
     }
     let relation_kind = match outcome.kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal
-        | MainChatKernelWriteOutcomeKind::LifeModelProposal
             if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite =>
         {
             openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
         }
-        MainChatKernelWriteOutcomeKind::MemoryProposal
-        | MainChatKernelWriteOutcomeKind::LifeModelProposal => {
+        MainChatKernelWriteOutcomeKind::MemoryProposal => {
             openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
@@ -10423,8 +10440,8 @@ async fn build_blocked_kernel_command_surface_result(
         .iter()
         .any(|receipt| receipt.status == ProviderInvocationStatus::Failed);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
-    let governed_strategy_blocker =
-        main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation;
+    let governed_strategy_blocker = main_chat_agent_turn.decision.policy_decision.route_kind
+        == PolicyRouteKind::GovernedBlocker;
     let failure_kind = main_chat_failure_kind_from_kernel_result(&kernel_result);
     if state.main_chat_agent_session_store.is_some() {
         let session_blockers = if waiting_for_review {
@@ -12927,86 +12944,6 @@ fn external_write_action_type(lower: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct MainChatLifeModelTypedChange {
-    proposal_type: openlife_core::agent::ProposalType,
-    affected_path: String,
-    after: Value,
-}
-
-fn main_chat_lifemodel_typed_change(user_text: &str) -> Option<MainChatLifeModelTypedChange> {
-    use openlife_core::agent::ProposalType;
-
-    let communication_style = value_after_case_insensitive_marker(
-        user_text,
-        &[
-            "communication style to ",
-            "communication style is ",
-            "沟通风格改为",
-            "沟通风格是",
-        ],
-    );
-    if let Some(value) = communication_style {
-        return Some(MainChatLifeModelTypedChange {
-            proposal_type: ProposalType::PreferenceUpdate,
-            affected_path: "preferences.communication_style".into(),
-            after: Value::String(value),
-        });
-    }
-
-    let primary_role = value_after_case_insensitive_marker(
-        user_text,
-        &[
-            "switching careers into ",
-            "switching careers toward ",
-            "switch careers into ",
-            "switch careers toward ",
-            "my primary role is ",
-            "primary role to ",
-            "我的主要角色是",
-            "我的主要角色改为",
-            "转型为",
-        ],
-    );
-    primary_role.map(|value| MainChatLifeModelTypedChange {
-        proposal_type: ProposalType::LifeModelUpdate,
-        affected_path: "identity.role_definition.primary_role".into(),
-        after: Value::String(value),
-    })
-}
-
-fn value_after_case_insensitive_marker(value: &str, markers: &[&str]) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    markers.iter().find_map(|marker| {
-        let marker_lower = marker.to_ascii_lowercase();
-        let index = lower.find(&marker_lower)?;
-        let candidate =
-            value
-                .get(index + marker.len()..)?
-                .trim()
-                .trim_matches(|character: char| {
-                    character.is_whitespace()
-                        || matches!(
-                            character,
-                            '.' | ','
-                                | ';'
-                                | ':'
-                                | '!'
-                                | '?'
-                                | '。'
-                                | '，'
-                                | '；'
-                                | '：'
-                                | '！'
-                                | '？'
-                                | '"'
-                                | '\''
-                        )
-                });
-        (!candidate.is_empty() && candidate.chars().count() <= 120).then(|| candidate.to_string())
-    })
-}
-
 fn extract_backtick_value(value: &str) -> Option<&str> {
     value
         .split('`')
@@ -13685,10 +13622,6 @@ fn synthesize_write_outcome_answer(outcome: &MainChatKernelWriteOutcome) -> Stri
     match outcome.kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => {
             "I created a Memory proposal for review. I did not write it into long-term memory."
-                .into()
-        }
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            "I created a LifeModel proposal for review. I did not update accepted LifeModel truth."
                 .into()
         }
         MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
@@ -15533,9 +15466,6 @@ mod tests {
             }
             MainChatAgentStrategy::ActionProposal => {
                 "Create calendar event `Planning review` at `2026-08-12T09:00:00+08:00`."
-            }
-            MainChatAgentStrategy::ReviewMaturation => {
-                "Review what changed in my working style this month."
             }
             MainChatAgentStrategy::BlockedConfirmation => {
                 "Send an email to alice@example.com."
@@ -17681,61 +17611,6 @@ mod tests {
             );
             assert!(main_chat_kernel_supports_turn(&strategy, &messages));
         }
-
-        let review_disposition = main_chat_kernel_support_disposition(
-            &MainChatAgentStrategy::ReviewMaturation,
-            &messages,
-        );
-        assert_eq!(
-            review_disposition,
-            MainChatKernelSupportDisposition::GovernedBlocker
-        );
-        assert!(main_chat_kernel_supports_turn(
-            &MainChatAgentStrategy::ReviewMaturation,
-            &messages
-        ));
-    }
-
-    #[tokio::test]
-    async fn main_chat_kernel_review_maturation_returns_governed_blocker_without_model_call() {
-        let model = ScriptedModelClient::ok("model should not be called");
-        let kernel = test_kernel(model.clone(), Vec::new());
-        let mut events = BufferedMainChatEventSink::default();
-
-        let result = kernel
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-review-maturation".into(),
-                    provider_authorization: policy_allowed_authorization("review-maturation"),
-                    messages: vec![user_message(
-                        "Review what changed in my working style this month.",
-                    )],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::ReviewMaturation),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut events,
-            )
-            .await;
-
-        assert_eq!(model.call_count(), 0);
-        assert_eq!(
-            result.blockers,
-            vec!["review_maturation_kernel_executor_unavailable".to_string()]
-        );
-        assert!(result.assistant_message.is_none());
-        assert!(result.route_metadata.is_some());
-        assert!(result.context_metadata.is_some());
-        assert!(!result.direct_writes_executed);
-        assert!(!result.legacy_fallback_used);
-        assert!(events.events().iter().any(|event| {
-            matches!(
-                event,
-                MainChatKernelEvent::Blocker { code }
-                    if code == "review_maturation_kernel_executor_unavailable"
-            )
-        }));
     }
 
     #[tokio::test]
@@ -20795,31 +20670,6 @@ mod tests {
         assert!(!life_model_result.legacy_fallback_used);
     }
 
-    #[test]
-    fn lifemodel_chat_change_requires_a_materializable_typed_diff() {
-        let role = main_chat_lifemodel_typed_change(
-            "Update my life model: I am switching careers into design leadership.",
-        )
-        .expect("explicit role change has a typed LifeModel target");
-        assert_eq!(role.affected_path, "identity.role_definition.primary_role");
-        assert_eq!(role.after, serde_json::json!("design leadership"));
-
-        let communication = main_chat_lifemodel_typed_change(
-            "Update my communication style to concise and direct.",
-        )
-        .expect("explicit communication preference has a typed LifeModel target");
-        assert_eq!(
-            communication.affected_path,
-            "preferences.communication_style"
-        );
-        assert_eq!(communication.after, serde_json::json!("concise and direct"));
-
-        assert!(
-            main_chat_lifemodel_typed_change("Update my life model based on this chat").is_none()
-        );
-        assert!(main_chat_lifemodel_typed_change("Propose an edit to MEMORY.md").is_none());
-    }
-
     #[tokio::test]
     async fn main_chat_kernel_goal_6_hs_policy_can_surface_blocker_or_proposal_outcome() {
         let model = ScriptedModelClient::ok("model should not be called");
@@ -21290,6 +21140,43 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
+    }
+
+    #[test]
+    fn kernel_long_term_preference_plans_candidate_without_provider_authority() {
+        let task_session_id = "proposal-long-term-preference";
+        let user_text = "My long-term preference is focused work before lunch.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            task_session_id,
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::LifeModelProposal
+        );
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        let input = MainChatTurnInput {
+            session_id: task_session_id.into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("LifeModel authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("typed write outcome");
+
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
+        );
+        assert_eq!(outcome.action_type, "lifemodel.learning_candidate.capture");
+        assert_eq!(outcome.target, "life_model.learning_candidates");
     }
 
     #[test]

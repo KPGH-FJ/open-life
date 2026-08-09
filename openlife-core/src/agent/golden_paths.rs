@@ -1,3 +1,6 @@
+use super::proposal_outcome::{
+    record_maturation_proposal_outcome_evidence, MaturationProposalOutcome,
+};
 use crate::agent::accepted_guidance::{
     create_accepted_guidance_from_maturation_candidate, AcceptedGuidanceLifecycleInput,
 };
@@ -25,9 +28,6 @@ use crate::agent::plan_execute::{
     PlanExecuteSession, PlanStepStatus,
 };
 use crate::agent::policy_store::{PolicyStore, PolicyTopic};
-use crate::agent::proposal_outcome::{
-    record_maturation_proposal_outcome_evidence, MaturationProposalOutcome,
-};
 use crate::agent::proposal_store::ProposalStore;
 use crate::agent::runtime_contract::{
     LifeEventDraft, RuntimeGuidanceConsumptionMode, RuntimeInput,

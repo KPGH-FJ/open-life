@@ -41,7 +41,6 @@ pub enum MainChatAgentStrategy {
     LifeModelProposal,
     FileWriteProposal,
     ActionProposal,
-    ReviewMaturation,
     BlockedConfirmation,
 }
 
@@ -57,7 +56,6 @@ impl MainChatAgentStrategy {
             Self::LifeModelProposal => "life_model_proposal",
             Self::FileWriteProposal => "file_write_proposal",
             Self::ActionProposal => "action_proposal",
-            Self::ReviewMaturation => "review_maturation",
             Self::BlockedConfirmation => "blocked_confirmation",
         }
     }
@@ -86,7 +84,6 @@ impl MainChatAgentStrategy {
             "life_model_proposal" => Ok(Self::LifeModelProposal),
             "file_write_proposal" => Ok(Self::FileWriteProposal),
             "action_proposal" => Ok(Self::ActionProposal),
-            "review_maturation" => Ok(Self::ReviewMaturation),
             "blocked_confirmation" => Ok(Self::BlockedConfirmation),
             _ => Err(corrupt_persisted_enum_text(
                 column,
@@ -342,8 +339,13 @@ impl IntentFrame {
             && !advice_only;
         let requests_memory_rollback_after_commit =
             requests_memory_change && explicitly_requests_same_turn_memory_rollback(&lower);
-        let requests_lifemodel_change = governance_intent.durable_write_requirement
+        let has_routed_lifemodel_candidate = !governance_intent
+            .memory_routing
+            .lifemodel_proposal_candidate_ids
+            .is_empty();
+        let requests_lifemodel_change = (governance_intent.durable_write_requirement
             == Some(MainChatDurableWriteRequirement::LifeModelProposal)
+            || has_routed_lifemodel_candidate)
             && !has_embedded_untrusted_instruction
             && !advice_only;
         let requests_file_change = is_governed_file_write_intent(&lower)
@@ -663,7 +665,7 @@ pub enum AllowedCapability {
     LocalUtilityProposal,
     ExternalWriteConfirmation,
     DangerousActionBlocker,
-    ReviewMaturationBlocker,
+    GovernedBlocker,
 }
 
 impl AllowedCapability {
@@ -693,7 +695,7 @@ impl AllowedCapability {
             Self::LocalUtilityProposal => "local_utility.proposal",
             Self::ExternalWriteConfirmation => "external_write.confirmation",
             Self::DangerousActionBlocker => "dangerous_action.blocker",
-            Self::ReviewMaturationBlocker => "review_maturation.blocker",
+            Self::GovernedBlocker => "governed.blocker",
         }
     }
 }
@@ -1569,7 +1571,7 @@ impl PolicyDecision {
             {
                 MainChatAgentStrategy::BlockedConfirmation
             }
-            PolicyRouteKind::GovernedBlocker => MainChatAgentStrategy::ReviewMaturation,
+            PolicyRouteKind::GovernedBlocker => MainChatAgentStrategy::BlockedConfirmation,
         }
     }
 }
@@ -1992,6 +1994,12 @@ impl PolicyRouter {
                 "durable_write_requires_review_proposal",
                 "durable Memory or LifeModel change must be proposal-only",
             )
+        } else if crate::agent::is_explicit_lifemodel_read_intent(&intent_frame.user_goal) {
+            (
+                PolicyRouteKind::DirectAnswer,
+                "explicit_lifemodel_v2_read",
+                "the user explicitly requested a read-only view of confirmed LifeModel v2 data",
+            )
         } else if intent_frame.requests_plan_task {
             (
                 PolicyRouteKind::PlanDraft,
@@ -2009,12 +2017,6 @@ impl PolicyRouter {
                 PolicyRouteKind::AskClarification,
                 "ambiguous_intent_requires_clarification",
                 "the user goal is too ambiguous to route safely",
-            )
-        } else if is_review_maturation_intent(&intent_frame.user_goal.to_ascii_lowercase()) {
-            (
-                PolicyRouteKind::GovernedBlocker,
-                "review_maturation_runtime_unavailable",
-                "review maturation is not an ordinary product route in Phase3",
             )
         } else {
             (
@@ -2270,6 +2272,11 @@ fn policy_allowed_capabilities(
     governance_plan: &PolicyGovernancePlan,
 ) -> Vec<AllowedCapability> {
     let mut capabilities = match route_kind {
+        PolicyRouteKind::DirectAnswer
+            if crate::agent::is_explicit_lifemodel_read_intent(&intent.user_goal) =>
+        {
+            Vec::new()
+        }
         PolicyRouteKind::DirectAnswer => vec![AllowedCapability::ProviderGeneration],
         PolicyRouteKind::AskClarification => vec![
             AllowedCapability::Clarification,
@@ -2337,7 +2344,7 @@ fn policy_allowed_capabilities(
         PolicyRouteKind::GovernedBlocker if intent.requires_hard_block => {
             vec![AllowedCapability::DangerousActionBlocker]
         }
-        PolicyRouteKind::GovernedBlocker => vec![AllowedCapability::ReviewMaturationBlocker],
+        PolicyRouteKind::GovernedBlocker => vec![AllowedCapability::GovernedBlocker],
         PolicyRouteKind::ReadOnlyTool => requested_read_capabilities(intent),
     };
     if !governance_plan.low_risk_life_event_candidate_ids.is_empty() {
@@ -4087,6 +4094,15 @@ impl AgentTaskSessionStore {
                 user_goal_minimized_version INTEGER NOT NULL DEFAULT 1,
                 payload_minimized_version INTEGER NOT NULL DEFAULT 2
             )",
+            [],
+        )?;
+        // `review_maturation` was a temporary product blocker, not a durable
+        // Agent capability. Preserve old task rows as blocked history while
+        // removing the retired strategy from the executable type system.
+        conn.execute(
+            "UPDATE agent_task_sessions
+             SET selected_strategy = 'blocked_confirmation'
+             WHERE selected_strategy = 'review_maturation'",
             [],
         )?;
         add_sqlite_column_if_missing(&conn, "agent_task_sessions", "user_goal_ref", "TEXT")?;
@@ -12515,10 +12531,10 @@ pub fn main_chat_runtime_eval_cases() -> Vec<MainChatRuntimeEvalCase> {
                 ),
                 7 => runtime_eval_case(
                     id,
-                    "review maturation runtime",
-                    &format!("Review my recent energy pattern evidence case {id}."),
-                    MainChatAgentStrategy::ReviewMaturation,
-                    true,
+                    "explicit lifemodel read runtime",
+                    &format!("What is recorded in my Life Model case {id}?"),
+                    MainChatAgentStrategy::DirectAnswer,
+                    false,
                     false,
                     false,
                     false,
@@ -13058,7 +13074,6 @@ fn run_one_main_chat_runtime_eval_case(
         | MainChatAgentStrategy::PlanExecute
         | MainChatAgentStrategy::TransientStateCommand
         | MainChatAgentStrategy::ReversibleMemoryCommit
-        | MainChatAgentStrategy::ReviewMaturation
         | MainChatAgentStrategy::BlockedConfirmation => {
             for action in runtime_eval_actions_for_strategy(decision.selected_strategy, &case.input)
             {
@@ -14799,10 +14814,6 @@ fn runtime_eval_actions_for_strategy(
             "memory.explicit_write",
             "Runtime eval explicit reversible Memory commit",
         )],
-        MainChatAgentStrategy::ReviewMaturation => vec![ExecutionAction::new(
-            "review.maturation_read",
-            "Runtime eval metadata-safe review",
-        )],
         MainChatAgentStrategy::BlockedConfirmation => vec![ExecutionAction::new(
             "external.write",
             "Runtime eval external write blocker",
@@ -15297,9 +15308,9 @@ pub fn first_40_seed_eval_cases() -> Vec<MainChatEvalCase> {
         ),
         router_case(
             6,
-            "working style review",
-            "Review what changed in my working style this month.",
-            MainChatAgentStrategy::ReviewMaturation,
+            "lifemodel explicit read",
+            "What communication preference is recorded in my Life Model?",
+            MainChatAgentStrategy::DirectAnswer,
         ),
         router_case(
             7,
@@ -15543,9 +15554,9 @@ pub fn legacy_100_scaffold_eval_cases() -> Vec<MainChatEvalCase> {
         ),
         router_case(
             49,
-            "maturation route",
-            "Review my recent energy pattern evidence.",
-            MainChatAgentStrategy::ReviewMaturation,
+            "lifemodel overview route",
+            "Show what is in my Life Model.",
+            MainChatAgentStrategy::DirectAnswer,
         ),
         router_case(
             50,
@@ -16775,20 +16786,6 @@ fn is_unselected_skill_boundary_intent(lower: &str) -> bool {
     )
 }
 
-fn is_review_maturation_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "review what changed",
-            "working style",
-            "this month",
-            "maturation",
-            "energy pattern evidence",
-            "review my recent",
-        ],
-    )
-}
-
 fn is_plan_execute_intent(lower: &str) -> bool {
     contains_any(
         lower,
@@ -17047,6 +17044,73 @@ fn stable_id(prefix: &str, parts: &[&str]) -> String {
 
 fn digest_hex(content: &str) -> String {
     stable_id("digest", &[content])
+}
+
+#[cfg(test)]
+mod explicit_lifemodel_read_policy_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_lifemodel_read_is_direct_and_cannot_gain_write_capability() {
+        let decision = AgentIngress::default().decide(
+            "lifemodel-v2-explicit-read-policy",
+            "我的 Life Model 记录了什么沟通偏好？",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::DirectAnswer
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+        assert_eq!(
+            decision.policy_decision.reason_code,
+            "explicit_lifemodel_v2_read"
+        );
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::LifeModelProposal));
+        assert!(!decision.intent_frame.requests_durable_write);
+    }
+
+    #[test]
+    fn lifemodel_update_keeps_proposal_only_priority_over_read_words() {
+        let decision = AgentIngress::default().decide(
+            "lifemodel-v2-write-policy",
+            "Show me and update my LifeModel: communication style is concise.",
+            None,
+            AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::LifeModelProposal
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+    }
+
+    #[test]
+    fn ordinary_reflection_question_no_longer_routes_to_retired_maturation_blocker() {
+        let decision = AgentIngress::default().decide(
+            "ordinary-reflection-after-maturation-retirement",
+            "Review what changed in my working style this month.",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::DirectAnswer
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+        assert_ne!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::Blocked
+        );
+    }
 }
 
 #[cfg(test)]
@@ -18373,7 +18437,6 @@ mod session_content_minimization_tests {
             MainChatAgentStrategy::MemoryProposal,
             MainChatAgentStrategy::LifeModelProposal,
             MainChatAgentStrategy::FileWriteProposal,
-            MainChatAgentStrategy::ReviewMaturation,
             MainChatAgentStrategy::BlockedConfirmation,
         ];
         let statuses = [
@@ -18464,6 +18527,46 @@ mod session_content_minimization_tests {
                 .expect("transcript fixture exists");
             assert_eq!(loaded.kind, kind);
         }
+    }
+
+    #[test]
+    fn retired_review_maturation_rows_migrate_to_blocked_history() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("agent-sessions.db");
+        let session_id = {
+            let store = AgentTaskSessionStore::new(&db_path).expect("task session store");
+            let session = store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "retired-maturation-history".into(),
+                    user_goal: "historical row".into(),
+                    selected_strategy: MainChatAgentStrategy::BlockedConfirmation,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create historical session");
+            store
+                .conn
+                .lock()
+                .expect("session database")
+                .execute(
+                    "UPDATE agent_task_sessions
+                     SET selected_strategy = 'review_maturation'
+                     WHERE id = ?1",
+                    [&session.id],
+                )
+                .expect("seed retired strategy");
+            session.id
+        };
+
+        let reopened = AgentTaskSessionStore::new(&db_path).expect("reopen and migrate");
+        let migrated = reopened
+            .load_session(&session_id)
+            .expect("load migrated session")
+            .expect("migrated session exists");
+        assert_eq!(
+            migrated.selected_strategy,
+            MainChatAgentStrategy::BlockedConfirmation
+        );
     }
 }
 

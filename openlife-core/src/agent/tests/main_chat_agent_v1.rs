@@ -313,6 +313,40 @@ fn habitual_work_preference_is_not_misclassified_as_a_plan_command() {
 }
 
 #[test]
+fn explicit_long_term_preference_routes_to_lifemodel_without_provider_generation() {
+    let user_text = "My long-term preference is focused work before lunch.";
+    let intent = IntentFrame::from_user_message(user_text);
+    assert!(intent.requests_lifemodel_change);
+    assert!(intent.requests_durable_write);
+    assert_eq!(
+        intent.execution_disposition,
+        IntentExecutionDisposition::ActionRequested
+    );
+    assert_eq!(
+        intent.memory_routing.lifemodel_proposal_candidate_ids.len(),
+        1
+    );
+
+    let decision = AgentIngress::default().decide(
+        "explicit-long-term-preference",
+        user_text,
+        None,
+        AgentTaskKind::Conversation,
+    );
+    assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::LifeModelProposal
+    );
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::LifeModelProposal));
+    assert!(!decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration));
+}
+
+#[test]
 fn supplied_text_transformation_with_plan_output_stays_a_side_effect_free_direct_answer() {
     const PROMPT: &str = "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。";
 
@@ -1353,9 +1387,9 @@ fn policy_router_real_life_scenario_eval_uses_only_policy_route_outputs() {
             PolicyRouteKind::ProposalOnlyWrite,
         ),
         (
-            "review unavailable",
+            "ordinary reflection",
             "Review my recent energy pattern evidence.",
-            PolicyRouteKind::GovernedBlocker,
+            PolicyRouteKind::DirectAnswer,
         ),
         (
             "web explicit",

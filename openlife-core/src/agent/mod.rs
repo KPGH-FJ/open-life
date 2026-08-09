@@ -12,6 +12,7 @@ pub mod governor;
 pub mod heuristic_store;
 pub mod hs_asset_authority;
 pub mod hs_selector;
+pub mod life_model_explicit_read;
 pub mod life_model_learning;
 pub mod life_model_runtime_context;
 pub mod life_model_view_model;
@@ -31,7 +32,7 @@ pub mod model_router;
 pub mod plan_execute;
 pub mod policy_store;
 pub mod product_read_model;
-pub mod proposal_outcome;
+mod proposal_outcome;
 pub mod proposal_store;
 pub mod provider_privacy_boundary;
 pub mod reasoning;
@@ -133,6 +134,9 @@ pub use hs_selector::{
     GuidancePolicyBoundarySummary, HSAssetExclusion, HSAssetKind, HSExclusionReason,
     HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
     SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
+};
+pub use life_model_explicit_read::{
+    is_explicit_lifemodel_read_intent, LifeModelExplicitReadAnswer, LifeModelExplicitReadFact,
 };
 pub use life_model_learning::{
     life_model_learning_candidate_snapshot_digest, LifeModelLearningCandidate,
@@ -238,6 +242,7 @@ pub use product_read_model::{
     ReviewActionKind, ReviewItemMaterializationStatus, ViewModelActions, ViewModelEnvelope,
     ViewModelSource, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
+#[cfg(test)]
 pub use proposal_outcome::{
     evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,

@@ -15,9 +15,10 @@ use crate::{
     AppState,
 };
 use openlife_core::agent::{
-    AgentProposal, ArtifactEffectState, MaturationProposalOutcome, MemoryLifecycleRecord,
-    MemoryLifecycleScope, MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource,
-    ProposalStatus, ProposalType, RiskLevel,
+    AgentProposal, ArtifactEffectState, LifeModelLearningCandidateStatus,
+    LifeModelLearningReviewDecisionReceipt, MemoryLifecycleRecord, MemoryLifecycleScope,
+    MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType,
+    RiskLevel,
 };
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
@@ -208,12 +209,39 @@ pub struct AcceptProposalResponse {
     /// creation and permission wait responses never manufacture this receipt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_materialization: Option<ArtifactMaterializationReceipt>,
+    /// Candidate lifecycle reconciliation is part of the confirmed LifeModel
+    /// effect. The command must never return an IPC error after the canonical
+    /// version was already committed merely because this truth field was not
+    /// represented by the typed response contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub life_model_learning: Option<LifeModelLearningAcceptResponse>,
     #[serde(alias = "blocked_action")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_action: Option<Value>,
     #[serde(alias = "can_continue")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_continue: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LifeModelLearningAcceptResponse {
+    Materialized(LifeModelLearningReviewDecisionReceipt),
+    ReconciliationRequired(LifeModelLearningReconciliationRequiredResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelLearningReconciliationRequiredResponse {
+    pub proposal_id: String,
+    pub status: LifeModelLearningReconciliationStatus,
+    pub canonical_life_model_changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeModelLearningReconciliationStatus {
+    ReconciliationRequired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +293,23 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
                 "accept Proposal confirmed response contains deferred-only truth fields".into(),
             );
         }
+        if let Some(learning) = response.life_model_learning.as_ref() {
+            match learning {
+                LifeModelLearningAcceptResponse::Materialized(receipt)
+                    if receipt.status == LifeModelLearningCandidateStatus::Materialized
+                        && receipt.materialized_version.is_some()
+                        && receipt.materialized_document_digest.is_some()
+                        && receipt.canonical_life_model_changed => {}
+                LifeModelLearningAcceptResponse::ReconciliationRequired(receipt)
+                    if receipt.canonical_life_model_changed => {}
+                _ => {
+                    return Err(
+                        "accept Proposal LifeModel learning response lacks confirmed materialization truth"
+                            .into(),
+                    )
+                }
+            }
+        }
     } else if response.status.as_deref() != Some("deferred")
         || response.reason_code.as_deref().is_none()
         || response.proposal_id.as_deref().is_none()
@@ -282,6 +327,7 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
         || response.memory_lifecycle.is_some()
         || response.memory_persistence.is_some()
         || response.artifact_materialization.is_some()
+        || response.life_model_learning.is_some()
         || response.blocked_action.is_some()
         || response.can_continue.is_some()
         || !response.main_chat_task_sync.is_empty()
@@ -3863,14 +3909,6 @@ async fn accept_proposal_with_state_and_confirmation(
         false
     };
     let dispatch_projection_confirmed = proposal_projected;
-    if proposal_projected {
-        record_maturation_proposal_outcome_evidence_with_state(
-            state,
-            &proposal,
-            MaturationProposalOutcome::Accepted,
-        )
-        .await;
-    }
     drop(terminal_owner_fence_guard);
     if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
@@ -4193,33 +4231,8 @@ pub(crate) async fn reject_proposal_with_state(
             error
         );
     }
-    record_maturation_proposal_outcome_evidence_with_state(
-        state,
-        &proposal,
-        MaturationProposalOutcome::Rejected,
-    )
-    .await;
     record_rejected_proactive_reminder_evidence(state, &proposal).await;
     Ok(())
-}
-
-async fn record_maturation_proposal_outcome_evidence_with_state(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-    outcome: MaturationProposalOutcome,
-) {
-    let evidence_store = state.evidence_store.lock().await;
-    if let Err(e) = openlife_core::agent::record_maturation_proposal_outcome_evidence(
-        &evidence_store,
-        proposal,
-        outcome,
-    ) {
-        log::warn!(
-            "[LifeModel-Maturation] failed to record proposal outcome evidence for proposal {}: {}",
-            proposal.id,
-            e
-        );
-    }
 }
 
 async fn record_rejected_proactive_reminder_evidence(
@@ -4284,12 +4297,6 @@ pub(crate) async fn edit_proposal_with_state(
             error
         );
     }
-    record_maturation_proposal_outcome_evidence_with_state(
-        state,
-        &proposal,
-        MaturationProposalOutcome::Edited,
-    )
-    .await;
     Ok(serde_json::json!({
         "success": true,
         "status": "edited_pending_review",
@@ -5270,6 +5277,16 @@ mod tests {
                 "byteSize": 42,
                 "mediaType": "text/markdown; charset=utf-8",
                 "status": "confirmed"
+            },
+            "lifeModelLearning": {
+                "candidateId": "candidate-1",
+                "proposalId": "proposal-1",
+                "changed": true,
+                "status": "materialized",
+                "contentScrubbed": false,
+                "materializedVersion": 7,
+                "materializedDocumentDigest": "sha256:lifemodel-v7",
+                "canonicalLifeModelChanged": true
             }
         }))
         .unwrap();
@@ -5297,6 +5314,12 @@ mod tests {
         assert_eq!(
             serialized["artifactMaterialization"]["contentDigest"],
             serialized["artifactMaterialization"]["observedContentDigest"]
+        );
+        assert_eq!(serialized["lifeModelLearning"]["status"], "materialized");
+        assert_eq!(serialized["lifeModelLearning"]["materializedVersion"], 7);
+        assert_eq!(
+            serialized["lifeModelLearning"]["canonicalLifeModelChanged"],
+            true
         );
     }
 
@@ -5369,6 +5392,42 @@ mod tests {
         }))
         .expect_err("deferred responses must not carry confirmed-effect truth");
         assert!(deferred_error.contains("confirmed-effect truth fields"));
+
+        let deferred_learning_error = typed_accept_proposal_response(serde_json::json!({
+            "success": false,
+            "status": "deferred",
+            "reasonCode": "origin_turn_open",
+            "proposalId": "proposal-deferred",
+            "dispatchState": "unclaimed",
+            "durableWriteExecuted": false,
+            "lifeModelLearning": {
+                "proposalId": "proposal-deferred",
+                "status": "reconciliation_required",
+                "canonicalLifeModelChanged": true
+            }
+        }))
+        .expect_err("deferred responses must not carry LifeModel materialization truth");
+        assert!(deferred_learning_error.contains("confirmed-effect truth fields"));
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_rejects_unconfirmed_lifemodel_learning_truth() {
+        let error = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "effectStatus": "confirmed",
+            "proposalProjectionStatus": "confirmed",
+            "proposalId": "proposal-learning",
+            "lifeModelLearning": {
+                "candidateId": "candidate-learning",
+                "proposalId": "proposal-learning",
+                "changed": false,
+                "status": "proposed",
+                "contentScrubbed": false,
+                "canonicalLifeModelChanged": false
+            }
+        }))
+        .expect_err("proposed Candidate state must not receive materialization credit");
+        assert!(error.contains("lacks confirmed materialization truth"));
     }
 
     #[test]
@@ -5454,7 +5513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_maturation_proposal_records_negative_outcome_without_applying() {
+    async fn reject_legacy_maturation_proposal_does_not_run_retired_outcome_pipeline() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
@@ -5477,19 +5536,14 @@ mod tests {
             .await
             .create_proposal(&proposal)
             .unwrap();
-        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
+        create_maturation_source_evidence(&state, &proposal).await;
 
         reject_proposal_with_state(proposal_id.clone(), &state)
             .await
             .unwrap();
 
         let records = proposal_outcome_records(&state, &proposal_id).await;
-        assert_eq!(records.len(), 1);
-        let evidence = &records[0];
-        assert_eq!(evidence.run_metadata["outcome"], "rejected");
-        assert_eq!(evidence.run_metadata["negative"], true);
-        assert_eq!(evidence.run_metadata["opposing"], true);
-        assert_eq!(evidence.opposing_refs, vec![source_evidence_id]);
+        assert!(records.is_empty());
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert_ne!(
             model.preferences.communication_style,

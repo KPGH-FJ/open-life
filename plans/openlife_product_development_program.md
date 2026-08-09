@@ -1252,12 +1252,11 @@ legacy 隔离 profile 完成建立、迁移、编辑、冲突、删除、回滚�
 界面问题。包含该修复的最终精确构建 `d02e9dae...` 已完成主 QA 的凭据恢复、重启、
 v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy QA 的独立凭据恢复、
 重启、v2 version 1 保持和迁移终态复核。未调用外部 Provider 或网络，未迁移真实
-用户 profile。5.3A“Observation 与 Candidate 边界”已于 2026-08-08 完成源码与
-自动化产品验证，并以提交 `aa7ac1b` 形成独立基线：当前用户明确表达的低敏长期偏好和
-协作偏好会暂存为可查看、可删除、可跨存储重启恢复的 Candidate；该路径不会创建
-Proposal，也不会修改 canonical LifeModel v2。前端产品测试、browser-shell 路由验收、
-Rust 格式、严格 Clippy 和全仓 Rust 测试均通过；browser-shell 证据不冒充真实 Tauri
-原生验收，完整原生闭环仍按计划属于 5.3F。5.3 固定为 A—F，不默认增加 5.3G。**
+用户 profile。5.3A—5.3E 已按固定顺序完成并分别形成提交 `aa7ac1b`、`a49258b`、
+`e797955`、`30c44b9` 和 `3c6fd58`。5.3F 的源码、自动化门禁与真实 Tauri 闭环已经
+完成，当前保持未提交供用户审阅；最终精确构建 `ae9f467f...` 已在既有
+`phase5-lifemodel-v2` 隔离 QA 中完成候选、审核、v8 物化、跨重启持久化和显式读取。
+5.3 固定为 A—F，不增加 5.3G；用户确认 5.3F 提交后，下一既定板块为 5.4。**
 
 第五阶段第一步实际完成：
 
@@ -1306,6 +1305,29 @@ Rust 格式、严格 Clippy 和全仓 Rust 测试均通过；browser-shell 证�
   Rust 格式、严格 Clippy、全仓 Rust 测试，前端格式、类型、250 项测试、production
   build/absence guard 和 8 项 browser-shell 验收均通过。browser-shell 不作为真实
   Tauri 原生闭环证据；Proposal 与产品审核继续属于 5.3D，完整原生验收仍属于 5.3F。
+- 5.3D 已以提交 `30c44b9` 建立 Candidate 到 Review Center 的受治理边界：只有用户
+  明确确认、仍处于可审核状态且绑定精确来源的 Candidate 才能生成 version-bound
+  typed diff；创建 Proposal 不等于批准或物化，冲突、过期和来源漂移保持 fail-closed。
+- 5.3E 已以提交 `3c6fd58` 完成决定反馈与版本化物化：批准后的精确 typed diff 通过
+  canonical LifeModel v2 owner 原子生成新版本，并把 Proposal、Candidate、版本号与
+  document digest 绑定；拒绝、编辑、并发漂移和重放不会获得错误物化信用。
+- 5.3F 已完成待审源码：Main Chat 可以从 canonical LifeModel v2 进行确定性显式只读，
+  回答会列出版本、来源和选择原因，不把 Conversation Memory 或待审核 Candidate 当成
+  已确认画像，也不会因此获得写入或 Provider 权限；旧 scalar LifeModel proposal、
+  ReviewMaturation 产品 blocker 和已被替代的生产 maturation outcome 入口已删除，仍有
+  真实内部调用者的 golden/evidence 代码没有冒进删除。
+- 真实 Tauri 收口先在 `2623661a...` 构建发现批准已完成但严格 IPC 响应拒绝未知
+  `lifeModelLearning` 字段；修复后保持 `deny_unknown_fields`，用 typed materialized /
+  reconciliation response 代替宽松 JSON。随后又用原始句子复现一般英文长期偏好会误入
+  Provider 准备路径；根因是 Memory 候选解析与 typed LifeModel 规则对 `long-term`
+  表达不一致，修复后该路径只获得 LifeModel proposal 权限。
+- 最终代码审查进一步移除了显式 LifeModel 读取的 `provider_generation` 策略能力；
+  该读取由确定性 canonical v2 路径直接回答，不再只是“持有 Provider 能力但没有调用”。
+  最终精确构建 `ae9f467f...` 在同一隔离 QA 中证明：`My long-term preference is
+  focused work before lunch.` 不调用 Provider 即可暂存 1 条 Candidate；送审时 canonical
+  v7 保持不变；批准后读模型确认 v8 已应用；完全重启后 v8 与该事实仍存在；新会话显式
+  读取返回 v8、Candidate 与原消息来源以及选择原因。全过程没有调用外部 Provider 或
+  网络。严格 Clippy、全仓 Rust 测试、前端 production build 和 absence guard 均通过。
 
 第四阶段实际完成：
 

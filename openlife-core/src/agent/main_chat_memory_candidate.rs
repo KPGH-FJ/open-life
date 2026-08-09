@@ -218,6 +218,13 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
     if normalized.is_empty() {
         return Vec::new();
     }
+    // A read-only LifeModel query is not evidence about the user and must not
+    // be promoted into a durable-write candidate merely because it names the
+    // LifeModel. Mixed read/write requests are excluded by the classifier and
+    // continue through the normal governed proposal path.
+    if crate::agent::is_explicit_lifemodel_read_intent(&normalized) {
+        return Vec::new();
+    }
     if is_current_external_fact_request(&normalized) {
         return Vec::new();
     }
@@ -800,13 +807,26 @@ fn is_identity_or_long_term_preference(lower: &str) -> bool {
             "design lead",
             "life model",
             "lifemodel",
+            "long-term preference",
+            "long term preference",
             "我是",
             "身份",
             "长期偏好",
             "价值观",
         ],
     ) || (contains_any(lower, &["i prefer", "我偏好", "我更喜欢"])
-        && contains_any(lower, &["以后", "长期", "always", "以后都"]))
+        && contains_any(
+            lower,
+            &[
+                "以后",
+                "长期",
+                "always",
+                "from now on",
+                "long-term",
+                "long term",
+                "以后都",
+            ],
+        ))
 }
 
 fn is_life_event_expression(lower: &str) -> bool {
@@ -1310,6 +1330,36 @@ mod tests {
 
         assert!(result.memory_proposal_candidate_ids.is_empty());
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn explicit_lifemodel_read_is_not_misclassified_as_a_write_candidate() {
+        for text in [
+            "我的 Life Model 记录了什么沟通偏好？",
+            "What is recorded in my Life Model?",
+            "What changed in my Life Model?",
+            "我的 Life Model 更新了什么？",
+        ] {
+            let result = routed(text);
+            assert!(result.candidates.is_empty(), "read became write: {text}");
+            assert!(result.memory_proposal_candidate_ids.is_empty());
+            assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        }
+    }
+
+    #[test]
+    fn mixed_lifemodel_read_and_write_still_requires_a_proposal() {
+        for text in [
+            "Show my Life Model and update my identity: I am a design lead.",
+            "看看我的个人模型，然后更新我的身份：我是设计负责人。",
+        ] {
+            let result = routed(text);
+            assert_eq!(
+                result.lifemodel_proposal_candidate_ids.len(),
+                1,
+                "mixed read/write lost governance: {text}"
+            );
+        }
     }
 
     #[test]

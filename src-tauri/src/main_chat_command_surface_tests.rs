@@ -262,7 +262,6 @@ fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
         "start_stream_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_allowed_manifest",
         "send_message_missing_workspace_file_source_records_kernel_blocked_read_evidence",
-        "main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy",
         "main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix",
     ] {
         assert!(
@@ -3657,6 +3656,91 @@ async fn main_chat_explicit_lifemodel_preference_send_stream_creates_learning_ca
             .expect("list stream learning candidates")
     };
     assert_eq!(stream_candidates.len(), 1);
+}
+
+#[tokio::test]
+async fn explicit_lifemodel_v2_read_uses_confirmed_version_across_new_sessions_without_provider() {
+    use openlife_core::life_model::v2::{
+        LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+    };
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let item = LifeModelUserValueV2::Statement {
+        statement: "Prefer concise updates with the conclusion first.".into(),
+    }
+    .into_item(
+        "learning:communication".into(),
+        vec![
+            "proposal:review-read-1".into(),
+            "lifemodel-learning-candidate:candidate-read-1".into(),
+            "lifemodel-learning-observation:observation-read-1".into(),
+        ],
+        "2026-08-09T08:00:00Z".into(),
+    );
+    let diff = LifeModelTypedDiffV2::from_operations_for_review(
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        None,
+        vec![LifeModelTypedOperationV2::Add {
+            section: LifeModelSectionV2::CollaborationPreferences,
+            item,
+        }],
+        true,
+    )
+    .unwrap();
+    state
+        .life_model_manager
+        .lock()
+        .await
+        .materialize_reviewed_v2_typed_diff(
+            &diff,
+            "review-read-1",
+            &[
+                "lifemodel-learning-candidate:candidate-read-1".into(),
+                "lifemodel-learning-observation:observation-read-1".into(),
+            ],
+            "2026-08-09T08:00:01Z",
+        )
+        .unwrap();
+
+    for session_id in ["lifemodel-read-session-one", "lifemodel-read-session-two"] {
+        let response = invoke_send_message_for_kernel_goal_3(
+            state.clone(),
+            session_id,
+            "我的 Life Model 记录了什么沟通偏好？",
+        )
+        .await;
+        assert_eq!(
+            response["agent_ingress"]["selectedStrategy"],
+            "direct_answer"
+        );
+        assert!(
+            response["agent_ingress"]["policyDecision"]["allowedCapabilities"]
+                .as_array()
+                .is_some_and(|capabilities| capabilities
+                    .iter()
+                    .all(|capability| capability != "provider_generation"))
+        );
+        assert_eq!(response["model_invoked"], false);
+        assert_eq!(response["tool_invoked"], false);
+        let reply = response["reply"].as_str().unwrap();
+        assert!(reply.contains("Life Model v2 第 1 版"));
+        assert!(reply.contains("Prefer concise updates with the conclusion first."));
+        assert!(reply.contains("proposal:review-read-1"));
+        assert!(reply.contains("使用原因"));
+        assert!(reply.contains("没有写入任何内容"));
+    }
+    assert_eq!(
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap()
+            .unwrap()
+            .model_version,
+        1
+    );
 }
 
 #[tokio::test]
@@ -8517,92 +8601,6 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
         .any(|action| action.action.action_type == "unsupported.tool"
             && action.status
                 == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
-}
-
-#[tokio::test]
-async fn main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy(
-) {
-    let user_text = "Review what changed in my working style this month.";
-    let expected_blocker = "review_maturation_kernel_executor_unavailable";
-
-    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let send_response = invoke_send_message_for_kernel_goal_3(
-        send_state.clone(),
-        "k3-send-review-maturation",
-        user_text,
-    )
-    .await;
-    assert_eq!(send_response["legacy_fallback_used"], false);
-    assert_eq!(
-        send_response["agent_ingress"]["selectedStrategy"],
-        "review_maturation"
-    );
-    assert!(send_response["tool_calls"]
-        .as_array()
-        .is_some_and(Vec::is_empty));
-    assert!(send_response["reply"]
-        .as_str()
-        .is_some_and(|reply| reply.contains(expected_blocker)));
-    let generation = &send_response["reasoning_trace"]["generation_result"];
-    assert_eq!(generation["selectedStrategy"], "review_maturation");
-    assert_eq!(generation["legacyFallbackUsed"], false);
-    assert_eq!(generation["directWritesExecuted"], false);
-    assert_eq!(generation["kernelBackedGovernedBlocker"], true);
-    assert_eq!(generation["kernelSupportDisposition"], "governed_blocker");
-    assert!(generation["blockers"]
-        .as_array()
-        .is_some_and(|blockers| blockers.iter().any(|blocker| blocker == expected_blocker)));
-    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
-        .as_str()
-        .expect("send review task session id");
-    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
-    assert_eq!(
-        send_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-    );
-    assert!(send_session
-        .pending_blockers
-        .contains(&expected_blocker.to_string()));
-    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
-    assert!(send_actions.is_empty());
-    let send_transcript = list_command_surface_transcript(&send_state, send_task_session_id).await;
-    assert!(send_transcript.iter().any(|entry| {
-        entry.kind == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
-            && entry.summary == "error_state_recorded"
-    }));
-    assert!(!send_transcript.iter().any(|entry| {
-        entry.kind
-            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback
-    }));
-
-    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let stream_response = invoke_start_stream_message_for_kernel_goal_3(
-        stream_state.clone(),
-        "k3-stream-review-maturation",
-        user_text,
-    )
-    .await;
-    let stream_task_session_id = task_session_id_from_response(&stream_response);
-    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
-    assert_eq!(
-        stream_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-    );
-    assert!(stream_session
-        .pending_blockers
-        .contains(&expected_blocker.to_string()));
-    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
-    assert!(stream_actions.is_empty());
-    let stream_transcript =
-        list_command_surface_transcript(&stream_state, &stream_task_session_id).await;
-    assert!(stream_transcript.iter().any(|entry| {
-        entry.kind == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
-            && entry.summary == "error_state_recorded"
-    }));
-    assert!(!stream_transcript.iter().any(|entry| {
-        entry.kind
-            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback
-    }));
 }
 
 #[tokio::test]
