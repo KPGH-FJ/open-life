@@ -443,6 +443,7 @@ pub struct MainChatKernelLifeModelContext {
     pub candidates: Vec<ContextSourceCandidate>,
     pub planning_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
     pub memory_rerank_terms: Vec<String>,
+    pub tool_preference_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -2349,6 +2350,17 @@ where
         // imported evidence and therefore cannot complete an attachment turn.
         direct_reply = None;
     }
+    let react_life_model_prompt = life_model_context.as_ref().and_then(|context| {
+        context
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "lifemodel.v2.runtime")
+            .map(|candidate| candidate.content.clone())
+    });
+    let react_tool_preference_hints = life_model_context
+        .as_ref()
+        .map(|context| context.tool_preference_hints.clone())
+        .unwrap_or_default();
     let privacy_engine = state.privacy_engine.lock().await.clone();
     let kernel = MainChatKernel::new(
         CommandSurfaceDirectAnswerModelClient::new(
@@ -2398,7 +2410,47 @@ where
         )
         .await;
     if use_agent_loop {
-        let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
+        let (plan, life_model_tool_preference_applied) =
+            build_main_chat_react_action_plan(session_id, &user_text)?
+                .apply_life_model_tool_preferences(&react_tool_preference_hints, &user_text);
+        let mut react_messages = messages.clone();
+        if let Some(prompt) = react_life_model_prompt {
+            react_messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".into(),
+                    content: prompt,
+                },
+            );
+        }
+        let (mut react_context_metadata, _) =
+            kernel.compile_context(session_id, sanitized_selected_skill_id.clone(), &user_text);
+        if life_model_tool_preference_applied {
+            if let Some(metadata) = react_context_metadata.life_model_context.as_mut() {
+                metadata.influence_receipt.status = "applied_equivalent_tool_preference".into();
+                metadata
+                    .influence_receipt
+                    .applied_surfaces
+                    .push("equivalent_tool_ranking".into());
+            }
+        }
+        event_sink.emit(MainChatKernelEvent::ContextLoaded {
+            context_snapshot_ref: react_context_metadata.context_snapshot_ref.clone(),
+            selected_source_count: react_context_metadata.selected_source_count,
+            selected_skill_instruction_loaded: react_context_metadata
+                .selected_skill_instruction_loaded,
+        });
+        if let Some(metadata) = react_context_metadata.life_model_context.as_ref() {
+            event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
+                available: metadata.available,
+                model_version: metadata.model_version,
+                selected_item_count: metadata.selected_item_refs.len(),
+                status: metadata.influence_receipt.status.clone(),
+                source_id: metadata.source_id.clone(),
+                selected_item_refs: metadata.selected_item_refs.clone(),
+                reason_codes: metadata.influence_receipt.reason_codes.clone(),
+            });
+        }
         let (_, privacy_map) = privacy_engine.desensitize_batch(
             &messages
                 .iter()
@@ -2416,7 +2468,7 @@ where
                 canonical_run_id,
                 session_id,
                 &user_text,
-                &messages,
+                &react_messages,
                 &life_model,
                 &privacy_engine,
                 &privacy_map,
@@ -7012,6 +7064,18 @@ where
                         .influence_receipt
                         .applied_surfaces
                         .push("context_building".into());
+                }
+                if life_model_context.selected_sections.iter().any(|section| {
+                    section == "stable_preferences" || section == "collaboration_preferences"
+                }) && !life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"communication_style".to_string())
+                {
+                    life_model_context
+                        .influence_receipt
+                        .applied_surfaces
+                        .push("communication_style".into());
                 }
                 life_model_context.influence_receipt.status = if life_model_context
                     .influence_receipt
@@ -11930,11 +11994,29 @@ fn build_kernel_lifemodel_context(
         .as_ref()
         .map(|packet| packet.facts.iter().map(|fact| fact.value.clone()).collect())
         .unwrap_or_default();
+    let tool_preference_hints = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.section,
+                        openlife_core::life_model::v2::LifeModelSectionV2::StablePreferences
+                            | openlife_core::life_model::v2::LifeModelSectionV2::CollaborationPreferences
+                    )
+                })
+                .map(|fact| fact.value.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     MainChatKernelLifeModelContext {
         metadata,
         candidates,
         planning_hints,
         memory_rerank_terms,
+        tool_preference_hints,
     }
 }
 
@@ -20752,10 +20834,14 @@ mod tests {
             metadata.influence_receipt.status,
             "applied_context_building"
         );
-        assert_eq!(
-            metadata.influence_receipt.applied_surfaces,
-            vec!["context_building"]
-        );
+        assert!(metadata
+            .influence_receipt
+            .applied_surfaces
+            .contains(&"context_building".into()));
+        assert!(metadata
+            .influence_receipt
+            .applied_surfaces
+            .contains(&"communication_style".into()));
         assert!(metadata
             .selected_item_refs
             .contains(&"collaboration_preferences:communication-direct".into()));

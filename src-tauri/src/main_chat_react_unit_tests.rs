@@ -251,6 +251,47 @@ fn main_chat_react_action_plan_allows_explicit_multi_source_reads() {
 }
 
 #[test]
+fn lifemodel_tool_preference_only_reorders_equivalent_allowed_candidates() {
+    let user_text = "For this eval, use two safe read sources for `Cargo.toml` and builtin echo.";
+    let original = build_main_chat_react_action_plan("session-lm-tool-order", user_text)
+        .expect("multi-source read plan");
+    let original_ids = original.tool_candidate_ids();
+    let original_actions = original.allowed_tool_action_metadata();
+    let (ranked, applied) = original
+        .apply_life_model_tool_preferences(&["优先 MCP 工具处理等价的读取任务".into()], user_text);
+
+    assert!(applied);
+    assert_eq!(ranked.tool_candidates[0].candidate_id, "builtin_echo");
+    assert_eq!(ranked.tool_candidates[0].selection_rank, 1);
+    assert_eq!(
+        ranked.tool_candidates[0].match_reason,
+        "lifemodel_equivalent_tool_preference"
+    );
+    let mut ranked_ids = ranked.tool_candidate_ids();
+    let mut original_ids_sorted = original_ids;
+    ranked_ids.sort();
+    original_ids_sorted.sort();
+    assert_eq!(ranked_ids, original_ids_sorted);
+    let mut ranked_actions = ranked.allowed_tool_action_metadata();
+    let mut original_actions = original_actions;
+    ranked_actions.sort_by_key(|value| value.to_string());
+    original_actions.sort_by_key(|value| value.to_string());
+    assert_eq!(ranked_actions, original_actions);
+}
+
+#[test]
+fn current_tool_instruction_overrides_lifemodel_tool_preference() {
+    let user_text = "For this eval, use two safe read sources for `Cargo.toml`; file first.";
+    let original = build_main_chat_react_action_plan("session-current-tool-order", user_text)
+        .expect("multi-source read plan");
+    let (ranked, applied) = original
+        .apply_life_model_tool_preferences(&["优先 MCP 工具处理等价的读取任务".into()], user_text);
+
+    assert!(!applied);
+    assert_eq!(ranked.tool_candidates[0].candidate_id, "file.read");
+}
+
+#[test]
 fn main_chat_react_agent_loop_guidance_declares_governed_tool_candidate_set() {
     let plan = build_main_chat_react_action_plan(
         "session-candidate-guidance",

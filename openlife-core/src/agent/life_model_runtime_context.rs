@@ -167,7 +167,14 @@ impl Candidate {
             .iter()
             .filter(|token| value.contains(token.as_str()))
             .count();
-        let intent_match = intents.matches(self.section);
+        let tool_preference_match = intents.tool_selection
+            && matches!(
+                self.section,
+                LifeModelSectionV2::StablePreferences
+                    | LifeModelSectionV2::CollaborationPreferences
+            )
+            && contains_any(&value, &["tool", "mcp", "local", "工具", "本地"]);
+        let intent_match = intents.matches(self.section) || tool_preference_match;
         self.relevant = direct_match || token_matches > 0 || intent_match;
         self.score =
             token_matches * 20 + usize::from(direct_match) * 60 + usize::from(intent_match) * 35;
@@ -190,6 +197,7 @@ struct TaskIntents {
     communication: bool,
     boundary_or_decision: bool,
     capability_or_resource: bool,
+    tool_selection: bool,
     relationship: bool,
 }
 
@@ -238,6 +246,13 @@ impl TaskIntents {
                     "能力",
                     "资源",
                     "可用",
+                ],
+            ),
+            tool_selection: contains_any(
+                task,
+                &[
+                    "tool", "mcp", "read", "source", "search", "file", "工具", "读取", "来源",
+                    "搜索", "文件",
                 ],
             ),
             relationship: contains_any(
@@ -568,5 +583,40 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn selects_confirmed_tool_preference_only_for_tool_tasks() {
+        let mut version = version();
+        version
+            .document
+            .stable_preferences
+            .push(LifeModelStatementV2 {
+                id: "prefer-mcp".into(),
+                statement: "等价读取任务优先 MCP 工具".into(),
+                source_refs: vec!["proposal:tool-preference".into()],
+                confirmed_at: "2026-08-03T00:00:00Z".into(),
+            });
+        version.document_digest = version.document.digest().unwrap();
+        version.version_digest = calculate_version_digest(
+            &version.model_id,
+            version.model_version,
+            version.parent_version,
+            version.parent_digest.as_deref(),
+            &version.document_digest,
+            &version.materialization_id,
+            &version.source_refs,
+            &version.created_at,
+        )
+        .unwrap();
+
+        let packet = LifeModelRuntimeContextV2::build(
+            &version,
+            "Read two safe sources for this task.",
+            now(),
+        )
+        .unwrap()
+        .expect("tool preference packet");
+        assert!(packet.facts.iter().any(|fact| fact.item_id == "prefer-mcp"));
     }
 }
