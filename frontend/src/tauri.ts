@@ -796,6 +796,16 @@ export type MainChatKernelEvent =
       selected_skill_instruction_loaded: boolean;
     }
   | {
+      type: "life_model_context_loaded";
+      available: boolean;
+      model_version?: number | null;
+      selected_item_count: number;
+      status: string;
+      source_id?: string | null;
+      selected_item_refs: string[];
+      reason_codes: string[];
+    }
+  | {
       type: "hs_context_loaded";
       available: boolean;
       warning_count: number;
