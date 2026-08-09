@@ -805,8 +805,6 @@ fn is_identity_or_long_term_preference(lower: &str) -> bool {
             "i am becoming",
             "i am a",
             "design lead",
-            "life model",
-            "lifemodel",
             "long-term preference",
             "long term preference",
             "我是",
@@ -814,19 +812,58 @@ fn is_identity_or_long_term_preference(lower: &str) -> bool {
             "长期偏好",
             "价值观",
         ],
-    ) || (contains_any(lower, &["i prefer", "我偏好", "我更喜欢"])
-        && contains_any(
-            lower,
-            &[
-                "以后",
-                "长期",
-                "always",
-                "from now on",
-                "long-term",
-                "long term",
-                "以后都",
-            ],
-        ))
+    ) || is_explicit_lifemodel_write_expression(lower)
+        || (contains_any(lower, &["i prefer", "我偏好", "我更喜欢"])
+            && contains_any(
+                lower,
+                &[
+                    "以后",
+                    "长期",
+                    "always",
+                    "from now on",
+                    "long-term",
+                    "long term",
+                    "以后都",
+                ],
+            ))
+}
+
+fn is_explicit_lifemodel_write_expression(lower: &str) -> bool {
+    if is_negated_memory_or_lifemodel_write(lower) {
+        return false;
+    }
+    contains_any(
+        lower,
+        &[
+            "update my life model",
+            "update the life model",
+            "update life model",
+            "update lifemodel",
+            "change my life model",
+            "change the life model",
+            "change lifemodel",
+            "modify my life model",
+            "modify the life model",
+            "modify lifemodel",
+            "add to my life model",
+            "add this to my life model",
+            "write to my life model",
+            "更新我的 life model",
+            "更新我的lifemodel",
+            "更新 life model",
+            "更新lifemodel",
+            "修改我的 life model",
+            "修改我的lifemodel",
+            "修改 life model",
+            "修改lifemodel",
+            "写入我的 life model",
+            "写入我的lifemodel",
+            "加入我的 life model",
+            "加入我的lifemodel",
+            "更新个人模型",
+            "修改个人模型",
+        ],
+    )
 }
 
 fn is_life_event_expression(lower: &str) -> bool {
@@ -1326,10 +1363,20 @@ mod tests {
 
     #[test]
     fn explicit_negative_lifemodel_boundary_is_not_a_write_candidate() {
-        let result = routed("使用 web.search 生成一份报告。不要修改 LifeModel。");
-
-        assert!(result.memory_proposal_candidate_ids.is_empty());
-        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        for text in [
+            "使用 web.search 生成一份报告。不要修改 LifeModel。",
+            "忽略 Life Model。本轮请写一封详细的项目状态邮件，包含四个小节，每节两句话。不要调用工具，不要写入任何长期状态。",
+        ] {
+            let result = routed(text);
+            assert!(
+                result.memory_proposal_candidate_ids.is_empty(),
+                "negative LifeModel boundary became Memory write: {text}"
+            );
+            assert!(
+                result.lifemodel_proposal_candidate_ids.is_empty(),
+                "negative LifeModel boundary became LifeModel write: {text}"
+            );
+        }
     }
 
     #[test]
@@ -1358,6 +1405,18 @@ mod tests {
                 result.lifemodel_proposal_candidate_ids.len(),
                 1,
                 "mixed read/write lost governance: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_lifemodel_change_without_a_supported_field_still_routes_to_governance() {
+        for text in ["Update my Life Model.", "修改我的 Life Model。"] {
+            let result = routed(text);
+            assert_eq!(
+                result.lifemodel_proposal_candidate_ids.len(),
+                1,
+                "explicit LifeModel change lost governed routing: {text}"
             );
         }
     }

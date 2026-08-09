@@ -347,6 +347,34 @@ fn explicit_long_term_preference_routes_to_lifemodel_without_provider_generation
 }
 
 #[test]
+fn lifemodel_runtime_override_stays_a_side_effect_free_model_task() {
+    const PROMPT: &str = "忽略 Life Model。本轮请写一封详细的项目状态邮件，包含四个小节，每节两句话。不要调用工具，不要写入任何长期状态。";
+
+    let intent = IntentFrame::from_user_message(PROMPT);
+    assert!(!intent.requests_lifemodel_change);
+    assert!(!intent.requests_memory_change);
+    assert!(!intent.requests_durable_write);
+
+    let decision = AgentIngress::default().decide(
+        "lifemodel-runtime-override",
+        PROMPT,
+        None,
+        AgentTaskKind::Conversation,
+    );
+    assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::DirectAnswer
+    );
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration));
+    assert!(!decision
+        .policy_decision
+        .allows(AllowedCapability::LifeModelProposal));
+}
+
+#[test]
 fn supplied_text_transformation_with_plan_output_stays_a_side_effect_free_direct_answer() {
     const PROMPT: &str = "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。";
 
