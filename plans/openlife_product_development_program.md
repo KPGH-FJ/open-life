@@ -1062,19 +1062,188 @@ v2 物化 -> 下一会话明确读取”，且普通 Agent 在 learning/LifeMode
 
 目标：证明 LifeModel 不是静态档案或被动数据库。
 
-- 将已确认且与任务相关的 LifeModel 编译为有界 runtime packet；
-- 分别验证它对 planning、reasoning、context building、memory retrieval 排序、
+- 将已确认且与任务相关的 canonical LifeModel v2 编译为有界 runtime packet；
+- 分别验证它对 planning、reasoning/context building、memory retrieval 排序、
   写作/沟通风格和已获准工具之间的 tool selection 优先级的影响；
 - 当前用户指令、Policy、权限、凭据和效果确认始终优先；LifeModel 和 Memory
   均不能授予能力或授权持久/外部写入；
-- 用户能够看到使用了哪条信息、来源版本、为什么相关、是否新鲜，以及它影响了
-  哪个决定；
-- 过期、冲突、来源不明或当前任务不相关的字段不进入正常决策；
-- 使用相同真实任务比较无 LifeModel、过期/冲突 LifeModel 和已确认相关
-  LifeModel，评估实际结果而不是只检查 prompt 中出现了字段。
+- 用户能够看到使用了哪条信息、来源版本、为什么相关、确认时间，以及它影响了
+  哪个可观察决定；不记录或展示模型隐藏思维链；
+- 明确失效、冲突、来源不明或当前任务不相关的字段不进入正常决策；长期事实不会
+  仅因时间较久被擅自判错，年龄只能作为可见的新鲜度信息，除非存在明确替代、删除
+  或受支持的 section 规则；
+- 使用相同真实任务比较无 LifeModel、不相关/不可用 LifeModel、相关已确认
+  LifeModel 和当前指令覆盖 LifeModel，评估实际结果而不是只检查 prompt 中出现字段。
 
 退出标准：代表性对照任务证明受治理 LifeModel 对结果有可解释的正面帮助，同时
 不改变权限和当前指令边界。
+
+###### 5.4 统一概念与优先级
+
+5.4 开发固定遵守以下运行时顺序：
+
+1. OpenLife 产品 Policy、能力合同、风险和权限边界；
+2. 用户当前明确指令和当前任务约束；
+3. 当前任务已验证事实、工具结果和业务域事实；
+4. 与当前任务相关、已确认的 LifeModel v2 长期用户信息；
+5. 符合作用域和生命周期要求的 Agent Memory、Workspace 与 Project 上下文；
+6. 外部网页、文件和工具返回的未信任内容。
+
+LifeModel 的作用是帮助 Agent 在多个合法方案之间作出更符合用户的选择，而不是
+修改事实、替代当前指令或产生授权。Agent Memory 继续回答“过去做过什么、当前项目
+进行到哪里”，LifeModel 回答“这个用户长期重视什么、通常偏好怎样协作”。两者可以
+同时进入 ContextCompiler，但必须保持独立来源、独立解释和独立故障降级。
+
+当前源码已有的 `LifeModelRuntimeContextV1` 不是 5.4 的正确起点：它读取 legacy YAML
+`LifeModel`，并以 `hs.summary.lifemodel` 混入历史 HS context；当前 canonical owner
+已经是 SQLite 中的 `LifeModelVersionV2`。5.4 必须先替换这条旧读取路径，不能在它
+上面继续增加个性化能力。历史 HS policy/guidance 如仍有独立真实消费者，可以暂时
+保留到 5.5，但不能再冒充 LifeModel v2 或与其形成双重加权。
+
+5.4 固定拆分为 5.4A 至 5.4F。不得默认增加 5.4G；新发现优先归入已有切片。只有
+产品范围发生实质变化或发现无法在现有 owner 内安全解决的阻塞，才停下并请求用户
+重新审批。
+
+当前实现必须从以下真实源码入口继续，不以旧计划描述代替调用链：canonical v2 与
+版本校验在 `openlife-core/src/life_model/v2.rs`；旧 runtime packet 在
+`openlife-core/src/agent/life_model_runtime_context.rs`；Main Chat 加载和注入在
+`src-tauri/src/main_chat_kernel.rs`；统一上下文选择在
+`openlife-core/src/agent/main_chat_agent_v1.rs` 的 `ContextCompiler`；Agent Memory
+候选在 `src-tauri/src/main_chat_context_loader.rs`；PlanExecute owner 在
+`openlife-core/src/agent/plan_execute.rs`；工具候选排序在
+`src-tauri/src/main_chat_react_tool_selection.rs`；用户可见入口继续复用
+`frontend/src/ui/journeys/governedAction/`。每个切片独立提交并停在用户审阅边界。
+
+###### 5.4A Canonical v2 runtime packet 与旧读取切换
+
+目标：建立唯一、受限、可验证的 LifeModel 运行时输入。
+
+- 输入只允许 `LifeModelVersionV2` 当前 canonical version、当前任务文本/typed intent
+  和注入时钟；YAML projection、legacy `LifeModel`、Candidate、pending Proposal、
+  Agent Memory 和 HS guidance 均不能成为 packet 权威；
+- 建立 typed `LifeModelRuntimePacketV2`，至少绑定 model id、version、document digest、
+  有界选中 item、section、item id、source refs、confirmed_at、相关原因、确认年龄和
+  packet digest；原始整份模型和 YAML 不进入 prompt；
+- 对 canonical document、version digest、时间、source refs 和 item/section 绑定做
+  fail-closed 校验；无关项、未来确认时间、损坏版本和无法解释来源的项不进入 packet；
+- 选择预算固定且小于现有 ContextCompiler 总预算；空模型或无相关项返回空 packet，
+  不生成默认画像；
+- `main_chat_kernel` 从 `load_v2_current` 读取，LifeModel packet 与仍暂存的 HS guidance
+  context 分开建模；删除 legacy `LifeModelRuntimeContextV1` 产品 caller、
+  `hs.summary.lifemodel` source id 和依赖旧 YAML 的 Main Chat 个性化测试；
+- HS runtime 中借用 legacy LifeModel `state.health_status` 的提示不得转入 v2；若没有
+  StateStore 当前事实则省略该 hint，不能把状态信息重新塞回 LifeModel；
+- LifeModel 读取失败只关闭个性化，健康的普通 Agent 继续工作并留下 typed degraded
+  状态；显式询问 LifeModel 时仍沿用 5.3F 的严格 unknown 行为。
+
+退出标准：相同 canonical v2 version 产生确定性 packet；legacy YAML 单独存在不能
+影响 Main Chat；损坏、无关和未确认信息均不进入上下文；普通 Agent 不因个性化失败
+而不可用。
+
+###### 5.4B Context/Reasoning 接入与用户可解释性
+
+目标：让 packet 进入真实 Main Chat 上下文，同时让用户知道它实际影响了什么。
+
+- 通过现有 `ContextCompiler` 接入 buffered、streaming、DirectAnswer 和 ReAct 路径，
+  不建立第二套 prompt assembler；
+- 新增 typed LifeModel context metadata/influence receipt，记录当前 task/run、canonical
+  version、packet digest、选中 item ids、相关原因和受影响 surface；持久层只记录有界
+  ids、refs 和 digest，不复制长期画像正文；
+- Workspace/Task 详情显示“本次使用了 LifeModel”或“本次未使用”，可查看版本、
+  选中信息、确认时间、来源和相关原因，并能跳转到 Personal Intelligence 对应项；
+- UI 解释只描述可观察的 context selection 和行为影响，不要求、保存或伪造隐藏
+  chain-of-thought；
+- 当前指令冲突时 packet 被抑制或标记 overridden；LifeModel 不得改变 PolicyRoute、
+  capability、risk、permission、credential 或 write admission；
+- 删除由 LifeModel 使用路径替代的 `HsContextLoaded`/`hs_context` LifeModel 语义；
+  尚有真实 HS guidance 消费者的字段必须改为明确的 legacy guidance 名称或留待 5.5，
+  不能继续把两者混称。
+
+退出标准：真实 send/stream 回答使用同一个 v2 packet；用户可以看到准确影响说明；
+当前指令覆盖、Policy 不变、无 packet 和 packet 故障场景均有失败反例。
+
+###### 5.4C Planning 个性化
+
+目标：LifeModel 能改善计划取舍，而不是只改变措辞。
+
+- 将相关长期目标、个人边界、决策原则、稳定偏好和协作偏好转换为受限 typed
+  planning hints，接入当前 Main Chat `PlanExecute` draft owner；
+- LifeModel 可以影响步骤优先级、节奏、表达粒度和多个安全方案之间的选择，但不能
+  增加未经请求的外部动作、跳过 Review、改变风险等级或直接创建 Task/Calendar；
+- 同一任务的无 LifeModel、相关 LifeModel 和当前指令覆盖三个版本必须产生可解释的
+  计划差异，并在 plan/session trace 中绑定所用 item ids；
+- 不相关目标不得挤占当前任务；个人边界与当前明确指令冲突时，当前指令优先，涉及
+  产品安全边界时 Product Policy 始终优先；
+- 若旧 accepted HS `gentle_planning` 或其他 guidance 在同一 planning seam 与 v2 重复
+  加权，则在本切片删除该 product caller；如仍有独立消费者，保持隔离并记录到 5.5
+  caller 收敛范围。
+
+退出标准：代表性计划在正确性不下降、权限完全一致的前提下体现相关长期目标或偏好；
+不相关和冲突场景不发生错误个性化。
+
+###### 5.4D Agent Memory 检索协同
+
+目标：LifeModel 帮助选择更相关的 Agent Memory，但不接管 Memory 权威。
+
+- Memory 的 scope、lifecycle、archive/delete/privacy、FTS/Vector eligibility 先由现有
+  Memory owner 决定；LifeModel 只能在已经合格的候选中做有界 boost/rerank；
+- 使用长期目标、稳定偏好和协作偏好生成 typed retrieval hints，不把 LifeModel 正文
+  写入 Memory、Vector 或 Markdown，也不新建 embedding store；
+- 基础语义/文本相关性保持主导，LifeModel 调整幅度有上限，并输出“为什么这条记忆
+  因当前长期目标更相关”的 receipt；
+- archived、deleted、privacy-erased、conflicted、跨 Workspace/Project 和 must-not-
+  recall 项即使关键词匹配也必须保持不可召回；
+- LifeModel 不可用时回到 5.1E 已完成的基础混合检索，不阻塞普通 Agent；用户界面
+  分别标识 Memory 来源和 LifeModel 排序影响，不能把两者合并成一条事实。
+
+退出标准：相同合格候选集在相关 LifeModel 下出现有理由的有限重排；资格集合不变，
+跨作用域和遗忘反例为零，基础检索降级路径仍可用。
+
+###### 5.4E 沟通风格与已授权工具偏好
+
+目标：让长期偏好影响输出方式和合法工具选择，同时不扩大能力。
+
+- 只有任务确实要求写作、回复、摘要或沟通时，相关 collaboration/stable preference
+  才影响长度、语气、结构和细节；当前用户明确指定的风格始终覆盖长期偏好；
+- 对多个已经由 PolicyRouter、manifest 和 ToolGateway 判定可用的等价候选，LifeModel
+  可以提供 bounded rank hint，例如用户确认的本地优先或常用工作方式；
+- LifeModel 不能新增 candidate、修改 manifest、把 unavailable 变 available、降低
+  risk、授予网络/Provider/MCP/File 权限、选择凭据或消费 allow-once；只有一个合法
+  candidate 时不得制造虚假的“个性化选择”；
+- tool ranking receipt 同时记录原始 eligible candidate ids、最终顺序、使用的
+  LifeModel item ids 和 policy invariance；模型返回非法排序时沿用当前 fail-closed
+  路径；
+- 输出风格和工具选择分别有正常场景、当前指令覆盖、不相关偏好、伪造 item、非法
+  candidate 和权限缺失反例。
+
+退出标准：真实沟通任务能稳定体现已确认风格；多个合法工具之间的偏好可解释，且
+任何 LifeModel 变化都不能改变可执行集合、权限或副作用边界。
+
+###### 5.4F 对照评估、原生收口与替代清理
+
+目标：用真实结果证明帮助，而不是以“字段进入 prompt”宣布完成。
+
+- 固定少量代表性任务：长期目标约束下的计划、沟通风格、Memory 召回排序、两个
+  已授权等价工具的选择；每个任务至少比较 no-model、relevant-model、irrelevant/
+  unavailable-model 和 current-instruction-override；
+- rubric 固定检查正确性、个性化相关性、当前指令遵循、事实引用、非干扰性和权限
+  集合不变；失败反例比平均分更优先，任何权限漂移直接判失败；
+- 自动化使用 deterministic fake 验证合同和反例，但不得把 scripted 输出当成真实
+  Agent 改善；最终至少使用一种真实配置模型（本地或经用户允许的 Provider）完成
+  小规模 A/B，并把 automated、native 和 external-live 证据分开陈述；
+- 在同一个既有隔离 QA profile 和同一精确构建中完成真实 Tauri：创建/确认一个 v2
+  fact、下一会话自动使用、查看解释、当前指令覆盖、禁用/损坏 LifeModel 后普通任务
+  继续工作；不反复创建 finalN profile 或初始化同类凭据；
+- final caller scan 删除已经被 v2 packet 替代的 legacy Main Chat LifeModel loader、
+  HS 混称、兼容 metadata 和无消费者测试；generic AgentRuntime/A2A 等仍有真实 caller
+  的 legacy `LifeModel` 不凭名称删除，进入 5.5 时必须带消费者和退出条件；
+- 更新 `docs/ARCHITECTURE.md` 或现有相关 ADR，只记录稳定 owner、优先级与故障边界，
+  不新增 evaluation registry、任务包、JSON 账本或自进化平台。
+
+退出标准：5.4A—5.4F 的产品反例、focused tests 和比例适当的全仓门禁全部通过；
+同一精确构建的真实 Tauri A/B 显示相关 LifeModel 能
+改善至少一个可观察结果，irrelevant/override 场景不产生负面干扰，权限集合逐项相同；
+5.4 替代路径没有平行 legacy Main Chat 权威，工作树停在用户审阅边界。
 
 ##### 5.5 贯穿式替换清理与最终收敛
 
@@ -1256,7 +1425,10 @@ v6 保持、精确新审核项选择与拒绝不物化验证，并完成 legacy 
 `e797955`、`30c44b9`、`3c6fd58` 和 `8e3e85b`；最终精确构建 `ae9f467f...` 已在既有
 `phase5-lifemodel-v2` 隔离 QA 中完成候选、审核、v8 物化、跨重启持久化和显式读取。
 5.3 提交后源码 Review 发现的 Review Center 学习分组与编辑部分失败恢复缺口已经在
-同阶段短收口中修复，没有增加 5.3G。5.3 已关闭，下一既定板块为 5.4。**
+同阶段短收口提交 `a4b5e0b` 中修复，没有增加 5.3G。5.3 已关闭。5.4 已根据当前
+canonical v2、Main Chat、ContextCompiler、PlanExecute、Memory retrieval 和 tool
+ranking 源码固定规划为 A—F 六个切片；当前只完成规划，尚未开始 5.4A 实现，等待
+用户审阅。**
 
 第五阶段第一步实际完成：
 
