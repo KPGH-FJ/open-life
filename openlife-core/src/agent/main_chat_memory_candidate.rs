@@ -836,18 +836,27 @@ fn is_explicit_lifemodel_write_expression(lower: &str) -> bool {
         lower,
         &[
             "update my life model",
+            "update my lifemodel",
             "update the life model",
+            "update the lifemodel",
             "update life model",
             "update lifemodel",
             "change my life model",
+            "change my lifemodel",
             "change the life model",
+            "change the lifemodel",
             "change lifemodel",
             "modify my life model",
+            "modify my lifemodel",
             "modify the life model",
+            "modify the lifemodel",
             "modify lifemodel",
             "add to my life model",
+            "add to my lifemodel",
             "add this to my life model",
+            "add this to my lifemodel",
             "write to my life model",
+            "write to my lifemodel",
             "更新我的 life model",
             "更新我的lifemodel",
             "更新 life model",
@@ -1411,7 +1420,12 @@ mod tests {
 
     #[test]
     fn explicit_lifemodel_change_without_a_supported_field_still_routes_to_governance() {
-        for text in ["Update my Life Model.", "修改我的 Life Model。"] {
+        for text in [
+            "Update my Life Model.",
+            "Update my LifeModel.",
+            "Show me and update my LifeModel: communication style is concise.",
+            "修改我的 Life Model。",
+        ] {
             let result = routed(text);
             assert_eq!(
                 result.lifemodel_proposal_candidate_ids.len(),
