@@ -11,6 +11,7 @@ use crate::agent::review_workflow::{
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::agent::ProposalStore;
+use crate::life_model::v2::LifeModelSectionV2;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -29,6 +30,16 @@ pub struct PlanExecuteInput {
     pub runtime_input: RuntimeInput,
     pub objective: String,
     pub max_steps: usize,
+    pub life_model_hints: Vec<PlanExecuteLifeModelHint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecuteLifeModelHint {
+    pub item_id: String,
+    pub section: LifeModelSectionV2,
+    pub value: String,
+    pub selected_reason: String,
 }
 
 impl PlanExecuteInput {
@@ -41,7 +52,13 @@ impl PlanExecuteInput {
             runtime_input,
             objective: objective.into(),
             max_steps,
+            life_model_hints: Vec::new(),
         }
+    }
+
+    pub fn with_life_model_hints(mut self, hints: Vec<PlanExecuteLifeModelHint>) -> Self {
+        self.life_model_hints = hints;
+        self
     }
 }
 
@@ -1478,6 +1495,36 @@ impl PlanExecuteSessionStore {
 fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
     let max_steps = input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT);
     let mut steps = Vec::new();
+    if let Some(goal) = input
+        .life_model_hints
+        .iter()
+        .find(|hint| hint.section == LifeModelSectionV2::LongTermGoals)
+    {
+        let title = format!(
+            "Align this week with {}",
+            bounded_product_step_text(&goal.value, 64)
+        );
+        push_named_step(&mut steps, max_steps, title, "lifemodel_goal_alignment");
+    }
+    if input.life_model_hints.iter().any(|hint| {
+        matches!(
+            hint.section,
+            LifeModelSectionV2::PersonalBoundaries | LifeModelSectionV2::DecisionPrinciples
+        )
+    }) {
+        push_step(
+            &mut steps,
+            max_steps,
+            PlanStepSpec {
+                title: "Check confirmed personal boundaries before scheduling",
+                intent: "lifemodel_boundary_check",
+                tool_name: None,
+                action_kind: "reason",
+                risk_level: RiskLevel::Low,
+                declared_write: false,
+            },
+        );
+    }
     if has_gentle_planning_guidance(input) {
         push_step(
             &mut steps,
@@ -1555,11 +1602,16 @@ fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
 
 fn metadata_safe_weekly_objective(input: &PlanExecuteInput) -> String {
     format!(
-        "scenario=weekly_planning task_kind={} max_steps={} selected_guidance_count={}",
+        "scenario=weekly_planning task_kind={} max_steps={} selected_guidance_count={} lifemodel_hint_count={}",
         input.runtime_input.task.kind,
         input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT),
-        selected_guidance_count(&input.runtime_input)
+        selected_guidance_count(&input.runtime_input),
+        input.life_model_hints.len(),
     )
+}
+
+fn bounded_product_step_text(value: &str, max_chars: usize) -> String {
+    value.trim().chars().take(max_chars).collect()
 }
 
 fn validate_step_title(title: &str) -> Result<()> {
@@ -2029,6 +2081,21 @@ fn push_step(steps: &mut Vec<PlanStep>, max_steps: usize, spec: PlanStepSpec) {
         action_kind: spec.action_kind.into(),
         risk_level: spec.risk_level,
         declared_write: spec.declared_write,
+    });
+}
+
+fn push_named_step(steps: &mut Vec<PlanStep>, max_steps: usize, title: String, intent: &str) {
+    if steps.len() >= max_steps {
+        return;
+    }
+    steps.push(PlanStep {
+        id: format!("step-{}", steps.len() + 1),
+        title,
+        intent: intent.into(),
+        tool_name: None,
+        action_kind: "plan".into(),
+        risk_level: RiskLevel::Low,
+        declared_write: false,
     });
 }
 

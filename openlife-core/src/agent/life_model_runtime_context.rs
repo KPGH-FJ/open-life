@@ -45,7 +45,10 @@ impl LifeModelRuntimeContextV2 {
         now: DateTime<Utc>,
     ) -> Result<Option<Self>> {
         version.validate_integrity()?;
-        if version.document.is_empty() || task_text.trim().is_empty() {
+        if version.document.is_empty()
+            || task_text.trim().is_empty()
+            || task_explicitly_disables_lifemodel(task_text)
+        {
             return Ok(None);
         }
         parse_not_future(&version.created_at, now)?;
@@ -183,6 +186,7 @@ impl Candidate {
 #[derive(Debug, Clone, Copy)]
 struct TaskIntents {
     planning: bool,
+    explicit_lifemodel: bool,
     communication: bool,
     boundary_or_decision: bool,
     capability_or_resource: bool,
@@ -196,6 +200,17 @@ impl TaskIntents {
                 task,
                 &[
                     "plan", "schedule", "calendar", "roadmap", "计划", "安排", "日历", "目标",
+                ],
+            ),
+            explicit_lifemodel: contains_any(
+                task,
+                &[
+                    "life model",
+                    "lifemodel",
+                    "long-term goal",
+                    "long term goal",
+                    "长期目标",
+                    "个人模型",
                 ],
             ),
             communication: contains_any(
@@ -243,7 +258,7 @@ impl TaskIntents {
 
     fn matches(self, section: LifeModelSectionV2) -> bool {
         match section {
-            LifeModelSectionV2::LongTermGoals => self.planning,
+            LifeModelSectionV2::LongTermGoals => self.planning && self.explicit_lifemodel,
             LifeModelSectionV2::StablePreferences
             | LifeModelSectionV2::CollaborationPreferences => self.communication,
             LifeModelSectionV2::Values
@@ -407,6 +422,25 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
+pub fn task_explicitly_disables_lifemodel(task_text: &str) -> bool {
+    let task = normalize(task_text);
+    contains_any(
+        &task,
+        &[
+            "ignore my life model",
+            "ignore lifemodel",
+            "do not use my life model",
+            "don't use my life model",
+            "without my life model",
+            "不要使用我的 life model",
+            "不要参考我的 life model",
+            "忽略我的 life model",
+            "不要使用个人模型",
+            "不要参考长期目标",
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +557,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn current_instruction_can_disable_lifemodel_context() {
+        assert!(LifeModelRuntimeContextV2::build(
+            &version(),
+            "Ignore my Life Model and plan this OpenLife task only from this message.",
+            now(),
+        )
+        .unwrap()
+        .is_none());
     }
 }

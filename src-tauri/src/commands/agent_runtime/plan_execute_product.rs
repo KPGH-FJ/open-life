@@ -227,7 +227,7 @@ pub(crate) async fn create_plan_execute_session_with_state(
     input: CreatePlanExecuteSessionInput,
     state: &Arc<AppState>,
 ) -> Result<PlanExecuteSession, String> {
-    create_plan_execute_session_with_source_run(input, state, None, None).await
+    create_plan_execute_session_with_source_run(input, state, None, None, None, Vec::new()).await
 }
 
 pub(crate) async fn create_plan_execute_session_for_main_chat_with_state(
@@ -235,12 +235,16 @@ pub(crate) async fn create_plan_execute_session_for_main_chat_with_state(
     state: &Arc<AppState>,
     source_run_id: &str,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    task_text: &str,
+    life_model_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
 ) -> Result<PlanExecuteSession, String> {
     create_plan_execute_session_with_source_run(
         input,
         state,
         Some(source_run_id),
         Some(execution_epoch),
+        Some(task_text),
+        life_model_hints,
     )
     .await
 }
@@ -250,6 +254,8 @@ async fn create_plan_execute_session_with_source_run(
     state: &Arc<AppState>,
     source_run_id: Option<&str>,
     execution_epoch: Option<&crate::main_chat_cancellation::MainChatExecutionEpoch>,
+    task_text: Option<&str>,
+    life_model_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
 ) -> Result<PlanExecuteSession, String> {
     let scenario = PlanExecuteProductScenario::try_from_id(
         input.scenario_id.as_deref().unwrap_or("weekly_planning"),
@@ -285,13 +291,16 @@ async fn create_plan_execute_session_with_source_run(
         let registry = state.mcp_registry.lock().await;
         registry.tools_prompt()
     };
+    let task_text = task_text
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Plan this week using confirmed context.");
     let task = AgentTask {
         kind: AgentTaskKind::Planning,
         session_id: source_chat_session_id.clone(),
-        user_text: "Use my LifeModel to plan this week.".into(),
+        user_text: task_text.into(),
         messages: vec![ChatMessage {
             role: "user".into(),
-            content: "Use my LifeModel to plan this week.".into(),
+            content: task_text.into(),
         }],
         layer: Layer::L2,
     };
@@ -324,7 +333,8 @@ async fn create_plan_execute_session_with_source_run(
         runtime_input,
         "scenario=weekly_planning product=workspace",
         max_steps,
-    );
+    )
+    .with_life_model_hints(life_model_hints);
     let draft = service.draft_product_plan(&plan_input, scenario);
     let session = PlanExecuteSession::new_draft(
         Some(source_chat_session_id),
@@ -2552,6 +2562,8 @@ mod tests {
             &state,
             "run-plan-cancel",
             &registration.execution_epoch(),
+            "Plan this week.",
+            Vec::new(),
         )
         .await
         .expect_err("cancel-winning epoch must reject PlanExecute canonical commit");
@@ -2575,5 +2587,35 @@ mod tests {
                     && fact.outcome
                         == crate::main_chat_cancellation::MainChatCanonicalCommitOutcome::RejectedAfterCancel
             }));
+    }
+
+    #[tokio::test]
+    async fn main_chat_plan_session_applies_bounded_lifemodel_goal_hint() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let session = create_plan_execute_session_with_source_run(
+            CreatePlanExecuteSessionInput {
+                scenario_id: Some("weekly_planning".into()),
+                source_chat_session_id: Some("lifemodel-plan-hint".into()),
+                max_steps: Some(5),
+            },
+            &state,
+            None,
+            None,
+            Some("Plan this week around OpenLife."),
+            vec![openlife_core::agent::PlanExecuteLifeModelHint {
+                item_id: "goal-openlife".into(),
+                section: openlife_core::life_model::v2::LifeModelSectionV2::LongTermGoals,
+                value: "完成 OpenLife: 让个人 Agent OS 真正可用".into(),
+                selected_reason: "task keyword matches: 1".into(),
+            }],
+        )
+        .await
+        .expect("LifeModel-aware PlanExecute draft");
+
+        assert!(session.steps[0].title.contains("OpenLife"));
+        assert_eq!(session.steps[0].intent, "lifemodel_goal_alignment");
+        assert!(!session.steps[0].declared_write);
+        assert!(session.steps[0].tool_name.is_none());
+        assert_eq!(session.steps[0].risk_level, RiskLevel::Low);
     }
 }

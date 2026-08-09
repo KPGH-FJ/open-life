@@ -221,10 +221,11 @@ pub use model_router::{
     TaskType,
 };
 pub use plan_execute::{
-    PlanDraft, PlanExecuteCancelResult, PlanExecuteInput, PlanExecuteProductAuthorityReport,
-    PlanExecuteProductContract, PlanExecuteProductContractReport, PlanExecuteProductScenario,
-    PlanExecuteReport, PlanExecuteReviewItem, PlanExecuteReviewSummary, PlanExecuteService,
-    PlanExecuteSession, PlanExecuteSessionStatus, PlanExecuteSessionStore, PlanExecuteStepEdit,
+    PlanDraft, PlanExecuteCancelResult, PlanExecuteInput, PlanExecuteLifeModelHint,
+    PlanExecuteProductAuthorityReport, PlanExecuteProductContract,
+    PlanExecuteProductContractReport, PlanExecuteProductScenario, PlanExecuteReport,
+    PlanExecuteReviewItem, PlanExecuteReviewSummary, PlanExecuteService, PlanExecuteSession,
+    PlanExecuteSessionStatus, PlanExecuteSessionStore, PlanExecuteStepEdit,
     PlanExecuteStepExecutionResult, PlanExecuteStepRecord, PlanExecutionOutput,
     PlanGovernanceDecisionSummary, PlanObservationSummary, PlanStep, PlanStepStatus, PlanStepTrace,
 };

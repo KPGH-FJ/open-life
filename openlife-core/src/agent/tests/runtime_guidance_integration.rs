@@ -271,6 +271,7 @@ fn w139_plan_execute_weekly_planning_consumes_guidance_and_stays_proposal_first(
             ),
             objective: "metadata-safe objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );
@@ -279,6 +280,7 @@ fn w139_plan_execute_weekly_planning_consumes_guidance_and_stays_proposal_first(
             runtime_input: runtime_input_with_packet(packet.clone()),
             objective: "metadata-safe objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );
@@ -290,6 +292,7 @@ fn w139_plan_execute_weekly_planning_consumes_guidance_and_stays_proposal_first(
             ),
             objective: "metadata-safe objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );

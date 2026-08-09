@@ -179,6 +179,7 @@ pub fn run_weekly_planning_golden_path(
             ),
             objective: "metadata-safe weekly planning objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );
@@ -194,6 +195,7 @@ pub fn run_weekly_planning_golden_path(
             ),
             objective: "metadata-safe weekly planning objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );
@@ -208,6 +210,7 @@ pub fn run_weekly_planning_golden_path(
         ),
         objective: "metadata-safe weekly planning objective".into(),
         max_steps: contract.max_step_count,
+        life_model_hints: Vec::new(),
     };
     let explicit_guided =
         service.draft_product_plan(&explicit_input, PlanExecuteProductScenario::WeeklyPlanning);
@@ -436,6 +439,7 @@ pub fn run_low_energy_support_golden_path(
             ),
             objective: "metadata-safe low-energy planning objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );
@@ -451,6 +455,7 @@ pub fn run_low_energy_support_golden_path(
             ),
             objective: "metadata-safe low-energy planning objective".into(),
             max_steps: contract.max_step_count,
+            life_model_hints: Vec::new(),
         },
         PlanExecuteProductScenario::WeeklyPlanning,
     );

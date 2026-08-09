@@ -441,6 +441,7 @@ pub struct MainChatKernelLifeModelContextMetadata {
 pub struct MainChatKernelLifeModelContext {
     pub metadata: MainChatKernelLifeModelContextMetadata,
     pub candidates: Vec<ContextSourceCandidate>,
+    pub planning_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -7406,7 +7407,7 @@ async fn build_successful_kernel_command_surface_result(
         openlife_core::scheduler::ProviderInvocationDurabilityProof,
     >,
     provider_config: AppConfig,
-    life_model: LifeModel,
+    _life_model: LifeModel,
     direct_reflex_used: bool,
     runtime_fact_answer: Option<MainChatRuntimeFactAnswer>,
     event_sink_label: &'static str,
@@ -7434,7 +7435,7 @@ async fn build_successful_kernel_command_surface_result(
         .clone()
         .ok_or_else(|| "Main Chat kernel result missing route metadata".to_string())?;
     let model_route = model_route_from_kernel_route(&route_metadata);
-    let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let context_summary = context_summary_from_kernel_result(&kernel_result);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
     let memory_governance_planned = kernel_result.memory_governance.is_some();
     let memory_governance_is_terminal_action = memory_governance_planned
@@ -9965,7 +9966,7 @@ async fn build_kernel_write_outcome_command_surface_result(
     supplied_provider_durability_proofs: Vec<
         openlife_core::scheduler::ProviderInvocationDurabilityProof,
     >,
-    life_model: LifeModel,
+    _life_model: LifeModel,
     event_sink_label: &'static str,
     kernel_events: Vec<MainChatKernelEvent>,
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
@@ -10061,7 +10062,7 @@ async fn build_kernel_write_outcome_command_surface_result(
     let provider_live_invoked = selected_provider_receipt.is_some_and(|receipt| !receipt.simulated)
         && !route_metadata.scripted_response_configured;
     let model_route = model_route_from_kernel_route(&route_metadata);
-    let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let context_summary = context_summary_from_kernel_result(&kernel_result);
     let mut reply = kernel_result
         .assistant_message
         .as_ref()
@@ -11711,6 +11712,10 @@ fn build_kernel_lifemodel_context(
     task_text: &str,
     mut warning_codes: Vec<String>,
 ) -> MainChatKernelLifeModelContext {
+    let current_instruction_override =
+        openlife_core::agent::life_model_runtime_context::task_explicitly_disables_lifemodel(
+            task_text,
+        );
     let life_model_runtime_packet = match life_model {
         Some(version) => match openlife_core::agent::LifeModelRuntimeContextV2::build(
             version,
@@ -11757,7 +11762,7 @@ fn build_kernel_lifemodel_context(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let reason_codes = life_model_runtime_packet
+    let mut reason_codes = life_model_runtime_packet
         .as_ref()
         .map(|packet| {
             packet
@@ -11767,6 +11772,9 @@ fn build_kernel_lifemodel_context(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if current_instruction_override {
+        reason_codes.push("current_instruction_override".into());
+    }
     let source_id = life_model_runtime_packet
         .as_ref()
         .map(|_| "lifemodel.v2.runtime".to_string());
@@ -11813,7 +11821,9 @@ fn build_kernel_lifemodel_context(
         warning_codes,
         influence_receipt: MainChatLifeModelInfluenceReceipt {
             schema: "openlife.lifemodel.influence-receipt.v1".into(),
-            status: if life_model_runtime_packet.is_some() {
+            status: if current_instruction_override {
+                "current_instruction_override".into()
+            } else if life_model_runtime_packet.is_some() {
                 "eligible_for_context".into()
             } else if life_model.is_some() {
                 "not_task_relevant".into()
@@ -11840,9 +11850,34 @@ fn build_kernel_lifemodel_context(
         )],
         _ => Vec::new(),
     };
+    let planning_hints = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.section,
+                        openlife_core::life_model::v2::LifeModelSectionV2::LongTermGoals
+                            | openlife_core::life_model::v2::LifeModelSectionV2::Values
+                            | openlife_core::life_model::v2::LifeModelSectionV2::PersonalBoundaries
+                            | openlife_core::life_model::v2::LifeModelSectionV2::DecisionPrinciples
+                    )
+                })
+                .map(|fact| openlife_core::agent::PlanExecuteLifeModelHint {
+                    item_id: fact.item_id.clone(),
+                    section: fact.section,
+                    value: fact.value.clone(),
+                    selected_reason: fact.selected_reason.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     MainChatKernelLifeModelContext {
         metadata,
         candidates,
+        planning_hints,
     }
 }
 
@@ -13863,22 +13898,24 @@ fn model_route_from_kernel_route(route: &MainChatRouteMetadata) -> ModelRouteTra
     }
 }
 
-fn context_summary_from_kernel_result(
-    result: &MainChatTurnResult,
-    life_model: &LifeModel,
-) -> ContextSummary {
+fn context_summary_from_kernel_result(result: &MainChatTurnResult) -> ContextSummary {
     let selected_source_ids = result
         .context_metadata
         .as_ref()
         .map(|metadata| metadata.selected_source_ids.clone())
         .unwrap_or_default();
     ContextSummary {
-        life_model_empty: life_model.is_effectively_empty(),
+        life_model_empty: result
+            .context_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .and_then(|metadata| metadata.model_version)
+            .is_none(),
         included_life_model_sections: result
             .context_metadata
             .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .map(|metadata| metadata.included_life_model_sections.clone())
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .map(|metadata| metadata.selected_sections.clone())
             .unwrap_or_default(),
         memory_hit_count: selected_source_ids
             .iter()
@@ -13904,7 +13941,7 @@ async fn build_kernel_plan_execute_command_surface_result<C, S>(
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
     scheduler: InferenceScheduler,
-    life_model: LifeModel,
+    _life_model: LifeModel,
     kernel: &MainChatKernel<C>,
     selected_skill_id: Option<String>,
     event_sink: &mut S,
@@ -13931,8 +13968,30 @@ where
         session_id: session_label,
         selected_skill_id: selected_skill_id.clone(),
     });
-    let (context_metadata, _system_prompt) =
+    let (mut context_metadata, _system_prompt) =
         kernel.compile_context(session_id.trim(), selected_skill_id.clone(), user_text);
+    let life_model_planning_hints = context_metadata
+        .life_model_context
+        .as_ref()
+        .filter(|metadata| metadata.available)
+        .and(kernel.context_config.life_model_context.as_ref())
+        .map(|context| context.planning_hints.clone())
+        .unwrap_or_default();
+    if !life_model_planning_hints.is_empty() {
+        if let Some(metadata) = context_metadata.life_model_context.as_mut() {
+            metadata.influence_receipt.status = "applied_planning".into();
+            if !metadata
+                .influence_receipt
+                .applied_surfaces
+                .contains(&"planning".to_string())
+            {
+                metadata
+                    .influence_receipt
+                    .applied_surfaces
+                    .push("planning".into());
+            }
+        }
+    }
     event_sink.emit(MainChatKernelEvent::ContextLoaded {
         context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
         selected_source_count: context_metadata.selected_source_count,
@@ -13992,6 +14051,8 @@ where
             state,
             canonical_run_id,
             execution_epoch,
+            user_text,
+            life_model_planning_hints.clone(),
         )
         .await?;
     let observation_metadata = serde_json::json!({
@@ -14002,6 +14063,8 @@ where
         "preview": format!("PlanExecute draft with {} steps", plan_session.steps.len()),
         "planExecuteSessionId": plan_session.session_id,
         "stepCount": plan_session.steps.len(),
+        "lifeModelPlanningHintCount": life_model_planning_hints.len(),
+        "lifeModelPlanningApplied": !life_model_planning_hints.is_empty(),
         "status": plan_session.status,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
@@ -14125,6 +14188,10 @@ where
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
         "kernelContextSnapshotRef": context_metadata.context_snapshot_ref,
+        "lifeModelInfluenceReceipt": context_metadata
+            .life_model_context
+            .as_ref()
+            .map(|metadata| metadata.influence_receipt.clone()),
         "hsPacketSelected": hs_metadata
             .as_ref()
             .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
@@ -14157,10 +14224,15 @@ where
     });
     let model_route = model_route_from_kernel_route(&route_metadata);
     let context_summary = ContextSummary {
-        life_model_empty: life_model.is_effectively_empty(),
-        included_life_model_sections: hs_metadata
+        life_model_empty: context_metadata
+            .life_model_context
             .as_ref()
-            .map(|metadata| metadata.included_life_model_sections.clone())
+            .and_then(|metadata| metadata.model_version)
+            .is_none(),
+        included_life_model_sections: context_metadata
+            .life_model_context
+            .as_ref()
+            .map(|metadata| metadata.selected_sections.clone())
             .unwrap_or_default(),
         memory_hit_count: context_metadata
             .selected_source_ids
