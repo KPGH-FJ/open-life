@@ -3,7 +3,6 @@ pub(crate) const STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID: &str =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LifeModelMaterializerCallerKind {
-    GovernedManualOverride,
     SourceDataCompatibilityMaterialization,
     AcceptedProposalApply,
     GovernedRestoreImportOperation,
@@ -13,7 +12,6 @@ pub(crate) enum LifeModelMaterializerCallerKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LifeModelMaterializerCallerPurpose {
     SourceDataCompatibilityNotAcceptedTruth,
-    GovernedManualOverride,
     AcceptedProposalApplySourceSpecificPatchMappingComplete,
     GovernedRestoreImportOperation,
     Unclassified,
@@ -97,9 +95,6 @@ fn caller_pair_allowed(context: &LifeModelMaterializerCallerContext) -> bool {
     matches!(
         (context.kind, context.purpose),
         (
-            LifeModelMaterializerCallerKind::GovernedManualOverride,
-            LifeModelMaterializerCallerPurpose::GovernedManualOverride,
-        ) | (
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ) | (

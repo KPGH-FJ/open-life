@@ -102,10 +102,11 @@ Scheduled tasks consume their durable task claim, typed Policy, canonical
 StateStore snapshot and Agent Memory. Planner mode does not advertise the
 legacy `life_model.read` or mixed-owner `goal.read` tools. The authenticated
 development A2A sidecar exposes only its bounded reasoning bridge and does not
-serve legacy personal-profile query skills. Proactive suggestions consume a
-bounded projection assembled from canonical LifeModel v2 plus StateStore;
-EvidenceStore affects reminder priority only and does not become a learning or
-personal-model authority.
+serve legacy personal-profile query skills; release frontend code exposes no
+A2A wrapper. The old release Proactive suggestion command and frontend wrapper
+had no product caller and are retired. The remaining Proactive core is limited
+to proposal-rejection evidence compatibility; it does not own LifeModel,
+learning, or the Agent runtime.
 
 ## ReAct And Tool Execution
 

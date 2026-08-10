@@ -2993,15 +2993,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         indexed: 10,
         skipped: 2,
       } as T);
-    case "get_feedback_summary":
-      return Promise.resolve({
-        total_messages: 100,
-        total_feedback_up: 80,
-        total_feedback_down: 5,
-        session_count: 10,
-      } as T);
-    case "should_show_calibration":
-      return Promise.resolve({ weekly: false, monthly: false, today: "2026-04-17" } as T);
     case "check_ollama_status":
       return Promise.resolve(true as T);
     case "get_policy_router_status":
@@ -3215,80 +3206,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         vectorStatus: "ready",
         routeQuality: "deterministic_hash_approximation",
       } as T);
-    case "a2a_local_agent_card":
-      return Promise.resolve({
-        name: "OpenLife Local Agent",
-        description: "本地 A2A 服务",
-        version: "0.1.0",
-        skills: [
-          {
-            id: "openlife.reasoning_bridge",
-            name: "推理桥接",
-            description: "桥接 OpenLife 和 A2A",
-          },
-        ],
-      } as T);
-    case "a2a_discover_agent":
-      return Promise.resolve({
-        name: "Remote Agent",
-        description: "外部代理",
-        version: "0.1.0",
-        url: "http://127.0.0.1:8080",
-        capabilities: { streaming: false },
-        skills: [{ id: "demo", name: "Demo Skill", description: "测试技能" }],
-      } as T);
-    case "a2a_send_task":
-    case "a2a_handle_task":
-      return Promise.resolve('{"status":"ok"}' as T);
-    case "a2a_bridge_local":
-      return Promise.resolve({
-        request: { method: _args?.method, params: { text: _args?.text } },
-        a2a_request: { message: { parts: [{ type: "text", text: _args?.text }] } },
-        response: { status: { state: "completed" } },
-        reasoning_result: { text: "桥接成功" },
-      } as T);
-    case "a2a_restart_sidecar":
-    case "a2a_stop_sidecar":
-      return Promise.resolve(undefined as T);
-    case "generate_micro_evolution_changes":
-      return Promise.resolve({
-        changes: [
-          {
-            dimension: "identity.values",
-            target_name: "健康",
-            old_value: 8,
-            new_value: 8.03,
-            reason: "近期正向行为信号增加",
-            confidence: 0.82,
-            sources: [
-              { source: "feedback", score: 0.03, weight: 0.5 },
-              { source: "behavior", score: 0.02, weight: 0.3 },
-              { source: "inference", score: 0.01, weight: 0.2 },
-            ],
-          },
-        ],
-        applied: true,
-        message: "已生成 1 项建议",
-        before: { identity: 70, goals: 60, capabilities: 50, state: 80, overall: 65 },
-        after: { identity: 71, goals: 60, capabilities: 50, state: 80, overall: 65 },
-        requires_confirmation: true,
-        signal_summary: {
-          feedback_terms: 2,
-          behavior_events: 1,
-          inference_items: 1,
-          top_feedback: [{ name: "健康", score: 0.03, source: "feedback" }],
-          top_behavior: [{ name: "value_focus:健康", score: 0.02, source: "behavior" }],
-          top_inference: [{ name: "identity.values:健康", score: 0.01, source: "inference" }],
-        },
-      } as T);
-    case "calibration_create_proposals":
-      return Promise.resolve({
-        created_count: 2,
-        created_ids: ["p1", "p2"],
-        error_count: 0,
-        errors: [],
-        message: "已创建 2 个 Proposal",
-      } as T);
     // Milestone D mocks
     case "get_hot_cache":
       return Promise.resolve({
@@ -3496,22 +3413,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         durable_lifemodel_write: true,
         imported_message_count: args?.payload?.messages?.length ?? 0,
         imported_vector_count: args?.payload?.vectors?.length ?? 0,
-      } as T);
-    case "generate_evolution_report":
-      return Promise.resolve({
-        success: true,
-        read_only: true,
-        metadata_safe: true,
-        durable_lifemodel_write: false,
-        evolution_rules_write: false,
-        applied_rule_count: 0,
-        liked_pattern_count: 2,
-        disliked_pattern_count: 1,
-        suggested_rule_count: 3,
-        proposal_candidate_count: 3,
-        candidate_status: "review_required_not_activated",
-        summary:
-          "Read-only feedback evolution report: 2 liked pattern(s), 1 disliked pattern(s), 3 review candidate(s).",
       } as T);
     case "test_llm_connection":
       return Promise.resolve({

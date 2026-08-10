@@ -5,7 +5,6 @@ pub mod calendar;
 pub mod config;
 pub mod core_value_signal_extractor;
 pub mod embedding;
-pub mod evolution;
 pub mod feedback;
 // Hermes module removed: replaced by agent::reasoning module
 pub mod json_utils;

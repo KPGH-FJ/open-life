@@ -1665,21 +1665,6 @@ fn gateway_request_for_caller(
     let after_hash = hash_life_model(after).ok();
     let request = match (caller_context.kind, caller_context.purpose) {
         (
-            LifeModelMaterializerCallerKind::GovernedManualOverride,
-            LifeModelMaterializerCallerPurpose::GovernedManualOverride,
-        ) => LifeModelWriteGatewayRequest {
-            intent: LifeModelWriteIntentKind::ManualOverride,
-            proposal_id: None,
-            run_id: None,
-            evidence_id: None,
-            base_hash: None,
-            current_hash: None,
-            before_hash,
-            after_hash,
-            explicit_manual_override: true,
-            risk_acknowledged: true,
-        },
-        (
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ) => LifeModelWriteGatewayRequest {
@@ -2546,7 +2531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_pre_change_snapshot_hash_prevents_stale_overwrite() {
+    async fn restore_import_pre_change_snapshot_hash_prevents_stale_overwrite() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let baseline = LifeModel::default();
         state
@@ -2572,9 +2557,9 @@ mod tests {
             stale_replacement,
             false,
             LifeModelMaterializerCallerContext::new(
-                "stale-pre-change-test",
-                LifeModelMaterializerCallerKind::GovernedManualOverride,
-                LifeModelMaterializerCallerPurpose::GovernedManualOverride,
+                "stale-restore-import-test",
+                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
             ),
             Some(&snapshotted_hash),
         )
@@ -2595,7 +2580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn governed_manual_override_cannot_replace_statestore_owned_daily_tasks() {
+    async fn governed_restore_import_cannot_replace_statestore_owned_daily_tasks() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let baseline = LifeModel::default();
         state
@@ -2619,14 +2604,14 @@ mod tests {
             replacement,
             false,
             LifeModelMaterializerCallerContext::new(
-                "manual-state-owner-test",
-                LifeModelMaterializerCallerKind::GovernedManualOverride,
-                LifeModelMaterializerCallerPurpose::GovernedManualOverride,
+                "restore-import-state-owner-test",
+                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
             ),
             Some(&baseline_hash),
         )
         .await
-        .expect_err("manual override must not create a second daily-task owner");
+        .expect_err("restore import must not create a second daily-task owner");
 
         assert!(error.contains("statestore_owned_path_changed:goals.daily"));
         assert!(state

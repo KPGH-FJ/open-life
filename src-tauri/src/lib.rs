@@ -145,9 +145,6 @@ use commands::diagnostics::{
 #[cfg(feature = "dev-extensions")]
 use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
 use commands::execution::{list_tool_permissions, revoke_tool_permission};
-use commands::feedback::{
-    generate_evolution_report, get_feedback_summary, log_analytics_event, save_feedback,
-};
 pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
@@ -172,7 +169,6 @@ use commands::memory::{
     privacy_erase_memory_asset, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
-use commands::proactive::get_proactive_suggestions;
 use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
     get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
@@ -1045,12 +1041,8 @@ pub fn run() {
             get_policy_router_status,
             get_model_router_status,
             set_scheduler_config,
-            save_feedback,
-            get_feedback_summary,
-            generate_evolution_report,
             run_memory_tier_maintenance,
             count_memory_chunks,
-            log_analytics_event,
             create_knowledge_note,
             search_memory,
             #[cfg(feature = "dev-extensions")]
@@ -1095,7 +1087,6 @@ pub fn run() {
             rotate_mcp_audit_key,
             get_privacy_policy,
             set_privacy_policy,
-            get_proactive_suggestions,
             list_tool_permissions,
             revoke_tool_permission,
             #[cfg(feature = "dev-extensions")]
@@ -1197,6 +1188,7 @@ mod retired_lifemodel_surface_tests {
         }
         for retired in [
             "get_life_model,",
+            "save_life_model,",
             "get_life_model_current_view",
             "builder_start",
             "builder_create_proposals",
@@ -1205,6 +1197,11 @@ mod retired_lifemodel_surface_tests {
             "create_snapshot",
             "restore_snapshot",
             "calibration_create_proposals",
+            "save_feedback",
+            "get_feedback_summary",
+            "generate_evolution_report",
+            "log_analytics_event",
+            "get_proactive_suggestions",
         ] {
             assert!(
                 !handler.contains(retired),

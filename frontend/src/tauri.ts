@@ -3239,51 +3239,6 @@ export interface ToolManifest {
   tags: string[];
 }
 
-export async function saveFeedback(
-  sessionId: string,
-  messageIndex: number,
-  feedbackType: "up" | "down",
-  contentPreview: string
-): Promise<void> {
-  return safeInvoke("save_feedback", {
-    ...sessionArgs(sessionId),
-    messageIndex,
-    message_index: messageIndex,
-    feedbackType,
-    feedback_type: feedbackType,
-    contentPreview,
-    content_preview: contentPreview,
-  });
-}
-
-export async function getFeedbackSummary(): Promise<{
-  total_messages: number;
-  total_feedback_up: number;
-  total_feedback_down: number;
-  session_count: number;
-}> {
-  return safeInvoke("get_feedback_summary");
-}
-
-export interface FeedbackEvolutionReportResult {
-  success: boolean;
-  read_only: boolean;
-  metadata_safe: boolean;
-  durable_lifemodel_write: boolean;
-  evolution_rules_write: boolean;
-  applied_rule_count: number;
-  liked_pattern_count: number;
-  disliked_pattern_count: number;
-  suggested_rule_count: number;
-  proposal_candidate_count: number;
-  candidate_status: string;
-  summary: string;
-}
-
-export async function generateEvolutionReport(): Promise<FeedbackEvolutionReportResult> {
-  return safeInvoke<FeedbackEvolutionReportResult>("generate_evolution_report");
-}
-
 export async function runMemoryTierMaintenance(): Promise<{
   promoted: number;
   demoted: number;
@@ -3311,19 +3266,6 @@ export async function rebuildMemoryIndex(
     ...(confirmationEvidence
       ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
       : {}),
-  });
-}
-
-export async function logAnalyticsEvent(
-  eventName: string,
-  sessionId?: string,
-  detail?: string
-): Promise<void> {
-  return safeInvoke("log_analytics_event", {
-    eventName,
-    event_name: eventName,
-    ...optionalDualArg("sessionId", "session_id", sessionId),
-    detail,
   });
 }
 
@@ -3446,53 +3388,6 @@ export async function searchMemory(
     ...raw,
     hits: raw.hits.map(([chunk, score]) => ({ chunk, score })),
   };
-}
-
-export async function a2aDiscoverAgent(url: string): Promise<any> {
-  return safeInvoke("a2a_discover_agent", { url });
-}
-
-export async function a2aSendTask(
-  url: string,
-  requestJson: string,
-  pairingToken?: string
-): Promise<string> {
-  return safeInvoke<string>("a2a_send_task", {
-    url,
-    requestJson,
-    request_json: requestJson,
-    ...optionalDualArg("pairingToken", "pairing_token", pairingToken),
-  });
-}
-
-export async function a2aLocalAgentCard(): Promise<any> {
-  return safeInvoke("a2a_local_agent_card");
-}
-
-export async function a2aHandleTask(requestJson: string): Promise<string> {
-  return safeInvoke<string>("a2a_handle_task", { requestJson, request_json: requestJson });
-}
-
-export async function a2aBridgeLocal(
-  method: string,
-  text: string,
-  sessionId?: string,
-  skill?: string
-): Promise<any> {
-  return safeInvoke("a2a_bridge_local", {
-    method,
-    text,
-    ...optionalDualArg("sessionId", "session_id", sessionId),
-    skill,
-  });
-}
-
-export async function a2aRestartSidecar(): Promise<void> {
-  return safeInvoke("a2a_restart_sidecar");
-}
-
-export async function a2aStopSidecar(): Promise<void> {
-  return safeInvoke("a2a_stop_sidecar");
 }
 
 export interface ExportedMessage {
@@ -4867,18 +4762,4 @@ export async function draftEditMemoryProposal(
 
 export async function postponeProposal(proposalId: string): Promise<void> {
   return safeInvoke("postpone_proposal", { proposalId, proposal_id: proposalId });
-}
-
-export interface ProactiveSuggestion {
-  id: string;
-  category: "daily_brief" | "weekly_review" | "stale_goal" | "pending_proposal" | "state_checkin";
-  title: string;
-  prompt: string;
-  priority: "low" | "medium" | "high";
-  seen: boolean;
-  created_at: string;
-}
-
-export async function getProactiveSuggestions(): Promise<ProactiveSuggestion[]> {
-  return safeInvoke("get_proactive_suggestions");
 }

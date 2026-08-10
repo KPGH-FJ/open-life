@@ -1249,16 +1249,17 @@ LifeModel 的作用是帮助 Agent 在多个合法方案之间作出更符合用
 
 目标：不再先做数月大清理，也不让已经被替代的历史平台继续增加维护成本。
 
-- 5.5 的清理规则从 5.1A 开始贯穿 5.1 至 5.4：每个新 owner 或产品能力激活的
-  同一切片中，追踪并删除已经被替代的旧写入、读取、command、bridge、兼容和
-  迁移路径；不得等到 5.4 完成后才一次性清理；
+- 原计划要求从 5.1A 开始边替换边清理；实际执行中仍有一批历史验证/成熟化平台
+  留到 5.5A 才集中删除。5.5 后续不得把这一偏差写成已贯彻的事实，也不得再次把
+  已有明确替代 owner 的旧写入、读取、command、bridge 和兼容路径积压到阶段末尾；
 - 5.5 作为独立板块时只做最终 caller、数据和 authority 收敛，不重新实现已经完成
   的替代能力；
 - 重点检查 HSAssetAuthorityRegistry、独立 Maturation Engine、runtime canonical
   RegressionSuite、通用 Heuristic 平台、Calibration/Micro Evolution 历史入口和
   无生产调用者的 Tauri command；
-- EvidenceStore 中仍有价值的来源、证据与冲突概念可以迁入 LifeModel 学习桥梁，
-  但不能继续作为广义 HS 平台；
+- EvidenceStore 按真实消费者拆分职责：只有与长期用户画像学习直接相关的来源证据
+  才能进入 LifeModel 学习边界；提醒拒绝等行为证据归 Proactive owner；无消费者的
+  广义 HS 证据路径删除，不把不同领域重新合并成通用学习平台；
 - 触及到的巨型文件只按已经建立的领域 owner 拆分，不为追求文件大小而机械拆分；
 - 删除前用真实 caller、数据迁移和恢复测试证明替代已经完成；不因为名称像历史
   模块就直接删除生产代码。
@@ -1271,7 +1272,7 @@ LifeModel 的作用是帮助 Agent 在多个合法方案之间作出更符合用
 5.5 固定拆分为 5.5A 至 5.5F，不默认增加 5.5G。它只做替代完成后的 caller、数据与
 authority 收敛，不建设新学习平台，也不重新实现 5.1—5.4 已有能力。
 
-2026-08-09 的源码核对表明：`MaturationEngine`、runtime `RegressionSuite` 和
+2026-08-10 的源码与提交历史核对表明：`MaturationEngine`、runtime `RegressionSuite` 和
 `golden_paths` 没有 shipped product caller，主要在彼此和测试中互相调用；旧 backend
 completion/readiness report 也没有产品消费者。另一方面，不能按名称整包删除：
 `EvidenceStore` 仍被 Proactive 与来源证据使用；`LifeEventStore` 仍在启动和 Memory
@@ -1355,8 +1356,9 @@ scheduler、A2A 与 Proactive 对 `RuntimeHSPacket`/legacy `LifeModel` 的运行
   HSAssetAuthorityRegistry reconciliation、相关 persistence manifest 项和无消费者 store；
 - 不自动删除用户磁盘上的旧数据库或 YAML。旧文件在不再参与 runtime 后保持 inert，
   由明确导出/迁移兼容边界读取；如仍有未迁移数据，保留只读迁移入口和退出条件；
-- EvidenceStore、LifeEventStore 中仍被产品使用的来源/冲突/提醒证据迁入窄 owner 后再
-  删除旧表或模块；不把它们整体并入 LifeModel；
+- EvidenceStore、LifeEventStore 中仍被产品使用的来源/冲突/提醒证据必须归属窄 owner；
+  只有旧通用表或模块已经没有当前消费者时才删除，仍承担窄产品职责的 Store 不为满足
+  清理数量而改名或重建；不把它们整体并入 LifeModel；
 - fresh、已有 v2、legacy 未迁移、只读恢复和损坏存储五类启动场景必须分别验证，任何
   无法确定的数据状态保持 unknown，不静默丢弃或伪造迁移完成。
 
@@ -1372,9 +1374,10 @@ scheduler、A2A 与 Proactive 对 `RuntimeHSPacket`/legacy `LifeModel` 的运行
 - 只拆分本阶段实际触及且仍有多个领域职责的巨型文件，不为文件大小机械搬家；
 - 更新现有 Architecture/ADR 与本 Program 的实际完成记录，不新建 JSON ledger、任务包、
   evidence registry 或自进化平台；
-- 通过 Rust/前端全仓门禁后，在同一既有隔离 QA 做一次真实 Tauri 回归：普通对话、
-  Agent Memory、LifeModel 学习与使用、Planning、Review、Policy/权限反例和跨重启；
-  不要求 external-live Provider，不反复初始化同类凭据；
+- 通过 Rust/前端全仓门禁后，只对 5.5 实际触及的启动、普通对话、Policy/权限和
+  Review 边界做一轮有界真实 Tauri smoke；跨会话 Memory、完整 LifeModel 学习/使用、
+  Planning 和跨重启的综合产品闭环留在 5.6，避免两阶段重复验收；不要求
+  external-live Provider，不反复初始化同类凭据；
 - 对仍保留的兼容路径逐项记录真实 caller 和退出条件。若无法证明可删，则保持并明确
   `UNKNOWN`，不得为完成清理而猜测。
 
@@ -1576,8 +1579,19 @@ Agent Memory 与 proposal 能力，不再宣称不可用的 legacy LifeModel/goa
 测试已删除，保留的正常、缺失、LocalOnly、proposal-first、A2A 故障与提醒拒绝反例已
 迁移到新合同。
 
-下一板块：**按既定顺序进入 5.5D，删除退役 command、bridge 与前端合同；5.5E—5.5F
-的范围与顺序保持不变，不新增 5.5G。**
+5.5D“删除退役 command、bridge 与前端合同”已于 2026-08-10 完成：发布端删除无产品
+caller 的 feedback/evolution/analytics、Proactive suggestion command，以及对应 TypeScript
+wrapper、类型和 browser mock；不再由发布前端暗示只存在于 `dev-extensions` 的 A2A
+能力。旧 feedback evolution、calibration、micro-evolution 实现与 `evolution` 模块从
+源码删除；`FeedbackStore` 只暂留当前 LifeModel gateway 与 proposal receipt 使用的
+audit-event 职责，旧表的数据处理明确留给 5.5E。旧 LifeModel whole-model direct-save
+测试路径、`GovernedManualOverride` materializer/write intent 也已删除；真实 import/recovery
+所需的 compare-and-swap 与 StateStore 字段所有权反例保留并改为当前 restore-import
+caller。前后端静态发布合同、259 项前端测试、production build、8 条 browser-shell E2E、
+严格 Clippy 与全仓 Rust 测试均通过。
+
+下一板块：**按既定顺序进入 5.5E，收敛启动存储、兼容数据与 authority registry；
+5.5F 的范围保持不变，不新增 5.5G。**
 
 第五阶段第一步实际完成：
 

@@ -177,10 +177,11 @@ write owner.
 
 The former patch/snapshot-backed current-view DTO and its frontend 4D dimension
 contract are deleted. Materialization credit now comes from the current Review
-item and canonical v2 version evidence. Legacy 4D analysis helpers that remain
-inside unshipped historical evolution code do not have a Tauri command or
-frontend caller and receive no product capability credit; their broader removal
-belongs to the Phase 5.5 replacement of that historical subsystem.
+item and canonical v2 version evidence. The unshipped feedback-evolution and
+calibration implementation, its release commands, and its frontend contracts
+were removed in Phase 5.5D. `FeedbackStore` remains temporarily as a narrow
+audit-event store while Phase 5.5E classifies legacy on-disk tables; it has no
+authority to learn or mutate LifeModel.
 
 Until legacy owner cutover is complete, a typed remove may not produce an empty
 v2 head. After cutover, the persisted receipt authorizes an empty canonical head;
@@ -197,11 +198,11 @@ failure, or backup failure is a definite pre-effect failure; ambiguous database
 commit failures remain unknown and are not automatically retried. After a v2
 owner exists, shipped legacy read and proposal-write paths reject normal product
 use. The original YAML and verified backup are evidence only and are not queried
-by the normal product ViewModel. Main Chat no longer reads legacy YAML for
-personalization. Scheduled execution, proactive suggestions, A2A, and generic
-AgentRuntime compatibility consumers remain separate caller-convergence work;
-they do not receive Main Chat v2 capability credit merely because the v2 owner
-exists.
+by the normal product ViewModel. Main Chat, scheduled execution, generic
+AgentRuntime, and the development A2A reasoning bridge no longer read legacy
+YAML for personalization. The uncalled release Proactive command is retired.
+None of these paths receives Main Chat v2 capability credit merely because the
+v2 owner exists.
 
 ## Main Chat Runtime Influence
 

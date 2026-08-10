@@ -34,7 +34,6 @@ pub fn life_model_field_authority(path: &str) -> LifeModelFieldAuthority {
 #[serde(rename_all = "snake_case")]
 pub enum LifeModelWriteIntentKind {
     AcceptedProposalMaterialization,
-    ManualOverride,
     RestoreImportOverride,
     SourceDataCompatibility,
     AutomaticLearning,
@@ -84,21 +83,6 @@ impl LifeModelWriteGatewayRequest {
             after_hash: Some(after_hash.into()),
             explicit_manual_override: false,
             risk_acknowledged: false,
-        }
-    }
-
-    pub fn manual_override(before_hash: impl Into<String>, after_hash: impl Into<String>) -> Self {
-        Self {
-            intent: LifeModelWriteIntentKind::ManualOverride,
-            proposal_id: None,
-            run_id: None,
-            evidence_id: None,
-            base_hash: None,
-            current_hash: None,
-            before_hash: Some(before_hash.into()),
-            after_hash: Some(after_hash.into()),
-            explicit_manual_override: true,
-            risk_acknowledged: true,
         }
     }
 
@@ -179,8 +163,7 @@ impl LifeModelWriteGateway {
                 }
                 Self::allowed(request, "accepted_proposal_materialization_allowed")
             }
-            LifeModelWriteIntentKind::ManualOverride
-            | LifeModelWriteIntentKind::RestoreImportOverride => {
+            LifeModelWriteIntentKind::RestoreImportOverride => {
                 if request.explicit_manual_override && request.risk_acknowledged {
                     Self::allowed(request, "governed_manual_override_allowed")
                 } else {
@@ -351,16 +334,6 @@ mod life_model_write_gateway_tests {
             decision.reason_code,
             "accepted_proposal_missing_base_or_current_hash"
         );
-    }
-
-    #[test]
-    fn life_model_write_gateway_allows_governed_manual_override() {
-        let decision = LifeModelWriteGateway::decide(
-            LifeModelWriteGatewayRequest::manual_override("hash:before", "hash:after"),
-        );
-
-        assert_eq!(decision.status, LifeModelWriteGatewayStatus::Allowed);
-        assert!(decision.allowed);
     }
 
     #[test]
