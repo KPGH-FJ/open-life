@@ -2180,6 +2180,28 @@ mod tests {
         AgentLoop::new(runtime, gateway, scheduler, config)
     }
 
+    /// Creates a provider-preparation fixture that never depends on a live
+    /// local Ollama process. The scripted scheduler still exercises payload
+    /// authorization and provider selection without crossing an adapter edge.
+    fn make_scripted_provider_test_agent_loop() -> AgentLoop {
+        let scheduler = InferenceScheduler::new(
+            "llama3".into(),
+            false,
+            "openrouter".into(),
+            "https://test.example.com/v1".into(),
+            "sk-test".into(),
+            "gpt-3.5-turbo".into(),
+            "text-embedding-ada-002".into(),
+            false,
+        )
+        .with_scripted_generation_response("provider preparation fixture");
+        let app_config = AppConfig::default();
+        let runtime = AgentRuntime::new(scheduler.clone(), &app_config);
+        let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
+        let config = AgentLoopConfig::default();
+        AgentLoop::new(runtime, gateway, scheduler, config)
+    }
+
     fn terminal_test_action(id: &str, status: &str) -> crate::agent::types::AgentAction {
         let now = chrono::Utc::now();
         crate::agent::types::AgentAction {
@@ -2320,7 +2342,7 @@ mod tests {
         wrap_user_content(&mut task);
         assert_ne!(task.user_text, user_text);
 
-        let agent = make_test_agent_loop();
+        let agent = make_scripted_provider_test_agent_loop();
         let network_policy = crate::config::NetworkPolicy {
             default_decision: "allow".into(),
             ..Default::default()
