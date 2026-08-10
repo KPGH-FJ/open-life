@@ -170,6 +170,10 @@ jobs:
           shared-key: "openlife-rust-macos"
 
       - name: Run tests
+        # Main Chat's debug-only async command-surface tests sit too close to
+        # Tokio's 2 MiB worker-stack default on GitHub's macOS runner.
+        env:
+          RUST_MIN_STACK: 4194304
         run: cargo test --all --locked
 
       - name: Verify dev A2A sidecar parent lifecycle
