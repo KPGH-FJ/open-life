@@ -41,7 +41,6 @@ pub enum MainChatAgentStrategy {
     LifeModelProposal,
     FileWriteProposal,
     ActionProposal,
-    ReviewMaturation,
     BlockedConfirmation,
 }
 
@@ -57,7 +56,6 @@ impl MainChatAgentStrategy {
             Self::LifeModelProposal => "life_model_proposal",
             Self::FileWriteProposal => "file_write_proposal",
             Self::ActionProposal => "action_proposal",
-            Self::ReviewMaturation => "review_maturation",
             Self::BlockedConfirmation => "blocked_confirmation",
         }
     }
@@ -86,7 +84,6 @@ impl MainChatAgentStrategy {
             "life_model_proposal" => Ok(Self::LifeModelProposal),
             "file_write_proposal" => Ok(Self::FileWriteProposal),
             "action_proposal" => Ok(Self::ActionProposal),
-            "review_maturation" => Ok(Self::ReviewMaturation),
             "blocked_confirmation" => Ok(Self::BlockedConfirmation),
             _ => Err(corrupt_persisted_enum_text(
                 column,
@@ -342,8 +339,13 @@ impl IntentFrame {
             && !advice_only;
         let requests_memory_rollback_after_commit =
             requests_memory_change && explicitly_requests_same_turn_memory_rollback(&lower);
-        let requests_lifemodel_change = governance_intent.durable_write_requirement
+        let has_routed_lifemodel_candidate = !governance_intent
+            .memory_routing
+            .lifemodel_proposal_candidate_ids
+            .is_empty();
+        let requests_lifemodel_change = (governance_intent.durable_write_requirement
             == Some(MainChatDurableWriteRequirement::LifeModelProposal)
+            || has_routed_lifemodel_candidate)
             && !has_embedded_untrusted_instruction
             && !advice_only;
         let requests_file_change = is_governed_file_write_intent(&lower)
@@ -663,7 +665,7 @@ pub enum AllowedCapability {
     LocalUtilityProposal,
     ExternalWriteConfirmation,
     DangerousActionBlocker,
-    ReviewMaturationBlocker,
+    GovernedBlocker,
 }
 
 impl AllowedCapability {
@@ -693,7 +695,7 @@ impl AllowedCapability {
             Self::LocalUtilityProposal => "local_utility.proposal",
             Self::ExternalWriteConfirmation => "external_write.confirmation",
             Self::DangerousActionBlocker => "dangerous_action.blocker",
-            Self::ReviewMaturationBlocker => "review_maturation.blocker",
+            Self::GovernedBlocker => "governed.blocker",
         }
     }
 }
@@ -1569,7 +1571,7 @@ impl PolicyDecision {
             {
                 MainChatAgentStrategy::BlockedConfirmation
             }
-            PolicyRouteKind::GovernedBlocker => MainChatAgentStrategy::ReviewMaturation,
+            PolicyRouteKind::GovernedBlocker => MainChatAgentStrategy::BlockedConfirmation,
         }
     }
 }
@@ -1992,6 +1994,12 @@ impl PolicyRouter {
                 "durable_write_requires_review_proposal",
                 "durable Memory or LifeModel change must be proposal-only",
             )
+        } else if crate::agent::is_explicit_lifemodel_read_intent(&intent_frame.user_goal) {
+            (
+                PolicyRouteKind::DirectAnswer,
+                "explicit_lifemodel_v2_read",
+                "the user explicitly requested a read-only view of confirmed LifeModel v2 data",
+            )
         } else if intent_frame.requests_plan_task {
             (
                 PolicyRouteKind::PlanDraft,
@@ -2009,12 +2017,6 @@ impl PolicyRouter {
                 PolicyRouteKind::AskClarification,
                 "ambiguous_intent_requires_clarification",
                 "the user goal is too ambiguous to route safely",
-            )
-        } else if is_review_maturation_intent(&intent_frame.user_goal.to_ascii_lowercase()) {
-            (
-                PolicyRouteKind::GovernedBlocker,
-                "review_maturation_runtime_unavailable",
-                "review maturation is not an ordinary product route in Phase3",
             )
         } else {
             (
@@ -2270,6 +2272,11 @@ fn policy_allowed_capabilities(
     governance_plan: &PolicyGovernancePlan,
 ) -> Vec<AllowedCapability> {
     let mut capabilities = match route_kind {
+        PolicyRouteKind::DirectAnswer
+            if crate::agent::is_explicit_lifemodel_read_intent(&intent.user_goal) =>
+        {
+            Vec::new()
+        }
         PolicyRouteKind::DirectAnswer => vec![AllowedCapability::ProviderGeneration],
         PolicyRouteKind::AskClarification => vec![
             AllowedCapability::Clarification,
@@ -2337,7 +2344,7 @@ fn policy_allowed_capabilities(
         PolicyRouteKind::GovernedBlocker if intent.requires_hard_block => {
             vec![AllowedCapability::DangerousActionBlocker]
         }
-        PolicyRouteKind::GovernedBlocker => vec![AllowedCapability::ReviewMaturationBlocker],
+        PolicyRouteKind::GovernedBlocker => vec![AllowedCapability::GovernedBlocker],
         PolicyRouteKind::ReadOnlyTool => requested_read_capabilities(intent),
     };
     if !governance_plan.low_risk_life_event_candidate_ids.is_empty() {
@@ -2498,6 +2505,11 @@ fn policy_authorized_explicit_memory_candidate_ids(intent: &IntentFrame) -> Vec<
             candidate.destination == crate::agent::MemoryDestination::MemoryProposal
                 && candidate.explicitness == "explicit"
                 && candidate.sensitivity != "sensitive"
+                && !matches!(
+                    candidate.kind,
+                    crate::agent::MemoryCandidateKind::ProceduralRule
+                        | crate::agent::MemoryCandidateKind::IdentityOrRole
+                )
         })
         .map(|candidate| candidate.candidate_id.clone())
         .collect::<Vec<_>>();
@@ -2649,6 +2661,7 @@ fn build_policy_governance_plan(
                     && candidate.sensitivity == "internal"
                     && candidate.confidence >= 0.85
                     && candidate.kind != MemoryCandidateKind::IdentityOrRole
+                    && candidate.kind != MemoryCandidateKind::ProceduralRule
                     && explicit_direct_ids.contains(&candidate.candidate_id) =>
             {
                 explicit_reversible_memory_candidate_ids.push(candidate.candidate_id.clone());
@@ -3100,8 +3113,8 @@ pub enum ContextSourceKind {
     SkillMetadata,
     SkillInstruction,
     Observation,
+    LifeModelContext,
     HsSummary,
-    AcceptedGuidance,
     LifeModelYaml,
     RawMemorySnippet,
 }
@@ -3120,8 +3133,8 @@ impl ContextSourceKind {
             Self::SkillMetadata => "skill_metadata",
             Self::SkillInstruction => "skill_instruction",
             Self::Observation => "observation",
+            Self::LifeModelContext => "life_model_context",
             Self::HsSummary => "hs_summary",
-            Self::AcceptedGuidance => "accepted_guidance",
             Self::LifeModelYaml => "life_model_yaml",
             Self::RawMemorySnippet => "raw_memory_snippet",
         }
@@ -3357,6 +3370,12 @@ impl ExecutionPolicy {
             return policy_decision(
                 MainChatPolicyLevel::L4ExternalWrite,
                 "unselected_skill_not_injected",
+            );
+        }
+        if action.action_type == "lifemodel.learning_candidate.capture" {
+            return policy_decision(
+                MainChatPolicyLevel::L1GovernedProposalCreate,
+                "governed_learning_candidate_capture_allowed",
             );
         }
         if contains_any(
@@ -3606,7 +3625,7 @@ pub const PRE_DISPATCH_PERSISTENCE_FAILURE_KIND: &str =
     "durable_event_store_unavailable_before_dispatch";
 const TASK_SESSION_PAYLOAD_VERSION: i64 = 2;
 const TASK_SESSION_CANONICAL_OWNER_VERSION: u64 = 1;
-const TRANSCRIPT_PAYLOAD_VERSION: i64 = 2;
+const TRANSCRIPT_PAYLOAD_VERSION: i64 = 3;
 const TASK_SESSION_V2_PHYSICAL_PURGE_MARKER: &str =
     "task_session_transcript_v2_physical_purge_complete";
 const MAX_TASK_SESSION_METADATA_ITEMS: usize = 512;
@@ -4077,6 +4096,15 @@ impl AgentTaskSessionStore {
             )",
             [],
         )?;
+        // `review_maturation` was a temporary product blocker, not a durable
+        // Agent capability. Preserve old task rows as blocked history while
+        // removing the retired strategy from the executable type system.
+        conn.execute(
+            "UPDATE agent_task_sessions
+             SET selected_strategy = 'blocked_confirmation'
+             WHERE selected_strategy = 'review_maturation'",
+            [],
+        )?;
         add_sqlite_column_if_missing(&conn, "agent_task_sessions", "user_goal_ref", "TEXT")?;
         add_sqlite_column_if_missing(
             &conn,
@@ -4098,7 +4126,7 @@ impl AgentTaskSessionStore {
                 summary TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT 'null',
                 created_at TEXT NOT NULL,
-                payload_minimized_version INTEGER NOT NULL DEFAULT 2
+                payload_minimized_version INTEGER NOT NULL DEFAULT 3
             )",
             [],
         )?;
@@ -4316,7 +4344,8 @@ impl AgentTaskSessionStore {
                 legacy_transcript_entries
             {
                 let kind = ExecutionTranscriptEntryKind::from_db_str(&kind, 2)?;
-                let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap_or(Value::Null);
+                let metadata = serde_json::from_str::<Value>(&metadata_json)
+                    .context("invalid legacy transcript metadata")?;
                 let minimized = minimize_transcript_metadata(
                     &metadata,
                     self.receipt_key.as_ref(),
@@ -11121,9 +11150,6 @@ fn transcript_metadata_field_value_allowed(
         "fileWritten",
         "fixtureBacked",
         "hardBlocked",
-        "hsContextAvailable",
-        "hsPacketSelected",
-        "hsRawLifeModelYamlIncluded",
         "kernelBackedPlanExecuteDraft",
         "kernelBackedProposalOnlyWrite",
         "kernelBackedReadOnlyToolLoop",
@@ -11214,10 +11240,7 @@ fn transcript_metadata_field_value_allowed(
             code.len() <= 96 && safe_typed_session_identifier(code) && !code.starts_with("hmac-")
         });
     }
-    if matches!(
-        field,
-        "sources" | "hsWarningCodes" | "toolSelectionCandidateCapabilityLabels"
-    ) {
+    if matches!(field, "sources" | "toolSelectionCandidateCapabilityLabels") {
         return value.as_array().is_some_and(|items| {
             items.len() <= MAX_TASK_SESSION_METADATA_ITEMS
                 && items
@@ -11228,7 +11251,7 @@ fn transcript_metadata_field_value_allowed(
     false
 }
 
-fn transcript_metadata_v2_is_valid(kind: ExecutionTranscriptEntryKind, value: &Value) -> bool {
+fn current_transcript_metadata_is_valid(kind: ExecutionTranscriptEntryKind, value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.iter().all(|(field, value)| match field.as_str() {
             "summaryCode" => value.as_str().is_some_and(|code| {
@@ -11285,7 +11308,7 @@ fn row_to_transcript_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Executio
     let summary: String = row.get(3)?;
     if minimized_version != TRANSCRIPT_PAYLOAD_VERSION
         || summary != transcript_summary_code(kind)
-        || !transcript_metadata_v2_is_valid(kind, &metadata)
+        || !current_transcript_metadata_is_valid(kind, &metadata)
     {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             6,
@@ -11690,7 +11713,6 @@ pub struct MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence {
     pub kernel_proposal_write_case_count: u32,
     pub kernel_plan_execute_case_count: u32,
     pub kernel_blocker_case_count: u32,
-    pub kernel_hs_context_case_count: u32,
     pub kernel_web_tool_case_count: u32,
     pub kernel_mcp_tool_case_count: u32,
     pub final_completion_ready: bool,
@@ -12030,9 +12052,6 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
     if command.kernel_blocker_case_count == 0 {
         push_unique_blocker(&mut blockers, "command_surface_kernel_blocker_missing");
     }
-    if command.kernel_hs_context_case_count == 0 {
-        push_unique_blocker(&mut blockers, "command_surface_kernel_hs_context_missing");
-    }
     if command.kernel_web_tool_case_count == 0 {
         push_unique_blocker(&mut blockers, "command_surface_kernel_web_tool_missing");
     }
@@ -12085,7 +12104,6 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
         && command.kernel_proposal_write_case_count > 0
         && command.kernel_plan_execute_case_count > 0
         && command.kernel_blocker_case_count > 0
-        && command.kernel_hs_context_case_count > 0
         && command.kernel_web_tool_case_count > 0
         && command.kernel_mcp_tool_case_count > 0
         && command.final_completion_ready;
@@ -12503,10 +12521,10 @@ pub fn main_chat_runtime_eval_cases() -> Vec<MainChatRuntimeEvalCase> {
                 ),
                 7 => runtime_eval_case(
                     id,
-                    "review maturation runtime",
-                    &format!("Review my recent energy pattern evidence case {id}."),
-                    MainChatAgentStrategy::ReviewMaturation,
-                    true,
+                    "explicit lifemodel read runtime",
+                    &format!("What is recorded in my Life Model case {id}?"),
+                    MainChatAgentStrategy::DirectAnswer,
+                    false,
                     false,
                     false,
                     false,
@@ -13046,7 +13064,6 @@ fn run_one_main_chat_runtime_eval_case(
         | MainChatAgentStrategy::PlanExecute
         | MainChatAgentStrategy::TransientStateCommand
         | MainChatAgentStrategy::ReversibleMemoryCommit
-        | MainChatAgentStrategy::ReviewMaturation
         | MainChatAgentStrategy::BlockedConfirmation => {
             for action in runtime_eval_actions_for_strategy(decision.selected_strategy, &case.input)
             {
@@ -13811,18 +13828,26 @@ fn runtime_eval_provider_route_observation(
     let mut router = crate::agent::ModelRouter::new();
     seed_runtime_eval_model_router(&mut router);
 
-    let route = if decision.privacy_risk.local_only_required {
-        let packet = runtime_eval_local_only_hs_packet(case, task_session_id);
-        router
-            .route_with_hs_packet(crate::agent::TaskType::Chat, false, &packet)
-            .map_err(|err| {
-                runtime_eval_failure(case, "provider_local_only_route_failed", &err.to_string())
-            })?
-    } else {
-        router
-            .route(crate::agent::TaskType::Chat, false, None)
-            .map_err(|err| runtime_eval_failure(case, "provider_route_failed", &err.to_string()))?
-    };
+    let route = router
+        .route(
+            crate::agent::TaskType::Chat,
+            false,
+            decision
+                .privacy_risk
+                .local_only_required
+                .then_some(crate::agent::PrivacyRequirement::Critical),
+        )
+        .map_err(|err| {
+            runtime_eval_failure(
+                case,
+                if decision.privacy_risk.local_only_required {
+                    "provider_local_only_route_failed"
+                } else {
+                    "provider_route_failed"
+                },
+                &err.to_string(),
+            )
+        })?;
 
     let local_only_provider_guard_exercised = if decision.privacy_risk.local_only_required {
         if route.provider != "ollama"
@@ -13896,40 +13921,6 @@ fn seed_runtime_eval_model_router(router: &mut crate::agent::ModelRouter) {
             health_is_estimated: false,
         },
     );
-}
-
-fn runtime_eval_local_only_hs_packet(
-    case: &MainChatRuntimeEvalCase,
-    task_session_id: &str,
-) -> crate::agent::RuntimeHSPacket {
-    crate::agent::RuntimeHSPacket {
-        selected_policies: vec![crate::agent::SelectedPolicyRef {
-            policy_id: crate::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
-            reason: "runtime_eval_sensitive_local_only".into(),
-            route: Some(crate::agent::ModelRoutePolicy::LocalOnly),
-            digest: format!("runtime-eval-local-only-{}", case.id),
-        }],
-        selected_heuristics: vec![],
-        guidance_refs: vec![],
-        estimated_tokens: 0,
-        audit: crate::agent::HSSelectionAudit {
-            agent_task_id: Some(task_session_id.into()),
-            agent_run_id: None,
-            input_digest: format!("runtime-eval-input-{}", case.id),
-            selected_policy_ids: vec![
-                crate::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()
-            ],
-            selected_heuristic_ids: vec![],
-            selected_guidance_ids: vec![],
-            selected_guidance_refs: vec![],
-            excluded_assets: vec![],
-            estimated_tokens: 0,
-            token_budget: 128,
-        },
-        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-            crate::llm::ProviderLocalOnlyReason::TestFixture,
-        ),
-    }
 }
 
 struct RuntimeEvalTempRoot(std::path::PathBuf);
@@ -14433,10 +14424,8 @@ fn runtime_eval_multi_step_agent_loop_observation(
         )
     })?;
 
-    let life_model = crate::life_model::LifeModel::default();
     let scheduler = crate::scheduler::InferenceScheduler::default();
-    let runtime =
-        crate::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &Default::default());
+    let runtime = crate::agent::AgentRuntime::new(scheduler.clone(), &Default::default());
     let agent_loop = crate::agent::AgentLoop::new(
         runtime,
         crate::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
@@ -14592,11 +14581,11 @@ fn runtime_eval_multi_step_agent_loop_observation(
     let result = runtime_eval_block_on(agent_loop.run_existing_with_provider_observer(
         crate::agent::AgentLoopRunRequest::new(
             &task,
-            &life_model,
             proof.tools_prompt,
             None,
             privacy_engine.clone(),
             &action_ctx,
+            crate::agent::RuntimePolicyContext::fail_closed(),
         ),
         canonical_run,
         &mut provider_progress,
@@ -14786,10 +14775,6 @@ fn runtime_eval_actions_for_strategy(
         MainChatAgentStrategy::ReversibleMemoryCommit => vec![ExecutionAction::new(
             "memory.explicit_write",
             "Runtime eval explicit reversible Memory commit",
-        )],
-        MainChatAgentStrategy::ReviewMaturation => vec![ExecutionAction::new(
-            "review.maturation_read",
-            "Runtime eval metadata-safe review",
         )],
         MainChatAgentStrategy::BlockedConfirmation => vec![ExecutionAction::new(
             "external.write",
@@ -15285,9 +15270,9 @@ pub fn first_40_seed_eval_cases() -> Vec<MainChatEvalCase> {
         ),
         router_case(
             6,
-            "working style review",
-            "Review what changed in my working style this month.",
-            MainChatAgentStrategy::ReviewMaturation,
+            "lifemodel explicit read",
+            "What communication preference is recorded in my Life Model?",
+            MainChatAgentStrategy::DirectAnswer,
         ),
         router_case(
             7,
@@ -15531,9 +15516,9 @@ pub fn legacy_100_scaffold_eval_cases() -> Vec<MainChatEvalCase> {
         ),
         router_case(
             49,
-            "maturation route",
-            "Review my recent energy pattern evidence.",
-            MainChatAgentStrategy::ReviewMaturation,
+            "lifemodel overview route",
+            "Show what is in my Life Model.",
+            MainChatAgentStrategy::DirectAnswer,
         ),
         router_case(
             50,
@@ -16551,6 +16536,14 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             "trash file",
             "move to trash",
             "restore file",
+            "propose an edit",
+            "propose edit",
+            "edit a knowledge asset",
+            "edit knowledge asset",
+            "edit agents.md",
+            "edit soul.md",
+            "edit user.md",
+            "edit memory.md",
             "写入工作区",
             "写入文件",
             "创建文件",
@@ -16562,6 +16555,8 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             "回收文件",
             "移到废纸篓",
             "恢复文件",
+            "修改知识资产",
+            "提议修改",
         ],
     );
     let named_file_write =
@@ -16749,20 +16744,6 @@ fn is_unselected_skill_boundary_intent(lower: &str) -> bool {
             "not selected skill",
             "未选择的 skill",
             "未选择技能",
-        ],
-    )
-}
-
-fn is_review_maturation_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "review what changed",
-            "working style",
-            "this month",
-            "maturation",
-            "energy pattern evidence",
-            "review my recent",
         ],
     )
 }
@@ -17025,6 +17006,73 @@ fn stable_id(prefix: &str, parts: &[&str]) -> String {
 
 fn digest_hex(content: &str) -> String {
     stable_id("digest", &[content])
+}
+
+#[cfg(test)]
+mod explicit_lifemodel_read_policy_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_lifemodel_read_is_direct_and_cannot_gain_write_capability() {
+        let decision = AgentIngress::default().decide(
+            "lifemodel-v2-explicit-read-policy",
+            "我的 Life Model 记录了什么沟通偏好？",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::DirectAnswer
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+        assert_eq!(
+            decision.policy_decision.reason_code,
+            "explicit_lifemodel_v2_read"
+        );
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::LifeModelProposal));
+        assert!(!decision.intent_frame.requests_durable_write);
+    }
+
+    #[test]
+    fn lifemodel_update_keeps_proposal_only_priority_over_read_words() {
+        let decision = AgentIngress::default().decide(
+            "lifemodel-v2-write-policy",
+            "Show me and update my LifeModel: communication style is concise.",
+            None,
+            AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::LifeModelProposal
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+    }
+
+    #[test]
+    fn ordinary_reflection_question_no_longer_routes_to_retired_maturation_blocker() {
+        let decision = AgentIngress::default().decide(
+            "ordinary-reflection-after-maturation-retirement",
+            "Review what changed in my working style this month.",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::DirectAnswer
+        );
+        assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+        assert_ne!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::Blocked
+        );
+    }
 }
 
 #[cfg(test)]
@@ -17469,6 +17517,7 @@ mod session_content_minimization_tests {
     use super::*;
 
     const SESSION_PAYLOAD_VERSION_V2: i64 = 2;
+    const TRANSCRIPT_PAYLOAD_VERSION_V3: i64 = 3;
 
     #[test]
     fn task_session_and_transcript_persist_only_canonical_ref_and_keyed_receipts() {
@@ -17896,7 +17945,7 @@ mod session_content_minimization_tests {
         assert!(session_payload.contains("tool_permission_required"));
         assert!(session_payload.contains("mainchat_ctx_deadbeef"));
         assert_eq!(session_version, SESSION_PAYLOAD_VERSION_V2);
-        assert_eq!(transcript_version, SESSION_PAYLOAD_VERSION_V2);
+        assert_eq!(transcript_version, TRANSCRIPT_PAYLOAD_VERSION_V3);
     }
 
     #[test]
@@ -17954,7 +18003,7 @@ mod session_content_minimization_tests {
     }
 
     #[test]
-    fn task_session_and_transcript_v2_migration_physically_purges_legacy_bodies() {
+    fn task_session_v2_and_transcript_v3_migration_physically_purges_legacy_bodies() {
         const LEGACY_SENTINEL: &str = "LEGACY_TASK_SESSION_TRANSCRIPT_BODY_SENTINEL";
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("task-session-v1-physical-purge.db");
@@ -18025,7 +18074,7 @@ mod session_content_minimization_tests {
             .unwrap();
         assert_eq!(
             versions,
-            (SESSION_PAYLOAD_VERSION_V2, SESSION_PAYLOAD_VERSION_V2)
+            (SESSION_PAYLOAD_VERSION_V2, TRANSCRIPT_PAYLOAD_VERSION_V3)
         );
         drop(conn);
         drop(migrated);
@@ -18042,6 +18091,147 @@ mod session_content_minimization_tests {
                     .any(|window| window == LEGACY_SENTINEL.as_bytes()));
             }
         }
+    }
+
+    #[test]
+    fn transcript_v2_hs_metadata_is_minimized_during_v3_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript-v2-hs-metadata.db");
+        let key = AgentRunReceiptKey::from_bytes([0x75; 32]).unwrap();
+        let store = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "transcript-v2-hs-metadata-chat".into(),
+                user_goal: "verify retired HS metadata migration".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .unwrap();
+        let entry = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::FollowUp,
+                summary: "historical follow-up".into(),
+                metadata: serde_json::json!({
+                    "modelGenerated": true,
+                    "providerEndpointKind": "local_openai_compatible"
+                }),
+            })
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            let metadata_json: String = conn
+                .query_row(
+                    "SELECT metadata_json FROM execution_transcript_entries WHERE id = ?1",
+                    [&entry.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut metadata = serde_json::from_str::<Value>(&metadata_json).unwrap();
+            let object = metadata.as_object_mut().unwrap();
+            object.insert("hsContextAvailable".into(), false.into());
+            object.insert("hsPacketSelected".into(), false.into());
+            object.insert("hsWarningCodes".into(), serde_json::json!([]));
+            conn.execute(
+                "UPDATE execution_transcript_entries
+                 SET metadata_json = ?2, payload_minimized_version = 2
+                 WHERE id = ?1",
+                params![entry.id, serde_json::to_string(&metadata).unwrap()],
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let migrated = AgentTaskSessionStore::new_with_receipt_key(&path, key).unwrap();
+        let conn = migrated.conn.lock().unwrap();
+        let (metadata_json, version): (String, i64) = conn
+            .query_row(
+                "SELECT metadata_json, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap();
+        assert_eq!(version, TRANSCRIPT_PAYLOAD_VERSION);
+        let schema_default: String = conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('execution_transcript_entries')
+                 WHERE name = 'payload_minimized_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_default, TRANSCRIPT_PAYLOAD_VERSION.to_string());
+        assert_eq!(metadata["modelGenerated"], true);
+        assert_eq!(metadata["providerEndpointKind"], "local_openai_compatible");
+        assert!(metadata.get("hsContextAvailable").is_none());
+        assert!(metadata.get("hsPacketSelected").is_none());
+        assert!(metadata.get("hsWarningCodes").is_none());
+        assert!(metadata
+            .get("defaultDeniedMetadataReceipt")
+            .and_then(Value::as_str)
+            .is_some_and(is_exact_hmac_receipt));
+    }
+
+    #[test]
+    fn transcript_v2_malformed_metadata_fails_closed_without_mutation() {
+        const MALFORMED_METADATA: &str = "{malformed-transcript-v2-metadata";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript-v2-malformed-metadata.db");
+        let key = AgentRunReceiptKey::from_bytes([0x76; 32]).unwrap();
+        let store = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "transcript-v2-malformed-metadata-chat".into(),
+                user_goal: "verify malformed transcript migration fails closed".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .unwrap();
+        let entry = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::FollowUp,
+                summary: "historical follow-up".into(),
+                metadata: serde_json::json!({"modelGenerated": true}),
+            })
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE execution_transcript_entries
+                 SET metadata_json = ?2, payload_minimized_version = 2
+                 WHERE id = ?1",
+                params![entry.id, MALFORMED_METADATA],
+            )
+            .unwrap();
+        drop(store);
+
+        let error = AgentTaskSessionStore::new_with_receipt_key(&path, key)
+            .err()
+            .expect("malformed v2 transcript metadata must fail closed")
+            .to_string();
+        assert!(
+            error.contains("invalid legacy transcript metadata"),
+            "{error}"
+        );
+
+        let raw = Connection::open(&path).unwrap();
+        let (metadata_json, version): (String, i64) = raw
+            .query_row(
+                "SELECT metadata_json, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(metadata_json, MALFORMED_METADATA);
+        assert_eq!(version, 2, "failed migration must not claim v3 completion");
     }
 
     #[test]
@@ -18351,7 +18541,6 @@ mod session_content_minimization_tests {
             MainChatAgentStrategy::MemoryProposal,
             MainChatAgentStrategy::LifeModelProposal,
             MainChatAgentStrategy::FileWriteProposal,
-            MainChatAgentStrategy::ReviewMaturation,
             MainChatAgentStrategy::BlockedConfirmation,
         ];
         let statuses = [
@@ -18442,6 +18631,46 @@ mod session_content_minimization_tests {
                 .expect("transcript fixture exists");
             assert_eq!(loaded.kind, kind);
         }
+    }
+
+    #[test]
+    fn retired_review_maturation_rows_migrate_to_blocked_history() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("agent-sessions.db");
+        let session_id = {
+            let store = AgentTaskSessionStore::new(&db_path).expect("task session store");
+            let session = store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "retired-maturation-history".into(),
+                    user_goal: "historical row".into(),
+                    selected_strategy: MainChatAgentStrategy::BlockedConfirmation,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create historical session");
+            store
+                .conn
+                .lock()
+                .expect("session database")
+                .execute(
+                    "UPDATE agent_task_sessions
+                     SET selected_strategy = 'review_maturation'
+                     WHERE id = ?1",
+                    [&session.id],
+                )
+                .expect("seed retired strategy");
+            session.id
+        };
+
+        let reopened = AgentTaskSessionStore::new(&db_path).expect("reopen and migrate");
+        let migrated = reopened
+            .load_session(&session_id)
+            .expect("load migrated session")
+            .expect("migrated session exists");
+        assert_eq!(
+            migrated.selected_strategy,
+            MainChatAgentStrategy::BlockedConfirmation
+        );
     }
 }
 

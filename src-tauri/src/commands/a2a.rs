@@ -364,13 +364,9 @@ async fn a2a_send_task_with_state(
 
 #[tauri::command]
 pub async fn a2a_local_agent_card(state: State<'_, Arc<AppState>>) -> Result<AgentCard, AppError> {
-    let model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
+    let _ = state;
     Ok(A2AServerHandler::default_agent_card(
         crate::a2a_server::configured_a2a_port(),
-        &model,
     ))
 }
 
@@ -380,15 +376,8 @@ pub async fn a2a_handle_task(
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, AppError> {
     let req: SendTaskRequest = serde_json::from_str(&request_json).map_err(AppError::from)?;
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
     let privacy_engine = state.privacy_engine.lock().await.clone();
-    let handler = A2AServerHandler {
-        life_model,
-        privacy_engine,
-    };
+    let handler = A2AServerHandler { privacy_engine };
     let resp = handler.handle_task(req).await;
     serde_json::to_string(&resp).map_err(AppError::from)
 }
@@ -407,15 +396,8 @@ pub async fn a2a_bridge_local(
         session_id: session_id.clone().unwrap_or_default(),
     };
     let a2a_req = reasoning_input_to_a2a_task(&req, skill.as_deref(), None);
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
     let privacy_engine = state.privacy_engine.lock().await.clone();
-    let handler = A2AServerHandler {
-        life_model,
-        privacy_engine,
-    };
+    let handler = A2AServerHandler { privacy_engine };
     let resp = handler.handle_task(a2a_req).await;
     let reasoning_result = a2a_response_to_reasoning_result(&resp).map_err(AppError::from)?;
     let bridge_preview = reasoning_input_to_a2a_task(

@@ -113,6 +113,7 @@ fn shipped_main_chat_debug_contract_redacts_message_reasoning_and_tool_bodies() 
         provider_invocation_status: crate::main_chat_turn_runtime::ProviderInvocationState::Failed,
         model_invoked: true,
         tool_invoked: true,
+        life_model_influence: None,
         turn_terminal: None,
     };
     let result_debug = format!("{result:?}");
@@ -175,6 +176,7 @@ fn shipped_execution_transcript_projects_timeline_without_keyed_authority() {
             crate::main_chat_turn_runtime::ProviderInvocationState::NotAttempted,
         model_invoked: false,
         tool_invoked: false,
+        life_model_influence: None,
         turn_terminal: None,
     };
 
@@ -262,7 +264,6 @@ fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
         "start_stream_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_allowed_manifest",
         "send_message_missing_workspace_file_source_records_kernel_blocked_read_evidence",
-        "main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy",
         "main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix",
     ] {
         assert!(
@@ -2313,7 +2314,6 @@ async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix()
     assert!(report.kernel_proposal_write_case_count > 0);
     assert!(report.kernel_plan_execute_case_count > 0);
     assert!(report.kernel_blocker_case_count > 0);
-    assert!(report.kernel_hs_context_case_count > 0);
     assert!(report.kernel_web_tool_case_count > 0);
     assert!(report.kernel_mcp_tool_case_count > 0);
     assert_eq!(
@@ -3236,7 +3236,7 @@ async fn main_chat_kernel_chinese_memory_proposal_send_stream() {
 }
 
 #[tokio::test]
-async fn main_chat_kernel_chinese_lifemodel_proposal_send_stream() {
+async fn main_chat_kernel_chinese_procedural_rule_routes_to_agent_memory_send_stream() {
     let user_text = "以后早上安排工作前先确认我有没有吃东西";
 
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -3252,35 +3252,43 @@ async fn main_chat_kernel_chinese_lifemodel_proposal_send_stream() {
     .await;
     assert_eq!(
         send_response["agent_ingress"]["selectedStrategy"],
-        "life_model_proposal"
+        "memory_proposal"
     );
     let generation = &send_response["reasoning_trace"]["generation_result"];
     assert_eq!(
-        generation["memoryGovernance"]["lifeModelProposalIds"]
+        generation["memoryGovernance"]["memoryProposalIds"]
             .as_array()
-            .expect("lifemodel proposal ids")
+            .expect("memory proposal ids")
             .len(),
         1
     );
-    assert!(generation["memoryGovernance"]["memoryProposalIds"]
+    assert!(generation["memoryGovernance"]["lifeModelProposalIds"]
         .as_array()
-        .expect("memory proposal ids")
+        .expect("lifemodel proposal ids")
         .is_empty());
     let task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
-        .expect("lifemodel task id");
+        .expect("memory task id");
     let proposal = find_command_surface_proposal_for_task(
         &send_state,
         task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
+        openlife_core::agent::ProposalType::MemoryWrite,
     )
     .await;
     assert_eq!(
         proposal
             .after
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(|content| content.contains("早上安排工作前先确认我有没有吃东西")),
+        Some(true)
+    );
+    assert_eq!(
+        proposal
+            .after
             .get("directLifeModelWrite")
             .and_then(serde_json::Value::as_bool),
-        Some(false)
+        None
     );
     let model_after = {
         let manager = send_state.life_model_manager.lock().await;
@@ -3300,11 +3308,18 @@ async fn main_chat_kernel_chinese_lifemodel_proposal_send_stream() {
     .await;
     assert_eq!(
         stream_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["memoryProposalIds"]
+            .as_array()
+            .expect("stream memory proposal ids")
+            .len(),
+        1
+    );
+    assert!(
+        stream_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
             ["lifeModelProposalIds"]
             .as_array()
             .expect("stream lifemodel proposal ids")
-            .len(),
-        1
+            .is_empty()
     );
 }
 
@@ -3324,7 +3339,7 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
     assert_eq!(send_response["legacy_fallback_used"], false);
     assert_eq!(
         send_response["agent_ingress"]["selectedStrategy"],
-        "life_model_proposal"
+        "memory_proposal"
     );
     let generation = &send_response["reasoning_trace"]["generation_result"];
     assert_eq!(generation["kernelBackedMemoryGovernance"], true);
@@ -3349,14 +3364,14 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .as_array()
             .expect("memory proposal ids")
             .len(),
-        1
+        2
     );
     assert_eq!(
         memory_governance["lifeModelProposalIds"]
             .as_array()
             .expect("lifemodel proposal ids")
             .len(),
-        1
+        0
     );
     let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
@@ -3384,23 +3399,11 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
     assert!(send_memory_content.contains("空腹喝咖啡"));
     assert!(send_memory_content.contains("心慌"));
     assert!(!send_memory_content.contains("帮我记下来"));
-    let lifemodel_proposal = find_command_surface_proposal_for_task(
-        &send_state,
-        send_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
-    assert_eq!(
-        lifemodel_proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
-    );
-    assert_eq!(
-        lifemodel_proposal
-            .after
-            .get("directLifeModelWrite")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
+    assert!(list_command_surface_proposals(&send_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
     assert!(list_command_surface_life_events(&send_state)
         .await
         .is_empty());
@@ -3452,14 +3455,14 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .as_array()
             .expect("stream memory proposal ids")
             .len(),
-        1
+        2
     );
     assert_eq!(
         stream_generation["memoryGovernance"]["lifeModelProposalIds"]
             .as_array()
             .expect("stream lifemodel proposal ids")
             .len(),
-        1
+        0
     );
     let stream_proposal = find_command_surface_proposal_for_task(
         &stream_state,
@@ -3471,16 +3474,11 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
         stream_proposal.status,
         openlife_core::agent::ProposalStatus::Pending
     );
-    let stream_lifemodel_proposal = find_command_surface_proposal_for_task(
-        &stream_state,
-        &stream_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
-    assert_eq!(
-        stream_lifemodel_proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
-    );
+    assert!(list_command_surface_proposals(&stream_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
     let stream_memory_content = stream_proposal
         .after
         .get("content")
@@ -3540,8 +3538,8 @@ async fn main_chat_kernel_chinese_arrange_today_work_not_lifemodel() {
 }
 
 #[tokio::test]
-async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_only() {
-    let user_text = "Update my life model: I am switching careers toward design lead.";
+async fn main_chat_explicit_lifemodel_preference_send_stream_creates_learning_candidate_only() {
+    let user_text = "Update my life model: communication style is concise and direct.";
 
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let model_before = {
@@ -3569,35 +3567,55 @@ async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_o
             .as_array()
             .expect("lifemodel proposal ids")
             .len(),
+        0
+    );
+    assert_eq!(
+        send_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["lifeModelLearningCandidateIds"]
+            .as_array()
+            .expect("lifemodel learning candidate ids")
+            .len(),
         1
     );
-    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
-        .as_str()
-        .expect("send lifemodel proposal task session id");
-    let proposal = find_command_surface_proposal_for_task(
-        &send_state,
-        send_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
-    )
-    .await;
     assert_eq!(
-        proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
+        send_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["directLifeModelWrite"],
+        false
     );
     assert_eq!(
-        proposal
-            .after
-            .get("directLifeModelWrite")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
+        send_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["acceptedDurableTruthWritten"],
+        false
     );
+    assert!(list_command_surface_proposals(&send_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
+    let send_candidates = {
+        let store = send_state
+            .life_model_learning_store
+            .as_ref()
+            .expect("send learning store")
+            .lock()
+            .await;
+        store
+            .list_active_candidates("workspace:default", 20)
+            .expect("list send learning candidates")
+    };
+    assert_eq!(send_candidates.len(), 1);
     assert_eq!(
-        proposal
-            .after
-            .get("acceptedDurableTruthWritten")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
+        send_candidates[0].section,
+        openlife_core::life_model::v2::LifeModelSectionV2::CollaborationPreferences
     );
+    assert_eq!(send_candidates[0].summary, "concise and direct");
+    assert!(send_response["agent_state"]["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| {
+            action["actionType"] == "lifemodel.learning_candidate.capture"
+                && action["status"] == "succeeded"
+                && action["riskLevel"] == "local_low_risk"
+        })));
     let model_after = {
         let manager = send_state.life_model_manager.lock().await;
         manager.load().expect("load life model after")
@@ -3614,21 +3632,115 @@ async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_o
         user_text,
     )
     .await;
-    let stream_task_session_id = task_session_id_from_response(&stream_response);
-    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
     assert_eq!(
-        stream_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        stream_response["reasoning_trace"]["generation_result"]["memoryGovernance"]
+            ["lifeModelLearningCandidateIds"]
+            .as_array()
+            .expect("stream lifemodel learning candidate ids")
+            .len(),
+        1
     );
-    let stream_proposal = find_command_surface_proposal_for_task(
-        &stream_state,
-        &stream_task_session_id,
-        openlife_core::agent::ProposalType::LifeModelUpdate,
+    assert!(list_command_surface_proposals(&stream_state)
+        .await
+        .into_iter()
+        .all(|proposal| proposal.proposal_type
+            != openlife_core::agent::ProposalType::LifeModelUpdate));
+    let stream_candidates = {
+        let store = stream_state
+            .life_model_learning_store
+            .as_ref()
+            .expect("stream learning store")
+            .lock()
+            .await;
+        store
+            .list_active_candidates("workspace:default", 20)
+            .expect("list stream learning candidates")
+    };
+    assert_eq!(stream_candidates.len(), 1);
+}
+
+#[tokio::test]
+async fn explicit_lifemodel_v2_read_uses_confirmed_version_across_new_sessions_without_provider() {
+    use openlife_core::life_model::v2::{
+        LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+    };
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let item = LifeModelUserValueV2::Statement {
+        statement: "Prefer concise updates with the conclusion first.".into(),
+    }
+    .into_item(
+        "learning:communication".into(),
+        vec![
+            "proposal:review-read-1".into(),
+            "lifemodel-learning-candidate:candidate-read-1".into(),
+            "lifemodel-learning-observation:observation-read-1".into(),
+        ],
+        "2026-08-09T08:00:00Z".into(),
+    );
+    let diff = LifeModelTypedDiffV2::from_operations_for_review(
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        None,
+        vec![LifeModelTypedOperationV2::Add {
+            section: LifeModelSectionV2::CollaborationPreferences,
+            item,
+        }],
+        true,
     )
-    .await;
+    .unwrap();
+    state
+        .life_model_manager
+        .lock()
+        .await
+        .materialize_reviewed_v2_typed_diff(
+            &diff,
+            "review-read-1",
+            &[
+                "lifemodel-learning-candidate:candidate-read-1".into(),
+                "lifemodel-learning-observation:observation-read-1".into(),
+            ],
+            "2026-08-09T08:00:01Z",
+        )
+        .unwrap();
+
+    for session_id in ["lifemodel-read-session-one", "lifemodel-read-session-two"] {
+        let response = invoke_send_message_for_kernel_goal_3(
+            state.clone(),
+            session_id,
+            "我的 Life Model 记录了什么沟通偏好？",
+        )
+        .await;
+        assert_eq!(
+            response["agent_ingress"]["selectedStrategy"],
+            "direct_answer"
+        );
+        assert!(
+            response["agent_ingress"]["policyDecision"]["allowedCapabilities"]
+                .as_array()
+                .is_some_and(|capabilities| capabilities
+                    .iter()
+                    .all(|capability| capability != "provider_generation"))
+        );
+        assert_eq!(response["model_invoked"], false);
+        assert_eq!(response["tool_invoked"], false);
+        let reply = response["reply"].as_str().unwrap();
+        assert!(reply.contains("Life Model v2 第 1 版"));
+        assert!(reply.contains("Prefer concise updates with the conclusion first."));
+        assert!(reply.contains("proposal:review-read-1"));
+        assert!(reply.contains("使用原因"));
+        assert!(reply.contains("没有写入任何内容"));
+    }
     assert_eq!(
-        stream_proposal.status,
-        openlife_core::agent::ProposalStatus::Pending
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap()
+            .unwrap()
+            .model_version,
+        1
     );
 }
 
@@ -8493,92 +8605,6 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
 }
 
 #[tokio::test]
-async fn main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy(
-) {
-    let user_text = "Review what changed in my working style this month.";
-    let expected_blocker = "review_maturation_kernel_executor_unavailable";
-
-    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let send_response = invoke_send_message_for_kernel_goal_3(
-        send_state.clone(),
-        "k3-send-review-maturation",
-        user_text,
-    )
-    .await;
-    assert_eq!(send_response["legacy_fallback_used"], false);
-    assert_eq!(
-        send_response["agent_ingress"]["selectedStrategy"],
-        "review_maturation"
-    );
-    assert!(send_response["tool_calls"]
-        .as_array()
-        .is_some_and(Vec::is_empty));
-    assert!(send_response["reply"]
-        .as_str()
-        .is_some_and(|reply| reply.contains(expected_blocker)));
-    let generation = &send_response["reasoning_trace"]["generation_result"];
-    assert_eq!(generation["selectedStrategy"], "review_maturation");
-    assert_eq!(generation["legacyFallbackUsed"], false);
-    assert_eq!(generation["directWritesExecuted"], false);
-    assert_eq!(generation["kernelBackedGovernedBlocker"], true);
-    assert_eq!(generation["kernelSupportDisposition"], "governed_blocker");
-    assert!(generation["blockers"]
-        .as_array()
-        .is_some_and(|blockers| blockers.iter().any(|blocker| blocker == expected_blocker)));
-    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
-        .as_str()
-        .expect("send review task session id");
-    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
-    assert_eq!(
-        send_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-    );
-    assert!(send_session
-        .pending_blockers
-        .contains(&expected_blocker.to_string()));
-    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
-    assert!(send_actions.is_empty());
-    let send_transcript = list_command_surface_transcript(&send_state, send_task_session_id).await;
-    assert!(send_transcript.iter().any(|entry| {
-        entry.kind == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
-            && entry.summary == "error_state_recorded"
-    }));
-    assert!(!send_transcript.iter().any(|entry| {
-        entry.kind
-            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback
-    }));
-
-    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let stream_response = invoke_start_stream_message_for_kernel_goal_3(
-        stream_state.clone(),
-        "k3-stream-review-maturation",
-        user_text,
-    )
-    .await;
-    let stream_task_session_id = task_session_id_from_response(&stream_response);
-    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
-    assert_eq!(
-        stream_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-    );
-    assert!(stream_session
-        .pending_blockers
-        .contains(&expected_blocker.to_string()));
-    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
-    assert!(stream_actions.is_empty());
-    let stream_transcript =
-        list_command_surface_transcript(&stream_state, &stream_task_session_id).await;
-    assert!(stream_transcript.iter().any(|entry| {
-        entry.kind == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
-            && entry.summary == "error_state_recorded"
-    }));
-    assert!(!stream_transcript.iter().any(|entry| {
-        entry.kind
-            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback
-    }));
-}
-
-#[tokio::test]
 async fn send_message_missing_workspace_file_source_records_kernel_blocked_read_evidence() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
@@ -9608,9 +9634,46 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
 
 #[tokio::test]
 async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
+    use openlife_core::life_model::v2::{
+        LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
+        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+    };
+
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let confirmed_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    let item_id = format!("communication-{}", "x".repeat(120));
+    let source_ref = format!("message:user:{}", "s".repeat(140));
     for state in [&send_state, &stream_state] {
+        let item = LifeModelUserValueV2::Statement {
+            statement: "沟通保持简洁直接".into(),
+        }
+        .into_item(
+            item_id.clone(),
+            vec![source_ref.clone()],
+            confirmed_at.clone(),
+        );
+        let diff = LifeModelTypedDiffV2::from_operations_for_review(
+            DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+            None,
+            vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::CollaborationPreferences,
+                item,
+            }],
+            true,
+        )
+        .unwrap();
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .materialize_reviewed_v2_typed_diff(
+                &diff,
+                "review-send-stream-parity",
+                &[],
+                &confirmed_at,
+            )
+            .unwrap();
         set_command_surface_scripted_generation_response(
             state,
             "gpt-kernel-parity",
@@ -9620,7 +9683,7 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     }
     let messages = vec![openlife_core::llm::ChatMessage {
         role: "user".into(),
-        content: "Explain focused work in one concise paragraph for a teammate.".into(),
+        content: "Write a concise project status email for a teammate.".into(),
     }];
 
     let send_result = crate::main_chat_send::send_message_with_state(
@@ -9645,6 +9708,18 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     assert!(!send_terminal.single_step_fallback_used);
     assert!(!send_terminal.direct_writes_executed);
     let send_value = serde_json::to_value(&send_result).expect("serialize send parity result");
+    let reloaded_influence = crate::commands::chat::get_chat_life_model_influence_with_state(
+        "command-surface-kernel-parity-send",
+        &send_state,
+    )
+    .await
+    .expect("reload durable Life Model influence")
+    .expect("durable Life Model influence receipt");
+    assert_eq!(reloaded_influence.status, "completed");
+    assert_eq!(
+        Some(reloaded_influence.life_model_influence),
+        send_result.life_model_influence
+    );
 
     let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
     crate::main_chat_streaming::start_stream_message_with_state(
@@ -9664,6 +9739,34 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
         .expect("stream parity done event");
 
     assert_eq!(send_value["reply"], stream_done["reply"]);
+    assert_eq!(
+        send_value["life_model_influence"],
+        stream_done["life_model_influence"]
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["status"],
+        "applied_context_building"
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["selectedItems"][0]["itemRef"],
+        format!("collaboration_preferences:{item_id}")
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["selectedItems"][0]["statement"],
+        "沟通保持简洁直接"
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["selectedItems"][0]["sourceRefs"][0],
+        source_ref
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["permissionGranted"],
+        false
+    );
+    assert_eq!(
+        send_value["life_model_influence"]["durableWriteAuthorized"],
+        false
+    );
     assert_eq!(send_value["legacy_fallback_used"], false);
     assert_eq!(stream_done["legacy_fallback_used"], false);
     assert_eq!(

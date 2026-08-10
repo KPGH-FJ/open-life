@@ -7,7 +7,6 @@ use openlife_core::embedding::{
     execute_embedding, prepare_embedding_request_recorded, EmbeddingInvocationReceipt,
     EmbeddingProfile, EmbeddingRouteConfig, PreparedEmbeddingRequestOutcome,
 };
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemorySearchHit;
 use openlife_core::privacy::PrivacyEngine;
@@ -16,7 +15,7 @@ use openlife_core::vectors::{
     VectorSearchOutcome,
 };
 
-use crate::main_chat_hs_runtime::classify_hs_policy_topic;
+use crate::main_chat_policy_runtime::classify_main_chat_policy_topic;
 use crate::memory_gateway::{
     prepare_memory_search_access_telemetry, prepare_vector_search_access_telemetry,
     record_text_search_access_telemetry_with_state,
@@ -321,7 +320,6 @@ pub(crate) async fn preprocess_chat_input(
     state: &Arc<AppState>,
 ) -> Result<
     (
-        LifeModel,
         String,
         PrivacyEngine,
         HashMap<String, String>,
@@ -350,7 +348,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
     options: MainChatPreprocessOptions,
 ) -> Result<
     (
-        LifeModel,
         String,
         PrivacyEngine,
         HashMap<String, String>,
@@ -360,18 +357,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
     ),
     String,
 > {
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
-    };
-
-    {
-        let mut cache = state.hot_cache.write().await;
-        if cache.is_stale(&life_model) {
-            cache.refresh(&life_model);
-        }
-    }
-
     let tools_prompt = {
         let reg = state.mcp_registry.lock().await;
         reg.tools_prompt()
@@ -382,13 +367,13 @@ pub(crate) async fn preprocess_chat_input_with_options(
     let mut privacy_map = HashMap::new();
     for msg in messages {
         if msg.role == "user" {
-            let hs_local_only = classify_hs_policy_topic(&msg.content, &tools_prompt)
+            let policy_local_only = classify_main_chat_policy_topic(&msg.content, &tools_prompt)
                 != openlife_core::agent::PolicyTopic::General;
             let (masked, map) = sanitize_for_capability_privacy_mode(
                 &privacy_engine,
                 &msg.content,
                 options.capability_privacy_mode,
-                hs_local_only,
+                policy_local_only,
             );
             privacy_map.extend(map);
             let mut final_text = masked;
@@ -435,13 +420,14 @@ pub(crate) async fn preprocess_chat_input_with_options(
     };
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
-            let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
-                != openlife_core::agent::PolicyTopic::General;
+            let policy_local_only =
+                classify_main_chat_policy_topic(&user_msg.content, &tools_prompt)
+                    != openlife_core::agent::PolicyTopic::General;
             let (memory_query, _) = sanitize_for_capability_privacy_mode(
                 &privacy_engine,
                 &user_msg.content,
                 options.capability_privacy_mode,
-                hs_local_only,
+                policy_local_only,
             );
             let text_telemetry_ticket = prepare_memory_search_access_telemetry(state);
             let text_hits = {
@@ -453,8 +439,9 @@ pub(crate) async fn preprocess_chat_input_with_options(
                     })?
             };
 
-            let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
-                != openlife_core::agent::PolicyTopic::General;
+            let policy_local_only =
+                classify_main_chat_policy_topic(&user_msg.content, &tools_prompt)
+                    != openlife_core::agent::PolicyTopic::General;
             let vector_hits = match prepare_embedding_request_recorded(
                 &memory_query,
                 EmbeddingRouteConfig::from_product_config(
@@ -466,7 +453,7 @@ pub(crate) async fn preprocess_chat_input_with_options(
                     credential_version,
                     network_policy.clone(),
                 ),
-                plan_embedding_privacy(&memory_query, &privacy_engine, hs_local_only),
+                plan_embedding_privacy(&memory_query, &privacy_engine, policy_local_only),
             ) {
                 PreparedEmbeddingRequestOutcome::Rejected(outcome) => {
                     embed_err = Some(embedding_runtime_evidence(
@@ -634,20 +621,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
         String::new()
     };
 
-    let hot_context = {
-        let cache = state.hot_cache.read().await;
-        cache.to_context_string()
-    };
-    if !hot_context.is_empty() {
-        desensitized_messages.insert(
-            0,
-            ChatMessage {
-                role: "system".into(),
-                content: hot_context,
-            },
-        );
-    }
-
     if !memory_context.is_empty() {
         if let Some(last_user) = desensitized_messages.iter_mut().rfind(|m| m.role == "user") {
             last_user.content = format!("{}\n\n{}", last_user.content, memory_context);
@@ -655,13 +628,8 @@ pub(crate) async fn preprocess_chat_input_with_options(
     }
 
     let context_summary = openlife_core::agent::types::ContextSummary {
-        life_model_empty: life_model.identity.name.is_empty(),
-        included_life_model_sections: vec![
-            "identity".to_string(),
-            "goals".to_string(),
-            "capabilities".to_string(),
-            "state".to_string(),
-        ],
+        life_model_empty: true,
+        included_life_model_sections: Vec::new(),
         memory_hit_count: memory_hit_count as i64,
         memory_sources,
         used_tools_prompt: !tools_prompt.is_empty(),
@@ -674,7 +642,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
     };
 
     Ok((
-        life_model,
         tools_prompt,
         privacy_engine,
         privacy_map,
@@ -810,6 +777,7 @@ mod tests {
             source_run_id: None,
             content: content.to_string(),
             scope: MemoryLifecycleScope::Global,
+            scope_owner_ref: None,
             category: MemoryLifecycleCategory::Fact,
             risk_level: MemoryLifecycleRiskLevel::Low,
             sensitivity: MemoryLifecycleSensitivity::Internal,
@@ -1138,7 +1106,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let evidence = direct.5.expect("rebuild evidence must reach Main Chat");
+        let evidence = direct.4.expect("rebuild evidence must reach Main Chat");
         assert!(evidence.contains("rebuild_required"), "{evidence}");
         assert!(evidence.contains("\"unknownProfileCount\":1"), "{evidence}");
     }

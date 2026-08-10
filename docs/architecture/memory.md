@@ -10,9 +10,14 @@ retrieval, and Main Chat memory-candidate surfaces.
 Authority remains with `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and current
 source.
 
+ADR 0016 makes Agent Memory a first-class domain separate from LifeModel.
+Procedural working rules, project context, Reflection, and bounded Markdown
+memory belong here unless an exact supported LifeModel field is proposed and
+accepted through the governed bridge.
+
 ## Last verified
 
-2026-07-31 during repository cleanup source tracing.
+2026-08-06 during Phase 5.1F user-control and native interface verification.
 
 ## Source map
 
@@ -25,6 +30,7 @@ source.
 - `src-tauri/src/memory_gateway.rs`
 - `src-tauri/src/main_chat_memory_proposals.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
+- `src-tauri/src/markdown_memory.rs`
 - `src-tauri/src/commands/memory.rs`
 
 ## Inherited blocker
@@ -77,15 +83,74 @@ view. Rollback removes accepted memory from active runtime context. High-risk
 or identity/value memory rollback requires explicit confirmation instead of
 being silently rolled back.
 
+The product lifecycle now keeps the following actions distinct:
+
+- correction creates a reviewed `MemoryWrite` replacement bound to one exact
+  prior `memory:<uuid>`; the old owner becomes superseded only after acceptance;
+- stop recall commits the `paused` retrieval disposition after Review and keeps
+  the canonical asset outside normal runtime retrieval;
+- archive commits the separate `archived` disposition after Review; paused and
+  archived assets can both be restored to `active` without recreating content;
+- rollback terminates one applied change while retaining its body and lifecycle
+  history;
+- privacy erase requires native confirmation, removes the canonical body,
+  content-bearing provenance, and corresponding accepted Review proposal
+  payload, then emits a tombstone that deletes the MemoryStore and VectorStore
+  projections. Only body-free Memory audit metadata remains, and replay of the
+  erased proposal cannot resurrect the body. This exact-Memory action does not
+  silently delete a separate source conversation or workspace document; those
+  retain their own explicit deletion controls.
+
+`MemoryViewModel.items` is the product-facing owner for content, scope,
+provenance explanation, recall state and allowed actions. The `/life-model`
+Memory area consumes that ViewModel instead of merging raw lifecycle rows and
+vector telemetry in the browser. It labels proposal creation as pending Review,
+not as an applied Memory change.
+
 `src-tauri/src/main_chat_memory_proposals.rs` supports draft edits for pending
 Memory or Preference proposals. The edit report is draft-only, preserves the
 original provenance, and reports that no durable write was executed.
 
 ## Retrieval And Context
 
-`openlife-core/src/agent/memory_service.rs` retrieves memory context from text
-search and optional vector search, merges and deduplicates hits, and formats a
-bounded context string. Embedding failure falls back to text-only retrieval.
+The production Main Chat retrieval path is
+`main_chat_context_loader -> memory_gateway -> MemoryStore/VectorStore ->
+MemoryLifecycleStore`. It queries the existing FTS and Vector projections, but
+only lifecycle owners admitted for the active scope may be returned or receive
+access telemetry. The canonical lifecycle store rechecks active/paused/archive,
+supersede and rollback truth before any content becomes prompt context.
+
+Global Memory has no scope owner. Conversation, Workspace and Project Memory
+uses an opaque `scopeOwnerRef` derived from the canonical conversation or the
+user-selected root. The owner is part of fact identity, so identical text in
+two projects remains two facts. A trusted runtime binds proposal materialization
+to the current selected scope; a forged or mismatched owner is rejected.
+Historical non-global records without an owner remain visible but are excluded
+from normal recall rather than being assigned from cwd or guessed by content.
+
+Eligible candidates are deduplicated by lifecycle owner and ranked by combined
+retrieval relevance, freshness, conflict state, confidence and source quality.
+Unresolved conflicts are excluded. Every selected block contains its
+`memory:<uuid>` source ref, scope owner, freshness and selection reason. A turn
+injects at most four Memory blocks and 4,800 body characters. Embedding failure,
+unknown profile, rebuild or Vector query failure keeps FTS results and adds an
+explicit degraded marker; it never reports text fallback as complete hybrid
+retrieval.
+
+## User control surface
+
+The `/life-model` route is the Personal Intelligence workspace, not a claim
+that Agent Memory belongs to LifeModel. It presents `LifeModelViewModel` and
+`MemoryViewModel` as peer domains. Each domain remains readable when only the
+other owner fails; reviewed Memory actions also require a current
+`ReviewCenterViewModel` before the UI enables them.
+
+Each Memory item exposes its canonical lifecycle state, why it was remembered,
+how it is eligible for per-turn recall, and backend-owned source references.
+Correction, pause and archive create Review proposals. Restore and rollback
+require exact canonical owners and verified projection receipts. Privacy erase
+also requires native confirmation. UI counts never prove a single action was
+materialized.
 
 `openlife-core/src/memory_cache.rs` builds a hot cache from the current
 LifeModel for identity, values, current goals, recent state, refresh time, and
@@ -93,8 +158,35 @@ LifeModel version. The cache is a prompt/context support surface, not a
 canonical truth write path.
 
 `src-tauri/src/main_chat_context_loader.rs` can include accepted lifecycle
-memory snippets and bounded `MEMORY.md` surfaces in Main Chat context. It labels
-them as bounded memory context and not trusted raw memory.
+memory snippets and bounded Markdown working-memory surfaces in Main Chat
+context. It labels them as bounded memory context and not trusted raw memory.
+
+Conversation history remains canonical in `MemoryStore.messages`. The runtime
+reconstructs a bounded provider context through
+`agent/conversation_context.rs`; its deterministic summary is a derived
+projection with a source range and digest, not long-term Memory.
+
+## Workspace And Project Markdown Memory
+
+`src-tauri/src/markdown_memory.rs` owns the file and scope contract. Workspace
+and Project are two explicit, user-selected directory roots stored in config.
+They are not inferred from the process working directory or from the list of
+generic knowledge roots. If both scopes select the same physical directory,
+the directory is loaded once rather than receiving two competing identities.
+
+Within each selected root, the active readable files are limited to
+`MEMORY.md` and one-level `memories/*.md` topic files. Symbolic links, nested
+paths, disabled `*.disabled.md` files, oversized files, and every other root are
+excluded. Runtime selection is task-relevant and capped by both file count and
+total character budgets. Each context block exposes its scope, relative source,
+and selection reason, and says explicitly that working memory is not identity,
+permission, or completion evidence.
+
+The Workspace editor reads through a backend ViewModel. Creating or editing a
+file only creates an `ExternalWriteAction` Review proposal with an exact target
+precondition. Deactivation is a reviewed move to `*.disabled.md`. Approval and
+artifact materialization still use the existing proposal and artifact gateway;
+neither the editor nor the context loader writes files directly.
 
 ## Main Chat Memory Candidates
 
@@ -104,6 +196,13 @@ Memory proposal, LifeModel proposal, or no-op destinations based on explicit
 memory markers, future-rule language, identity/preference signals, and life
 event expressions.
 
-Low-confidence candidates are not routed into durable paths. Future rules and
-identity/preference style claims route to proposal destinations, not direct
-truth mutation.
+Low-confidence candidates are not routed into durable paths. Personal future
+working rules route to Agent Memory proposal candidates. Identity and stable
+preference candidates can reach the LifeModel bridge only when the runtime can
+produce an exact supported field path and typed value; otherwise the candidate
+remains blocked and no fake proposal is created.
+
+Memory lifecycle and vector retrieval enrich the Agent. If an optional
+enrichment store is unavailable, Main Chat carries an explicit degraded marker
+and continues with healthy base context; exact reads and writes against the
+missing store remain unavailable.

@@ -881,6 +881,7 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
         source_run_id: Some("run-productization-fixture".into()),
         content: "Prefer stage 4 durable delivery.".into(),
         scope: MemoryLifecycleScope::Workspace,
+        scope_owner_ref: None,
         category: MemoryLifecycleCategory::Preference,
         risk_level: MemoryLifecycleRiskLevel::Low,
         sensitivity: crate::agent::MemoryLifecycleSensitivity::Internal,

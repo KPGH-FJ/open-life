@@ -3561,12 +3561,13 @@ mod tests {
             crate::agent::PolicyEvaluationRequest {
                 topic: crate::agent::PolicyTopic::General,
                 requested_route: crate::agent::ModelRoutePolicy::CloudAllowed,
-                heuristic_effect: None,
             },
         );
-        ProviderPolicyAuthorization::from_hs_context_decision(&decision, decision_id)
-            .and_then(|authorization| authorization.bind_hs_current_user_subject(current_user_text))
-            .expect("canonical HS cloud decision")
+        ProviderPolicyAuthorization::from_policy_store_context_decision(&decision, decision_id)
+            .and_then(|authorization| {
+                authorization.bind_policy_store_current_user_subject(current_user_text)
+            })
+            .expect("canonical PolicyStore cloud decision")
     }
 
     fn canonical_cloud_authorization(
@@ -3583,7 +3584,7 @@ mod tests {
                 }],
                 &[],
             )
-            .expect("canonical HS cloud payload scope")
+            .expect("canonical PolicyStore cloud payload scope")
     }
 
     fn local_only_test_authorization(
@@ -4856,7 +4857,7 @@ mod tests {
         assert_eq!(prepared.data_route, ProviderDataRoute::PolicyAllowed);
         assert_eq!(
             prepared.policy_authorization().authority(),
-            crate::llm::ProviderPolicyAuthority::HsPolicyStore
+            crate::llm::ProviderPolicyAuthority::PolicyStore
         );
         let replay_error = scheduler
             .prepare_chat_request_with_authorization(
@@ -5195,8 +5196,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hs_outbound_receipt_retains_typed_provenance_without_raw_hs() {
-        let user_text = "ordinary HS governed request";
+    async fn policy_store_outbound_receipt_retains_typed_provenance_without_raw_profile_data() {
+        let user_text = "ordinary PolicyStore governed request";
         let task = crate::agent::AgentTask {
             kind: crate::agent::AgentTaskKind::Conversation,
             session_id: "hs-provider-trace-session".into(),
@@ -5207,23 +5208,18 @@ mod tests {
             }],
             layer: crate::layer::Layer::L2,
         };
-        let packet = crate::agent::build_runtime_hs_packet(
+        let policy_context = crate::agent::build_runtime_policy_context(
             &crate::agent::PolicyStore::mvp_builtin(),
-            &crate::agent::HeuristicStore::new_in_memory().unwrap(),
-            crate::agent::RuntimeHSPacketBuildInput {
+            crate::agent::RuntimePolicyContextBuildInput {
                 task: &task,
                 sanitized_intent_summary: user_text.into(),
                 privacy_topic: crate::agent::PolicyTopic::General,
                 risk_level: crate::agent::RiskLevel::Low,
                 tool_requirements: Vec::new(),
-                current_state_hints: serde_json::json!({}),
-                token_budget: 128,
-                agent_run_id: Some("hs-provider-trace-run".into()),
             },
         )
-        .unwrap()
-        .expect("HS packet retains the route-policy capability");
-        let authorization = packet
+        .expect("PolicyStore context retains the route-policy capability");
+        let authorization = policy_context
             .provider_authorization()
             .clone()
             .authorize_derived_payload(
@@ -5232,10 +5228,10 @@ mod tests {
                 &task.messages,
                 &[],
             )
-            .expect("HS policy binds the exact outbound payload");
-        let provenance = packet.provider_policy_provenance_refs();
+            .expect("PolicyStore policy binds the exact outbound payload");
+        let provenance = policy_context.policy_provenance_refs().to_vec();
         assert!(provenance.iter().any(|reference| {
-            reference.kind() == crate::llm::ProviderPolicyProvenanceKind::HsRouteDecision
+            reference.kind() == crate::llm::ProviderPolicyProvenanceKind::PolicyStoreRouteDecision
         }));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5275,7 +5271,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("HS-governed provider request should prepare");
+            .expect("PolicyStore-governed provider request should prepare");
         assert!(!prepared.context_manifest.raw_life_model_included);
         assert!(!prepared.context_manifest.raw_unbounded_memory_included);
         let prepared_endpoint = prepared.provider_endpoint.clone();

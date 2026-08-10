@@ -1214,16 +1214,6 @@ impl std::fmt::Debug for AgentRunError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HSBehaviorCheckSummary {
-    pub id: String,
-    pub label: String,
-    pub passed: bool,
-    #[serde(default)]
-    pub summary: Option<String>,
-}
-
 /// A single traceable execution of an Agent task.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1258,12 +1248,13 @@ pub struct AgentRun {
     /// current observed execution truth.
     #[serde(default)]
     pub legacy_payload_unverified: bool,
-    /// Metadata-safe HS asset selection audit for this run.
+    /// Read-only compatibility metadata from historical HS-selected runs.
+    /// Current runtime never creates this selection authority.
     #[serde(default)]
-    pub hs_selection_audit: Option<crate::agent::hs_selector::HSSelectionAudit>,
+    pub hs_selection_audit: Option<crate::agent::legacy_hs_audit::HSSelectionAudit>,
     /// Metadata-safe deterministic behavior checks relevant to selected HS assets.
     #[serde(default)]
-    pub behavior_checks: Vec<HSBehaviorCheckSummary>,
+    pub behavior_checks: Vec<crate::agent::legacy_hs_audit::HSBehaviorCheckSummary>,
     /// Warnings generated during execution (e.g., parse warnings, budget warnings)
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -1366,41 +1357,6 @@ impl AgentRun {
             session_id: Some(session_id.to_string()),
             status: AgentRunStatus::Running,
             kind: AgentTaskKind::Builder,
-            user_input: None,
-            input_ref: None,
-            input_digest: None,
-            context_summary: None,
-            model_route: None,
-            output_preview: None,
-            error: None,
-            generated_proposals: Vec::new(),
-            actions: Vec::new(),
-            observations: Vec::new(),
-            reasoning_strategy: None,
-            reasoning_trace: None,
-            reasoning_trace_digest: None,
-            legacy_payload_unverified: false,
-            hs_selection_audit: None,
-            behavior_checks: Vec::new(),
-            warnings: Vec::new(),
-            status_updates: Vec::new(),
-            step_count: 0,
-            tool_call_count: 0,
-            deleted_at: None,
-            delete_reason: None,
-            started_at: now,
-            finished_at: None,
-        }
-    }
-
-    pub fn new_calibration_run() -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4().to_string(),
-            task_id: Uuid::new_v4().to_string(),
-            session_id: None,
-            status: AgentRunStatus::Running,
-            kind: AgentTaskKind::Calibration,
             user_input: None,
             input_ref: None,
             input_digest: None,

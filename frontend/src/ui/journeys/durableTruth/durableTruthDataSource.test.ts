@@ -4,6 +4,21 @@ const tauriMocks = vi.hoisted(() => ({
   getLifeModelViewModel: vi.fn(),
   getMemoryViewModel: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
+  draftLegacyLifeModelMigration: vi.fn(),
+  draftLifeModelV2Change: vi.fn(),
+  draftLifeModelV2Rollback: vi.fn(),
+  draftLifeModelV2Export: vi.fn(),
+  confirmLifeModelLearningCandidate: vi.fn(),
+  stageLifeModelLearningCandidate: vi.fn(),
+  deleteLifeModelLearningCandidate: vi.fn(),
+  rejectLifeModelLearningCandidate: vi.fn(),
+  pauseLifeModelLearningSuggestionClass: vi.fn(),
+  draftMemoryCorrectionProposal: vi.fn(),
+  draftMemoryArchiveProposal: vi.fn(),
+  draftMemoryStopRecallProposal: vi.fn(),
+  restoreArchivedMemory: vi.fn(),
+  rollbackMemoryAsset: vi.fn(),
+  privacyEraseMemoryAsset: vi.fn(),
 }));
 
 vi.mock("@/tauri", () => tauriMocks);
@@ -53,5 +68,254 @@ describe("durable truth Tauri data source", () => {
       status: "failed",
       message: "memory unavailable",
     });
+  });
+
+  it("accepts candidate deletion only when the receipt proves Proposal and LifeModel stayed unchanged", async () => {
+    tauriMocks.deleteLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      deleted: true,
+      proposalDeleted: false,
+      canonicalLifeModelChanged: false,
+    });
+
+    await tauriDurableTruthDataSource.deleteLifeModelLearningCandidate("candidate:one");
+
+    expect(tauriMocks.deleteLifeModelLearningCandidate).toHaveBeenCalledWith("candidate:one");
+
+    tauriMocks.deleteLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      deleted: true,
+      proposalDeleted: false,
+      canonicalLifeModelChanged: true,
+    });
+    await expect(
+      tauriDurableTruthDataSource.deleteLifeModelLearningCandidate("candidate:one")
+    ).rejects.toThrow("lifemodel_learning_candidate_delete_receipt_unverified");
+  });
+
+  it("accepts explicit candidate feedback without Proposal or LifeModel credit", async () => {
+    tauriMocks.confirmLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      status: "reviewable",
+      sourceKind: "user_feedback",
+      proposalCreated: false,
+      canonicalLifeModelChanged: false,
+    });
+
+    await tauriDurableTruthDataSource.confirmLifeModelLearningCandidate("candidate:one");
+
+    expect(tauriMocks.confirmLifeModelLearningCandidate).toHaveBeenCalledWith("candidate:one");
+
+    tauriMocks.confirmLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      status: "reviewable",
+      sourceKind: "user_feedback",
+      proposalCreated: true,
+      canonicalLifeModelChanged: false,
+    });
+    await expect(
+      tauriDurableTruthDataSource.confirmLifeModelLearningCandidate("candidate:one")
+    ).rejects.toThrow("lifemodel_learning_candidate_confirm_receipt_unverified");
+  });
+
+  it("credits candidate staging only when Review exists and canonical LifeModel stayed unchanged", async () => {
+    tauriMocks.stageLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      proposalId: "proposal:one",
+      status: "review_required",
+      baseVersion: 2,
+      baseDocumentDigest: "sha256:base",
+      resultDocumentDigest: "sha256:result",
+      canonicalLifeModelChanged: false,
+    });
+
+    await expect(
+      tauriDurableTruthDataSource.stageLifeModelLearningCandidate("candidate:one")
+    ).resolves.toBe("proposal:one");
+
+    tauriMocks.stageLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      proposalId: "proposal:two",
+      status: "review_required",
+      resultDocumentDigest: "sha256:result",
+      canonicalLifeModelChanged: true,
+    });
+    await expect(
+      tauriDurableTruthDataSource.stageLifeModelLearningCandidate("candidate:one")
+    ).rejects.toThrow("lifemodel_learning_stage_receipt_unverified");
+  });
+
+  it("accepts candidate suppression only with scrubbed content and no Proposal or LifeModel change", async () => {
+    tauriMocks.rejectLifeModelLearningCandidate.mockResolvedValueOnce({
+      candidateId: "candidate:one",
+      changed: true,
+      status: "rejected",
+      suppressionKind: "exact_candidate",
+      contentScrubbed: true,
+      proposalChanged: false,
+      canonicalLifeModelChanged: false,
+    });
+    tauriMocks.pauseLifeModelLearningSuggestionClass.mockResolvedValueOnce({
+      candidateId: "candidate:two",
+      changed: true,
+      status: "rejected",
+      suppressionKind: "suggestion_class",
+      contentScrubbed: true,
+      proposalChanged: false,
+      canonicalLifeModelChanged: false,
+    });
+
+    await tauriDurableTruthDataSource.rejectLifeModelLearningCandidate("candidate:one");
+    await tauriDurableTruthDataSource.pauseLifeModelLearningSuggestionClass("candidate:two");
+
+    expect(tauriMocks.rejectLifeModelLearningCandidate).toHaveBeenCalledWith("candidate:one");
+    expect(tauriMocks.pauseLifeModelLearningSuggestionClass).toHaveBeenCalledWith("candidate:two");
+  });
+
+  it("keeps correction and archive reviewed while restore, rollback, and erase use exact owners", async () => {
+    tauriMocks.draftMemoryCorrectionProposal.mockResolvedValue({
+      memoryId: "memory:one",
+      action: "correct",
+      status: "review_required",
+    });
+    tauriMocks.draftMemoryArchiveProposal.mockResolvedValue({
+      memoryId: "memory:one",
+      action: "archive",
+      status: "review_required",
+    });
+    tauriMocks.draftMemoryStopRecallProposal.mockResolvedValue({
+      memoryId: "memory:one",
+      action: "stop_recall",
+      status: "review_required",
+    });
+    tauriMocks.restoreArchivedMemory.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "applied",
+    });
+    tauriMocks.rollbackMemoryAsset.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "applied",
+    });
+    tauriMocks.privacyEraseMemoryAsset.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "applied",
+    });
+
+    await tauriDurableTruthDataSource.correctMemory("memory:one", "corrected");
+    await tauriDurableTruthDataSource.archiveMemory("memory:one");
+    await tauriDurableTruthDataSource.stopRecall("memory:one");
+    await tauriDurableTruthDataSource.restoreMemory("memory:one");
+    await tauriDurableTruthDataSource.rollbackMemory("memory:one", "user correction");
+    await tauriDurableTruthDataSource.privacyEraseMemory("memory:one");
+
+    expect(tauriMocks.draftMemoryCorrectionProposal).toHaveBeenCalledWith(
+      "memory:one",
+      "corrected"
+    );
+    expect(tauriMocks.draftMemoryArchiveProposal).toHaveBeenCalledWith("memory:one");
+    expect(tauriMocks.draftMemoryStopRecallProposal).toHaveBeenCalledWith("memory:one");
+    expect(tauriMocks.restoreArchivedMemory).toHaveBeenCalledWith({
+      ownerKind: "memory_lifecycle",
+      ownerId: "memory:one",
+    });
+    expect(tauriMocks.rollbackMemoryAsset).toHaveBeenCalledWith("memory:one", "user correction");
+    expect(tauriMocks.privacyEraseMemoryAsset).toHaveBeenCalledWith("memory:one");
+  });
+
+  it("accepts only an exact Review-required migration draft receipt", async () => {
+    const request = {
+      sourceDigest: "sha256:source",
+      selections: [
+        {
+          candidateId: "legacy-candidate:one",
+          decision: "exclude" as const,
+          editedValue: null,
+        },
+      ],
+      nonLifemodelItemsAcknowledged: true,
+    };
+    tauriMocks.draftLegacyLifeModelMigration.mockResolvedValue({
+      proposalId: "proposal:migration",
+      status: "review_required",
+      sourceDigest: "sha256:source",
+      includedCount: 0,
+      excludedCount: 1,
+      nonLifemodelItemCount: 2,
+    });
+
+    await expect(tauriDurableTruthDataSource.draftLegacyLifeModelMigration(request)).resolves.toBe(
+      "proposal:migration"
+    );
+    expect(tauriMocks.draftLegacyLifeModelMigration).toHaveBeenCalledWith(request);
+
+    tauriMocks.draftLegacyLifeModelMigration.mockResolvedValue({
+      proposalId: "proposal:forged",
+      status: "review_required",
+      sourceDigest: "sha256:other",
+      includedCount: 0,
+      excludedCount: 1,
+      nonLifemodelItemCount: 2,
+    });
+    await expect(
+      tauriDurableTruthDataSource.draftLegacyLifeModelMigration(request)
+    ).rejects.toThrow("lifemodel_migration_proposal_receipt_unverified");
+  });
+
+  it("accepts only exact Review-required LifeModel v2 operation receipts", async () => {
+    const change = {
+      baseVersion: 4,
+      baseDocumentDigest: "sha256:base",
+      change: { operation: "clear" as const },
+    };
+    tauriMocks.draftLifeModelV2Change.mockResolvedValue({
+      proposalId: "proposal:change",
+      status: "review_required",
+      baseVersion: 4,
+    });
+    await expect(tauriDurableTruthDataSource.draftLifeModelChange(change)).resolves.toBe(
+      "proposal:change"
+    );
+
+    const rollback = {
+      baseVersion: 4,
+      baseDocumentDigest: "sha256:base",
+      targetVersion: 2,
+      targetDocumentDigest: "sha256:target",
+    };
+    tauriMocks.draftLifeModelV2Rollback.mockResolvedValue({
+      proposalId: "proposal:rollback",
+      status: "review_required",
+      baseVersion: 4,
+    });
+    await expect(tauriDurableTruthDataSource.draftLifeModelRollback(rollback)).resolves.toBe(
+      "proposal:rollback"
+    );
+
+    const exportRequest = {
+      modelVersion: 4,
+      documentDigest: "sha256:base",
+      projectionDigest: null,
+      format: "json" as const,
+      targetPath: "/safe/lifemodel.json",
+    };
+    tauriMocks.draftLifeModelV2Export.mockResolvedValue({
+      proposalId: "proposal:export",
+      status: "review_required",
+      baseVersion: 3,
+    });
+    await expect(tauriDurableTruthDataSource.draftLifeModelExport(exportRequest)).rejects.toThrow(
+      "lifemodel_v2_proposal_receipt_unverified"
+    );
+  });
+
+  it("does not report a direct Memory action as complete while its projection is pending", async () => {
+    tauriMocks.privacyEraseMemoryAsset.mockResolvedValue({
+      canonicalCommitted: true,
+      projectionState: "pending",
+    });
+
+    await expect(tauriDurableTruthDataSource.privacyEraseMemory("memory:one")).rejects.toThrow(
+      "memory_privacy_erase_projection_pending"
+    );
   });
 });

@@ -3,8 +3,12 @@ import type {
   ChatSession,
   ImportedResourceReceipt,
   MainChatSkillSummary,
+  MainChatLifeModelProductReceipt,
   MainChatToolCandidateList,
   MainChatTurnStatus,
+  MarkdownMemoryProposalReceipt,
+  MarkdownMemoryScope,
+  MarkdownMemoryViewModel,
   ProductAction,
   StreamMessageChunkPayload,
   StreamMessageStartPayload,
@@ -35,6 +39,13 @@ export type WorkspaceCapabilityState =
   | { phase: "selecting"; skillId: string | null }
   | { phase: "failed"; reason: string };
 
+export type WorkspaceMarkdownMemoryState =
+  | { phase: "loading"; model: MarkdownMemoryViewModel | null }
+  | { phase: "ready"; model: MarkdownMemoryViewModel; lastProposal?: MarkdownMemoryProposalReceipt }
+  | { phase: "selecting_root"; model: MarkdownMemoryViewModel | null; scope: MarkdownMemoryScope }
+  | { phase: "submitting"; model: MarkdownMemoryViewModel; operation: "write" | "deactivate" }
+  | { phase: "failed"; model: MarkdownMemoryViewModel | null; reason: string };
+
 export type WorkspaceTurnState =
   | { phase: "idle" }
   | { phase: "creating_session" }
@@ -47,6 +58,7 @@ export type WorkspaceTurnState =
       sessionId: string;
       status: MainChatTurnStatus;
       blockers: string[];
+      lifeModelInfluence?: MainChatLifeModelProductReceipt;
     }
   | { phase: "failed"; stage: "create" | "send" | "refresh"; reason: string };
 
@@ -96,6 +108,7 @@ export type WorkspaceConversationController = {
   selectedSkillId: string | null;
   toolCandidates: MainChatToolCandidateList | null;
   capabilityState: WorkspaceCapabilityState;
+  markdownMemory: WorkspaceMarkdownMemoryState;
   busy: boolean;
   ensureLoaded: () => void;
   reload: () => Promise<boolean>;
@@ -105,6 +118,19 @@ export type WorkspaceConversationController = {
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
   selectSkill: (skillId: string | null) => Promise<boolean>;
+  reloadMarkdownMemory: () => Promise<boolean>;
+  selectMarkdownMemoryRoot: (scope: MarkdownMemoryScope) => Promise<boolean>;
+  proposeMarkdownMemoryWrite: (request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    content: string;
+    expectedCurrentDigest?: string;
+  }) => Promise<boolean>;
+  proposeMarkdownMemoryDeactivation: (request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    expectedCurrentDigest: string;
+  }) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
   cancel: () => Promise<void>;
@@ -115,7 +141,8 @@ export type WorkspaceConversationController = {
 export function useWorkspaceConversation(
   dataSource: WorkspaceConversationDataSource | undefined,
   announce: Announce,
-  onAfterTurn: () => Promise<void>
+  onAfterTurn: () => Promise<void>,
+  preferredSessionId?: string | null
 ): WorkspaceConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -142,16 +169,24 @@ export function useWorkspaceConversation(
   const [capabilityState, setCapabilityState] = useState<WorkspaceCapabilityState>({
     phase: "idle",
   });
+  const [markdownMemory, setMarkdownMemory] = useState<WorkspaceMarkdownMemoryState>({
+    phase: "loading",
+    model: null,
+  });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
   const cancelRequestRef = useRef(0);
+  const markdownMemoryRequestRef = useRef(0);
   const loadedRef = useRef(false);
+  const explicitConversationChoiceRef = useRef(false);
 
   useEffect(() => {
     requestRef.current += 1;
     operationRef.current += 1;
     cancelRequestRef.current += 1;
+    markdownMemoryRequestRef.current += 1;
     loadedRef.current = false;
+    explicitConversationChoiceRef.current = false;
     setSessions([]);
     setSelectedSessionId(null);
     setMessages([]);
@@ -169,13 +204,144 @@ export function useWorkspaceConversation(
     setSelectedSkillId(null);
     setToolCandidates(null);
     setCapabilityState({ phase: "idle" });
+    setMarkdownMemory({ phase: "loading", model: null });
     return () => {
       requestRef.current += 1;
       operationRef.current += 1;
       cancelRequestRef.current += 1;
+      markdownMemoryRequestRef.current += 1;
       loadedRef.current = false;
     };
   }, [dataSource]);
+
+  const reloadMarkdownMemory = useCallback(async (): Promise<boolean> => {
+    const requestId = ++markdownMemoryRequestRef.current;
+    if (!dataSource?.loadMarkdownMemory) {
+      setMarkdownMemory(current => ({
+        phase: "failed",
+        model: current.model,
+        reason: "markdown_memory_data_source_unavailable",
+      }));
+      return false;
+    }
+    setMarkdownMemory(current => ({ phase: "loading", model: current.model }));
+    try {
+      const model = await dataSource.loadMarkdownMemory();
+      if (requestId !== markdownMemoryRequestRef.current) return false;
+      setMarkdownMemory({ phase: "ready", model });
+      return true;
+    } catch (error) {
+      if (requestId !== markdownMemoryRequestRef.current) return false;
+      setMarkdownMemory(current => ({
+        phase: "failed",
+        model: current.model,
+        reason: errorText(error),
+      }));
+      return false;
+    }
+  }, [dataSource]);
+
+  useEffect(() => {
+    if (!dataSource?.loadMarkdownMemory) return;
+    void reloadMarkdownMemory();
+  }, [dataSource, reloadMarkdownMemory]);
+
+  const selectMarkdownMemoryRoot = useCallback(
+    async (scope: MarkdownMemoryScope): Promise<boolean> => {
+      if (!dataSource?.selectMarkdownMemoryRoot || markdownMemory.phase === "selecting_root") {
+        announce("当前不能选择 Markdown Memory 文件夹。");
+        return false;
+      }
+      const currentModel = markdownMemory.model;
+      const requestId = ++markdownMemoryRequestRef.current;
+      setMarkdownMemory({ phase: "selecting_root", model: currentModel, scope });
+      try {
+        const selection = await dataSource.selectMarkdownMemoryRoot(scope);
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        if (selection.cancelled) {
+          if (currentModel) setMarkdownMemory({ phase: "ready", model: currentModel });
+          else setMarkdownMemory({ phase: "loading", model: null });
+          announce("没有选择文件夹；当前 Markdown Memory 作用域未改变。");
+          return false;
+        }
+        if (selection.scope !== scope || !selection.selectedPath) {
+          throw new Error("markdown_memory_root_selection_identity_mismatch");
+        }
+        const reloaded = await reloadMarkdownMemory();
+        announce(
+          reloaded
+            ? `${scope === "workspace" ? "Workspace" : "Project"} Memory 文件夹已重新读取。`
+            : "文件夹选择已返回，但 Memory 状态没有得到后端确认。"
+        );
+        return reloaded;
+      } catch (error) {
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "failed", model: currentModel, reason: errorText(error) });
+        announce("Markdown Memory 文件夹没有完成选择。");
+        return false;
+      }
+    },
+    [announce, dataSource, markdownMemory, reloadMarkdownMemory]
+  );
+
+  const proposeMarkdownMemoryWrite = useCallback(
+    async (request: {
+      scope: MarkdownMemoryScope;
+      relativePath: string;
+      content: string;
+      expectedCurrentDigest?: string;
+    }): Promise<boolean> => {
+      if (!dataSource?.draftMarkdownMemoryFileProposal || !markdownMemory.model) {
+        announce("当前不能提交 Markdown Memory 变更。");
+        return false;
+      }
+      const model = markdownMemory.model;
+      const requestId = ++markdownMemoryRequestRef.current;
+      setMarkdownMemory({ phase: "submitting", model, operation: "write" });
+      try {
+        const receipt = await dataSource.draftMarkdownMemoryFileProposal(request);
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "ready", model, lastProposal: receipt });
+        announce("Markdown Memory 变更已进入 Review；当前文件尚未修改。");
+        return true;
+      } catch (error) {
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "failed", model, reason: errorText(error) });
+        announce("Markdown Memory 变更未能进入 Review；当前文件未修改。");
+        return false;
+      }
+    },
+    [announce, dataSource, markdownMemory.model]
+  );
+
+  const proposeMarkdownMemoryDeactivation = useCallback(
+    async (request: {
+      scope: MarkdownMemoryScope;
+      relativePath: string;
+      expectedCurrentDigest: string;
+    }): Promise<boolean> => {
+      if (!dataSource?.deactivateMarkdownMemoryFileProposal || !markdownMemory.model) {
+        announce("当前不能停用 Markdown Memory 文件。");
+        return false;
+      }
+      const model = markdownMemory.model;
+      const requestId = ++markdownMemoryRequestRef.current;
+      setMarkdownMemory({ phase: "submitting", model, operation: "deactivate" });
+      try {
+        const receipt = await dataSource.deactivateMarkdownMemoryFileProposal(request);
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "ready", model, lastProposal: receipt });
+        announce("停用请求已进入 Review；批准并物化前仍会继续召回当前文件。");
+        return true;
+      } catch (error) {
+        if (requestId !== markdownMemoryRequestRef.current) return false;
+        setMarkdownMemory({ phase: "failed", model, reason: errorText(error) });
+        announce("停用请求未能进入 Review；当前文件仍保持启用。");
+        return false;
+      }
+    },
+    [announce, dataSource, markdownMemory.model]
+  );
 
   useEffect(() => {
     let active = true;
@@ -218,9 +384,29 @@ export function useWorkspaceConversation(
     async (sessionId: string, requestId: number): Promise<void> => {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
       const history = await dataSource.loadHistory(sessionId);
+      let influence = null;
+      let influenceError: string | null = null;
+      try {
+        influence = await dataSource.loadLifeModelInfluence(sessionId);
+      } catch (error) {
+        influenceError = errorText(error);
+      }
       if (requestId !== requestRef.current) return;
       setSelectedSessionId(sessionId);
       setMessages(history);
+      setTurnState(
+        influenceError
+          ? { phase: "failed", stage: "refresh", reason: influenceError }
+          : influence
+            ? {
+                phase: "resolved",
+                sessionId,
+                status: influence.status,
+                blockers: [],
+                lifeModelInfluence: influence.lifeModelInfluence,
+              }
+            : { phase: "idle" }
+      );
     },
     [dataSource]
   );
@@ -236,9 +422,13 @@ export function useWorkspaceConversation(
       setSessions(nextSessions);
       const currentStillExists =
         selectedSessionId && nextSessions.some(item => item.session_id === selectedSessionId);
+      const preferredStillExists =
+        preferredSessionId && nextSessions.some(item => item.session_id === preferredSessionId);
       const nextSessionId = currentStillExists
         ? selectedSessionId
-        : (nextSessions[0]?.session_id ?? null);
+        : preferredStillExists
+          ? preferredSessionId
+          : (nextSessions[0]?.session_id ?? null);
       if (nextSessionId) {
         await loadHistory(nextSessionId, requestId);
       } else {
@@ -257,7 +447,45 @@ export function useWorkspaceConversation(
       setMessages([]);
       return false;
     }
-  }, [dataSource, loadHistory, selectedSessionId]);
+  }, [dataSource, loadHistory, preferredSessionId, selectedSessionId]);
+
+  useEffect(() => {
+    if (
+      !preferredSessionId ||
+      loadStatus !== "ready" ||
+      selectedSessionId === preferredSessionId ||
+      explicitConversationChoiceRef.current ||
+      draft.trim() ||
+      pendingResources.length > 0 ||
+      !sessions.some(session => session.session_id === preferredSessionId)
+    ) {
+      return;
+    }
+    const requestId = ++requestRef.current;
+    setLoadStatus("loading");
+    setLoadError(null);
+    setTurnState({ phase: "idle" });
+    setStreamingReply("");
+    setActiveTaskSessionId(null);
+    void loadHistory(preferredSessionId, requestId)
+      .then(() => {
+        if (requestId === requestRef.current) setLoadStatus("ready");
+      })
+      .catch(error => {
+        if (requestId !== requestRef.current) return;
+        setLoadStatus("error");
+        setLoadError(errorText(error));
+        setMessages([]);
+      });
+  }, [
+    draft,
+    loadHistory,
+    loadStatus,
+    pendingResources.length,
+    preferredSessionId,
+    selectedSessionId,
+    sessions,
+  ]);
 
   const ensureLoaded = useCallback(() => {
     if (loadedRef.current || loadStatus === "loading") return;
@@ -322,6 +550,7 @@ export function useWorkspaceConversation(
         announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
         return;
       }
+      explicitConversationChoiceRef.current = true;
       const requestId = ++requestRef.current;
       setLoadStatus("loading");
       setLoadError(null);
@@ -348,6 +577,7 @@ export function useWorkspaceConversation(
       announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
       return;
     }
+    explicitConversationChoiceRef.current = true;
     requestRef.current += 1;
     setSelectedSessionId(null);
     setMessages([]);
@@ -359,6 +589,11 @@ export function useWorkspaceConversation(
     setActiveTaskSessionId(null);
     announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
   }, [announce, busy, pendingResources.length]);
+
+  const updateDraft = useCallback((value: string) => {
+    if (value.trim()) explicitConversationChoiceRef.current = true;
+    setDraft(value);
+  }, []);
 
   const attachResources = useCallback(async (): Promise<boolean> => {
     if (!dataSource || loadStatus !== "ready" || busy) {
@@ -604,6 +839,7 @@ export function useWorkspaceConversation(
           sessionId,
           status,
           blockers: result.blockers ?? result.turn_terminal?.blockers ?? [],
+          lifeModelInfluence: result.life_model_influence,
         });
         await onAfterTurn();
         announce(turnAnnouncement(status));
@@ -740,15 +976,20 @@ export function useWorkspaceConversation(
       selectedSkillId,
       toolCandidates,
       capabilityState,
+      markdownMemory,
       busy,
       ensureLoaded,
       reload,
       selectSession,
       startNewConversation,
-      setDraft,
+      setDraft: updateDraft,
       attachResources,
       detachResource,
       selectSkill,
+      reloadMarkdownMemory,
+      selectMarkdownMemoryRoot,
+      proposeMarkdownMemoryWrite,
+      proposeMarkdownMemoryDeactivation,
       sendAction,
       send,
       cancel,
@@ -759,6 +1000,7 @@ export function useWorkspaceConversation(
       busy,
       cancel,
       capabilityState,
+      markdownMemory,
       deleteSelected,
       detachResource,
       draft,
@@ -770,9 +1012,11 @@ export function useWorkspaceConversation(
       pendingResources,
       pendingResourceTurnOperationId,
       renameSelected,
+      reloadMarkdownMemory,
       reload,
       resourceMutation,
       selectSkill,
+      selectMarkdownMemoryRoot,
       selectSession,
       selectedSessionId,
       selectedSkillId,
@@ -786,6 +1030,9 @@ export function useWorkspaceConversation(
       activeTaskSessionId,
       turnState,
       toolCandidates,
+      updateDraft,
+      proposeMarkdownMemoryWrite,
+      proposeMarkdownMemoryDeactivation,
     ]
   );
 }

@@ -1371,9 +1371,9 @@ fn minimize_context_summary(
 }
 
 fn minimize_hs_selection_audit(
-    audit: &crate::agent::hs_selector::HSSelectionAudit,
+    audit: &crate::agent::legacy_hs_audit::HSSelectionAudit,
     origin: ReceiptOrigin<'_>,
-) -> crate::agent::hs_selector::HSSelectionAudit {
+) -> crate::agent::legacy_hs_audit::HSSelectionAudit {
     let mut minimized = audit.clone();
     minimized.agent_task_id = audit
         .agent_task_id
@@ -1441,9 +1441,9 @@ fn minimize_hs_selection_audit(
 }
 
 fn minimize_behavior_check(
-    check: &crate::agent::types::HSBehaviorCheckSummary,
+    check: &crate::agent::legacy_hs_audit::HSBehaviorCheckSummary,
     origin: ReceiptOrigin<'_>,
-) -> crate::agent::types::HSBehaviorCheckSummary {
+) -> crate::agent::legacy_hs_audit::HSBehaviorCheckSummary {
     let mut minimized = check.clone();
     minimized.id = metadata_safe_label_or_ref("behavior_check_id", &check.id, origin);
     minimized.label =
@@ -1567,14 +1567,14 @@ fn minimized_status_updates_json_with_origin(
 }
 
 fn minimized_behavior_checks_json(
-    checks: &[crate::agent::types::HSBehaviorCheckSummary],
+    checks: &[crate::agent::legacy_hs_audit::HSBehaviorCheckSummary],
     key: &AgentRunReceiptKey,
 ) -> Result<String> {
     minimized_behavior_checks_json_with_origin(checks, ReceiptOrigin::NewInput(key))
 }
 
 fn minimized_behavior_checks_json_with_origin(
-    checks: &[crate::agent::types::HSBehaviorCheckSummary],
+    checks: &[crate::agent::legacy_hs_audit::HSBehaviorCheckSummary],
     origin: ReceiptOrigin<'_>,
 ) -> Result<String> {
     serde_json::to_string(
@@ -1587,8 +1587,8 @@ fn minimized_behavior_checks_json_with_origin(
 }
 
 fn minimized_behavior_checks_json_for_update(
-    incoming: &[crate::agent::types::HSBehaviorCheckSummary],
-    stored: &[crate::agent::types::HSBehaviorCheckSummary],
+    incoming: &[crate::agent::legacy_hs_audit::HSBehaviorCheckSummary],
+    stored: &[crate::agent::legacy_hs_audit::HSBehaviorCheckSummary],
     key: &AgentRunReceiptKey,
 ) -> Result<String> {
     let minimized = incoming
@@ -2524,6 +2524,7 @@ impl RawAgentRunToolExecutionRecord {
 /// Owner-module-only lookup seal for LifeEvent lineage. Its fields are
 /// private to AgentRunStore and it has no serde implementation.
 #[derive(Debug)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) struct CanonicalAgentRunLifeEventSourceSeal {
     run_id: String,
     canonical_store_identity: String,
@@ -2532,6 +2533,7 @@ pub(crate) struct CanonicalAgentRunLifeEventSourceSeal {
     _lookup_nonce: uuid::Uuid,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl CanonicalAgentRunLifeEventSourceSeal {
     pub(crate) fn run_id(&self) -> &str {
         &self.run_id
@@ -3164,13 +3166,12 @@ impl AgentRunStore {
             canonical_content_digest,
             owner_revision,
         );
-        let (permit, draft) =
-            crate::agent::lifemodel_backend_completion::issue_life_event_create_permit(
-                message_proof,
-                policy_proof,
-                &execution_proof,
-                operation_id,
-            )?;
+        let (permit, draft) = crate::agent::life_event_store::issue_life_event_create_permit(
+            message_proof,
+            policy_proof,
+            &execution_proof,
+            operation_id,
+        )?;
         permit.matches_current_agent_run_owner(
             execution_proof.canonical_store_identity(),
             execution_proof.canonical_ref(),
@@ -3230,7 +3231,7 @@ impl AgentRunStore {
     pub(crate) fn commit_prepared_life_event_for_test(
         &self,
         life_event_store: &crate::agent::LifeEventStore,
-        permit: crate::agent::lifemodel_backend_completion::LifeEventCreatePermit,
+        permit: crate::agent::life_event_store::LifeEventCreatePermit,
         draft: crate::agent::LifeEventDraft,
     ) -> Result<crate::agent::LifeEvent> {
         if !permit.runtime_seal_is_valid() || !permit.matches_draft(&draft) {
@@ -3339,6 +3340,7 @@ impl AgentRunStore {
         clippy::too_many_arguments,
         reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
     )]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn create_life_event_from_active_run(
         &self,
         life_event_store: &crate::agent::LifeEventStore,
@@ -5386,7 +5388,7 @@ impl AgentRunStore {
                     None
                 };
             let hs_selection_audit_json = parse_optional_legacy_json::<
-                crate::agent::hs_selector::HSSelectionAudit,
+                crate::agent::legacy_hs_audit::HSSelectionAudit,
             >(
                 &legacy.run_id,
                 "hs_selection_audit_json",
@@ -5396,7 +5398,7 @@ impl AgentRunStore {
             .transpose()
             .context("failed to serialize minimized legacy AgentRun HS selection audit")?;
             let behavior_checks =
-                parse_legacy_json_array::<crate::agent::types::HSBehaviorCheckSummary>(
+                parse_legacy_json_array::<crate::agent::legacy_hs_audit::HSBehaviorCheckSummary>(
                     &legacy.run_id,
                     "behavior_checks_json",
                     legacy.behavior_checks_json.as_deref(),
@@ -7102,7 +7104,7 @@ impl AgentRunStore {
             behavior_checks_json,
             14,
             "behavior_checks_json",
-            |checks: &Vec<crate::agent::types::HSBehaviorCheckSummary>| {
+            |checks: &Vec<crate::agent::legacy_hs_audit::HSBehaviorCheckSummary>| {
                 checks
                     .iter()
                     .map(|check| {
@@ -12842,7 +12844,7 @@ mod tests {
             redaction_level: crate::agent::types::RedactionLevel::Strict,
         });
         run.reasoning_strategy = Some(SECRET.into());
-        run.hs_selection_audit = Some(crate::agent::hs_selector::HSSelectionAudit {
+        run.hs_selection_audit = Some(crate::agent::legacy_hs_audit::HSSelectionAudit {
             agent_task_id: Some(run.task_id.clone()),
             agent_run_id: Some(run.id.clone()),
             input_digest: format!("sha256:{}", "a".repeat(64)),
@@ -12854,7 +12856,7 @@ mod tests {
             estimated_tokens: 1,
             token_budget: 2,
         });
-        run.behavior_checks = vec![crate::agent::types::HSBehaviorCheckSummary {
+        run.behavior_checks = vec![crate::agent::legacy_hs_audit::HSBehaviorCheckSummary {
             id: "behavior-check-ref".into(),
             label: SECRET.into(),
             passed: false,
@@ -12925,7 +12927,7 @@ mod tests {
         const SHORT_SECRET: &str = "pin_74291";
         let store = AgentRunStore::new_in_memory().unwrap();
         let mut run = create_test_run();
-        run.behavior_checks = vec![crate::agent::types::HSBehaviorCheckSummary {
+        run.behavior_checks = vec![crate::agent::legacy_hs_audit::HSBehaviorCheckSummary {
             id: "behavior-check-short-secret".into(),
             label: SHORT_SECRET.into(),
             passed: false,

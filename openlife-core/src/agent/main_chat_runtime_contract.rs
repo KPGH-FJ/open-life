@@ -68,9 +68,7 @@ impl MainChatAgentProductStrategyRoute {
         match strategy {
             MainChatAgentStrategy::DirectAnswer => Self::DirectAnswer,
             MainChatAgentStrategy::ReActToolExecution => Self::ReactToolExecution,
-            MainChatAgentStrategy::PlanExecute | MainChatAgentStrategy::ReviewMaturation => {
-                Self::PlanExecute
-            }
+            MainChatAgentStrategy::PlanExecute => Self::PlanExecute,
             MainChatAgentStrategy::TransientStateCommand => Self::TaskControl,
             MainChatAgentStrategy::ReversibleMemoryCommit => Self::MemoryCommit,
             MainChatAgentStrategy::MemoryProposal
@@ -1845,9 +1843,7 @@ fn plan_from_evidence(
             AgentTaskSessionStatus::Running | AgentTaskSessionStatus::WaitingPermission
         ),
         source: match session.selected_strategy {
-            MainChatAgentStrategy::PlanExecute | MainChatAgentStrategy::ReviewMaturation => {
-                "plan_execute".into()
-            }
+            MainChatAgentStrategy::PlanExecute => "plan_execute".into(),
             _ => "agent_loop".into(),
         },
         evidence_id: plan_entry

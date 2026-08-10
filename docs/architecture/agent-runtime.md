@@ -17,7 +17,7 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-07-31 during repository cleanup source tracing.
+2026-08-10 during Phase 5.5C generic runtime input convergence.
 
 ## Source map
 
@@ -27,7 +27,7 @@ current source. Superseded execution plans remain in Git history.
 - `src-tauri/src/main_chat_turn_pipeline.rs`
 - `src-tauri/src/main_chat_kernel.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
-- `src-tauri/src/main_chat_hs_runtime.rs`
+- `src-tauri/src/main_chat_policy_runtime.rs`
 - `src-tauri/src/main_chat_react_tool_selection.rs`
 - `src-tauri/src/main_chat_react_runtime.rs`
 - `src-tauri/src/main_chat_react_execution.rs`
@@ -80,9 +80,40 @@ context from workspace/configured files such as `AGENTS.md`, `SOUL.md`,
 `USER.md`, `MEMORY.md`, and selected `SKILL.md`. Those surfaces are context,
 not policy override and not user truth promotion.
 
-`src-tauri/src/main_chat_hs_runtime.rs` constructs the HS runtime packet and
-classifies policy topic/risk. Sensitive or non-general topics can force local
-policy through the routing layer.
+`src-tauri/src/main_chat_policy_runtime.rs` classifies the current task's
+policy topic, risk, and write-side-effect requirements. It reads PolicyStore
+only: sensitive topics remain LocalOnly and unconfirmed external writes remain
+proposal-first. It does not read HeuristicStore or inject personalization.
+
+Generic `AgentRuntime` and `AgentLoop` accept an explicit `RuntimePolicyContext`
+containing provider authorization, metadata-safe provenance and the
+proposal-first action fact. They do not accept a legacy YAML `LifeModel`, an
+HS packet, heuristic guidance or an implicit personalization prompt. Agent
+Memory remains an explicit input; canonical LifeModel v2 personalization is
+compiled by the owning product adapter before the generic runtime boundary.
+
+Main Chat personalization has one product path: bounded Agent Memory plus the
+canonical LifeModel v2 runtime context. The kernel no longer compiles an
+accepted-guidance/HS context in parallel. PlanExecute receives the same
+canonical v2 planning hints; its product entrypoint does not enable legacy
+runtime-guidance consumption.
+
+Historical AgentRun rows can still expose minimized HS selection-audit and
+behavior-check metadata through the product read model. Those DTOs are
+read-only compatibility: current constructors initialize them empty, and no
+selector, provider authorization, tool capability, or durable-write path can
+be reconstructed from them. They can be removed when the corresponding
+historical AgentRun columns are explicitly migrated or retired.
+
+Scheduled tasks consume their durable task claim, typed Policy, canonical
+StateStore snapshot and Agent Memory. Planner mode does not advertise the
+legacy `life_model.read` or mixed-owner `goal.read` tools. The authenticated
+development A2A sidecar exposes only its bounded reasoning bridge and does not
+serve legacy personal-profile query skills; release frontend code exposes no
+A2A wrapper. The old release Proactive suggestion command and frontend wrapper
+had no product caller and are retired. The remaining Proactive core is limited
+to proposal-rejection evidence compatibility; it does not own LifeModel,
+learning, or the Agent runtime.
 
 ## ReAct And Tool Execution
 

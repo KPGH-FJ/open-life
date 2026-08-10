@@ -407,6 +407,94 @@
   background: var(--ol-surface);
 }
 
+.ol-workspace-markdown-memory {
+  display: grid;
+  gap: var(--ol-space-3);
+  padding: var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-3);
+  background: var(--ol-surface-subtle);
+}
+
+.ol-workspace-markdown-memory > p,
+.ol-workspace-markdown-memory small {
+  margin: 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-workspace-markdown-memory__roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+}
+
+.ol-workspace-markdown-memory__roots button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: var(--ol-space-2);
+  padding: 0 var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface);
+  color: var(--ol-ink-secondary);
+  font: inherit;
+  font-size: var(--ol-type-caption);
+  cursor: pointer;
+}
+
+.ol-workspace-markdown-memory__roots button.is-active {
+  border-color: var(--ol-focus);
+  color: var(--ol-ink);
+}
+
+.ol-workspace-markdown-memory__roots button:disabled {
+  color: var(--ol-control-boundary);
+  cursor: default;
+}
+
+.ol-workspace-markdown-memory__roots span {
+  color: var(--ol-ink-muted);
+}
+
+.ol-workspace-markdown-memory__editor,
+.ol-workspace-markdown-memory__editor label {
+  display: grid;
+  gap: var(--ol-space-2);
+}
+
+.ol-workspace-markdown-memory__editor label > span {
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+  font-weight: 650;
+}
+
+.ol-workspace-markdown-memory__editor input,
+.ol-workspace-markdown-memory__editor select,
+.ol-workspace-markdown-memory__editor textarea {
+  width: 100%;
+  padding: var(--ol-space-2);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  font: inherit;
+}
+
+.ol-workspace-markdown-memory__editor textarea {
+  resize: vertical;
+  font-family: var(--ol-font-mono);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-workspace-markdown-memory__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+}
+
 .ol-workspace-resources {
   display: grid;
   gap: var(--ol-space-2);
@@ -703,7 +791,35 @@
 
 .ol-review-queue__items {
   display: grid;
+  gap: var(--ol-space-4);
+}
+
+.ol-review-queue-section {
+  display: grid;
   gap: var(--ol-space-1);
+  min-width: 0;
+}
+
+.ol-review-queue-section__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ol-space-2);
+  padding: 0 var(--ol-space-2) var(--ol-space-1);
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-review-queue-section__heading > span {
+  font-weight: 650;
+}
+
+.ol-review-queue-section__overflow {
+  margin: var(--ol-space-1) var(--ol-space-2) 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
 }
 
 .ol-review-queue-item {

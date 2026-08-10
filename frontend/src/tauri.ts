@@ -176,51 +176,6 @@ function optionalDualArg<T>(
   return value === undefined ? {} : { [camelKey]: value, [snakeKey]: value };
 }
 
-export async function getLifeModel(): Promise<LifeModel> {
-  return safeInvoke<LifeModel>("get_life_model");
-}
-
-export interface LifeModelChangeView {
-  path: string;
-  proposalId: string;
-  proposalStatus: string;
-  proposalSource: string;
-  proposalSourceDetail?: string | null;
-  proposalRunId?: string | null;
-  sourceExcerpt?: string | null;
-  sourceUnavailableReason?: string | null;
-  confidence: number;
-  riskLevel: string;
-  before?: any;
-  after: any;
-  patchId?: string | null;
-  patchStatus?: string | null;
-  patchPath?: string | null;
-  patchUnavailableReason?: string | null;
-  snapshotVersions: string[];
-  snapshotUnavailableReason?: string | null;
-  currentMatchesAcceptedAfter: boolean;
-}
-
-export interface LifeModelCurrentView {
-  path: string;
-  label: string;
-  value?: string | null;
-  unavailableReason?: string | null;
-  currentValueSource: string;
-  change?: LifeModelChangeView | null;
-}
-
-export async function getLifeModelCurrentView(): Promise<LifeModelCurrentView> {
-  return safeInvoke<LifeModelCurrentView>("get_life_model_current_view");
-}
-
-const MANUAL_SNAPSHOT_RESTORE_REQUEST = {
-  purpose: "manual_restore",
-  explicitUserIntent: true,
-  createPreChangeSnapshot: true,
-} as const;
-
 function manualDataImportRequest(operationId: string) {
   return {
     operationId,
@@ -277,6 +232,8 @@ export interface AppConfig {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     safe_paths?: string[];
+    workspace_memory_root?: string;
+    project_memory_root?: string;
     search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
     search_provider_key?: string;
     search_provider_key_ref?: string;
@@ -308,6 +265,77 @@ export interface ArtifactOutputDirectorySelection {
 
 export async function selectArtifactOutputDirectory(): Promise<ArtifactOutputDirectorySelection> {
   return safeInvoke<ArtifactOutputDirectorySelection>("select_artifact_output_directory");
+}
+
+export type MarkdownMemoryScope = "workspace" | "project";
+
+export interface MarkdownMemoryRootSelection {
+  cancelled: boolean;
+  scope: MarkdownMemoryScope;
+  selectedPath: string | null;
+}
+
+export interface MarkdownMemoryRootView {
+  scope: MarkdownMemoryScope;
+  configured: boolean;
+  rootPath: string | null;
+  status: "ready" | "unavailable" | "unconfigured";
+}
+
+export interface MarkdownMemoryFileView {
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  content: string;
+  contentDigest: string;
+  charCount: number;
+  active: boolean;
+}
+
+export interface MarkdownMemoryViewModel {
+  roots: MarkdownMemoryRootView[];
+  files: MarkdownMemoryFileView[];
+  totalCharCount: number;
+  truncated: boolean;
+  sourceRule: string;
+}
+
+export interface MarkdownMemoryProposalReceipt {
+  proposalId: string;
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  operation: "write" | "deactivate";
+  status: "review_required";
+}
+
+export async function selectMarkdownMemoryRoot(
+  scope: MarkdownMemoryScope
+): Promise<MarkdownMemoryRootSelection> {
+  return safeInvoke<MarkdownMemoryRootSelection>("select_markdown_memory_root", { scope });
+}
+
+export async function getMarkdownMemoryViewModel(): Promise<MarkdownMemoryViewModel> {
+  return safeInvoke<MarkdownMemoryViewModel>("get_markdown_memory_view_model");
+}
+
+export async function draftMarkdownMemoryFileProposal(request: {
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  content: string;
+  expectedCurrentDigest?: string;
+}): Promise<MarkdownMemoryProposalReceipt> {
+  return safeInvoke<MarkdownMemoryProposalReceipt>("draft_markdown_memory_file_proposal", {
+    request,
+  });
+}
+
+export async function deactivateMarkdownMemoryFileProposal(request: {
+  scope: MarkdownMemoryScope;
+  relativePath: string;
+  expectedCurrentDigest: string;
+}): Promise<MarkdownMemoryProposalReceipt> {
+  return safeInvoke<MarkdownMemoryProposalReceipt>("deactivate_markdown_memory_file_proposal", {
+    request,
+  });
 }
 
 export interface CredentialRecoveryItem {
@@ -505,7 +533,6 @@ export interface ReasoningTrace {
   };
   layer_timings_ms?: Record<string, number>;
   stable_steps?: string[];
-  hsSelectionAudit?: HSSelectionAudit;
   behaviorChecks?: HSBehaviorCheckSummary[];
 }
 
@@ -544,49 +571,6 @@ export interface MainChatGenerationResult {
   [key: string]: any;
 }
 
-export interface HSAssetExclusion {
-  assetId: string;
-  assetKind: string;
-  reason: string;
-}
-
-export interface HSSelectionAudit {
-  selectedPolicyIds?: string[];
-  selectedHeuristicIds?: string[];
-  selectedGuidanceIds?: string[];
-  selectedGuidanceRefs?: SelectedGuidanceRef[];
-  excludedAssets?: HSAssetExclusion[];
-  estimatedTokens?: number;
-  tokenBudget?: number;
-}
-
-export interface SelectedGuidanceRef {
-  guidanceId: string;
-  guidanceDigest: string;
-  guidanceType: string;
-  lifecycleStatus: string;
-  domain: string;
-  triggerDigest: string;
-  selectedReason: string;
-  impactKind: string;
-  impactSummary: string;
-  riskLevel: string;
-  privacyLevel: string;
-  sourceProposalId?: string;
-  sourceEvidenceCount: number;
-  sourceLineageDigest: string;
-  policyBoundary: {
-    hardPolicyBoundary: boolean;
-    routePolicyRelaxed: boolean;
-    toolPolicyRelaxed: boolean;
-    proposalFirstPreserved: boolean;
-    privacyConstraintCount: number;
-    modelConstraintCount: number;
-    toolConstraintCount: number;
-    constraintDigest: string;
-  };
-}
-
 export interface HSBehaviorCheckSummary {
   id: string;
   label: string;
@@ -614,7 +598,35 @@ export interface SendMessageResult {
   provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
+  life_model_influence?: MainChatLifeModelProductReceipt;
   turn_terminal?: OpenLifeTurnTerminal;
+}
+
+export interface MainChatLifeModelSelectedItemReceipt {
+  itemRef: string;
+  statement: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+  reasonCode: string;
+}
+
+export interface MainChatLifeModelProductReceipt {
+  status: string;
+  sourceId?: string | null;
+  modelVersion?: number | null;
+  versionDigest?: string | null;
+  documentDigest?: string | null;
+  selectedItems: MainChatLifeModelSelectedItemReceipt[];
+  appliedSurfaces: string[];
+  currentInstructionPriorityPreserved: boolean;
+  policyPriorityPreserved: boolean;
+  permissionGranted: boolean;
+  durableWriteAuthorized: boolean;
+}
+
+export interface ChatLifeModelInfluenceSnapshot {
+  status: MainChatTurnStatus;
+  lifeModelInfluence: MainChatLifeModelProductReceipt;
 }
 
 export interface ImportedResourceReceipt {
@@ -747,6 +759,7 @@ export interface StreamMessageDonePayload {
   provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
+  life_model_influence?: MainChatLifeModelProductReceipt;
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
@@ -768,11 +781,15 @@ export type MainChatKernelEvent =
       selected_skill_instruction_loaded: boolean;
     }
   | {
-      type: "hs_context_loaded";
+      type: "life_model_context_loaded";
       available: boolean;
-      warning_count: number;
-      selected_policy_count: number;
-      accepted_guidance_count: number;
+      model_version?: number | null;
+      selected_item_count: number;
+      status: string;
+      source_id?: string | null;
+      selected_item_refs: string[];
+      reason_codes: string[];
+      receipt: MainChatLifeModelProductReceipt;
     }
   | {
       type: "route_selected";
@@ -1660,6 +1677,15 @@ export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> 
   return safeInvoke<ChatMessage[]>("get_chat_history", sessionArgs(sessionId));
 }
 
+export async function getChatLifeModelInfluence(
+  sessionId: string
+): Promise<ChatLifeModelInfluenceSnapshot | null> {
+  return safeInvoke<ChatLifeModelInfluenceSnapshot | null>(
+    "get_chat_life_model_influence",
+    sessionArgs(sessionId)
+  );
+}
+
 export async function saveChatMessage(
   sessionId: string,
   message: ChatMessage,
@@ -1691,15 +1717,6 @@ export async function getPolicyRouterStatus(): Promise<PolicyRouterStatus> {
 
 export async function getModelRouterStatus(): Promise<ModelRouterStatus> {
   return safeInvoke<ModelRouterStatus>("get_model_router_status");
-}
-
-export interface BuilderCompletion {
-  identity: number;
-  goals: number;
-  capabilities: number;
-  state: number;
-  overall: number;
-  lowest_dimension?: string | null;
 }
 
 export interface DataFileStatus {
@@ -1913,8 +1930,6 @@ export interface SystemDiagnostics {
   vector_corrupt_embedding_count?: number;
   vector_unknown_profile_count?: number;
   vector_profile_dimension_mismatch_count?: number;
-  unfinished_builder_sessions: number;
-  pending_builder_review_sessions?: number;
   ollama_service_online?: boolean;
   ollama_online: boolean;
   local_model: string;
@@ -1934,14 +1949,12 @@ export interface SystemDiagnostics {
   active_data_dir?: string;
   database_status?: string;
   startup_warnings?: string[];
-  snapshot_count: number;
   life_model_ready: boolean;
   app_version: string;
   model_empty: boolean;
   chat_session_count: number;
   usage_ready?: boolean;
   usage_readiness_issues?: string[];
-  builder_completion: BuilderCompletion;
   data_files: DataFileStatus;
   ollama_models: OllamaModelInfo[];
   config_source: string;
@@ -1972,8 +1985,6 @@ export interface LifeReadinessProjection {
   usageReady: boolean;
   lifeModelReady: boolean;
   modelEmpty: boolean;
-  pendingBuilderReviewSessions: number;
-  unfinishedBuilderSessions: number;
   databaseStatus: string;
   readinessIssues: string[];
   usageReadinessIssues: string[];
@@ -2317,6 +2328,21 @@ export type ReviewDecisionContext = {
     terminalEvidenceSummary: string;
     effectBoundary: string;
   };
+  lifeModelLearning?: {
+    candidateId: string;
+    candidateSnapshotDigest: string;
+    section: string;
+    proposedStatement: string;
+    explicitness: string;
+    stability: string;
+    sensitivity: string;
+    conflictStatus: string;
+    supportCount: number;
+    independentSupportCount: number;
+    confirmedAt: string;
+    sourceRefs: string[];
+    sourceKinds: string[];
+  };
   evidenceRefs: EvidenceRef[];
 };
 
@@ -2379,20 +2405,13 @@ export type ReviewCenterViewModel = {
 // Canonical Rust owner: openlife-core/src/agent/life_model_view_model.rs.
 export type LifeModelTruthMode =
   | "canonical"
-  | "current_compatibility"
   | "candidate"
   | "pending_review"
   | "manual_override"
   | "unknown"
   | "unavailable";
 
-export type LifeModelDimensionId = "identity" | "goals" | "capabilities" | "state";
-
-export type LifeModelConfidence = "low" | "medium" | "high" | "unknown";
-
 export type LifeModelOwnerStatus = "PARTIAL" | "PHASE_2_REQUIRED" | "UNKNOWN";
-
-export type LifeModelProvenance = "limited" | "unknown" | "PHASE_2_REQUIRED";
 
 export type LifeModelReviewItemRef = BackendEntityRef & {
   kind: "review_item";
@@ -2403,37 +2422,232 @@ export type LifeModelCanonicalSummary = {
   title: string;
   summary: string;
   versionLabel: string;
+  parentVersion: number | null;
+  documentDigest: string;
   lastMaterializedAt: string | null;
+  freshnessStatus: string;
+  conflictStatus: string;
   evidenceRefs: EvidenceRef[];
+  document: LifeModelDocumentV2;
+  humanProjection: LifeModelHumanProjectionV2;
 };
 
-export type LifeModelCurrentViewSummary = {
-  currentViewRef: BackendEntityRef;
-  compatibilityMode: boolean;
-  label: string;
-  summary: string;
-  divergenceFromCanonical: "none" | "minor" | "material" | "unknown";
-  evidenceRefs: EvidenceRef[];
-  ownerStatus: LifeModelOwnerStatus;
+export type LifeModelStatementV2 = {
+  id: string;
+  statement: string;
+  sourceRefs: string[];
+  confirmedAt: string;
 };
 
-export type LifeModelDimensionSummary = {
-  id: LifeModelDimensionId;
-  label: string;
+export type LifeModelLongTermGoalV2 = {
+  id: string;
+  direction: string;
+  meaning: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelRelationshipV2 = {
+  id: string;
+  personLabel: string;
+  relationship: string;
+  significance: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelNamedItemV2 = {
+  id: string;
+  name: string;
+  description: string;
+  sourceRefs: string[];
+  confirmedAt: string;
+};
+
+export type LifeModelDocumentV2 = {
+  schemaVersion: "openlife.lifemodel.v2";
+  modelId: string;
+  identity: LifeModelStatementV2[];
+  values: LifeModelStatementV2[];
+  longTermGoals: LifeModelLongTermGoalV2[];
+  stablePreferences: LifeModelStatementV2[];
+  personalBoundaries: LifeModelStatementV2[];
+  importantRelationships: LifeModelRelationshipV2[];
+  capabilities: LifeModelNamedItemV2[];
+  resources: LifeModelNamedItemV2[];
+  decisionPrinciples: LifeModelStatementV2[];
+  collaborationPreferences: LifeModelStatementV2[];
+};
+
+export type LifeModelVersionHistoryEntryV2 = {
+  modelId: string;
+  modelVersion: number;
+  parentVersion: number | null;
+  documentDigest: string;
+  itemCount: number;
   summary: string;
-  confidence: LifeModelConfidence;
-  stale: boolean;
-  pendingReviewItemRefs: LifeModelReviewItemRef[];
-  evidenceRefs: EvidenceRef[];
-  provenance: LifeModelProvenance;
-  ownerStatus: LifeModelOwnerStatus;
+  sourceRefs: string[];
+  createdAt: string;
+  changeSummary: { added: number; replaced: number; removed: number };
+};
+
+export type LifeModelHumanProjectionV2 = {
+  schemaVersion: "openlife.lifemodel.v2.yaml-projection.v1";
+  modelId: string;
+  modelVersion: number;
+  itemCount: number;
+  documentDigest: string;
+  yamlContentDigest: string;
+  projectionDigest: string;
+  yaml: string;
+};
+
+export type LegacyLifeModelMigrationItemV2 = {
+  sourcePath: string;
+  valuePreview: string;
+  valueDigest: string;
+  valueTruncated: boolean;
+  disposition:
+    | "review_required"
+    | "external_owner"
+    | "manual_classification"
+    | "not_migrated"
+    | "migration_metadata";
+  targetOwner:
+    | "life_model_v2"
+    | "state_store"
+    | "tasks"
+    | "agent_memory"
+    | "agent_runtime"
+    | "migration_metadata"
+    | "legacy_compatibility_projection"
+    | "unassigned";
+  targetSection:
+    | "identity"
+    | "values"
+    | "long_term_goals"
+    | "stable_preferences"
+    | "personal_boundaries"
+    | "important_relationships"
+    | "capabilities"
+    | "resources"
+    | "decision_principles"
+    | "collaboration_preferences"
+    | null;
+  reasonCode: string;
+  sensitive: boolean;
+};
+
+export type LegacyLifeModelMigrationPreviewV2 = {
+  schemaVersion: string;
+  sourceDigest: string;
+  items: LegacyLifeModelMigrationItemV2[];
+  reviewRequiredCount: number;
+  externalOwnerCount: number;
+  manualClassificationCount: number;
+  notMigratedCount: number;
+  migrationMetadataCount: number;
+  containsSensitiveItems: boolean;
+  candidates: LegacyLifeModelMigrationCandidateV2[];
+};
+
+export type LifeModelSectionV2 =
+  | "identity"
+  | "values"
+  | "long_term_goals"
+  | "stable_preferences"
+  | "personal_boundaries"
+  | "important_relationships"
+  | "capabilities"
+  | "resources"
+  | "decision_principles"
+  | "collaboration_preferences";
+
+export type LegacyLifeModelMigrationCandidateValueV2 =
+  | { kind: "statement"; value: { statement: string } }
+  | { kind: "long_term_goal"; value: { direction: string; meaning: string } }
+  | {
+      kind: "relationship";
+      value: { person_label: string; relationship: string; significance: string };
+    }
+  | { kind: "capability"; value: { name: string; description: string } }
+  | { kind: "resource"; value: { name: string; description: string } };
+
+export type LifeModelUserValueV2 = LegacyLifeModelMigrationCandidateValueV2;
+
+export type LifeModelV2UserChange =
+  | { operation: "add"; section: LifeModelSectionV2; value: LifeModelUserValueV2 }
+  | {
+      operation: "replace";
+      section: LifeModelSectionV2;
+      item_id: string;
+      value: LifeModelUserValueV2;
+    }
+  | { operation: "remove"; section: LifeModelSectionV2; item_id: string }
+  | { operation: "clear" };
+
+export type DraftLifeModelV2ChangeRequest = {
+  baseVersion: number | null;
+  baseDocumentDigest: string | null;
+  change: LifeModelV2UserChange;
+};
+
+export type DraftLifeModelV2RollbackRequest = {
+  baseVersion: number;
+  baseDocumentDigest: string;
+  targetVersion: number;
+  targetDocumentDigest: string;
+};
+
+export type DraftLifeModelV2ExportRequest = {
+  modelVersion: number;
+  documentDigest: string;
+  projectionDigest: string | null;
+  format: "yaml" | "json";
+  targetPath: string;
+};
+
+export type LifeModelV2ProposalReceipt = {
+  proposalId: string;
+  status: "review_required";
+  baseVersion: number | null;
+  baseDocumentDigest: string | null;
+  resultDocumentDigest: string | null;
+  operationCount: number;
+};
+
+export type LegacyLifeModelMigrationCandidateV2 = {
+  candidateId: string;
+  itemId: string;
+  sourcePaths: string[];
+  targetSection: LifeModelSectionV2;
+  proposedValue: LegacyLifeModelMigrationCandidateValueV2;
+  sensitive: boolean;
+};
+
+export type LegacyLifeModelMigrationSelectionV2 = {
+  candidateId: string;
+  decision: "include" | "exclude";
+  editedValue: LegacyLifeModelMigrationCandidateValueV2 | null;
+};
+
+export type DraftLegacyLifeModelMigrationRequest = {
+  sourceDigest: string;
+  selections: LegacyLifeModelMigrationSelectionV2[];
+  nonLifemodelItemsAcknowledged: boolean;
+};
+
+export type DraftLegacyLifeModelMigrationReceipt = {
+  proposalId: string;
+  status: "review_required";
+  sourceDigest: string;
+  includedCount: number;
+  excludedCount: number;
+  nonLifemodelItemCount: number;
 };
 
 export type LifeModelTrustQualityState = {
   readiness: "not_built" | "limited" | "usable_with_limits" | "ready" | "stale" | "unknown";
-  completionScore: number | null;
-  missingDimensionCount: number;
-  staleDimensionCount: number;
   warningRefs: EvidenceRef[];
   ownerStatus: LifeModelOwnerStatus;
 };
@@ -2493,11 +2707,106 @@ export type LifeModelMemoryLinkageSummary = {
   ownerStatus: LifeModelOwnerStatus;
 };
 
+export type LifeModelLearningCandidate = {
+  id: string;
+  workspaceRef: string;
+  summary: string;
+  section: LifeModelSectionV2;
+  value: LifeModelUserValueV2;
+  targetKey: string;
+  suggestionClass: string;
+  supportCount: number;
+  oppositionCount: number;
+  independentSupportCount: number;
+  status:
+    | "accumulating"
+    | "reviewable"
+    | "conflicted"
+    | "proposed"
+    | "rejected"
+    | "materialized"
+    | "expired";
+  explicitness: "explicit_user_request" | "passive_inference";
+  sensitivity: "internal";
+  observationIds: string[];
+  sourceRefs: string[];
+  sourceKinds: Array<
+    | "explicit_user_message"
+    | "task_outcome"
+    | "agent_reflection"
+    | "user_feedback"
+    | "user_correction"
+    | "model_extraction"
+  >;
+  confirmedAt?: string;
+  proposalId?: string;
+  decidedAt?: string;
+  materializedVersion?: number;
+  materializedDocumentDigest?: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+};
+
+export type LifeModelLearningSummary = {
+  available: boolean;
+  activeCount: number;
+  candidates: LifeModelLearningCandidate[];
+};
+
+export type DeleteLifeModelLearningCandidateReceipt = {
+  candidateId: string;
+  deleted: boolean;
+  proposalDeleted: false;
+  canonicalLifeModelChanged: false;
+};
+
+export type ConfirmLifeModelLearningCandidateReceipt = {
+  candidateId: string;
+  status: "reviewable";
+  sourceKind: "user_feedback";
+  proposalCreated: false;
+  canonicalLifeModelChanged: false;
+};
+
+export type StageLifeModelLearningCandidateReceipt = {
+  candidateId: string;
+  proposalId: string;
+  status: "review_required";
+  baseVersion: number | null;
+  baseDocumentDigest: string | null;
+  resultDocumentDigest: string;
+  canonicalLifeModelChanged: false;
+};
+
+export type LifeModelLearningDecisionReceipt = {
+  candidateId: string;
+  changed: boolean;
+  status: "rejected" | "expired";
+  suppressionKind: "exact_candidate" | "suggestion_class" | null;
+  contentScrubbed: boolean;
+  proposalChanged: false;
+  canonicalLifeModelChanged: false;
+};
+
+export type LifeModelLearningReviewDecisionReceipt = {
+  candidateId: string;
+  proposalId: string;
+  changed: boolean;
+  status: "proposed" | "rejected" | "materialized";
+  contentScrubbed: boolean;
+  correctionObservationId?: string;
+  cooldownUntil?: string;
+  materializedVersion?: number;
+  materializedDocumentDigest?: string;
+  canonicalLifeModelChanged: boolean;
+};
+
 export type LifeModelViewModel = {
   truthMode: LifeModelTruthMode;
   canonicalSummary: LifeModelCanonicalSummary | null;
-  currentViewSummary: LifeModelCurrentViewSummary | null;
-  dimensionSummaries: LifeModelDimensionSummary[];
+  versionHistory: LifeModelVersionHistoryEntryV2[];
+  legacyMigrationPreview: LegacyLifeModelMigrationPreviewV2 | null;
   trustQualityState: LifeModelTrustQualityState;
   pendingUpdateCounts: LifeModelPendingUpdateCounts;
   provenanceRefs: EvidenceRef[];
@@ -2506,6 +2815,7 @@ export type LifeModelViewModel = {
   manualOverrideState: LifeModelManualOverrideState | null;
   relatedReviewItemRefs: LifeModelReviewItemRef[];
   memoryLinkage: LifeModelMemoryLinkageSummary;
+  learning: LifeModelLearningSummary;
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };
@@ -2717,6 +3027,31 @@ export type MemoryViewModelSummary = {
   tierSummary?: MemoryTierSummary;
 };
 
+export type MemoryItemView = {
+  memoryId: string;
+  content?: string;
+  scope: string;
+  category: string;
+  status: string;
+  materializationStatus: string;
+  recallState: "active" | "paused" | "archived" | "historical" | "erased" | "unavailable";
+  sensitivity: string;
+  whyRemembered: string;
+  recallExplanation: string;
+  acceptedAt?: string;
+  evidenceIds: string[];
+  sourceRefs: EvidenceRef[];
+  supersedesMemoryId?: string;
+  replacementMemoryId?: string;
+  privacyErased: boolean;
+  canCorrect: boolean;
+  canStopRecall: boolean;
+  canArchive: boolean;
+  canRestore: boolean;
+  canRollback: boolean;
+  canPrivacyErase: boolean;
+};
+
 export type MemoryViewModel = {
   summary: MemoryViewModelSummary;
   lifecycleSummary: MemoryLifecycleSummary;
@@ -2724,6 +3059,7 @@ export type MemoryViewModel = {
   recentMemoryRefs: BackendEntityRef[];
   reviewItemRefs: BackendEntityRef[];
   lifeModelLinkage: MemoryLifeModelLinkageSummary;
+  items: MemoryItemView[];
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };
@@ -2859,176 +3195,6 @@ export interface ToolManifest {
   tags: string[];
 }
 
-export async function recommendMcpManifests(topK?: number): Promise<ToolManifest[]> {
-  const value = topK ?? 5;
-  return safeInvoke<ToolManifest[]>("recommend_mcp_manifests", {
-    topK: value,
-    top_k: value,
-  });
-}
-
-export async function createSnapshot(
-  tag: string,
-  note: string
-): Promise<import("./types").LifeModelVersion> {
-  return safeInvoke<import("./types").LifeModelVersion>("create_snapshot", { tag, note });
-}
-
-export async function listSnapshots(): Promise<import("./types").LifeModelVersion[]> {
-  return safeInvoke<import("./types").LifeModelVersion[]>("list_snapshots");
-}
-
-export interface SnapshotRestoreResult {
-  success: boolean;
-  legacy: boolean;
-  warning: string;
-  metadata_safe: boolean;
-  durable_lifemodel_write: boolean;
-  restored_snapshot_version: string;
-  restored_model_version?: string;
-  pre_restore_snapshot_created: boolean;
-  pre_restore_snapshot_version?: string | null;
-}
-
-export async function restoreSnapshot(version: string): Promise<SnapshotRestoreResult> {
-  return safeInvoke<SnapshotRestoreResult>("restore_snapshot", {
-    version,
-    governedRequest: MANUAL_SNAPSHOT_RESTORE_REQUEST,
-    governed_request: MANUAL_SNAPSHOT_RESTORE_REQUEST,
-  });
-}
-
-export async function diffSnapshots(v1: string, v2: string): Promise<string> {
-  return safeInvoke<string>("diff_snapshots", { v1, v2 });
-}
-
-export async function saveFeedback(
-  sessionId: string,
-  messageIndex: number,
-  feedbackType: "up" | "down",
-  contentPreview: string
-): Promise<void> {
-  return safeInvoke("save_feedback", {
-    ...sessionArgs(sessionId),
-    messageIndex,
-    message_index: messageIndex,
-    feedbackType,
-    feedback_type: feedbackType,
-    contentPreview,
-    content_preview: contentPreview,
-  });
-}
-
-export async function getFeedbackSummary(): Promise<{
-  total_messages: number;
-  total_feedback_up: number;
-  total_feedback_down: number;
-  session_count: number;
-}> {
-  return safeInvoke("get_feedback_summary");
-}
-
-export interface FeedbackEvolutionReportResult {
-  success: boolean;
-  read_only: boolean;
-  metadata_safe: boolean;
-  durable_lifemodel_write: boolean;
-  evolution_rules_write: boolean;
-  applied_rule_count: number;
-  liked_pattern_count: number;
-  disliked_pattern_count: number;
-  suggested_rule_count: number;
-  proposal_candidate_count: number;
-  candidate_status: string;
-  summary: string;
-}
-
-export async function generateEvolutionReport(): Promise<FeedbackEvolutionReportResult> {
-  return safeInvoke<FeedbackEvolutionReportResult>("generate_evolution_report");
-}
-
-export async function generateCalibrationReport(periodDays: number): Promise<{
-  period_days: number;
-  feedback_up: number;
-  feedback_down: number;
-  top_liked_patterns: string[];
-  top_disliked_patterns: string[];
-  value_changes: string[];
-  suggested_actions: string[];
-  summary_text: string;
-}> {
-  return safeInvoke("generate_calibration_report", {
-    periodDays,
-    period_days: periodDays,
-  });
-}
-
-export interface SignalSource {
-  source: string;
-  score: number;
-  weight: number;
-}
-
-export interface EvolutionChange {
-  dimension: string;
-  target_name: string;
-  old_value: number;
-  new_value: number;
-  reason: string;
-  confidence: number;
-  sources: SignalSource[];
-}
-
-export interface SignalContributor {
-  name: string;
-  score: number;
-  source: string;
-}
-
-export interface EvolutionSignalSummary {
-  feedback_terms: number;
-  behavior_events: number;
-  inference_items: number;
-  top_feedback: SignalContributor[];
-  top_behavior: SignalContributor[];
-  top_inference: SignalContributor[];
-}
-
-export async function generateMicroEvolutionChanges(): Promise<{
-  changes: EvolutionChange[];
-  applied: boolean;
-  message: string;
-  before: Model4DCompletion;
-  after: Model4DCompletion;
-  requires_confirmation: boolean;
-  signal_summary: EvolutionSignalSummary;
-}> {
-  return safeInvoke("generate_micro_evolution_changes");
-}
-
-export async function calibrationCreateProposals(changes: EvolutionChange[]): Promise<{
-  created_count: number;
-  created_ids: string[];
-  run_id: string;
-  error_count: number;
-  errors: string[];
-  message: string;
-}> {
-  return safeInvoke("calibration_create_proposals", { changes });
-}
-
-export async function shouldShowCalibration(): Promise<{
-  weekly: boolean;
-  monthly: boolean;
-  today: string;
-}> {
-  return safeInvoke("should_show_calibration");
-}
-
-export async function markCalibrationShown(period: "weekly" | "monthly"): Promise<void> {
-  return safeInvoke("mark_calibration_shown", { period });
-}
-
 export async function runMemoryTierMaintenance(): Promise<{
   promoted: number;
   demoted: number;
@@ -3056,19 +3222,6 @@ export async function rebuildMemoryIndex(
     ...(confirmationEvidence
       ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
       : {}),
-  });
-}
-
-export async function logAnalyticsEvent(
-  eventName: string,
-  sessionId?: string,
-  detail?: string
-): Promise<void> {
-  return safeInvoke("log_analytics_event", {
-    eventName,
-    event_name: eventName,
-    ...optionalDualArg("sessionId", "session_id", sessionId),
-    detail,
   });
 }
 
@@ -3191,236 +3344,6 @@ export async function searchMemory(
     ...raw,
     hits: raw.hits.map(([chunk, score]) => ({ chunk, score })),
   };
-}
-
-export async function a2aDiscoverAgent(url: string): Promise<any> {
-  return safeInvoke("a2a_discover_agent", { url });
-}
-
-export async function a2aSendTask(
-  url: string,
-  requestJson: string,
-  pairingToken?: string
-): Promise<string> {
-  return safeInvoke<string>("a2a_send_task", {
-    url,
-    requestJson,
-    request_json: requestJson,
-    ...optionalDualArg("pairingToken", "pairing_token", pairingToken),
-  });
-}
-
-export async function a2aLocalAgentCard(): Promise<any> {
-  return safeInvoke("a2a_local_agent_card");
-}
-
-export async function a2aHandleTask(requestJson: string): Promise<string> {
-  return safeInvoke<string>("a2a_handle_task", { requestJson, request_json: requestJson });
-}
-
-export async function a2aBridgeLocal(
-  method: string,
-  text: string,
-  sessionId?: string,
-  skill?: string
-): Promise<any> {
-  return safeInvoke("a2a_bridge_local", {
-    method,
-    text,
-    ...optionalDualArg("sessionId", "session_id", sessionId),
-    skill,
-  });
-}
-
-export async function a2aRestartSidecar(): Promise<void> {
-  return safeInvoke("a2a_restart_sidecar");
-}
-
-export async function a2aStopSidecar(): Promise<void> {
-  return safeInvoke("a2a_stop_sidecar");
-}
-
-export interface BuilderProgress {
-  progress: number;
-  current_step_label: string;
-  step_index: number;
-  total_steps: number;
-  current_session?: number;
-  waiting_pairwise?: boolean;
-  waiting_phase_confirmation?: boolean;
-  phase_summary?: string;
-}
-
-export interface BuilderAnalysis {
-  completion: Model4DCompletion;
-  gaps: string[];
-}
-export interface BuilderSignal {
-  id: string;
-  source_step: number;
-  source_question_id: string;
-  dimension: "Identity" | "Goals" | "Capabilities" | "State";
-  affected_path: string;
-  proposed_value: unknown;
-  confidence: number;
-  reason: string;
-  risk_level: "low" | "medium" | "high";
-  user_status: "Pending" | "Accepted" | "Edited" | "Rejected";
-}
-
-export interface BuilderSummary {
-  identity_summary: string;
-  goals_summary: string;
-  capabilities_summary: string;
-  state_summary: string;
-  assumptions: string[];
-  unresolved_questions: string[];
-  recommended_next_steps: string[];
-}
-
-export interface BuilderPendingSignalsView {
-  session_id: string;
-  signals: BuilderSignal[];
-  summary: BuilderSummary;
-  finished: boolean;
-}
-
-export interface BuilderTurnResponse {
-  prompt: string;
-  finished: boolean;
-  progress: BuilderProgress;
-  analysis?: BuilderAnalysis;
-  review?: BuilderPendingSignalsView | null;
-  waiting_for_review?: boolean;
-  durable_lifemodel_write?: false;
-  mode?: string;
-  target_dimension?: string;
-}
-
-export interface BuilderPatchReview {
-  signals: BuilderSignal[];
-  summary: BuilderSummary;
-  assumptions: string[];
-  uncertain_fields: string[];
-  confidence_by_dimension: Record<string, number>;
-}
-
-export async function builderStart(
-  mode: "quick" | "incremental" | "socratic",
-  sessionId: string,
-  targetDimension?: "identity" | "goals" | "capabilities" | "state"
-): Promise<BuilderTurnResponse> {
-  return safeInvoke("builder_start", {
-    mode,
-    ...sessionArgs(sessionId),
-    ...optionalDualArg("targetDimension", "target_dimension", targetDimension),
-  });
-}
-
-export async function builderStep(
-  sessionId: string,
-  userReply: string
-): Promise<BuilderTurnResponse> {
-  return safeInvoke("builder_step", {
-    ...sessionArgs(sessionId),
-    userReply,
-    user_reply: userReply,
-  });
-}
-
-export interface UnfinishedBuilderSession {
-  session_id: string;
-  mode: "Quick" | "Incremental" | "Socratic";
-  step_index: number;
-  finished: boolean;
-  current_prompt: string;
-  pending_signal_count: number;
-  waiting_for_review: boolean;
-  review_in_progress: boolean;
-  target_dimension?: "Identity" | "Goals" | "Capabilities" | "State";
-  retention_status?: "active" | "expired_recoverable" | null;
-  expires_at?: string | null;
-  purge_after?: string | null;
-}
-
-export async function builderListUnfinished(): Promise<UnfinishedBuilderSession[]> {
-  return safeInvoke("builder_list_unfinished");
-}
-
-export async function builderDeleteSession(sessionId: string): Promise<void> {
-  return safeInvoke("builder_delete_session", sessionArgs(sessionId));
-}
-export async function builderGetPendingSignals(
-  sessionId: string
-): Promise<BuilderPendingSignalsView> {
-  return safeInvoke("builder_get_pending_signals", sessionArgs(sessionId));
-}
-
-export interface BuilderSignalDecision {
-  id: string;
-  status: "accepted" | "rejected" | "edited";
-  proposed_value?: unknown;
-}
-
-export async function builderCreateProposals(
-  sessionId: string,
-  decisions: BuilderSignalDecision[]
-): Promise<{
-  success: boolean;
-  created_count: number;
-  reused_count: number;
-  updated_count: number;
-  rejected_count: number;
-  proposal_ids: string[];
-  run_id: string;
-  warnings?: string[];
-}> {
-  return safeInvoke("builder_create_proposals", { ...sessionArgs(sessionId), decisions });
-}
-
-export async function goalCapabilityGapAnalysis(): Promise<string[]> {
-  return safeInvoke<string[]>("goal_capability_gap_analysis");
-}
-
-export interface CapabilityGap {
-  goal_name: string;
-  skill_name: string;
-  current_level: number;
-  target_level: number;
-  severity: string;
-  suggestion: string;
-}
-
-export async function goalCapabilityGapReport(): Promise<CapabilityGap[]> {
-  return safeInvoke<CapabilityGap[]>("goal_capability_gap_report");
-}
-
-export async function identityGoalAlignmentCheck(): Promise<string[]> {
-  return safeInvoke<string[]>("identity_goal_alignment_check");
-}
-
-export interface AlignmentIssue {
-  goal_name: string;
-  severity: string;
-  related_values: string[];
-  reason: string;
-  suggestion: string;
-}
-
-export async function identityGoalAlignmentReport(): Promise<AlignmentIssue[]> {
-  return safeInvoke<AlignmentIssue[]>("identity_goal_alignment_report");
-}
-
-export interface Model4DCompletion {
-  identity: number;
-  goals: number;
-  capabilities: number;
-  state: number;
-  overall: number;
-}
-
-export async function getModel4DCompletion(): Promise<Model4DCompletion> {
-  return safeInvoke<Model4DCompletion>("get_model_4d_completion");
 }
 
 export interface ExportedMessage {
@@ -4363,6 +4286,92 @@ export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeMod
   return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
 }
 
+export async function deleteLifeModelLearningCandidate(
+  candidateId: string
+): Promise<DeleteLifeModelLearningCandidateReceipt> {
+  return safeInvoke<DeleteLifeModelLearningCandidateReceipt>(
+    "delete_lifemodel_learning_candidate",
+    { candidateId, candidate_id: candidateId }
+  );
+}
+
+export async function confirmLifeModelLearningCandidate(
+  candidateId: string
+): Promise<ConfirmLifeModelLearningCandidateReceipt> {
+  return safeInvoke<ConfirmLifeModelLearningCandidateReceipt>(
+    "confirm_lifemodel_learning_candidate",
+    { candidateId, candidate_id: candidateId }
+  );
+}
+
+export async function stageLifeModelLearningCandidate(
+  candidateId: string
+): Promise<StageLifeModelLearningCandidateReceipt> {
+  return safeInvoke<StageLifeModelLearningCandidateReceipt>("stage_lifemodel_learning_candidate", {
+    candidateId,
+    candidate_id: candidateId,
+  });
+}
+
+export async function editLifeModelLearningProposal(
+  proposalId: string,
+  statement: string
+): Promise<{
+  proposalId: string;
+  status: "edited_pending_review";
+  resultDocumentDigest: string;
+  durableWriteExecuted: false;
+  learning: LifeModelLearningReviewDecisionReceipt;
+}> {
+  return safeInvoke("edit_lifemodel_learning_proposal", {
+    request: { proposalId, statement },
+  });
+}
+
+export async function rejectLifeModelLearningCandidate(
+  candidateId: string
+): Promise<LifeModelLearningDecisionReceipt> {
+  return safeInvoke<LifeModelLearningDecisionReceipt>("reject_lifemodel_learning_candidate", {
+    candidateId,
+    candidate_id: candidateId,
+  });
+}
+
+export async function pauseLifeModelLearningSuggestionClass(
+  candidateId: string
+): Promise<LifeModelLearningDecisionReceipt> {
+  return safeInvoke<LifeModelLearningDecisionReceipt>("pause_lifemodel_learning_suggestion_class", {
+    candidateId,
+    candidate_id: candidateId,
+  });
+}
+
+export async function draftLegacyLifeModelMigration(
+  request: DraftLegacyLifeModelMigrationRequest
+): Promise<DraftLegacyLifeModelMigrationReceipt> {
+  return safeInvoke<DraftLegacyLifeModelMigrationReceipt>("draft_legacy_lifemodel_migration", {
+    request,
+  });
+}
+
+export async function draftLifeModelV2Change(
+  request: DraftLifeModelV2ChangeRequest
+): Promise<LifeModelV2ProposalReceipt> {
+  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_change", { request });
+}
+
+export async function draftLifeModelV2Rollback(
+  request: DraftLifeModelV2RollbackRequest
+): Promise<LifeModelV2ProposalReceipt> {
+  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_rollback", { request });
+}
+
+export async function draftLifeModelV2Export(
+  request: DraftLifeModelV2ExportRequest
+): Promise<LifeModelV2ProposalReceipt> {
+  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_export", { request });
+}
+
 export async function getMemoryViewModel(): Promise<ViewModelEnvelope<MemoryViewModel>> {
   return safeInvoke<ViewModelEnvelope<MemoryViewModel>>("get_memory_view_model");
 }
@@ -4506,6 +4515,7 @@ export interface MemoryRollbackReport {
     aggregateKind: string;
     aggregateId: string;
     mutationKind: string;
+    aggregateRevision: number;
     payloadDigest: string;
     tombstoneId?: string | null;
     createdAt: string;
@@ -4513,6 +4523,32 @@ export interface MemoryRollbackReport {
   canonicalCommitted: boolean;
   projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
   projectionErrorDigest?: string;
+}
+
+export interface MemoryPrivacyEraseReport {
+  memoryId: string;
+  erasedAt: string;
+  materializedView: MemoryMaterializedView;
+  canonicalMutation: {
+    eventId: string;
+    aggregateKind: string;
+    aggregateId: string;
+    mutationKind: string;
+    aggregateRevision: number;
+    payloadDigest: string;
+    tombstoneId?: string | null;
+    createdAt: string;
+  };
+  canonicalCommitted: boolean;
+  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
+}
+
+export interface MemoryActionProposalReceipt {
+  proposalId: string;
+  memoryId: string;
+  action: "correct" | "stop_recall" | "archive";
+  status: "review_required";
 }
 
 export interface MemoryProposalDraftEditReport {
@@ -4571,6 +4607,13 @@ export interface ConfirmedAcceptProposalResult {
     errorDigest?: string;
   };
   artifactMaterialization?: ArtifactMaterializationReceipt;
+  lifeModelLearning?:
+    | LifeModelLearningReviewDecisionReceipt
+    | {
+        proposalId: string;
+        status: "reconciliation_required";
+        canonicalLifeModelChanged: true;
+      };
   blockedAction?: unknown;
   canContinue?: boolean;
 }
@@ -4596,6 +4639,33 @@ export async function rollbackMemoryAsset(
   reason: string
 ): Promise<MemoryRollbackReport> {
   return safeInvoke("rollback_memory_asset", { memoryId, memory_id: memoryId, reason });
+}
+
+export async function draftMemoryCorrectionProposal(
+  memoryId: string,
+  content: string
+): Promise<MemoryActionProposalReceipt> {
+  return safeInvoke("draft_memory_correction_proposal", {
+    memoryId,
+    memory_id: memoryId,
+    content,
+  });
+}
+
+export async function draftMemoryArchiveProposal(
+  memoryId: string
+): Promise<MemoryActionProposalReceipt> {
+  return safeInvoke("draft_memory_archive_proposal", { memoryId, memory_id: memoryId });
+}
+
+export async function draftMemoryStopRecallProposal(
+  memoryId: string
+): Promise<MemoryActionProposalReceipt> {
+  return safeInvoke("draft_memory_stop_recall_proposal", { memoryId, memory_id: memoryId });
+}
+
+export async function privacyEraseMemoryAsset(memoryId: string): Promise<MemoryPrivacyEraseReport> {
+  return safeInvoke("privacy_erase_memory_asset", { memoryId, memory_id: memoryId });
 }
 
 export async function listMemoryAssets(
@@ -4648,18 +4718,4 @@ export async function draftEditMemoryProposal(
 
 export async function postponeProposal(proposalId: string): Promise<void> {
   return safeInvoke("postpone_proposal", { proposalId, proposal_id: proposalId });
-}
-
-export interface ProactiveSuggestion {
-  id: string;
-  category: "daily_brief" | "weekly_review" | "stale_goal" | "pending_proposal" | "state_checkin";
-  title: string;
-  prompt: string;
-  priority: "low" | "medium" | "high";
-  seen: boolean;
-  created_at: string;
-}
-
-export async function getProactiveSuggestions(): Promise<ProactiveSuggestion[]> {
-  return safeInvoke("get_proactive_suggestions");
 }

@@ -1,12 +1,5 @@
 import { vi } from "vitest";
-import type {
-  LifeModel,
-  ChatMessage,
-  DailyGoal,
-  StateHistoryEntry,
-  StateAlert,
-  LifeModelVersion,
-} from "@/types";
+import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "@/types";
 import type {
   LifeModelViewModel,
   MemoryViewModel,
@@ -199,62 +192,12 @@ export function createMockLifeModelViewModelEnvelope(
   const now = new Date().toISOString();
   const base: ViewModelEnvelope<LifeModelViewModel> = {
     data: {
-      truthMode: "current_compatibility",
+      truthMode: "unknown",
       canonicalSummary: null,
-      currentViewSummary: null,
-      dimensionSummaries: [
-        {
-          id: "identity",
-          label: "Identity",
-          summary: "测试用户 / 开发者 / 健康",
-          confidence: "high",
-          stale: false,
-          pendingReviewItemRefs: [],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-        {
-          id: "goals",
-          label: "Goals",
-          summary: "完成项目 / 早起",
-          confidence: "medium",
-          stale: false,
-          pendingReviewItemRefs: [
-            { id: "proposal-life-model-1", kind: "review_item", label: "Review item" },
-          ],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-        {
-          id: "capabilities",
-          label: "Capabilities",
-          summary: "编程 / 写作 / AI",
-          confidence: "medium",
-          stale: false,
-          pendingReviewItemRefs: [],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-        {
-          id: "state",
-          label: "State",
-          summary: "工作 / 学习 / 良好",
-          confidence: "medium",
-          stale: false,
-          pendingReviewItemRefs: [],
-          evidenceRefs: [],
-          provenance: "limited",
-          ownerStatus: "PARTIAL",
-        },
-      ],
+      versionHistory: [],
+      legacyMigrationPreview: null,
       trustQualityState: {
         readiness: "usable_with_limits",
-        completionScore: 72.5,
-        missingDimensionCount: 0,
-        staleDimensionCount: 0,
         warningRefs: [],
         ownerStatus: "PARTIAL",
       },
@@ -314,6 +257,11 @@ export function createMockLifeModelViewModelEnvelope(
         linkageStatus: "partial",
         tierSummary: { total: 12, tier1: 5, tier2: 4, tier3: 3, archived: 0 },
         ownerStatus: "PHASE_2_REQUIRED",
+      },
+      learning: {
+        available: true,
+        activeCount: 0,
+        candidates: [],
       },
       sourceRefs: [
         {
@@ -601,6 +549,30 @@ export function createMockMemoryViewModelEnvelope(
         memoryRefs: [],
         evidenceRefs: [],
       },
+      items: [
+        {
+          memoryId: "memory:mock",
+          content: "User prefers concise answers.",
+          scope: "global",
+          category: "preference",
+          status: "materialized",
+          materializationStatus: "materialized",
+          recallState: "active",
+          sensitivity: "internal",
+          whyRemembered: "The user approved this reviewed Memory proposal.",
+          recallExplanation: "The current task and scope must match before recall.",
+          acceptedAt: now,
+          evidenceIds: ["message:mock"],
+          sourceRefs: [],
+          privacyErased: false,
+          canCorrect: true,
+          canStopRecall: true,
+          canArchive: true,
+          canRestore: false,
+          canRollback: true,
+          canPrivacyErase: true,
+        },
+      ],
       sourceRefs: [],
       contractLimitations: [
         "Vector tier counts are supporting storage telemetry; lifecycle materialization status remains the product memory authority.",
@@ -691,7 +663,7 @@ export const mockPreviewAgentRun = {
       governanceDecisionKind: "allow",
       riskLevel: "low",
       reasonCode: "default_react",
-      hasHsPacket: false,
+      hasPolicyContext: true,
       warnings: [],
       proposalIds: [],
       planStepCount: 0,
@@ -803,23 +775,6 @@ const mockPlanExecuteSession = {
   metadataSafeSummary: {},
 };
 
-export const mockLifeModelVersions: LifeModelVersion[] = [
-  {
-    version: "0.1.0",
-    timestamp: new Date().toISOString(),
-    tag: "auto",
-    note: "自动保存",
-    yaml_content: "",
-  },
-  {
-    version: "0.2.0",
-    timestamp: new Date(Date.now() - 3600000).toISOString(),
-    tag: "manual",
-    note: "手动调整目标与状态",
-    yaml_content: "",
-  },
-];
-
 function mockStage5PreflightFixture() {
   return {
     reportKind: "main_chat_stage5_release_debug_preflight",
@@ -911,21 +866,77 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         prefer_local_model: false,
         local_model: "llama3",
       } as T);
-    case "get_life_model":
-      return Promise.resolve(mockLifeModel as T);
-    case "get_life_model_current_view":
-      return Promise.resolve({
-        path: "preferences.communication_style",
-        label: "沟通偏好",
-        value: null,
-        unavailableReason: "current_value_empty",
-        currentValueSource: "unavailable",
-        change: null,
-      } as T);
     case "get_life_model_view_model":
       return Promise.resolve(createMockLifeModelViewModelEnvelope() as T);
+    case "delete_lifemodel_learning_candidate":
+      return Promise.resolve({
+        candidateId: _args?.candidateId ?? _args?.candidate_id ?? "",
+        deleted: true,
+        proposalDeleted: false,
+        canonicalLifeModelChanged: false,
+      } as T);
+    case "draft_lifemodel_v2_change":
+      return Promise.resolve({
+        proposalId: "proposal:lifemodel-v2-change:mock",
+        status: "review_required",
+        baseVersion: _args?.request?.baseVersion ?? null,
+        baseDocumentDigest: _args?.request?.baseDocumentDigest ?? null,
+        resultDocumentDigest: "sha256:result",
+        operationCount: 1,
+      } as T);
+    case "draft_lifemodel_v2_rollback":
+      return Promise.resolve({
+        proposalId: "proposal:lifemodel-v2-rollback:mock",
+        status: "review_required",
+        baseVersion: _args?.request?.baseVersion ?? null,
+        baseDocumentDigest: _args?.request?.baseDocumentDigest ?? null,
+        resultDocumentDigest: _args?.request?.targetDocumentDigest ?? null,
+        operationCount: 1,
+      } as T);
+    case "draft_lifemodel_v2_export":
+      return Promise.resolve({
+        proposalId: "proposal:lifemodel-v2-export:mock",
+        status: "review_required",
+        baseVersion: _args?.request?.modelVersion ?? null,
+        baseDocumentDigest: _args?.request?.documentDigest ?? null,
+        resultDocumentDigest: null,
+        operationCount: 0,
+      } as T);
     case "get_memory_view_model":
       return Promise.resolve(createMockMemoryViewModelEnvelope() as T);
+    case "get_markdown_memory_view_model":
+      return Promise.resolve({
+        roots: [
+          { scope: "workspace", configured: false, rootPath: null, status: "unconfigured" },
+          { scope: "project", configured: false, rootPath: null, status: "unconfigured" },
+        ],
+        files: [],
+        totalCharCount: 0,
+        truncated: false,
+        sourceRule: "explicit roots only",
+      } as T);
+    case "select_markdown_memory_root":
+      return Promise.resolve({
+        cancelled: true,
+        scope: _args?.scope ?? "project",
+        selectedPath: null,
+      } as T);
+    case "draft_markdown_memory_file_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:markdown-memory:mock",
+        scope: _args?.request?.scope ?? "project",
+        relativePath: _args?.request?.relativePath ?? "MEMORY.md",
+        operation: "write",
+        status: "review_required",
+      } as T);
+    case "deactivate_markdown_memory_file_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:markdown-memory:mock-deactivate",
+        scope: _args?.request?.scope ?? "project",
+        relativePath: _args?.request?.relativePath ?? "MEMORY.md",
+        operation: "deactivate",
+        status: "review_required",
+      } as T);
     case "get_provider_privacy_boundary_summary":
       return Promise.resolve(createMockProviderPrivacyBoundarySummaryEnvelope() as T);
     case "get_tasks_view_model":
@@ -2196,18 +2207,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           tags: ["file", "filesystem", "local"],
         },
       ] as T);
-    case "recommend_mcp_manifests":
-      return Promise.resolve([
-        {
-          name: "filesystem",
-          description: "适合当前阶段进行本地文件读写",
-          parameters: {},
-          permission_level: "high",
-          version: "1.0.0",
-          source: { type: "Mcp", server_name: "filesystem" },
-          tags: ["file", "filesystem", "local"],
-        },
-      ] as T);
     case "list_tool_manifests":
       return Promise.resolve([
         {
@@ -2245,6 +2244,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       ] as T);
     case "get_chat_history":
       return Promise.resolve(mockChatMessages as T);
+    case "get_chat_life_model_influence":
+      return Promise.resolve(null as T);
     case "run_multi_strategy_agent_preview":
       return Promise.resolve({
         runId: "run-preview-1",
@@ -2257,7 +2258,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           selectedStrategyKind: "react",
           taskKind: "conversation",
           riskLevel: "low",
-          hasHsPacket: false,
+          hasPolicyContext: true,
           governanceDecisionKind: "allow",
           reasonCode: "default_react",
         },
@@ -2737,8 +2738,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
         checkedAt: "2026-05-31T06:08:00Z",
       } as T);
-    case "list_snapshots":
-      return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
       if (_args?.runId === "run-preview-1") {
         return Promise.resolve(mockPreviewAgentRun as T);
@@ -2863,6 +2862,50 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           contentDigest: "digest",
         },
       } as T);
+    case "draft_memory_correction_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:memory-correction:mock",
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        action: "correct",
+        status: "review_required",
+      } as T);
+    case "draft_memory_archive_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:memory-archive:mock",
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        action: "archive",
+        status: "review_required",
+      } as T);
+    case "draft_memory_stop_recall_proposal":
+      return Promise.resolve({
+        proposalId: "proposal:memory-stop-recall:mock",
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        action: "stop_recall",
+        status: "review_required",
+      } as T);
+    case "privacy_erase_memory_asset":
+      return Promise.resolve({
+        memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+        erasedAt: new Date().toISOString(),
+        materializedView: {
+          materializedViewId: "memory_view:global",
+          version: 2,
+          activeMemoryIds: [],
+          runtimeSurfaceIds: ["runtime:global"],
+          updatedAt: new Date().toISOString(),
+          contentDigest: "erased-view",
+        },
+        canonicalMutation: {
+          eventId: "memory-erase:mock",
+          aggregateKind: "memory_lifecycle",
+          aggregateId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+          mutationKind: "deleted",
+          payloadDigest: "erased",
+          createdAt: new Date().toISOString(),
+        },
+        canonicalCommitted: true,
+        projectionState: "applied",
+      } as T);
     case "list_stage4_knowledge_asset_inventory":
       return Promise.resolve({
         inventoryId: "stage4_knowledge_inventory:mock",
@@ -2942,52 +2985,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "enable_plugin":
     case "disable_plugin":
       return Promise.resolve(undefined as T);
-    case "diff_snapshots":
-      return Promise.resolve(
-        [
-          "-identity:",
-          "-  mission_statement: 成为更好的自己",
-          "+identity:",
-          "+  mission_statement: 成为更稳定的自己",
-          "-goals:",
-          "+goals:",
-          "+  daily:",
-          "+    - name: 复盘",
-          "-state:",
-          "+state:",
-          "+  current_focus: 深度工作",
-        ].join("\n") as T
-      );
-    case "create_snapshot":
-      return Promise.resolve(mockLifeModelVersions[0] as T);
-    case "restore_snapshot":
-      return Promise.resolve({
-        success: true,
-        legacy: false,
-        governed_operation: true,
-        warning: "metadata-safe",
-        metadata_safe: true,
-        durable_lifemodel_write: true,
-        restored_snapshot_version: args?.version ?? "0.1.0",
-        pre_restore_snapshot_created: true,
-      } as T);
-    case "goal_capability_gap_analysis":
-      return Promise.resolve(["需要提升编程技能", "需要更多学习时间"] as T);
-    case "goal_capability_gap_report":
-      return Promise.resolve([
-        {
-          goal_name: "完成 AI 项目",
-          skill_name: "编程",
-          current_level: 4,
-          target_level: 7,
-          severity: "high",
-          suggestion: "安排 2 周刻意练习，并补一个可验证里程碑",
-        },
-      ] as T);
-    case "identity_goal_alignment_check":
-      return Promise.resolve([] as T);
-    case "identity_goal_alignment_report":
-      return Promise.resolve([] as T);
     case "count_memory_chunks":
       return Promise.resolve(42 as T);
     case "rebuild_memory_index":
@@ -2996,15 +2993,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         indexed: 10,
         skipped: 2,
       } as T);
-    case "get_feedback_summary":
-      return Promise.resolve({
-        total_messages: 100,
-        total_feedback_up: 80,
-        total_feedback_down: 5,
-        session_count: 10,
-      } as T);
-    case "should_show_calibration":
-      return Promise.resolve({ weekly: false, monthly: false, today: "2026-04-17" } as T);
     case "check_ollama_status":
       return Promise.resolve(true as T);
     case "get_policy_router_status":
@@ -3069,8 +3057,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         mcp_recent_pii_count: 1,
         memory_chunk_count: 42,
         vector_corrupt_embedding_count: 0,
-        unfinished_builder_sessions: 0,
-        pending_builder_review_sessions: 0,
         ollama_online: true,
         local_model: "llama3",
         resolved_local_model: "llama3:latest",
@@ -3085,21 +3071,12 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         active_data_dir: "/tmp/openlife-test",
         database_status: "ok",
         startup_warnings: [],
-        snapshot_count: 2,
         life_model_ready: true,
         app_version: "0.1.0",
         model_empty: false,
         chat_session_count: 3,
         usage_ready: true,
         usage_readiness_issues: [],
-        builder_completion: {
-          identity: 80,
-          goals: 75,
-          capabilities: 70,
-          state: 65,
-          overall: 72.5,
-          lowest_dimension: "state",
-        },
         data_files: {
           messages_db_exists: true,
           messages_db_size_mb: 1.2,
@@ -3133,8 +3110,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           usageReady: true,
           lifeModelReady: true,
           modelEmpty: false,
-          pendingBuilderReviewSessions: 0,
-          unfinishedBuilderSessions: 0,
           databaseStatus: "ok",
           readinessIssues: [],
           usageReadinessIssues: [],
@@ -3209,62 +3184,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         sanitized_arguments: { query: "帮我搜索 <EMAIL_0> 的公开信息" },
         requires_confirmation: true,
       } as T);
-    case "get_model_4d_completion":
-      return Promise.resolve({
-        identity: 0.7,
-        goals: 0.6,
-        capabilities: 0.5,
-        state: 0.8,
-      } as T);
-    case "builder_list_unfinished":
-      return Promise.resolve([] as T);
-    case "builder_start":
-      return Promise.resolve({
-        prompt: "请描述你的价值观",
-        finished: false,
-        progress: { progress: 0.2, current_step_label: "价值观", step_index: 1, total_steps: 5 },
-        review: null,
-      } as T);
-    case "builder_step":
-      return Promise.resolve({
-        prompt: "下一步问题",
-        finished: false,
-        progress: {
-          progress: 0.4,
-          current_step_label: "目标",
-          step_index: 2,
-          total_steps: 5,
-          waiting_phase_confirmation: false,
-        },
-        mode: "Quick",
-        review: null,
-      } as T);
-    case "builder_get_pending_signals":
-      return Promise.resolve({
-        session_id: "test-session",
-        signals: [],
-        summary: {
-          identity_summary: "基于 0 个信号",
-          goals_summary: "基于 0 个信号",
-          capabilities_summary: "基于 0 个信号",
-          state_summary: "基于 0 个信号",
-          assumptions: ["用户通过快速构建流程提供"],
-          unresolved_questions: [],
-          recommended_next_steps: ["审阅并确认信号", "可选择进入渐进构建继续完善"],
-        },
-        finished: true,
-      } as T);
-    case "builder_create_proposals":
-      return Promise.resolve({
-        success: true,
-        created_count: 1,
-        reused_count: 0,
-        updated_count: 0,
-        rejected_count: 0,
-        proposal_ids: ["proposal-1"],
-        run_id: "run-1",
-        warnings: [],
-      } as T);
     case "search_memory":
       return Promise.resolve({
         hits: [],
@@ -3286,80 +3205,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
         vectorStatus: "ready",
         routeQuality: "deterministic_hash_approximation",
-      } as T);
-    case "a2a_local_agent_card":
-      return Promise.resolve({
-        name: "OpenLife Local Agent",
-        description: "本地 A2A 服务",
-        version: "0.1.0",
-        skills: [
-          {
-            id: "openlife.reasoning_bridge",
-            name: "推理桥接",
-            description: "桥接 OpenLife 和 A2A",
-          },
-        ],
-      } as T);
-    case "a2a_discover_agent":
-      return Promise.resolve({
-        name: "Remote Agent",
-        description: "外部代理",
-        version: "0.1.0",
-        url: "http://127.0.0.1:8080",
-        capabilities: { streaming: false },
-        skills: [{ id: "demo", name: "Demo Skill", description: "测试技能" }],
-      } as T);
-    case "a2a_send_task":
-    case "a2a_handle_task":
-      return Promise.resolve('{"status":"ok"}' as T);
-    case "a2a_bridge_local":
-      return Promise.resolve({
-        request: { method: _args?.method, params: { text: _args?.text } },
-        a2a_request: { message: { parts: [{ type: "text", text: _args?.text }] } },
-        response: { status: { state: "completed" } },
-        reasoning_result: { text: "桥接成功" },
-      } as T);
-    case "a2a_restart_sidecar":
-    case "a2a_stop_sidecar":
-      return Promise.resolve(undefined as T);
-    case "generate_micro_evolution_changes":
-      return Promise.resolve({
-        changes: [
-          {
-            dimension: "identity.values",
-            target_name: "健康",
-            old_value: 8,
-            new_value: 8.03,
-            reason: "近期正向行为信号增加",
-            confidence: 0.82,
-            sources: [
-              { source: "feedback", score: 0.03, weight: 0.5 },
-              { source: "behavior", score: 0.02, weight: 0.3 },
-              { source: "inference", score: 0.01, weight: 0.2 },
-            ],
-          },
-        ],
-        applied: true,
-        message: "已生成 1 项建议",
-        before: { identity: 70, goals: 60, capabilities: 50, state: 80, overall: 65 },
-        after: { identity: 71, goals: 60, capabilities: 50, state: 80, overall: 65 },
-        requires_confirmation: true,
-        signal_summary: {
-          feedback_terms: 2,
-          behavior_events: 1,
-          inference_items: 1,
-          top_feedback: [{ name: "健康", score: 0.03, source: "feedback" }],
-          top_behavior: [{ name: "value_focus:健康", score: 0.02, source: "behavior" }],
-          top_inference: [{ name: "identity.values:健康", score: 0.01, source: "inference" }],
-        },
-      } as T);
-    case "calibration_create_proposals":
-      return Promise.resolve({
-        created_count: 2,
-        created_ids: ["p1", "p2"],
-        error_count: 0,
-        errors: [],
-        message: "已创建 2 个 Proposal",
       } as T);
     // Milestone D mocks
     case "get_hot_cache":
@@ -3568,22 +3413,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         durable_lifemodel_write: true,
         imported_message_count: args?.payload?.messages?.length ?? 0,
         imported_vector_count: args?.payload?.vectors?.length ?? 0,
-      } as T);
-    case "generate_evolution_report":
-      return Promise.resolve({
-        success: true,
-        read_only: true,
-        metadata_safe: true,
-        durable_lifemodel_write: false,
-        evolution_rules_write: false,
-        applied_rule_count: 0,
-        liked_pattern_count: 2,
-        disliked_pattern_count: 1,
-        suggested_rule_count: 3,
-        proposal_candidate_count: 3,
-        candidate_status: "review_required_not_activated",
-        summary:
-          "Read-only feedback evolution report: 2 liked pattern(s), 1 disliked pattern(s), 3 review candidate(s).",
       } as T);
     case "test_llm_connection":
       return Promise.resolve({

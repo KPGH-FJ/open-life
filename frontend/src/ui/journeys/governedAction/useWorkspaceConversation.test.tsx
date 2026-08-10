@@ -35,6 +35,7 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
       },
     ]),
     loadHistory: vi.fn().mockResolvedValue(existingMessages),
+    loadLifeModelInfluence: vi.fn().mockResolvedValue(null),
     createSession: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -76,6 +77,194 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
 }
 
 describe("workspace conversation journey", () => {
+  it("keeps the backend-owned Life Model influence receipt after a completed turn", async () => {
+    const response = turnResult("completed");
+    response.life_model_influence = {
+      status: "applied_context_building",
+      sourceId: "lifemodel.v2.runtime",
+      modelVersion: 3,
+      selectedItems: [
+        {
+          itemRef: "collaboration_preferences:communication-direct",
+          statement: "沟通保持简洁直接",
+          sourceRefs: ["message:user:send-stream-parity"],
+          confirmedAt: "2026-08-09T00:00:00Z",
+          reasonCode: "task intent matches collaboration_preferences",
+        },
+      ],
+      appliedSurfaces: ["context_building", "communication_style"],
+      currentInstructionPriorityPreserved: true,
+      policyPriorityPreserved: true,
+      permissionGranted: false,
+      durableWriteAuthorized: false,
+    };
+    const dataSource = source({ streamTurn: vi.fn().mockResolvedValue(response) });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("请写一封项目邮件"));
+
+    await act(async () => result.current.send());
+
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      status: "completed",
+      lifeModelInfluence: {
+        status: "applied_context_building",
+        modelVersion: 3,
+        selectedItems: [
+          {
+            itemRef: "collaboration_preferences:communication-direct",
+            statement: "沟通保持简洁直接",
+          },
+        ],
+        permissionGranted: false,
+        durableWriteAuthorized: false,
+      },
+    });
+  });
+
+  it("restores the durable Life Model influence receipt after switching conversations", async () => {
+    const receipt = {
+      status: "applied_context_building",
+      sourceId: "lifemodel.v2.runtime",
+      modelVersion: 3,
+      selectedItems: [
+        {
+          itemRef: "collaboration_preferences:communication-direct",
+          statement: "沟通保持简洁直接",
+          sourceRefs: ["message:user:send-stream-parity"],
+          confirmedAt: "2026-08-09T00:00:00Z",
+          reasonCode: "task intent matches collaboration_preferences",
+        },
+      ],
+      appliedSurfaces: ["context_building", "communication_style"],
+      currentInstructionPriorityPreserved: true,
+      policyPriorityPreserved: true,
+      permissionGranted: false,
+      durableWriteAuthorized: false,
+    };
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-1",
+          title: "有个性化说明",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:02:00Z",
+        },
+        {
+          session_id: "conversation-2",
+          title: "普通对话",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+        },
+      ]),
+      loadLifeModelInfluence: vi.fn(async sessionId =>
+        sessionId === "conversation-1"
+          ? { status: "completed" as const, lifeModelInfluence: receipt }
+          : null
+      ),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+
+    await act(async () => expect(await result.current.reload()).toBe(true));
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      lifeModelInfluence: receipt,
+    });
+
+    act(() => result.current.selectSession("conversation-2"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-2"));
+    expect(result.current.turnState).toEqual({ phase: "idle" });
+
+    act(() => result.current.selectSession("conversation-1"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      lifeModelInfluence: receipt,
+    });
+  });
+
+  it("keeps canonical chat history visible when the influence receipt cannot be verified", async () => {
+    const dataSource = source({
+      loadLifeModelInfluence: vi.fn().mockRejectedValue(new Error("canonical_state_unknown")),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+
+    await act(async () => expect(await result.current.reload()).toBe(true));
+
+    expect(result.current.messages).toEqual(existingMessages);
+    expect(result.current.loadStatus).toBe("ready");
+    expect(result.current.turnState).toMatchObject({
+      phase: "failed",
+      stage: "refresh",
+    });
+  });
+
+  it("keeps Markdown Memory changes pending until the backend returns a Review receipt", async () => {
+    const loadMarkdownMemory = vi.fn().mockResolvedValue({
+      roots: [
+        { scope: "workspace", configured: false, rootPath: null, status: "unconfigured" },
+        { scope: "project", configured: true, rootPath: "/project", status: "ready" },
+      ],
+      files: [
+        {
+          scope: "project",
+          relativePath: "MEMORY.md",
+          content: "# Release\nKeep sources exact.",
+          contentDigest: "sha256:current",
+          charCount: 29,
+          active: true,
+        },
+      ],
+      totalCharCount: 29,
+      truncated: false,
+      sourceRule: "exact roots only",
+    });
+    const draftMarkdownMemoryFileProposal = vi.fn().mockResolvedValue({
+      proposalId: "proposal-1",
+      scope: "project",
+      relativePath: "MEMORY.md",
+      operation: "write",
+      status: "review_required",
+    });
+    const dataSource = source({ loadMarkdownMemory, draftMarkdownMemoryFileProposal });
+    const announce = vi.fn();
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await waitFor(() => expect(result.current.markdownMemory.phase).toBe("ready"));
+
+    await act(async () =>
+      expect(
+        await result.current.proposeMarkdownMemoryWrite({
+          scope: "project",
+          relativePath: "MEMORY.md",
+          content: "# Release\nKeep sources and dates exact.",
+          expectedCurrentDigest: "sha256:current",
+        })
+      ).toBe(true)
+    );
+
+    expect(draftMarkdownMemoryFileProposal).toHaveBeenCalledWith({
+      scope: "project",
+      relativePath: "MEMORY.md",
+      content: "# Release\nKeep sources and dates exact.",
+      expectedCurrentDigest: "sha256:current",
+    });
+    expect(result.current.markdownMemory).toMatchObject({
+      phase: "ready",
+      lastProposal: { proposalId: "proposal-1", status: "review_required" },
+    });
+    expect(loadMarkdownMemory).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith("Markdown Memory 变更已进入 Review；当前文件尚未修改。");
+  });
+
   it("binds selected resources and the streamed turn to one exact operation", async () => {
     const pickResources = vi.fn(async (importOperationId: string, turnOperationId: string) => ({
       cancelled: false,
@@ -378,6 +567,115 @@ describe("workspace conversation journey", () => {
     expect(result.current.selectedSessionId).toBe("conversation-1");
     expect(result.current.messages).toEqual(existingMessages);
     expect(dataSource.loadHistory).toHaveBeenCalledWith("conversation-1");
+  });
+
+  it("restores the paused task conversation instead of a newer unrelated session", async () => {
+    const loadHistory = vi.fn().mockResolvedValue(existingMessages);
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-2",
+          title: "稍后更新的其他对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:02:00Z",
+        },
+        {
+          session_id: "conversation-1",
+          title: "等待继续的项目任务",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:01:00Z",
+        },
+      ]),
+      loadHistory,
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(
+        dataSource,
+        vi.fn(),
+        vi.fn().mockResolvedValue(undefined),
+        "conversation-1"
+      )
+    );
+
+    await act(async () => result.current.reload());
+
+    expect(result.current.selectedSessionId).toBe("conversation-1");
+    expect(loadHistory).toHaveBeenCalledWith("conversation-1");
+    expect(loadHistory).not.toHaveBeenCalledWith("conversation-2");
+  });
+
+  it("rebinds the paused task conversation when the task read model loads after history", async () => {
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-2",
+          title: "稍后更新的其他对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:02:00Z",
+        },
+        {
+          session_id: "conversation-1",
+          title: "等待继续的项目任务",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:01:00Z",
+        },
+      ]),
+    });
+    const { result, rerender } = renderHook(
+      ({ preferredSessionId }: { preferredSessionId: string | null }) =>
+        useWorkspaceConversation(
+          dataSource,
+          vi.fn(),
+          vi.fn().mockResolvedValue(undefined),
+          preferredSessionId
+        ),
+      { initialProps: { preferredSessionId: null as string | null } }
+    );
+
+    await act(async () => result.current.reload());
+    expect(result.current.selectedSessionId).toBe("conversation-2");
+
+    rerender({ preferredSessionId: "conversation-1" });
+
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+  });
+
+  it("does not override an explicit conversation choice with task recovery preference", async () => {
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-2",
+          title: "活动任务对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:02:00Z",
+        },
+        {
+          session_id: "conversation-1",
+          title: "用户选择的对话",
+          created_at: "2026-08-05T00:00:00Z",
+          updated_at: "2026-08-05T00:01:00Z",
+        },
+      ]),
+    });
+    const { result, rerender } = renderHook(
+      ({ preferredSessionId }: { preferredSessionId: string | null }) =>
+        useWorkspaceConversation(
+          dataSource,
+          vi.fn(),
+          vi.fn().mockResolvedValue(undefined),
+          preferredSessionId
+        ),
+      { initialProps: { preferredSessionId: null as string | null } }
+    );
+
+    await act(async () => result.current.reload());
+    act(() => result.current.selectSession("conversation-1"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+
+    rerender({ preferredSessionId: "conversation-2" });
+
+    await act(async () => Promise.resolve());
+    expect(result.current.selectedSessionId).toBe("conversation-1");
   });
 
   it("keeps pending work distinct after send and refreshes both history and work state", async () => {

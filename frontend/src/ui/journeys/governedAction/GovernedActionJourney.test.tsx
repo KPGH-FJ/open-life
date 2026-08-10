@@ -4,9 +4,76 @@ import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
 import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
 import type { ReviewAction, ReviewItem } from "@/tauri";
-import { reviewDecisionFeedback, reviewItemStatus } from "./ReviewGovernedView";
+import {
+  reviewDecisionFeedback,
+  reviewItemStatus,
+  reviewQueueSections,
+} from "./ReviewGovernedView";
 
 describe("Workbench governed action journey", () => {
+  it("groups LifeModel learning reviews separately and shows at most five at once", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const template = snapshot.reviewEnvelope.data!.items[1];
+    const learningItems = Array.from(
+      { length: 7 },
+      (_, index): ReviewItem => ({
+        ...template,
+        id: `learning-${index + 1}`,
+        status: index < 2 ? "approved" : "pending",
+        source: {
+          ...template.source,
+          proposalId: `learning-${index + 1}`,
+        },
+        decisionContext: {
+          ...template.decisionContext,
+          reviewItemId: `learning-${index + 1}`,
+          title: `学习建议 ${index + 1}`,
+          lifeModelLearning: {
+            candidateId: `candidate-${index + 1}`,
+            candidateSnapshotDigest: `sha256:${String(index + 1).padStart(64, "0")}`,
+            section: "stable_preferences",
+            proposedStatement: `偏好 ${index + 1}`,
+            explicitness: "explicit_user_request",
+            stability: "user_confirmed",
+            sensitivity: "internal",
+            conflictStatus: "none",
+            supportCount: 1,
+            independentSupportCount: 1,
+            confirmedAt: "2026-08-09T00:00:00Z",
+            sourceRefs: [`message:${index + 1}`],
+            sourceKinds: ["explicit_user_message"],
+          },
+        },
+      })
+    );
+    const ordinaryItem = snapshot.reviewEnvelope.data!.items[0];
+
+    const sections = reviewQueueSections([...learningItems, ordinaryItem]);
+
+    expect(sections).toHaveLength(2);
+    expect(sections[0]).toMatchObject({
+      id: "lifemodel_learning",
+      label: "LifeModel 学习建议",
+      totalCount: 7,
+      hiddenCount: 2,
+    });
+    expect(sections[0].items.map(item => item.id)).toEqual([
+      "learning-3",
+      "learning-4",
+      "learning-5",
+      "learning-6",
+      "learning-7",
+    ]);
+    expect(sections[1]).toMatchObject({
+      id: "other",
+      label: "其他建议与权限",
+      totalCount: 1,
+      hiddenCount: 0,
+    });
+    expect(sections[1].items).toEqual([ordinaryItem]);
+  });
+
   it("keeps view, approval, refresh, resume, and completion as separate states", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
@@ -79,6 +146,68 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByText("缺少目标范围和有效期；不能批准。")).toBeInTheDocument();
     await user.click(approve);
     expect(dispatchReview).not.toHaveBeenCalled();
+  });
+
+  it("shows the backend-owned exact LifeModel typed diff before approval", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const item = snapshot.reviewEnvelope.data!.items[0];
+        return {
+          ...snapshot,
+          reviewEnvelope: {
+            ...snapshot.reviewEnvelope,
+            data: {
+              ...snapshot.reviewEnvelope.data!,
+              items: [
+                {
+                  ...item,
+                  type: "life_model_update" as const,
+                  decisionContext: {
+                    ...item.decisionContext,
+                    title: "Review LifeModel changes",
+                    summary: "Review an exact version-bound LifeModel change.",
+                    permission: undefined,
+                    before: {
+                      kind: "object" as const,
+                      summary: "LifeModel v2 version 1",
+                      detail: "sha256:base",
+                      sensitivity: "local_private" as const,
+                      truncated: false,
+                    },
+                    after: {
+                      kind: "list" as const,
+                      summary: "1 LifeModel change(s): 1 add, 0 replace, 0 remove",
+                      detail: "add values/value:autonomy: Autonomy matters.",
+                      sensitivity: "local_private" as const,
+                      truncated: false,
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        initialSurface="review"
+      />
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Review LifeModel changes", level: 2 })
+    ).toBeInTheDocument();
+    expect(screen.getByText("LifeModel v2 version 1")).toBeInTheDocument();
+    await user.click(screen.getByText("查看精确变更"));
+    expect(screen.getByText("add values/value:autonomy: Autonomy matters.")).toBeInTheDocument();
   });
 
   it("fails stale governed state closed while preserving evidence access", async () => {
@@ -287,8 +416,130 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
-  it("labels a global active task that belongs to another selected conversation", async () => {
+  it("opens Personal Intelligence from a durable Life Model influence receipt", async () => {
+    const user = userEvent.setup();
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      loadDurableTruth: async () => {
+        const snapshot = await fixture.loadDurableTruth();
+        return {
+          ...snapshot,
+          lifeModelEnvelope: {
+            ...snapshot.lifeModelEnvelope,
+            status: "ready" as const,
+            data: {
+              ...snapshot.lifeModelEnvelope.data!,
+              truthMode: "canonical" as const,
+              canonicalSummary: {
+                lifeModelRef: {
+                  id: "lifemodel:primary:v8",
+                  kind: "lifemodel" as const,
+                  label: "LifeModel v2 version 8",
+                },
+                title: "已确认的长期个人模型",
+                summary: "1 条已确认信息",
+                versionLabel: "v8",
+                parentVersion: 7,
+                documentDigest: "sha256:document-v8",
+                lastMaterializedAt: "2026-08-09T00:00:00Z",
+                freshnessStatus: "current",
+                conflictStatus: "none",
+                evidenceRefs: [],
+                document: {
+                  schemaVersion: "openlife.lifemodel.v2" as const,
+                  modelId: "primary",
+                  identity: [],
+                  values: [],
+                  longTermGoals: [],
+                  stablePreferences: [],
+                  personalBoundaries: [],
+                  importantRelationships: [],
+                  capabilities: [],
+                  resources: [],
+                  decisionPrinciples: [],
+                  collaborationPreferences: [
+                    {
+                      id: "communication-direct",
+                      statement: "沟通保持简洁直接",
+                      sourceRefs: ["message:user:confirmed-preference"],
+                      confirmedAt: "2026-08-09T00:00:00Z",
+                    },
+                  ],
+                },
+                humanProjection: {
+                  schemaVersion: "openlife.lifemodel.v2.yaml-projection.v1" as const,
+                  modelId: "primary",
+                  modelVersion: 8,
+                  itemCount: 1,
+                  documentDigest: "sha256:document-v8",
+                  yamlContentDigest: "sha256:yaml-v8",
+                  projectionDigest: "sha256:projection-v8",
+                  yaml: "collaboration_preferences:\n  - id: communication-direct",
+                },
+              },
+            },
+          },
+        };
+      },
+      loadLifeModelInfluence: vi.fn().mockResolvedValue({
+        status: "completed" as const,
+        lifeModelInfluence: {
+          status: "applied_context_building",
+          sourceId: "lifemodel.v2.runtime",
+          modelVersion: 8,
+          selectedItems: [
+            {
+              itemRef: "collaboration_preferences:communication-direct",
+              statement: "沟通保持简洁直接",
+              sourceRefs: ["message:user:confirmed-preference"],
+              confirmedAt: "2026-08-09T00:00:00Z",
+              reasonCode: "task intent matches collaboration_preferences",
+            },
+          ],
+          appliedSurfaces: ["context_building", "communication_style"],
+          currentInstructionPriorityPreserved: true,
+          policyPriorityPreserved: true,
+          permissionGranted: false,
+          durableWriteAuthorized: false,
+        },
+      }),
+    };
+
+    render(
+      <ReadOnlySpineJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByText("本轮参考了你的 Life Model")).toBeInTheDocument();
+    await user.click(screen.getByText("查看使用依据"));
+    await user.click(screen.getByRole("button", { name: "在个人智能中查看：沟通保持简洁直接" }));
+
+    expect(await screen.findByRole("tab", { name: /关于我.*LifeModel/ })).toBeInTheDocument();
+    expect(screen.getByText("本次影响使用的长期信息")).toBeInTheDocument();
+    expect(
+      screen
+        .getByText("collaboration_preferences:communication-direct")
+        .closest("[data-lifemodel-item-ref]")
+    ).toHaveAttribute("data-lifemodel-item-ref", "collaboration_preferences:communication-direct");
+    expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+  });
+
+  it("fails closed when an active task points to a missing conversation", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const initial = await fixture.load();
+    const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
+      action => action.kind === "approve"
+    )!;
+    await fixture.dispatchReviewAction(approve);
     const dataSource = {
       ...fixture,
       load: async () => {
@@ -320,8 +571,13 @@ describe("Workbench governed action journey", () => {
 
     expect(await screen.findByText("全局活动任务")).toBeInTheDocument();
     expect(
-      screen.getByText("这项活动任务属于另一段对话；下方消息和发送操作仍以当前选中的对话为准。")
+      screen.getByText(
+        "后端仍有这项任务，但对应会话记录已经缺失；当前不会从摘要猜测上下文或继续执行。"
+      )
     ).toBeInTheDocument();
+    const resume = screen.getByRole("button", { name: "继续任务" });
+    expect(resume).toBeDisabled();
+    expect(resume).toHaveAttribute("data-action-enabled", "false");
   });
 
   it("shows only backend-confirmed resources and removes them through the exact binding", async () => {

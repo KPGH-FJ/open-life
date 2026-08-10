@@ -5,7 +5,7 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
-use chrono::TimeZone;
+use chrono::{TimeZone, Utc};
 use futures::StreamExt;
 #[cfg(test)]
 use once_cell::sync::Lazy as LazyLock;
@@ -24,14 +24,12 @@ use openlife_core::agent::main_chat_agent_v1::{
 use openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot;
 use openlife_core::agent::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig,
-    AgentActionRequest, AgentRun, AgentRunStatus, AgentTask, CanonicalMemoryFactDescriptor,
-    ContextSummary, MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind,
-    MemoryDestination, MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity,
-    ModelRoutePolicy, ModelRouteTrace, ReasoningTrace, RedactionLevel, RiskLevel, RuntimeHSPacket,
+    AgentActionRequest, AgentRun, AgentRunStatus, CanonicalMemoryFactDescriptor, ContextSummary,
+    MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
+    MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity, ModelRouteTrace,
+    ReasoningTrace, RedactionLevel, RiskLevel,
 };
 use openlife_core::config::{AppConfig, NetworkPolicy};
-use openlife_core::layer::Layer;
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::{
     BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
     ProviderInvocationReceipt, ProviderInvocationStatus, ProviderPayloadCategory,
@@ -55,6 +53,7 @@ use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_tur
 use crate::main_chat_context_loader::{
     compile_main_chat_context, ensure_bundled_selected_skill_context_candidate,
     load_configured_knowledge_context_candidates,
+    load_configured_markdown_memory_context_candidates,
     load_current_workspace_knowledge_context_candidates, retrievable_lifecycle_context_candidates,
     sanitize_main_chat_selected_skill_id,
 };
@@ -65,7 +64,6 @@ use crate::main_chat_event_stream::{
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, main_chat_provider_endpoint_kind, preview_text,
 };
-use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 #[cfg(test)]
 use crate::main_chat_react_runtime::MainChatReactCanonicalToolDelta;
 use crate::main_chat_react_runtime::{
@@ -98,6 +96,7 @@ const KERNEL_CONTEXT_TOKEN_BUDGET: u32 = 120;
 const MAX_ROUTE_LABEL_CHARS: usize = 96;
 const MAX_REASON_CHARS: usize = 180;
 const MAX_CONTEXT_CONTENT_CHARS: usize = 700;
+const MAX_LIFEMODEL_STATEMENT_CHARS: usize = 320;
 const MAX_SYSTEM_PROMPT_CHARS: usize = 4_000;
 const MAX_ASSISTANT_PREVIEW_CHARS: usize = 180;
 const MAX_TOOL_OBSERVATION_PREVIEW_CHARS: usize = 700;
@@ -304,7 +303,8 @@ pub struct MainChatKernelToolCall {
 #[serde(rename_all = "snake_case")]
 pub enum MainChatKernelWriteOutcomeKind {
     MemoryProposal,
-    LifeModelProposal,
+    LifeModelLearningCandidate,
+    LifeModelTypedDiffBlocker,
     FileWriteProposal,
     CalendarEventProposal,
     EmailDraftProposal,
@@ -318,7 +318,8 @@ impl MainChatKernelWriteOutcomeKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::MemoryProposal => "memory_proposal",
-            Self::LifeModelProposal => "lifemodel_proposal",
+            Self::LifeModelLearningCandidate => "lifemodel_learning_candidate",
+            Self::LifeModelTypedDiffBlocker => "lifemodel_typed_diff_blocker",
             Self::FileWriteProposal => "file_write_proposal",
             Self::CalendarEventProposal => "calendar_event_proposal",
             Self::EmailDraftProposal => "email_draft_proposal",
@@ -396,38 +397,96 @@ pub struct MainChatKernelContextMetadata {
     pub workspace_policy_override_blocked: bool,
     pub system_prompt_chars: usize,
     #[serde(default)]
-    pub hs_context: Option<MainChatKernelHsContextMetadata>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatKernelHsContextMetadata {
-    pub available: bool,
-    pub summary_source_id: Option<String>,
-    pub summary_digest: Option<String>,
-    pub summary_chars: usize,
-    pub source_provenance: Option<String>,
-    pub freshness: Option<String>,
-    pub privacy_class: Option<String>,
-    pub included_life_model_sections: Vec<String>,
-    pub selected_policy_ids: Vec<String>,
-    pub accepted_guidance_ids: Vec<String>,
-    pub accepted_guidance_count: usize,
-    pub policy_blocker_codes: Vec<String>,
-    pub proposal_policy_active: bool,
-    pub route_policy_relaxed_by_guidance: bool,
-    pub tool_policy_relaxed_by_guidance: bool,
-    pub proposal_first_preserved: bool,
-    pub raw_life_model_yaml_included: bool,
-    pub raw_unbounded_memory_included: bool,
-    pub warning_codes: Vec<String>,
+    pub life_model_context: Option<MainChatKernelLifeModelContextMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MainChatKernelHsContext {
-    pub metadata: MainChatKernelHsContextMetadata,
+pub struct MainChatLifeModelInfluenceReceipt {
+    pub schema: String,
+    pub status: String,
+    pub applied_surfaces: Vec<String>,
+    pub selected_item_refs: Vec<String>,
+    pub reason_codes: Vec<String>,
+    pub current_instruction_priority_preserved: bool,
+    pub policy_priority_preserved: bool,
+    pub permission_granted: bool,
+    pub durable_write_authorized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatLifeModelSelectedItemReceipt {
+    pub item_ref: String,
+    pub statement: String,
+    pub source_refs: Vec<String>,
+    pub confirmed_at: String,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatLifeModelProductReceipt {
+    pub status: String,
+    pub source_id: Option<String>,
+    pub model_version: Option<u64>,
+    pub version_digest: Option<String>,
+    pub document_digest: Option<String>,
+    pub selected_items: Vec<MainChatLifeModelSelectedItemReceipt>,
+    pub applied_surfaces: Vec<String>,
+    pub current_instruction_priority_preserved: bool,
+    pub policy_priority_preserved: bool,
+    pub permission_granted: bool,
+    pub durable_write_authorized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatKernelLifeModelContextMetadata {
+    pub available: bool,
+    pub source_id: Option<String>,
+    pub model_id: Option<String>,
+    pub model_version: Option<u64>,
+    pub version_digest: Option<String>,
+    pub document_digest: Option<String>,
+    pub selected_sections: Vec<String>,
+    pub selected_item_refs: Vec<String>,
+    pub selected_items: Vec<MainChatLifeModelSelectedItemReceipt>,
+    pub context_digest: Option<String>,
+    pub context_chars: usize,
+    pub omitted_relevant_fact_count: usize,
+    pub warning_codes: Vec<String>,
+    pub influence_receipt: MainChatLifeModelInfluenceReceipt,
+}
+
+impl MainChatKernelLifeModelContextMetadata {
+    fn product_receipt(&self) -> MainChatLifeModelProductReceipt {
+        MainChatLifeModelProductReceipt {
+            status: self.influence_receipt.status.clone(),
+            source_id: self.source_id.clone(),
+            model_version: self.model_version,
+            version_digest: self.version_digest.clone(),
+            document_digest: self.document_digest.clone(),
+            selected_items: self.selected_items.clone(),
+            applied_surfaces: self.influence_receipt.applied_surfaces.clone(),
+            current_instruction_priority_preserved: self
+                .influence_receipt
+                .current_instruction_priority_preserved,
+            policy_priority_preserved: self.influence_receipt.policy_priority_preserved,
+            permission_granted: self.influence_receipt.permission_granted,
+            durable_write_authorized: self.influence_receipt.durable_write_authorized,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatKernelLifeModelContext {
+    pub metadata: MainChatKernelLifeModelContextMetadata,
     pub candidates: Vec<ContextSourceCandidate>,
+    pub planning_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
+    pub memory_rerank_terms: Vec<String>,
+    pub tool_preference_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -442,11 +501,15 @@ pub enum MainChatKernelEvent {
         selected_source_count: usize,
         selected_skill_instruction_loaded: bool,
     },
-    HsContextLoaded {
+    LifeModelContextLoaded {
         available: bool,
-        warning_count: usize,
-        selected_policy_count: usize,
-        accepted_guidance_count: usize,
+        model_version: Option<u64>,
+        selected_item_count: usize,
+        status: String,
+        source_id: Option<String>,
+        selected_item_refs: Vec<String>,
+        reason_codes: Vec<String>,
+        receipt: MainChatLifeModelProductReceipt,
     },
     RouteSelected {
         route_metadata: MainChatRouteMetadata,
@@ -1959,6 +2022,16 @@ impl MainChatKernelCommandSurfaceResult {
                 )
             })
         });
+        let life_model_influence = self
+            .kernel_events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                MainChatKernelEvent::LifeModelContextLoaded { receipt, .. } => {
+                    Some(receipt.clone())
+                }
+                _ => None,
+            });
         SendMessageResult {
             reply: self.reply,
             status: if canonical_failure_observed {
@@ -1978,6 +2051,7 @@ impl MainChatKernelCommandSurfaceResult {
             provider_invocation_status,
             model_invoked,
             tool_invoked,
+            life_model_influence,
             turn_terminal: None,
         }
     }
@@ -2089,7 +2163,7 @@ where
                 "silentWritesAllowed": false,
                 "kernelBackedDirectAnswer": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::DirectAnswer,
                 "kernelBackedReadOnlyToolLoop": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReActToolExecution,
-                "kernelBackedGovernedBlocker": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation,
+                "kernelBackedGovernedBlocker": main_chat_agent_turn.decision.policy_decision.route_kind == PolicyRouteKind::GovernedBlocker,
                 "kernelSupportDisposition": main_chat_kernel_support_disposition(
                     &main_chat_agent_turn.decision.selected_strategy,
                     &messages,
@@ -2175,16 +2249,6 @@ where
                 .await,
             );
         }
-        MainChatAgentStrategy::ReviewMaturation => {
-            execution_transcript.extend(
-                append_main_chat_kernel_review_maturation_blocker_transcript(
-                    state,
-                    main_chat_agent_turn,
-                    sanitized_selected_skill_id.as_deref(),
-                )
-                .await,
-            );
-        }
     }
 
     if main_chat_agent_turn.decision.selected_strategy
@@ -2235,7 +2299,12 @@ where
             provider_generation_path: RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
         })
         .await;
-    let mut direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
+    let life_model_explicit_read =
+        resolve_lifemodel_v2_explicit_read_direct_reply(state, main_chat_agent_turn, &user_text)
+            .await;
+    let mut direct_reply = if let Some(reply) = life_model_explicit_read {
+        Some(reply)
+    } else if let Some(answer) = runtime_fact_answer.as_ref() {
         Some(CommandSurfaceDirectReply::runtime_fact(answer))
     } else if user_text.trim().is_empty() {
         None
@@ -2243,21 +2312,39 @@ where
         main_chat_policy_direct_reflex_response(&main_chat_agent_turn.decision, &user_text)
             .map(CommandSurfaceDirectReply::direct_reflex)
     };
-    let (life_model, hs_context) = command_surface_kernel_hs_context(
-        state,
-        &task_session_id,
-        &user_text,
-        main_chat_agent_turn.decision.task_kind,
-    )
-    .await;
+    let mut life_model_context = command_surface_kernel_runtime_context(state, &user_text).await;
     let extra_candidates = command_surface_kernel_context_candidates(
         state,
         &provider_config.system.knowledge_roots,
         sanitized_selected_skill_id.as_deref(),
+        &task_session_id,
         &user_text,
+        life_model_context
+            .as_ref()
+            .map(|context| context.memory_rerank_terms.as_slice())
+            .unwrap_or_default(),
     )
     .await?;
-    if direct_reply.is_some()
+    if extra_candidates.iter().any(|candidate| {
+        candidate
+            .inclusion_reason
+            .contains("lifemodel_rerank_bonus=0.0")
+            && !candidate
+                .inclusion_reason
+                .contains("lifemodel_rerank_bonus=0.000")
+    }) {
+        if let Some(context) = life_model_context.as_mut() {
+            context.metadata.influence_receipt.status = "applied_memory_rerank".into();
+            context
+                .metadata
+                .influence_receipt
+                .applied_surfaces
+                .push("memory_retrieval_rerank".into());
+        }
+    }
+    if direct_reply
+        .as_ref()
+        .is_some_and(|reply| reply.route_model != "lifemodel_v2_explicit_read")
         && state
             .resource_runtime
             .as_ref()
@@ -2275,6 +2362,17 @@ where
         // imported evidence and therefore cannot complete an attachment turn.
         direct_reply = None;
     }
+    let react_life_model_prompt = life_model_context.as_ref().and_then(|context| {
+        context
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "lifemodel.v2.runtime")
+            .map(|candidate| candidate.content.clone())
+    });
+    let react_tool_preference_hints = life_model_context
+        .as_ref()
+        .map(|context| context.tool_preference_hints.clone())
+        .unwrap_or_default();
     let privacy_engine = state.privacy_engine.lock().await.clone();
     let kernel = MainChatKernel::new(
         CommandSurfaceDirectAnswerModelClient::new(
@@ -2294,7 +2392,7 @@ where
         load_workspace_knowledge: true,
         token_budget: 160,
         extra_candidates,
-        hs_context,
+        life_model_context,
         stream_provider_tokens: event_sink_label == "streaming",
         authorized_memory_routing: Some(
             main_chat_agent_turn
@@ -2324,6 +2422,24 @@ where
         .await;
     if use_agent_loop {
         let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
+        let mut react_messages = messages.clone();
+        if let Some(prompt) = react_life_model_prompt {
+            react_messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".into(),
+                    content: prompt,
+                },
+            );
+        }
+        let (mut react_context_metadata, _) =
+            kernel.compile_context(session_id, sanitized_selected_skill_id.clone(), &user_text);
+        event_sink.emit(MainChatKernelEvent::ContextLoaded {
+            context_snapshot_ref: react_context_metadata.context_snapshot_ref.clone(),
+            selected_source_count: react_context_metadata.selected_source_count,
+            selected_skill_instruction_loaded: react_context_metadata
+                .selected_skill_instruction_loaded,
+        });
         let (_, privacy_map) = privacy_engine.desensitize_batch(
             &messages
                 .iter()
@@ -2341,11 +2457,11 @@ where
                 canonical_run_id,
                 session_id,
                 &user_text,
-                &messages,
-                &life_model,
+                &react_messages,
                 &privacy_engine,
                 &privacy_map,
                 &plan,
+                &react_tool_preference_hints,
                 &provider_authorization,
                 provider_runtime,
                 execution_epoch,
@@ -2353,6 +2469,32 @@ where
             )
             .await?
         };
+        let life_model_tool_preference_applied = agent_loop_attempt
+            .metadata
+            .get("lifeModelToolPreferenceApplied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if life_model_tool_preference_applied {
+            if let Some(metadata) = react_context_metadata.life_model_context.as_mut() {
+                metadata.influence_receipt.status = "applied_equivalent_tool_preference".into();
+                metadata
+                    .influence_receipt
+                    .applied_surfaces
+                    .push("equivalent_tool_ranking".into());
+            }
+        }
+        if let Some(metadata) = react_context_metadata.life_model_context.as_ref() {
+            event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
+                available: metadata.available,
+                model_version: metadata.model_version,
+                selected_item_count: metadata.selected_item_refs.len(),
+                status: metadata.influence_receipt.status.clone(),
+                source_id: metadata.source_id.clone(),
+                selected_item_refs: metadata.selected_item_refs.clone(),
+                reason_codes: metadata.influence_receipt.reason_codes.clone(),
+                receipt: metadata.product_receipt(),
+            });
+        }
         for receipt in &agent_loop_attempt.provider_receipts {
             emit_provider_receipt(receipt, event_sink)?;
         }
@@ -2394,7 +2536,6 @@ where
             provider_durability_scope,
             provider_durability_proofs,
             provider_config,
-            life_model,
             false,
             None,
             event_sink_label,
@@ -2413,7 +2554,6 @@ where
             main_chat_agent_turn,
             execution_transcript,
             scheduler,
-            life_model,
             &kernel,
             sanitized_selected_skill_id,
             event_sink,
@@ -2431,7 +2571,7 @@ where
                 selected_skill_id: sanitized_selected_skill_id.clone(),
                 policy_decision: main_chat_agent_turn.decision.policy_decision.clone(),
                 model_supplied_tool_arguments: None,
-                runtime_fact_direct_answer: runtime_fact_answer.is_some(),
+                runtime_fact_direct_answer: direct_reply.is_some(),
             },
             event_sink,
         )
@@ -2453,7 +2593,6 @@ where
             scheduler,
             provider_durability_scope,
             Vec::new(),
-            life_model,
             event_sink_label,
             kernel_events,
         )
@@ -2494,7 +2633,6 @@ where
         provider_durability_scope,
         Vec::new(),
         provider_config,
-        life_model,
         direct_reply.is_some(),
         runtime_fact_answer,
         event_sink_label,
@@ -3536,9 +3674,6 @@ pub(crate) fn main_chat_kernel_support_disposition(
         | MainChatAgentStrategy::BlockedConfirmation => {
             MainChatKernelSupportDisposition::KernelSupported
         }
-        MainChatAgentStrategy::ReviewMaturation => {
-            MainChatKernelSupportDisposition::GovernedBlocker
-        }
     }
 }
 
@@ -3814,45 +3949,12 @@ async fn append_task_scoped_agent_reflection(
     .await
 }
 
-async fn append_main_chat_kernel_review_maturation_blocker_transcript(
-    state: &Arc<AppState>,
-    main_chat_agent_turn: &MainChatAgentTurn,
-    selected_skill_id: Option<&str>,
-) -> Vec<ExecutionTranscriptEntry> {
-    let Some(task_session_id) = main_chat_agent_turn
-        .decision
-        .agent_task_session_id
-        .as_deref()
-    else {
-        return Vec::new();
-    };
-    append_main_chat_agent_transcript(
-        state,
-        Some(task_session_id),
-        ExecutionTranscriptEntryKind::Plan,
-        "MainChatKernel ReviewMaturation disposition was prepared.",
-        serde_json::json!({
-            "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-            "promptContract": "kernel_review_maturation_governed_blocker",
-            "toolExecutionAllowed": false,
-            "writeExecutionAllowed": false,
-            "silentWritesAllowed": false,
-            "legacyFallbackUsed": false,
-            "kernelBackedGovernedBlocker": true,
-            "kernelSupportDisposition": MainChatKernelSupportDisposition::GovernedBlocker.as_str(),
-            "blockerReason": "review_maturation_kernel_executor_unavailable",
-            "selectedSkillId": selected_skill_id,
-        }),
-    )
-    .await
-}
-
 #[derive(Debug, Clone)]
 pub struct MainChatKernelContextConfig {
     pub load_workspace_knowledge: bool,
     pub token_budget: u32,
     pub extra_candidates: Vec<ContextSourceCandidate>,
-    pub hs_context: Option<MainChatKernelHsContext>,
+    pub life_model_context: Option<MainChatKernelLifeModelContext>,
     pub stream_provider_tokens: bool,
     pub authorized_memory_routing: Option<MainChatMemoryRoutingResult>,
 }
@@ -3863,7 +3965,7 @@ impl Default for MainChatKernelContextConfig {
             load_workspace_knowledge: true,
             token_budget: KERNEL_CONTEXT_TOKEN_BUDGET,
             extra_candidates: Vec::new(),
-            hs_context: None,
+            life_model_context: None,
             stream_provider_tokens: false,
             authorized_memory_routing: None,
         }
@@ -5120,6 +5222,78 @@ struct CommandSurfaceDirectReply {
     route_reason: String,
 }
 
+async fn resolve_lifemodel_v2_explicit_read_direct_reply(
+    state: &Arc<AppState>,
+    turn: &MainChatAgentTurn,
+    user_text: &str,
+) -> Option<CommandSurfaceDirectReply> {
+    if turn.decision.policy_route != PolicyRouteKind::DirectAnswer
+        || !openlife_core::agent::is_explicit_lifemodel_read_intent(user_text)
+    {
+        return None;
+    }
+
+    let loaded = state
+        .life_model_manager
+        .lock()
+        .await
+        .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID);
+    let (content, reason) = match loaded {
+        Ok(Some(version)) => {
+            match openlife_core::agent::LifeModelExplicitReadAnswer::build(&version, user_text) {
+                Ok(answer) => (
+                    answer.render_for_user(user_text),
+                    "lifemodel_v2_explicit_read_confirmed",
+                ),
+                Err(error) => (
+                    lifemodel_v2_explicit_read_unavailable_reply(user_text),
+                    if error
+                        .to_string()
+                        .contains("lifemodel_v2_explicit_read_intent_required")
+                    {
+                        "lifemodel_v2_explicit_read_intent_changed"
+                    } else {
+                        "lifemodel_v2_explicit_read_binding_invalid"
+                    },
+                ),
+            }
+        }
+        Ok(None) => (
+            lifemodel_v2_explicit_read_empty_reply(user_text),
+            "lifemodel_v2_explicit_read_empty",
+        ),
+        Err(_) => (
+            lifemodel_v2_explicit_read_unavailable_reply(user_text),
+            "lifemodel_v2_explicit_read_unavailable",
+        ),
+    };
+    Some(CommandSurfaceDirectReply::lifemodel_explicit_read(
+        content, reason,
+    ))
+}
+
+fn lifemodel_v2_explicit_read_empty_reply(user_text: &str) -> String {
+    if user_text
+        .chars()
+        .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+    {
+        "当前还没有可验证的 Life Model v2 版本，因此我不能声称已经了解你的长期画像。本次只进行了读取，没有写入任何内容。".into()
+    } else {
+        "There is no verifiable Life Model v2 version yet, so I cannot claim confirmed long-term knowledge about you. This was read-only and wrote nothing.".into()
+    }
+}
+
+fn lifemodel_v2_explicit_read_unavailable_reply(user_text: &str) -> String {
+    if user_text
+        .chars()
+        .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+    {
+        "我目前无法验证 canonical Life Model v2，因此相关内容保持未知；我不会改用会话记忆或旧 YAML 来冒充答案。本次没有写入任何内容。".into()
+    } else {
+        "I cannot currently verify canonical Life Model v2, so the requested personal context remains unknown. I will not substitute conversation memory or legacy YAML. Nothing was written.".into()
+    }
+}
+
 fn main_chat_policy_direct_reflex_response(
     decision: &AgentIngressDecision,
     user_text: &str,
@@ -5179,6 +5353,14 @@ impl CommandSurfaceDirectReply {
             content,
             route_model: "L1_reflex".into(),
             route_reason: "main_chat_kernel_direct_reflex".into(),
+        }
+    }
+
+    fn lifemodel_explicit_read(content: String, reason: &str) -> Self {
+        Self {
+            content,
+            route_model: "lifemodel_v2_explicit_read".into(),
+            route_reason: reason.into(),
         }
     }
 }
@@ -5406,15 +5588,18 @@ where
             selected_source_count: context_metadata.selected_source_count,
             selected_skill_instruction_loaded: context_metadata.selected_skill_instruction_loaded,
         });
-        if let Some(hs_context) = context_metadata.hs_context.as_ref() {
-            event_sink.emit(MainChatKernelEvent::HsContextLoaded {
-                available: hs_context.available,
-                warning_count: hs_context.warning_codes.len(),
-                selected_policy_count: hs_context.selected_policy_ids.len(),
-                accepted_guidance_count: hs_context.accepted_guidance_count,
+        if let Some(life_model_context) = context_metadata.life_model_context.as_ref() {
+            event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
+                available: life_model_context.available,
+                model_version: life_model_context.model_version,
+                selected_item_count: life_model_context.selected_item_refs.len(),
+                status: life_model_context.influence_receipt.status.clone(),
+                source_id: life_model_context.source_id.clone(),
+                selected_item_refs: life_model_context.selected_item_refs.clone(),
+                reason_codes: life_model_context.influence_receipt.reason_codes.clone(),
+                receipt: life_model_context.product_receipt(),
             });
         }
-
         let replayed_read_observations = self.replayed_read_observations.clone();
         let external_read_required =
             policy_authorizes_kernel_read_lane(&input) || !replayed_read_observations.is_empty();
@@ -5442,7 +5627,7 @@ where
                 matches!(
                     outcome.kind,
                     MainChatKernelWriteOutcomeKind::MemoryProposal
-                        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+                        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
                 )
             })
         {
@@ -5472,10 +5657,11 @@ where
 
         if input
             .policy_decision
-            .allows(AllowedCapability::ReviewMaturationBlocker)
+            .allows(AllowedCapability::GovernedBlocker)
         {
+            let blocker_code = input.policy_decision.reason_code.clone();
             return self.governed_blocker(
-                "review_maturation_kernel_executor_unavailable",
+                &blocker_code,
                 context_metadata,
                 route_metadata,
                 event_sink,
@@ -5525,7 +5711,7 @@ where
                 || !matches!(
                     outcome.kind,
                     MainChatKernelWriteOutcomeKind::MemoryProposal
-                        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+                        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
                 )
         }) {
             return self.run_write_outcome_turn(
@@ -5593,10 +5779,7 @@ where
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
             selected_context_refs: context_metadata.selected_source_ids.clone(),
             raw_life_model_included: context_metadata.raw_life_model_yaml_included,
-            raw_unbounded_memory_included: context_metadata
-                .hs_context
-                .as_ref()
-                .is_some_and(|context| context.raw_unbounded_memory_included),
+            raw_unbounded_memory_included: false,
             selected_skill_id,
             payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: self.context_config.stream_provider_tokens,
@@ -5733,7 +5916,7 @@ where
 
     fn governed_blocker<S>(
         &self,
-        code: &'static str,
+        code: &str,
         context_metadata: MainChatKernelContextMetadata,
         route_metadata: MainChatRouteMetadata,
         event_sink: &mut S,
@@ -6193,10 +6376,7 @@ where
                 context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
                 selected_context_refs: context_metadata.selected_source_ids.clone(),
                 raw_life_model_included: context_metadata.raw_life_model_yaml_included,
-                raw_unbounded_memory_included: context_metadata
-                    .hs_context
-                    .as_ref()
-                    .is_some_and(|context| context.raw_unbounded_memory_included),
+                raw_unbounded_memory_included: false,
                 selected_skill_id: sanitize_main_chat_selected_skill_id(
                     input.selected_skill_id.as_deref(),
                 ),
@@ -6501,10 +6681,7 @@ where
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
             selected_context_refs: context_metadata.selected_source_ids.clone(),
             raw_life_model_included: context_metadata.raw_life_model_yaml_included,
-            raw_unbounded_memory_included: context_metadata
-                .hs_context
-                .as_ref()
-                .is_some_and(|context| context.raw_unbounded_memory_included),
+            raw_unbounded_memory_included: false,
             selected_skill_id: sanitize_main_chat_selected_skill_id(
                 input.selected_skill_id.as_deref(),
             ),
@@ -6829,8 +7006,8 @@ where
             &mut candidates,
             selected_skill_id.as_deref(),
         );
-        if let Some(hs_context) = self.context_config.hs_context.as_ref() {
-            candidates.extend(hs_context.candidates.clone());
+        if let Some(life_model_context) = self.context_config.life_model_context.as_ref() {
+            candidates.extend(life_model_context.candidates.clone());
         }
         candidates.extend(self.context_config.extra_candidates.clone());
 
@@ -6850,34 +7027,65 @@ where
             .map(|source| bounded_label(&source.source_id, MAX_ROUTE_LABEL_CHARS))
             .collect::<Vec<_>>();
 
-        let mut hs_context = self
+        let mut life_model_context = self
             .context_config
-            .hs_context
+            .life_model_context
             .as_ref()
             .map(|context| context.metadata.clone());
-        if let Some(hs_context) = hs_context.as_mut() {
-            hs_context.available = hs_context
-                .summary_source_id
-                .as_ref()
-                .is_some_and(|source_id| {
-                    compiled
-                        .selected_sources
-                        .iter()
-                        .any(|source| source.source_id == *source_id)
-                });
-            hs_context.accepted_guidance_ids = hs_context
-                .accepted_guidance_ids
-                .iter()
-                .filter(|guidance_id| {
-                    let expected_source_id = format!("hs.accepted_guidance.{guidance_id}");
-                    compiled
-                        .selected_sources
-                        .iter()
-                        .any(|source| source.source_id == expected_source_id)
-                })
-                .cloned()
-                .collect();
-            hs_context.accepted_guidance_count = hs_context.accepted_guidance_ids.len();
+        if let Some(life_model_context) = life_model_context.as_mut() {
+            life_model_context.available =
+                life_model_context
+                    .source_id
+                    .as_ref()
+                    .is_some_and(|source_id| {
+                        compiled
+                            .selected_sources
+                            .iter()
+                            .any(|source| source.source_id == *source_id)
+                    });
+            if life_model_context.available {
+                if !life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"context_building".to_string())
+                {
+                    life_model_context
+                        .influence_receipt
+                        .applied_surfaces
+                        .push("context_building".into());
+                }
+                if life_model_context.selected_sections.iter().any(|section| {
+                    section == "stable_preferences" || section == "collaboration_preferences"
+                }) && !life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"communication_style".to_string())
+                {
+                    life_model_context
+                        .influence_receipt
+                        .applied_surfaces
+                        .push("communication_style".into());
+                }
+                life_model_context.influence_receipt.status = if life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"memory_retrieval_rerank".to_string())
+                {
+                    "applied_context_and_memory_rerank".into()
+                } else {
+                    "applied_context_building".into()
+                };
+            } else if life_model_context.source_id.is_some() {
+                life_model_context.influence_receipt.status = if life_model_context
+                    .influence_receipt
+                    .applied_surfaces
+                    .contains(&"memory_retrieval_rerank".to_string())
+                {
+                    "applied_memory_rerank_without_direct_context".into()
+                } else {
+                    "eligible_not_selected_by_context_budget".into()
+                };
+            }
         }
 
         (
@@ -6891,7 +7099,7 @@ where
                 raw_topk_memory_trusted: compiled.raw_topk_memory_trusted,
                 workspace_policy_override_blocked: compiled.workspace_policy_override_blocked,
                 system_prompt_chars: system_prompt.chars().count(),
-                hs_context,
+                life_model_context,
             },
             system_prompt,
         )
@@ -7265,7 +7473,6 @@ async fn build_successful_kernel_command_surface_result(
         openlife_core::scheduler::ProviderInvocationDurabilityProof,
     >,
     provider_config: AppConfig,
-    life_model: LifeModel,
     direct_reflex_used: bool,
     runtime_fact_answer: Option<MainChatRuntimeFactAnswer>,
     event_sink_label: &'static str,
@@ -7293,7 +7500,7 @@ async fn build_successful_kernel_command_surface_result(
         .clone()
         .ok_or_else(|| "Main Chat kernel result missing route metadata".to_string())?;
     let model_route = model_route_from_kernel_route(&route_metadata);
-    let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let context_summary = context_summary_from_kernel_result(&kernel_result);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
     let memory_governance_planned = kernel_result.memory_governance.is_some();
     let memory_governance_is_terminal_action = memory_governance_planned
@@ -7397,10 +7604,6 @@ async fn build_successful_kernel_command_surface_result(
         }
     }
     let kernel_event_count = kernel_events.len();
-    let hs_metadata = kernel_result
-        .context_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.hs_context.clone());
     if let Some(context_snapshot_ref) = kernel_result
         .context_metadata
         .as_ref()
@@ -7417,29 +7620,6 @@ async fn build_successful_kernel_command_surface_result(
         .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
     }
     let mut generation_metadata = serde_json::json!({
-        "hsPacketSelected": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                || !metadata.accepted_guidance_ids.is_empty()),
-        "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-        "hsWarningCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.warning_codes.clone())
-            .unwrap_or_default(),
-        "hsSelectedPolicyIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.selected_policy_ids.clone())
-            .unwrap_or_default(),
-        "hsAcceptedGuidanceIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.accepted_guidance_ids.clone())
-            .unwrap_or_default(),
-        "hsProposalPolicyActive": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.proposal_policy_active),
-        "hsRawLifeModelYamlIncluded": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
         "toolCallCount": kernel_result.tool_calls.len(),
         "toolCalled": read_tool_loop_used,
         "directWritesExecuted": false,
@@ -7841,6 +8021,13 @@ async fn build_successful_kernel_command_surface_result(
             );
         }
     }
+    let task_outcome = if !pending_read_tool_blockers.is_empty() {
+        "blocked"
+    } else if !pending_proposal_ids.is_empty() {
+        "waiting_review"
+    } else {
+        "completed"
+    };
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
@@ -7884,33 +8071,72 @@ async fn build_successful_kernel_command_surface_result(
         )
         .await,
     );
-    execution_transcript.extend(
-        append_task_scoped_agent_reflection(
+    let reflection_entries = append_task_scoped_agent_reflection(
+        state,
+        task_session_id,
+        TaskScopedAgentReflection {
+            run_id: &agent_run.id,
+            outcome: task_outcome,
+            successful_action_count: tool_calls
+                .iter()
+                .filter(|call| matches!(call.status, ToolCallStatus::Success))
+                .count(),
+            failed_or_unknown_action_count: tool_calls
+                .iter()
+                .filter(|call| !matches!(call.status, ToolCallStatus::Success))
+                .count(),
+            proposal_count: visible_proposal_ids.len(),
+            business_fact_written: false,
+        },
+    )
+    .await;
+    let reflection_recorded = !reflection_entries.is_empty();
+    execution_transcript.extend(reflection_entries);
+    if task_outcome == "completed" {
+        match crate::life_model_learning::capture_completed_task_learning_evidence(
             state,
             task_session_id,
-            TaskScopedAgentReflection {
-                run_id: &agent_run.id,
-                outcome: if !pending_read_tool_blockers.is_empty() {
-                    "blocked"
-                } else if !pending_proposal_ids.is_empty() {
-                    "waiting_review"
-                } else {
-                    "completed"
-                },
-                successful_action_count: tool_calls
-                    .iter()
-                    .filter(|call| matches!(call.status, ToolCallStatus::Success))
-                    .count(),
-                failed_or_unknown_action_count: tool_calls
-                    .iter()
-                    .filter(|call| !matches!(call.status, ToolCallStatus::Success))
-                    .count(),
-                proposal_count: visible_proposal_ids.len(),
-                business_fact_written: false,
-            },
+            &agent_run.id,
+            user_text,
+            reflection_recorded,
         )
-        .await,
-    );
+        .await
+        {
+            Ok(receipt) if receipt.deterministic_candidate_found => {
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::Observation,
+                        "A completed task and any recorded bounded Reflection added evidence to a LifeModel learning candidate; no proposal or canonical LifeModel write occurred.",
+                        serde_json::json!({
+                            "artifactType": "life_model_learning_task_evidence",
+                            "candidateIds": receipt.candidate_ids,
+                            "observationIds": receipt.observation_ids,
+                            "sourceKinds": if reflection_recorded {
+                                vec!["task_outcome", "agent_reflection"]
+                            } else {
+                                vec!["task_outcome"]
+                            },
+                            "optionalModelExtractionStatus": receipt.optional_model_extraction_status,
+                            "proposalCreated": receipt.proposal_created,
+                            "directLifeModelWrite": receipt.canonical_life_model_changed,
+                            "directWritesExecuted": false,
+                            "acceptedDurableTruthWritten": false,
+                        }),
+                    )
+                    .await,
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "[MainChatKernel] optional LifeModel task learning evidence skipped: {}",
+                    error
+                );
+            }
+        }
+    }
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -7936,7 +8162,6 @@ fn is_kernel_proposal_outcome(kind: MainChatKernelWriteOutcomeKind) -> bool {
     matches!(
         kind,
         MainChatKernelWriteOutcomeKind::MemoryProposal
-            | MainChatKernelWriteOutcomeKind::LifeModelProposal
             | MainChatKernelWriteOutcomeKind::FileWriteProposal
             | MainChatKernelWriteOutcomeKind::CalendarEventProposal
             | MainChatKernelWriteOutcomeKind::EmailDraftProposal
@@ -7950,8 +8175,12 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
         MainChatKernelWriteOutcomeKind::MemoryProposal => {
             "Create a ReviewWorkflow Memory item from MainChatKernel.".into()
         }
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            "Create a ReviewWorkflow LifeModel item from MainChatKernel.".into()
+        MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
+            "Stage an explicit long-term preference without creating a proposal or LifeModel version."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
+            "Block an untyped LifeModel request without creating a fake review item.".into()
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
             "Create a ReviewWorkflow file-write item from MainChatKernel.".into()
@@ -7980,7 +8209,12 @@ fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> Stri
 fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'static str {
     match kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => "memory.write",
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => "life_model.update",
+        MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
+            "lifemodel.learning_candidate.capture"
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
+            "life_model.change_requires_typed_diff"
+        }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => "file.write",
         MainChatKernelWriteOutcomeKind::CalendarEventProposal => "calendar.propose_event",
         MainChatKernelWriteOutcomeKind::EmailDraftProposal => "email.propose_draft",
@@ -8377,51 +8611,6 @@ async fn prepare_kernel_write_proposal(
                 Some(fact),
             )
         }
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            let requested_change = outcome
-                .governed_input
-                .get("requestedChange")
-                .and_then(Value::as_str)
-                .unwrap_or(user_text);
-            let after = if let Some(asset_id) = outcome.target.strip_prefix("knowledge_asset.") {
-                serde_json::json!({
-                    "assetId": asset_id,
-                    "assetKind": "knowledge_markdown",
-                    "requestedChange": requested_change,
-                    "source": "main_chat_kernel",
-                    "sourceRunId": run_id,
-                    "payloadSummary": outcome.payload_summary,
-                    "proposedDiff": {
-                        "operation": "append_note",
-                        "target": asset_id,
-                        "summary": "Add bounded knowledge asset note from Main Chat.",
-                    },
-                    "directKnowledgeFileWrite": false,
-                    "requiresReviewCenterApproval": true,
-                    "directLifeModelWrite": false,
-                    "acceptedDurableTruthWritten": false,
-                    "directWritesExecuted": false,
-                })
-            } else {
-                serde_json::json!({
-                    "requestedChange": requested_change,
-                    "source": "main_chat_kernel",
-                    "sourceRunId": run_id,
-                    "payloadSummary": outcome.payload_summary,
-                    "directLifeModelWrite": false,
-                    "acceptedDurableTruthWritten": false,
-                    "directWritesExecuted": false,
-                })
-            };
-            (
-                ProposalType::LifeModelUpdate,
-                outcome.target.clone(),
-                "User requested a proposal-first LifeModel update from MainChatKernel.".to_string(),
-                RiskLevel::High,
-                after,
-                None,
-            )
-        }
         MainChatKernelWriteOutcomeKind::CalendarEventProposal => (
             ProposalType::ScheduledTask,
             "calendar.events".into(),
@@ -8572,7 +8761,9 @@ async fn prepare_kernel_write_proposal(
             }
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
-        | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+        | MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
+        | MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             return Err("kernel blocker outcome cannot create proposal".into());
         }
     };
@@ -8641,13 +8832,11 @@ async fn prepare_kernel_write_proposal(
     }
     let relation_kind = match outcome.kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal
-        | MainChatKernelWriteOutcomeKind::LifeModelProposal
             if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite =>
         {
             openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
         }
-        MainChatKernelWriteOutcomeKind::MemoryProposal
-        | MainChatKernelWriteOutcomeKind::LifeModelProposal => {
+        MainChatKernelWriteOutcomeKind::MemoryProposal => {
             openlife_core::agent::ProposalTerminalRelationKind::NonBlockingSuccessor
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
@@ -8662,7 +8851,9 @@ async fn prepare_kernel_write_proposal(
             openlife_core::agent::ProposalTerminalRelationKind::EffectBlockingPrerequisite
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
-        | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+        | MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        | MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
+        | MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
             return Err("kernel blocker outcome cannot create proposal".into())
         }
     };
@@ -8851,7 +9042,8 @@ async fn materialize_kernel_memory_governance(
 ) -> Result<MainChatMemoryGovernanceMaterialization, String> {
     let life_event_ids: Vec<String> = Vec::new();
     let mut memory_proposal_ids = Vec::new();
-    let mut lifemodel_proposal_ids = Vec::new();
+    let lifemodel_proposal_ids = Vec::new();
+    let mut lifemodel_learning_candidate_ids = Vec::new();
     let mut explicit_memory_receipts = Vec::new();
     let mut explicit_memory_rollback_receipts = Vec::new();
     let mut canonical_memory_noop_ids = Vec::new();
@@ -9112,6 +9304,109 @@ async fn materialize_kernel_memory_governance(
             }
             continue;
         }
+        if candidate.destination == MemoryDestination::LifeModelProposal {
+            let learning_authorized = source_kind
+                == IntentSourceKind::CurrentAuthenticatedUserMessage
+                && policy_decision.allows(AllowedCapability::LifeModelProposal)
+                && policy_decision.allows_memory_candidate(&candidate.candidate_id);
+            if !learning_authorized {
+                push_unique_string(&mut blockers, "lifemodel_learning_policy_authority_missing");
+                continue;
+            }
+            let queued = enqueue_main_chat_agent_action(
+                state,
+                task_session_id,
+                "lifemodel.learning_candidate.capture",
+                "Stage an explicit long-term user preference as a reviewable learning candidate.",
+                execution_transcript,
+            )
+            .await?;
+            transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+                .await?;
+            match crate::life_model_learning::capture_explicit_main_chat_candidate(
+                state,
+                candidate,
+                policy_decision,
+                source_user_message,
+            )
+            .await
+            {
+                Ok(receipt) => {
+                    let metadata = serde_json::json!({
+                        "memoryGovernanceArtifact": true,
+                        "artifactType": "life_model_learning_candidate",
+                        "candidateId": receipt.candidate.id,
+                        "observationId": receipt.observation.id,
+                        "section": receipt.candidate.section,
+                        "status": receipt.candidate.status,
+                        "sourceRefs": receipt.candidate.source_refs,
+                        "replayed": receipt.replayed,
+                        "proposalCreated": receipt.proposal_created,
+                        "directLifeModelWrite": receipt.canonical_life_model_changed,
+                        "directWritesExecuted": false,
+                        "acceptedDurableTruthWritten": false,
+                    });
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Observed,
+                        Some(metadata.clone()),
+                    )
+                    .await?;
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Completed,
+                        Some(metadata.clone()),
+                    )
+                    .await?;
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::Observation,
+                            "OpenLife staged an explicit long-term preference as a learning candidate; no proposal or LifeModel version was created.",
+                            metadata,
+                        )
+                        .await,
+                    );
+                    lifemodel_learning_candidate_ids.push(receipt.candidate.id);
+                }
+                Err(error) => {
+                    let blocker = error.split(':').next().unwrap_or(error.as_str());
+                    push_unique_string(&mut blockers, blocker);
+                    let metadata = serde_json::json!({
+                        "memoryGovernanceArtifact": true,
+                        "artifactType": "life_model_learning_candidate",
+                        "candidateId": candidate.candidate_id,
+                        "status": "not_staged",
+                        "reasonCode": blocker,
+                        "proposalCreated": false,
+                        "directLifeModelWrite": false,
+                        "directWritesExecuted": false,
+                        "acceptedDurableTruthWritten": false,
+                    });
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Failed,
+                        Some(metadata.clone()),
+                    )
+                    .await?;
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::Observation,
+                            "The LifeModel learning candidate was not staged; ordinary Agent capabilities remain available.",
+                            metadata,
+                        )
+                        .await,
+                    );
+                }
+            }
+            continue;
+        }
         let proposal_authorized = match candidate.destination {
             MemoryDestination::MemoryProposal => {
                 policy_decision.allows(AllowedCapability::MemoryProposal)
@@ -9195,12 +9490,7 @@ async fn materialize_kernel_memory_governance(
                 continue;
             }
         };
-        let is_lifemodel = candidate.destination == MemoryDestination::LifeModelProposal;
-        if is_lifemodel {
-            lifemodel_proposal_ids.push(proposal.id.clone());
-        } else {
-            memory_proposal_ids.push(proposal.id.clone());
-        }
+        memory_proposal_ids.push(proposal.id.clone());
         if created_for_turn {
             new_pending_proposal_ids.push(proposal.id.clone());
         } else {
@@ -9208,7 +9498,7 @@ async fn materialize_kernel_memory_governance(
         }
         let proposal_metadata = serde_json::json!({
             "memoryGovernanceArtifact": true,
-            "artifactType": if is_lifemodel { "life_model_proposal" } else { "memory_proposal" },
+            "artifactType": "memory_proposal",
             "proposalId": proposal.id,
             "proposalType": proposal.proposal_type,
             "affectedPath": proposal.affected_path,
@@ -9261,6 +9551,7 @@ async fn materialize_kernel_memory_governance(
         &life_event_ids,
         &memory_proposal_ids,
         &lifemodel_proposal_ids,
+        &lifemodel_learning_candidate_ids,
         &explicit_memory_receipts,
         &explicit_memory_rollback_receipts,
         &canonical_memory_noop_ids,
@@ -9351,31 +9642,9 @@ async fn create_kernel_memory_governance_proposal(
                 Some(fact),
             )
         }
-        MemoryDestination::LifeModelProposal => (
-            ProposalType::LifeModelUpdate,
-            "lifemodel.pending.chat_conversation".to_string(),
-            if policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite {
-                "The current authenticated user explicitly requested a governed LifeModel change; review is required before accepted LifeModel truth changes."
-                    .to_string()
-            } else {
-                "OpenLife inferred a possible LifeModel candidate while answering; user review is required and the candidate is not an explicit write request."
-                    .to_string()
-            },
-            RiskLevel::High,
-            serde_json::json!({
-                "requestedChange": candidate.normalized_claim,
-                "candidateId": candidate.candidate_id,
-                "candidateKind": candidate.kind,
-                "sourceEvidence": candidate.source_preview,
-                "impactPreview": memory_candidate_impact_preview(candidate),
-                "source": "main_chat_memory_governance",
-                "sourceRunId": run_id,
-                "directLifeModelWrite": false,
-                "acceptedDurableTruthWritten": false,
-                "directWritesExecuted": false,
-            }),
-            None,
-        ),
+        MemoryDestination::LifeModelProposal => {
+            return Err("lifemodel_learning_candidate_must_not_create_proposal_in_5_3a".into())
+        }
         _ => return Err("candidate destination cannot create proposal".into()),
     };
 
@@ -9456,6 +9725,7 @@ fn memory_governance_metadata(
     life_event_ids: &[String],
     memory_proposal_ids: &[String],
     lifemodel_proposal_ids: &[String],
+    lifemodel_learning_candidate_ids: &[String],
     explicit_memory_receipts: &[serde_json::Value],
     explicit_memory_rollback_receipts: &[serde_json::Value],
     canonical_memory_noop_ids: &[String],
@@ -9485,6 +9755,7 @@ fn memory_governance_metadata(
         "lifeEventIds": life_event_ids,
         "memoryProposalIds": memory_proposal_ids,
         "lifeModelProposalIds": lifemodel_proposal_ids,
+        "lifeModelLearningCandidateIds": lifemodel_learning_candidate_ids,
         "explicitMemoryReceipts": explicit_memory_receipts,
         "explicitMemoryRollbackReceipts": explicit_memory_rollback_receipts,
         "canonicalMemoryNoOpIds": canonical_memory_noop_ids,
@@ -9508,6 +9779,7 @@ fn empty_memory_governance_metadata() -> serde_json::Value {
         "lifeEventIds": [],
         "memoryProposalIds": [],
         "lifeModelProposalIds": [],
+        "lifeModelLearningCandidateIds": [],
         "explicitMemoryReceipts": [],
         "explicitMemoryRollbackReceipts": [],
         "canonicalMemoryNoOpIds": [],
@@ -9574,6 +9846,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
         .unwrap_or(0);
     let lifemodel_proposal_count = memory_governance
         .get("lifeModelProposalIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let lifemodel_learning_candidate_count = memory_governance
+        .get("lifeModelLearningCandidateIds")
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
@@ -9651,6 +9928,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
     if lifemodel_proposal_count > 0 {
         lines.push(format!("待确认 LifeModel 更新：{lifemodel_proposal_count} 条，审批前不会写入 accepted LifeModel。"));
     }
+    if lifemodel_learning_candidate_count > 0 {
+        lines.push(format!(
+            "已暂存待验证的长期信息：{lifemodel_learning_candidate_count} 条；目前还不是 Proposal，也没有写入 LifeModel。"
+        ));
+    }
     if explicit_memory_write_count > 0 {
         lines.push(format!(
             "已按你当前这条明确指令写入可撤销 Memory：{explicit_memory_write_count} 条（包含必要的保守治理升级）。"
@@ -9688,11 +9970,10 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
         lines.push("没有执行直接 Memory 写入或 accepted LifeModel 写入。".into());
     } else if rollback_count > 0 {
         lines.push(
-            "没有修改 canonical LifeModel-HS；撤销事实已持久化，应用重启后仍应保持非 active。"
-                .into(),
+            "没有修改 canonical LifeModel；撤销事实已持久化，应用重启后仍应保持非 active。".into(),
         );
     } else {
-        lines.push("没有修改 canonical LifeModel-HS；Memory receipt 可用于撤销。".into());
+        lines.push("没有修改 canonical LifeModel；Memory receipt 可用于撤销。".into());
     }
     lines.join("\n")
 }
@@ -9722,7 +10003,6 @@ async fn build_kernel_write_outcome_command_surface_result(
     supplied_provider_durability_proofs: Vec<
         openlife_core::scheduler::ProviderInvocationDurabilityProof,
     >,
-    life_model: LifeModel,
     event_sink_label: &'static str,
     kernel_events: Vec<MainChatKernelEvent>,
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
@@ -9818,7 +10098,7 @@ async fn build_kernel_write_outcome_command_surface_result(
     let provider_live_invoked = selected_provider_receipt.is_some_and(|receipt| !receipt.simulated)
         && !route_metadata.scripted_response_configured;
     let model_route = model_route_from_kernel_route(&route_metadata);
-    let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let context_summary = context_summary_from_kernel_result(&kernel_result);
     let mut reply = kernel_result
         .assistant_message
         .as_ref()
@@ -10083,36 +10363,12 @@ async fn build_kernel_write_outcome_command_surface_result(
         }
     }
 
-    let hs_metadata = kernel_result
-        .context_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.hs_context.clone());
     let generation_metadata = serde_json::json!({
         "text": reply,
         "mainChatAgentV1": true,
         "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
         "legacyFallbackUsed": false,
         "directWritesExecuted": false,
-        "hsPacketSelected": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                || !metadata.accepted_guidance_ids.is_empty()),
-        "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-        "hsWarningCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.warning_codes.clone())
-            .unwrap_or_default(),
-        "hsSelectedPolicyIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.selected_policy_ids.clone())
-            .unwrap_or_default(),
-        "hsPolicyBlockerCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.policy_blocker_codes.clone())
-            .unwrap_or_default(),
-        "hsProposalPolicyActive": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.proposal_policy_active),
         "kernelBackedProposalOnlyWrite": true,
         "kernelBackedReadBeforeWriteProposal": !tool_calls.is_empty(),
         "toolCallCount": tool_calls.len(),
@@ -10292,8 +10548,8 @@ async fn build_blocked_kernel_command_surface_result(
         .iter()
         .any(|receipt| receipt.status == ProviderInvocationStatus::Failed);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
-    let governed_strategy_blocker =
-        main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation;
+    let governed_strategy_blocker = main_chat_agent_turn.decision.policy_decision.route_kind
+        == PolicyRouteKind::GovernedBlocker;
     let failure_kind = main_chat_failure_kind_from_kernel_result(&kernel_result);
     if state.main_chat_agent_session_store.is_some() {
         let session_blockers = if waiting_for_review {
@@ -10399,10 +10655,6 @@ async fn build_blocked_kernel_command_surface_result(
         agent_run.error = None;
         agent_run.finished_at = None;
     }
-    let hs_metadata = kernel_result
-        .context_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.hs_context.clone());
     let mut reasoning_trace = ReasoningTrace {
         generation_result: Some(serde_json::json!({
             "text": reply,
@@ -10410,23 +10662,6 @@ async fn build_blocked_kernel_command_surface_result(
             "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
             "legacyFallbackUsed": false,
             "directWritesExecuted": false,
-            "hsPacketSelected": hs_metadata
-                .as_ref()
-                .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                    || !metadata.accepted_guidance_ids.is_empty()),
-            "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-            "hsWarningCodes": hs_metadata
-                .as_ref()
-                .map(|metadata| metadata.warning_codes.clone())
-                .unwrap_or_default(),
-            "hsSelectedPolicyIds": hs_metadata
-                .as_ref()
-                .map(|metadata| metadata.selected_policy_ids.clone())
-                .unwrap_or_default(),
-            "hsPolicyBlockerCodes": hs_metadata
-                .as_ref()
-                .map(|metadata| metadata.policy_blocker_codes.clone())
-                .unwrap_or_default(),
             "kernelBackedDirectAnswer": !read_tool_loop_used,
             "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
             "kernelBackedGovernedBlocker": governed_strategy_blocker,
@@ -11347,84 +11582,60 @@ fn tool_call_status_from_kernel_status(status: &str) -> ToolCallStatus {
     }
 }
 
-async fn command_surface_kernel_hs_context(
+async fn command_surface_kernel_runtime_context(
     state: &Arc<AppState>,
-    task_session_id: &str,
     user_text: &str,
-    task_kind: openlife_core::agent::AgentTaskKind,
-) -> (LifeModel, Option<MainChatKernelHsContext>) {
-    let mut warnings = Vec::new();
-    let maybe_life_model = {
+) -> Option<MainChatKernelLifeModelContext> {
+    let mut life_model_warnings = Vec::new();
+    let canonical_life_model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load_existing()
+        manager.load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
     };
-    let (life_model, life_model_available) = match maybe_life_model {
-        Ok(Some(model)) => (model, true),
-        Ok(None) => {
-            warnings.push("hs_lifemodel_missing".to_string());
-            (LifeModel::default(), false)
-        }
+    let canonical_life_model = match canonical_life_model {
+        Ok(version) => version,
         Err(error) => {
             log::warn!(
-                "[MainChatKernel] bounded HS LifeModel load failed: {}",
+                "[MainChatKernel] canonical LifeModel v2 load failed: {}",
                 error
             );
-            warnings.push("hs_lifemodel_malformed".to_string());
-            (LifeModel::default(), false)
-        }
-    };
-
-    let task = AgentTask {
-        kind: task_kind,
-        session_id: task_session_id.to_string(),
-        user_text: user_text.to_string(),
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: user_text.to_string(),
-        }],
-        layer: Layer::L2,
-    };
-    let hs_packet = match build_chat_runtime_hs_packet(
-        state,
-        &task,
-        &life_model,
-        "",
-        Some(task_session_id.to_string()),
-    )
-    .await
-    {
-        Ok(packet) => packet,
-        Err(error) => {
-            log::warn!("[MainChatKernel] bounded HS packet build failed: {}", error);
-            warnings.push("hs_packet_build_failed".to_string());
+            life_model_warnings.push("lifemodel_v2_unavailable".to_string());
             None
         }
     };
 
-    let context = build_kernel_hs_context(
-        &life_model,
-        life_model_available,
-        hs_packet.as_ref(),
+    let life_model_context = build_kernel_lifemodel_context(
+        canonical_life_model.as_ref(),
         user_text,
-        warnings,
+        life_model_warnings,
     );
-    (life_model, Some(context))
+    Some(life_model_context)
 }
 
 async fn command_surface_kernel_context_candidates(
     state: &Arc<AppState>,
     configured_knowledge_roots: &[String],
     selected_skill_id: Option<&str>,
+    conversation_owner_id: &str,
     task_text: &str,
+    life_model_rerank_terms: &[String],
 ) -> Result<Vec<ContextSourceCandidate>, String> {
     let mut candidates = Vec::new();
+    candidates.extend(
+        retrievable_lifecycle_context_candidates(
+            state,
+            conversation_owner_id,
+            task_text,
+            life_model_rerank_terms,
+        )
+        .await?,
+    );
     candidates.extend(load_configured_knowledge_context_candidates(
         configured_knowledge_roots,
         selected_skill_id,
         task_text,
     ));
+    candidates.extend(load_configured_markdown_memory_context_candidates(state, task_text).await?);
     ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id);
-    candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
     let sessions = {
         let store = state.memory_store.lock().await;
         store.list_sessions(5).map_err(|error| {
@@ -11445,217 +11656,240 @@ async fn command_surface_kernel_context_candidates(
     Ok(candidates)
 }
 
-fn build_kernel_hs_context(
-    life_model: &LifeModel,
-    life_model_available: bool,
-    packet: Option<&RuntimeHSPacket>,
+fn build_kernel_lifemodel_context(
+    life_model: Option<&openlife_core::life_model::v2::LifeModelVersionV2>,
     task_text: &str,
     mut warning_codes: Vec<String>,
-) -> MainChatKernelHsContext {
+) -> MainChatKernelLifeModelContext {
+    let current_instruction_override =
+        openlife_core::agent::life_model_runtime_context::task_explicitly_disables_lifemodel(
+            task_text,
+        );
+    let life_model_runtime_packet = match life_model {
+        Some(version) => match openlife_core::agent::LifeModelRuntimeContextV2::build(
+            version,
+            task_text,
+            Utc::now(),
+        ) {
+            Ok(packet) => packet,
+            Err(error) => {
+                log::warn!(
+                    "[MainChatKernel] canonical LifeModel v2 runtime packet rejected: {}",
+                    error
+                );
+                warning_codes.push("lifemodel_v2_runtime_packet_rejected".into());
+                None
+            }
+        },
+        None => None,
+    };
     warning_codes.sort();
     warning_codes.dedup();
-
-    let life_model_runtime_packet = life_model_available
-        .then(|| openlife_core::agent::LifeModelRuntimeContextV1::build(life_model, task_text))
-        .flatten();
-    let included_sections = life_model_runtime_packet
+    let selected_sections = life_model_runtime_packet
         .as_ref()
-        .map(|packet| packet.selected_sections.clone())
+        .map(|packet| {
+            packet
+                .selected_sections
+                .iter()
+                .map(|section| life_model_section_label(*section).to_string())
+                .collect()
+        })
         .unwrap_or_default();
-    let selected_policy_ids = packet
-        .map(|packet| packet.audit.selected_policy_ids.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| bounded_label(&id, MAX_ROUTE_LABEL_CHARS))
-        .collect::<Vec<_>>();
-    let accepted_guidance_ids = packet
-        .map(|packet| packet.audit.selected_guidance_ids.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| bounded_label(&id, MAX_ROUTE_LABEL_CHARS))
-        .collect::<Vec<_>>();
-    let proposal_policy_active = selected_policy_ids
-        .iter()
-        .any(|id| id == openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST);
-    let policy_blocker_codes = packet
-        .map(kernel_hs_policy_blocker_codes)
+    let selected_item_refs = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .map(|fact| {
+                    format!(
+                        "{}:{}",
+                        life_model_section_label(fact.section),
+                        fact.item_id
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
-    let route_policy_relaxed_by_guidance = packet
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .any(|guidance| guidance.policy_boundary.route_policy_relaxed)
-        })
-        .unwrap_or(false);
-    let tool_policy_relaxed_by_guidance = packet
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .any(|guidance| guidance.policy_boundary.tool_policy_relaxed)
-        })
-        .unwrap_or(false);
-    let proposal_first_preserved = packet
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .all(|guidance| guidance.policy_boundary.proposal_first_preserved)
-        })
-        .unwrap_or(true);
-    let freshness = life_model_runtime_packet
+    let selected_items = life_model_runtime_packet
         .as_ref()
-        .map(|packet| bounded_label(&packet.source_updated_at, MAX_ROUTE_LABEL_CHARS))
-        .filter(|value| !value.is_empty())
-        .or_else(|| life_model_runtime_packet.as_ref().map(|_| "unknown".into()));
-    let source_provenance = Some(match packet {
-        Some(packet) => format!(
-            "life_model_manager.load_existing + lifemodel_runtime_context.v1 + hs_selector.audit:{}",
-            bounded_label(&packet.audit.input_digest, MAX_ROUTE_LABEL_CHARS)
-        ),
-        None => "life_model_manager.load_existing + lifemodel_runtime_context.v1 + hs_selector.none".into(),
-    });
-    let privacy_class = Some("private".to_string());
-    let summary_source_id = life_model_runtime_packet
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .map(|fact| MainChatLifeModelSelectedItemReceipt {
+                    item_ref: format!(
+                        "{}:{}",
+                        life_model_section_label(fact.section),
+                        fact.item_id
+                    ),
+                    statement: bounded_label(&fact.value, MAX_LIFEMODEL_STATEMENT_CHARS),
+                    source_refs: fact.source_refs.to_vec(),
+                    confirmed_at: fact.confirmed_at.clone(),
+                    reason_code: bounded_label(&fact.selected_reason, MAX_REASON_CHARS),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut reason_codes = life_model_runtime_packet
         .as_ref()
-        .map(|_| "hs.summary.lifemodel".to_string());
-
-    let summary_content = life_model_runtime_packet.as_ref().map(|runtime_packet| {
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .map(|fact| bounded_label(&fact.selected_reason, MAX_REASON_CHARS))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if current_instruction_override {
+        reason_codes.push("current_instruction_override".into());
+    }
+    let source_id = life_model_runtime_packet
+        .as_ref()
+        .map(|_| "lifemodel.v2.runtime".to_string());
+    let content = life_model_runtime_packet.as_ref().map(|packet| {
         bounded_text(
-            &render_kernel_hs_summary(
-                runtime_packet,
-                packet,
-                source_provenance.as_deref().unwrap_or("unknown"),
-                freshness.as_deref().unwrap_or("unknown"),
-                privacy_class.as_deref().unwrap_or("private"),
-                &warning_codes,
+            &format!(
+                "{}\nprovenance: life_model_manager.load_v2_current\nprivacy: private",
+                packet.render_prompt()
             ),
             MAX_CONTEXT_CONTENT_CHARS,
         )
     });
-    let summary_digest = summary_content.as_ref().map(|content| {
+    let context_digest = content.as_ref().map(|content| {
         let (bytes, hash) = openlife_core::agent::metadata_safe::metadata_safe_text_digest(content);
         format!("bytes:{bytes} hash:{hash}")
     });
-    let summary_chars = summary_content
+    let context_chars = content
         .as_ref()
         .map(|content| content.chars().count())
         .unwrap_or_default();
-
-    let mut metadata = MainChatKernelHsContextMetadata {
-        available: summary_content.is_some(),
-        summary_source_id: summary_source_id.clone(),
-        summary_digest,
-        summary_chars,
-        source_provenance,
-        freshness,
-        privacy_class,
-        included_life_model_sections: included_sections,
-        selected_policy_ids,
-        accepted_guidance_ids,
-        accepted_guidance_count: 0,
-        policy_blocker_codes,
-        proposal_policy_active,
-        route_policy_relaxed_by_guidance,
-        tool_policy_relaxed_by_guidance,
-        proposal_first_preserved,
-        raw_life_model_yaml_included: false,
-        raw_unbounded_memory_included: false,
+    let metadata = MainChatKernelLifeModelContextMetadata {
+        available: false,
+        source_id: source_id.clone(),
+        model_id: life_model_runtime_packet
+            .as_ref()
+            .map(|packet| packet.model_id.clone()),
+        model_version: life_model_runtime_packet
+            .as_ref()
+            .map(|packet| packet.model_version),
+        version_digest: life_model_runtime_packet
+            .as_ref()
+            .map(|packet| packet.version_digest.clone()),
+        document_digest: life_model_runtime_packet
+            .as_ref()
+            .map(|packet| packet.document_digest.clone()),
+        selected_sections,
+        selected_item_refs: selected_item_refs.clone(),
+        selected_items,
+        context_digest,
+        context_chars,
+        omitted_relevant_fact_count: life_model_runtime_packet
+            .as_ref()
+            .map(|packet| packet.omitted_relevant_fact_count)
+            .unwrap_or_default(),
         warning_codes,
+        influence_receipt: MainChatLifeModelInfluenceReceipt {
+            schema: "openlife.lifemodel.influence-receipt.v1".into(),
+            status: if current_instruction_override {
+                "current_instruction_override".into()
+            } else if life_model_runtime_packet.is_some() {
+                "eligible_for_context".into()
+            } else if life_model.is_some() {
+                "not_task_relevant".into()
+            } else {
+                "canonical_model_unavailable".into()
+            },
+            applied_surfaces: Vec::new(),
+            selected_item_refs,
+            reason_codes,
+            current_instruction_priority_preserved: true,
+            policy_priority_preserved: true,
+            permission_granted: false,
+            durable_write_authorized: false,
+        },
     };
-    metadata.accepted_guidance_count = metadata.accepted_guidance_ids.len();
-
-    let mut candidates = Vec::new();
-    if let (Some(source_id), Some(content)) = (summary_source_id, summary_content) {
-        candidates.push(ContextSourceCandidate::new(
-            ContextSourceKind::HsSummary,
+    let candidates = match (source_id, content) {
+        (Some(source_id), Some(content)) => vec![ContextSourceCandidate::new(
+            ContextSourceKind::LifeModelContext,
             source_id,
             content,
-            "bounded LifeModel-HS summary with provenance, freshness, and privacy metadata",
+            "bounded canonical LifeModel v2 context with item-level provenance",
             "private",
             18,
-        ));
-    }
-
-    if let Some(packet) = packet {
-        for guidance in &packet.guidance_refs {
-            let guidance_id = bounded_label(&guidance.guidance_id, MAX_ROUTE_LABEL_CHARS);
-            let content = bounded_text(
-                &format!(
-                    "Accepted HS guidance summary\nid: {}\ntype: {}\ndomain: {}\nimpact: {}\nsource_proposal: {}\nsource_evidence_count: {}\npolicy_boundary: hard={}, route_relaxed={}, tool_relaxed={}, proposal_first_preserved={}",
-                    guidance_id,
-                    bounded_label(&guidance.guidance_type, MAX_ROUTE_LABEL_CHARS),
-                    bounded_label(&guidance.domain, MAX_ROUTE_LABEL_CHARS),
-                    bounded_label(&guidance.impact_summary, MAX_REASON_CHARS),
-                    guidance
-                        .source_proposal_id
-                        .as_deref()
-                        .map(|id| bounded_label(id, MAX_ROUTE_LABEL_CHARS))
-                        .unwrap_or_else(|| "none".into()),
-                    guidance.source_evidence_count,
-                    guidance.policy_boundary.hard_policy_boundary,
-                    guidance.policy_boundary.route_policy_relaxed,
-                    guidance.policy_boundary.tool_policy_relaxed,
-                    guidance.policy_boundary.proposal_first_preserved,
-                ),
-                MAX_CONTEXT_CONTENT_CHARS,
-            );
-            candidates.push(ContextSourceCandidate::new(
-                ContextSourceKind::AcceptedGuidance,
-                format!("hs.accepted_guidance.{guidance_id}"),
-                content,
-                "accepted guidance summary; cannot override privacy/tool/write policy",
-                "private",
-                12,
-            ));
-        }
-    }
-
-    MainChatKernelHsContext {
+        )],
+        _ => Vec::new(),
+    };
+    let planning_hints = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.section,
+                        openlife_core::life_model::v2::LifeModelSectionV2::LongTermGoals
+                            | openlife_core::life_model::v2::LifeModelSectionV2::Values
+                            | openlife_core::life_model::v2::LifeModelSectionV2::PersonalBoundaries
+                            | openlife_core::life_model::v2::LifeModelSectionV2::DecisionPrinciples
+                    )
+                })
+                .map(|fact| openlife_core::agent::PlanExecuteLifeModelHint {
+                    item_id: fact.item_id.clone(),
+                    section: fact.section,
+                    value: fact.value.clone(),
+                    selected_reason: fact.selected_reason.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let memory_rerank_terms = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| packet.facts.iter().map(|fact| fact.value.clone()).collect())
+        .unwrap_or_default();
+    let tool_preference_hints = life_model_runtime_packet
+        .as_ref()
+        .map(|packet| {
+            packet
+                .facts
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact.section,
+                        openlife_core::life_model::v2::LifeModelSectionV2::StablePreferences
+                            | openlife_core::life_model::v2::LifeModelSectionV2::CollaborationPreferences
+                    )
+                })
+                .map(|fact| fact.value.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    MainChatKernelLifeModelContext {
         metadata,
         candidates,
+        planning_hints,
+        memory_rerank_terms,
+        tool_preference_hints,
     }
 }
 
-fn render_kernel_hs_summary(
-    runtime_packet: &openlife_core::agent::LifeModelRuntimeContextV1,
-    packet: Option<&RuntimeHSPacket>,
-    provenance: &str,
-    freshness: &str,
-    privacy_class: &str,
-    warning_codes: &[String],
-) -> String {
-    let selected_policy_ids = packet
-        .map(|packet| packet.audit.selected_policy_ids.join(","))
-        .unwrap_or_else(|| "none".into());
-    let accepted_guidance_count = packet
-        .map(|packet| packet.guidance_refs.len())
-        .unwrap_or_default();
-    format!(
-        "{}\nselection_freshness: {freshness}\nprovenance: {provenance}\nprivacy: {privacy_class}\nselected_policy_ids: {selected_policy_ids}\naccepted_guidance_count: {accepted_guidance_count}\nwarnings: {}",
-        runtime_packet.render_prompt(),
-        if warning_codes.is_empty() {
-            "none".into()
-        } else {
-            warning_codes.join(",")
-        },
-    )
-}
-
-fn kernel_hs_policy_blocker_codes(packet: &RuntimeHSPacket) -> Vec<String> {
-    let mut blockers = Vec::new();
-    for policy in &packet.selected_policies {
-        if policy.route == Some(ModelRoutePolicy::LocalOnly) {
-            blockers.push("hs_policy_local_only".to_string());
-        }
-        if policy.policy_id == openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST {
-            blockers.push("hs_policy_proposal_first".to_string());
-        }
+fn life_model_section_label(
+    section: openlife_core::life_model::v2::LifeModelSectionV2,
+) -> &'static str {
+    use openlife_core::life_model::v2::LifeModelSectionV2;
+    match section {
+        LifeModelSectionV2::Identity => "identity",
+        LifeModelSectionV2::Values => "values",
+        LifeModelSectionV2::LongTermGoals => "long_term_goals",
+        LifeModelSectionV2::StablePreferences => "stable_preferences",
+        LifeModelSectionV2::PersonalBoundaries => "personal_boundaries",
+        LifeModelSectionV2::ImportantRelationships => "important_relationships",
+        LifeModelSectionV2::Capabilities => "capabilities",
+        LifeModelSectionV2::Resources => "resources",
+        LifeModelSectionV2::DecisionPrinciples => "decision_principles",
+        LifeModelSectionV2::CollaborationPreferences => "collaboration_preferences",
     }
-    blockers.sort();
-    blockers.dedup();
-    blockers
 }
 
 fn plan_kernel_read_tools(
@@ -12295,7 +12529,7 @@ fn memory_governance_compatible_write_outcome(
             | (
                 false,
                 true,
-                MainChatKernelWriteOutcomeKind::LifeModelProposal
+                MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
             )
     );
     if !compatible {
@@ -12461,26 +12695,50 @@ fn plan_kernel_write_outcome(
         .policy_decision
         .allows(AllowedCapability::LifeModelProposal)
     {
-        let target = main_chat_lifemodel_write_target(user_text);
+        if crate::life_model_learning::supports_explicit_user_text(user_text) {
+            return Some(MainChatKernelWriteOutcome {
+                kind: MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate,
+                action_type: "lifemodel.learning_candidate.capture".into(),
+                target: "life_model.learning_candidates".into(),
+                reason:
+                    "An explicit long-term preference can be staged as a bounded learning candidate"
+                        .into(),
+                payload_summary: payload_summary.clone(),
+                governed_input: serde_json::json!({
+                    "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+                    "target": "life_model.learning_candidates",
+                    "governedInputSource": "kernel_lifemodel_learning_candidate",
+                    "proposalCreated": false,
+                    "directLifeModelWrite": false,
+                    "directWritesExecuted": false,
+                    "modelArgumentsIgnored": model_arguments_ignored,
+                }),
+                proposal_type: None,
+                blocker_code: Some("lifemodel_learning_candidate_route_required".into()),
+                requires_confirmation: false,
+                hard_blocked: true,
+                replayable: false,
+            });
+        }
         return Some(MainChatKernelWriteOutcome {
-            kind: MainChatKernelWriteOutcomeKind::LifeModelProposal,
-            action_type: "proposal.create".into(),
-            target: target.clone(),
-            reason: "LifeModel-affecting request must create a governed LifeModel proposal".into(),
-            payload_summary: payload_summary.clone(),
+            kind: MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker,
+            action_type: "life_model.change_requires_typed_diff".into(),
+            target: "life_model.unresolved".into(),
+            reason: "LifeModel learning candidate was not staged because the request has no exact supported long-term preference"
+                .into(),
+            payload_summary,
             governed_input: serde_json::json!({
                 "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
-                "target": target,
-                "governedInputSource": "kernel_lifemodel_update_proposal",
+                "governedInputSource": "kernel_lifemodel_learning_candidate_blocker",
                 "directLifeModelWrite": false,
                 "directWritesExecuted": false,
                 "modelArgumentsIgnored": model_arguments_ignored,
             }),
-            proposal_type: Some("life_model_update".into()),
-            blocker_code: Some("proposal_review_required".into()),
+            proposal_type: None,
+            blocker_code: Some("lifemodel_learning_typed_candidate_required".into()),
             requires_confirmation: false,
-            hard_blocked: false,
-            replayable: true,
+            hard_blocked: true,
+            replayable: false,
         });
     }
 
@@ -12741,31 +12999,6 @@ fn is_memory_write_intent(lower: &str) -> bool {
     )
 }
 
-fn is_lifemodel_write_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "knowledge asset edit",
-            "edit a knowledge asset",
-            "edit agents.md",
-            "edit soul.md",
-            "edit user.md",
-            "edit memory.md",
-            "propose an edit to agents.md",
-            "propose an edit to soul.md",
-            "propose an edit to user.md",
-            "propose an edit to memory.md",
-            "lifemodel",
-            "life model",
-            "life_model",
-            "switching careers",
-            "update my life",
-            "update my identity",
-            "design lead",
-        ],
-    )
-}
-
 fn is_external_write_intent(lower: &str) -> bool {
     contains_any(
         lower,
@@ -12790,21 +13023,6 @@ fn external_write_action_type(lower: &str) -> &'static str {
         "calendar.real_write"
     } else {
         "external.write"
-    }
-}
-
-fn main_chat_lifemodel_write_target(user_text: &str) -> String {
-    let lower = user_text.to_ascii_lowercase();
-    if lower.contains("agents.md") {
-        "knowledge_asset.AGENTS.md".into()
-    } else if lower.contains("soul.md") {
-        "knowledge_asset.SOUL.md".into()
-    } else if lower.contains("user.md") {
-        "knowledge_asset.USER.md".into()
-    } else if lower.contains("memory.md") {
-        "knowledge_asset.MEMORY.md".into()
-    } else {
-        "lifemodel.pending.chat_conversation".into()
     }
 }
 
@@ -13488,8 +13706,12 @@ fn synthesize_write_outcome_answer(outcome: &MainChatKernelWriteOutcome) -> Stri
             "I created a Memory proposal for review. I did not write it into long-term memory."
                 .into()
         }
-        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            "I created a LifeModel proposal for review. I did not update accepted LifeModel truth."
+        MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate => {
+            "I staged a long-term preference candidate. I did not create a proposal or update accepted LifeModel truth."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker => {
+            "I did not create a LifeModel proposal because this request does not identify an exact supported field change. No LifeModel truth was changed."
                 .into()
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
@@ -13534,22 +13756,24 @@ fn model_route_from_kernel_route(route: &MainChatRouteMetadata) -> ModelRouteTra
     }
 }
 
-fn context_summary_from_kernel_result(
-    result: &MainChatTurnResult,
-    life_model: &LifeModel,
-) -> ContextSummary {
+fn context_summary_from_kernel_result(result: &MainChatTurnResult) -> ContextSummary {
     let selected_source_ids = result
         .context_metadata
         .as_ref()
         .map(|metadata| metadata.selected_source_ids.clone())
         .unwrap_or_default();
     ContextSummary {
-        life_model_empty: life_model.is_effectively_empty(),
+        life_model_empty: result
+            .context_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .and_then(|metadata| metadata.model_version)
+            .is_none(),
         included_life_model_sections: result
             .context_metadata
             .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .map(|metadata| metadata.included_life_model_sections.clone())
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .map(|metadata| metadata.selected_sections.clone())
             .unwrap_or_default(),
         memory_hit_count: selected_source_ids
             .iter()
@@ -13575,7 +13799,6 @@ async fn build_kernel_plan_execute_command_surface_result<C, S>(
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
     scheduler: InferenceScheduler,
-    life_model: LifeModel,
     kernel: &MainChatKernel<C>,
     selected_skill_id: Option<String>,
     event_sink: &mut S,
@@ -13602,19 +13825,45 @@ where
         session_id: session_label,
         selected_skill_id: selected_skill_id.clone(),
     });
-    let (context_metadata, _system_prompt) =
+    let (mut context_metadata, _system_prompt) =
         kernel.compile_context(session_id.trim(), selected_skill_id.clone(), user_text);
+    let life_model_planning_hints = context_metadata
+        .life_model_context
+        .as_ref()
+        .filter(|metadata| metadata.available)
+        .and(kernel.context_config.life_model_context.as_ref())
+        .map(|context| context.planning_hints.clone())
+        .unwrap_or_default();
+    if !life_model_planning_hints.is_empty() {
+        if let Some(metadata) = context_metadata.life_model_context.as_mut() {
+            metadata.influence_receipt.status = "applied_planning".into();
+            if !metadata
+                .influence_receipt
+                .applied_surfaces
+                .contains(&"planning".to_string())
+            {
+                metadata
+                    .influence_receipt
+                    .applied_surfaces
+                    .push("planning".into());
+            }
+        }
+    }
     event_sink.emit(MainChatKernelEvent::ContextLoaded {
         context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
         selected_source_count: context_metadata.selected_source_count,
         selected_skill_instruction_loaded: context_metadata.selected_skill_instruction_loaded,
     });
-    if let Some(hs_context) = context_metadata.hs_context.as_ref() {
-        event_sink.emit(MainChatKernelEvent::HsContextLoaded {
-            available: hs_context.available,
-            warning_count: hs_context.warning_codes.len(),
-            selected_policy_count: hs_context.selected_policy_ids.len(),
-            accepted_guidance_count: hs_context.accepted_guidance_count,
+    if let Some(life_model_context) = context_metadata.life_model_context.as_ref() {
+        event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
+            available: life_model_context.available,
+            model_version: life_model_context.model_version,
+            selected_item_count: life_model_context.selected_item_refs.len(),
+            status: life_model_context.influence_receipt.status.clone(),
+            source_id: life_model_context.source_id.clone(),
+            selected_item_refs: life_model_context.selected_item_refs.clone(),
+            reason_codes: life_model_context.influence_receipt.reason_codes.clone(),
+            receipt: life_model_context.product_receipt(),
         });
     }
     let mut route_metadata = kernel.model_client.route_metadata();
@@ -13652,6 +13901,8 @@ where
             state,
             canonical_run_id,
             execution_epoch,
+            user_text,
+            life_model_planning_hints.clone(),
         )
         .await?;
     let observation_metadata = serde_json::json!({
@@ -13662,6 +13913,8 @@ where
         "preview": format!("PlanExecute draft with {} steps", plan_session.steps.len()),
         "planExecuteSessionId": plan_session.session_id,
         "stepCount": plan_session.steps.len(),
+        "lifeModelPlanningHintCount": life_model_planning_hints.len(),
+        "lifeModelPlanningApplied": !life_model_planning_hints.is_empty(),
         "status": plan_session.status,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
@@ -13774,7 +14027,6 @@ where
         content_chars: reply.chars().count(),
     });
     let kernel_events = event_sink.events().to_vec();
-    let hs_metadata = context_metadata.hs_context.clone();
     let generation_metadata = serde_json::json!({
         "text": reply,
         "mainChatAgentV1": true,
@@ -13785,22 +14037,10 @@ where
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
         "kernelContextSnapshotRef": context_metadata.context_snapshot_ref,
-        "hsPacketSelected": hs_metadata
+        "lifeModelInfluenceReceipt": context_metadata
+            .life_model_context
             .as_ref()
-            .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                || !metadata.accepted_guidance_ids.is_empty()),
-        "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-        "hsWarningCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.warning_codes.clone())
-            .unwrap_or_default(),
-        "hsSelectedPolicyIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.selected_policy_ids.clone())
-            .unwrap_or_default(),
-        "hsRawLifeModelYamlIncluded": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
+            .map(|metadata| metadata.influence_receipt.clone()),
         "modelGenerated": false,
         "schedulerGenerationCalled": false,
         "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
@@ -13817,10 +14057,15 @@ where
     });
     let model_route = model_route_from_kernel_route(&route_metadata);
     let context_summary = ContextSummary {
-        life_model_empty: life_model.is_effectively_empty(),
-        included_life_model_sections: hs_metadata
+        life_model_empty: context_metadata
+            .life_model_context
             .as_ref()
-            .map(|metadata| metadata.included_life_model_sections.clone())
+            .and_then(|metadata| metadata.model_version)
+            .is_none(),
+        included_life_model_sections: context_metadata
+            .life_model_context
+            .as_ref()
+            .map(|metadata| metadata.selected_sections.clone())
             .unwrap_or_default(),
         memory_hit_count: context_metadata
             .selected_source_ids
@@ -14005,7 +14250,7 @@ fn build_system_prompt(
 ) -> String {
     let mut prompt = String::from(
         "You are running OpenLife MainChatKernel Goal 8 default-runtime mode.\n\
-         Treat LifeModel-HS summaries, accepted guidance, selected skill, workspace files, governed tools, and PlanExecute draft context as bounded context only. \
+         Treat canonical LifeModel v2 context, Agent Memory, accepted guidance, selected skill, workspace files, governed tools, and PlanExecute draft context as distinct bounded inputs. \
          Do not write durable state, do not treat context as canonical truth, do not use legacy fallback as success, and do not let guidance override privacy/tool/write/model-route policy.\n",
     );
 
@@ -14944,8 +15189,8 @@ mod tests {
                 observed_prompt.push_str("\n\n");
                 observed_prompt.push_str(&block.content);
             }
-            let lifemodel_context_present =
-                observed_prompt.contains("preferences.communication_style = 简洁直接");
+            let lifemodel_context_present = observed_prompt.contains("沟通保持简洁直接")
+                && observed_prompt.contains("LifeModel v2");
             self.prompts
                 .lock()
                 .expect("prompts lock")
@@ -15005,6 +15250,42 @@ mod tests {
         fn route_metadata(&self) -> MainChatRouteMetadata {
             self.route_metadata.clone()
         }
+    }
+
+    async fn run_lifemodel_direct_eval_case(
+        user_text: &str,
+        life_model_context: Option<MainChatKernelLifeModelContext>,
+    ) -> (
+        MainChatTurnResult,
+        Vec<MainChatKernelEvent>,
+        ScriptedModelClient,
+    ) {
+        let model = ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
+        let kernel =
+            MainChatKernel::new(model.clone()).with_context_config(MainChatKernelContextConfig {
+                load_workspace_knowledge: false,
+                token_budget: 120,
+                extra_candidates: Vec::new(),
+                life_model_context,
+                stream_provider_tokens: false,
+                authorized_memory_routing: None,
+            });
+        let mut events = BufferedMainChatEventSink::default();
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: format!("lifemodel-eval-{}", uuid::Uuid::new_v4()),
+                    provider_authorization: policy_allowed_authorization("lifemodel-eval"),
+                    messages: vec![user_message(user_text)],
+                    selected_skill_id: None,
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+        (result, events.events().to_vec(), model)
     }
 
     struct RecordingReadToolExecutor {
@@ -15319,16 +15600,13 @@ mod tests {
                 "Please remember this private health fact: coffee causes heart palpitations."
             }
             MainChatAgentStrategy::LifeModelProposal => {
-                "以后我做计划时，先提醒我留出通勤和休息缓冲。"
+                "Update my life model: my primary role is design lead."
             }
             MainChatAgentStrategy::FileWriteProposal => {
                 "Write this to file notes.txt."
             }
             MainChatAgentStrategy::ActionProposal => {
                 "Create calendar event `Planning review` at `2026-08-12T09:00:00+08:00`."
-            }
-            MainChatAgentStrategy::ReviewMaturation => {
-                "Review what changed in my working style this month."
             }
             MainChatAgentStrategy::BlockedConfirmation => {
                 "Send an email to alice@example.com."
@@ -15385,7 +15663,7 @@ mod tests {
             ),
             (
                 MainChatAgentStrategy::LifeModelProposal,
-                "以后我做计划时，先提醒我留出通勤和休息缓冲。",
+                "Update my life model: my primary role is design lead.",
             ),
             (
                 MainChatAgentStrategy::FileWriteProposal,
@@ -17298,7 +17576,7 @@ mod tests {
                 load_workspace_knowledge: false,
                 token_budget: 80,
                 extra_candidates,
-                hs_context: None,
+                life_model_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             })
@@ -17315,144 +17593,13 @@ mod tests {
                 load_workspace_knowledge: false,
                 token_budget: 80,
                 extra_candidates,
-                hs_context: None,
+                life_model_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: Some(
                     openlife_core::agent::plan_main_chat_memory_routing(current_user_message),
                 ),
             })
             .with_canonical_run_id("kernel-test-canonical-run")
-    }
-
-    fn test_kernel_with_hs(
-        model: ScriptedModelClient,
-        hs_context: MainChatKernelHsContext,
-        extra_candidates: Vec<ContextSourceCandidate>,
-    ) -> MainChatKernel<ScriptedModelClient> {
-        MainChatKernel::new(model)
-            .with_context_config(MainChatKernelContextConfig {
-                load_workspace_knowledge: false,
-                token_budget: 120,
-                extra_candidates,
-                hs_context: Some(hs_context),
-                stream_provider_tokens: false,
-                authorized_memory_routing: None,
-            })
-            .with_canonical_run_id("kernel-test-canonical-run")
-    }
-
-    fn test_kernel_with_hs_and_authorized_memory_routing(
-        model: ScriptedModelClient,
-        hs_context: MainChatKernelHsContext,
-        extra_candidates: Vec<ContextSourceCandidate>,
-        current_user_message: &str,
-    ) -> MainChatKernel<ScriptedModelClient> {
-        MainChatKernel::new(model)
-            .with_context_config(MainChatKernelContextConfig {
-                load_workspace_knowledge: false,
-                token_budget: 120,
-                extra_candidates,
-                hs_context: Some(hs_context),
-                stream_provider_tokens: false,
-                authorized_memory_routing: Some(
-                    openlife_core::agent::plan_main_chat_memory_routing(current_user_message),
-                ),
-            })
-            .with_canonical_run_id("kernel-test-canonical-run")
-    }
-
-    fn sample_hs_life_model() -> LifeModel {
-        let mut life_model = LifeModel::default_model();
-        life_model.identity.name = "RAW_LIFEMODEL_YAML_SECRET".into();
-        life_model.identity.mission_statement = "Build useful local-first agents.".into();
-        life_model.state.health_status.energy_level = 2;
-        life_model.state.current_focus = "MainChatKernel rescue".into();
-        life_model
-            .goals
-            .short_term
-            .push(openlife_core::life_model::GoalItem {
-                name: "Ship Goal 6".into(),
-                status: "active".into(),
-                priority: 9,
-                progress: 0.4,
-                ..Default::default()
-            });
-        life_model
-    }
-
-    fn accepted_guidance_ref() -> openlife_core::agent::SelectedGuidanceRef {
-        openlife_core::agent::SelectedGuidanceRef {
-            guidance_id: "accepted_guidance_kernel_low_energy".into(),
-            guidance_digest: "sha256:accepted-guidance-digest".into(),
-            guidance_type: "accepted_guidance".into(),
-            lifecycle_status: openlife_core::agent::HeuristicLifecycleStatus::Trial,
-            domain: "planning".into(),
-            trigger_digest: "sha256:trigger-digest".into(),
-            selected_reason: "task_domain_and_trigger_match".into(),
-            impact_kind: "gentle_planning".into(),
-            impact_summary: "Prefer one tiny next step for planning.".into(),
-            risk_level: openlife_core::agent::RiskLevel::Low,
-            privacy_level: openlife_core::agent::EvidencePrivacyLevel::Internal,
-            source_proposal_id: Some("proposal-accepted-guidance".into()),
-            source_evidence_count: 2,
-            source_lineage_digest: "sha256:lineage-digest".into(),
-            policy_boundary: openlife_core::agent::GuidancePolicyBoundarySummary {
-                hard_policy_boundary: true,
-                route_policy_relaxed: false,
-                tool_policy_relaxed: false,
-                proposal_first_preserved: true,
-                privacy_constraint_count: 1,
-                model_constraint_count: 1,
-                tool_constraint_count: 1,
-                constraint_digest: "sha256:constraint-digest".into(),
-            },
-        }
-    }
-
-    fn hs_packet(include_external_policy: bool, include_guidance: bool) -> RuntimeHSPacket {
-        let mut selected_policies = Vec::new();
-        if include_external_policy {
-            selected_policies.push(openlife_core::agent::SelectedPolicyRef {
-                policy_id: openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST
-                    .into(),
-                reason: "tool_requirement_write".into(),
-                route: None,
-                digest: "policy-digest".into(),
-            });
-        }
-        let guidance_refs = if include_guidance {
-            vec![accepted_guidance_ref()]
-        } else {
-            Vec::new()
-        };
-        RuntimeHSPacket {
-            selected_policies: selected_policies.clone(),
-            selected_heuristics: Vec::new(),
-            guidance_refs: guidance_refs.clone(),
-            estimated_tokens: 12,
-            audit: openlife_core::agent::HSSelectionAudit {
-                agent_task_id: Some("task-kernel-hs".into()),
-                agent_run_id: Some("run-kernel-hs".into()),
-                input_digest: "hs-input-digest".into(),
-                selected_policy_ids: selected_policies
-                    .iter()
-                    .map(|policy| policy.policy_id.clone())
-                    .collect(),
-                selected_heuristic_ids: Vec::new(),
-                selected_guidance_ids: guidance_refs
-                    .iter()
-                    .map(|guidance| guidance.guidance_id.clone())
-                    .collect(),
-                selected_guidance_refs: guidance_refs,
-                excluded_assets: Vec::new(),
-                estimated_tokens: 12,
-                token_budget: 128,
-            },
-            provider_authorization:
-                openlife_core::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-                    openlife_core::llm::ProviderLocalOnlyReason::TestFixture,
-                ),
-        }
     }
 
     #[test]
@@ -17474,61 +17621,6 @@ mod tests {
             );
             assert!(main_chat_kernel_supports_turn(&strategy, &messages));
         }
-
-        let review_disposition = main_chat_kernel_support_disposition(
-            &MainChatAgentStrategy::ReviewMaturation,
-            &messages,
-        );
-        assert_eq!(
-            review_disposition,
-            MainChatKernelSupportDisposition::GovernedBlocker
-        );
-        assert!(main_chat_kernel_supports_turn(
-            &MainChatAgentStrategy::ReviewMaturation,
-            &messages
-        ));
-    }
-
-    #[tokio::test]
-    async fn main_chat_kernel_review_maturation_returns_governed_blocker_without_model_call() {
-        let model = ScriptedModelClient::ok("model should not be called");
-        let kernel = test_kernel(model.clone(), Vec::new());
-        let mut events = BufferedMainChatEventSink::default();
-
-        let result = kernel
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-review-maturation".into(),
-                    provider_authorization: policy_allowed_authorization("review-maturation"),
-                    messages: vec![user_message(
-                        "Review what changed in my working style this month.",
-                    )],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::ReviewMaturation),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut events,
-            )
-            .await;
-
-        assert_eq!(model.call_count(), 0);
-        assert_eq!(
-            result.blockers,
-            vec!["review_maturation_kernel_executor_unavailable".to_string()]
-        );
-        assert!(result.assistant_message.is_none());
-        assert!(result.route_metadata.is_some());
-        assert!(result.context_metadata.is_some());
-        assert!(!result.direct_writes_executed);
-        assert!(!result.legacy_fallback_used);
-        assert!(events.events().iter().any(|event| {
-            matches!(
-                event,
-                MainChatKernelEvent::Blocker { code }
-                    if code == "review_maturation_kernel_executor_unavailable"
-            )
-        }));
     }
 
     #[tokio::test]
@@ -18683,7 +18775,7 @@ mod tests {
                 load_workspace_knowledge: false,
                 token_budget: 80,
                 extra_candidates: Vec::new(),
-                hs_context: None,
+                life_model_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             })
@@ -18894,7 +18986,7 @@ mod tests {
                 load_workspace_knowledge: false,
                 token_budget: 80,
                 extra_candidates: Vec::new(),
-                hs_context: None,
+                life_model_context: None,
                 stream_provider_tokens: true,
                 authorized_memory_routing: None,
             })
@@ -19987,7 +20079,7 @@ mod tests {
                 load_workspace_knowledge: false,
                 token_budget: 80,
                 extra_candidates: Vec::new(),
-                hs_context: None,
+                life_model_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             },
@@ -20232,53 +20324,86 @@ mod tests {
         assert!(!result.direct_writes_executed);
     }
 
-    #[test]
-    fn main_chat_kernel_lifemodel_packet_is_task_relevant_and_excludes_state_compatibility() {
-        let mut life_model = sample_hs_life_model();
-        life_model.state.current_focus = "stale compatibility focus".into();
-        life_model
-            .goals
-            .daily
-            .push(openlife_core::life_model::DailyGoal {
-                name: "stale compatibility daily task".into(),
-                ..Default::default()
+    #[tokio::test]
+    async fn command_surface_lifemodel_v2_result_ab_preserves_override_and_policy() {
+        use openlife_core::life_model::v2::{
+            LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
+            LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
+        };
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let item = LifeModelStatementV2 {
+            id: "communication-direct".into(),
+            statement: "沟通保持简洁直接".into(),
+            source_refs: vec!["message:user:runtime-v2".into()],
+            confirmed_at: "2026-08-09T00:00:00Z".into(),
+        };
+        let mut result = LifeModelDocumentV2::empty("primary");
+        result.collaboration_preferences.push(item.clone());
+        let diff = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: None,
+            base_document_digest: None,
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::CollaborationPreferences,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        };
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager
+                .materialize_reviewed_v2_typed_diff(
+                    &diff,
+                    "runtime-v2-test",
+                    &[],
+                    "2026-08-09T00:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let life_model_context =
+            command_surface_kernel_runtime_context(&state, "请写一封简洁的项目邮件").await;
+        let context = life_model_context.expect("bounded context");
+
+        assert_eq!(
+            context.metadata.source_id.as_deref(),
+            Some("lifemodel.v2.runtime")
+        );
+        let prompt = context
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "lifemodel.v2.runtime")
+            .map(|candidate| candidate.content.as_str())
+            .expect("canonical v2 candidate");
+        assert!(prompt.contains("沟通保持简洁直接"));
+        assert!(prompt.contains(
+            "Communication preferences constrain response tone, brevity, structure, and wording only"
+        ));
+        assert!(prompt.contains("never invent task facts from it"));
+        assert!(prompt.contains("LifeModel v2"));
+        assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
+        assert!(!context.metadata.influence_receipt.permission_granted);
+        assert!(!context.metadata.influence_receipt.durable_write_authorized);
+
+        let model = ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
+        let kernel =
+            MainChatKernel::new(model.clone()).with_context_config(MainChatKernelContextConfig {
+                load_workspace_knowledge: false,
+                token_budget: 120,
+                extra_candidates: Vec::new(),
+                life_model_context: Some(context),
+                stream_provider_tokens: false,
+                authorized_memory_routing: None,
             });
-        let runtime_packet = openlife_core::agent::LifeModelRuntimeContextV1::build(
-            &life_model,
-            "Help me Ship Goal 6",
-        )
-        .expect("task-relevant LifeModel packet");
-        let summary = render_kernel_hs_summary(
-            &runtime_packet,
-            None,
-            "hs_selector.audit:none",
-            "unknown",
-            "private",
-            &[],
-        );
-
-        assert!(summary.contains("goals.short_term"));
-        assert!(!summary.contains("stale compatibility focus"));
-        assert!(!summary.contains("stale compatibility daily task"));
-        assert!(summary.contains("permissions_granted: false"));
-    }
-
-    #[tokio::test]
-    async fn main_chat_kernel_goal_6_bounded_hs_summary_context_is_inspectable() {
-        let model = ScriptedModelClient::ok("HS-aware direct answer.");
-        let life_model = sample_hs_life_model();
-        let packet = hs_packet(false, false);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
         let mut events = BufferedMainChatEventSink::default();
-
-        let result = kernel
+        let turn = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-summary".into(),
-                    provider_authorization: policy_allowed_authorization("hs-summary"),
-                    messages: vec![user_message("Use my HS context for a short answer.")],
+                    session_id: "session-runtime-v2".into(),
+                    provider_authorization: policy_allowed_authorization("runtime-v2"),
+                    messages: vec![user_message("请写一封简洁的项目邮件")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
@@ -20287,170 +20412,128 @@ mod tests {
                 &mut events,
             )
             .await;
-
-        let context = result.context_metadata.as_ref().expect("context metadata");
-        let hs = context.hs_context.as_ref().expect("hs metadata");
-        assert!(hs.available);
+        let metadata = turn
+            .context_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .expect("LifeModel influence metadata");
+        assert!(metadata.available);
+        assert_eq!(metadata.model_version, Some(1));
         assert_eq!(
-            hs.summary_source_id.as_deref(),
-            Some("hs.summary.lifemodel")
+            metadata.influence_receipt.status,
+            "applied_context_building"
         );
-        assert!(hs.summary_digest.as_deref().is_some_and(|digest| {
-            digest.starts_with("bytes:") && digest.contains(" hash:sha256:")
-        }));
-        assert!(hs.summary_chars <= MAX_CONTEXT_CONTENT_CHARS);
-        assert_eq!(hs.privacy_class.as_deref(), Some("private"));
-        assert!(hs
-            .source_provenance
-            .as_deref()
-            .is_some_and(|value| value.contains("hs_selector.audit")));
-        assert!(hs
-            .included_life_model_sections
-            .contains(&"goals".to_string()));
-        assert!(context
-            .selected_source_ids
-            .contains(&"hs.summary.lifemodel".to_string()));
-        assert!(!hs.raw_life_model_yaml_included);
-        assert!(!hs.raw_unbounded_memory_included);
-        assert!(events.events().iter().any(|event| {
-            matches!(
-                event,
-                MainChatKernelEvent::HsContextLoaded {
-                    available: true,
-                    warning_count: 0,
-                    ..
-                }
-            )
-        }));
-    }
-
-    #[tokio::test]
-    async fn confirmed_lifemodel_context_changes_the_direct_answer_product_path() {
-        let user_text = "Write a project status confirmation email for Friday.";
-        let mut life_model = LifeModel::default_model();
-        life_model.preferences.communication_style = "简洁直接".into();
-        let hs_context = build_kernel_hs_context(&life_model, true, None, user_text, Vec::new());
-        let with_context_model =
-            ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
-        let without_context_model =
-            ScriptedModelClient::ok("unused").with_lifemodel_sensitive_response();
-        let mut with_context_events = BufferedMainChatEventSink::default();
-        let mut without_context_events = BufferedMainChatEventSink::default();
-
-        let with_context = test_kernel_with_hs(with_context_model.clone(), hs_context, Vec::new())
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-lifemodel-ab-with".into(),
-                    provider_authorization: policy_allowed_authorization("lifemodel-ab-with"),
-                    messages: vec![user_message(user_text)],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut with_context_events,
-            )
-            .await;
-        let without_context = test_kernel(without_context_model.clone(), Vec::new())
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-lifemodel-ab-without".into(),
-                    provider_authorization: policy_allowed_authorization("lifemodel-ab-without"),
-                    messages: vec![user_message(user_text)],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut without_context_events,
-            )
-            .await;
-
+        assert!(metadata
+            .influence_receipt
+            .applied_surfaces
+            .contains(&"context_building".into()));
+        assert!(metadata
+            .influence_receipt
+            .applied_surfaces
+            .contains(&"communication_style".into()));
+        assert!(metadata
+            .selected_item_refs
+            .contains(&"collaboration_preferences:communication-direct".into()));
+        assert!(
+            metadata
+                .influence_receipt
+                .current_instruction_priority_preserved
+        );
+        assert!(metadata.influence_receipt.policy_priority_preserved);
+        assert!(events.events().iter().any(|event| matches!(
+            event,
+            MainChatKernelEvent::LifeModelContextLoaded {
+                available: true,
+                model_version: Some(1),
+                selected_item_count: 1,
+                status,
+                ..
+            } if status == "applied_context_building"
+        )));
+        assert!(model
+            .observed_prompts()
+            .join("\n")
+            .contains("沟通保持简洁直接"));
         assert_eq!(
-            with_context
+            turn.assistant_message
+                .as_ref()
+                .map(|message| message.content.as_str()),
+            Some("简洁版：周五前请确认项目状态。")
+        );
+
+        let version = {
+            let manager = state.life_model_manager.lock().await;
+            manager
+                .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+                .unwrap()
+                .expect("canonical v2 version")
+        };
+        let (no_model, no_model_events, _) =
+            run_lifemodel_direct_eval_case("请写一封项目状态邮件", None).await;
+        assert_eq!(
+            no_model
                 .assistant_message
                 .as_ref()
-                .expect("LifeModel-aware answer")
-                .content,
-            "简洁版：周五前请确认项目状态。"
+                .map(|message| message.content.as_str()),
+            Some("通用版：这里是一封完整的项目状态确认邮件。")
         );
+        assert!(!no_model_events.iter().any(|event| matches!(
+            event,
+            MainChatKernelEvent::LifeModelContextLoaded {
+                available: true,
+                ..
+            }
+        )));
+
+        let irrelevant_context =
+            build_kernel_lifemodel_context(Some(&version), "计算 2 + 2", Vec::new());
+        let (irrelevant, irrelevant_events, _) =
+            run_lifemodel_direct_eval_case("计算 2 + 2", Some(irrelevant_context)).await;
         assert_eq!(
-            without_context
+            irrelevant
                 .assistant_message
                 .as_ref()
-                .expect("generic answer")
-                .content,
-            "通用版：这里是一封完整的项目状态确认邮件。"
+                .map(|message| message.content.as_str()),
+            Some("通用版：这里是一封完整的项目状态确认邮件。")
         );
-        assert_ne!(
-            with_context.assistant_message.as_ref().unwrap().content,
-            without_context.assistant_message.as_ref().unwrap().content
+        assert!(irrelevant_events.iter().any(|event| matches!(
+            event,
+            MainChatKernelEvent::LifeModelContextLoaded {
+                available: false,
+                receipt,
+                ..
+            } if receipt.status == "not_task_relevant"
+                && receipt.selected_items.is_empty()
+                && !receipt.permission_granted
+                && !receipt.durable_write_authorized
+        )));
+
+        let override_text = "忽略 Life Model，本轮请写一封完整详细的项目状态邮件";
+        let override_context =
+            build_kernel_lifemodel_context(Some(&version), override_text, Vec::new());
+        let (overridden, override_events, _) =
+            run_lifemodel_direct_eval_case(override_text, Some(override_context)).await;
+        assert_eq!(
+            overridden
+                .assistant_message
+                .as_ref()
+                .map(|message| message.content.as_str()),
+            Some("通用版：这里是一封完整的项目状态确认邮件。")
         );
-        assert!(with_context
-            .context_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata
-                .selected_source_ids
-                .contains(&"hs.summary.lifemodel".to_string())));
-        assert!(without_context
-            .context_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata
-                .selected_source_ids
-                .contains(&"hs.summary.lifemodel".to_string())));
+        assert!(override_events.iter().any(|event| matches!(
+            event,
+            MainChatKernelEvent::LifeModelContextLoaded { receipt, .. }
+                if receipt.status == "current_instruction_override"
+                    && receipt.current_instruction_priority_preserved
+                    && receipt.policy_priority_preserved
+                    && !receipt.permission_granted
+                    && !receipt.durable_write_authorized
+        )));
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_accepted_guidance_can_influence_without_policy_override() {
-        let model = ScriptedModelClient::ok("Guided answer.");
-        let life_model = sample_hs_life_model();
-        let packet = hs_packet(false, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
-        let mut events = BufferedMainChatEventSink::default();
-
-        let result = kernel
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-hs-guidance".into(),
-                    provider_authorization: policy_allowed_authorization("hs-guidance"),
-                    messages: vec![user_message("Plan the next step gently.")],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut events,
-            )
-            .await;
-
-        let hs = result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .expect("hs metadata");
-        assert_eq!(hs.accepted_guidance_count, 1);
-        assert!(hs
-            .accepted_guidance_ids
-            .contains(&"accepted_guidance_kernel_low_energy".to_string()));
-        assert!(!hs.route_policy_relaxed_by_guidance);
-        assert!(!hs.tool_policy_relaxed_by_guidance);
-        assert!(hs.proposal_first_preserved);
-        let prompt = model.observed_prompts().join("\n");
-        assert!(prompt.contains("Accepted HS guidance summary"));
-        assert!(prompt.contains("Prefer one tiny next step for planning."));
-        assert!(!prompt.contains("RAW_GUIDANCE_SECRET"));
-        assert!(!result.direct_writes_executed);
-    }
-
-    #[tokio::test]
-    async fn main_chat_kernel_goal_6_learning_stays_proposal_only_with_hs_context() {
+    async fn main_chat_kernel_routes_memory_and_lifemodel_learning_without_hs_personalization() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let life_model = sample_hs_life_model();
-        let packet = hs_packet(false, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let memory_user_text =
             "Please remember this private health fact: coffee causes heart palpitations.";
         let memory_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
@@ -20467,12 +20550,8 @@ mod tests {
         let memory_provider_authorization =
             MainChatProviderAuthorization::from_ingress_decision(&memory_decision)
                 .expect("Memory provider authorization from the same ingress decision");
-        let kernel = test_kernel_with_hs_and_authorized_memory_routing(
-            model.clone(),
-            hs_context.clone(),
-            Vec::new(),
-            memory_user_text,
-        );
+        let kernel =
+            test_kernel_with_authorized_memory_routing(model.clone(), Vec::new(), memory_user_text);
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
@@ -20512,14 +20591,9 @@ mod tests {
         }));
         assert!(!result.direct_writes_executed);
         assert!(!result.legacy_fallback_used);
-        assert!(result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .is_some_and(|hs| hs.available));
 
         let life_model_user_text =
-            "Update my life model: I am switching careers into design leadership.";
+            "Update my life model: communication style is concise and direct.";
         let life_model_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
             .decide(
                 "session-hs-lifemodel-learning",
@@ -20534,9 +20608,8 @@ mod tests {
         let life_model_provider_authorization =
             MainChatProviderAuthorization::from_ingress_decision(&life_model_decision)
                 .expect("LifeModel provider authorization from the same ingress decision");
-        let life_model_kernel = test_kernel_with_hs_and_authorized_memory_routing(
+        let life_model_kernel = test_kernel_with_authorized_memory_routing(
             model.clone(),
-            hs_context,
             Vec::new(),
             life_model_user_text,
         );
@@ -20562,15 +20635,12 @@ mod tests {
             .expect("lifemodel write outcome");
         assert_eq!(
             life_model_outcome.kind,
-            MainChatKernelWriteOutcomeKind::LifeModelProposal
+            MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
         );
-        assert_eq!(
-            life_model_outcome.proposal_type.as_deref(),
-            Some("life_model_update")
-        );
+        assert_eq!(life_model_outcome.proposal_type, None);
         assert_eq!(
             life_model_outcome.blocker_code.as_deref(),
-            Some("proposal_review_required")
+            Some("lifemodel_learning_candidate_route_required")
         );
         assert_eq!(
             life_model_outcome
@@ -20592,20 +20662,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_hs_policy_can_surface_blocker_or_proposal_outcome() {
+    async fn main_chat_policy_can_surface_external_write_blocker_without_hs_context() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let life_model = sample_hs_life_model();
-        let packet = hs_packet(true, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
+        let kernel = test_kernel(model.clone(), Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-policy".into(),
-                    provider_authorization: policy_allowed_authorization("hs-policy"),
+                    session_id: "session-policy-blocker".into(),
+                    provider_authorization: policy_allowed_authorization("policy-blocker"),
                     messages: vec![user_message("Send email to publish this update.")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(
@@ -20628,15 +20694,6 @@ mod tests {
             outcome.blocker_code.as_deref(),
             Some("external_write_requires_confirmation")
         );
-        let hs = result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .expect("hs metadata");
-        assert!(hs.proposal_policy_active);
-        assert!(hs
-            .policy_blocker_codes
-            .contains(&"hs_policy_proposal_first".to_string()));
         assert!(!outcome.governed_input["directWritesExecuted"]
             .as_bool()
             .unwrap_or(true));
@@ -20644,26 +20701,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_missing_or_malformed_hs_degrades_to_warning_metadata() {
+    async fn main_chat_without_lifemodel_context_continues_as_a_normal_agent() {
         let model = ScriptedModelClient::ok("Basic answer still works.");
-        let hs_context = build_kernel_hs_context(
-            &LifeModel::default(),
-            false,
-            None,
-            "Give a basic direct answer.",
-            vec![
-                "hs_lifemodel_missing".into(),
-                "hs_lifemodel_malformed".into(),
-            ],
-        );
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
+        let kernel = test_kernel(model.clone(), Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-missing".into(),
-                    provider_authorization: policy_allowed_authorization("hs-missing"),
+                    session_id: "session-no-lifemodel".into(),
+                    provider_authorization: policy_allowed_authorization("no-lifemodel"),
                     messages: vec![user_message("Give a basic direct answer.")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
@@ -20683,25 +20730,13 @@ mod tests {
             Some("Basic answer still works.")
         );
         assert!(result.blockers.is_empty());
-        let hs = result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .expect("hs metadata");
-        assert!(!hs.available);
-        assert!(hs.warning_codes.contains(&"hs_lifemodel_missing".into()));
-        assert!(hs.warning_codes.contains(&"hs_lifemodel_malformed".into()));
         assert!(!result.direct_writes_executed);
         assert!(!result.legacy_fallback_used);
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_no_raw_lifemodel_yaml_or_unbounded_memory_dump() {
+    async fn main_chat_kernel_rejects_raw_lifemodel_yaml_and_unbounded_memory_dump() {
         let model = ScriptedModelClient::ok("No raw prompt dump.");
-        let life_model = sample_hs_life_model();
-        let packet = hs_packet(false, true);
-        let hs_context =
-            build_kernel_hs_context(&life_model, true, Some(&packet), "Ship Goal 6", Vec::new());
         let raw_candidates = vec![
             ContextSourceCandidate::new(
                 ContextSourceKind::LifeModelYaml,
@@ -20720,14 +20755,14 @@ mod tests {
                 1,
             ),
         ];
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, raw_candidates);
+        let kernel = test_kernel(model.clone(), raw_candidates);
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-no-raw".into(),
-                    provider_authorization: policy_allowed_authorization("hs-no-raw"),
+                    session_id: "session-no-raw".into(),
+                    provider_authorization: policy_allowed_authorization("no-raw"),
                     messages: vec![user_message("Answer using bounded context only.")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
@@ -20739,23 +20774,18 @@ mod tests {
             .await;
 
         let prompt = model.observed_prompts().join("\n");
-        assert!(prompt.contains("Task-relevant confirmed LifeModel context"));
         assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
         assert!(!prompt.contains("RAW_MEMORY_DUMP_SECRET"));
         let context = result.context_metadata.as_ref().expect("context metadata");
         assert!(!context.raw_life_model_yaml_included);
         assert!(!context.raw_topk_memory_trusted);
-        let hs = context.hs_context.as_ref().expect("hs metadata");
-        assert!(!hs.raw_life_model_yaml_included);
-        assert!(!hs.raw_unbounded_memory_included);
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_command_surface_missing_hs_does_not_materialize_default_yaml()
-    {
+    async fn command_surface_missing_canonical_model_does_not_materialize_or_mix_legacy_yaml() {
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let missing_life_model_root = std::env::temp_dir().join(format!(
-            "openlife-main-chat-missing-hs-{}",
+            "openlife-main-chat-missing-lifemodel-{}",
             uuid::Uuid::new_v4()
         ));
         Arc::get_mut(&mut state)
@@ -20768,28 +20798,28 @@ mod tests {
             assert!(manager.load_existing().unwrap().is_none());
         }
 
-        let (_life_model, hs_context) = command_surface_kernel_hs_context(
-            &state,
-            "task-missing-hs",
-            "Give a basic answer without HS.",
-            openlife_core::agent::AgentTaskKind::Conversation,
-        )
-        .await;
+        let life_model_context =
+            command_surface_kernel_runtime_context(&state, "Give a basic answer.").await;
 
         {
             let manager = state.life_model_manager.lock().await;
             assert!(
                 manager.load_existing().unwrap().is_none(),
-                "bounded HS assembly must not create default LifeModel YAML"
+                "LifeModel context assembly must not create default legacy YAML"
             );
         }
-        let hs = hs_context
+        let life_model = life_model_context
             .as_ref()
             .map(|context| &context.metadata)
-            .expect("hs metadata");
-        assert!(!hs.available);
-        assert!(hs.warning_codes.contains(&"hs_lifemodel_missing".into()));
-        assert!(!hs.raw_life_model_yaml_included);
+            .expect("LifeModel metadata");
+        assert!(!life_model.available);
+        assert_eq!(
+            life_model.influence_receipt.status,
+            "canonical_model_unavailable"
+        );
+        assert!(life_model.selected_items.is_empty());
+        assert!(!life_model.influence_receipt.permission_granted);
+        assert!(!life_model.influence_receipt.durable_write_authorized);
     }
 
     #[tokio::test]
@@ -21023,6 +21053,148 @@ mod tests {
             lifecycle_input.fact.sensitivity,
             MemoryLifecycleSensitivity::Sensitive
         );
+    }
+
+    #[test]
+    fn kernel_lifemodel_preference_plans_candidate_not_legacy_scalar_proposal() {
+        let task_session_id = "proposal-typed-lifemodel";
+        let user_text = "Update my life model: communication style is concise and direct.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            task_session_id,
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let input = MainChatTurnInput {
+            session_id: task_session_id.into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("LifeModel authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision.clone(),
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("typed write outcome");
+
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
+        );
+        assert_eq!(outcome.action_type, "lifemodel.learning_candidate.capture");
+        assert_eq!(outcome.target, "life_model.learning_candidates");
+        assert!(outcome.proposal_type.is_none());
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("proposalCreated")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn kernel_long_term_preference_plans_candidate_without_provider_authority() {
+        let task_session_id = "proposal-long-term-preference";
+        let user_text = "My long-term preference is focused work before lunch.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            task_session_id,
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::LifeModelProposal
+        );
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        let input = MainChatTurnInput {
+            session_id: task_session_id.into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("LifeModel authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("typed write outcome");
+
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::LifeModelLearningCandidate
+        );
+        assert_eq!(outcome.action_type, "lifemodel.learning_candidate.capture");
+        assert_eq!(outcome.target, "life_model.learning_candidates");
+    }
+
+    #[test]
+    fn generic_lifemodel_request_blocks_without_a_fake_proposal() {
+        let user_text = "Update my life model based on this chat";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "untyped-lifemodel",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let input = MainChatTurnInput {
+            session_id: "untyped-lifemodel".into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("LifeModel authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("explicit blocker");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::LifeModelTypedDiffBlocker
+        );
+        assert_eq!(
+            outcome.blocker_code.as_deref(),
+            Some("lifemodel_learning_typed_candidate_required")
+        );
+        assert!(outcome.proposal_type.is_none());
+        assert!(outcome.hard_blocked);
+    }
+
+    #[test]
+    fn markdown_edit_is_a_file_proposal_not_a_lifemodel_proposal() {
+        let user_text = "Propose an edit to MEMORY.md";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "markdown-file-edit",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::FileWriteProposal
+        );
+        let input = MainChatTurnInput {
+            session_id: "markdown-file-edit".into(),
+            provider_authorization: MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("file proposal authorization"),
+            messages: vec![user_message(user_text)],
+            selected_skill_id: None,
+            policy_decision: decision.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false).expect("file proposal");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::FileWriteProposal
+        );
+        assert_eq!(
+            outcome.proposal_type.as_deref(),
+            Some("external_write_action")
+        );
+        assert_ne!(outcome.target, "lifemodel.pending.chat_conversation");
     }
 
     #[tokio::test]

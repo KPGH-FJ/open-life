@@ -1,8 +1,5 @@
 import type {
   EvidenceRef,
-  BuilderSignal,
-  BuilderSignalDecision,
-  BuilderTurnResponse,
   ChatSession,
   ProviderPrivacyBoundarySummary,
   ReviewAction,
@@ -14,7 +11,6 @@ import type {
   ViewModelEnvelope,
   ViewModelStatus,
   WorkspaceViewModel,
-  UnfinishedBuilderSession,
 } from "@/tauri";
 import type { ChatMessage } from "@/types";
 import type {
@@ -22,10 +18,7 @@ import type {
   GovernedActionSnapshot,
   WorkspaceConversationDataSource,
 } from "@/ui/journeys/governedAction";
-import type {
-  DurableTruthDataSource,
-  LifeModelBuilderDataSource,
-} from "@/ui/journeys/durableTruth";
+import type { DurableTruthDataSource } from "@/ui/journeys/durableTruth";
 import type { ReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
 import type { SettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import {
@@ -47,173 +40,13 @@ export type WorkbenchJourneyDataSource = ReadOnlySpineDataSource &
   GovernedActionDataSource &
   DurableTruthDataSource &
   SettingsPrivacyDataSource &
-  WorkspaceConversationDataSource &
-  LifeModelBuilderDataSource;
+  WorkspaceConversationDataSource;
 
 type FixtureStage = "pending" | "approved" | "rejected" | "deferred" | "running";
-type BuilderReviewFixtureStage = "pending" | "approved" | "rejected" | "deferred";
 
 const generatedAt = "2026-07-20T09:30:00.000Z";
 const taskId = "task-interview-notes";
 const reviewItemId = "review-permission-interview-notes";
-const builderReviewItemPrefix = "review-lifemodel-builder:";
-
-function builderSignals(): BuilderSignal[] {
-  return [
-    {
-      id: "builder-signal:goal-focus",
-      source_step: 1,
-      source_question_id: "current-goal",
-      dimension: "Goals",
-      affected_path: "goals.short_term",
-      proposed_value: "完成访谈研究并确定下一轮产品验证重点",
-      confidence: 0.82,
-      reason: "来自你刚才描述的三个月重点。",
-      risk_level: "medium",
-      user_status: "Pending",
-    },
-    {
-      id: "builder-signal:working-style",
-      source_step: 1,
-      source_question_id: "current-goal",
-      dimension: "State",
-      affected_path: "state.current_focus",
-      proposed_value: "优先完成客户研究，再进入方案收敛",
-      confidence: 0.76,
-      reason: "来自你对当前工作顺序的描述。",
-      risk_level: "low",
-      user_status: "Pending",
-    },
-  ];
-}
-
-function builderReviewItemId(signalId: string): string {
-  return `${builderReviewItemPrefix}${signalId}`;
-}
-
-function builderReviewAction(
-  signalId: string,
-  kind: "approve" | "reject" | "later" | "apply" | "view_evidence",
-  enabled = true,
-  disabledReason?: string
-): ReviewAction {
-  const targetReviewItemId = builderReviewItemId(signalId);
-  const labels = {
-    approve: "批准变更",
-    reject: "拒绝",
-    later: "稍后处理",
-    apply: "应用变更",
-    view_evidence: "查看依据",
-  } as const;
-  return {
-    id: `${targetReviewItemId}:${kind}`,
-    label: labels[kind],
-    kind,
-    effect:
-      kind === "apply"
-        ? "materialization_request"
-        : kind === "view_evidence"
-          ? "evidence_only"
-          : "decision_only",
-    enabled,
-    ...(enabled ? {} : { disabledReason: disabledReason ?? "当前动作不可用。" }),
-    requiresConfirmation: kind === "approve" || kind === "apply",
-    targetReviewItemId,
-    expectedMaterializationStatusAfterDispatch: kind === "apply" ? "applying" : "not_started",
-    completionProofAfterDispatch: false,
-  } as ReviewAction;
-}
-
-function builderReviewItem(
-  decision: BuilderSignalDecision,
-  stage: BuilderReviewFixtureStage
-): ReviewItem {
-  const signal = builderSignals().find(candidate => candidate.id === decision.id);
-  if (!signal) throw new Error(`fixture_builder_signal_unknown:${decision.id}`);
-  const status: ReviewItem["status"] = stage === "approved" ? "approved" : stage;
-  const value = decision.status === "edited" ? decision.proposed_value : signal.proposed_value;
-  const valueSummary =
-    typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? "无法显示候选值");
-  const evidence: EvidenceRef[] = [
-    {
-      id: signal.id,
-      label: `${signal.affected_path} 候选来源`,
-      source: "review",
-      sensitivity: "local_private",
-    },
-    {
-      id: "builder-session:fixture-builder-session",
-      label: "首次建立回答会话",
-      source: "audit",
-      sensitivity: "local_private",
-    },
-  ];
-  const awaitingDecision = status === "pending" || status === "deferred";
-  return {
-    id: builderReviewItemId(signal.id),
-    type: "life_model_update",
-    source: {
-      kind: "proposal",
-      proposalId: `fixture-proposal:${signal.id}`,
-      proposalSource: "lifemodel_builder",
-      sourceDetail: `来自首次建立回答的 ${signal.affected_path} 候选`,
-      runId: "fixture-builder-run",
-    },
-    status,
-    materializationStatus: "not_started",
-    decisionContext: {
-      reviewItemId: builderReviewItemId(signal.id),
-      title: signal.dimension === "Goals" ? "将客户研究设为近期目标" : "将客户研究设为当前工作重点",
-      summary: `建议把“${valueSummary}”加入 LifeModel 审核流程。`,
-      before: {
-        kind: "text",
-        summary: "当前尚未建立对应的 LifeModel 字段",
-        sensitivity: "local_private",
-        truncated: false,
-      },
-      after: {
-        kind: "text",
-        summary: valueSummary,
-        sensitivity: "local_private",
-        truncated: false,
-      },
-      reasonSummary: signal.reason,
-      sourceSummary: "来自本机首次建立会话中的用户回答。",
-      impactSummary: "批准后仍需后端应用流程；不会自动改动任务、文件或外部服务。",
-      affectedObjectLabels: [`LifeModel · ${signal.affected_path}`],
-      evidenceRefs: evidence,
-    },
-    allowedActions: awaitingDecision
-      ? [
-          builderReviewAction(signal.id, "approve"),
-          builderReviewAction(signal.id, "reject"),
-          builderReviewAction(
-            signal.id,
-            "later",
-            status !== "deferred",
-            "这项建议已经设为稍后处理。"
-          ),
-          builderReviewAction(signal.id, "view_evidence"),
-        ]
-      : status === "approved"
-        ? [
-            builderReviewAction(
-              signal.id,
-              "apply",
-              false,
-              "后端未提供 Builder 建议的应用命令；批准不等于已应用。"
-            ),
-            builderReviewAction(signal.id, "view_evidence"),
-          ]
-        : [builderReviewAction(signal.id, "view_evidence")],
-    risk: signal.risk_level,
-    evidenceRefs: evidence,
-    targetRefs: [
-      { id: `lifemodel:${signal.affected_path}`, kind: "lifemodel", label: signal.affected_path },
-      { id: `fixture-proposal:${signal.id}`, kind: "proposal", label: "Builder 候选建议" },
-    ],
-  };
-}
 
 const permissionEvidence: EvidenceRef = {
   id: "permission-scope:interview-notes:read-once",
@@ -496,8 +329,7 @@ function buildSnapshot(
   id: WorkbenchFixtureId,
   stage: FixtureStage,
   durableStage: DurableFixtureStage,
-  providerReviewStage: ProviderTestFixtureStage | null,
-  builderReviewItems: ReviewItem[]
+  providerReviewStage: ProviderTestFixtureStage | null
 ): GovernedActionSnapshot {
   const status = readStatus(id);
   const empty = id === "fixture-empty";
@@ -506,10 +338,7 @@ function buildSnapshot(
   const durableItem = durableReviewItem(durableStage);
   const providerItem = providerReviewStage ? providerTestReviewItem(providerReviewStage) : null;
   const task = activeTask(stage);
-  const reviewItems = [
-    ...(empty ? [] : [item, durableItem, ...(providerItem ? [providerItem] : [])]),
-    ...builderReviewItems,
-  ];
+  const reviewItems = empty ? [] : [item, durableItem, ...(providerItem ? [providerItem] : [])];
   const workspace: WorkspaceViewModel = {
     ...(empty ? {} : { activeTask: task }),
     recentTaskRefs: empty ? [] : [{ id: taskId, kind: "task", label: task.title }],
@@ -595,23 +424,6 @@ function buildSnapshot(
               : []),
           ]
         : []),
-      ...(builderReviewItems.length > 0
-        ? [
-            {
-              id: "batch:lifemodel-builder",
-              domain: "life_model" as const,
-              itemIds: builderReviewItems.map(candidate => candidate.id),
-              actionRequiredCount: builderReviewItems.filter(candidate =>
-                ["pending", "edited", "deferred"].includes(candidate.status)
-              ).length,
-              highestRisk: builderReviewItems.some(candidate => candidate.risk === "high")
-                ? ("high" as const)
-                : builderReviewItems.some(candidate => candidate.risk === "medium")
-                  ? ("medium" as const)
-                  : ("low" as const),
-            },
-          ]
-        : []),
     ],
     items: reviewItems,
     summary: {
@@ -683,11 +495,6 @@ export function workbenchJourneyFixtureDataSource(
   const settingsFixture = createSettingsPrivacyFixture(id);
   let stage: FixtureStage = "pending";
   let durableStage = initialDurableFixtureStage(id);
-  let builderSession: UnfinishedBuilderSession | null = null;
-  const builderReviewStates = new Map<
-    string,
-    { decision: BuilderSignalDecision; stage: BuilderReviewFixtureStage }
-  >();
   let sessions: ChatSession[] = [
     {
       session_id: "conversation-research-plan",
@@ -720,116 +527,46 @@ export function workbenchJourneyFixtureDataSource(
     }
     throw new Error(`fixture_task_control_unsupported:${control.kind}`);
   }
-  function builderTurn(finished: boolean): BuilderTurnResponse {
-    return {
-      prompt: finished ? "请逐项核对这些候选理解。" : "接下来三个月，你最希望推进什么？",
-      finished,
-      progress: {
-        progress: finished ? 100 : 25,
-        current_step_label: finished ? "候选核对" : "当前目标",
-        step_index: finished ? 1 : 0,
-        total_steps: 2,
-      },
-      waiting_for_review: finished,
-      durable_lifemodel_write: false,
-      review: finished
-        ? {
-            session_id: builderSession?.session_id ?? "fixture-builder-session",
-            finished: true,
-            signals: builderSignals(),
-            summary: {
-              identity_summary: "",
-              goals_summary: "当前重点是完成客户研究并形成下一轮验证计划。",
-              capabilities_summary: "",
-              state_summary: "当前处于研究和方案收敛阶段。",
-              assumptions: [],
-              unresolved_questions: [],
-              recommended_next_steps: ["逐项核对候选后创建审核建议"],
-            },
-          }
-        : null,
-    };
-  }
-
   return {
     ...readOnly,
     ...settingsFixture.dataSource,
     async load() {
       const providerItem = settingsFixture.currentReviewItem();
-      const builderReviewItems = [...builderReviewStates.values()].map(entry =>
-        builderReviewItem(entry.decision, entry.stage)
-      );
       return buildSnapshot(
         id,
         stage,
         durableStage,
-        providerItem ? (providerItem.status as ProviderTestFixtureStage) : null,
-        builderReviewItems
+        providerItem ? (providerItem.status as ProviderTestFixtureStage) : null
       );
     },
     async loadDurableTruth() {
-      const builderReviewItems = [...builderReviewStates.values()].map(entry =>
-        builderReviewItem(entry.decision, entry.stage)
-      );
-      return buildDurableFixtureSnapshot(id, durableStage, builderReviewItems);
+      return buildDurableFixtureSnapshot(id, durableStage);
     },
-    async listUnfinished() {
-      return builderSession ? [{ ...builderSession }] : [];
+    async draftLegacyLifeModelMigration() {
+      return "fixture-lifemodel-migration-proposal";
     },
-    async startQuick(sessionId) {
-      if (readStatus(id) === "error") throw new Error("fixture_builder_unavailable");
-      builderSession = {
-        session_id: sessionId,
-        mode: "Quick",
-        step_index: 0,
-        finished: false,
-        current_prompt: "接下来三个月，你最希望推进什么？",
-        pending_signal_count: 0,
-        waiting_for_review: false,
-        review_in_progress: false,
-      };
-      return builderTurn(false);
+    async draftLifeModelChange() {
+      return "fixture-lifemodel-v2-change-proposal";
     },
-    async resume(session) {
-      builderSession = { ...session };
-      return builderTurn(session.waiting_for_review || session.finished);
+    async draftLifeModelRollback() {
+      return "fixture-lifemodel-v2-rollback-proposal";
     },
-    async answer(sessionId) {
-      if (!builderSession || builderSession.session_id !== sessionId) {
-        throw new Error("fixture_builder_session_missing");
-      }
-      builderSession = {
-        ...builderSession,
-        step_index: 1,
-        finished: true,
-        current_prompt: "请逐项核对这些候选理解。",
-        pending_signal_count: 2,
-        waiting_for_review: true,
-      };
-      return builderTurn(true);
+    async draftLifeModelExport() {
+      return "fixture-lifemodel-v2-export-proposal";
     },
-    async createProposals(sessionId, decisions: BuilderSignalDecision[]) {
-      if (!builderSession || builderSession.session_id !== sessionId) {
-        throw new Error("fixture_builder_session_missing");
-      }
-      const retained = decisions.filter(decision => decision.status !== "rejected");
-      builderReviewStates.clear();
-      retained.forEach(decision => {
-        builderReviewStates.set(decision.id, { decision, stage: "pending" });
-      });
-      builderSession = null;
-      durableStage = "pending";
-      return {
-        success: true,
-        created_count: retained.length,
-        reused_count: 0,
-        updated_count: 0,
-        rejected_count: decisions.length - retained.length,
-        proposal_ids: retained.map(decision => `fixture-proposal:${decision.id}`),
-        run_id: "fixture-builder-run",
-        warnings: [],
-      };
+    async confirmLifeModelLearningCandidate() {},
+    async stageLifeModelLearningCandidate() {
+      return "fixture-lifemodel-learning-proposal";
     },
+    async deleteLifeModelLearningCandidate() {},
+    async rejectLifeModelLearningCandidate() {},
+    async pauseLifeModelLearningSuggestionClass() {},
+    async correctMemory() {},
+    async archiveMemory() {},
+    async stopRecall() {},
+    async restoreMemory() {},
+    async rollbackMemory() {},
+    async privacyEraseMemory() {},
     async listSessions() {
       if (readStatus(id) === "error") throw new Error("fixture_conversation_store_unavailable");
       return sessions.map(session => ({ ...session }));
@@ -839,6 +576,9 @@ export function workbenchJourneyFixtureDataSource(
       const history = histories.get(sessionId);
       if (!history) throw new Error("fixture_conversation_session_missing");
       return history.map(message => ({ ...message }));
+    },
+    async loadLifeModelInfluence() {
+      return null;
     },
     async createSession(sessionId, title) {
       if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
@@ -940,30 +680,19 @@ export function workbenchJourneyFixtureDataSource(
       };
     },
     async dispatchReviewAction(reviewAction) {
-      const builderSignalId = [...builderReviewStates.keys()].find(
-        signalId => builderReviewItemId(signalId) === reviewAction.targetReviewItemId
-      );
-      if (readStatus(id) !== "ready" && !(readStatus(id) === "empty" && builderSignalId)) {
+      if (readStatus(id) !== "ready") {
         throw new Error("fixture_review_read_model_not_ready");
       }
       if (settingsFixture.dispatchReviewAction(reviewAction)) return;
       if (
         reviewAction.targetReviewItemId !== reviewItemId &&
-        reviewAction.targetReviewItemId !== durableReviewItemId &&
-        !builderSignalId
+        reviewAction.targetReviewItemId !== durableReviewItemId
       ) {
         throw new Error("fixture_review_target_mismatch");
       }
       if (!reviewAction.enabled)
         throw new Error(reviewAction.disabledReason || "fixture_action_disabled");
-      if (builderSignalId) {
-        const current = builderReviewStates.get(builderSignalId);
-        if (!current) throw new Error("fixture_builder_review_item_missing");
-        if (reviewAction.kind === "approve") current.stage = "approved";
-        else if (reviewAction.kind === "reject") current.stage = "rejected";
-        else if (reviewAction.kind === "later") current.stage = "deferred";
-        else throw new Error("fixture_builder_review_action_unsupported");
-      } else if (reviewAction.targetReviewItemId === durableReviewItemId) {
+      if (reviewAction.targetReviewItemId === durableReviewItemId) {
         if (reviewAction.kind === "approve") durableStage = "approved_not_applied";
         else if (reviewAction.kind === "reject") durableStage = "rejected";
         else if (reviewAction.kind === "later") durableStage = "deferred";
@@ -973,6 +702,7 @@ export function workbenchJourneyFixtureDataSource(
       else if (reviewAction.kind === "later") stage = "deferred";
       else throw new Error("fixture_review_action_unsupported");
     },
+    async editLifeModelLearningProposal() {},
     async resumeTask(control) {
       await applyTaskControl(control);
     },

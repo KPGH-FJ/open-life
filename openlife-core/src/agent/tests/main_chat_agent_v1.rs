@@ -156,7 +156,8 @@ fn intent_frame_extracts_real_life_semantics_without_routing() {
     let future_preference =
         IntentFrame::from_user_message("以后我做计划时，先提醒我留出通勤和休息缓冲。");
     assert!(future_preference.requests_durable_write);
-    assert!(future_preference.requests_lifemodel_change);
+    assert!(future_preference.requests_memory_change);
+    assert!(!future_preference.requests_lifemodel_change);
     assert!(!future_preference.requires_external_read);
     assert_eq!(
         future_preference.time_range,
@@ -309,6 +310,68 @@ fn habitual_work_preference_is_not_misclassified_as_a_plan_command() {
         explicit_plan.requests_plan_task,
         "an explicit planning request must still reach PlanExecute"
     );
+}
+
+#[test]
+fn explicit_long_term_preference_routes_to_lifemodel_without_provider_generation() {
+    let user_text = "My long-term preference is focused work before lunch.";
+    let intent = IntentFrame::from_user_message(user_text);
+    assert!(intent.requests_lifemodel_change);
+    assert!(intent.requests_durable_write);
+    assert_eq!(
+        intent.execution_disposition,
+        IntentExecutionDisposition::ActionRequested
+    );
+    assert_eq!(
+        intent.memory_routing.lifemodel_proposal_candidate_ids.len(),
+        1
+    );
+
+    let decision = AgentIngress::default().decide(
+        "explicit-long-term-preference",
+        user_text,
+        None,
+        AgentTaskKind::Conversation,
+    );
+    assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::LifeModelProposal
+    );
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::LifeModelProposal));
+    assert!(!decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration));
+}
+
+#[test]
+fn lifemodel_runtime_override_stays_a_side_effect_free_model_task() {
+    const PROMPT: &str = "忽略 Life Model。本轮请写一封详细的项目状态邮件，包含四个小节，每节两句话。不要调用工具，不要写入任何长期状态。";
+
+    let intent = IntentFrame::from_user_message(PROMPT);
+    assert!(!intent.requests_lifemodel_change);
+    assert!(!intent.requests_memory_change);
+    assert!(!intent.requests_durable_write);
+
+    let decision = AgentIngress::default().decide(
+        "lifemodel-runtime-override",
+        PROMPT,
+        None,
+        AgentTaskKind::Conversation,
+    );
+    assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::DirectAnswer
+    );
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration));
+    assert!(!decision
+        .policy_decision
+        .allows(AllowedCapability::LifeModelProposal));
 }
 
 #[test]
@@ -785,7 +848,7 @@ fn policy_governance_plan_keeps_goal_progress_conversation_only() {
 }
 
 #[test]
-fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
+fn policy_governance_plan_preserves_episode_inferred_and_procedural_memory_lanes() {
     let decision = AgentIngress::default().decide(
         "policy-governance-mixed",
         "今天午饭吃了牛肉面，下午犯困。I usually batch similar tasks to stay focused. Going forward, remind me to check my task list before scheduling work.",
@@ -808,7 +871,7 @@ fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
         candidate.disposition == PolicyGovernanceDisposition::InferredStableFact
     }));
     assert!(plan.candidate_dispositions.iter().any(|candidate| {
-        candidate.disposition == PolicyGovernanceDisposition::ExplicitGovernedLifeModelRequest
+        candidate.disposition == PolicyGovernanceDisposition::ExplicitReversibleMemoryRequest
     }));
     assert!(plan.deferred_review_groups.iter().any(|group| {
         group.mode == PolicyGovernanceReviewMode::Deferred
@@ -817,7 +880,7 @@ fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
     }));
     assert!(plan.blocking_review_groups.iter().any(|group| {
         group.mode == PolicyGovernanceReviewMode::Blocking
-            && group.domain == PolicyGovernanceReviewDomain::LifeModel
+            && group.domain == PolicyGovernanceReviewDomain::Memory
             && group.candidate_ids.len() == 1
     }));
 }
@@ -1352,9 +1415,9 @@ fn policy_router_real_life_scenario_eval_uses_only_policy_route_outputs() {
             PolicyRouteKind::ProposalOnlyWrite,
         ),
         (
-            "review unavailable",
+            "ordinary reflection",
             "Review my recent energy pattern evidence.",
-            PolicyRouteKind::GovernedBlocker,
+            PolicyRouteKind::DirectAnswer,
         ),
         (
             "web explicit",
@@ -1421,7 +1484,7 @@ fn stage1_browser_prompts_select_expected_main_chat_strategies() {
         (
             "D34",
             "Propose an edit to SOUL.md knowledge asset wording.",
-            MainChatAgentStrategy::LifeModelProposal,
+            MainChatAgentStrategy::FileWriteProposal,
         ),
     ];
 
@@ -1686,7 +1749,6 @@ fn final_acceptance_gate_requires_runtime_command_surface_and_live_provider_evid
                 kernel_proposal_write_case_count: 2,
                 kernel_plan_execute_case_count: 2,
                 kernel_blocker_case_count: 4,
-                kernel_hs_context_case_count: 24,
                 kernel_web_tool_case_count: 2,
                 kernel_mcp_tool_case_count: 2,
                 final_completion_ready: false,
@@ -1750,7 +1812,6 @@ fn final_acceptance_gate_rechecks_runtime_coverage_instead_of_trusting_ready_fla
                 kernel_proposal_write_case_count: 2,
                 kernel_plan_execute_case_count: 2,
                 kernel_blocker_case_count: 4,
-                kernel_hs_context_case_count: 24,
                 kernel_web_tool_case_count: 2,
                 kernel_mcp_tool_case_count: 2,
                 final_completion_ready: true,
@@ -1799,7 +1860,6 @@ fn final_acceptance_gate_requires_separate_live_web_and_mcp_agent_loop_evidence(
                 kernel_proposal_write_case_count: 2,
                 kernel_plan_execute_case_count: 2,
                 kernel_blocker_case_count: 4,
-                kernel_hs_context_case_count: 24,
                 kernel_web_tool_case_count: 2,
                 kernel_mcp_tool_case_count: 2,
                 final_completion_ready: true,
@@ -1848,7 +1908,6 @@ fn final_acceptance_gate_rechecks_split_runtime_live_web_and_mcp_coverage() {
                 kernel_proposal_write_case_count: 2,
                 kernel_plan_execute_case_count: 2,
                 kernel_blocker_case_count: 4,
-                kernel_hs_context_case_count: 24,
                 kernel_web_tool_case_count: 2,
                 kernel_mcp_tool_case_count: 2,
                 final_completion_ready: true,

@@ -4,6 +4,7 @@ import type { ReviewAction, TaskControl } from "@/tauri";
 const tauriMocks = vi.hoisted(() => ({
   acceptProposal: vi.fn(),
   cancelMainChatAgentTask: vi.fn(),
+  editLifeModelLearningProposal: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
   getTasksViewModel: vi.fn(),
   getWorkspaceViewModel: vi.fn(),
@@ -111,6 +112,55 @@ describe("governed action Tauri data source", () => {
     expect(tauriMocks.rejectProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.postponeProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.resumeMainChatAgentTask).toHaveBeenCalledWith("task-1");
+  });
+
+  it("uses the schema-aware LifeModel learning editor and verifies its receipt", async () => {
+    tauriMocks.editLifeModelLearningProposal.mockResolvedValueOnce({
+      proposalId: "review-1",
+      status: "edited_pending_review",
+      resultDocumentDigest: "sha256:result",
+      durableWriteExecuted: false,
+      learning: {
+        candidateId: "candidate-1",
+        proposalId: "review-1",
+        changed: true,
+        status: "proposed",
+        contentScrubbed: false,
+        correctionObservationId: "observation-edit-1",
+        canonicalLifeModelChanged: false,
+      },
+    });
+
+    await tauriGovernedActionDataSource.editLifeModelLearningProposal(
+      "review-1",
+      "先给结论，再补充依据"
+    );
+
+    expect(tauriMocks.editLifeModelLearningProposal).toHaveBeenCalledWith(
+      "review-1",
+      "先给结论，再补充依据"
+    );
+  });
+
+  it("fails closed when the learning edit receipt lacks candidate evidence", async () => {
+    tauriMocks.editLifeModelLearningProposal.mockResolvedValueOnce({
+      proposalId: "review-1",
+      status: "edited_pending_review",
+      resultDocumentDigest: "sha256:result",
+      durableWriteExecuted: false,
+      learning: {
+        candidateId: "",
+        proposalId: "review-1",
+        changed: true,
+        status: "proposed",
+        contentScrubbed: false,
+        canonicalLifeModelChanged: false,
+      },
+    } as never);
+
+    await expect(
+      tauriGovernedActionDataSource.editLifeModelLearningProposal("review-1", "先给结论")
+    ).rejects.toThrow("lifemodel_learning_edit_receipt_unverified");
   });
 
   it("dispatches only exact executable TaskControl contracts", async () => {

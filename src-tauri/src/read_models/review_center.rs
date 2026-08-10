@@ -71,8 +71,8 @@ pub(crate) async fn get_review_center_view_model_with_state(
         .into_iter()
         .flatten()
         .collect::<BTreeMap<_, _>>();
-    let (action_materialization_overrides, mut action_warnings) =
-        action_materialization_overrides(&proposal_store, &proposals);
+    let (dispatch_materialization_overrides, mut dispatch_warnings) =
+        dispatch_materialization_overrides(&proposal_store, &proposals);
     drop(proposal_store);
     let config = state.config.lock().await;
     let safe_paths = config.system.safe_paths.clone();
@@ -80,8 +80,8 @@ pub(crate) async fn get_review_center_view_model_with_state(
 
     let (mut materialization_overrides, mut warnings) =
         memory_materialization_overrides(state, &proposals).await;
-    materialization_overrides.extend(action_materialization_overrides);
-    warnings.append(&mut action_warnings);
+    materialization_overrides.extend(dispatch_materialization_overrides);
+    warnings.append(&mut dispatch_warnings);
     let safe_mode_reason = if state.startup_warnings.is_empty() {
         None
     } else {
@@ -111,7 +111,7 @@ pub(crate) async fn get_review_center_view_model_with_state(
     Ok(envelope)
 }
 
-fn action_materialization_overrides(
+fn dispatch_materialization_overrides(
     proposal_store: &openlife_core::agent::ProposalStore,
     proposals: &[AgentProposal],
 ) -> (
@@ -122,7 +122,7 @@ fn action_materialization_overrides(
     let mut warnings = Vec::new();
     for proposal in proposals
         .iter()
-        .filter(|proposal| is_dispatch_backed_governed_action(proposal))
+        .filter(|proposal| is_dispatch_backed_review_item(proposal))
     {
         match proposal_store.dispatch_state(&proposal.id) {
             Ok(Some(dispatch_state)) => {
@@ -163,9 +163,14 @@ fn action_materialization_overrides(
     (overrides, warnings)
 }
 
-fn is_dispatch_backed_governed_action(proposal: &AgentProposal) -> bool {
+fn is_dispatch_backed_review_item(proposal: &AgentProposal) -> bool {
     match proposal.proposal_type {
         ProposalType::ScheduledTask => true,
+        ProposalType::LifeModelUpdate => matches!(
+            proposal.affected_path.as_str(),
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+                | openlife_core::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
+        ),
         ProposalType::DataExport => matches!(
             proposal
                 .after
@@ -270,8 +275,8 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 #[cfg(test)]
 mod tests {
     use super::{
-        action_materialization_overrides, action_materialization_status,
-        is_dispatch_backed_governed_action,
+        action_materialization_status, dispatch_materialization_overrides,
+        is_dispatch_backed_review_item,
     };
     use openlife_core::agent::{
         AgentProposal, ProposalSource, ProposalStatus, ProposalStore, ProposalType,
@@ -330,7 +335,42 @@ mod tests {
             .expect("project accepted proposal"));
 
         let (overrides, warnings) =
-            action_materialization_overrides(&store, std::slice::from_ref(&proposal));
+            dispatch_materialization_overrides(&store, std::slice::from_ref(&proposal));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            overrides.get(&proposal.id),
+            Some(&ReviewItemMaterializationStatus::Applied)
+        );
+    }
+
+    #[test]
+    fn review_projection_reads_confirmed_lifemodel_v2_dispatch_receipt() {
+        let store = ProposalStore::new_in_memory().expect("proposal store");
+        let mut proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            json!({"schemaVersion": "openlife.lifemodel.typed-diff.v2"}),
+            "Apply one reviewed LifeModel v2 change.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        store.create_proposal(&proposal).expect("create proposal");
+        let claim = store
+            .claim_dispatch(&proposal.id)
+            .expect("claim dispatch")
+            .expect("claim id");
+        assert!(store
+            .mark_effect_confirmed_projection_pending(&proposal.id, &claim)
+            .expect("persist confirmed effect"));
+        proposal.accept();
+        assert!(store
+            .project_confirmed_effect(&proposal, &claim)
+            .expect("project accepted proposal"));
+
+        let (overrides, warnings) =
+            dispatch_materialization_overrides(&store, std::slice::from_ref(&proposal));
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -351,6 +391,6 @@ mod tests {
             ProposalSource::Manual,
         );
 
-        assert!(!is_dispatch_backed_governed_action(&proposal));
+        assert!(!is_dispatch_backed_review_item(&proposal));
     }
 }

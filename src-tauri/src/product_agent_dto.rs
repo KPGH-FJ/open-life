@@ -949,6 +949,7 @@ fn product_state_action_type(value: &str) -> String {
         | "shell.destructive"
         | "plan_execute.create_session"
         | "memory.governance.plan"
+        | "lifemodel.learning_candidate.capture"
         | "builtin_tool" => value.into(),
         _ => "unknown_action_type".into(),
     }
@@ -2186,6 +2187,7 @@ mod tests {
                     source_run_id: Some(HOSTILE.into()),
                     content: HOSTILE.into(),
                     scope: openlife_core::agent::memory_lifecycle::MemoryLifecycleScope::Global,
+                    scope_owner_ref: None,
                     category:
                         openlife_core::agent::memory_lifecycle::MemoryLifecycleCategory::Fact,
                     risk_level:

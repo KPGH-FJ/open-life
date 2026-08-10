@@ -19,8 +19,6 @@ export function makeLifeStateProjection(
     usageReady: true,
     lifeModelReady: true,
     modelEmpty: false,
-    pendingBuilderReviewSessions: 0,
-    unfinishedBuilderSessions: 0,
     databaseStatus: "ok",
     readinessIssues: [],
     usageReadinessIssues: [],

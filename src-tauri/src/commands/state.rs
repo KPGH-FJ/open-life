@@ -203,11 +203,6 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_session_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::builder::BuilderSessionStore::new(
-                    temp_dir.path().join("builder_sessions.json"),
-                ),
-            )),
             a2a_sidecar: Arc::new(tokio::sync::Mutex::new(
                 crate::a2a_sidecar::A2ASidecar::new(crate::a2a_server::configured_a2a_port()),
             )),
@@ -222,17 +217,15 @@ mod tests {
             life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
             ))),
-            heuristic_store: Arc::new(tokio::sync::Mutex::new({
-                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
-                store.seed_mvp_heuristics().unwrap();
-                store
-            })),
             policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
             ))),
             memory_lifecycle_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
+            ))),
+            life_model_learning_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
             plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),

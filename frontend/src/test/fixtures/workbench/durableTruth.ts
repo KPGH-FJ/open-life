@@ -1,6 +1,5 @@
 import type {
   EvidenceRef,
-  LifeModelDimensionSummary,
   LifeModelViewModel,
   MemoryLaneSummary,
   MemoryViewModel,
@@ -168,90 +167,18 @@ export function durableReviewItem(stage: DurableFixtureStage): ReviewItem {
   };
 }
 
-function dimensions(stage: DurableFixtureStage): LifeModelDimensionSummary[] {
-  const applied = stage === "applied";
-  return [
-    {
-      id: "identity",
-      label: "身份与角色",
-      summary: "负责产品与工程决策，需要保留连续的独立思考时间。",
-      confidence: "medium",
-      stale: false,
-      pendingReviewItemRefs: [],
-      evidenceRefs: [lifeModelEvidence],
-      provenance: "limited",
-      ownerStatus: "PARTIAL",
-    },
-    {
-      id: "goals",
-      label: "目标与节奏",
-      summary: applied
-        ? "工作日上午优先安排需要持续专注的任务。"
-        : "本周重点是完成客户研究总结和产品方案。",
-      confidence: "medium",
-      stale: false,
-      pendingReviewItemRefs:
-        stage === "pending" || stage === "deferred"
-          ? [{ id: durableReviewItemId, kind: "review_item", label: "上午深度工作偏好" }]
-          : [],
-      evidenceRefs: applied ? [preferenceEvidence] : [lifeModelEvidence],
-      provenance: "limited",
-      ownerStatus: "PARTIAL",
-    },
-    {
-      id: "capabilities",
-      label: "能力与资源",
-      summary: "可以独立完成产品研究、原型设计和工程实现。",
-      confidence: "medium",
-      stale: false,
-      pendingReviewItemRefs: [],
-      evidenceRefs: [lifeModelEvidence],
-      provenance: "limited",
-      ownerStatus: "PARTIAL",
-    },
-    {
-      id: "state",
-      label: "当前状态",
-      summary: "近期工作节奏稳定，但下午更容易被协作事项打断。",
-      confidence: "low",
-      stale: false,
-      pendingReviewItemRefs: [],
-      evidenceRefs: [conversationEvidence],
-      provenance: "limited",
-      ownerStatus: "PARTIAL",
-    },
-  ];
-}
-
 function lifeModel(stage: DurableFixtureStage): LifeModelViewModel {
   const pending = stage === "pending" || stage === "deferred";
   const approvedNotApplied = stage === "approved_not_applied" || stage === "applying";
   const failed = stage === "failed";
   const applied = stage === "applied";
   return {
-    truthMode: "current_compatibility",
+    truthMode: "unknown",
     canonicalSummary: null,
-    currentViewSummary: {
-      currentViewRef: {
-        id: "lifemodel:current-compatibility-view",
-        kind: "lifemodel",
-        label: "当前兼容视图",
-      },
-      compatibilityMode: true,
-      label: "当前有来源的长期理解",
-      summary: applied
-        ? "你倾向在工作日上午处理需要持续专注的任务，并在表达时先给结论再展开细节。"
-        : "你重视连续思考时间，表达时更偏好先给结论再展开细节。",
-      divergenceFromCanonical: "unknown",
-      evidenceRefs: [lifeModelEvidence, memoryEvidence, ...(applied ? [preferenceEvidence] : [])],
-      ownerStatus: "PARTIAL",
-    },
-    dimensionSummaries: dimensions(stage),
+    versionHistory: [],
+    legacyMigrationPreview: null,
     trustQualityState: {
       readiness: "usable_with_limits",
-      completionScore: null,
-      missingDimensionCount: 0,
-      staleDimensionCount: 0,
       warningRefs: [],
       ownerStatus: "PARTIAL",
     },
@@ -323,6 +250,11 @@ function lifeModel(stage: DurableFixtureStage): LifeModelViewModel {
       tierSummary: { total: 18, tier1: 6, tier2: 8, tier3: 4, archived: 2 },
       ownerStatus: "PHASE_2_REQUIRED",
     },
+    learning: {
+      available: true,
+      activeCount: 0,
+      candidates: [],
+    },
     sourceRefs: [lifeModelEvidence, memoryEvidence, conversationEvidence],
     contractLimitations: [
       "当前只提供兼容视图，不代表完整 canonical LifeModel。",
@@ -337,13 +269,10 @@ function emptyLifeModel(): LifeModelViewModel {
     ...base,
     truthMode: "unknown",
     canonicalSummary: null,
-    currentViewSummary: null,
-    dimensionSummaries: [],
+    versionHistory: [],
+    legacyMigrationPreview: null,
     trustQualityState: {
       readiness: "not_built",
-      completionScore: null,
-      missingDimensionCount: 4,
-      staleDimensionCount: 0,
       warningRefs: [],
       ownerStatus: "UNKNOWN",
     },
@@ -377,6 +306,11 @@ function emptyLifeModel(): LifeModelViewModel {
       linkageStatus: "unknown",
       tierSummary: { total: null, tier1: null, tier2: null, tier3: null, archived: null },
       ownerStatus: "UNKNOWN",
+    },
+    learning: {
+      available: true,
+      activeCount: 0,
+      candidates: [],
     },
     sourceRefs: [],
     contractLimitations: [
@@ -493,9 +427,33 @@ function memory(stage: DurableFixtureStage): MemoryViewModel {
       memoryRefs: [{ id: memoryEvidence.id, kind: "memory", label: "先结论后细节的写作反馈" }],
       evidenceRefs: [memoryEvidence],
     },
+    items: [
+      {
+        memoryId: memoryEvidence.id,
+        content: "输出建议时先给结论，再补充依据。",
+        scope: "project",
+        category: "preference",
+        status: "materialized",
+        materializationStatus: "materialized",
+        recallState: rolledBack ? "historical" : "active",
+        sensitivity: "internal",
+        whyRemembered: "用户在 Review 中确认了这条工作偏好。",
+        recallExplanation: "只有当前项目与任务相关时才会参与混合检索，并在每个回合重新排序。",
+        acceptedAt: generatedAt,
+        evidenceIds: [conversationEvidence.id],
+        sourceRefs: [memoryEvidence, conversationEvidence],
+        privacyErased: false,
+        canCorrect: !rolledBack,
+        canStopRecall: !rolledBack,
+        canArchive: !rolledBack,
+        canRestore: false,
+        canRollback: !rolledBack,
+        canPrivacyErase: true,
+      },
+    ],
     sourceRefs: [memoryEvidence, conversationEvidence],
     contractLimitations: [
-      "MemoryViewModel 只提供汇总和 lane 级读取，不提供单条回滚动作。",
+      "MemoryViewModel 的单条动作能力来自后端字段；fixture 不证明真实原生确认。",
       "汇总数量不能证明某个建议已经应用。",
     ],
   };

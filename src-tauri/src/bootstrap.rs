@@ -17,12 +17,10 @@ use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapSta
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
-    reconcile_collaboration_guidance_authority, AgentProposal, AgentRunReceiptKey,
-    CollaborationGuidanceCutoverStatus, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, HSAssetAuthorityRegistry, MemoryLifecycleStore, PlanExecuteSessionStore,
-    ProposalSource, ProposalStore, ProposalType, ReviewWorkflow, RiskLevel,
+    AgentProposal, AgentRunReceiptKey, DurableWriteRequest, DurableWriteSource,
+    DurableWriteSubject, MemoryLifecycleStore, PlanExecuteSessionStore, ProposalSource,
+    ProposalStore, ProposalType, ReviewWorkflow, RiskLevel,
 };
-use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
@@ -1530,42 +1528,6 @@ fn init_life_event_store(
     }
 }
 
-fn init_heuristic_store(
-    db_path: &Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<openlife_core::agent::HeuristicStore, String> {
-    match openlife_core::agent::HeuristicStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            if !ephemeral_store_fallback_allowed() {
-                return Err(format!(
-                    "heuristics.db durable initialization failed: {primary_err}"
-                ));
-            }
-            let fallback = recovery_db_path("heuristics.db");
-            startup_warnings.borrow_mut().push(format!(
-                "heuristics.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match openlife_core::agent::HeuristicStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 heuristics.db 初始化也失败，已降级为内存数据库：{}",
-                        fallback_err
-                    ));
-                    openlife_core::agent::HeuristicStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 heuristic store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
 fn init_proposal_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -2111,7 +2073,12 @@ fn bootstrap_with_secret_store(
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
-    match life_model_manager.load() {
+    // Bootstrap must remain read-only for an absent legacy model. Calling
+    // `load()` here used to manufacture a default-filled YAML document on the
+    // first launch, which then looked like user-authored migration input to the
+    // v2 product path. Canonical creation is owned by an explicitly reviewed
+    // v2 proposal, never by application startup.
+    match life_model_manager.load_existing() {
         Ok(_) => persistence.register_read_write("LifeModelFileStore"),
         Err(error) => persistence.register_unavailable(
             "LifeModelFileStore",
@@ -2354,93 +2321,7 @@ fn bootstrap_with_secret_store(
             }
         });
 
-    let heuristics_db_path = data_dir.join("heuristics.db");
-    let heuristic_store = init_store(
-        || init_heuristic_store(&heuristics_db_path, &startup_warnings),
-        || {
-            openlife_core::agent::HeuristicStore::open_read_only_existing(&heuristics_db_path)
-                .map_err(|e| e.to_string())
-        },
-        || openlife_core::agent::HeuristicStore::new_in_memory().map_err(|e| e.to_string()),
-        "HeuristicStore",
-        &startup_warnings,
-        &persistence,
-    );
-    let heuristic_store =
-        required_store_or_unavailable(heuristic_store, "HeuristicStore", &startup_warnings, || {
-            openlife_core::agent::HeuristicStore::unavailable_sentinel()
-                .map_err(|error| error.to_string())
-        });
-    if let Err(e) = heuristic_store.seed_mvp_heuristics() {
-        startup_warnings
-            .borrow_mut()
-            .push(format!("initial heuristics seed failed: {}", e));
-    }
     let policy_store = openlife_core::agent::PolicyStore::mvp_builtin();
-    match HSAssetAuthorityRegistry::new(life_model_manager.hs_asset_authority_registry_path()) {
-        Ok(hs_authority_registry) => {
-            persistence.register_read_write("HSAssetAuthorityRegistry");
-            let hs_reconciliation = if persistence.bootstrap_mutations_safe() {
-                (|| -> Result<(), String> {
-                    let hs_authority_model = life_model_manager.load().map_err(|error| {
-                        format!(
-                    "LifeModel could not be loaded for HS asset authority reconciliation: {error}"
-                )
-                    })?;
-                    let hs_cutover = reconcile_collaboration_guidance_authority(
-                        &hs_authority_registry,
-                        &hs_authority_model,
-                        &heuristic_store,
-                    )
-                    .map_err(|error| {
-                        format!("collaboration guidance authority reconciliation failed: {error}")
-                    })?;
-                    match hs_cutover.status {
-                        CollaborationGuidanceCutoverStatus::Promoted
-                        | CollaborationGuidanceCutoverStatus::AlreadyPromoted => life_model_manager
-                            .save_hs_compatibility_view(&hs_cutover.projection.yaml)
-                            .map_err(|error| {
-                                format!(
-                            "derived collaboration guidance YAML projection failed: {error}"
-                        )
-                            })?,
-                        CollaborationGuidanceCutoverStatus::ShadowEvidencePending => {
-                            log::info!(
-                                "collaboration guidance remains LifeModel YAML-owned until a real product runtime receipt is observed; LM-C promotion is fail-closed"
-                            );
-                        }
-                    }
-                    Ok(())
-                })()
-            } else {
-                startup_warnings.borrow_mut().push(
-                    "HS asset authority reconciliation skipped because another canonical store is degraded"
-                        .into(),
-                );
-                Ok(())
-            };
-            if let Err(error) = hs_reconciliation {
-                persistence.register_unavailable(
-                    "HSAssetAuthorityRegistry",
-                    "hs_asset_authority_reconciliation_failed",
-                    &error,
-                );
-                startup_warnings.borrow_mut().push(format!(
-                    "HS asset authority is unavailable; product entered read-only degraded mode: {error}"
-                ));
-            }
-        }
-        Err(error) => {
-            persistence.register_unavailable(
-                "HSAssetAuthorityRegistry",
-                "hs_asset_authority_registry_open_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "HS asset authority registry is unavailable; product entered read-only degraded mode: {error}"
-            ));
-        }
-    }
 
     let proposals_db_path = data_dir.join("proposals.db");
     let proposal_store = init_store(
@@ -2468,6 +2349,32 @@ fn bootstrap_with_secret_store(
     let memory_lifecycle_store = optional_store(
         memory_lifecycle_store,
         "MemoryLifecycleStore",
+        &startup_warnings,
+    );
+
+    let life_model_learning_db_path = data_dir.join("life_model_learning.db");
+    let life_model_learning_store = init_store(
+        || {
+            openlife_core::agent::LifeModelLearningStore::new(&life_model_learning_db_path)
+                .map_err(|error| error.to_string())
+        },
+        || {
+            openlife_core::agent::LifeModelLearningStore::open_read_only_existing(
+                &life_model_learning_db_path,
+            )
+            .map_err(|error| error.to_string())
+        },
+        || {
+            openlife_core::agent::LifeModelLearningStore::new_in_memory()
+                .map_err(|error| error.to_string())
+        },
+        "LifeModelLearningStore",
+        &startup_warnings,
+        &persistence,
+    );
+    let life_model_learning_store = optional_store(
+        life_model_learning_store,
+        "LifeModelLearningStore",
         &startup_warnings,
     );
 
@@ -2875,9 +2782,9 @@ fn bootstrap_with_secret_store(
     };
 
     let hot_cache: SharedHotCache = {
-        let initial_cache = match life_model_manager.load() {
-            Ok(model) => HotMemoryCache::from_life_model(&model),
-            Err(_) => HotMemoryCache::default(),
+        let initial_cache = match life_model_manager.load_existing() {
+            Ok(Some(model)) => HotMemoryCache::from_life_model(&model),
+            Ok(None) | Err(_) => HotMemoryCache::default(),
         };
         Arc::new(tokio::sync::RwLock::new(initial_cache))
     };
@@ -3073,16 +2980,6 @@ fn bootstrap_with_secret_store(
         },
     }
 
-    let builder_session_store = BuilderSessionStore::new(data_dir.join("builder_sessions.json"));
-    match builder_session_store.list_unfinished_sessions() {
-        Ok(_) => persistence.register_read_write("BuilderSessionStore"),
-        Err(error) => persistence.register_unavailable(
-            "BuilderSessionStore",
-            "builder_session_store_read_failed",
-            &error.to_string(),
-        ),
-    }
-
     let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
     match plugin_registry.reload() {
         Ok(_) => persistence.register_read_write("PluginRegistry"),
@@ -3148,20 +3045,18 @@ fn bootstrap_with_secret_store(
             Ok(store) => {
                 persistence.register_read_write("StateStore");
                 if persistence.bootstrap_mutations_safe() {
-                    let daily_task_cutover_result = life_model_manager
-                        .load()
-                        .map_err(|error| {
-                            format!(
-                                "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
-                            )
-                        })
-                        .and_then(|model| {
-                            crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
+                    let daily_task_cutover_result = match life_model_manager.load_existing() {
+                        Ok(Some(model)) => crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
                                 &store,
                                 &model,
                                 chrono::Utc::now(),
                             )
-                        });
+                            .map(|_| ()),
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(format!(
+                            "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
+                        )),
+                    };
                     if let Err(error) = daily_task_cutover_result {
                         // Shipped product reads require the import receipt and
                         // fail closed. Never merge a partial StateStore view
@@ -3252,7 +3147,6 @@ fn bootstrap_with_secret_store(
         feedback_store: Arc::new(Mutex::new(feedback_store)),
         vector_store: Arc::new(Mutex::new(vector_store)),
         vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-        builder_session_store: Arc::new(Mutex::new(builder_session_store)),
         a2a_sidecar: Arc::new(Mutex::new(a2a_sidecar::A2ASidecar::new(
             crate::a2a_server::configured_a2a_port(),
         ))),
@@ -3261,10 +3155,11 @@ fn bootstrap_with_secret_store(
         agent_run_store: agent_run_store.map(|store| Arc::new(Mutex::new(store))),
         evidence_store: Arc::new(Mutex::new(evidence_store)),
         life_event_store: life_event_store.map(|store| Arc::new(Mutex::new(store))),
-        heuristic_store: Arc::new(Mutex::new(heuristic_store)),
         policy_store: Arc::new(policy_store),
         proposal_store: proposal_store.map(|store| Arc::new(Mutex::new(store))),
         memory_lifecycle_store: memory_lifecycle_store.map(|store| Arc::new(Mutex::new(store))),
+        life_model_learning_store: life_model_learning_store
+            .map(|store| Arc::new(Mutex::new(store))),
         plan_execute_session_store: plan_execute_session_store
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_agent_session_store: main_chat_agent_session_store
@@ -3300,9 +3195,7 @@ fn bootstrap_with_secret_store(
 mod tests {
     use super::*;
     use crate::secret_store::SecretStore;
-    use openlife_core::agent::{
-        EvidenceQuery, HeuristicQuery, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
-    };
+    use openlife_core::agent::EvidenceQuery;
 
     #[test]
     fn future_legacy_schedule_is_staged_once_through_review_workflow() {
@@ -3712,6 +3605,13 @@ mod tests {
         assert_eq!(secrets.operation_counts(), (0, 0));
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
         assert!(!directory.path().join("mcp_audit.db").exists());
+        assert!(
+            !directory
+                .path()
+                .join("life-model/current/life_model.yaml")
+                .exists(),
+            "fresh bootstrap must not manufacture a legacy LifeModel YAML"
+        );
         assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 6);
         assert!(result.state.credential_bootstrap_snapshot.purposes[..5]
             .iter()
@@ -4373,7 +4273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_initializes_hs_stores_and_seeds_mvp_heuristics() {
+    async fn fresh_bootstrap_keeps_retired_hs_stores_absent_and_preserves_current_owners() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let result =
             bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
@@ -4392,16 +4292,20 @@ mod tests {
             .query(EvidenceQuery::default())
             .unwrap();
 
-        let heuristic_store = result.state.heuristic_store.lock().await;
-        let heuristics = heuristic_store
-            .query(HeuristicQuery {
-                domain: Some("planning".into()),
-                ..Default::default()
-            })
-            .unwrap();
-        assert!(heuristics
+        assert!(!temp_dir.path().join("heuristics.db").exists());
+        assert!(!temp_dir
+            .path()
+            .join("life-model/current/hs_asset_authority.db")
+            .exists());
+        let persistence = result.state.persistence_coordinator.snapshot();
+        assert!(!persistence
+            .stores
             .iter()
-            .any(|heuristic| heuristic.id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING));
+            .any(|store| store.store == "HeuristicStore"));
+        assert!(!persistence
+            .stores
+            .iter()
+            .any(|store| store.store == "HSAssetAuthorityRegistry"));
         assert!(result
             .state
             .policy_store
@@ -4482,6 +4386,27 @@ mod tests {
         );
         assert!(projection.safe_mode.active);
         assert_eq!(projection.readiness.database_status, "degraded");
+    }
+
+    #[test]
+    fn legacy_hs_files_remain_inert_and_byte_unchanged_during_bootstrap() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heuristic_path = temp_dir.path().join("heuristics.db");
+        let authority_path = temp_dir
+            .path()
+            .join("life-model/current/hs_asset_authority.db");
+        std::fs::create_dir_all(authority_path.parent().unwrap()).unwrap();
+        let heuristic_marker = b"retired-heuristic-store-must-remain-inert";
+        let authority_marker = b"retired-authority-registry-must-remain-inert";
+        std::fs::write(&heuristic_path, heuristic_marker).unwrap();
+        std::fs::write(&authority_path, authority_marker).unwrap();
+
+        let result =
+            bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
+
+        assert!(result.state.startup_warnings.is_empty());
+        assert_eq!(std::fs::read(heuristic_path).unwrap(), heuristic_marker);
+        assert_eq!(std::fs::read(authority_path).unwrap(), authority_marker);
     }
 
     #[tokio::test]
@@ -4873,39 +4798,6 @@ mod tests {
         let secrets = TestSecretStore::default();
         let preparation =
             bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
-        {
-            let manager = preparation.state.life_model_manager.lock().await;
-            let heuristic_store = preparation.state.heuristic_store.lock().await;
-            let registry = openlife_core::agent::HSAssetAuthorityRegistry::new(
-                manager.hs_asset_authority_registry_path(),
-            )
-            .expect("restart test HS authority registry");
-            let revision = registry
-                .authority(openlife_core::agent::HSAssetCategory::CollaborationGuidance)
-                .expect("restart test HS authority")
-                .revision;
-            let scenario = registry
-                .record_product_scenario(
-                    openlife_core::agent::HSAssetCategory::CollaborationGuidance,
-                    revision,
-                    "test-fixture:provider-consent-restart",
-                    openlife_core::agent::HSAssetOwner::AcceptedHsStore,
-                    &[openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.into()],
-                    openlife_core::agent::digest_string("provider-consent-restart-runtime-audit"),
-                )
-                .expect("restart test product receipt shape");
-            let model = manager.load().expect("restart test LifeModel");
-            let report = openlife_core::agent::complete_collaboration_guidance_cutover(
-                &registry,
-                &model,
-                &heuristic_store,
-                &scenario,
-            )
-            .expect("restart test HS cutover fixture");
-            manager
-                .save_hs_compatibility_view(&report.projection.yaml)
-                .expect("restart test HS compatibility view");
-        }
         drop(preparation);
 
         let first =

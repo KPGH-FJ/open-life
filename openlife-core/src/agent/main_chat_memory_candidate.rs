@@ -89,7 +89,7 @@ pub(crate) struct DeterministicLifeEventPolicyProof {
     normalized_claim: String,
     confidence: f32,
     risk_level: crate::agent::RiskLevel,
-    sensitivity: crate::agent::lifemodel_backend_completion::LifeEventSensitivity,
+    sensitivity: crate::agent::life_event_store::LifeEventSensitivity,
     runtime_binding_digest: String,
     runtime_nonce: Uuid,
 }
@@ -143,9 +143,7 @@ impl DeterministicLifeEventPolicyProof {
         self.risk_level
     }
 
-    pub(crate) fn sensitivity(
-        &self,
-    ) -> crate::agent::lifemodel_backend_completion::LifeEventSensitivity {
+    pub(crate) fn sensitivity(&self) -> crate::agent::life_event_store::LifeEventSensitivity {
         self.sensitivity
     }
 
@@ -153,7 +151,7 @@ impl DeterministicLifeEventPolicyProof {
     pub(crate) fn with_policy_for_test(
         mut self,
         risk_level: crate::agent::RiskLevel,
-        sensitivity: crate::agent::lifemodel_backend_completion::LifeEventSensitivity,
+        sensitivity: crate::agent::life_event_store::LifeEventSensitivity,
     ) -> Self {
         self.risk_level = risk_level;
         self.sensitivity = sensitivity;
@@ -205,7 +203,7 @@ pub(crate) fn issue_deterministic_life_event_policy_proof(
         normalized_claim: candidate.normalized_claim,
         confidence: candidate.confidence,
         risk_level: crate::agent::RiskLevel::Low,
-        sensitivity: crate::agent::lifemodel_backend_completion::LifeEventSensitivity::Low,
+        sensitivity: crate::agent::life_event_store::LifeEventSensitivity::Low,
         runtime_binding_digest: String::new(),
         runtime_nonce: Uuid::new_v4(),
     };
@@ -216,6 +214,13 @@ pub(crate) fn issue_deterministic_life_event_policy_proof(
 pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemoryCandidate> {
     let normalized = compact_text(user_text);
     if normalized.is_empty() {
+        return Vec::new();
+    }
+    // A read-only LifeModel query is not evidence about the user and must not
+    // be promoted into a durable-write candidate merely because it names the
+    // LifeModel. Mixed read/write requests are excluded by the classifier and
+    // continue through the normal governed proposal path.
+    if crate::agent::is_explicit_lifemodel_read_intent(&normalized) {
         return Vec::new();
     }
     if is_current_external_fact_request(&normalized) {
@@ -243,7 +248,7 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
         }
         let span_id = source_span_id(index, &compact);
         let explicit_memory = has_explicit_memory_marker(&lower);
-        let future_rule = is_future_rule(&lower);
+        let future_rule = is_future_rule(&lower) && has_personal_rule_subject(&lower);
         let identity_or_preference = is_identity_or_long_term_preference(&lower);
         let no_op_weather_statement = is_weather_statement_only(&lower);
         let hypothetical_only = is_hypothetical_plan_only(&lower);
@@ -282,19 +287,15 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
                 &mut candidates,
                 &span_id,
                 MemoryCandidateKind::ProceduralRule,
-                MemoryDestination::LifeModelProposal,
+                MemoryDestination::MemoryProposal,
                 &compact,
                 &claim,
                 "internal",
                 "stable",
-                if explicit_memory {
-                    "explicit"
-                } else {
-                    "implicit"
-                },
+                "explicit",
                 "future_rule",
                 0.91,
-                vec!["future_behavior_rule".into()],
+                vec!["agent_procedural_memory_rule".into()],
             );
         }
 
@@ -773,6 +774,13 @@ fn is_future_rule(lower: &str) -> bool {
     )
 }
 
+fn has_personal_rule_subject(lower: &str) -> bool {
+    lower.starts_with("i ")
+        || lower.starts_with("my ")
+        || lower.starts_with("me ")
+        || contains_any(lower, &[" i ", " my ", " me ", "我", "我的"])
+}
+
 fn is_identity_or_long_term_preference(lower: &str) -> bool {
     if contains_any(
         lower,
@@ -795,15 +803,74 @@ fn is_identity_or_long_term_preference(lower: &str) -> bool {
             "i am becoming",
             "i am a",
             "design lead",
-            "life model",
-            "lifemodel",
+            "long-term preference",
+            "long term preference",
             "我是",
             "身份",
             "长期偏好",
             "价值观",
         ],
-    ) || (contains_any(lower, &["i prefer", "我偏好", "我更喜欢"])
-        && contains_any(lower, &["以后", "长期", "always", "以后都"]))
+    ) || is_explicit_lifemodel_write_expression(lower)
+        || (contains_any(lower, &["i prefer", "我偏好", "我更喜欢"])
+            && contains_any(
+                lower,
+                &[
+                    "以后",
+                    "长期",
+                    "always",
+                    "from now on",
+                    "long-term",
+                    "long term",
+                    "以后都",
+                ],
+            ))
+}
+
+fn is_explicit_lifemodel_write_expression(lower: &str) -> bool {
+    if is_negated_memory_or_lifemodel_write(lower) {
+        return false;
+    }
+    contains_any(
+        lower,
+        &[
+            "update my life model",
+            "update my lifemodel",
+            "update the life model",
+            "update the lifemodel",
+            "update life model",
+            "update lifemodel",
+            "change my life model",
+            "change my lifemodel",
+            "change the life model",
+            "change the lifemodel",
+            "change lifemodel",
+            "modify my life model",
+            "modify my lifemodel",
+            "modify the life model",
+            "modify the lifemodel",
+            "modify lifemodel",
+            "add to my life model",
+            "add to my lifemodel",
+            "add this to my life model",
+            "add this to my lifemodel",
+            "write to my life model",
+            "write to my lifemodel",
+            "更新我的 life model",
+            "更新我的lifemodel",
+            "更新 life model",
+            "更新lifemodel",
+            "修改我的 life model",
+            "修改我的lifemodel",
+            "修改 life model",
+            "修改lifemodel",
+            "写入我的 life model",
+            "写入我的lifemodel",
+            "加入我的 life model",
+            "加入我的lifemodel",
+            "更新个人模型",
+            "修改个人模型",
+        ],
+    )
 }
 
 fn is_life_event_expression(lower: &str) -> bool {
@@ -1272,11 +1339,15 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_memory_candidate_routes_future_rule_to_lifemodel_proposal() {
+    fn main_chat_memory_candidate_routes_future_rule_to_agent_memory_proposal() {
         let result = routed("以后早上安排工作前先确认我有没有吃东西");
 
-        assert_eq!(result.lifemodel_proposal_candidate_ids.len(), 1);
-        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert_eq!(result.memory_proposal_candidate_ids.len(), 1);
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        assert!(result.candidates.iter().any(|candidate| {
+            candidate.kind == MemoryCandidateKind::ProceduralRule
+                && candidate.destination == MemoryDestination::MemoryProposal
+        }));
     }
 
     #[test]
@@ -1299,10 +1370,67 @@ mod tests {
 
     #[test]
     fn explicit_negative_lifemodel_boundary_is_not_a_write_candidate() {
-        let result = routed("使用 web.search 生成一份报告。不要修改 LifeModel。");
+        for text in [
+            "使用 web.search 生成一份报告。不要修改 LifeModel。",
+            "忽略 Life Model。本轮请写一封详细的项目状态邮件，包含四个小节，每节两句话。不要调用工具，不要写入任何长期状态。",
+        ] {
+            let result = routed(text);
+            assert!(
+                result.memory_proposal_candidate_ids.is_empty(),
+                "negative LifeModel boundary became Memory write: {text}"
+            );
+            assert!(
+                result.lifemodel_proposal_candidate_ids.is_empty(),
+                "negative LifeModel boundary became LifeModel write: {text}"
+            );
+        }
+    }
 
-        assert!(result.memory_proposal_candidate_ids.is_empty());
-        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    #[test]
+    fn explicit_lifemodel_read_is_not_misclassified_as_a_write_candidate() {
+        for text in [
+            "我的 Life Model 记录了什么沟通偏好？",
+            "What is recorded in my Life Model?",
+            "What changed in my Life Model?",
+            "我的 Life Model 更新了什么？",
+        ] {
+            let result = routed(text);
+            assert!(result.candidates.is_empty(), "read became write: {text}");
+            assert!(result.memory_proposal_candidate_ids.is_empty());
+            assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        }
+    }
+
+    #[test]
+    fn mixed_lifemodel_read_and_write_still_requires_a_proposal() {
+        for text in [
+            "Show my Life Model and update my identity: I am a design lead.",
+            "看看我的个人模型，然后更新我的身份：我是设计负责人。",
+        ] {
+            let result = routed(text);
+            assert_eq!(
+                result.lifemodel_proposal_candidate_ids.len(),
+                1,
+                "mixed read/write lost governance: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_lifemodel_change_without_a_supported_field_still_routes_to_governance() {
+        for text in [
+            "Update my Life Model.",
+            "Update my LifeModel.",
+            "Show me and update my LifeModel: communication style is concise.",
+            "修改我的 Life Model。",
+        ] {
+            let result = routed(text);
+            assert_eq!(
+                result.lifemodel_proposal_candidate_ids.len(),
+                1,
+                "explicit LifeModel change lost governed routing: {text}"
+            );
+        }
     }
 
     #[test]
@@ -1370,8 +1498,12 @@ mod tests {
             routed("空腹喝咖啡会心慌，香蕉酸奶会缓解。以后早上安排工作前先确认我有没有吃东西");
 
         assert!(result.life_event_candidate_ids.is_empty());
-        assert_eq!(result.memory_proposal_candidate_ids.len(), 1);
-        assert_eq!(result.lifemodel_proposal_candidate_ids.len(), 1);
+        assert_eq!(result.memory_proposal_candidate_ids.len(), 2);
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        assert!(result.candidates.iter().any(|candidate| {
+            candidate.kind == MemoryCandidateKind::ProceduralRule
+                && candidate.destination == MemoryDestination::MemoryProposal
+        }));
         assert!(result.candidates.len() >= 2);
     }
 

@@ -28,9 +28,12 @@ approval.
 
 ## Accepted Decisions
 
-- `adr/0013-lifemodel-hs-source-of-truth-governance.md`
+- `adr/0016-agent-memory-lifemodel-domain-boundaries.md`
 - `adr/0014-explicit-user-memory-write-lane.md`
 - `adr/0015-transient-state-command-lane.md`
+
+ADR 0013 is retained as superseded historical evidence and is not current
+architecture authority.
 
 ## CI Support
 

@@ -1,12 +1,12 @@
 use crate::agent::{
-    AgentExecutionBudget, AgentTask, AgentTaskKind, GovernanceDecisionKind, HSSelectionAudit,
-    LifeModelGovernor, PlanDraft, PlanExecuteInput, PlanExecuteProductContract,
+    AgentExecutionBudget, AgentTask, AgentTaskKind, GovernanceDecisionKind, LifeModelGovernor,
+    PlanDraft, PlanExecuteInput, PlanExecuteLifeModelHint, PlanExecuteProductContract,
     PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteSessionStatus,
     PlanExecuteSessionStore, PlanExecuteStepEdit, PlanStep, PlanStepStatus, ProposalStore,
-    RiskLevel, RuntimeHSPacket, RuntimeInput,
+    RiskLevel, RuntimeInput, RuntimePolicyContext,
 };
 use crate::layer::Layer;
-use crate::life_model::LifeModel;
+use crate::life_model::v2::LifeModelSectionV2;
 use crate::llm::ChatMessage;
 
 fn runtime_input(user_text: &str) -> RuntimeInput {
@@ -25,36 +25,12 @@ fn runtime_input_with_source_run(user_text: &str, source_run_id: Option<&str>) -
             }],
             layer: Layer::L2,
         },
-        LifeModel::default(),
         Some("memory context should not be copied into trace".into()),
         "Available tools: memory.search, calendar.create_event, file.update",
-        source_run_id.map(test_hs_packet),
+        RuntimePolicyContext::fail_closed(),
         AgentExecutionBudget::default(),
     )
-}
-
-fn test_hs_packet(source_run_id: &str) -> RuntimeHSPacket {
-    RuntimeHSPacket {
-        selected_policies: Vec::new(),
-        selected_heuristics: Vec::new(),
-        guidance_refs: Vec::new(),
-        estimated_tokens: 8,
-        audit: HSSelectionAudit {
-            agent_task_id: Some("task-plan-execute".into()),
-            agent_run_id: Some(source_run_id.into()),
-            input_digest: "digest-input".into(),
-            selected_policy_ids: Vec::new(),
-            selected_heuristic_ids: Vec::new(),
-            selected_guidance_ids: Vec::new(),
-            selected_guidance_refs: Vec::new(),
-            excluded_assets: Vec::new(),
-            estimated_tokens: 8,
-            token_budget: 128,
-        },
-        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-            crate::llm::ProviderLocalOnlyReason::TestFixture,
-        ),
-    }
+    .with_source_run_id(source_run_id.unwrap_or(""))
 }
 
 fn plan_input(user_text: &str, max_steps: usize) -> PlanExecuteInput {
@@ -62,6 +38,7 @@ fn plan_input(user_text: &str, max_steps: usize) -> PlanExecuteInput {
         runtime_input: runtime_input(user_text),
         objective: "metadata-safe objective".into(),
         max_steps,
+        life_model_hints: Vec::new(),
     }
 }
 
@@ -74,6 +51,7 @@ fn plan_input_with_source_run(
         runtime_input: runtime_input_with_source_run(user_text, Some(source_run_id)),
         objective: "metadata-safe objective".into(),
         max_steps,
+        life_model_hints: Vec::new(),
     }
 }
 
@@ -307,6 +285,30 @@ fn weekly_planning_product_contract_is_ready_for_clean_plan_draft() {
         report.metadata_safe_summary["proposalFirstWriteBoundary"],
         true
     );
+}
+
+#[test]
+fn weekly_planning_uses_confirmed_lifemodel_goal_without_changing_action_authority() {
+    let service = PlanExecuteService;
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let input = plan_input(
+        "Plan this week around my product work.",
+        contract.max_step_count,
+    )
+    .with_life_model_hints(vec![PlanExecuteLifeModelHint {
+        item_id: "goal-openlife".into(),
+        section: LifeModelSectionV2::LongTermGoals,
+        value: "完成 OpenLife: 让个人 Agent OS 真正可用".into(),
+        selected_reason: "task keyword matches: 1".into(),
+    }]);
+    let draft = service.draft_product_plan(&input, PlanExecuteProductScenario::WeeklyPlanning);
+
+    assert!(draft.steps[0].title.contains("OpenLife"));
+    assert_eq!(draft.steps[0].intent, "lifemodel_goal_alignment");
+    assert!(!draft.steps[0].declared_write);
+    assert!(draft.steps[0].tool_name.is_none());
+    assert_eq!(draft.steps[0].risk_level, RiskLevel::Low);
+    assert!(contract.evaluate_draft(&draft).is_ok());
 }
 
 #[test]

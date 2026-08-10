@@ -12,6 +12,7 @@ pub mod bootstrap;
 pub mod commands;
 pub(crate) mod danger_action_confirmation;
 pub mod errors;
+pub(crate) mod life_model_learning;
 #[allow(dead_code)]
 pub(crate) mod life_model_materializer_guard;
 pub(crate) mod life_model_write_gateway;
@@ -31,12 +32,12 @@ pub(crate) mod main_chat_event_stream;
 pub(crate) mod main_chat_final_gate;
 #[allow(dead_code)]
 pub(crate) mod main_chat_generation_support;
-pub(crate) mod main_chat_hs_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
 #[allow(dead_code)]
 pub(crate) mod main_chat_live_provider_harness;
 pub(crate) mod main_chat_memory_proposals;
+pub(crate) mod main_chat_policy_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_preprocess;
 pub(crate) mod main_chat_react_execution;
@@ -58,6 +59,7 @@ pub(crate) mod main_chat_task_controls;
 pub(crate) mod main_chat_turn_pipeline;
 #[allow(dead_code)]
 pub mod main_chat_turn_runtime;
+pub(crate) mod markdown_memory;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
@@ -95,7 +97,7 @@ mod main_chat_react_boundary_tests;
 mod main_chat_react_unit_tests;
 
 #[cfg(test)]
-mod main_chat_hs_runtime_tests;
+mod main_chat_policy_runtime_tests;
 
 #[cfg(test)]
 mod main_chat_task_control_tests;
@@ -132,19 +134,9 @@ use commands::agent_runtime::{
     skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
-use commands::builder::{
-    builder_create_proposals, builder_delete_session, builder_get_pending_signals,
-    builder_list_unfinished, builder_start, builder_step, get_model_4d_completion,
-    goal_capability_gap_analysis, goal_capability_gap_report, identity_goal_alignment_check,
-    identity_goal_alignment_report,
-};
-use commands::calibration::{
-    calibration_create_proposals, generate_calibration_report, generate_micro_evolution_changes,
-    mark_calibration_shown, should_show_calibration,
-};
 use commands::chat::{
-    create_chat_session, delete_chat_session, get_chat_history, list_chat_sessions,
-    rename_chat_session, save_chat_message,
+    create_chat_session, delete_chat_session, get_chat_history, get_chat_life_model_influence,
+    list_chat_sessions, rename_chat_session, save_chat_message,
 };
 use commands::diagnostics::{
     check_ollama_status, get_policy_router_status, get_runtime_build_info, get_system_diagnostics,
@@ -153,26 +145,30 @@ use commands::diagnostics::{
 #[cfg(feature = "dev-extensions")]
 use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
 use commands::execution::{list_tool_permissions, revoke_tool_permission};
-use commands::feedback::{
-    generate_evolution_report, get_feedback_summary, log_analytics_event, save_feedback,
-};
 pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
-use commands::life_model::{get_life_model, get_life_model_current_view};
+use commands::life_model::{
+    confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
+    draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
+    draft_lifemodel_v2_rollback, edit_lifemodel_learning_proposal,
+    pause_lifemodel_learning_suggestion_class, reject_lifemodel_learning_candidate,
+    stage_lifemodel_learning_candidate,
+};
 use commands::mcp::list_tool_manifests;
 #[cfg(feature = "dev-extensions")]
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
-    list_mcp_tools, recommend_mcp_manifests, register_mcp_server, unregister_mcp_server,
+    list_mcp_tools, register_mcp_server, unregister_mcp_server,
 };
 use commands::memory::{
-    archive_low_access_memories, count_memory_chunks, create_knowledge_note, get_hot_cache,
-    get_memory_tier_stats, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
+    archive_low_access_memories, count_memory_chunks, create_knowledge_note,
+    draft_memory_archive_proposal, draft_memory_correction_proposal,
+    draft_memory_stop_recall_proposal, get_hot_cache, get_memory_tier_stats, list_archived_chunks,
+    privacy_erase_memory_asset, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
-use commands::proactive::get_proactive_suggestions;
 use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
     get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
@@ -188,7 +184,6 @@ use commands::settings::{
 #[cfg(feature = "dev-extensions")]
 use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
 use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
-use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_memory_proposals::draft_edit_memory_proposal;
@@ -196,6 +191,10 @@ use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
     retry_main_chat_agent_action,
+};
+use markdown_memory::{
+    deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
+    get_markdown_memory_view_model,
 };
 use read_models::life_model::get_life_model_view_model;
 use read_models::memory::get_memory_view_model;
@@ -307,6 +306,8 @@ pub struct SendMessageResult {
     pub model_invoked: bool,
     pub tool_invoked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_terminal: Option<crate::main_chat_turn_runtime::OpenLifeTurnTerminal>,
 }
 
@@ -340,16 +341,6 @@ impl std::fmt::Debug for SendMessageResult {
 }
 
 #[derive(serde::Serialize)]
-pub struct BuilderCompletion {
-    pub identity: f32,
-    pub goals: f32,
-    pub capabilities: f32,
-    pub state: f32,
-    pub overall: f32,
-    pub lowest_dimension: Option<String>,
-}
-
-#[derive(serde::Serialize)]
 pub struct OllamaModelInfo {
     pub name: String,
     pub size_mb: u64,
@@ -367,8 +358,6 @@ pub struct SystemDiagnostics {
     pub vector_corrupt_embedding_count: usize,
     pub vector_unknown_profile_count: usize,
     pub vector_profile_dimension_mismatch_count: usize,
-    pub unfinished_builder_sessions: usize,
-    pub pending_builder_review_sessions: usize,
     pub ollama_service_online: bool,
     pub ollama_online: bool,
     pub local_model: String,
@@ -388,14 +377,12 @@ pub struct SystemDiagnostics {
     pub active_data_dir: String,
     pub database_status: String,
     pub startup_warnings: Vec<String>,
-    pub snapshot_count: usize,
     pub life_model_ready: bool,
     pub app_version: String,
     pub model_empty: bool,
     pub chat_session_count: usize,
     pub usage_ready: bool,
     pub usage_readiness_issues: Vec<String>,
-    pub builder_completion: BuilderCompletion,
     pub ollama_models: Vec<OllamaModelInfo>,
     pub agent_run_count: usize,
     pub agent_run_store_status: String,
@@ -513,6 +500,15 @@ async fn select_artifact_output_directory<R: tauri::Runtime>(
     state: State<'_, Arc<AppState>>,
 ) -> Result<commands::settings::ArtifactOutputDirectorySelection, errors::AppError> {
     commands::settings::select_artifact_output_directory(app_handle, state.inner()).await
+}
+
+#[tauri::command]
+async fn select_markdown_memory_root<R: tauri::Runtime>(
+    scope: markdown_memory::MarkdownMemoryScope,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<commands::settings::MarkdownMemoryRootSelection, errors::AppError> {
+    commands::settings::select_markdown_memory_root(app_handle, state.inner(), scope).await
 }
 
 #[tauri::command]
@@ -942,18 +938,30 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_life_model,
-            get_life_model_current_view,
+            draft_legacy_lifemodel_migration,
+            draft_lifemodel_v2_change,
+            draft_lifemodel_v2_rollback,
+            draft_lifemodel_v2_export,
+            confirm_lifemodel_learning_candidate,
+            delete_lifemodel_learning_candidate,
+            reject_lifemodel_learning_candidate,
+            pause_lifemodel_learning_suggestion_class,
+            stage_lifemodel_learning_candidate,
+            edit_lifemodel_learning_proposal,
             get_life_state_projection,
             get_life_model_view_model,
             get_review_center_view_model,
             get_memory_view_model,
+            get_markdown_memory_view_model,
+            draft_markdown_memory_file_proposal,
+            deactivate_markdown_memory_file_proposal,
             get_provider_privacy_boundary_summary,
             get_tasks_view_model,
             get_workspace_view_model,
             get_config,
             save_config,
             select_artifact_output_directory,
+            select_markdown_memory_root,
             recover_required_credential_access,
             get_agent_run,
             list_agent_runs,
@@ -984,6 +992,10 @@ pub fn run() {
             draft_edit_memory_proposal,
             postpone_proposal,
             rollback_memory_asset,
+            draft_memory_correction_proposal,
+            draft_memory_archive_proposal,
+            draft_memory_stop_recall_proposal,
+            privacy_erase_memory_asset,
             list_memory_assets,
             get_memory_asset,
             send_message,
@@ -1002,6 +1014,7 @@ pub fn run() {
             cancel_main_chat_agent_task,
             retry_main_chat_agent_action,
             get_chat_history,
+            get_chat_life_model_influence,
             save_chat_message,
             #[cfg(feature = "dev-extensions")]
             execute_tool_call,
@@ -1017,8 +1030,6 @@ pub fn run() {
             list_mcp_tools,
             #[cfg(feature = "dev-extensions")]
             list_mcp_templates,
-            #[cfg(feature = "dev-extensions")]
-            recommend_mcp_manifests,
             list_tool_manifests,
             #[cfg(feature = "dev-extensions")]
             list_mcp_audit_logs,
@@ -1030,16 +1041,8 @@ pub fn run() {
             get_policy_router_status,
             get_model_router_status,
             set_scheduler_config,
-            create_snapshot,
-            list_snapshots,
-            restore_snapshot,
-            diff_snapshots,
-            save_feedback,
-            get_feedback_summary,
-            generate_evolution_report,
             run_memory_tier_maintenance,
             count_memory_chunks,
-            log_analytics_event,
             create_knowledge_note,
             search_memory,
             #[cfg(feature = "dev-extensions")]
@@ -1056,17 +1059,6 @@ pub fn run() {
             a2a_restart_sidecar,
             #[cfg(feature = "dev-extensions")]
             a2a_stop_sidecar,
-            builder_start,
-            builder_step,
-            builder_list_unfinished,
-            builder_delete_session,
-            builder_get_pending_signals,
-            builder_create_proposals,
-            get_model_4d_completion,
-            goal_capability_gap_analysis,
-            goal_capability_gap_report,
-            identity_goal_alignment_check,
-            identity_goal_alignment_report,
             export_all_data,
             get_danger_action_preflight,
             import_all_data,
@@ -1081,11 +1073,6 @@ pub fn run() {
             get_state_history,
             get_state_alerts,
             get_daily_goals,
-            generate_calibration_report,
-            generate_micro_evolution_changes,
-            calibration_create_proposals,
-            should_show_calibration,
-            mark_calibration_shown,
             get_hot_cache,
             archive_low_access_memories,
             restore_archived_chunks,
@@ -1100,7 +1087,6 @@ pub fn run() {
             rotate_mcp_audit_key,
             get_privacy_policy,
             set_privacy_policy,
-            get_proactive_suggestions,
             list_tool_permissions,
             revoke_tool_permission,
             #[cfg(feature = "dev-extensions")]
@@ -1171,6 +1157,55 @@ mod external_source_tests {
             assert!(
                 validated_external_https_source(rejected).is_err(),
                 "URL should be rejected: {rejected}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod retired_lifemodel_surface_tests {
+    #[test]
+    fn shipped_handler_contains_only_the_v2_lifemodel_product_surface() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("shipped Tauri handler start");
+        let end = source[start..]
+            .find("])\n        .build(")
+            .map(|offset| start + offset)
+            .expect("shipped Tauri handler end");
+        let handler = &source[start..end];
+
+        for required in [
+            "get_life_model_view_model",
+            "draft_lifemodel_v2_change",
+            "draft_legacy_lifemodel_migration",
+        ] {
+            assert!(
+                handler.contains(required),
+                "missing current command {required}"
+            );
+        }
+        for retired in [
+            "get_life_model,",
+            "save_life_model,",
+            "get_life_model_current_view",
+            "builder_start",
+            "builder_create_proposals",
+            "get_model_4d_completion",
+            "recommend_mcp_manifests",
+            "create_snapshot",
+            "restore_snapshot",
+            "calibration_create_proposals",
+            "save_feedback",
+            "get_feedback_summary",
+            "generate_evolution_report",
+            "log_analytics_event",
+            "get_proactive_suggestions",
+        ] {
+            assert!(
+                !handler.contains(retired),
+                "retired LifeModel command is still shipped: {retired}"
             );
         }
     }

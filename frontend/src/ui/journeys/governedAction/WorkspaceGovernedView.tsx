@@ -80,6 +80,7 @@ export function WorkspaceGovernedView({
   onConfirmResume,
   onCancelResume,
   onOpenInspector,
+  onOpenLifeModel,
   conversation,
 }: {
   snapshot: GovernedActionSnapshot | null;
@@ -91,6 +92,7 @@ export function WorkspaceGovernedView({
   onConfirmResume: () => void;
   onCancelResume: () => void;
   onOpenInspector: () => void;
+  onOpenLifeModel: (itemRef: string) => void;
   conversation?: WorkspaceConversationController;
 }) {
   const envelope = snapshot?.workspaceEnvelope;
@@ -103,10 +105,18 @@ export function WorkspaceGovernedView({
     Boolean(task?.conversationId) &&
     Boolean(conversation?.selectedSessionId) &&
     task?.conversationId === conversation?.selectedSessionId;
+  const taskConversationAvailable =
+    Boolean(task?.conversationId) &&
+    Boolean(conversation?.sessions.some(session => session.session_id === task?.conversationId));
+  const taskConversationMissing =
+    Boolean(task?.conversationId) &&
+    conversation?.loadStatus === "ready" &&
+    !taskConversationAvailable;
   const taskBelongsToAnotherConversation =
     Boolean(task?.conversationId) &&
     Boolean(conversation?.selectedSessionId) &&
-    task?.conversationId !== conversation?.selectedSessionId;
+    task?.conversationId !== conversation?.selectedSessionId &&
+    taskConversationAvailable;
   const permissionItem = model?.pendingReviewItems.find(item => item.type === "tool_permission");
   const resumeControl = snapshot ? findExactResumeControl(snapshot) : null;
   const lifecycle = task ? taskLifecyclePresentation(task) : null;
@@ -209,6 +219,7 @@ export function WorkspaceGovernedView({
         {conversation && (
           <WorkspaceConversationPanel
             controller={conversation}
+            onOpenLifeModel={onOpenLifeModel}
             disabledReason={conversationDisabledReason}
           />
         )}
@@ -243,6 +254,12 @@ export function WorkspaceGovernedView({
       {taskBelongsToAnotherConversation && (
         <FoundationNotice title="任务与当前对话不同" tone="neutral">
           <p>这项活动任务属于另一段对话；下方消息和发送操作仍以当前选中的对话为准。</p>
+        </FoundationNotice>
+      )}
+
+      {taskConversationMissing && (
+        <FoundationNotice title="任务对话无法恢复" tone="protection" live>
+          <p>后端仍有这项任务，但对应会话记录已经缺失；当前不会从摘要猜测上下文或继续执行。</p>
         </FoundationNotice>
       )}
 
@@ -312,7 +329,9 @@ export function WorkspaceGovernedView({
               data-action-id={resumeControl.id}
               data-action-kind={resumeControl.kind}
               data-action-effect={resumeControl.effect}
-              data-action-enabled={String(resumeControl.enabled)}
+              data-action-enabled={String(
+                resumeControl.enabled && envelope.status !== "stale" && !taskConversationMissing
+              )}
               data-action-disabled-reason={resumeControl.disabledReason ?? ""}
               data-action-target-ref={resumeControl.targetTaskId}
               data-action-requires-confirmation={String(
@@ -323,13 +342,17 @@ export function WorkspaceGovernedView({
               )}
               loading={actionBusy(resumeState)}
               loadingLabel={resumeState.phase === "refreshing" ? "正在核对" : "正在请求"}
-              disabled={!resumeControl.enabled || envelope.status === "stale"}
+              disabled={
+                !resumeControl.enabled || envelope.status === "stale" || taskConversationMissing
+              }
               disabledReason={
                 envelope.status === "stale"
                   ? "工作区状态已陈旧；请先重新读取。"
-                  : resumeControl.enabled
-                    ? undefined
-                    : resumeControl.disabledReason || "后端未允许恢复当前任务。"
+                  : taskConversationMissing
+                    ? "任务的原始会话记录缺失；不能从摘要重建并继续。"
+                    : resumeControl.enabled
+                      ? undefined
+                      : resumeControl.disabledReason || "后端未允许恢复当前任务。"
               }
               onClick={() => onResume(resumeControl, task.taskSessionId!)}
             />
@@ -364,6 +387,7 @@ export function WorkspaceGovernedView({
       {conversation && (
         <WorkspaceConversationPanel
           controller={conversation}
+          onOpenLifeModel={onOpenLifeModel}
           disabledReason={conversationDisabledReason}
         />
       )}

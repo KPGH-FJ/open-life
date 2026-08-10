@@ -5,9 +5,8 @@
 use crate::AppState;
 use openlife_core::agent::agent_loop::{AgentLoopConfig, AgentRole};
 use openlife_core::agent::{
-    AgentLoop, AgentRunStatus, AgentTask, AgentTaskKind, HSSelectionAudit, ModelRoutePolicy,
-    RuntimeHSPacket, SelectedPolicyRef, ToolDispatchAttempt, ToolDispatchObserver,
-    ToolExecutionReceipt, ToolStartedTransitionObserver, ToolTransportStatus,
+    AgentLoop, AgentRunStatus, AgentTask, AgentTaskKind, RuntimePolicyContext, ToolDispatchAttempt,
+    ToolDispatchObserver, ToolExecutionReceipt, ToolStartedTransitionObserver, ToolTransportStatus,
 };
 use openlife_core::layer::Layer;
 use openlife_core::llm::{ChatMessage, ProviderDataRoute};
@@ -560,12 +559,6 @@ async fn execute_scheduled_task(
             .map_err(|error| {
                 ScheduledExecutionFailure::from_error("scheduled_tool_resources_unavailable", error)
             })?;
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|error| {
-            ScheduledExecutionFailure::from_error("scheduled_lifemodel_load_failed", error)
-        })?
-    };
     let provider_runtime = state.provider_runtime_snapshot().await;
     if !provider_runtime.coherent {
         return Err(ScheduledExecutionFailure::from_error(
@@ -599,7 +592,6 @@ async fn execute_scheduled_task(
     let network_policy = provider_runtime.config.system.network_policy;
 
     let agent_runtime = openlife_core::agent::AgentRuntime::new_with_runtime_config(
-        life_model.clone(),
         runtime_scheduler,
         network_policy.clone(),
         resources.agent_runtime_config.clone(),
@@ -619,8 +611,6 @@ async fn execute_scheduled_task(
         shutdown_notify: Some(state.shutdown_notify.clone()),
         role: AgentRole::Planner,
         toolset_allowlist: vec![
-            "goal.read".into(),
-            "life_model.read".into(),
             "state.read".into(),
             "memory.search".into(),
             "proposal.create".into(),
@@ -639,7 +629,7 @@ async fn execute_scheduled_task(
         }],
         layer: Layer::L2,
     };
-    let policy_packet = scheduled_policy_packet(&claim, &task.session_id).map_err(|error| {
+    let policy_context = RuntimePolicyContext::from_scheduled_claim(&claim).map_err(|error| {
         ScheduledExecutionFailure::from_error("scheduled_provider_policy_invalid", error)
     })?;
     let tools_prompt = String::new();
@@ -665,12 +655,11 @@ async fn execute_scheduled_task(
             resources.governed.shared.persistence_coordinator.as_ref(),
         )
         .with_calendar_ics_paths(&calendar_ics_paths)
-        .with_life_model(&life_model)
         .with_memory_store(&resources.governed.memory_store)
         .with_proposal_store(&resources.proposal_store)
         .with_agent_run_store(&resources.agent_run_store)
         .with_network_policy(&network_policy)
-        .with_hs_runtime_packet(&policy_packet)
+        .with_external_write_proposal_policy(policy_context.external_write_requires_proposal())
         .with_tool_dispatch_observer(&tool_observer)
         .with_tool_started_transition_observer(&tool_observer)
         .with_canonical_write_admission(&tool_observer);
@@ -687,11 +676,11 @@ async fn execute_scheduled_task(
         agent_loop
             .run(
                 &task,
-                &life_model,
                 &tools_prompt,
                 None,
                 resources.governed.shared.privacy_engine.clone(),
                 &action_ctx,
+                policy_context,
             )
             .await
             .map_err(|error| {
@@ -798,38 +787,6 @@ fn project_tool_terminal_receipts(
     Ok(())
 }
 
-fn scheduled_policy_packet(
-    claim: &ScheduledTaskClaim,
-    task_session_id: &str,
-) -> anyhow::Result<RuntimeHSPacket> {
-    let policy_id = format!("scheduler.policy.{}", claim.provider_grant().policy_version);
-    Ok(RuntimeHSPacket {
-        selected_policies: vec![SelectedPolicyRef {
-            policy_id: policy_id.clone(),
-            reason: claim.provider_grant().reason_code.clone(),
-            route: Some(model_route_from_provider_grant(claim)),
-            digest: claim.provider_grant().grant_id.clone(),
-        }],
-        selected_heuristics: Vec::new(),
-        guidance_refs: Vec::new(),
-        estimated_tokens: 0,
-        audit: HSSelectionAudit {
-            agent_task_id: Some(task_session_id.into()),
-            agent_run_id: None,
-            input_digest: claim.provider_grant().grant_id.clone(),
-            selected_policy_ids: vec![policy_id],
-            selected_heuristic_ids: Vec::new(),
-            selected_guidance_ids: Vec::new(),
-            selected_guidance_refs: Vec::new(),
-            excluded_assets: Vec::new(),
-            estimated_tokens: 0,
-            token_budget: 0,
-        },
-        provider_authorization:
-            openlife_core::llm::ProviderPolicyAuthorization::from_scheduled_claim(claim)?,
-    })
-}
-
 fn validate_scheduled_task_terminal<'a>(
     status: AgentRunStatus,
     run_has_error: bool,
@@ -863,13 +820,6 @@ fn provider_data_route_label(route: ProviderDataRoute) -> &'static str {
     match route {
         ProviderDataRoute::LocalOnly => "local_only",
         ProviderDataRoute::PolicyAllowed => "policy_allowed",
-    }
-}
-
-fn model_route_from_provider_grant(claim: &ScheduledTaskClaim) -> ModelRoutePolicy {
-    match claim.provider_grant().data_route {
-        ProviderDataRoute::LocalOnly => ModelRoutePolicy::LocalOnly,
-        ProviderDataRoute::PolicyAllowed => ModelRoutePolicy::CloudAllowed,
     }
 }
 
@@ -997,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_packet_binds_local_only_route_to_durable_decision_id() {
+    fn typed_policy_context_binds_local_only_route_to_durable_decision_id() {
         let store = TaskStore::new_in_memory().unwrap();
         let task = due_task();
         store.create_task_idempotent(&task).unwrap();
@@ -1006,19 +956,21 @@ mod tests {
             .claim_next_due(chrono::Utc::now(), chrono::Duration::seconds(30))
             .unwrap()
             .unwrap();
-        let packet = scheduled_policy_packet(&claim, "scheduled:attempt-id").unwrap();
+        let context =
+            openlife_core::agent::RuntimePolicyContext::from_scheduled_claim(&claim).unwrap();
 
-        assert_eq!(packet.audit.input_digest, provider_grant.grant_id);
-        assert_eq!(packet.selected_policies.len(), 1);
         assert_eq!(
-            packet.selected_policies[0].route,
-            Some(ModelRoutePolicy::LocalOnly)
+            context.provider_authorization().data_route(),
+            openlife_core::llm::ProviderDataRoute::LocalOnly
         );
-        assert_eq!(packet.selected_policies[0].digest, provider_grant.grant_id);
         assert_eq!(
-            packet.provider_authorization.decision_id(),
+            context.provider_authorization().decision_id(),
             provider_grant.policy_decision_digest
         );
+        assert!(context.policy_provenance_refs().iter().any(|reference| {
+            reference.kind()
+                == openlife_core::llm::ProviderPolicyProvenanceKind::ScheduledRouteDecision
+        }));
     }
 
     #[test]

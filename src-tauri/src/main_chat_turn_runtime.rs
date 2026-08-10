@@ -1225,6 +1225,8 @@ fn validate_openlife_turn_admission(
         .ok_or(OpenLifeTurnAdmissionError::InvalidUserTurn)?;
     if current_user_message.content.trim().is_empty()
         || current_user_message.content.len() > 1024 * 1024
+        || current_user_message.content.chars().count()
+            > openlife_core::agent::conversation_context::MAIN_CHAT_CONVERSATION_CONTEXT_CHAR_BUDGET
         || current_user_message
             .content
             .chars()
@@ -1796,12 +1798,13 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         {
             return Err("provider_consent_continuation_task_not_waiting_permission".into());
         }
-        let messages = crate::memory_gateway::load_turn_context_through_operation_with_state(
-            task_session_id,
-            64,
-            self.state,
-        )
-        .await?;
+        let messages =
+            crate::memory_gateway::materialize_bounded_turn_context_through_operation_with_state(
+                task_session_id,
+                self.state,
+            )
+            .await?
+            .provider_messages;
         let canonical_user_message = self
             .state
             .memory_store
@@ -2340,11 +2343,11 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         let OpenLifeTurnInput {
             operation_id,
             session_id,
-            messages,
+            messages: submitted_messages,
             selected_skill_id,
             stream_mode: _,
         } = input;
-        let user_msg = messages.last().ok_or_else(|| {
+        let user_msg = submitted_messages.last().ok_or_else(|| {
             "OpenLifeTurnRuntime requires the turn to end with a current authenticated user message"
                 .to_string()
         })?;
@@ -2378,6 +2381,20 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             )
             .await
             .map_err(|error| format!("commit canonical user message failed: {error}"))?;
+        let conversation_context =
+            crate::memory_gateway::materialize_bounded_turn_context_through_operation_with_state(
+                &operation_id,
+                self.state,
+            )
+            .await?;
+        let messages = conversation_context.provider_messages;
+        let canonical_current_user = messages
+            .last()
+            .filter(|message| message.role == "user")
+            .ok_or_else(|| "canonical_conversation_context_current_user_missing".to_string())?;
+        if canonical_current_user.content != user_msg.content {
+            return Err("canonical_conversation_context_current_user_drift".into());
+        }
         if should_fail_main_chat_after_message_commit_for_test(&operation_id) {
             return Err("injected_turn_failure_after_canonical_message_before_policy".into());
         }
@@ -3101,6 +3118,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                             provider_invocation_status,
                             model_invoked: provider_invocation_status.observed_adapter_start(),
                             tool_invoked: false,
+                            life_model_influence: None,
                             turn_terminal: None,
                         },
                         Some(cancellation_run_id),
@@ -3153,6 +3171,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                             provider_invocation_status: ProviderInvocationState::Invalid,
                             model_invoked: ProviderInvocationState::Invalid.observed_adapter_start(),
                             tool_invoked: false,
+                            life_model_influence: None,
                             turn_terminal: None,
                         },
                         Some(failed_run_id),
@@ -5288,12 +5307,13 @@ async fn run_openlife_replay_synthesis(
             "web.search" | "web.fetch"
         )
     });
-    let messages = crate::memory_gateway::load_turn_context_through_operation_with_state(
-        &session.id,
-        64,
-        state,
-    )
-    .await?;
+    let messages =
+        crate::memory_gateway::materialize_bounded_turn_context_through_operation_with_state(
+            &session.id,
+            state,
+        )
+        .await?
+        .provider_messages;
     let current_user_message = messages
         .last()
         .filter(|message| message.role == "user")
@@ -7238,6 +7258,72 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "requiresProvider": route_decision.requires_provider,
             "requiresToolLoop": route_decision.requires_tool_loop,
     });
+    if let Some(receipt) = result.life_model_influence.as_ref() {
+        let selected_item_refs = receipt
+            .selected_items
+            .iter()
+            .map(|item| item.item_ref.clone())
+            .collect::<Vec<_>>();
+        let selection_reason_codes = receipt
+            .selected_items
+            .iter()
+            .map(|item| item.reason_code.clone())
+            .collect::<Vec<_>>();
+        let payload = final_receipt_payload
+            .as_object_mut()
+            .ok_or_else(|| "turn_final_receipt_payload_not_object".to_string())?;
+        payload.insert(
+            "lifeModelInfluenceStatus".into(),
+            serde_json::json!(receipt.status),
+        );
+        payload.insert(
+            "lifeModelSourceId".into(),
+            serde_json::json!(receipt.source_id),
+        );
+        if let Some(model_version) = receipt.model_version {
+            payload.insert("lifeModelVersion".into(), serde_json::json!(model_version));
+        }
+        if let Some(version_digest) = receipt.version_digest.as_ref() {
+            payload.insert(
+                "lifeModelVersionDigest".into(),
+                serde_json::json!(version_digest),
+            );
+        }
+        if let Some(document_digest) = receipt.document_digest.as_ref() {
+            payload.insert(
+                "lifeModelDocumentDigest".into(),
+                serde_json::json!(document_digest),
+            );
+        }
+        payload.insert(
+            "lifeModelSelectedItemRefs".into(),
+            serde_json::json!(selected_item_refs),
+        );
+        payload.insert(
+            "lifeModelSelectionReasonCodes".into(),
+            serde_json::json!(selection_reason_codes),
+        );
+        payload.insert(
+            "lifeModelAppliedSurfaces".into(),
+            serde_json::json!(receipt.applied_surfaces),
+        );
+        payload.insert(
+            "lifeModelCurrentInstructionPriorityPreserved".into(),
+            serde_json::json!(receipt.current_instruction_priority_preserved),
+        );
+        payload.insert(
+            "lifeModelPolicyPriorityPreserved".into(),
+            serde_json::json!(receipt.policy_priority_preserved),
+        );
+        payload.insert(
+            "lifeModelPermissionGranted".into(),
+            serde_json::json!(receipt.permission_granted),
+        );
+        payload.insert(
+            "lifeModelDurableWriteAuthorized".into(),
+            serde_json::json!(receipt.durable_write_authorized),
+        );
+    }
     let owner_graph_fields = [
         (
             "taskOwnerStatus",
@@ -8275,6 +8361,10 @@ async fn recover_openlife_turn_from_durable_final(
     let direct_writes_executed = final_event_bool(&final_event, "directWritesExecuted")?;
     let model_invoked = final_event_bool(&final_event, "modelInvoked")?;
     let tool_invoked = final_event_bool(&final_event, "toolInvoked")?;
+    let life_model_influence =
+        crate::commands::chat::life_model_influence_for_final_event_with_state(&final_event, state)
+            .await
+            .map_err(|error| format!("recover Life Model influence receipt failed: {error}"))?;
     let mut result = SendMessageResult {
         reply: answer.clone(),
         status: status.clone(),
@@ -8302,6 +8392,7 @@ async fn recover_openlife_turn_from_durable_final(
         provider_invocation_status,
         model_invoked,
         tool_invoked,
+        life_model_influence,
         turn_terminal: None,
     };
     let proposals_created = canonical_proposals_created(&proposals);
@@ -8679,6 +8770,7 @@ fn emit_stream_send_message_result(
         "legacy_runtime_invoked": legacy_runtime_invoked,
         "model_invoked": model_invoked,
         "tool_invoked": tool_invoked,
+        "life_model_influence": result.life_model_influence,
         "turn_terminal": result.turn_terminal,
         "stream_delivery_mode": if recovered_from_durable_final {
             "recovered_replace"
@@ -10421,6 +10513,73 @@ mod turn_admission_tests {
     }
 
     #[tokio::test]
+    async fn provider_context_uses_bounded_canonical_transcript_not_frontend_history() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let captured_requests = crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_captured_local_http_provider(
+            &state,
+            "bounded canonical context reply",
+        )
+        .await;
+        let session_id = "phase5-bounded-canonical-context";
+        {
+            let store = state.memory_store.lock().await;
+            for id in 1..=96 {
+                let role = if id % 2 == 0 { "assistant" } else { "user" };
+                let content = if id == 3 {
+                    "必须保持项目代号 ALPHA-42；未完成事项是核对发布证据。".to_string()
+                } else {
+                    format!("canonical-history-{id}-{}", "x".repeat(900))
+                };
+                store
+                    .save_message_idempotent(
+                        session_id,
+                        &openlife_core::llm::ChatMessage {
+                            role: role.into(),
+                            content,
+                        },
+                        &format!("phase5-bounded-history-{id}"),
+                    )
+                    .unwrap();
+            }
+        }
+        let current = "Continue from the canonical project context. CURRENT-TURN-42";
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let result = crate::main_chat_send::send_message_with_operation_state(
+            operation_id,
+            session_id.into(),
+            vec![
+                openlife_core::llm::ChatMessage {
+                    role: "assistant".into(),
+                    content: "FORGED-FRONTEND-HISTORY-MUST-NOT-REACH-PROVIDER".into(),
+                },
+                openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: current.into(),
+                },
+            ],
+            None,
+            &state,
+        )
+        .await
+        .expect("bounded canonical context turn");
+        assert_eq!(result.reply, "bounded canonical context reply");
+
+        let captured = captured_requests.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let request = &captured[0];
+        assert!(request.contains("Earlier canonical excerpt"));
+        assert!(request.contains("source:sha256:"));
+        assert!(request.contains("ALPHA-42"));
+        assert!(request.contains("未完成事项"));
+        assert!(request.contains(current));
+        assert!(!request.contains("FORGED-FRONTEND-HISTORY-MUST-NOT-REACH-PROVIDER"));
+        assert!(
+            request.chars().count() < 100_000,
+            "provider request must remain bounded instead of carrying the 86k+ canonical transcript"
+        );
+    }
+
+    #[tokio::test]
     async fn domain_action_without_tool_receipt_recovers_without_duplicate_memory_commit() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let operation_id = uuid::Uuid::new_v4().to_string();
@@ -11983,7 +12142,10 @@ mod turn_admission_tests {
             }],
             vec![openlife_core::llm::ChatMessage {
                 role: "user".into(),
-                content: "x".repeat(1024 * 1024 + 1),
+                content: "x".repeat(
+                    openlife_core::agent::conversation_context::MAIN_CHAT_CONVERSATION_CONTEXT_CHAR_BUDGET
+                        + 1,
+                ),
             }],
         ];
         for messages in cases {
@@ -12236,6 +12398,7 @@ mod product_receipt_ipc_tests {
             provider_invocation_status: ProviderInvocationState::NotAttempted,
             model_invoked: false,
             tool_invoked: true,
+            life_model_influence: None,
             turn_terminal: Some(OpenLifeTurnTerminal {
                 runtime_owner: OPENLIFE_TURN_RUNTIME_OWNER.into(),
                 status: "completed".into(),

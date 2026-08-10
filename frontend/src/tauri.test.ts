@@ -2,14 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   acceptProposal,
-  builderStart,
   draftEditMemoryProposal,
   editProposal,
   getStateHistory,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
   restoreArchivedMemory,
-  restoreSnapshot,
   saveChatMessage,
   startStreamMessage,
   importAllData,
@@ -325,7 +323,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("keeps existing explicit aliases for high-traffic chat and builder commands", async () => {
+  it("keeps existing explicit aliases for high-traffic chat commands", async () => {
     await startStreamMessage("session-1", [{ role: "user", content: "你好" }], {
       operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
     });
@@ -334,7 +332,6 @@ describe("tauri command argument aliases", () => {
       { role: "assistant", content: "你好" },
       "c7414f1e-35dc-4aec-b2f0-f704313003aa"
     );
-    await builderStart("incremental", "builder-1", "goals");
 
     expect(invoke).toHaveBeenCalledWith(
       "start_stream_message",
@@ -359,15 +356,6 @@ describe("tauri command argument aliases", () => {
         message: { role: "assistant", content: "你好" },
         operationId: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
         operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "builder_start",
-      expect.objectContaining({
-        sessionId: "builder-1",
-        session_id: "builder-1",
-        targetDimension: "goals",
-        target_dimension: "goals",
       })
     );
   });
@@ -476,34 +464,7 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("sends governed restore and import request envelopes", async () => {
-    vi.mocked(invoke).mockClear();
-    vi.mocked(invoke).mockResolvedValue({
-      success: true,
-      legacy: false,
-      governed_operation: true,
-      warning: "metadata-safe",
-      metadata_safe: true,
-      durable_lifemodel_write: true,
-      restored_snapshot_version: "0.1.0",
-      pre_restore_snapshot_created: true,
-    });
-    await restoreSnapshot("0.1.0");
-
-    expect(invoke).toHaveBeenCalledWith("restore_snapshot", {
-      version: "0.1.0",
-      governedRequest: {
-        purpose: "manual_restore",
-        explicitUserIntent: true,
-        createPreChangeSnapshot: true,
-      },
-      governed_request: {
-        purpose: "manual_restore",
-        explicitUserIntent: true,
-        createPreChangeSnapshot: true,
-      },
-    });
-
+  it("sends the governed import request envelope", async () => {
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke).mockResolvedValue({
       success: true,

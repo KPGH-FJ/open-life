@@ -8,7 +8,6 @@ use axum::{
 };
 use openlife_core::a2a::AgentCard;
 use openlife_core::a2a::{A2AServerHandler, SendTaskRequest, SendTaskResponse};
-use openlife_core::life_model::LifeModelManager;
 use openlife_core::privacy::{PrivacyEngine, PrivacyPolicy};
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -71,7 +70,6 @@ pub fn paired_token_for_local_client() -> Result<String, String> {
 
 #[derive(Clone)]
 pub struct A2AServerRuntimeState {
-    life_model_manager: Arc<LifeModelManager>,
     privacy_engine: PrivacyEngine,
     port: u16,
 }
@@ -202,14 +200,7 @@ fn load_persisted_a2a_runtime_state_from_data_dir(
         })?;
     let privacy_policy = PrivacyPolicy::from_yaml(&policy_text)
         .map_err(|error| format!("a2a_persisted_privacy_policy_parse_failed:{error}"))?;
-    let life_model_manager = Arc::new(LifeModelManager::new(
-        data_dir.join("life-model").join("current"),
-    ));
-    life_model_manager
-        .load()
-        .map_err(|error| format!("a2a_life_model_load_failed:{error}"))?;
     Ok(A2AServerRuntimeState {
-        life_model_manager,
         privacy_engine: PrivacyEngine::with_policy(privacy_policy),
         port,
     })
@@ -375,13 +366,7 @@ async fn public_agent_card_handler(
 async fn private_agent_card_handler(
     State(state): State<A2AServerRuntimeState>,
 ) -> Result<Json<openlife_core::a2a::AgentCard>, StatusCode> {
-    let model = state
-        .life_model_manager
-        .load()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(A2AServerHandler::default_agent_card(
-        state.port, &model,
-    )))
+    Ok(Json(A2AServerHandler::default_agent_card(state.port)))
 }
 
 async fn public_health_handler() -> Json<A2APublicHealth> {
@@ -398,12 +383,7 @@ async fn send_task(
 ) -> Result<Json<SendTaskResponse>, StatusCode> {
     openlife_core::a2a::validate_external_task_request(&req)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let life_model = state
-        .life_model_manager
-        .load()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let handler = A2AServerHandler {
-        life_model,
         privacy_engine: state.privacy_engine.clone(),
     };
     Ok(Json(handler.handle_task(req).await))

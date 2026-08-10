@@ -94,4 +94,19 @@ describe("durable truth lifecycle presentation", () => {
       status: "unknown",
     });
   });
+
+  it("does not let one peer owner failure poison the other owner's review truth", () => {
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    snapshot.memoryEnvelope = {
+      ...snapshot.memoryEnvelope,
+      data: null,
+      status: "error",
+      evidenceRefs: [],
+    };
+
+    expect(durableLifecyclePresentation(snapshot, durableReviewItem("pending"))).toMatchObject({
+      lifecycle: "pending_review",
+      status: "waiting",
+    });
+  });
 });

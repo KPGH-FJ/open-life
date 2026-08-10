@@ -12,7 +12,7 @@ use openlife_core::agent::main_chat_agent_v1::{
 use openlife_core::agent::{
     AgentProposal, CanonicalMemoryFactDescriptor, ExplicitMemoryWriteInput,
     ExplicitMemoryWriteReceipt, MainChatMemoryCandidate, MemoryLifecycleAcceptanceInput,
-    MemoryLifecycleScope, MemoryMaterializedView, MemoryRollbackReport,
+    MemoryLifecycleScope, MemoryMaterializedView, MemoryPrivacyEraseReport, MemoryRollbackReport,
 };
 use openlife_core::embedding::{
     execute_embedding, prepare_embedding_request_recorded, EmbeddingInvocationReceipt,
@@ -938,16 +938,18 @@ pub(crate) async fn save_turn_user_message_idempotent_with_state(
     Ok(commit)
 }
 
-pub(crate) async fn load_turn_context_through_operation_with_state(
+pub(crate) async fn materialize_bounded_turn_context_through_operation_with_state(
     operation_id: &str,
-    limit: usize,
     state: &Arc<AppState>,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<openlife_core::agent::conversation_context::ConversationContextProjection, String> {
     state
         .memory_store
         .lock()
         .await
-        .load_conversation_messages_through_operation(operation_id, limit)
+        .materialize_bounded_conversation_context_through_operation(
+            operation_id,
+            openlife_core::agent::conversation_context::ConversationContextConfig::default(),
+        )
         .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())
 }
 
@@ -1894,7 +1896,7 @@ async fn apply_memory_retrieval_projection(
         .project_memory_retrieval_state(
             &canonical_head.last_event_id,
             &owner,
-            canonical_head.disposition == MemoryRetrievalDisposition::Archived,
+            canonical_head.disposition != MemoryRetrievalDisposition::Active,
             canonical_head.revision,
         )
         .map_err(ProjectionReconciliationError::failed)?;
@@ -2056,10 +2058,12 @@ async fn apply_memory_lifecycle_projection(
     let session_id = if record.scope == MemoryLifecycleScope::Global {
         openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID
     } else {
-        record
-            .source_task_session_id
-            .as_deref()
-            .unwrap_or(openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID)
+        record.scope_owner_ref.as_deref().unwrap_or_else(|| {
+            record
+                .source_task_session_id
+                .as_deref()
+                .unwrap_or(openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID)
+        })
     };
     match delivery.projection_target.as_str() {
         "memory_store" => {
@@ -2503,6 +2507,28 @@ pub(crate) async fn search_memory_with_state(
     top_k: usize,
     state: &Arc<AppState>,
 ) -> Result<MemorySearchResult, AppError> {
+    search_memory_with_scope_filter(query, top_k, state, None).await
+}
+
+/// Runtime-context search restricted to canonical lifecycle owners that were
+/// already admitted by the current conversation/workspace/project scope.
+/// Filtering happens before access telemetry, so an out-of-scope candidate is
+/// neither injected nor falsely recorded as used.
+pub(crate) async fn search_lifecycle_memory_with_state(
+    query: String,
+    top_k: usize,
+    allowed_memory_ids: &HashSet<String>,
+    state: &Arc<AppState>,
+) -> Result<MemorySearchResult, AppError> {
+    search_memory_with_scope_filter(query, top_k, state, Some(allowed_memory_ids)).await
+}
+
+async fn search_memory_with_scope_filter(
+    query: String,
+    top_k: usize,
+    state: &Arc<AppState>,
+    allowed_lifecycle_memory_ids: Option<&HashSet<String>>,
+) -> Result<MemorySearchResult, AppError> {
     require_persistence_read(state, "MemoryStore")?;
     require_persistence_read(state, "VectorStore")?;
     require_persistence_read(state, "MemoryLifecycleStore")?;
@@ -2511,7 +2537,7 @@ pub(crate) async fn search_memory_with_state(
         privacy_engine.desensitize(&query).0
     };
     let text_telemetry_ticket = prepare_memory_search_access_telemetry(state);
-    let text_hits = {
+    let mut text_hits = {
         let store = state.memory_store.lock().await;
         store
             .search_text_memories(None, &desensitized_query, top_k)
@@ -2519,6 +2545,9 @@ pub(crate) async fn search_memory_with_state(
                 AppError::db_with_hint(error.to_string(), "memory_retrieval_degraded")
             })?
     };
+    if let Some(allowed) = allowed_lifecycle_memory_ids {
+        text_hits.retain(|hit| lifecycle_source_is_allowed(&hit.chunk.source, allowed));
+    }
     let EmbeddingOutcome {
         profile,
         receipt,
@@ -2548,7 +2577,15 @@ pub(crate) async fn search_memory_with_state(
             let vector_telemetry_ticket = prepare_vector_search_access_telemetry(state);
             let store = state.vector_store.lock().await.clone();
             match store.search(&embedding, &profile, top_k) {
-                Ok(VectorSearchOutcome::Matches { matches, rebuild }) => {
+                Ok(VectorSearchOutcome::Matches {
+                    mut matches,
+                    rebuild,
+                }) => {
+                    if let Some(allowed) = allowed_lifecycle_memory_ids {
+                        matches.retain(|(chunk, _)| {
+                            lifecycle_source_is_allowed(&chunk.source, allowed)
+                        });
+                    }
                     let status = if rebuild.is_some() {
                         "rebuild_required"
                     } else {
@@ -2606,6 +2643,12 @@ pub(crate) async fn search_memory_with_state(
         rebuild,
         degraded_evidence,
     })
+}
+
+fn lifecycle_source_is_allowed(source: &str, allowed_memory_ids: &HashSet<String>) -> bool {
+    source
+        .strip_prefix("memory_lifecycle:")
+        .is_some_and(|memory_id| allowed_memory_ids.contains(memory_id))
 }
 
 pub(crate) async fn run_memory_tier_maintenance_with_state(
@@ -2971,6 +3014,11 @@ async fn set_memory_retrieval_dispositions_with_state(
     if lifecycle_owned != 0 && lifecycle_owned != owners.len() {
         return Err(AppError::permission(
             "one canonical Memory retrieval batch cannot span MemoryStore and MemoryLifecycleStore",
+        ));
+    }
+    if lifecycle_owned == 0 && disposition == MemoryRetrievalDisposition::Paused {
+        return Err(AppError::permission(
+            "paused recall is supported only for MemoryLifecycleStore owners",
         ));
     }
     let (mutations, outbox_owner) = if lifecycle_owned == owners.len() {
@@ -3596,13 +3644,20 @@ pub(crate) async fn materialize_memory_proposal_with_state(
             Some("canonical_lifemodel_truth_requires_lifemodel_write_gateway".to_string()),
         ));
     }
+    let (workspace_root, project_root) = {
+        let config = state.config.lock().await;
+        (
+            config.system.workspace_memory_root.clone(),
+            config.system.project_memory_root.clone(),
+        )
+    };
     let mut lifecycle_report = {
         let lifecycle_store = state
             .memory_lifecycle_store
             .as_ref()
             .ok_or_else(memory_lifecycle_store_missing)?;
         let store = lifecycle_store.lock().await;
-        let lifecycle_input =
+        let mut lifecycle_input =
             match MemoryLifecycleAcceptanceInput::from_memory_proposal(proposal, content.clone()) {
                 Ok(input) => input,
                 Err(error) => {
@@ -3616,6 +3671,21 @@ pub(crate) async fn materialize_memory_proposal_with_state(
                     ));
                 }
             };
+        if let Err(error) = openlife_core::agent::bind_memory_fact_scope_owner(
+            &mut lifecycle_input.fact,
+            Some(&session_id),
+            workspace_root.as_deref(),
+            project_root.as_deref(),
+        ) {
+            return Ok(patch_result(
+                proposal,
+                false,
+                "memory_write_scope_owner_unavailable",
+                Some(openlife_core::persistence_outbox::metadata_digest(
+                    &error.to_string(),
+                )),
+            ));
+        }
         match store.accept_memory_proposal(lifecycle_input) {
             Ok(report) => report,
             Err(error) => {
@@ -3655,6 +3725,31 @@ pub(crate) async fn materialize_memory_proposal_with_state(
         .as_ref()
         .ok_or_else(|| "active Memory admission is missing canonical mutation".to_string())?;
     notify_canonical_outbox_background_worker(state);
+    let mut preceding_projection_states = Vec::new();
+    let mut preceding_reconciliation_error_digests = Vec::new();
+    for receipt in &lifecycle_report.preceding_canonical_mutations {
+        if let Err(error) = reconcile_foreground_canonical_outbox_event_with_state(
+            state,
+            CanonicalOutboxOwner::MemoryLifecycleStore,
+            &receipt.event_id,
+        )
+        .await
+        {
+            preceding_reconciliation_error_digests
+                .push(openlife_core::persistence_outbox::metadata_digest(&error));
+        }
+        preceding_projection_states.push(
+            state
+                .memory_lifecycle_store
+                .as_ref()
+                .ok_or_else(memory_lifecycle_store_missing)?
+                .lock()
+                .await
+                .projection_summary(&receipt.event_id)
+                .map_err(|error| error.to_string())?
+                .state(),
+        );
+    }
     let reconciliation_error = reconcile_foreground_canonical_outbox_event_with_state(
         state,
         CanonicalOutboxOwner::MemoryLifecycleStore,
@@ -3670,7 +3765,17 @@ pub(crate) async fn materialize_memory_proposal_with_state(
         .await
         .projection_summary(&canonical_mutation.event_id)
         .map_err(|error| error.to_string())?;
-    lifecycle_report.projection_state = projection_summary.state();
+    lifecycle_report.projection_state =
+        if preceding_projection_states.contains(&ProjectionDeliveryState::Degraded) {
+            ProjectionDeliveryState::Degraded
+        } else if preceding_projection_states
+            .iter()
+            .any(|state| *state != ProjectionDeliveryState::Applied)
+        {
+            ProjectionDeliveryState::Pending
+        } else {
+            projection_summary.state()
+        };
     let projection_issue = if lifecycle_report.projection_state == ProjectionDeliveryState::Applied
     {
         None
@@ -3682,6 +3787,8 @@ pub(crate) async fn materialize_memory_proposal_with_state(
                 "projectionState": lifecycle_report.projection_state,
                 "pending": projection_summary.pending,
                 "degraded": projection_summary.degraded,
+                "precedingProjectionStates": preceding_projection_states,
+                "precedingReconciliationErrorDigests": preceding_reconciliation_error_digests,
                 "reconciliationErrorDigest": reconciliation_error
                     .as_deref()
                     .map(openlife_core::persistence_outbox::metadata_digest),
@@ -3891,14 +3998,25 @@ pub(crate) async fn archive_memory_for_proposal_with_state(
     proposal: &AgentProposal,
     owners: &[CanonicalMemoryOwnerInput],
 ) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
-    let results = set_memory_retrieval_dispositions_with_state(
-        owners,
-        MemoryRetrievalDisposition::Archived,
-        "user_reviewed_archive",
-        state,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let disposition = match proposal
+        .after
+        .get("recallDisposition")
+        .or_else(|| proposal.after.get("recall_disposition"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("paused") => MemoryRetrievalDisposition::Paused,
+        Some("archived") | None => MemoryRetrievalDisposition::Archived,
+        Some(_) => return Err("MemoryArchive Proposal recall disposition is invalid".into()),
+    };
+    let reason_code = match disposition {
+        MemoryRetrievalDisposition::Paused => "user_reviewed_stop_recall",
+        MemoryRetrievalDisposition::Archived => "user_reviewed_archive",
+        MemoryRetrievalDisposition::Active => unreachable!(),
+    };
+    let results =
+        set_memory_retrieval_dispositions_with_state(owners, disposition, reason_code, state)
+            .await
+            .map_err(|error| error.to_string())?;
     let projection_issue = results
         .iter()
         .find(|result| result.projection_state != ProjectionDeliveryState::Applied)
@@ -3937,6 +4055,68 @@ pub(crate) async fn rollback_memory_asset_with_state(
         .map_err(|e| e.to_string())?;
     drop(store);
     finish_memory_rollback_projection(state, &mut report).await?;
+    Ok(report)
+}
+
+pub(crate) async fn privacy_erase_memory_asset_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryPrivacyEraseReport, String> {
+    require_persistence_write_string(state)?;
+    ensure_exact_memory_id(&memory_id)?;
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let proposal_id = lifecycle_store
+        .lock()
+        .await
+        .get_record(&memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Memory privacy erase target not found".to_string())?
+        .proposal_id;
+    if proposal_id.starts_with("proposal:") {
+        state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "ProposalStore unavailable while privacy-erasing Memory".to_string())?
+            .lock()
+            .await
+            .redact_accepted_memory_proposal_content(&proposal_id, &memory_id)
+            .map_err(|error| error.to_string())?;
+    }
+    let mut report = lifecycle_store
+        .lock()
+        .await
+        .privacy_erase_memory_asset(&memory_id)
+        .map_err(|error| error.to_string())?;
+    notify_canonical_outbox_background_worker(state);
+    let reconciliation_error = reconcile_blocking_canonical_outbox_event_with_state(
+        state,
+        CanonicalOutboxOwner::MemoryLifecycleStore,
+        &report.canonical_mutation.event_id,
+    )
+    .await
+    .err();
+    match lifecycle_store
+        .lock()
+        .await
+        .projection_summary(&report.canonical_mutation.event_id)
+    {
+        Ok(summary) => report.projection_state = summary.state(),
+        Err(error) => {
+            report.projection_state = ProjectionDeliveryState::Degraded;
+            report.projection_error_digest = Some(
+                openlife_core::persistence_outbox::metadata_digest(&error.to_string()),
+            );
+        }
+    }
+    if report.projection_state != ProjectionDeliveryState::Applied {
+        if let Some(error) = reconciliation_error {
+            report.projection_error_digest =
+                Some(openlife_core::persistence_outbox::metadata_digest(&error));
+        }
+    }
     Ok(report)
 }
 
@@ -4249,6 +4429,99 @@ impl MemoryGatewayWriteReportExt for MemoryGatewayWriteReport {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn reviewed_project_memory_proposal(id: &str, content: &str) -> AgentProposal {
+        let mut proposal = AgentProposal::new(
+            openlife_core::agent::ProposalType::MemoryWrite,
+            "memory.project",
+            serde_json::json!({
+                "content": content,
+                "scope": "project",
+                "category": "preference",
+                "candidateKind": "preference",
+                "riskLevel": "low",
+                "sensitivity": "internal"
+            }),
+            "Reviewed project Memory",
+            1.0,
+            openlife_core::agent::RiskLevel::Low,
+            openlife_core::agent::ProposalSource::Manual,
+        );
+        proposal.id = id.into();
+        proposal
+    }
+
+    #[tokio::test]
+    async fn reviewed_correction_waits_for_old_tombstone_and_new_projection() {
+        let state = crate::test_utils::test_app_state();
+        let project_root = tempfile::tempdir().expect("project root");
+        state.config.lock().await.system.project_memory_root = Some(
+            project_root
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let original = reviewed_project_memory_proposal(
+            "proposal:correction-original",
+            "Original project communication preference.",
+        );
+        let original_result = materialize_memory_proposal_with_state(
+            &state,
+            &original,
+            "Original project communication preference.".into(),
+            "session:test".into(),
+            "manual".into(),
+        )
+        .await
+        .unwrap();
+        assert!(original_result.success);
+        let original_record = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_retrievable_records(None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.content == "Original project communication preference.")
+            .unwrap();
+        assert!(original_record.scope_owner_ref.is_some());
+        let original_memory_id = original_record.memory_id;
+
+        let mut correction = reviewed_project_memory_proposal(
+            "proposal:correction-replacement",
+            "Corrected project communication preference.",
+        );
+        correction.after["supersedesMemoryId"] = serde_json::json!(original_memory_id);
+        let correction_result = materialize_memory_proposal_with_state(
+            &state,
+            &correction,
+            "Corrected project communication preference.".into(),
+            "session:test".into(),
+            "manual".into(),
+        )
+        .await
+        .unwrap();
+        assert!(correction_result.success, "{correction_result:?}");
+
+        let projected = state
+            .memory_store
+            .lock()
+            .await
+            .export_active_memory_records()
+            .unwrap();
+        let projected_content = projected
+            .into_iter()
+            .map(|record| record.content)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            projected_content,
+            vec!["Corrected project communication preference.".to_string()]
+        );
+    }
 
     fn install_canonical_commit_admission_barrier(
         state: &Arc<AppState>,

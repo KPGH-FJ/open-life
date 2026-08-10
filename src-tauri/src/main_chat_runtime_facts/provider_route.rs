@@ -1096,12 +1096,13 @@ fn provider_route_fact_bindings(
 fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool {
     let mentions_route_truth = [
         "provider",
-        "model",
         "route",
         "routetype",
         "fallback",
         "actually used",
         "current model",
+        "actual model",
+        "model actually used",
         "deepseek",
         "ollama",
         "openai",
@@ -1109,7 +1110,6 @@ fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool 
         "cloud",
         "local",
         "local-first",
-        "模型",
         "路线",
         "路由",
         "云端",
@@ -1120,6 +1120,10 @@ fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool 
         "当前实际使用",
         "当前实际",
         "实际使用",
+        "当前模型",
+        "当前使用的模型",
+        "实际使用的模型",
+        "用了什么模型",
         "你现在用",
         "当前用",
     ]

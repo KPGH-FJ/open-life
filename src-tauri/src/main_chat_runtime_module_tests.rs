@@ -1101,7 +1101,7 @@ fn focused_main_chat_modules_import_helpers_from_owning_modules_not_lib_rs_root(
         for import_block in root_crate_import_blocks(&module_source) {
             for helper in [
                 "append_main_chat_agent_transcript",
-                "build_chat_runtime_hs_packet",
+                "build_chat_runtime_policy_packet",
                 "finalize_chat_agent_run",
                 "generate_non_stream_fallback",
                 "main_chat_provider_endpoint_kind",

@@ -213,22 +213,6 @@ pub async fn list_mcp_templates() -> Result<serde_json::Value, AppError> {
 }
 
 #[tauri::command]
-pub async fn recommend_mcp_manifests(
-    top_k: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::tool_manifest::ToolManifest>, AppError> {
-    let model = state
-        .life_model_manager
-        .lock()
-        .await
-        .load()
-        .map_err(AppError::from)?;
-    let gaps = model.goal_capability_gap_analysis();
-    let registry = state.mcp_registry.lock().await;
-    Ok(registry.recommend_manifests(&gaps, top_k))
-}
-
-#[tauri::command]
 pub async fn list_mcp_audit_logs(
     limit: usize,
     state: State<'_, Arc<AppState>>,

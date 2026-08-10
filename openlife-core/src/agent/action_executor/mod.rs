@@ -571,7 +571,9 @@ pub struct ActionExecutionContext<'a> {
     pub(crate) bound_content_receipt_issuer: Option<&'a dyn BoundContentReceiptIssuer>,
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     pub web_search_fixture_output: Option<&'a str>,
-    pub hs_runtime_packet: Option<&'a crate::agent::RuntimeHSPacket>,
+    /// Evaluated PolicyStore result for the current task. This is intentionally
+    /// a single action-policy fact rather than an HS/personalization envelope.
+    pub external_write_requires_proposal: bool,
     pub tool_dispatch_observer: Option<&'a dyn ToolDispatchObserver>,
     pub tool_started_transition_observer: Option<&'a dyn ToolStartedTransitionObserver>,
     pub tool_audit_persistence_observer: Option<&'a dyn ToolAuditPersistenceObserver>,
@@ -644,7 +646,7 @@ impl<'a> ActionExecutionContext<'a> {
             bound_content_receipt_issuer: None,
             network_policy: None,
             web_search_fixture_output: None,
-            hs_runtime_packet: None,
+            external_write_requires_proposal: false,
             tool_dispatch_observer: None,
             tool_started_transition_observer: None,
             tool_audit_persistence_observer: None,
@@ -746,8 +748,8 @@ impl<'a> ActionExecutionContext<'a> {
         self
     }
 
-    pub fn with_hs_runtime_packet(mut self, packet: &'a crate::agent::RuntimeHSPacket) -> Self {
-        self.hs_runtime_packet = Some(packet);
+    pub fn with_external_write_proposal_policy(mut self, required: bool) -> Self {
+        self.external_write_requires_proposal = required;
         self
     }
 

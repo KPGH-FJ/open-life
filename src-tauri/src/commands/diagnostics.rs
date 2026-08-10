@@ -1,6 +1,6 @@
 use crate::errors::AppError;
 use crate::storage::app_data_dir;
-use crate::{AppState, BuilderCompletion, OllamaModelInfo, SystemDiagnostics};
+use crate::{AppState, OllamaModelInfo, SystemDiagnostics};
 use openlife_core::ollama::inspect_ollama_status_for_generation;
 use std::sync::Arc;
 use tauri::State;
@@ -122,23 +122,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
             (0, 0, 0, 0)
         }
     };
-    let (unfinished_builder_sessions, pending_builder_review_sessions) = {
-        if state
-            .persistence_coordinator
-            .require_trusted_read("BuilderSessionStore")
-            .is_ok()
-        {
-            let store = state.builder_session_store.lock().await;
-            let sessions = store.list_unfinished_sessions().unwrap_or_default();
-            let pending_review = sessions
-                .iter()
-                .filter(|session| session.finished && !session.pending_signals.is_empty())
-                .count();
-            (sessions.len(), pending_review)
-        } else {
-            (0, 0)
-        }
-    };
     let (
         local_model,
         prefer_local_model,
@@ -197,21 +180,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
         .collect::<Vec<_>>();
     let resolved_local_model = ollama_status.resolved_model;
     let ollama_online = resolved_local_model.is_some();
-    let snapshot_count = {
-        if state
-            .persistence_coordinator
-            .require_trusted_read("LifeModelFileStore")
-            .is_ok()
-        {
-            let vm = state.version_manager.lock().await;
-            vm.list_versions()
-                .map(|versions| versions.len())
-                .unwrap_or_default()
-        } else {
-            0
-        }
-    };
-    let (life_model_ready, model_empty, builder_completion) = {
+    let (life_model_ready, model_empty) = {
         let model = if state
             .persistence_coordinator
             .require_trusted_read("LifeModelFileStore")
@@ -222,46 +191,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
             None
         };
         match model {
-            Some(model) => {
-                let empty = model.is_effectively_empty();
-
-                let completion = model.calculate_4d_completion();
-                let lowest_dim = [
-                    ("identity", completion.identity),
-                    ("goals", completion.goals),
-                    ("capabilities", completion.capabilities),
-                    ("state", completion.state),
-                ]
-                .iter()
-                .min_by_key(|(_, score)| *score)
-                .map(|(name, _)| name.to_string());
-
-                let builder_comp = BuilderCompletion {
-                    identity: completion.identity as f32,
-                    goals: completion.goals as f32,
-                    capabilities: completion.capabilities as f32,
-                    state: completion.state as f32,
-                    overall: (completion.identity as f32
-                        + completion.goals as f32
-                        + completion.capabilities as f32
-                        + completion.state as f32)
-                        / 4.0,
-                    lowest_dimension: lowest_dim,
-                };
-                (true, empty, builder_comp)
-            }
-            None => (
-                false,
-                true,
-                BuilderCompletion {
-                    identity: 0.0,
-                    goals: 0.0,
-                    capabilities: 0.0,
-                    state: 0.0,
-                    overall: 0.0,
-                    lowest_dimension: None,
-                },
-            ),
+            Some(model) => (true, model.is_effectively_empty()),
+            None => (false, true),
         }
     };
     let chat_session_count = {
@@ -312,17 +243,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
     if !life_model_ready {
         readiness_issues
             .push("人生模型读取失败：请检查应用数据目录权限或重新保存人生模型。".to_string());
-    }
-    if model_empty && pending_builder_review_sessions > 0 {
-        readiness_issues.push(format!(
-            "检测到 {} 个待确认的人生模型 Review 会话。你其实已经完成了问题收集，下一步更适合先回到 Builder 审阅并应用这些建议，而不是重新开始构建。",
-            pending_builder_review_sessions
-        ));
-    } else if model_empty && unfinished_builder_sessions > 0 {
-        readiness_issues.push(format!(
-            "检测到 {} 个未完成的人生模型构建会话，其中可能包含待确认的 Review 内容。建议先回到 Builder 继续或应用这些结果，再开始深度试用。",
-            unfinished_builder_sessions
-        ));
     }
     if prefer_local_model && !ollama_online && !cloud_api_validated {
         readiness_issues.push(format!(
@@ -394,25 +314,14 @@ pub(crate) async fn get_system_diagnostics_with_state(
         usage_readiness_issues
             .push("核心聊天链路未就绪，请先修复使用准备检查中的问题。".to_string());
     }
-    if model_empty && pending_builder_review_sessions > 0 {
-        usage_readiness_issues.push(format!(
-            "人生模型构建中仍有 {} 个待确认项：请先到 Mailbox 审阅并应用结果，再验证个性化体验。",
-            pending_builder_review_sessions
-        ));
-    } else if model_empty && unfinished_builder_sessions > 0 {
-        usage_readiness_issues.push(
-            "人生模型构建中仍有未完成会话：请先回到 Life Model 构建流程完成确认，再验证个性化体验。".to_string(),
-        );
-    }
     if model_empty {
         usage_readiness_issues.push(
-            "人生模型尚未构建：请通过 Life Model 构建流程创建初始模型，以便获得个性化体验。"
-                .to_string(),
+            "LifeModel 尚未建立：请在个人智能中明确填写一条长期信息并通过 Review。".to_string(),
         );
     }
     if chat_session_count == 0 && !model_empty {
         usage_readiness_issues
-            .push("尚未开始任何对话：建议到 Companion 进行一次对话，验证核心链路。".to_string());
+            .push("尚未开始任何对话：建议到工作区进行一次对话，验证核心链路。".to_string());
     }
     if cloud_api_configured && !cloud_api_validated {
         usage_readiness_issues.push(format!(
@@ -493,8 +402,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
         vector_corrupt_embedding_count,
         vector_unknown_profile_count,
         vector_profile_dimension_mismatch_count,
-        unfinished_builder_sessions,
-        pending_builder_review_sessions,
         ollama_service_online,
         ollama_online,
         local_model,
@@ -520,14 +427,12 @@ pub(crate) async fn get_system_diagnostics_with_state(
             "degraded".to_string()
         },
         startup_warnings: state.startup_warnings.clone(),
-        snapshot_count,
         life_model_ready,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         model_empty,
         chat_session_count,
         usage_ready,
         usage_readiness_issues,
-        builder_completion,
         ollama_models,
         agent_run_count,
         agent_run_store_status,

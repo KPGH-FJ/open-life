@@ -10,7 +10,7 @@
 use crate::agent::{
     ActionExecutionContext, ActionExecutorConfig, AgentExecutionBudget, AgentLoop, AgentLoopConfig,
     AgentLoopRunRequest, AgentObservation, AgentRun, AgentRunStatus, AgentRunStore, AgentTask,
-    AgentTaskKind, ToolGateway,
+    AgentTaskKind, RuntimePolicyContext, ToolGateway,
 };
 use crate::layer::Layer;
 use crate::life_model::LifeModel;
@@ -20,13 +20,9 @@ use crate::scheduler::InferenceScheduler;
 
 /// Helper to create a minimal AgentLoop for testing
 fn create_test_agent_loop(config: AgentLoopConfig) -> AgentLoop {
-    let life_model = LifeModel::default();
     let scheduler = InferenceScheduler::default();
-    let runtime = crate::agent::AgentRuntime::new(
-        life_model,
-        scheduler.clone(),
-        &crate::config::AppConfig::default(),
-    );
+    let runtime =
+        crate::agent::AgentRuntime::new(scheduler.clone(), &crate::config::AppConfig::default());
     let tool_gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
     AgentLoop::new(runtime, tool_gateway, scheduler, config)
 }
@@ -140,7 +136,7 @@ fn test_action_parser_final_envelope() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -185,7 +181,7 @@ fn test_action_parser_actions_envelope() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -237,7 +233,7 @@ fn test_action_parser_direct_read_actions_keep_executor_input_shape() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -287,7 +283,7 @@ fn test_action_parser_legacy_tool_calls() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -332,7 +328,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -378,7 +374,7 @@ fn test_action_parser_no_json() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -423,7 +419,7 @@ fn test_action_parser_final_with_actions() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -515,7 +511,7 @@ fn test_max_tool_calls_stop_reason() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -562,7 +558,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -612,7 +608,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -688,7 +684,7 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         bound_content_receipt_issuer: Some(&agent_run_store),
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -700,17 +696,16 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         ),
     };
 
-    let life_model = LifeModel::default();
     let mut provider_observer = |_| Ok(());
     let result = loop_instance
         .run_existing_with_provider_observer(
             AgentLoopRunRequest::new(
                 &task,
-                &life_model,
                 "Available tools: memory.search",
                 None,
                 privacy_engine.clone(),
                 &action_ctx,
+                RuntimePolicyContext::fail_closed(),
             ),
             canonical_run,
             &mut provider_observer,
@@ -871,11 +866,11 @@ async fn agent_loop_stops_when_canonical_memory_retrieval_is_degraded() {
     let result = loop_instance
         .run(
             &task,
-            &LifeModel::default(),
             "Available tools: memory.search",
             None,
             privacy_engine.clone(),
             &action_ctx,
+            RuntimePolicyContext::fail_closed(),
         )
         .await
         .unwrap();
@@ -944,17 +939,16 @@ async fn dispatched_memory_tool_failure_has_one_failed_terminal_truth() {
     .with_agent_run_store(&agent_run_store)
     .with_tool_dispatch_observer(&dispatch_fault);
 
-    let life_model = LifeModel::default();
     let mut provider_observer = |_| Ok(());
     let result = loop_instance
         .run_existing_with_provider_observer(
             AgentLoopRunRequest::new(
                 &task,
-                &life_model,
                 "Available tools: memory.search",
                 None,
                 privacy_engine.clone(),
                 &action_ctx,
+                RuntimePolicyContext::fail_closed(),
             ),
             canonical_run,
             &mut provider_observer,
@@ -1068,17 +1062,16 @@ async fn agent_loop_retains_one_live_receipt_per_action_in_stable_order() {
     .with_agent_run_store(&agent_run_store)
     .with_tool_dispatch_observer(&dispatch_fault);
 
-    let life_model = LifeModel::default();
     let mut provider_observer = |_| Ok(());
     let result = loop_instance
         .run_existing_with_provider_observer(
             AgentLoopRunRequest::new(
                 &task,
-                &life_model,
                 "Available tools: memory.search",
                 None,
                 privacy_engine.clone(),
                 &action_ctx,
+                RuntimePolicyContext::fail_closed(),
             ),
             canonical_run,
             &mut provider_observer,
@@ -1158,7 +1151,7 @@ async fn test_proposal_tool_bypass_permission_blocking() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -1240,7 +1233,7 @@ async fn test_permission_check_tool() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -1306,7 +1299,7 @@ async fn test_memory_propose_write_creates_proposal() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: None,
+        external_write_requires_proposal: false,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -1372,18 +1365,27 @@ fn test_agent_loop_config_role_planner_instruction() {
     };
     let instruction = config.role_system_instruction().unwrap();
     assert!(instruction.contains("Planner mode"));
-    assert!(instruction.contains("goal.read"));
+    assert!(instruction.contains("state.read"));
+    assert!(instruction.contains("memory.search"));
+    assert!(!instruction.contains("life_model.read"));
+    assert!(!instruction.contains("goal.read"));
 }
 
 #[test]
 fn test_agent_loop_config_toolset_allowlist() {
     let config = AgentLoopConfig {
         role: crate::agent::agent_loop::AgentRole::Planner,
-        toolset_allowlist: vec!["goal.read".into(), "life_model.read".into()],
+        toolset_allowlist: vec!["state.read".into(), "memory.search".into()],
         ..Default::default()
     };
     assert_eq!(config.toolset_allowlist.len(), 2);
-    assert!(config.toolset_allowlist.contains(&"goal.read".to_string()));
+    assert!(config.toolset_allowlist.contains(&"state.read".to_string()));
+    assert!(config
+        .toolset_allowlist
+        .contains(&"memory.search".to_string()));
+    assert!(!config
+        .toolset_allowlist
+        .contains(&"life_model.read".to_string()));
 }
 
 #[tokio::test]

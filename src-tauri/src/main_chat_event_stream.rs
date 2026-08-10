@@ -6742,6 +6742,7 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
         "policyAuthority",
         &[
             "main_chat_policy_router",
+            "policy_store",
             "hs_policy_store",
             "scheduled_policy",
             "explicit_provider_probe_policy",
@@ -7116,6 +7117,7 @@ enum PayloadValueSchema {
     Bool,
     Count,
     MetadataStringArray,
+    LifeModelReasonCodeArray,
     ContextReferenceArray,
     OpaqueDigestArray,
     ToolOwnerBindingArray,
@@ -7824,6 +7826,36 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("durableEventCount", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("requiresProvider", PayloadValueSchema::Bool),
     PayloadFieldSchema::optional("requiresToolLoop", PayloadValueSchema::Bool),
+    PayloadFieldSchema::optional(
+        "lifeModelInfluenceStatus",
+        PayloadValueSchema::MetadataString,
+    ),
+    PayloadFieldSchema::optional(
+        "lifeModelSourceId",
+        PayloadValueSchema::MetadataStringOrNull,
+    ),
+    PayloadFieldSchema::optional("lifeModelVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::optional("lifeModelVersionDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::optional("lifeModelDocumentDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::optional(
+        "lifeModelSelectedItemRefs",
+        PayloadValueSchema::MetadataStringArray,
+    ),
+    PayloadFieldSchema::optional(
+        "lifeModelSelectionReasonCodes",
+        PayloadValueSchema::LifeModelReasonCodeArray,
+    ),
+    PayloadFieldSchema::optional(
+        "lifeModelAppliedSurfaces",
+        PayloadValueSchema::MetadataStringArray,
+    ),
+    PayloadFieldSchema::optional(
+        "lifeModelCurrentInstructionPriorityPreserved",
+        PayloadValueSchema::Bool,
+    ),
+    PayloadFieldSchema::optional("lifeModelPolicyPriorityPreserved", PayloadValueSchema::Bool),
+    PayloadFieldSchema::optional("lifeModelPermissionGranted", PayloadValueSchema::Bool),
+    PayloadFieldSchema::optional("lifeModelDurableWriteAuthorized", PayloadValueSchema::Bool),
     PayloadFieldSchema::optional("replayEpochGeneration", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("replayExecutionRef", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("errorBodyStored", PayloadValueSchema::Bool),
@@ -8547,6 +8579,9 @@ fn normalize_schema_field_value(
             .map(|_| value.clone())
             .ok_or_else(invalid),
         Schema::MetadataStringArray => normalize_metadata_string_array(value).ok_or_else(invalid),
+        Schema::LifeModelReasonCodeArray => {
+            normalize_life_model_reason_code_array(value).ok_or_else(invalid)
+        }
         Schema::ContextReferenceArray => {
             normalize_context_reference_array(value).ok_or_else(invalid)
         }
@@ -8583,6 +8618,28 @@ fn normalize_schema_field_value(
             normalize_child_workflow_provenance(value, digest_key).ok_or_else(invalid)
         }
     }
+}
+
+fn normalize_life_model_reason_code_array(value: &Value) -> Option<Value> {
+    let values = value.as_array()?;
+    if values.len() > 4 {
+        return None;
+    }
+    values
+        .iter()
+        .all(|value| {
+            value.as_str().is_some_and(|reason| {
+                !reason.is_empty()
+                    && reason.trim() == reason
+                    && reason.chars().count() <= 120
+                    && reason.chars().all(|character| {
+                        character.is_ascii_alphanumeric()
+                            || character == ' '
+                            || matches!(character, '_' | '-' | ':')
+                    })
+            })
+        })
+        .then(|| value.clone())
 }
 
 fn validate_canonical_schema_field_value(
@@ -11073,6 +11130,53 @@ mod tests {
     }
 
     #[test]
+    fn final_delivery_preserves_bounded_lifemodel_influence_references() {
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let event = store
+            .append(MainChatAgentEventDraft {
+                task_session_id: "task-lifemodel-final-schema".into(),
+                run_id: "run-lifemodel-final-schema".into(),
+                event_type: "final_delivery.created".into(),
+                object_type: "final_delivery".into(),
+                object_id: "delivery-lifemodel-final-schema".into(),
+                created_at: Utc::now(),
+                source: "openlife_turn_runtime.final_delivery_owner".into(),
+                payload: json!({
+                    "status": "completed",
+                    "lifeModelInfluenceStatus": "applied_context_building",
+                    "lifeModelSourceId": "lifemodel.v2.runtime",
+                    "lifeModelVersion": 3,
+                    "lifeModelVersionDigest": format!("sha256:{}", "a".repeat(64)),
+                    "lifeModelDocumentDigest": format!("sha256:{}", "b".repeat(64)),
+                    "lifeModelSelectedItemRefs": [
+                        "collaboration_preferences:communication-direct"
+                    ],
+                    "lifeModelSelectionReasonCodes": [
+                        "task intent matches collaboration_preferences"
+                    ],
+                    "lifeModelAppliedSurfaces": ["context_building", "communication_style"],
+                    "lifeModelCurrentInstructionPriorityPreserved": true,
+                    "lifeModelPolicyPriorityPreserved": true,
+                    "lifeModelPermissionGranted": false,
+                    "lifeModelDurableWriteAuthorized": false,
+                }),
+                backfilled: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            event.payload["lifeModelSelectedItemRefs"][0],
+            "collaboration_preferences:communication-direct"
+        );
+        assert_eq!(
+            event.payload["lifeModelSelectionReasonCodes"][0],
+            "task intent matches collaboration_preferences"
+        );
+        assert_eq!(event.payload["lifeModelPermissionGranted"], false);
+        assert!(event.payload.get(UNRECOGNIZED_FIELDS_RECEIPT).is_none());
+    }
+
+    #[test]
     fn typed_error_digests_keep_counterfactual_event_facts_distinct() {
         let digest_a = format!("sha256:{}", "a".repeat(64));
         let digest_b = format!("sha256:{}", "b".repeat(64));
@@ -13518,6 +13622,26 @@ mod tests {
         )
         .unwrap();
         draft
+    }
+
+    #[test]
+    fn policy_store_provider_authority_is_accepted_as_typed_policy_evidence() {
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let request_id = "request-policy-store-authority";
+        let mut event = store
+            .append(provider_started_draft(
+                "task-policy-store-authority",
+                "run-policy-store-authority",
+                request_id,
+                "provider-a",
+            ))
+            .unwrap();
+        event.payload["policyAuthority"] = json!("policy_store");
+        event.payload["policyVersion"] = json!("policy_store_v1");
+
+        assert_eq!(event.payload["policyAuthority"], "policy_store");
+        assert_eq!(event.payload["policyVersion"], "policy_store_v1");
+        validate_persisted_provider_event_shape(&event).unwrap();
     }
 
     fn provider_terminal_draft(

@@ -2,6 +2,11 @@ use crate::agent::product_read_model::{
     EvidenceRef, EvidenceSensitivity, ExternalTransmissionStatus,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType};
+use crate::life_model::v2::{
+    LegacyLifeModelMigrationPlanV2, LifeModelItemV2, LifeModelTypedDiffV2,
+    LifeModelTypedOperationV2, LifeModelUserValueV2, LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+    LIFE_MODEL_V2_TYPED_DIFF_PATH,
+};
 use crate::tool_permissions::ActionBoundToolPermissionScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -133,6 +138,28 @@ pub struct GovernedActionReviewContract {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LifeModelLearningReviewContext {
+    pub candidate_id: String,
+    pub candidate_snapshot_digest: String,
+    pub section: String,
+    pub proposed_statement: String,
+    pub explicitness: String,
+    pub stability: String,
+    pub sensitivity: String,
+    pub conflict_status: String,
+    pub support_count: usize,
+    pub independent_support_count: usize,
+    pub confirmed_at: String,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+    #[serde(default)]
+    pub observation_ids: Vec<String>,
+    #[serde(default)]
+    pub source_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewDecisionContext {
     pub review_item_id: String,
     pub title: String,
@@ -151,6 +178,8 @@ pub struct ReviewDecisionContext {
     pub permission: Option<PermissionDecisionContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_contract: Option<GovernedActionReviewContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub life_model_learning: Option<LifeModelLearningReviewContext>,
     #[serde(default)]
     pub evidence_refs: Vec<EvidenceRef>,
 }
@@ -159,8 +188,11 @@ pub fn build_review_decision_context(
     proposal: &AgentProposal,
     evidence_refs: &[EvidenceRef],
 ) -> ReviewDecisionContext {
+    let life_model_v2_diff = reviewed_lifemodel_v2_diff(proposal);
+    let legacy_migration = reviewed_legacy_lifemodel_migration(proposal);
     let permission = (proposal.proposal_type == ProposalType::ToolPermission)
         .then(|| build_permission_decision_context(proposal, evidence_refs));
+    let life_model_learning = reviewed_lifemodel_learning_context(proposal);
     let after = if permission.is_some() {
         ReviewReadableValue {
             kind: ReviewReadableValueKind::Redacted,
@@ -170,24 +202,243 @@ pub fn build_review_decision_context(
             sensitivity: EvidenceSensitivity::Redacted,
             truncated: false,
         }
+    } else if let Some(diff) = life_model_v2_diff.as_ref() {
+        readable_lifemodel_v2_diff(diff)
+    } else if let Some(plan) = legacy_migration.as_ref() {
+        plan.typed_diff.as_ref().map_or_else(
+            || ReviewReadableValue {
+                kind: ReviewReadableValueKind::List,
+                summary: "Create an authoritative empty LifeModel v2".into(),
+                detail: Some(format!(
+                    "0 included; {} explicitly excluded",
+                    plan.excluded_candidate_ids.len()
+                )),
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            },
+            readable_lifemodel_v2_diff,
+        )
     } else {
         readable_value(&proposal.after)
     };
+    let before = life_model_v2_diff
+        .as_ref()
+        .map(|diff| ReviewReadableValue {
+            kind: ReviewReadableValueKind::Object,
+            summary: diff.base_version.map_or_else(
+                || "Empty LifeModel v2".into(),
+                |version| format!("LifeModel v2 version {version}"),
+            ),
+            detail: diff.base_document_digest.clone(),
+            sensitivity: EvidenceSensitivity::LocalPrivate,
+            truncated: false,
+        })
+        .or_else(|| {
+            legacy_migration.as_ref().map(|plan| ReviewReadableValue {
+                kind: ReviewReadableValueKind::Object,
+                summary: "Reviewed legacy YAML snapshot".into(),
+                detail: Some(format!(
+            "{}; {} candidate(s) included; {} excluded; {} other legacy field(s) remain outside v2",
+            plan.legacy_source_digest,
+            plan.included_candidate_ids.len(),
+            plan.excluded_candidate_ids.len(),
+            plan.non_lifemodel_item_count,
+        )),
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            })
+        });
 
     ReviewDecisionContext {
         review_item_id: proposal.id.clone(),
         title: proposal_title(proposal),
         summary: proposal_summary(proposal),
-        before: proposal.before.as_ref().map(readable_value),
+        before: before.or_else(|| proposal.before.as_ref().map(readable_value)),
         after,
         reason_summary: bounded_text(&proposal.reason, "No reason was supplied."),
-        source_summary: proposal_source_summary(proposal.source).into(),
+        source_summary: if life_model_learning.is_some() {
+            "User-confirmed LifeModel learning evidence".into()
+        } else {
+            proposal_source_summary(proposal.source).into()
+        },
         impact_summary: impact_summary(proposal).into(),
         affected_object_labels: vec![affected_object_label(proposal)],
         expires_at: proposal.expires_at,
         permission,
         action_contract: build_governed_action_review_contract(proposal),
+        life_model_learning,
         evidence_refs: evidence_refs.to_vec(),
+    }
+}
+
+pub fn is_lifemodel_learning_review(proposal: &AgentProposal) -> bool {
+    reviewed_lifemodel_learning_context(proposal).is_some()
+}
+
+fn reviewed_lifemodel_learning_context(
+    proposal: &AgentProposal,
+) -> Option<LifeModelLearningReviewContext> {
+    let diff = reviewed_lifemodel_v2_diff(proposal)?;
+    let before = proposal.before.as_ref()?;
+    if before.get("schema")?.as_str()? != "openlife.lifemodel.learning.review.v1"
+        || before.get("conflictStatus")?.as_str()? != "none"
+        || diff.operations.len() != 1
+    {
+        return None;
+    }
+    let (section, statement) = match &diff.operations[0] {
+        LifeModelTypedOperationV2::Add {
+            section,
+            item: LifeModelItemV2::Statement(item),
+        } => (
+            format!("{section:?}").to_ascii_lowercase(),
+            item.statement.clone(),
+        ),
+        _ => return None,
+    };
+    let proposed_statement =
+        match serde_json::from_value::<LifeModelUserValueV2>(before.get("proposedValue")?.clone())
+            .ok()?
+        {
+            LifeModelUserValueV2::Statement { statement } => statement,
+            _ => return None,
+        };
+    if statement != proposed_statement {
+        return None;
+    }
+    let strings = |key: &str| {
+        before
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(8)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    Some(LifeModelLearningReviewContext {
+        candidate_id: before.get("candidateId")?.as_str()?.to_string(),
+        candidate_snapshot_digest: before.get("candidateSnapshotDigest")?.as_str()?.to_string(),
+        section,
+        proposed_statement,
+        explicitness: before.get("explicitness")?.as_str()?.to_string(),
+        stability: before.get("stability")?.as_str()?.to_string(),
+        sensitivity: before.get("sensitivity")?.as_str()?.to_string(),
+        conflict_status: "none".into(),
+        support_count: before.get("supportCount")?.as_u64()? as usize,
+        independent_support_count: before.get("independentSupportCount")?.as_u64()? as usize,
+        confirmed_at: before.get("confirmedAt")?.as_str()?.to_string(),
+        source_refs: strings("sourceRefs"),
+        observation_ids: strings("observationIds"),
+        source_kinds: strings("sourceKinds"),
+    })
+}
+
+fn reviewed_legacy_lifemodel_migration(
+    proposal: &AgentProposal,
+) -> Option<LegacyLifeModelMigrationPlanV2> {
+    (proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path == LIFE_MODEL_V2_LEGACY_MIGRATION_PATH)
+        .then(|| serde_json::from_value(proposal.after.clone()).ok())
+        .flatten()
+        .filter(|plan: &LegacyLifeModelMigrationPlanV2| plan.validate_contract().is_ok())
+}
+
+fn reviewed_lifemodel_v2_diff(proposal: &AgentProposal) -> Option<LifeModelTypedDiffV2> {
+    (proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path == LIFE_MODEL_V2_TYPED_DIFF_PATH)
+        .then(|| serde_json::from_value(proposal.after.clone()).ok())
+        .flatten()
+        .filter(|diff: &LifeModelTypedDiffV2| diff.validate_contract().is_ok())
+}
+
+fn readable_lifemodel_v2_diff(diff: &LifeModelTypedDiffV2) -> ReviewReadableValue {
+    let mut add = 0;
+    let mut replace = 0;
+    let mut remove = 0;
+    let mut lines = Vec::new();
+    for operation in &diff.operations {
+        let (verb, section, item_id, content) = match operation {
+            LifeModelTypedOperationV2::Add { section, item } => {
+                add += 1;
+                ("add", section, item_id(item), Some(item_summary(item)))
+            }
+            LifeModelTypedOperationV2::Replace {
+                section,
+                item_id,
+                item,
+                ..
+            } => {
+                replace += 1;
+                (
+                    "replace",
+                    section,
+                    item_id.as_str(),
+                    Some(item_summary(item)),
+                )
+            }
+            LifeModelTypedOperationV2::Remove {
+                section, item_id, ..
+            } => {
+                remove += 1;
+                ("remove", section, item_id.as_str(), None)
+            }
+        };
+        let section = format!("{section:?}").to_ascii_lowercase();
+        lines.push(match content {
+            Some(content) => format!("{verb} {section}/{item_id}: {content}"),
+            None => format!("{verb} {section}/{item_id}"),
+        });
+    }
+    let detail = lines.join("\n");
+    ReviewReadableValue {
+        kind: ReviewReadableValueKind::List,
+        summary: format!(
+            "{} LifeModel change(s): {add} add, {replace} replace, {remove} remove",
+            diff.operations.len()
+        ),
+        detail: (detail.len() <= MAX_READABLE_DETAIL_BYTES).then_some(detail),
+        sensitivity: EvidenceSensitivity::LocalPrivate,
+        truncated: lines.join("\n").len() > MAX_READABLE_DETAIL_BYTES,
+    }
+}
+
+fn item_id(item: &LifeModelItemV2) -> &str {
+    match item {
+        LifeModelItemV2::Statement(item) => &item.id,
+        LifeModelItemV2::LongTermGoal(item) => &item.id,
+        LifeModelItemV2::Relationship(item) => &item.id,
+        LifeModelItemV2::Capability(item) => &item.id,
+        LifeModelItemV2::Resource(item) => &item.id,
+    }
+}
+
+fn item_summary(item: &LifeModelItemV2) -> String {
+    match item {
+        LifeModelItemV2::Statement(item) => bounded_text(&item.statement, "Empty statement"),
+        LifeModelItemV2::LongTermGoal(item) => bounded_text(
+            &format!("{} — {}", item.direction, item.meaning),
+            "Empty long-term goal",
+        ),
+        LifeModelItemV2::Relationship(item) => bounded_text(
+            &format!(
+                "{} — {} — {}",
+                item.person_label, item.relationship, item.significance
+            ),
+            "Empty relationship",
+        ),
+        LifeModelItemV2::Capability(item) => bounded_text(
+            &format!("{} — {}", item.name, item.description),
+            "Empty capability",
+        ),
+        LifeModelItemV2::Resource(item) => bounded_text(
+            &format!("{} — {}", item.name, item.description),
+            "Empty resource",
+        ),
     }
 }
 
@@ -585,12 +836,30 @@ fn proposal_operation(proposal: &AgentProposal) -> Option<&str> {
 }
 
 fn proposal_title(proposal: &AgentProposal) -> String {
+    if reviewed_lifemodel_learning_context(proposal).is_some() {
+        return "Review a learned long-term fact".into();
+    }
+    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
+        return "Review legacy LifeModel migration".into();
+    }
+    if reviewed_lifemodel_v2_diff(proposal).is_some() {
+        return "Review LifeModel changes".into();
+    }
     let title = match proposal.proposal_type {
         ProposalType::GoalUpdate => "Update a goal",
         ProposalType::StateUpdate => "Update personal state",
         ProposalType::PreferenceUpdate => "Update a preference",
         ProposalType::CapabilityUpdate => "Update a capability",
         ProposalType::MemoryWrite => "Add a memory",
+        ProposalType::MemoryArchive
+            if proposal
+                .after
+                .get("recallDisposition")
+                .and_then(Value::as_str)
+                == Some("paused") =>
+        {
+            "Stop recalling a memory"
+        }
         ProposalType::MemoryArchive => "Archive a memory",
         ProposalType::ToolPermission => "Allow one action",
         ProposalType::PluginPermission => "Review plugin access",
@@ -622,7 +891,30 @@ fn proposal_title(proposal: &AgentProposal) -> String {
 }
 
 fn proposal_summary(proposal: &AgentProposal) -> String {
+    if reviewed_lifemodel_learning_context(proposal).is_some() {
+        return "Review one user-confirmed candidate and its exact sources before it becomes part of LifeModel v2."
+            .into();
+    }
+    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
+        return "Review every selected legacy field before one backed-up, atomic switch to the canonical LifeModel v2 owner."
+            .into();
+    }
+    if reviewed_lifemodel_v2_diff(proposal).is_some() {
+        return "Review the exact version-bound LifeModel changes before a new canonical version is materialized."
+            .into();
+    }
     match proposal.proposal_type {
+        ProposalType::MemoryArchive
+            if proposal.after.get("recallDisposition").and_then(Value::as_str)
+                == Some("paused") =>
+        {
+            "Review whether this memory should stop participating in recall while remaining available to restore."
+                .into()
+        }
+        ProposalType::MemoryArchive => {
+            "Review whether this memory should move to the archive and leave active recall."
+                .into()
+        }
         ProposalType::ToolPermission => {
             "Review the exact permission scope before allowing one matching action.".into()
         }
@@ -703,6 +995,12 @@ fn impact_summary(proposal: &AgentProposal) -> &'static str {
 }
 
 fn affected_object_label(proposal: &AgentProposal) -> String {
+    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
+        return "Legacy YAML to LifeModel v2 owner cutover".into();
+    }
+    if reviewed_lifemodel_v2_diff(proposal).is_some() {
+        return "LifeModel v2 canonical version".into();
+    }
     let prefix = match proposal.proposal_type {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => "Memory",
         ProposalType::ToolPermission | ProposalType::PluginPermission => "Permission",
@@ -964,6 +1262,113 @@ mod tests {
 
         assert!(detail.contains("[REDACTED]"));
         assert!(!detail.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn lifemodel_v2_typed_diff_has_version_bound_human_review_language() {
+        use crate::life_model::v2::{
+            LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
+            LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
+        };
+        let item = LifeModelStatementV2 {
+            id: "value:autonomy".into(),
+            statement: "Autonomy matters.".into(),
+            source_refs: vec!["message:user:1".into()],
+            confirmed_at: "2026-08-08T10:00:00Z".into(),
+        };
+        let mut result = LifeModelDocumentV2::empty("primary");
+        result.values.push(item.clone());
+        let diff = LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: None,
+            base_document_digest: None,
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        };
+        let mut proposal = proposal(
+            ProposalType::LifeModelUpdate,
+            serde_json::to_value(diff).unwrap(),
+        );
+        proposal.affected_path = LIFE_MODEL_V2_TYPED_DIFF_PATH.into();
+
+        let context = build_review_decision_context(&proposal, &[]);
+
+        assert_eq!(context.title, "Review LifeModel changes");
+        assert_eq!(context.before.unwrap().summary, "Empty LifeModel v2");
+        assert!(context.after.summary.contains("1 add"));
+        assert!(context.after.detail.unwrap().contains("Autonomy matters."));
+        assert_eq!(
+            context.affected_object_labels,
+            vec!["LifeModel v2 canonical version"]
+        );
+    }
+
+    #[test]
+    fn legacy_migration_review_explains_atomic_owner_switch_without_raw_yaml() {
+        use crate::life_model::v2::{
+            LegacyLifeModelMigrationDecisionV2, LegacyLifeModelMigrationPreviewV2,
+            LegacyLifeModelMigrationSelectionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        };
+        let raw = "metadata:\n  version: '0.1'\nidentity:\n  name: Alice\n";
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(raw).unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = preview
+            .build_migration_plan(
+                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+                &selections,
+                true,
+                "2026-08-08T10:00:00Z",
+            )
+            .unwrap();
+        let mut migration = proposal(
+            ProposalType::LifeModelUpdate,
+            serde_json::to_value(plan).unwrap(),
+        );
+        migration.affected_path = LIFE_MODEL_V2_LEGACY_MIGRATION_PATH.into();
+
+        let context = build_review_decision_context(&migration, &[]);
+        assert_eq!(context.title, "Review legacy LifeModel migration");
+        assert!(context.summary.contains("atomic switch"));
+        let before = context.before.unwrap();
+        assert!(before.summary.contains("legacy YAML snapshot"));
+        assert!(before.detail.unwrap().contains(&preview.source_digest));
+        assert!(context.after.summary.contains("LifeModel change"));
+        assert!(!context.reason_summary.contains(raw));
+    }
+
+    #[test]
+    fn memory_stop_recall_and_archive_have_distinct_review_language() {
+        let paused = build_review_decision_context(
+            &proposal(
+                ProposalType::MemoryArchive,
+                json!({"recallDisposition": "paused"}),
+            ),
+            &[],
+        );
+        let archived = build_review_decision_context(
+            &proposal(
+                ProposalType::MemoryArchive,
+                json!({"recallDisposition": "archived"}),
+            ),
+            &[],
+        );
+
+        assert_eq!(paused.title, "Stop recalling a memory");
+        assert!(paused.summary.contains("remaining available to restore"));
+        assert_eq!(archived.title, "Archive a memory");
+        assert!(archived.summary.contains("move to the archive"));
     }
 
     #[test]

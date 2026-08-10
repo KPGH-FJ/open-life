@@ -1,11 +1,11 @@
+use crate::agent::{AgentTask, RiskLevel, RuntimePolicyContext};
 use crate::tool_manifest::ToolManifest;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY: &str = "policy.sensitive_topics.local_only";
 pub const BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST: &str =
     "policy.external_writes.proposal_first";
-pub const BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING: &str = "heuristic.low_energy_planning";
-pub const BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY: &str = "heuristic.rejected_reminder_delay";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,27 +27,20 @@ pub enum ModelRoutePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HeuristicPolicyEffect {
-    pub heuristic_id: String,
-    pub requested_route: Option<ModelRoutePolicy>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PolicyEvaluationRequest {
     pub topic: PolicyTopic,
     pub requested_route: ModelRoutePolicy,
-    pub heuristic_effect: Option<HeuristicPolicyEffect>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PolicyConflictAudit {
-    pub policy_id: String,
-    pub heuristic_id: Option<String>,
-    pub attempted_route: Option<ModelRoutePolicy>,
-    pub enforced_route: ModelRoutePolicy,
-    pub policy_won: bool,
+/// Narrow current-runtime input owned by PolicyStore. It contains no
+/// Heuristic, legacy LifeModel, or historical HS personalization data.
+#[derive(Debug, Clone)]
+pub struct RuntimePolicyContextBuildInput<'a> {
+    pub task: &'a AgentTask,
+    pub sanitized_intent_summary: String,
+    pub privacy_topic: PolicyTopic,
+    pub risk_level: RiskLevel,
+    pub tool_requirements: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,7 +49,6 @@ pub struct ContextPolicyDecision {
     policy_id: String,
     route: ModelRoutePolicy,
     hard_boundary: bool,
-    conflicts: Vec<PolicyConflictAudit>,
 }
 
 impl ContextPolicyDecision {
@@ -72,10 +64,6 @@ impl ContextPolicyDecision {
         self.hard_boundary
     }
 
-    pub fn conflicts(&self) -> &[PolicyConflictAudit] {
-        &self.conflicts
-    }
-
     /// Re-check the invariant that makes this value an authority object rather
     /// than a caller-authored route label.
     pub(crate) fn validate_provider_authority(&self) -> anyhow::Result<()> {
@@ -84,20 +72,13 @@ impl ContextPolicyDecision {
                 if self.route != ModelRoutePolicy::LocalOnly || !self.hard_boundary {
                     anyhow::bail!("sensitive-topic provider policy is not fail closed");
                 }
-                if self.conflicts.iter().any(|conflict| {
-                    conflict.policy_id != BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY
-                        || conflict.enforced_route != ModelRoutePolicy::LocalOnly
-                        || !conflict.policy_won
-                }) {
-                    anyhow::bail!("sensitive-topic provider policy has invalid conflict evidence");
-                }
             }
             "policy.general.default_route" => {
-                if self.hard_boundary || !self.conflicts.is_empty() {
+                if self.hard_boundary {
                     anyhow::bail!("general provider policy has non-canonical boundary evidence");
                 }
             }
-            _ => anyhow::bail!("unknown HS provider policy authority"),
+            _ => anyhow::bail!("unknown PolicyStore provider policy authority"),
         }
         Ok(())
     }
@@ -158,23 +139,10 @@ impl PolicyStore {
         request: PolicyEvaluationRequest,
     ) -> ContextPolicyDecision {
         if Self::is_sensitive_topic(request.topic) {
-            let mut conflicts = Vec::new();
-            if let Some(effect) = request.heuristic_effect {
-                if effect.requested_route == Some(ModelRoutePolicy::CloudAllowed) {
-                    conflicts.push(PolicyConflictAudit {
-                        policy_id: BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
-                        heuristic_id: Some(effect.heuristic_id),
-                        attempted_route: effect.requested_route,
-                        enforced_route: ModelRoutePolicy::LocalOnly,
-                        policy_won: true,
-                    });
-                }
-            }
             return ContextPolicyDecision {
                 policy_id: BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
                 route: ModelRoutePolicy::LocalOnly,
                 hard_boundary: true,
-                conflicts,
             };
         }
 
@@ -182,7 +150,6 @@ impl PolicyStore {
             policy_id: "policy.general.default_route".into(),
             route: request.requested_route,
             hard_boundary: false,
-            conflicts: Vec::new(),
         }
     }
 
@@ -247,4 +214,60 @@ impl PolicyStore {
             || name.ends_with(".propose_update")
             || name.ends_with(".propose_event")
     }
+}
+
+/// Evaluate the PolicyStore facts consumed by current Agent runtime paths.
+/// The returned capability is subject-bound and cannot contain historical
+/// heuristic guidance or user-profile data.
+pub fn build_runtime_policy_context(
+    policy_store: &PolicyStore,
+    input: RuntimePolicyContextBuildInput<'_>,
+) -> Result<RuntimePolicyContext> {
+    let context_policy = policy_store.evaluate_context_policy(PolicyEvaluationRequest {
+        topic: input.privacy_topic,
+        requested_route: ModelRoutePolicy::CloudAllowed,
+    });
+    let input_digest = crate::agent::metadata_safe::metadata_safe_text_digest(&format!(
+        "{}:{}:{}",
+        input.task.kind, input.risk_level, input.sanitized_intent_summary
+    ))
+    .1;
+    let provider_authorization =
+        crate::llm::ProviderPolicyAuthorization::from_policy_store_context_decision(
+            &context_policy,
+            input_digest.clone(),
+        )?
+        .bind_policy_store_current_user_subject(&input.task.user_text)?;
+    let mut provenance = vec![crate::llm::ProviderPolicyProvenanceRef::new(
+        crate::llm::ProviderPolicyProvenanceKind::PolicyStoreRouteDecision,
+        provider_authorization.decision_id(),
+        &input_digest,
+    )];
+    if context_policy.hard_boundary() {
+        provenance.push(crate::llm::ProviderPolicyProvenanceRef::new(
+            crate::llm::ProviderPolicyProvenanceKind::PolicyStorePolicy,
+            context_policy.policy_id(),
+            crate::agent::metadata_safe::metadata_safe_text_digest(context_policy.policy_id()).1,
+        ));
+    }
+    let external_write_requires_proposal = input
+        .tool_requirements
+        .iter()
+        .any(|requirement| matches!(requirement.as_str(), "write" | "external_side_effect"));
+    if external_write_requires_proposal {
+        provenance.push(crate::llm::ProviderPolicyProvenanceRef::new(
+            crate::llm::ProviderPolicyProvenanceKind::PolicyStorePolicy,
+            BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+            crate::agent::metadata_safe::metadata_safe_text_digest(
+                BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+            )
+            .1,
+        ));
+    }
+
+    Ok(RuntimePolicyContext::new(
+        provider_authorization,
+        provenance,
+        external_write_requires_proposal,
+    ))
 }

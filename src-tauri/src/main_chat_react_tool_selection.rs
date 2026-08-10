@@ -154,6 +154,57 @@ impl MainChatReactToolSelectionRanking {
 }
 
 impl MainChatReactActionPlan {
+    pub(crate) fn apply_life_model_tool_preferences(
+        mut self,
+        tool_preferences: &[String],
+        current_user_text: &str,
+    ) -> (Self, bool) {
+        if self.tool_candidates.len() < 2
+            || current_instruction_selects_tool(current_user_text, &self.tool_candidates)
+            || !equivalent_tool_candidates(&self.tool_candidates)
+        {
+            return (self, false);
+        }
+        let prefer_mcp = tool_preferences.iter().any(|preference| {
+            let preference = preference.to_lowercase();
+            preference.contains("prefer mcp")
+                || preference.contains("mcp first")
+                || preference.contains("优先 mcp")
+                || preference.contains("首选 mcp")
+        });
+        let prefer_file = tool_preferences.iter().any(|preference| {
+            let preference = preference.to_lowercase();
+            preference.contains("prefer file")
+                || preference.contains("file first")
+                || preference.contains("优先文件")
+                || preference.contains("首选文件")
+        });
+        if prefer_mcp == prefer_file {
+            return (self, false);
+        }
+        let before = self.tool_candidate_ids();
+        self.tool_candidates.sort_by_key(|candidate| {
+            let is_file = candidate.target == "file.read";
+            if (prefer_file && is_file) || (prefer_mcp && !is_file) {
+                0
+            } else {
+                1
+            }
+        });
+        if self.tool_candidate_ids() == before {
+            return (self, false);
+        }
+        for (index, candidate) in self.tool_candidates.iter_mut().enumerate() {
+            candidate.selection_rank = index + 1;
+            candidate.match_reason = "lifemodel_equivalent_tool_preference".into();
+        }
+        if let Some(primary) = self.tool_candidates.first() {
+            self.target = primary.target.clone();
+            self.arguments = primary.arguments.clone();
+        }
+        (self, true)
+    }
+
     fn governed_candidate_input(candidate: &MainChatReactToolCandidate) -> serde_json::Value {
         match candidate.executor_action_type.as_str() {
             "memory_search" | "session_search" => candidate.arguments.clone(),
@@ -890,6 +941,31 @@ fn main_chat_explicit_mcp_read_request(lower: &str) -> bool {
         || lower.contains("governed mcp")
 }
 
+fn equivalent_tool_candidates(candidates: &[MainChatReactToolCandidate]) -> bool {
+    let Some(first) = candidates.first() else {
+        return false;
+    };
+    candidates.iter().all(|candidate| {
+        candidate.executor_action_type == first.executor_action_type
+            && candidate.capabilities == first.capabilities
+    })
+}
+
+fn current_instruction_selects_tool(
+    user_text: &str,
+    candidates: &[MainChatReactToolCandidate],
+) -> bool {
+    let current = user_text.to_lowercase();
+    current.contains("file first")
+        || current.contains("mcp first")
+        || current.contains("优先文件")
+        || current.contains("优先 mcp")
+        || candidates.iter().any(|candidate| {
+            current.contains(&format!("use {}", candidate.candidate_id.to_lowercase()))
+                || current.contains(&format!("使用 {}", candidate.candidate_id.to_lowercase()))
+        })
+}
+
 fn main_chat_explicit_multi_source_read_request(lower: &str) -> bool {
     (lower.contains("two safe read sources")
         || lower.contains("two read sources")
@@ -927,7 +1003,7 @@ pub(crate) fn build_main_chat_react_agent_loop_messages(
             plan.executor_action_type,
             plan.target,
             arguments_digest_label,
-            plan.tool_candidate_contract()
+            plan.tool_candidate_contract(),
         ),
     });
     guided_messages.extend_from_slice(messages_for_generation);

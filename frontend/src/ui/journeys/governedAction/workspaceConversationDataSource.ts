@@ -2,18 +2,24 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelMainChatAgentTask,
   createChatSession,
+  deactivateMarkdownMemoryFileProposal,
   deleteChatSession,
   detachResourceFromTurn,
+  draftMarkdownMemoryFileProposal,
   getChatHistory,
+  getChatLifeModelInfluence,
+  getMarkdownMemoryViewModel,
   listChatSessions,
   listMainChatSkills,
   listMainChatToolCandidates,
   pickAndImportResources,
   renameChatSession,
+  selectMarkdownMemoryRoot,
   selectMainChatSkill,
   clearMainChatSkill,
   startStreamMessage,
   type ChatSession,
+  type ChatLifeModelInfluenceSnapshot,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
   type MainChatAgentTaskState,
@@ -21,6 +27,10 @@ import {
   type MainChatSelectedSkill,
   type MainChatSkillSummary,
   type MainChatToolCandidateList,
+  type MarkdownMemoryProposalReceipt,
+  type MarkdownMemoryRootSelection,
+  type MarkdownMemoryScope,
+  type MarkdownMemoryViewModel,
   type StreamMessageChunkPayload,
   type StreamMessageDonePayload,
   type StreamMessageStartPayload,
@@ -35,6 +45,7 @@ export type WorkspaceStreamEvents = {
 export interface WorkspaceConversationDataSource {
   listSessions(): Promise<ChatSession[]>;
   loadHistory(sessionId: string): Promise<ChatMessage[]>;
+  loadLifeModelInfluence(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
   createSession(sessionId: string, title: string): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
@@ -58,6 +69,19 @@ export interface WorkspaceConversationDataSource {
   selectSkill?(sessionId: string, skillId: string): Promise<MainChatSelectedSkill>;
   clearSkill?(sessionId: string): Promise<MainChatSelectedSkill>;
   listToolCandidates?(taskSessionId?: string): Promise<MainChatToolCandidateList>;
+  loadMarkdownMemory?(): Promise<MarkdownMemoryViewModel>;
+  selectMarkdownMemoryRoot?(scope: MarkdownMemoryScope): Promise<MarkdownMemoryRootSelection>;
+  draftMarkdownMemoryFileProposal?(request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    content: string;
+    expectedCurrentDigest?: string;
+  }): Promise<MarkdownMemoryProposalReceipt>;
+  deactivateMarkdownMemoryFileProposal?(request: {
+    scope: MarkdownMemoryScope;
+    relativePath: string;
+    expectedCurrentDigest: string;
+  }): Promise<MarkdownMemoryProposalReceipt>;
 }
 
 function matchesActiveStream(
@@ -99,6 +123,7 @@ async function streamTurn(
 export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSource = {
   listSessions: listChatSessions,
   loadHistory: getChatHistory,
+  loadLifeModelInfluence: getChatLifeModelInfluence,
   createSession: createChatSession,
   renameSession: renameChatSession,
   deleteSession: deleteChatSession,
@@ -110,4 +135,8 @@ export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSour
   selectSkill: selectMainChatSkill,
   clearSkill: clearMainChatSkill,
   listToolCandidates: listMainChatToolCandidates,
+  loadMarkdownMemory: getMarkdownMemoryViewModel,
+  selectMarkdownMemoryRoot,
+  draftMarkdownMemoryFileProposal,
+  deactivateMarkdownMemoryFileProposal,
 };

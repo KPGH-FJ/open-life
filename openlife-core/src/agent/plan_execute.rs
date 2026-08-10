@@ -2,15 +2,13 @@ use crate::agent::governor::{
     GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
     ToolGovernanceInput,
 };
-use crate::agent::hs_selector::{
-    build_guidance_impact_read_model, GuidanceAffectedSurface, GuidanceImpactReadModel,
-};
 use crate::agent::review_workflow::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
 };
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::agent::ProposalStore;
+use crate::life_model::v2::LifeModelSectionV2;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -29,6 +27,16 @@ pub struct PlanExecuteInput {
     pub runtime_input: RuntimeInput,
     pub objective: String,
     pub max_steps: usize,
+    pub life_model_hints: Vec<PlanExecuteLifeModelHint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecuteLifeModelHint {
+    pub item_id: String,
+    pub section: LifeModelSectionV2,
+    pub value: String,
+    pub selected_reason: String,
 }
 
 impl PlanExecuteInput {
@@ -41,7 +49,13 @@ impl PlanExecuteInput {
             runtime_input,
             objective: objective.into(),
             max_steps,
+            life_model_hints: Vec::new(),
         }
+    }
+
+    pub fn with_life_model_hints(mut self, hints: Vec<PlanExecuteLifeModelHint>) -> Self {
+        self.life_model_hints = hints;
+        self
     }
 }
 
@@ -222,9 +236,7 @@ impl PlanExecuteProductContract {
                 "scenarioId": self.scenario.as_id(),
                 "taskKind": input.task.kind.to_string(),
                 "maxStepCount": self.max_step_count,
-                "hasHsPacket": input.hs_packet.is_some(),
-                "selectedGuidanceCount": selected_guidance_count(input),
-                "guidanceImpactKinds": selected_guidance_impact_kinds(input),
+                "typedPolicyPresent": true,
                 "toolsPromptPresent": !input.tools_prompt.trim().is_empty(),
                 "memoryContextPresent": input.memory_context.is_some(),
                 "proposalFirstWriteBoundary": true,
@@ -341,8 +353,6 @@ pub struct PlanExecuteReport {
     pub governance_decisions: Vec<PlanGovernanceDecisionSummary>,
     pub observation_summaries: Vec<PlanObservationSummary>,
     pub warnings: Vec<String>,
-    #[serde(default)]
-    pub guidance_impact: Option<Box<GuidanceImpactReadModel>>,
     pub metadata_safe_summary: Value,
 }
 
@@ -454,18 +464,6 @@ impl PlanExecuteService {
             });
         }
 
-        let guidance_impact = if input.runtime_input.guidance_consumption_mode.is_enabled() {
-            input.runtime_input.hs_packet.as_ref().map(|packet| {
-                Box::new(build_guidance_impact_read_model(
-                    source_run_id.as_deref(),
-                    "plan_execute",
-                    packet,
-                    vec![GuidanceAffectedSurface::PlanExecuteTrace],
-                ))
-            })
-        } else {
-            None
-        };
         let report = PlanExecuteReport::new(
             plan_id,
             source_run_id,
@@ -473,7 +471,6 @@ impl PlanExecuteService {
             governance_decisions,
             observation_summaries,
             warnings.clone(),
-            guidance_impact,
         );
 
         PlanExecutionOutput {
@@ -1478,38 +1475,36 @@ impl PlanExecuteSessionStore {
 fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
     let max_steps = input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT);
     let mut steps = Vec::new();
-    if has_gentle_planning_guidance(input) {
+    if let Some(goal) = input
+        .life_model_hints
+        .iter()
+        .find(|hint| hint.section == LifeModelSectionV2::LongTermGoals)
+    {
+        let title = format!(
+            "Align this week with {}",
+            bounded_product_step_text(&goal.value, 64)
+        );
+        push_named_step(&mut steps, max_steps, title, "lifemodel_goal_alignment");
+    }
+    if input.life_model_hints.iter().any(|hint| {
+        matches!(
+            hint.section,
+            LifeModelSectionV2::PersonalBoundaries | LifeModelSectionV2::DecisionPrinciples
+        )
+    }) {
         push_step(
             &mut steps,
             max_steps,
             PlanStepSpec {
-                title: "Choose one small weekly focus",
-                intent: "read_only_planning",
+                title: "Check confirmed personal boundaries before scheduling",
+                intent: "lifemodel_boundary_check",
                 tool_name: None,
-                action_kind: "plan",
+                action_kind: "reason",
                 risk_level: RiskLevel::Low,
                 declared_write: false,
             },
         );
-        push_step(
-            &mut steps,
-            max_steps,
-            PlanStepSpec {
-                title: "Prepare lightweight weekly check-in proposal",
-                intent: "write_like_schedule_task",
-                tool_name: Some("review_center.propose_scheduled_task"),
-                action_kind: "schedule",
-                risk_level: RiskLevel::Medium,
-                declared_write: true,
-            },
-        );
-
-        return PlanDraft {
-            objective: metadata_safe_weekly_objective(input),
-            steps,
-        };
     }
-
     push_step(
         &mut steps,
         max_steps,
@@ -1555,11 +1550,15 @@ fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
 
 fn metadata_safe_weekly_objective(input: &PlanExecuteInput) -> String {
     format!(
-        "scenario=weekly_planning task_kind={} max_steps={} selected_guidance_count={}",
+        "scenario=weekly_planning task_kind={} max_steps={} lifemodel_hint_count={}",
         input.runtime_input.task.kind,
         input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT),
-        selected_guidance_count(&input.runtime_input)
+        input.life_model_hints.len(),
     )
+}
+
+fn bounded_product_step_text(value: &str, max_chars: usize) -> String {
+    value.trim().chars().take(max_chars).collect()
 }
 
 fn validate_step_title(title: &str) -> Result<()> {
@@ -2032,6 +2031,21 @@ fn push_step(steps: &mut Vec<PlanStep>, max_steps: usize, spec: PlanStepSpec) {
     });
 }
 
+fn push_named_step(steps: &mut Vec<PlanStep>, max_steps: usize, title: String, intent: &str) {
+    if steps.len() >= max_steps {
+        return;
+    }
+    steps.push(PlanStep {
+        id: format!("step-{}", steps.len() + 1),
+        title,
+        intent: intent.into(),
+        tool_name: None,
+        action_kind: "plan".into(),
+        risk_level: RiskLevel::Low,
+        declared_write: false,
+    });
+}
+
 fn contains_search_intent(lowercase_text: &str) -> bool {
     ["search", "查找", "检索"]
         .iter()
@@ -2079,7 +2093,6 @@ impl PlanExecuteReport {
         governance_decisions: Vec<PlanGovernanceDecisionSummary>,
         observation_summaries: Vec<PlanObservationSummary>,
         warnings: Vec<String>,
-        guidance_impact: Option<Box<GuidanceImpactReadModel>>,
     ) -> Self {
         let step_count = traces.len();
         let executed_read_only_step_count = traces
@@ -2104,10 +2117,6 @@ impl PlanExecuteReport {
             "blockedOrProposalRequiredStepCount": blocked_or_proposal_required_step_count,
             "governanceDecisionCount": governance_decisions.len(),
             "observationSummaryCount": observation_summaries.len(),
-            "selectedGuidanceCount": guidance_impact
-                .as_ref()
-                .map(|impact| impact.selected_guidance_count)
-                .unwrap_or(0),
             "warningCount": warnings.len(),
         });
 
@@ -2120,64 +2129,13 @@ impl PlanExecuteReport {
             governance_decisions,
             observation_summaries,
             warnings,
-            guidance_impact,
             metadata_safe_summary,
         }
     }
 }
 
-fn selected_guidance_count(input: &RuntimeInput) -> usize {
-    if !input.guidance_consumption_mode.is_enabled() {
-        return 0;
-    }
-    input
-        .hs_packet
-        .as_ref()
-        .map(|packet| packet.guidance_refs.len())
-        .unwrap_or(0)
-}
-
-fn selected_guidance_impact_kinds(input: &RuntimeInput) -> Vec<String> {
-    if !input.guidance_consumption_mode.is_enabled() {
-        return Vec::new();
-    }
-    input
-        .hs_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .map(|guidance| guidance.impact_kind.clone())
-                .fold(Vec::new(), |mut kinds, kind| {
-                    push_unique(&mut kinds, kind);
-                    kinds
-                })
-        })
-        .unwrap_or_default()
-}
-
-fn has_gentle_planning_guidance(input: &PlanExecuteInput) -> bool {
-    if !input.runtime_input.guidance_consumption_mode.is_enabled() {
-        return false;
-    }
-    input
-        .runtime_input
-        .hs_packet
-        .as_ref()
-        .is_some_and(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .any(|guidance| guidance.impact_kind == "gentle_planning")
-        })
-}
-
 fn source_run_id(input: &RuntimeInput) -> Option<String> {
-    input
-        .hs_packet
-        .as_ref()
-        .and_then(|packet| packet.audit.agent_run_id.clone())
+    input.source_run_id.clone()
 }
 
 fn execute_internal_read_only_step(step: &PlanStep) -> PlanObservationSummary {
@@ -2237,7 +2195,6 @@ fn governance_subject_kind(subject: GovernanceSubject) -> &'static str {
     match subject {
         GovernanceSubject::RuntimeInput => "runtime_input",
         GovernanceSubject::ToolAction => "tool_action",
-        GovernanceSubject::MaturationCandidate => "maturation_candidate",
         GovernanceSubject::ModelRoute => "model_route",
         GovernanceSubject::MemoryWrite => "memory_write",
         GovernanceSubject::ExternalWrite => "external_write",

@@ -4,9 +4,8 @@ use crate::agent::action_executor::{
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::tool_gateway::ToolGateway;
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
-use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
+use crate::agent::{RuntimeInput, RuntimeOutput, RuntimePolicyContext};
 use crate::layer::Layer;
-use crate::life_model::LifeModel;
 #[cfg(test)]
 use crate::llm::ProviderInvocationStatus;
 use crate::llm::{
@@ -89,55 +88,28 @@ impl AgentLoopConfig {
                  - Decomposing goals into actionable steps\n\
                  - Identifying blockers and dependencies\n\
                  - Proposing schedule adjustments\n\
-                 - Reading current goals before suggesting changes\n\
-                 Use goal.read, life_model.read, and proposal.create tools.",
+                 - Reading current short-lived state and Agent Memory before suggesting changes\n\
+                 Use state.read, memory.search, and proposal.create tools.",
             ),
         }
     }
 }
 
-pub fn apply_react_guidance_to_config(
-    mut config: AgentLoopConfig,
-    packet: Option<&RuntimeHSPacket>,
-    mode: RuntimeGuidanceConsumptionMode,
-) -> AgentLoopConfig {
-    if !mode.is_enabled() {
-        return config;
-    }
-    let Some(packet) = packet else {
-        return config;
-    };
-    if packet
-        .guidance_refs
-        .iter()
-        .any(|guidance| guidance.impact_kind == "gentle_planning")
-    {
-        config.max_steps = config.max_steps.min(2);
-        config.max_tool_calls = config.max_tool_calls.min(2);
-    }
-    config
-}
-
 fn intersect_provider_authorizations(
     explicit: Option<ProviderPolicyAuthorization>,
-    hs_policy: Option<ProviderPolicyAuthorization>,
+    runtime_policy: ProviderPolicyAuthorization,
 ) -> ProviderPolicyAuthorization {
-    match (explicit, hs_policy) {
-        (Some(explicit), Some(_))
-            if explicit.data_route() == crate::llm::ProviderDataRoute::LocalOnly =>
-        {
+    match explicit {
+        Some(explicit) if explicit.data_route() == crate::llm::ProviderDataRoute::LocalOnly => {
             explicit
         }
-        (Some(explicit), Some(hs_policy))
-            if hs_policy.data_route() == crate::llm::ProviderDataRoute::LocalOnly =>
+        Some(explicit)
+            if runtime_policy.data_route() == crate::llm::ProviderDataRoute::LocalOnly =>
         {
             explicit.restrict_to_local(ProviderLocalOnlyReason::CanonicalRouteIntersection)
         }
-        (Some(explicit), Some(_)) | (Some(explicit), None) => explicit,
-        (None, Some(hs_policy)) => hs_policy,
-        (None, None) => ProviderPolicyAuthorization::local_only_fail_closed(
-            ProviderLocalOnlyReason::MissingCanonicalPolicy,
-        ),
+        Some(explicit) => explicit,
+        None => runtime_policy,
     }
 }
 
@@ -150,14 +122,12 @@ struct AgentLoopContext<'a> {
     /// prompt-hardening transform. `task.user_text` may be wrapped or otherwise
     /// compiled for model consumption and must never be reused as policy truth.
     pub provider_subject_text: &'a str,
-    pub life_model: &'a LifeModel,
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
-    pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub policy_context: RuntimePolicyContext,
     pub provider_authorization: Option<ProviderPolicyAuthorization>,
     pub network_policy: crate::config::NetworkPolicy,
-    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
 }
 
 /// Typed execution boundary for one AgentLoop invocation. Keeping these
@@ -165,30 +135,30 @@ struct AgentLoopContext<'a> {
 /// growing a parallel positional API as runtime facts are added.
 pub struct AgentLoopRunRequest<'a> {
     task: &'a AgentTask,
-    life_model: &'a LifeModel,
     tools_prompt: &'a str,
     memory_context: Option<String>,
     privacy_engine: PrivacyEngine,
     action_ctx: &'a ActionExecutionContext<'a>,
+    policy_context: RuntimePolicyContext,
     provider_authorization: Option<ProviderPolicyAuthorization>,
 }
 
 impl<'a> AgentLoopRunRequest<'a> {
     pub fn new(
         task: &'a AgentTask,
-        life_model: &'a LifeModel,
         tools_prompt: &'a str,
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
         action_ctx: &'a ActionExecutionContext<'a>,
+        policy_context: RuntimePolicyContext,
     ) -> Self {
         Self {
             task,
-            life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
             action_ctx,
+            policy_context,
             provider_authorization: None,
         }
     }
@@ -330,13 +300,11 @@ struct StepResult {
 struct StepContext<'a> {
     pub task: &'a AgentTask,
     pub provider_subject_text: &'a str,
-    pub life_model: &'a LifeModel,
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
-    pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub policy_context: RuntimePolicyContext,
     pub provider_authorization: Option<ProviderPolicyAuthorization>,
-    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     pub action_ctx: &'a ActionExecutionContext<'a>,
     pub run: &'a mut AgentRun,
     pub tool_call_count: u32,
@@ -425,9 +393,7 @@ impl AgentLoop {
     ) -> Result<PreparedProviderRequest> {
         let provider_authorization = intersect_provider_authorizations(
             actx.provider_authorization.clone(),
-            actx.hs_runtime_packet
-                .as_ref()
-                .map(|packet| packet.provider_authorization().clone()),
+            actx.policy_context.provider_authorization().clone(),
         );
         let provider_authorization = if self.config.allow_cloud {
             provider_authorization
@@ -450,11 +416,7 @@ impl AgentLoop {
             .iter()
             .map(|block| block.category.clone())
             .collect::<Vec<_>>();
-        let policy_provenance_refs = actx
-            .hs_runtime_packet
-            .as_ref()
-            .map(RuntimeHSPacket::provider_policy_provenance_refs)
-            .unwrap_or_default();
+        let policy_provenance_refs = actx.policy_context.policy_provenance_refs().to_vec();
         let provider_authorization = provider_authorization.authorize_derived_payload(
             ProviderPayloadPurpose::AgentLoopStep,
             actx.provider_subject_text,
@@ -548,14 +510,12 @@ impl AgentLoop {
         let repair_actx = AgentLoopContext {
             task: &repair_task,
             provider_subject_text: actx.provider_subject_text,
-            life_model: actx.life_model,
             tools_prompt: actx.tools_prompt,
             memory_context: actx.memory_context.clone(),
             privacy_engine: actx.privacy_engine.clone(),
-            hs_runtime_packet: actx.hs_runtime_packet.clone(),
+            policy_context: actx.policy_context.clone(),
             provider_authorization: actx.provider_authorization.clone(),
             network_policy: actx.network_policy.clone(),
-            guidance_consumption_mode: actx.guidance_consumption_mode,
         };
 
         match self
@@ -600,20 +560,6 @@ impl AgentLoop {
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
         run.user_input = Some(actx.task.user_text.clone());
-        let mut current_hs_packet = actx.hs_runtime_packet.clone();
-        let guided_config = apply_react_guidance_to_config(
-            config.clone(),
-            current_hs_packet.as_ref(),
-            actx.guidance_consumption_mode,
-        );
-        if let Some(packet) = current_hs_packet.as_mut() {
-            if packet.audit.agent_run_id.is_none() {
-                packet.audit.agent_run_id = Some(run.id.clone());
-            }
-            run.hs_selection_audit = Some(packet.audit.clone());
-            run.behavior_checks = crate::agent::behavior_checks_for_packet(packet);
-        }
-
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
         let mut final_response = String::new();
@@ -655,12 +601,12 @@ impl AgentLoop {
             );
 
             // Check step budget
-            if step_count >= guided_config.max_steps {
+            if step_count >= config.max_steps {
                 stop_reason = "max_steps_reached".into();
                 if final_response.is_empty() {
                     final_response = format!(
                         "已达到最大执行步数 ({})。当前结果：{}",
-                        guided_config.max_steps, final_response
+                        config.max_steps, final_response
                     );
                 }
                 break;
@@ -723,19 +669,17 @@ impl AgentLoop {
                     StepContext {
                         task: &current_task,
                         provider_subject_text: actx.provider_subject_text,
-                        life_model: actx.life_model,
                         tools_prompt: &current_tools_prompt,
                         memory_context,
                         privacy_engine: current_privacy_engine.clone(),
-                        hs_runtime_packet: current_hs_packet.clone(),
+                        policy_context: actx.policy_context.clone(),
                         provider_authorization: actx.provider_authorization.clone(),
-                        guidance_consumption_mode: actx.guidance_consumption_mode,
                         action_ctx,
                         run: &mut run,
                         tool_call_count,
                     },
                     callback.clone(),
-                    &guided_config,
+                    config,
                     provider_progress,
                 )
                 .await
@@ -875,21 +819,21 @@ impl AgentLoop {
     pub async fn run(
         &self,
         task: &AgentTask,
-        life_model: &LifeModel,
         tools_prompt: &str,
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
         action_ctx: &ActionExecutionContext<'_>,
+        policy_context: RuntimePolicyContext,
     ) -> Result<AgentLoopResult> {
         let mut ignore_provider_progress = |_: ProviderInvocationProgress| Ok(());
         self.run_with_provider_observer(
             AgentLoopRunRequest::new(
                 task,
-                life_model,
                 tools_prompt,
                 memory_context,
                 privacy_engine,
                 action_ctx,
+                policy_context,
             ),
             &mut ignore_provider_progress,
         )
@@ -905,24 +849,22 @@ impl AgentLoop {
     ) -> Result<AgentLoopResult> {
         let AgentLoopRunRequest {
             task,
-            life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
             action_ctx,
+            policy_context,
             provider_authorization,
         } = request;
         let actx = AgentLoopContext {
             task,
             provider_subject_text: &task.user_text,
-            life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            policy_context,
             provider_authorization,
             network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
-            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
         self.run_loop_core(
             &actx,
@@ -946,11 +888,11 @@ impl AgentLoop {
     ) -> Result<AgentLoopResult> {
         let AgentLoopRunRequest {
             task,
-            life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
             action_ctx,
+            policy_context,
             provider_authorization,
         } = request;
         if canonical_run.id.trim().is_empty() || canonical_run.task_id.trim().is_empty() {
@@ -965,14 +907,12 @@ impl AgentLoop {
         let actx = AgentLoopContext {
             task,
             provider_subject_text: &task.user_text,
-            life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            policy_context,
             provider_authorization,
             network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
-            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
         // Keep the product AgentLoop seam stack-bounded. `run_loop_core`
         // contains the full iterative provider/tool state machine; inlining
@@ -1010,7 +950,6 @@ impl AgentLoop {
         privacy_engine: PrivacyEngine,
         action_ctx: &ActionExecutionContext<'_>,
     ) -> Result<AgentLoopResult> {
-        let hs_runtime_packet = input.hs_packet.as_ref().or(action_ctx.hs_runtime_packet);
         let runtime_action_ctx = ActionExecutionContext {
             registry: action_ctx.registry,
             permission_store: action_ctx.permission_store,
@@ -1025,7 +964,9 @@ impl AgentLoop {
             agent_run_store: action_ctx.agent_run_store,
             bound_content_receipt_issuer: action_ctx.bound_content_receipt_issuer,
             network_policy: action_ctx.network_policy,
-            hs_runtime_packet,
+            external_write_requires_proposal: input
+                .policy_context
+                .external_write_requires_proposal(),
             tool_dispatch_observer: action_ctx.tool_dispatch_observer,
             tool_started_transition_observer: action_ctx.tool_started_transition_observer,
             tool_audit_persistence_observer: action_ctx.tool_audit_persistence_observer,
@@ -1039,17 +980,15 @@ impl AgentLoop {
         let actx = AgentLoopContext {
             task: &input.task,
             provider_subject_text: &input.task.user_text,
-            life_model: &input.life_model_compat,
             tools_prompt: &input.tools_prompt,
             memory_context: input.memory_context.clone(),
             privacy_engine,
-            hs_runtime_packet: runtime_action_ctx.hs_runtime_packet.cloned(),
+            policy_context: input.policy_context.clone(),
             provider_authorization: None,
             network_policy: runtime_action_ctx
                 .network_policy
                 .cloned()
                 .unwrap_or_default(),
-            guidance_consumption_mode: input.guidance_consumption_mode,
         };
         let config = self.config_with_runtime_budget(input);
 
@@ -1088,24 +1027,22 @@ impl AgentLoop {
     pub async fn run_streaming(
         &self,
         task: &AgentTask,
-        life_model: &LifeModel,
         tools_prompt: &str,
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
         action_ctx: &ActionExecutionContext<'_>,
+        policy_context: RuntimePolicyContext,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentLoopResult> {
         let actx = AgentLoopContext {
             task,
             provider_subject_text: &task.user_text,
-            life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            policy_context,
             provider_authorization: None,
             network_policy: action_ctx.network_policy.cloned().unwrap_or_default(),
-            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
         let mut ignore_provider_progress = |_: ProviderInvocationProgress| Ok(());
         self.run_loop_core(
@@ -1140,14 +1077,12 @@ impl AgentLoop {
             let actx = AgentLoopContext {
                 task: ctx.task,
                 provider_subject_text: ctx.provider_subject_text,
-                life_model: ctx.life_model,
                 tools_prompt: ctx.tools_prompt,
                 memory_context: ctx.memory_context.clone(),
                 privacy_engine: ctx.privacy_engine.clone(),
-                hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                policy_context: ctx.policy_context.clone(),
                 provider_authorization: ctx.provider_authorization.clone(),
                 network_policy: ctx.action_ctx.network_policy.cloned().unwrap_or_default(),
-                guidance_consumption_mode: ctx.guidance_consumption_mode,
             };
             if let Some(ref cb) = callback {
                 self.generate_response_streaming(&actx, cb.clone(), provider_progress)
@@ -1165,13 +1100,6 @@ impl AgentLoop {
                 if ctx.run.reasoning_trace.is_none() {
                     ctx.run.reasoning_trace = Some(gen.runtime_output.reasoning_trace.clone());
                 }
-                if ctx.run.hs_selection_audit.is_none() {
-                    ctx.run.hs_selection_audit = gen.runtime_output.hs_selection_audit.clone();
-                }
-                if ctx.run.behavior_checks.is_empty() {
-                    ctx.run.behavior_checks = gen.runtime_output.hs_behavior_checks.clone();
-                }
-
                 let reply = gen.reply;
 
                 // Check for tool calls in the reply
@@ -1204,18 +1132,16 @@ impl AgentLoop {
                             &AgentLoopContext {
                                 task: ctx.task,
                                 provider_subject_text: ctx.provider_subject_text,
-                                life_model: ctx.life_model,
                                 tools_prompt: ctx.tools_prompt,
                                 memory_context: memory_ctx.clone(),
                                 privacy_engine: privacy.clone(),
-                                hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                                policy_context: ctx.policy_context.clone(),
                                 provider_authorization: ctx.provider_authorization.clone(),
                                 network_policy: ctx
                                     .action_ctx
                                     .network_policy
                                     .cloned()
                                     .unwrap_or_default(),
-                                guidance_consumption_mode: ctx.guidance_consumption_mode,
                             },
                             ctx.action_ctx,
                             ctx.run,
@@ -1335,15 +1261,13 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task_with_hs_packet_and_guidance_mode(
+            .execute_task(
                 actx.task,
-                actx.life_model,
                 actx.tools_prompt,
                 actx.memory_context.clone(),
                 memory_hits,
                 actx.privacy_engine.clone(),
-                actx.hs_runtime_packet.clone(),
-                actx.guidance_consumption_mode,
+                actx.policy_context.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
@@ -1394,15 +1318,13 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task_with_hs_packet_and_guidance_mode(
+            .execute_task(
                 actx.task,
-                actx.life_model,
                 actx.tools_prompt,
                 actx.memory_context.clone(),
                 memory_hits,
                 actx.privacy_engine.clone(),
-                actx.hs_runtime_packet.clone(),
-                actx.guidance_consumption_mode,
+                actx.policy_context.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
@@ -2231,7 +2153,6 @@ mod tests {
     use crate::agent::tool_gateway::ToolGateway;
     use crate::agent::types::{AgentObservation, AgentRun, AgentTaskKind};
     use crate::config::AppConfig;
-    use crate::life_model::LifeModel;
     use crate::llm::{ChatMessage, ProviderInvocationReceipt};
     use crate::mcp::McpRegistry;
     use crate::mcp_audit::McpAuditStore;
@@ -2242,7 +2163,6 @@ mod tests {
     /// Creates a minimal AgentLoop for testing parse_agent_reply and build_follow_up_messages.
     /// Uses dummy scheduler credentials (no actual LLM calls are made).
     fn make_test_agent_loop() -> AgentLoop {
-        let life_model = LifeModel::default();
         let scheduler = InferenceScheduler::new(
             "llama3".into(),
             false,
@@ -2254,7 +2174,29 @@ mod tests {
             false,
         );
         let app_config = AppConfig::default();
-        let runtime = AgentRuntime::new(life_model, scheduler.clone(), &app_config);
+        let runtime = AgentRuntime::new(scheduler.clone(), &app_config);
+        let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
+        let config = AgentLoopConfig::default();
+        AgentLoop::new(runtime, gateway, scheduler, config)
+    }
+
+    /// Creates a provider-preparation fixture that never depends on a live
+    /// local Ollama process. The scripted scheduler still exercises payload
+    /// authorization and provider selection without crossing an adapter edge.
+    fn make_scripted_provider_test_agent_loop() -> AgentLoop {
+        let scheduler = InferenceScheduler::new(
+            "llama3".into(),
+            false,
+            "openrouter".into(),
+            "https://test.example.com/v1".into(),
+            "sk-test".into(),
+            "gpt-3.5-turbo".into(),
+            "text-embedding-ada-002".into(),
+            false,
+        )
+        .with_scripted_generation_response("provider preparation fixture");
+        let app_config = AppConfig::default();
+        let runtime = AgentRuntime::new(scheduler.clone(), &app_config);
         let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
         let config = AgentLoopConfig::default();
         AgentLoop::new(runtime, gateway, scheduler, config)
@@ -2353,16 +2295,15 @@ mod tests {
             crate::agent::PolicyEvaluationRequest {
                 topic: crate::agent::PolicyTopic::Health,
                 requested_route: crate::agent::ModelRoutePolicy::CloudAllowed,
-                heuristic_effect: None,
             },
         );
-        let hs_local = ProviderPolicyAuthorization::from_hs_context_decision(
+        let policy_store_local = ProviderPolicyAuthorization::from_policy_store_context_decision(
             &hs_decision,
-            "hs-local-intersection-decision",
+            "policy-store-local-intersection-decision",
         )
         .unwrap();
 
-        let intersected = intersect_provider_authorizations(Some(main_chat), Some(hs_local));
+        let intersected = intersect_provider_authorizations(Some(main_chat), policy_store_local);
         assert_eq!(
             intersected.data_route(),
             crate::llm::ProviderDataRoute::LocalOnly
@@ -2401,8 +2342,7 @@ mod tests {
         wrap_user_content(&mut task);
         assert_ne!(task.user_text, user_text);
 
-        let agent = make_test_agent_loop();
-        let life_model = LifeModel::default();
+        let agent = make_scripted_provider_test_agent_loop();
         let network_policy = crate::config::NetworkPolicy {
             default_decision: "allow".into(),
             ..Default::default()
@@ -2410,14 +2350,12 @@ mod tests {
         let context = AgentLoopContext {
             task: &task,
             provider_subject_text: user_text,
-            life_model: &life_model,
             tools_prompt: "",
             memory_context: None,
             privacy_engine: PrivacyEngine::new(),
-            hs_runtime_packet: None,
             provider_authorization: Some(authorization.clone()),
             network_policy: network_policy.clone(),
-            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
+            policy_context: RuntimePolicyContext::fail_closed(),
         };
 
         let prepared = agent
@@ -2477,7 +2415,7 @@ mod tests {
                 bound_content_receipt_issuer: None,
                 network_policy: None,
                 web_search_fixture_output: None,
-                hs_runtime_packet: None,
+                external_write_requires_proposal: true,
                 tool_dispatch_observer: None,
                 tool_started_transition_observer: None,
                 tool_audit_persistence_observer: None,
@@ -2737,11 +2675,11 @@ mod tests {
             .run_existing_with_provider_observer(
                 AgentLoopRunRequest::new(
                     &task,
-                    &LifeModel::default(),
                     "",
                     None,
                     PrivacyEngine::new(),
                     &action_ctx,
+                    RuntimePolicyContext::fail_closed(),
                 ),
                 canonical_run,
                 &mut observer,
@@ -2772,17 +2710,16 @@ mod tests {
             }],
             layer: crate::layer::Layer::L2,
         };
-        let life_model = LifeModel::default();
         let canonical_run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
         let mut observer = |_: ProviderInvocationProgress| Ok(());
         let future = agent.run_existing_with_provider_observer(
             AgentLoopRunRequest::new(
                 &task,
-                &life_model,
                 "",
                 None,
                 PrivacyEngine::new(),
                 &action_ctx,
+                RuntimePolicyContext::fail_closed(),
             ),
             canonical_run,
             &mut observer,

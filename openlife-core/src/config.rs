@@ -182,6 +182,12 @@ pub struct SystemConfig {
     /// Additional bounded knowledge roots for Main Chat context loading.
     #[serde(default)]
     pub knowledge_roots: Vec<String>,
+    /// User-selected root for Workspace-scoped Markdown working memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_memory_root: Option<String>,
+    /// User-selected root for Project-scoped Markdown working memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_memory_root: Option<String>,
 }
 
 impl Default for SystemConfig {
@@ -203,6 +209,8 @@ impl Default for SystemConfig {
             search_provider_key_ref: None,
             searxng_url: String::new(),
             knowledge_roots: Vec::new(),
+            workspace_memory_root: None,
+            project_memory_root: None,
         }
     }
 }

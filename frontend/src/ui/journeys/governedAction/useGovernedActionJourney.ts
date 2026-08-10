@@ -53,6 +53,7 @@ export type GovernedActionJourneyController = {
   requestReviewAction: (action: ReviewAction) => void;
   confirmReviewAction: () => void;
   cancelReviewConfirmation: () => void;
+  editLifeModelLearning: (statement: string) => Promise<boolean>;
   requestResume: (control: TaskControl, expectedTaskId: string) => void;
   confirmResume: () => void;
   cancelResumeConfirmation: () => void;
@@ -172,6 +173,51 @@ export function useGovernedActionJourney(
         : [];
     return items.find(item => item.id === selectedItemId) ?? items[0] ?? null;
   }, [selectedItemId, snapshot]);
+
+  const editLifeModelLearning = useCallback(
+    async (statement: string): Promise<boolean> => {
+      const item = selectedItem;
+      if (
+        !dataSource ||
+        !item?.decisionContext.lifeModelLearning ||
+        !reviewEnvelopeAllowsDecisions(snapshotRef.current) ||
+        activeReviewOperationRef.current !== null ||
+        activeResumeOperationRef.current !== null ||
+        activeTaskControlOperationRef.current !== null
+      ) {
+        announce("当前审核项不能使用 LifeModel 结构化编辑器。");
+        return false;
+      }
+      const operationId = ++operationSequenceRef.current;
+      activeReviewOperationRef.current = operationId;
+      try {
+        await dataSource.editLifeModelLearningProposal(item.source.proposalId, statement);
+        const refreshed = await loadSnapshot(false);
+        const revised = refreshed.reviewEnvelope.data?.items.find(
+          candidate => candidate.id === item.id
+        );
+        if (
+          refreshed.reviewEnvelope.status !== "ready" ||
+          revised?.status !== "edited" ||
+          revised.decisionContext.lifeModelLearning?.proposedStatement !== statement.trim()
+        ) {
+          announce("修改已发送，但刷新后的审核项无法证明新内容，当前不报告成功。");
+          return false;
+        }
+        setSelectedItemId(revised.id);
+        announce("审核内容已按 LifeModel schema 更新；尚未写入规范版本。");
+        return true;
+      } catch (error) {
+        announce(`LifeModel 审核内容未修改：${errorCode(error)}`);
+        return false;
+      } finally {
+        if (activeReviewOperationRef.current === operationId) {
+          activeReviewOperationRef.current = null;
+        }
+      }
+    },
+    [announce, dataSource, loadSnapshot, selectedItem]
+  );
 
   const executeReviewAction = useCallback(
     async (action: ReviewAction) => {
@@ -577,6 +623,7 @@ export function useGovernedActionJourney(
     requestReviewAction,
     confirmReviewAction,
     cancelReviewConfirmation,
+    editLifeModelLearning,
     requestResume,
     confirmResume,
     cancelResumeConfirmation,

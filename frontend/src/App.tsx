@@ -2,10 +2,7 @@ import { Component, type ErrorInfo, type ReactNode, useEffect } from "react";
 import { AlertTriangle, Copy, Home, RefreshCw } from "lucide-react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { FoundationActionButton, FoundationNotice } from "@/ui/foundation";
-import {
-  tauriDurableTruthDataSource,
-  tauriLifeModelBuilderDataSource,
-} from "@/ui/journeys/durableTruth";
+import { tauriDurableTruthDataSource } from "@/ui/journeys/durableTruth";
 import {
   tauriGovernedActionDataSource,
   tauriWorkspaceConversationDataSource,
@@ -186,7 +183,6 @@ function ProductionWorkbenchRoute() {
       durableTruthDataSource={tauriDurableTruthDataSource}
       settingsPrivacyDataSource={tauriSettingsPrivacyDataSource}
       workspaceConversationDataSource={tauriWorkspaceConversationDataSource}
-      lifeModelBuilderDataSource={tauriLifeModelBuilderDataSource}
       initialMode={route.mode}
       initialSurface={route.surface}
       onRouteChange={changeRoute}

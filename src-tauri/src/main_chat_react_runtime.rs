@@ -2,14 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use openlife_core::layer::Layer;
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::ProviderInvocationProgress;
 
 use crate::main_chat_generation_support::{main_chat_provider_endpoint_kind, preview_text};
-use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::main_chat_kernel::{MainChatModelProgress, MainChatProviderAuthorization};
+use crate::main_chat_policy_runtime::build_chat_runtime_policy_context;
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_agent_loop_messages, main_chat_react_agent_loop_execution_plan,
     rank_main_chat_react_tool_candidates_with_authorization_and_progress, MainChatReactActionPlan,
@@ -477,10 +476,10 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     session_id: &str,
     user_text: &str,
     messages_for_generation: &[ChatMessage],
-    life_model: &LifeModel,
     privacy_engine: &PrivacyEngine,
     privacy_map: &HashMap<String, String>,
     plan: &MainChatReactActionPlan,
+    life_model_tool_preferences: &[String],
     provider_authorization: &MainChatProviderAuthorization,
     provider_runtime: &crate::state::ProviderRuntimeSnapshot,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
@@ -521,7 +520,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         &resources.execution.governed.shared.registry,
         plan,
     );
-    let (agent_loop_plan, tool_selection_ranking) =
+    let (provider_ranked_plan, tool_selection_ranking) =
         rank_main_chat_react_tool_candidates_with_authorization_and_progress(
             &scheduler,
             messages_for_generation,
@@ -532,6 +531,12 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             emit_progress,
         )
         .await;
+    // Provider ranking may only order the already governed candidate set.
+    // Apply the user's confirmed LifeModel preference last so the product
+    // receipt describes the actual order used by AgentLoop, while the current
+    // instruction and the eligible set remain authoritative.
+    let (agent_loop_plan, life_model_tool_preference_applied) = provider_ranked_plan
+        .apply_life_model_tool_preferences(life_model_tool_preferences, user_text);
     // OpenLifeTurnRuntime installs one fresh receipt collector on the captured
     // provider generation. Ranking and AgentLoop must keep sharing that exact
     // collector so a dropped kernel future does not also drop the only
@@ -580,6 +585,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments),
         "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
         "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
+        "lifeModelToolPreferenceApplied": life_model_tool_preference_applied,
         "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
         "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
         "toolSelectionContractDigest": tool_selection_contract_digest,
@@ -653,7 +659,6 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             governed.calendar_ics_paths.clone(),
             provider_network_policy.clone(),
             openlife_core::agent::AgentRuntime::new_with_runtime_config(
-                life_model.clone(),
                 agent_loop_scheduler.clone(),
                 provider_network_policy.clone(),
                 resources.agent_runtime_config.clone(),
@@ -805,16 +810,8 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         messages: agent_loop_messages,
         layer: Layer::L2,
     };
-    let hs_packet = match build_chat_runtime_hs_packet(
-        state,
-        &task,
-        life_model,
-        &tools_prompt,
-        None,
-    )
-    .await
-    {
-        Ok(packet) => packet,
+    let policy_context = match build_chat_runtime_policy_context(state, &task, &tools_prompt) {
+        Ok(context) => context,
         Err(err) => {
             let model_error_digest =
                 openlife_core::agent::metadata_safe::metadata_safe_value_digest(
@@ -993,7 +990,6 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 .persistence_coordinator
                 .as_ref(),
         )
-        .with_life_model(life_model)
         .with_memory_store(&resources.execution.governed.memory_store)
         .with_calendar_ics_paths(&calendar_ics_paths)
         .with_network_policy(&network_policy)
@@ -1011,9 +1007,8 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             action_ctx = action_ctx.with_canonical_state(canonical_state);
         }
         action_ctx = action_ctx.with_agent_run_store(&resources.execution.agent_run_store);
-        if let Some(ref packet) = hs_packet {
-            action_ctx = action_ctx.with_hs_runtime_packet(packet);
-        }
+        action_ctx = action_ctx
+            .with_external_write_proposal_policy(policy_context.external_write_requires_proposal());
         if let Some(ref fixture_output) = web_search_fixture_output {
             action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
         }
@@ -1074,11 +1069,11 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             .run_existing_with_provider_observer(
                 openlife_core::agent::AgentLoopRunRequest::new(
                     &task,
-                    life_model,
                     &tools_prompt,
                     None,
                     privacy_engine.clone(),
                     &action_ctx,
+                    policy_context.clone(),
                 )
                 .with_provider_authorization(provider_authorization.policy_authorization.clone()),
                 canonical_run,

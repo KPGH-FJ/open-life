@@ -78,13 +78,15 @@ export function durableLifecyclePresentation(
       detail: "LifeModel、Memory 与审核状态尚未完成核对。",
     };
   }
-  if (
-    [
-      snapshot.lifeModelEnvelope.status,
-      snapshot.memoryEnvelope.status,
-      snapshot.reviewEnvelope.status,
-    ].some(status => status === "error")
-  ) {
+  const ownerStatuses = item
+    ? [
+        snapshot.reviewEnvelope.status,
+        item.type === "memory_write" || item.type === "memory_archive"
+          ? snapshot.memoryEnvelope.status
+          : snapshot.lifeModelEnvelope.status,
+      ]
+    : [snapshot.reviewEnvelope.status];
+  if (ownerStatuses.some(status => status === "error")) {
     return {
       lifecycle: "unknown",
       label: "状态不可用",
@@ -92,13 +94,7 @@ export function durableLifecyclePresentation(
       detail: "至少一个后端读模型读取失败，当前不能确认长期状态。",
     };
   }
-  if (
-    [
-      snapshot.lifeModelEnvelope.status,
-      snapshot.memoryEnvelope.status,
-      snapshot.reviewEnvelope.status,
-    ].some(status => status === "stale")
-  ) {
+  if (ownerStatuses.some(status => status === "stale")) {
     return {
       lifecycle: "unknown",
       label: "状态已陈旧",
@@ -106,13 +102,7 @@ export function durableLifecyclePresentation(
       detail: "刷新成功前不使用旧数据确认决定、应用或回滚结果。",
     };
   }
-  if (
-    [
-      snapshot.lifeModelEnvelope.status,
-      snapshot.memoryEnvelope.status,
-      snapshot.reviewEnvelope.status,
-    ].some(status => status === "loading")
-  ) {
+  if (ownerStatuses.some(status => status === "loading")) {
     return {
       lifecycle: "unknown",
       label: "正在核对",
@@ -273,8 +263,8 @@ export function durableTruthContext(
 ): WorkbenchContextSummary {
   const state = durableLifecyclePresentation(snapshot, item);
   return {
-    eyebrow: "长期状态",
-    title: "LifeModel",
+    eyebrow: "个人智能",
+    title: "关于我与 Agent 记忆",
     status: { label: state.label, status: state.status, verified: state.verified },
   };
 }
@@ -287,8 +277,8 @@ export function durableTruthInspector(
 ): WorkbenchInspectorModel {
   if (!snapshot) {
     return {
-      title: "长期状态依据",
-      conclusion: "正在读取 LifeModel、Memory 与审核状态。",
+      title: "个人智能依据",
+      conclusion: "正在分别读取 LifeModel、Agent Memory 与审核状态。",
       risk: "读取完成前不确认长期状态。",
       nextAction: "等待三个后端读模型返回。",
       evidence: [],
@@ -313,7 +303,7 @@ export function durableTruthInspector(
   ];
 
   return {
-    title: item?.decisionContext.title ?? "长期状态依据",
+    title: item?.decisionContext.title ?? "个人智能依据",
     conclusion: `${state.label}。${state.detail}`,
     risk:
       state.lifecycle === "unknown"

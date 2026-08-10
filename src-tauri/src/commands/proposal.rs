@@ -15,11 +15,11 @@ use crate::{
     AppState,
 };
 use openlife_core::agent::{
-    AgentProposal, ArtifactEffectState, MaturationProposalOutcome, MemoryLifecycleRecord,
-    MemoryLifecycleScope, MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource,
-    ProposalStatus, ProposalType, RiskLevel,
+    AgentProposal, ArtifactEffectState, LifeModelLearningCandidateStatus,
+    LifeModelLearningReviewDecisionReceipt, MemoryLifecycleRecord, MemoryLifecycleScope,
+    MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType,
+    RiskLevel,
 };
-use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +51,78 @@ fn reviewed_artifact_target_precondition(
         ),
         _ => Err("Artifact Proposal 必须精确绑定目标不存在或审核时的目标内容摘要。".into()),
     }
+}
+
+async fn artifact_safe_paths_for_proposal(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Vec<String>, String> {
+    let config = state.config.lock().await;
+    if proposal.after.get("source").and_then(Value::as_str) != Some("markdown_memory_editor") {
+        return Ok(config.system.safe_paths.clone());
+    }
+    let scope = match proposal.after.get("memoryScope").and_then(Value::as_str) {
+        Some("workspace") => crate::markdown_memory::MarkdownMemoryScope::Workspace,
+        Some("project") => crate::markdown_memory::MarkdownMemoryScope::Project,
+        _ => return Err("Markdown memory proposal scope is missing or invalid".into()),
+    };
+    let relative = proposal
+        .after
+        .get("memoryRelativePath")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Markdown memory proposal relative path is missing".to_string())?;
+    let relative = crate::markdown_memory::validate_markdown_memory_relative_path(relative)?;
+    let configured_root = match scope {
+        crate::markdown_memory::MarkdownMemoryScope::Workspace => {
+            config.system.workspace_memory_root.as_deref()
+        }
+        crate::markdown_memory::MarkdownMemoryScope::Project => {
+            config.system.project_memory_root.as_deref()
+        }
+    }
+    .ok_or_else(|| "Markdown memory proposal root is no longer configured".to_string())?;
+    let root = std::path::PathBuf::from(configured_root)
+        .canonicalize()
+        .map_err(|error| format!("Markdown memory proposal root is unavailable: {error}"))?;
+    let expected_source = root.join(&relative);
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("propose_write");
+    if matches!(operation, "move" | "trash" | "restore") {
+        let source = proposal
+            .after
+            .get("source_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Markdown memory move source is missing".to_string())?;
+        let target = proposal
+            .after
+            .get("target_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Markdown memory move target is missing".to_string())?;
+        let filename = expected_source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| "Markdown memory move filename is invalid".to_string())?;
+        let expected_target = expected_source.with_file_name(format!("{filename}.disabled.md"));
+        if operation != "move" || source != expected_source || target != expected_target {
+            return Err("Markdown memory move is not bound to the selected scope root".into());
+        }
+    } else {
+        let target = proposal
+            .after
+            .get("path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "Markdown memory write target is missing".to_string())?;
+        if target != expected_source {
+            return Err("Markdown memory write is not bound to the selected scope root".into());
+        }
+    }
+    Ok(vec![root.to_string_lossy().into_owned()])
 }
 
 fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
@@ -137,12 +209,39 @@ pub struct AcceptProposalResponse {
     /// creation and permission wait responses never manufacture this receipt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_materialization: Option<ArtifactMaterializationReceipt>,
+    /// Candidate lifecycle reconciliation is part of the confirmed LifeModel
+    /// effect. The command must never return an IPC error after the canonical
+    /// version was already committed merely because this truth field was not
+    /// represented by the typed response contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub life_model_learning: Option<LifeModelLearningAcceptResponse>,
     #[serde(alias = "blocked_action")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_action: Option<Value>,
     #[serde(alias = "can_continue")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_continue: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LifeModelLearningAcceptResponse {
+    Materialized(LifeModelLearningReviewDecisionReceipt),
+    ReconciliationRequired(LifeModelLearningReconciliationRequiredResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelLearningReconciliationRequiredResponse {
+    pub proposal_id: String,
+    pub status: LifeModelLearningReconciliationStatus,
+    pub canonical_life_model_changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeModelLearningReconciliationStatus {
+    ReconciliationRequired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +293,23 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
                 "accept Proposal confirmed response contains deferred-only truth fields".into(),
             );
         }
+        if let Some(learning) = response.life_model_learning.as_ref() {
+            match learning {
+                LifeModelLearningAcceptResponse::Materialized(receipt)
+                    if receipt.status == LifeModelLearningCandidateStatus::Materialized
+                        && receipt.materialized_version.is_some()
+                        && receipt.materialized_document_digest.is_some()
+                        && receipt.canonical_life_model_changed => {}
+                LifeModelLearningAcceptResponse::ReconciliationRequired(receipt)
+                    if receipt.canonical_life_model_changed => {}
+                _ => {
+                    return Err(
+                        "accept Proposal LifeModel learning response lacks confirmed materialization truth"
+                            .into(),
+                    )
+                }
+            }
+        }
     } else if response.status.as_deref() != Some("deferred")
         || response.reason_code.as_deref().is_none()
         || response.proposal_id.as_deref().is_none()
@@ -211,6 +327,7 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
         || response.memory_lifecycle.is_some()
         || response.memory_persistence.is_some()
         || response.artifact_materialization.is_some()
+        || response.life_model_learning.is_some()
         || response.blocked_action.is_some()
         || response.can_continue.is_some()
         || !response.main_chat_task_sync.is_empty()
@@ -242,6 +359,7 @@ pub(crate) fn canonical_lifemodel_path(path: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn is_communication_style_lifemodel_path(path: &str) -> bool {
     canonical_lifemodel_path(path) == COMMUNICATION_STYLE_CANONICAL_PATH
 }
@@ -309,10 +427,21 @@ async fn ensure_review_change_precedes_effect_dispatch(
     }
 }
 
-fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
+fn is_retired_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
     proposal.proposal_type == ProposalType::LifeModelUpdate
         && proposal.source == ProposalSource::BuilderReview
         && proposal.affected_path == openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
+}
+
+fn is_lifemodel_v2_typed_diff(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+}
+
+fn is_legacy_lifemodel_v2_migration(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path
+            == openlife_core::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
 }
 
 fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
@@ -329,6 +458,15 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
             | "lifemodel_patch_batch_conflict"
             | "lifemodel_gateway_batch_blocked"
             | "lifemodel_compare_and_swap_conflict"
+            | "lifemodel_v2_typed_diff_validation_failed"
+            | "lifemodel_v2_typed_diff_precondition_failed"
+            | "lifemodel_v2_typed_diff_commit_conflict"
+            | "lifemodel_v2_migration_validation_failed"
+            | "lifemodel_v2_migration_source_changed"
+            | "lifemodel_v2_migration_backup_failed"
+            | "lifemodel_v2_migration_commit_conflict"
+            | "lifemodel_legacy_write_retired"
+            | "lifemodel_legacy_owner_retired"
             | "memory_write_not_committed"
             | "memory_write_duplicate_no_effect"
             | "scheduled_task_review_snapshot_missing"
@@ -468,7 +606,6 @@ async fn reconcile_artifact_effects_with_state(
             .map_err(|error| runtime_proposal_store_error(state, error))?
     };
     let backlog_may_remain = records.len() == bounded_limit as usize;
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
     let mut reconciled = 0usize;
     for record in records {
         let proposal = {
@@ -496,6 +633,20 @@ async fn reconcile_artifact_effects_with_state(
             reconciled += 1;
             continue;
         }
+        let safe_paths = match artifact_safe_paths_for_proposal(state, &proposal).await {
+            Ok(safe_paths) => safe_paths,
+            Err(_) => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_scope_binding_failed",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
+        };
         let operation = proposal
             .after
             .get("operation")
@@ -1090,7 +1241,7 @@ async fn confirmed_artifact_receipt_from_store(
             .get("target_path")
             .and_then(Value::as_str)
             .ok_or_else(|| "confirmed artifact move lost target_path".to_string())?;
-        let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+        let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
         let (target_reference_digest, observation) =
             inspect_artifact_move(source, target, &record.content_digest, &safe_paths)?;
         if target_reference_digest != record.target_reference_digest
@@ -1121,7 +1272,7 @@ async fn confirmed_artifact_receipt_from_store(
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
     let prepared = prepare_artifact_materialization(
         &proposal.id,
         &record.dispatch_claim_id,
@@ -1188,436 +1339,6 @@ fn patch_result_for_proposal(
         path: proposal.affected_path.clone(),
         operation: operation.to_string(),
         error,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LifeModelProposalPatchSourceMappingReport {
-    proposal_source: ProposalSource,
-    patch_source: PatchSource,
-    exact_source_mapping: bool,
-    metadata_safe_fallback: bool,
-    apply_allowed: bool,
-    metadata_safe: bool,
-    contains_raw_proposal_payload: bool,
-    contains_raw_lifemodel_patch_value: bool,
-    contains_raw_memory_text: bool,
-    contains_raw_chat_text: bool,
-    contains_raw_tool_payload: bool,
-    default_chat_route_unchanged: bool,
-    default_chat_entrypoints_changed: bool,
-    default_chat_route: String,
-    proposal_first_convergence_complete: bool,
-    required_follow_up: String,
-    blocking_reasons: Vec<String>,
-}
-
-fn lifemodel_patch_source_mapping_for_proposal_source(
-    source: ProposalSource,
-) -> (PatchSource, bool, Option<&'static str>) {
-    match source {
-        ProposalSource::BuilderReview => (PatchSource::BuilderReview, true, None),
-        ProposalSource::CalibrationRun => (PatchSource::Calibration, true, None),
-        ProposalSource::FeedbackEvolution => (PatchSource::Evolution, true, None),
-        ProposalSource::Manual => (PatchSource::Manual, true, None),
-        ProposalSource::ChatConversation => (PatchSource::ChatConversation, true, None),
-        ProposalSource::ProactiveAgent => (PatchSource::ProactiveAgent, true, None),
-        ProposalSource::SkillRuntime => (PatchSource::SkillRuntime, true, None),
-        ProposalSource::Plugin => (PatchSource::Plugin, true, None),
-        ProposalSource::NetworkConsent => (
-            PatchSource::Manual,
-            false,
-            Some("network_consent_is_not_a_lifemodel_patch_source"),
-        ),
-        ProposalSource::MemoryGovernance => (PatchSource::MemoryGovernance, true, None),
-        ProposalSource::PlanningSession => (PatchSource::PlanningSession, true, None),
-    }
-}
-
-fn evaluate_lifemodel_proposal_patch_source_mapping(
-    proposal: &AgentProposal,
-) -> LifeModelProposalPatchSourceMappingReport {
-    let (patch_source, exact_source_mapping, fallback_reason) =
-        lifemodel_patch_source_mapping_for_proposal_source(proposal.source);
-
-    let mut blocking_reasons = Vec::new();
-    if let Some(reason) = fallback_reason {
-        blocking_reasons.push(format!("{reason}:using_manual_metadata_safe_fallback"));
-    }
-
-    let metadata_safe_fallback = !exact_source_mapping;
-    let required_follow_up = if metadata_safe_fallback {
-        format!(
-            "W90+: confirm a dedicated PatchSource variant or accepted Manual fallback policy for {} before proposal-first convergence.",
-            proposal.source
-        )
-    } else {
-        "none".to_string()
-    };
-
-    LifeModelProposalPatchSourceMappingReport {
-        proposal_source: proposal.source,
-        patch_source,
-        exact_source_mapping,
-        metadata_safe_fallback,
-        apply_allowed: true,
-        metadata_safe: true,
-        contains_raw_proposal_payload: false,
-        contains_raw_lifemodel_patch_value: false,
-        contains_raw_memory_text: false,
-        contains_raw_chat_text: false,
-        contains_raw_tool_payload: false,
-        default_chat_route_unchanged: true,
-        default_chat_entrypoints_changed: false,
-        default_chat_route: "main_chat_kernel".into(),
-        proposal_first_convergence_complete: exact_source_mapping && fallback_reason.is_none(),
-        required_follow_up,
-        blocking_reasons,
-    }
-}
-
-pub(crate) fn ensure_lifemodel_proposal_patch_source_mapping(
-    proposal: &AgentProposal,
-) -> Result<LifeModelProposalPatchSourceMappingReport, String> {
-    let report = evaluate_lifemodel_proposal_patch_source_mapping(proposal);
-    if !report.apply_allowed {
-        return Err(format!(
-            "LifeModel proposal PatchSource mapping is unsupported for proposal source {}.",
-            proposal.source
-        ));
-    }
-    if !report.metadata_safe
-        || report.contains_raw_proposal_payload
-        || report.contains_raw_lifemodel_patch_value
-        || report.contains_raw_memory_text
-        || report.contains_raw_chat_text
-        || report.contains_raw_tool_payload
-    {
-        return Err(format!(
-            "LifeModel proposal PatchSource mapping report is not metadata-safe for proposal source {}.",
-            proposal.source
-        ));
-    }
-    if proposal.source != ProposalSource::BuilderReview
-        && report.patch_source == PatchSource::BuilderReview
-    {
-        return Err(format!(
-            "LifeModel proposal source {} must not be mapped to BuilderReview.",
-            proposal.source
-        ));
-    }
-    if !report.exact_source_mapping && !report.metadata_safe_fallback {
-        return Err(format!(
-            "LifeModel proposal source {} has neither an exact PatchSource mapping nor a metadata-safe fallback.",
-            proposal.source
-        ));
-    }
-    Ok(report)
-}
-
-pub(crate) fn resolve_lifemodel_patch_source_for_proposal(proposal: &AgentProposal) -> PatchSource {
-    evaluate_lifemodel_proposal_patch_source_mapping(proposal).patch_source
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LifeModelProposalPatchSourceReadinessEntry {
-    proposal_source: ProposalSource,
-    patch_source: PatchSource,
-    exact_source_mapping: bool,
-    metadata_safe_fallback: bool,
-    unsupported_or_unclassified: bool,
-    metadata_safe: bool,
-    follow_up: String,
-    blocking_reasons: Vec<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LifeModelProposalPatchSourceReadinessReport {
-    readiness_ready: bool,
-    metadata_safe: bool,
-    contains_raw_proposal_payload: bool,
-    contains_raw_lifemodel_patch_value: bool,
-    contains_raw_memory_text: bool,
-    contains_raw_chat_text: bool,
-    contains_raw_tool_payload: bool,
-    exact_mapping_count: usize,
-    metadata_safe_fallback_count: usize,
-    unsupported_or_unclassified_count: usize,
-    builder_review_only_for_builder_review: bool,
-    no_hardcoded_builder_review_in_apply_path: bool,
-    apply_path_uses_mapping_ensure: bool,
-    apply_path_uses_source_resolver: bool,
-    default_chat_route_unchanged: bool,
-    proposal_first_convergence_complete: bool,
-    blocking_reasons: Vec<String>,
-    entries: Vec<LifeModelProposalPatchSourceReadinessEntry>,
-}
-
-#[allow(dead_code)]
-fn w89_push_unique(blocking_reasons: &mut Vec<String>, reason: impl Into<String>) {
-    let reason = reason.into();
-    if !blocking_reasons.contains(&reason) {
-        blocking_reasons.push(reason);
-    }
-}
-
-#[allow(dead_code)]
-fn lifemodel_proposal_patch_source_readiness_sources() -> [ProposalSource; 10] {
-    [
-        ProposalSource::BuilderReview,
-        ProposalSource::CalibrationRun,
-        ProposalSource::FeedbackEvolution,
-        ProposalSource::Manual,
-        ProposalSource::ChatConversation,
-        ProposalSource::ProactiveAgent,
-        ProposalSource::SkillRuntime,
-        ProposalSource::Plugin,
-        ProposalSource::MemoryGovernance,
-        ProposalSource::PlanningSession,
-    ]
-}
-
-#[allow(dead_code)]
-fn lifemodel_proposal_patch_source_readiness_entry(
-    source: ProposalSource,
-) -> LifeModelProposalPatchSourceReadinessEntry {
-    let (patch_source, exact_source_mapping, fallback_reason) =
-        lifemodel_patch_source_mapping_for_proposal_source(source);
-    let metadata_safe_fallback = fallback_reason.is_some();
-    let unsupported_or_unclassified = !exact_source_mapping && !metadata_safe_fallback;
-    let follow_up = if metadata_safe_fallback {
-        format!(
-            "W90+: confirm a dedicated PatchSource variant or accepted Manual fallback policy for {} before proposal-first convergence.",
-            source
-        )
-    } else if unsupported_or_unclassified {
-        format!(
-            "Classify proposal source {} before applying LifeModel proposal patches.",
-            source
-        )
-    } else {
-        "none".into()
-    };
-    let mut blocking_reasons = Vec::new();
-    if metadata_safe_fallback {
-        w89_push_unique(
-            &mut blocking_reasons,
-            format!("proposal_patch_source_fallback_strategy_unconfirmed:{source}"),
-        );
-    }
-    if unsupported_or_unclassified {
-        w89_push_unique(
-            &mut blocking_reasons,
-            format!("proposal_patch_source_unclassified:{source}"),
-        );
-    }
-    if source != ProposalSource::BuilderReview && patch_source == PatchSource::BuilderReview {
-        w89_push_unique(
-            &mut blocking_reasons,
-            format!("non_builder_review_source_mapped_to_builder_review:{source}"),
-        );
-    }
-
-    LifeModelProposalPatchSourceReadinessEntry {
-        proposal_source: source,
-        patch_source,
-        exact_source_mapping,
-        metadata_safe_fallback,
-        unsupported_or_unclassified,
-        metadata_safe: true,
-        follow_up,
-        blocking_reasons,
-    }
-}
-
-#[allow(dead_code)]
-fn default_chat_bodies_do_not_call_lifemodel_proposal_patch_helpers(
-    send_message_body: &str,
-    start_stream_message_body: &str,
-) -> bool {
-    let forbidden_helpers = [
-        "LifeModelProposalPatchSourceMappingReport",
-        "evaluate_lifemodel_proposal_patch_source_mapping",
-        "ensure_lifemodel_proposal_patch_source_mapping",
-        "resolve_lifemodel_patch_source_for_proposal",
-        "LifeModelProposalPatchSourceReadinessReport",
-        "evaluate_lifemodel_proposal_patch_source_readiness",
-        "ensure_lifemodel_proposal_patch_source_readiness",
-    ];
-    forbidden_helpers.iter().all(|helper| {
-        !send_message_body.contains(helper) && !start_stream_message_body.contains(helper)
-    })
-}
-
-#[allow(dead_code)]
-fn apply_path_uses_source_resolver_for_lifemodel_patch_from_proposal(
-    apply_proposal_to_state_body: &str,
-) -> bool {
-    let resolver_index =
-        apply_proposal_to_state_body.find("resolve_lifemodel_patch_source_for_proposal");
-    let from_proposal_index = apply_proposal_to_state_body.find("LifeModelPatch::from_proposal");
-    match (resolver_index, from_proposal_index) {
-        (Some(resolver_index), Some(from_proposal_index))
-            if resolver_index < from_proposal_index =>
-        {
-            apply_proposal_to_state_body[from_proposal_index..].contains("patch_source,")
-        }
-        _ => false,
-    }
-}
-
-#[allow(dead_code)]
-fn evaluate_lifemodel_proposal_patch_source_readiness(
-    apply_proposal_to_state_body: &str,
-    send_message_body: &str,
-    start_stream_message_body: &str,
-) -> LifeModelProposalPatchSourceReadinessReport {
-    let entries: Vec<_> = lifemodel_proposal_patch_source_readiness_sources()
-        .into_iter()
-        .map(lifemodel_proposal_patch_source_readiness_entry)
-        .collect();
-    let exact_mapping_count = entries
-        .iter()
-        .filter(|entry| entry.exact_source_mapping)
-        .count();
-    let metadata_safe_fallback_count = entries
-        .iter()
-        .filter(|entry| entry.metadata_safe_fallback)
-        .count();
-    let unsupported_or_unclassified_count = entries
-        .iter()
-        .filter(|entry| entry.unsupported_or_unclassified)
-        .count();
-    let builder_review_only_for_builder_review = entries.iter().all(|entry| {
-        entry.patch_source != PatchSource::BuilderReview
-            || entry.proposal_source == ProposalSource::BuilderReview
-    });
-    let no_hardcoded_builder_review_in_apply_path =
-        !apply_proposal_to_state_body.contains("PatchSource::BuilderReview");
-    let apply_path_uses_mapping_ensure =
-        apply_proposal_to_state_body.contains("ensure_lifemodel_proposal_patch_source_mapping");
-    let apply_path_uses_source_resolver =
-        apply_path_uses_source_resolver_for_lifemodel_patch_from_proposal(
-            apply_proposal_to_state_body,
-        );
-    let default_chat_route_unchanged =
-        default_chat_bodies_do_not_call_lifemodel_proposal_patch_helpers(
-            send_message_body,
-            start_stream_message_body,
-        );
-
-    let contains_raw_proposal_payload = false;
-    let contains_raw_lifemodel_patch_value = false;
-    let contains_raw_memory_text = false;
-    let contains_raw_chat_text = false;
-    let contains_raw_tool_payload = false;
-    let metadata_safe = entries.iter().all(|entry| entry.metadata_safe)
-        && !contains_raw_proposal_payload
-        && !contains_raw_lifemodel_patch_value
-        && !contains_raw_memory_text
-        && !contains_raw_chat_text
-        && !contains_raw_tool_payload;
-    let proposal_first_convergence_complete = true;
-
-    let mut blocking_reasons = Vec::new();
-    if metadata_safe_fallback_count > 0 {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "proposal_patch_source_fallback_strategy_unconfirmed",
-        );
-    }
-    if unsupported_or_unclassified_count > 0 {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "proposal_patch_source_unsupported_or_unclassified",
-        );
-    }
-    if !builder_review_only_for_builder_review {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "non_builder_review_source_mapped_to_builder_review",
-        );
-    }
-    if !no_hardcoded_builder_review_in_apply_path {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "apply_proposal_to_state_hardcodes_builder_review",
-        );
-    }
-    if !apply_path_uses_mapping_ensure {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "apply_proposal_to_state_missing_patch_source_mapping_ensure",
-        );
-    }
-    if !apply_path_uses_source_resolver {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "apply_proposal_to_state_missing_patch_source_resolver",
-        );
-    }
-    if !default_chat_route_unchanged {
-        w89_push_unique(
-            &mut blocking_reasons,
-            "default_chat_entrypoints_call_proposal_patch_source_helper",
-        );
-    }
-    if !metadata_safe {
-        w89_push_unique(&mut blocking_reasons, "readiness_report_metadata_not_safe");
-    }
-
-    let readiness_ready = blocking_reasons.is_empty()
-        && metadata_safe
-        && builder_review_only_for_builder_review
-        && no_hardcoded_builder_review_in_apply_path
-        && apply_path_uses_mapping_ensure
-        && apply_path_uses_source_resolver
-        && default_chat_route_unchanged
-        && unsupported_or_unclassified_count == 0
-        && proposal_first_convergence_complete;
-
-    LifeModelProposalPatchSourceReadinessReport {
-        readiness_ready,
-        metadata_safe,
-        contains_raw_proposal_payload,
-        contains_raw_lifemodel_patch_value,
-        contains_raw_memory_text,
-        contains_raw_chat_text,
-        contains_raw_tool_payload,
-        exact_mapping_count,
-        metadata_safe_fallback_count,
-        unsupported_or_unclassified_count,
-        builder_review_only_for_builder_review,
-        no_hardcoded_builder_review_in_apply_path,
-        apply_path_uses_mapping_ensure,
-        apply_path_uses_source_resolver,
-        default_chat_route_unchanged,
-        proposal_first_convergence_complete,
-        blocking_reasons,
-        entries,
-    }
-}
-
-#[allow(dead_code)]
-fn ensure_lifemodel_proposal_patch_source_readiness(
-    apply_proposal_to_state_body: &str,
-    send_message_body: &str,
-    start_stream_message_body: &str,
-) -> Result<LifeModelProposalPatchSourceReadinessReport, String> {
-    let report = evaluate_lifemodel_proposal_patch_source_readiness(
-        apply_proposal_to_state_body,
-        send_message_body,
-        start_stream_message_body,
-    );
-    if report.readiness_ready {
-        Ok(report)
-    } else {
-        Err(format!(
-            "LifeModel proposal PatchSource readiness blocked: {}",
-            report.blocking_reasons.join(",")
-        ))
     }
 }
 
@@ -1715,7 +1436,15 @@ async fn apply_external_write_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_paths = match artifact_safe_paths_for_proposal(state, proposal).await {
+        Ok(safe_paths) => safe_paths,
+        Err(error) => {
+            let code = "artifact_scope_binding_failed";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+        }
+    };
     let target_precondition = match reviewed_artifact_target_precondition(&proposal.after) {
         Ok(precondition) => precondition,
         Err(error) => {
@@ -1892,7 +1621,15 @@ async fn apply_external_move_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_paths = match artifact_safe_paths_for_proposal(state, proposal).await {
+        Ok(safe_paths) => safe_paths,
+        Err(error) => {
+            let code = "artifact_move_scope_binding_failed";
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+        }
+    };
     let prepared =
         match prepare_artifact_move(&proposal.id, source, target, expected_digest, &safe_paths) {
             Ok(prepared) => prepared,
@@ -2553,14 +2290,6 @@ fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), Stri
     Err("Proposal affected_path 不能为空。".to_string())
 }
 
-fn json_value_at_dot_path(root: &Value, path: &str) -> Option<Value> {
-    let mut current = root;
-    for segment in path.split('.') {
-        current = current.get(segment)?;
-    }
-    Some(current.clone())
-}
-
 #[allow(dead_code)]
 fn apply_life_model_value(
     model: &LifeModel,
@@ -2807,6 +2536,33 @@ pub(crate) fn validate_proposal_payload(
 
 fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), String> {
     validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    if is_lifemodel_v2_typed_diff(proposal) {
+        let diff = serde_json::from_value::<openlife_core::life_model::v2::LifeModelTypedDiffV2>(
+            proposal.after.clone(),
+        )
+        .map_err(|_| "invalid_lifemodel_v2_typed_diff_payload".to_string())?;
+        diff.validate_contract()
+            .map_err(|error| error.to_string())?;
+        if proposal.base_hash.as_deref() != diff.base_document_digest.as_deref() {
+            return Err("lifemodel_v2_typed_diff_proposal_base_mismatch".into());
+        }
+    }
+    if is_legacy_lifemodel_v2_migration(proposal) {
+        if proposal.source != ProposalSource::Manual
+            || proposal.source_detail.as_deref() != Some("legacy_lifemodel_migration")
+        {
+            return Err("lifemodel_v2_migration_proposal_source_mismatch".into());
+        }
+        let plan = serde_json::from_value::<
+            openlife_core::life_model::v2::LegacyLifeModelMigrationPlanV2,
+        >(proposal.after.clone())
+        .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
+        plan.validate_contract()
+            .map_err(|error| error.to_string())?;
+        if proposal.base_hash.is_some() {
+            return Err("lifemodel_v2_migration_proposal_base_must_be_empty".into());
+        }
+    }
     if proposal.proposal_type == ProposalType::ToolPermission
         && tool_permission_scope_kind(&proposal.after)? == ToolPermissionScopeKind::ActionBound
         && tool_permission_scope_field(&proposal.after, "action_type") == Some("network")
@@ -3101,160 +2857,36 @@ async fn apply_proposal_to_state(
         | ProposalType::StateUpdate
         | ProposalType::PreferenceUpdate
         | ProposalType::CapabilityUpdate => {
-            let canonical_affected_path = canonical_lifemodel_path(&proposal.affected_path);
-            let model = {
-                let manager = state.life_model_manager.lock().await;
-                manager.load().map_err(|e| e.to_string())?
-            };
-            let source_mapping = ensure_lifemodel_proposal_patch_source_mapping(proposal)?;
-            if source_mapping.metadata_safe_fallback {
-                log::warn!(
-                    "[proposal] W88 PatchSource metadata-safe fallback: proposal_source={}, patch_source={}, follow_up={}, blockers={}",
-                    proposal.source,
-                    source_mapping.patch_source,
-                    source_mapping.required_follow_up,
-                    source_mapping.blocking_reasons.join("|")
-                );
-            }
-            let patch_source = resolve_lifemodel_patch_source_for_proposal(proposal);
-
-            if proposal.proposal_type == ProposalType::LifeModelUpdate
-                && canonical_affected_path
-                    == openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
-            {
-                if proposal.source != ProposalSource::BuilderReview {
-                    return Err(
-                        "lifemodel_patch_batch_is_restricted_to_builder_review_source".into(),
-                    );
-                }
-                let batch = serde_json::from_value::<
-                    openlife_core::life_model::patch::LifeModelPatchBatchV1,
+            if is_legacy_lifemodel_v2_migration(proposal) {
+                let plan = serde_json::from_value::<
+                    openlife_core::life_model::v2::LegacyLifeModelMigrationPlanV2,
                 >(after)
-                .map_err(|_| "invalid_lifemodel_patch_batch_payload".to_string())?;
-                batch.validate()?;
-                if let Some(operation) = batch.operations.iter().find(|operation| {
-                    openlife_core::life_model_write_gateway::life_model_field_authority(
-                        &operation.path,
-                    ) != openlife_core::life_model_write_gateway::LifeModelFieldAuthority::CanonicalLifeModel
-                }) {
-                    return Ok(openlife_core::life_model::patch::PatchApplyResult {
-                        patch_id: format!("batch:{}", proposal.id),
-                        success: false,
-                        path: operation.path.clone(),
-                        operation: "lifemodel_patch_batch_field_authority_blocked".into(),
-                        error: Some("builder_batch_contains_non_lifemodel_owned_field".into()),
-                    });
-                }
-                let builder_risk = match proposal.risk_level {
-                    openlife_core::agent::RiskLevel::Low => openlife_core::builder::RiskLevel::Low,
-                    openlife_core::agent::RiskLevel::Medium => {
-                        openlife_core::builder::RiskLevel::Medium
-                    }
-                    openlife_core::agent::RiskLevel::High => {
-                        openlife_core::builder::RiskLevel::High
-                    }
-                    openlife_core::agent::RiskLevel::Critical => {
-                        openlife_core::builder::RiskLevel::High
-                    }
-                };
-                let signals = batch
-                    .operations
-                    .iter()
-                    .map(|operation| {
-                        let dimension = match operation.path.split('.').next() {
-                            Some("identity") => openlife_core::builder::BuilderDimension::Identity,
-                            Some("goals") => openlife_core::builder::BuilderDimension::Goals,
-                            Some("capabilities") => {
-                                openlife_core::builder::BuilderDimension::Capabilities
-                            }
-                            Some("state") | Some("preferences") => {
-                                openlife_core::builder::BuilderDimension::State
-                            }
-                            _ => return Err("invalid_builder_candidate_path".to_string()),
-                        };
-                        Ok(openlife_core::builder::BuilderSignal {
-                            id: operation.candidate_id.clone(),
-                            source_step: 0,
-                            source_question_id: "builder_review_batch".into(),
-                            dimension,
-                            affected_path: operation.path.clone(),
-                            proposed_value: operation.candidate.clone(),
-                            confidence: proposal.confidence,
-                            reason: "accepted_builder_review_candidate".into(),
-                            risk_level: builder_risk,
-                            user_status: openlife_core::builder::SignalUserStatus::Accepted,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                let mut preview_model = model.clone();
-                let (applied, skipped) =
-                    openlife_core::builder::BuilderEngine::apply_signals_to_model(
-                        &mut preview_model,
-                        &signals,
-                    );
-                if !skipped.is_empty() || applied.len() != signals.len() {
-                    return Err("invalid_builder_candidate_batch".into());
-                }
-                let before_value = serde_json::to_value(&model)
-                    .map_err(|_| "lifemodel_batch_before_serialization_failed".to_string())?;
-                let after_value = serde_json::to_value(&preview_model)
-                    .map_err(|_| "lifemodel_batch_after_serialization_failed".to_string())?;
-                let mut patches = Vec::with_capacity(batch.operations.len());
-                for operation in batch.operations {
-                    let path = canonical_lifemodel_path(&operation.path);
-                    if path != operation.path {
-                        return Err("lifemodel_patch_batch_path_must_be_canonical".into());
-                    }
-                    let path_pointer = openlife_core::life_model::patch::dot_to_pointer(&path);
-                    let path_display =
-                        openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
-                    let before = json_value_at_dot_path(&before_value, &path)
-                        .ok_or_else(|| "builder_candidate_before_path_missing".to_string())?;
-                    let after = json_value_at_dot_path(&after_value, &path)
-                        .ok_or_else(|| "builder_candidate_after_path_missing".to_string())?;
-                    patches.push(
-                        openlife_core::life_model::patch::LifeModelPatch::from_proposal(
-                            &proposal.id,
-                            &path_pointer,
-                            &path_display,
-                            openlife_core::life_model::patch::PatchOp::Replace,
-                            Some(before),
-                            after,
-                            &proposal.reason,
-                            proposal.confidence,
-                            proposal.risk_level,
-                            patch_source,
-                        ),
-                    );
-                }
-                return life_model_write_gateway::materialize_accepted_lifemodel_patch_batch_with_state(
-                    state, proposal, patches,
+                .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
+                return life_model_write_gateway::materialize_accepted_legacy_lifemodel_migration_with_state(
+                    state, proposal, &plan,
                 )
                 .await;
             }
-
-            let path_pointer =
-                openlife_core::life_model::patch::dot_to_pointer(&canonical_affected_path);
-            let path_display =
-                openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
-
-            let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
-                &proposal.id,
-                &path_pointer,
-                &path_display,
-                openlife_core::life_model::patch::PatchOp::Replace,
-                proposal.before.clone(),
-                after.clone(),
-                &proposal.reason,
-                proposal.confidence,
-                proposal.risk_level,
-                patch_source,
-            );
-
-            life_model_write_gateway::materialize_accepted_lifemodel_proposal_with_state(
-                state, proposal, patch,
-            )
-            .await
+            if is_lifemodel_v2_typed_diff(proposal) {
+                let diff = serde_json::from_value::<
+                    openlife_core::life_model::v2::LifeModelTypedDiffV2,
+                >(after)
+                .map_err(|_| "invalid_lifemodel_v2_typed_diff_payload".to_string())?;
+                return life_model_write_gateway::materialize_accepted_lifemodel_v2_typed_diff_with_state(
+                    state, proposal, &diff,
+                )
+                .await;
+            }
+            Ok(openlife_core::life_model::patch::PatchApplyResult {
+                patch_id: proposal.id.clone(),
+                success: false,
+                path: proposal.affected_path.clone(),
+                operation: "lifemodel_legacy_write_retired".into(),
+                error: Some(
+                    "Legacy 4D LifeModel writes are retired. Recreate this change through the v2 typed Review flow."
+                        .into(),
+                ),
+            })
         }
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => match proposal.proposal_type {
             ProposalType::MemoryWrite => {
@@ -3768,6 +3400,31 @@ pub(crate) async fn accept_proposal_with_state(
     accept_proposal_with_state_and_confirmation(proposal_id, state, None).await
 }
 
+async fn reconcile_lifemodel_learning_materialization_response(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    warnings: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    match crate::life_model_learning::reconcile_lifemodel_learning_materialization_with_state(
+        state, proposal,
+    )
+    .await
+    {
+        Ok(Some(receipt)) => serde_json::to_value(receipt).ok(),
+        Ok(None) => None,
+        Err(error) => {
+            warnings.push(format!(
+                "LifeModel 已由 gateway 处理，但学习候选状态尚待 reconciliation: {error}"
+            ));
+            Some(serde_json::json!({
+                "proposalId": proposal.id,
+                "status": "reconciliation_required",
+                "canonicalLifeModelChanged": true,
+            }))
+        }
+    }
+}
+
 async fn accept_proposal_with_state_and_confirmation(
     proposal_id: String,
     state: &Arc<AppState>,
@@ -3776,6 +3433,10 @@ async fn accept_proposal_with_state_and_confirmation(
     require_persistence_write(state)?;
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
 
     let (confirmed_projection_claim, dispatch_state) = {
         let store = state
@@ -3805,12 +3466,22 @@ async fn accept_proposal_with_state_and_confirmation(
                 if let Err(error) = reconcile_agent_runs_for_proposal(state, &accepted).await {
                     warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
                 }
-                Ok(confirmed_effect_reconciliation_response(
+                let learning = reconcile_lifemodel_learning_materialization_response(
+                    state,
+                    &accepted,
+                    &mut warnings,
+                )
+                .await;
+                let mut response = confirmed_effect_reconciliation_response(
                     &accepted,
                     true,
                     warnings,
                     artifact_receipt.clone(),
-                ))
+                );
+                if let Some(learning) = learning {
+                    response["lifeModelLearning"] = learning;
+                }
+                Ok(response)
             }
             Err(error) => Ok(confirmed_effect_reconciliation_response(
                 &proposal,
@@ -3834,23 +3505,18 @@ async fn accept_proposal_with_state_and_confirmation(
         if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
             warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
         }
-        return Ok(confirmed_effect_reconciliation_response(
-            &proposal,
-            true,
-            warnings,
-            artifact_receipt,
-        ));
+        let learning =
+            reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
+                .await;
+        let mut response =
+            confirmed_effect_reconciliation_response(&proposal, true, warnings, artifact_receipt);
+        if let Some(learning) = learning {
+            response["lifeModelLearning"] = learning;
+        }
+        return Ok(response);
     }
     ensure_pending_or_postponed(&proposal)?;
     validate_proposal_for_acceptance(&proposal)?;
-    if is_builder_lifemodel_patch_batch(&proposal) {
-        let batch =
-            serde_json::from_value::<openlife_core::life_model::patch::LifeModelPatchBatchV1>(
-                proposal.after.clone(),
-            )
-            .map_err(|_| "invalid_lifemodel_patch_batch_payload".to_string())?;
-        batch.validate()?;
-    }
     if matches!(
         proposal.proposal_type,
         ProposalType::PluginPermission
@@ -4123,6 +3789,9 @@ async fn accept_proposal_with_state_and_confirmation(
         };
     }
     let mut warnings = Vec::new();
+    let learning_materialization =
+        reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
+            .await;
     let effect_receipt_persisted = if artifact_materialization.is_some() {
         true
     } else {
@@ -4244,14 +3913,6 @@ async fn accept_proposal_with_state_and_confirmation(
         false
     };
     let dispatch_projection_confirmed = proposal_projected;
-    if proposal_projected {
-        record_maturation_proposal_outcome_evidence_with_state(
-            state,
-            &proposal,
-            MaturationProposalOutcome::Accepted,
-        )
-        .await;
-    }
     drop(terminal_owner_fence_guard);
     if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
         warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
@@ -4287,6 +3948,9 @@ async fn accept_proposal_with_state_and_confirmation(
     }
     if let Some(transition) = terminal_owner_transition_response {
         response["terminalOwnerTransition"] = transition;
+    }
+    if let Some(learning) = learning_materialization {
+        response["lifeModelLearning"] = learning;
     }
     if proposal.proposal_type == ProposalType::MemoryWrite {
         let decision = memory_gateway::memory_gateway_decision_for_proposal(
@@ -4538,9 +4202,12 @@ pub(crate) async fn reject_proposal_with_state(
 ) -> Result<(), String> {
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
-    if proposal.status == ProposalStatus::Rejected
-        && sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?
-    {
+    if proposal.status == ProposalStatus::Rejected {
+        crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
+            state, &proposal,
+        )
+        .await?;
+        let _ = sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?;
         if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
             log::warn!(
                 "[proposal] AgentRun rejection replay reconciliation pending for {}: {}",
@@ -4551,10 +4218,18 @@ pub(crate) async fn reject_proposal_with_state(
         return Ok(());
     }
     ensure_pending_or_postponed(&proposal)?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     let expected_status = proposal.status;
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
+        state, &proposal,
+    )
+    .await?;
     let _task_cancelled =
         sync_main_chat_task_after_blocking_review_reject(state, &proposal).await?;
     if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
@@ -4564,33 +4239,8 @@ pub(crate) async fn reject_proposal_with_state(
             error
         );
     }
-    record_maturation_proposal_outcome_evidence_with_state(
-        state,
-        &proposal,
-        MaturationProposalOutcome::Rejected,
-    )
-    .await;
     record_rejected_proactive_reminder_evidence(state, &proposal).await;
     Ok(())
-}
-
-async fn record_maturation_proposal_outcome_evidence_with_state(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-    outcome: MaturationProposalOutcome,
-) {
-    let evidence_store = state.evidence_store.lock().await;
-    if let Err(e) = openlife_core::agent::record_maturation_proposal_outcome_evidence(
-        &evidence_store,
-        proposal,
-        outcome,
-    ) {
-        log::warn!(
-            "[LifeModel-Maturation] failed to record proposal outcome evidence for proposal {}: {}",
-            proposal.id,
-            e
-        );
-    }
 }
 
 async fn record_rejected_proactive_reminder_evidence(
@@ -4619,9 +4269,28 @@ pub(crate) async fn edit_proposal_with_state(
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
-    if is_builder_lifemodel_patch_batch(&proposal) {
+    if is_lifemodel_v2_typed_diff(&proposal) || is_legacy_lifemodel_v2_migration(&proposal) {
         return Err(
-            "Builder batch Proposal requires a typed Builder editor; generic JSON edit is disabled."
+            "LifeModel v2 Proposal requires its schema-aware editor; generic JSON edit is disabled."
+                .into(),
+        );
+    }
+    if is_retired_lifemodel_patch_batch(&proposal) {
+        return Err(
+            "Legacy Builder batch editing is retired; reject it and create a v2 typed LifeModel proposal."
+                .into(),
+        );
+    }
+    if matches!(
+        proposal.proposal_type,
+        ProposalType::LifeModelUpdate
+            | ProposalType::GoalUpdate
+            | ProposalType::StateUpdate
+            | ProposalType::PreferenceUpdate
+            | ProposalType::CapabilityUpdate
+    ) {
+        return Err(
+            "Legacy 4D LifeModel proposal editing is retired; reject it and create a v2 typed LifeModel proposal."
                 .into(),
         );
     }
@@ -4636,16 +4305,116 @@ pub(crate) async fn edit_proposal_with_state(
             error
         );
     }
-    record_maturation_proposal_outcome_evidence_with_state(
-        state,
-        &proposal,
-        MaturationProposalOutcome::Edited,
-    )
-    .await;
     Ok(serde_json::json!({
         "success": true,
         "status": "edited_pending_review",
         "durable_write_executed": false,
+    }))
+}
+
+pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
+    proposal_id: String,
+    statement: String,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, String> {
+    require_persistence_write(state)?;
+    check_safe_mode(state)?;
+    let statement = statement.trim();
+    if statement.is_empty() || statement.chars().count() > 500 {
+        return Err("LifeModel learning statement must contain 1 to 500 characters.".into());
+    }
+    let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
+    ensure_pending_or_postponed(&proposal)?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
+    ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
+    if !proposal
+        .source_detail
+        .as_deref()
+        .is_some_and(|detail| detail.starts_with("lifemodel_learning:"))
+        || !openlife_core::agent::review_decision_context::is_lifemodel_learning_review(&proposal)
+    {
+        return Err("Only a validated LifeModel learning proposal supports this editor.".into());
+    }
+    let original: openlife_core::life_model::v2::LifeModelTypedDiffV2 =
+        serde_json::from_value(proposal.after.clone())
+            .map_err(|_| "LifeModel learning typed diff is invalid.".to_string())?;
+    let operation = original
+        .operations
+        .first()
+        .cloned()
+        .ok_or_else(|| "LifeModel learning typed operation is missing.".to_string())?;
+    let (section, mut item) = match operation {
+        openlife_core::life_model::v2::LifeModelTypedOperationV2::Add {
+            section,
+            item: openlife_core::life_model::v2::LifeModelItemV2::Statement(item),
+        } if original.operations.len() == 1 => (section, item),
+        _ => return Err("LifeModel learning editor only supports one statement add.".into()),
+    };
+    item.statement = statement.to_string();
+    let manager = state.life_model_manager.lock().await;
+    let current = manager
+        .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+        .map_err(|error| error.to_string())?;
+    if current.as_ref().map(|version| version.model_version) != original.base_version
+        || current
+            .as_ref()
+            .map(|version| version.document_digest.as_str())
+            != original.base_document_digest.as_deref()
+    {
+        return Err(
+            "LifeModel learning proposal base is stale; create a fresh review item.".into(),
+        );
+    }
+    let allow_empty_result = current.is_some()
+        || manager
+            .load_v2_cutover(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .map_err(|error| error.to_string())?
+            .is_some();
+    let revised = openlife_core::life_model::v2::LifeModelTypedDiffV2::from_operations_for_review(
+        openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID,
+        current.as_ref(),
+        vec![
+            openlife_core::life_model::v2::LifeModelTypedOperationV2::Add {
+                section,
+                item: openlife_core::life_model::v2::LifeModelItemV2::Statement(item),
+            },
+        ],
+        allow_empty_result,
+    )
+    .map_err(|error| error.to_string())?;
+    drop(manager);
+    let before = proposal
+        .before
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "LifeModel learning review metadata is missing.".to_string())?;
+    before.insert(
+        "proposedValue".into(),
+        serde_json::to_value(
+            openlife_core::life_model::v2::LifeModelUserValueV2::Statement {
+                statement: statement.to_string(),
+            },
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    before.insert("editedByUser".into(), Value::Bool(true));
+    let expected_status = proposal.status;
+    proposal.edit(serde_json::to_value(&revised).map_err(|error| error.to_string())?);
+    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    let learning = crate::life_model_learning::record_lifemodel_learning_review_edit_with_state(
+        state, &proposal, statement,
+    )
+    .await?
+    .ok_or_else(|| "LifeModel learning review context disappeared after edit.".to_string())?;
+    Ok(serde_json::json!({
+        "proposalId": proposal.id,
+        "status": "edited_pending_review",
+        "resultDocumentDigest": revised.result_document_digest,
+        "durableWriteExecuted": false,
+        "learning": learning,
     }))
 }
 
@@ -4656,6 +4425,10 @@ pub(crate) async fn postpone_proposal_with_state(
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
+    crate::life_model_learning::reconcile_lifemodel_learning_review_edit_with_state(
+        state, &proposal,
+    )
+    .await?;
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     let expected_status = proposal.status;
     proposal.postpone();
@@ -5104,10 +4877,9 @@ mod tests {
             EvidenceSourceType, EvidenceType, MemoryCandidateKind, ProposalSource, ProposalStore,
             ProposalType, RiskLevel,
         },
-        builder::BuilderSessionStore,
         config::AppConfig,
         feedback::FeedbackStore,
-        life_model::{patch::PatchSource, LifeModelManager},
+        life_model::LifeModelManager,
         mcp::McpRegistry,
         mcp_audit::McpAuditStore,
         memory::MemoryStore,
@@ -5189,9 +4961,6 @@ mod tests {
             feedback_store: Arc::new(Mutex::new(FeedbackStore::new_in_memory().unwrap())),
             vector_store: Arc::new(Mutex::new(VectorStore::new_in_memory().unwrap())),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_session_store: Arc::new(Mutex::new(BuilderSessionStore::new(
-                temp_dir.path().join("builder_sessions.json"),
-            ))),
             a2a_sidecar: Arc::new(Mutex::new(A2ASidecar::new(
                 crate::a2a_server::configured_a2a_port(),
             ))),
@@ -5208,17 +4977,15 @@ mod tests {
             life_event_store: Some(Arc::new(Mutex::new(
                 openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
             ))),
-            heuristic_store: Arc::new(Mutex::new({
-                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
-                store.seed_mvp_heuristics().unwrap();
-                store
-            })),
             policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
             ))),
             memory_lifecycle_store: Some(Arc::new(Mutex::new(
                 openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
+            ))),
+            life_model_learning_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
             plan_execute_session_store: Some(Arc::new(Mutex::new(
                 openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
@@ -5355,34 +5122,6 @@ mod tests {
             .unwrap()
     }
 
-    fn assert_no_w75_raw_content(serialized: &str) {
-        for raw in [
-            "RAW_PROMPT_SECRET",
-            "RAW_ASSISTANT_OUTPUT_SECRET",
-            "RAW_MEMORY_TEXT_SECRET",
-            "RAW_TOOL_PAYLOAD_SECRET",
-            "RAW_EDITED_PAYLOAD_SECRET",
-            "unredacted reviewer note",
-        ] {
-            assert!(
-                !serialized.contains(raw),
-                "serialized W75 evidence leaked raw marker {raw}: {serialized}"
-            );
-        }
-    }
-
-    fn test_lifemodel_source_proposal(source: ProposalSource) -> AgentProposal {
-        AgentProposal::new(
-            ProposalType::GoalUpdate,
-            "identity.name",
-            serde_json::json!("W88 mapped name"),
-            "W88 source mapping fixture",
-            0.9,
-            RiskLevel::Low,
-            source,
-        )
-    }
-
     fn extract_rust_function_body(source: &str, signature: &str) -> String {
         let start = source
             .find(signature)
@@ -5412,39 +5151,6 @@ mod tests {
             }
         }
         source[body_start..end].to_string()
-    }
-
-    async fn accept_lifemodel_proposal_and_patch_source(
-        source: ProposalSource,
-    ) -> (PatchSource, serde_json::Value) {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut proposal = test_lifemodel_source_proposal(source);
-        stamp_lifemodel_base_hash(&mut proposal, &state).await;
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        let result = accept_proposal_with_state(proposal_id.clone(), &state)
-            .await
-            .unwrap();
-
-        let patches = state
-            .patch_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list_patches_by_proposal(&proposal_id)
-            .unwrap();
-        assert_eq!(patches.len(), 1);
-        (patches[0].source, result)
     }
 
     #[test]
@@ -5582,6 +5288,16 @@ mod tests {
                 "byteSize": 42,
                 "mediaType": "text/markdown; charset=utf-8",
                 "status": "confirmed"
+            },
+            "lifeModelLearning": {
+                "candidateId": "candidate-1",
+                "proposalId": "proposal-1",
+                "changed": true,
+                "status": "materialized",
+                "contentScrubbed": false,
+                "materializedVersion": 7,
+                "materializedDocumentDigest": "sha256:lifemodel-v7",
+                "canonicalLifeModelChanged": true
             }
         }))
         .unwrap();
@@ -5609,6 +5325,12 @@ mod tests {
         assert_eq!(
             serialized["artifactMaterialization"]["contentDigest"],
             serialized["artifactMaterialization"]["observedContentDigest"]
+        );
+        assert_eq!(serialized["lifeModelLearning"]["status"], "materialized");
+        assert_eq!(serialized["lifeModelLearning"]["materializedVersion"], 7);
+        assert_eq!(
+            serialized["lifeModelLearning"]["canonicalLifeModelChanged"],
+            true
         );
     }
 
@@ -5681,6 +5403,42 @@ mod tests {
         }))
         .expect_err("deferred responses must not carry confirmed-effect truth");
         assert!(deferred_error.contains("confirmed-effect truth fields"));
+
+        let deferred_learning_error = typed_accept_proposal_response(serde_json::json!({
+            "success": false,
+            "status": "deferred",
+            "reasonCode": "origin_turn_open",
+            "proposalId": "proposal-deferred",
+            "dispatchState": "unclaimed",
+            "durableWriteExecuted": false,
+            "lifeModelLearning": {
+                "proposalId": "proposal-deferred",
+                "status": "reconciliation_required",
+                "canonicalLifeModelChanged": true
+            }
+        }))
+        .expect_err("deferred responses must not carry LifeModel materialization truth");
+        assert!(deferred_learning_error.contains("confirmed-effect truth fields"));
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_rejects_unconfirmed_lifemodel_learning_truth() {
+        let error = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "effectStatus": "confirmed",
+            "proposalProjectionStatus": "confirmed",
+            "proposalId": "proposal-learning",
+            "lifeModelLearning": {
+                "candidateId": "candidate-learning",
+                "proposalId": "proposal-learning",
+                "changed": false,
+                "status": "proposed",
+                "contentScrubbed": false,
+                "canonicalLifeModelChanged": false
+            }
+        }))
+        .expect_err("proposed Candidate state must not receive materialization credit");
+        assert!(error.contains("lacks confirmed materialization truth"));
     }
 
     #[test]
@@ -5749,353 +5507,6 @@ mod tests {
     }
 
     #[test]
-    fn w88_lifemodel_proposal_patch_source_mapping_is_source_specific() {
-        for (source, expected) in [
-            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
-            (ProposalSource::CalibrationRun, PatchSource::Calibration),
-            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
-            (ProposalSource::Manual, PatchSource::Manual),
-        ] {
-            let proposal = test_lifemodel_source_proposal(source);
-            let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
-            assert_eq!(report.proposal_source, source);
-            assert_eq!(report.patch_source, expected);
-            assert!(report.exact_source_mapping);
-            assert!(!report.metadata_safe_fallback);
-            assert!(report.blocking_reasons.is_empty());
-            assert_eq!(
-                ensure_lifemodel_proposal_patch_source_mapping(&proposal)
-                    .unwrap()
-                    .patch_source,
-                expected
-            );
-            assert_eq!(
-                resolve_lifemodel_patch_source_for_proposal(&proposal),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn w95_lifemodel_proposal_sources_have_exact_patch_source_mappings() {
-        for (source, expected) in [
-            (
-                ProposalSource::ChatConversation,
-                PatchSource::ChatConversation,
-            ),
-            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
-            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
-            (ProposalSource::Plugin, PatchSource::Plugin),
-            (
-                ProposalSource::MemoryGovernance,
-                PatchSource::MemoryGovernance,
-            ),
-            (
-                ProposalSource::PlanningSession,
-                PatchSource::PlanningSession,
-            ),
-        ] {
-            let proposal = test_lifemodel_source_proposal(source);
-            let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
-            assert_eq!(report.proposal_source, source);
-            assert_eq!(report.patch_source, expected);
-            assert_ne!(report.patch_source, PatchSource::BuilderReview);
-            assert!(report.exact_source_mapping);
-            assert!(!report.metadata_safe_fallback);
-            assert!(report.apply_allowed);
-            assert!(report.metadata_safe);
-            assert!(report.default_chat_route_unchanged);
-            assert!(report.proposal_first_convergence_complete);
-            assert!(report.blocking_reasons.is_empty());
-            assert_eq!(report.required_follow_up, "none");
-            assert_eq!(
-                ensure_lifemodel_proposal_patch_source_mapping(&proposal)
-                    .unwrap()
-                    .patch_source,
-                expected
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn w88_accept_lifemodel_proposal_writes_source_specific_patch_store_source() {
-        for (source, expected) in [
-            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
-            (ProposalSource::CalibrationRun, PatchSource::Calibration),
-            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
-            (ProposalSource::Manual, PatchSource::Manual),
-        ] {
-            let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
-            assert_eq!(result["success"], true);
-            assert_eq!(actual, expected, "{source} must map to {expected}");
-        }
-    }
-
-    #[tokio::test]
-    async fn w95_non_typical_lifemodel_proposal_sources_write_dedicated_patch_source() {
-        for (source, expected) in [
-            (
-                ProposalSource::ChatConversation,
-                PatchSource::ChatConversation,
-            ),
-            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
-            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
-            (ProposalSource::Plugin, PatchSource::Plugin),
-            (
-                ProposalSource::MemoryGovernance,
-                PatchSource::MemoryGovernance,
-            ),
-            (
-                ProposalSource::PlanningSession,
-                PatchSource::PlanningSession,
-            ),
-        ] {
-            let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
-            assert_eq!(result["success"], true);
-            assert_ne!(
-                actual,
-                PatchSource::BuilderReview,
-                "{source} must not be masqueraded as BuilderReview"
-            );
-            assert_eq!(actual, expected);
-        }
-    }
-
-    #[test]
-    fn w88_apply_proposal_to_state_no_longer_hardcodes_builder_review_patch_source() {
-        let source = std::fs::read_to_string(format!(
-            "{}/src/commands/proposal.rs",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .expect("read proposal.rs");
-        let body = extract_rust_function_body(&source, "async fn apply_proposal_to_state(");
-        assert!(
-            !body.contains("PatchSource::BuilderReview"),
-            "apply_proposal_to_state must use the W88 source-specific resolver, not a hardcoded BuilderReview PatchSource"
-        );
-        assert!(body.contains("resolve_lifemodel_patch_source_for_proposal"));
-    }
-
-    #[test]
-    fn w88_lifemodel_proposal_patch_source_mapping_report_is_metadata_safe() {
-        let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
-            "state.current_focus",
-            serde_json::json!({
-                "raw": "W88_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
-                "memory": "W88_RAW_MEMORY_TEXT_SECRET",
-                "chat": "W88_RAW_CHAT_TEXT_SECRET",
-                "tool": "W88_RAW_TOOL_PAYLOAD_SECRET"
-            }),
-            "W88_RAW_PROPOSAL_REASON_SECRET",
-            0.8,
-            RiskLevel::Low,
-            ProposalSource::ChatConversation,
-        );
-        proposal.before = Some(serde_json::json!("W88_RAW_BEFORE_VALUE_SECRET"));
-        proposal.source_detail = Some("W88_RAW_SOURCE_DETAIL_SECRET".into());
-
-        let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
-        assert!(report.metadata_safe);
-        assert!(!report.contains_raw_proposal_payload);
-        assert!(!report.contains_raw_lifemodel_patch_value);
-        assert!(!report.contains_raw_memory_text);
-        assert!(!report.contains_raw_chat_text);
-        assert!(!report.contains_raw_tool_payload);
-
-        let debug_dump = format!("{report:?}");
-        for forbidden in [
-            "W88_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
-            "W88_RAW_MEMORY_TEXT_SECRET",
-            "W88_RAW_CHAT_TEXT_SECRET",
-            "W88_RAW_TOOL_PAYLOAD_SECRET",
-            "W88_RAW_PROPOSAL_REASON_SECRET",
-            "W88_RAW_BEFORE_VALUE_SECRET",
-            "W88_RAW_SOURCE_DETAIL_SECRET",
-        ] {
-            assert!(
-                !debug_dump.contains(forbidden),
-                "W88 source mapping report leaked raw marker {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn w88_lifemodel_proposal_patch_source_mapping_keeps_default_chat_kernel_path() {
-        let report = evaluate_lifemodel_proposal_patch_source_mapping(
-            &test_lifemodel_source_proposal(ProposalSource::ChatConversation),
-        );
-        assert!(report.default_chat_route_unchanged);
-        assert_eq!(report.default_chat_route, "main_chat_kernel");
-        assert!(!report.default_chat_entrypoints_changed);
-    }
-
-    fn w89_source_bodies() -> (String, String, String) {
-        let proposal_rs_path = format!("{}/src/commands/proposal.rs", env!("CARGO_MANIFEST_DIR"));
-        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-        let proposal_source = std::fs::read_to_string(proposal_rs_path).expect("read proposal.rs");
-        let lib_source = std::fs::read_to_string(lib_rs_path).expect("read lib.rs");
-        (
-            extract_rust_function_body(&proposal_source, "async fn apply_proposal_to_state("),
-            extract_rust_function_body(&lib_source, "async fn send_message("),
-            extract_rust_function_body(&lib_source, "async fn start_stream_message("),
-        )
-    }
-
-    fn w89_entry(
-        entries: &[LifeModelProposalPatchSourceReadinessEntry],
-        source: ProposalSource,
-    ) -> &LifeModelProposalPatchSourceReadinessEntry {
-        entries
-            .iter()
-            .find(|entry| entry.proposal_source == source)
-            .unwrap_or_else(|| panic!("missing W89 readiness entry for {source}"))
-    }
-
-    #[test]
-    fn w95_lifemodel_proposal_patch_source_readiness_report_covers_all_exact_sources() {
-        let (apply_body, send_body, stream_body) = w89_source_bodies();
-        let report = evaluate_lifemodel_proposal_patch_source_readiness(
-            &apply_body,
-            &send_body,
-            &stream_body,
-        );
-
-        assert!(report.readiness_ready);
-        assert!(report.metadata_safe);
-        assert_eq!(report.exact_mapping_count, 10);
-        assert_eq!(report.metadata_safe_fallback_count, 0);
-        assert_eq!(report.unsupported_or_unclassified_count, 0);
-        assert!(report.builder_review_only_for_builder_review);
-        assert!(report.no_hardcoded_builder_review_in_apply_path);
-        assert!(report.apply_path_uses_mapping_ensure);
-        assert!(report.apply_path_uses_source_resolver);
-        assert!(report.default_chat_route_unchanged);
-        assert!(report.proposal_first_convergence_complete);
-        assert_eq!(report.entries.len(), 10);
-        assert!(report.blocking_reasons.is_empty());
-
-        for (source, patch_source) in [
-            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
-            (ProposalSource::CalibrationRun, PatchSource::Calibration),
-            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
-            (ProposalSource::Manual, PatchSource::Manual),
-            (
-                ProposalSource::ChatConversation,
-                PatchSource::ChatConversation,
-            ),
-            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
-            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
-            (ProposalSource::Plugin, PatchSource::Plugin),
-            (
-                ProposalSource::MemoryGovernance,
-                PatchSource::MemoryGovernance,
-            ),
-            (
-                ProposalSource::PlanningSession,
-                PatchSource::PlanningSession,
-            ),
-        ] {
-            let entry = w89_entry(&report.entries, source);
-            assert_eq!(entry.patch_source, patch_source);
-            assert!(entry.exact_source_mapping);
-            assert!(!entry.metadata_safe_fallback);
-            assert_eq!(entry.follow_up, "none");
-        }
-    }
-
-    #[test]
-    fn w89_lifemodel_proposal_patch_source_readiness_report_is_metadata_safe() {
-        let (apply_body, send_body, stream_body) = w89_source_bodies();
-        let report = evaluate_lifemodel_proposal_patch_source_readiness(
-            &format!("{apply_body} W89_RAW_PROPOSAL_PAYLOAD_SECRET"),
-            &format!("{send_body} W89_RAW_CHAT_TEXT_SECRET"),
-            &format!("{stream_body} W89_RAW_TOOL_PAYLOAD_SECRET"),
-        );
-
-        assert!(report.metadata_safe);
-        assert!(!report.contains_raw_proposal_payload);
-        assert!(!report.contains_raw_lifemodel_patch_value);
-        assert!(!report.contains_raw_memory_text);
-        assert!(!report.contains_raw_chat_text);
-        assert!(!report.contains_raw_tool_payload);
-
-        let debug_dump = format!("{report:?}");
-        for forbidden in [
-            "W89_RAW_PROPOSAL_PAYLOAD_SECRET",
-            "W89_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
-            "W89_RAW_MEMORY_TEXT_SECRET",
-            "W89_RAW_CHAT_TEXT_SECRET",
-            "W89_RAW_TOOL_PAYLOAD_SECRET",
-        ] {
-            assert!(
-                !debug_dump.contains(forbidden),
-                "W89 readiness report leaked raw marker {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn w89_apply_path_readiness_scanner_proves_mapping_ensure_and_resolver_use() {
-        let (apply_body, send_body, stream_body) = w89_source_bodies();
-        let report = evaluate_lifemodel_proposal_patch_source_readiness(
-            &apply_body,
-            &send_body,
-            &stream_body,
-        );
-
-        assert!(report.no_hardcoded_builder_review_in_apply_path);
-        assert!(report.apply_path_uses_mapping_ensure);
-        assert!(report.apply_path_uses_source_resolver);
-        assert!(apply_body.contains("ensure_lifemodel_proposal_patch_source_mapping(proposal)"));
-        assert!(apply_body.contains("resolve_lifemodel_patch_source_for_proposal(proposal)"));
-        assert!(apply_body.contains("LifeModelPatch::from_proposal"));
-        assert!(!apply_body.contains("PatchSource::BuilderReview"));
-    }
-
-    #[test]
-    fn w89_default_chat_entrypoints_do_not_call_patch_source_mapping_or_readiness_helpers() {
-        let (apply_body, send_body, stream_body) = w89_source_bodies();
-        let report = evaluate_lifemodel_proposal_patch_source_readiness(
-            &apply_body,
-            &send_body,
-            &stream_body,
-        );
-
-        assert!(report.default_chat_route_unchanged);
-        for forbidden in [
-            "LifeModelProposalPatchSourceMappingReport",
-            "evaluate_lifemodel_proposal_patch_source_mapping",
-            "ensure_lifemodel_proposal_patch_source_mapping",
-            "resolve_lifemodel_patch_source_for_proposal",
-            "LifeModelProposalPatchSourceReadinessReport",
-            "evaluate_lifemodel_proposal_patch_source_readiness",
-            "ensure_lifemodel_proposal_patch_source_readiness",
-        ] {
-            assert!(
-                !send_body.contains(forbidden),
-                "send_message must not call proposal PatchSource helper {forbidden}"
-            );
-            assert!(
-                !stream_body.contains(forbidden),
-                "start_stream_message must not call proposal PatchSource helper {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn w95_readiness_ensure_passes_after_patch_source_fallback_closure() {
-        let (apply_body, send_body, stream_body) = w89_source_bodies();
-        let report =
-            ensure_lifemodel_proposal_patch_source_readiness(&apply_body, &send_body, &stream_body)
-                .expect("W95 closes proposal PatchSource fallback policy");
-
-        assert!(report.readiness_ready);
-        assert!(report.proposal_first_convergence_complete);
-        assert!(report.blocking_reasons.is_empty());
-    }
-
-    #[test]
     fn lifemodel_closed_loop_canonicalizes_communication_style_aliases() {
         for alias in [
             "/preferences/communication_style",
@@ -6113,165 +5524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proposal_accept_normalizes_communication_style_alias_before_apply() {
-        for alias in [
-            "/preferences/communication_style",
-            "preferences.communication_style",
-            "preferences.communication",
-            "/preferences/communication",
-        ] {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let state = test_app_state(&temp_dir);
-            let mut proposal = AgentProposal::new(
-                ProposalType::PreferenceUpdate,
-                alias,
-                serde_json::json!(format!("accepted via {alias}")),
-                "用户确认沟通偏好。",
-                0.91,
-                RiskLevel::Low,
-                ProposalSource::FeedbackEvolution,
-            );
-            stamp_lifemodel_base_hash(&mut proposal, &state).await;
-            let id = proposal.id.clone();
-            state
-                .proposal_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .create_proposal(&proposal)
-                .unwrap();
-
-            let result = accept_proposal_with_state(id.clone(), &state)
-                .await
-                .unwrap();
-
-            assert_eq!(
-                result["patch_result"]["path"],
-                serde_json::json!("/preferences/communication_style")
-            );
-            let model = state.life_model_manager.lock().await.load().unwrap();
-            assert_eq!(
-                model.preferences.communication_style,
-                format!("accepted via {alias}")
-            );
-            let stored = state
-                .proposal_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .get_proposal(&id)
-                .unwrap()
-                .unwrap();
-            assert_eq!(stored.affected_path, COMMUNICATION_STYLE_CANONICAL_PATH);
-            let patches = state
-                .patch_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .list_patches_by_proposal(&id)
-                .unwrap();
-            assert_eq!(patches.len(), 1);
-            assert_eq!(patches[0].path_pointer, "/preferences/communication_style");
-        }
-    }
-
-    #[tokio::test]
-    async fn accept_life_model_proposal_updates_model_and_marks_accepted() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut proposal = AgentProposal::new(
-            ProposalType::GoalUpdate,
-            "identity.name",
-            serde_json::json!("Fujing"),
-            "用户确认的新称呼",
-            0.9,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        stamp_lifemodel_base_hash(&mut proposal, &state).await;
-        let id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        accept_proposal_with_state(id.clone(), &state)
-            .await
-            .unwrap();
-
-        let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(model.identity.name, "Fujing");
-        let stored = state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .get_proposal(&id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ProposalStatus::Accepted);
-    }
-
-    #[tokio::test]
-    async fn accept_maturation_proposal_records_outcome_evidence() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!("W132 accepted communication style"),
-            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET unredacted reviewer note",
-            0.9,
-            RiskLevel::Low,
-            ProposalSource::FeedbackEvolution,
-        );
-        proposal.run_id = Some("run-tauri-w75-accept".into());
-        proposal.source_detail = Some("maturation:preference.communication".into());
-        stamp_lifemodel_base_hash(&mut proposal, &state).await;
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
-
-        accept_proposal_with_state(proposal_id.clone(), &state)
-            .await
-            .unwrap();
-
-        let records = proposal_outcome_records(&state, &proposal_id).await;
-        assert_eq!(records.len(), 1);
-        let evidence = &records[0];
-        assert_eq!(evidence.run_metadata["outcome"], "accepted");
-        assert_eq!(evidence.linked_proposal_ids, vec![proposal_id.clone()]);
-        assert_eq!(evidence.linked_agent_run_ids, vec!["run-tauri-w75-accept"]);
-        assert_eq!(
-            evidence.run_metadata["sourceEvidenceIds"],
-            serde_json::json!([source_evidence_id])
-        );
-        assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
-
-        let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(
-            model.preferences.communication_style,
-            "W132 accepted communication style"
-        );
-    }
-
-    #[tokio::test]
-    async fn reject_maturation_proposal_records_negative_outcome_without_applying() {
+    async fn reject_legacy_maturation_proposal_does_not_run_retired_outcome_pipeline() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
@@ -6294,19 +5547,14 @@ mod tests {
             .await
             .create_proposal(&proposal)
             .unwrap();
-        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
+        create_maturation_source_evidence(&state, &proposal).await;
 
         reject_proposal_with_state(proposal_id.clone(), &state)
             .await
             .unwrap();
 
         let records = proposal_outcome_records(&state, &proposal_id).await;
-        assert_eq!(records.len(), 1);
-        let evidence = &records[0];
-        assert_eq!(evidence.run_metadata["outcome"], "rejected");
-        assert_eq!(evidence.run_metadata["negative"], true);
-        assert_eq!(evidence.run_metadata["opposing"], true);
-        assert_eq!(evidence.opposing_refs, vec![source_evidence_id]);
+        assert!(records.is_empty());
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert_ne!(
             model.preferences.communication_style,
@@ -6325,7 +5573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_life_model_proposal_applies_edited_value() {
+    async fn legacy_lifemodel_proposal_edit_is_rejected_without_mutation() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let proposal = AgentProposal::new(
@@ -6347,11 +5595,10 @@ mod tests {
             .create_proposal(&proposal)
             .unwrap();
 
-        let edit_result = edit_proposal_with_state(id.clone(), serde_json::json!("新焦点"), &state)
+        let error = edit_proposal_with_state(id.clone(), serde_json::json!("新焦点"), &state)
             .await
-            .unwrap();
-        assert_eq!(edit_result["status"], "edited_pending_review");
-        assert_eq!(edit_result["durable_write_executed"], false);
+            .unwrap_err();
+        assert!(error.contains("Legacy 4D LifeModel proposal editing is retired"));
 
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert_ne!(model.state.current_focus, "新焦点");
@@ -6364,12 +5611,13 @@ mod tests {
             .get_proposal(&id)
             .unwrap()
             .unwrap();
-        assert_eq!(stored.status, ProposalStatus::Edited);
+        assert_eq!(stored.status, ProposalStatus::Pending);
+        assert_eq!(stored.after, serde_json::json!("旧焦点"));
         assert_eq!(stored.resolved_at, None);
     }
 
     #[tokio::test]
-    async fn edit_maturation_proposal_records_outcome_without_raw_edited_payload() {
+    async fn legacy_maturation_proposal_edit_is_rejected_without_outcome_or_write() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
@@ -6394,21 +5642,17 @@ mod tests {
             .unwrap();
         create_maturation_source_evidence(&state, &proposal).await;
 
-        let edit_result = edit_proposal_with_state(
+        let error = edit_proposal_with_state(
             proposal_id.clone(),
             serde_json::json!("RAW_EDITED_PAYLOAD_SECRET"),
             &state,
         )
         .await
-        .unwrap();
-        assert_eq!(edit_result["status"], "edited_pending_review");
+        .unwrap_err();
+        assert!(error.contains("Legacy 4D LifeModel proposal editing is retired"));
 
         let records = proposal_outcome_records(&state, &proposal_id).await;
-        assert_eq!(records.len(), 1);
-        let evidence = &records[0];
-        assert_eq!(evidence.run_metadata["outcome"], "edited");
-        assert_eq!(evidence.run_metadata["editedPayloadIncluded"], false);
-        assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
+        assert!(records.is_empty());
 
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert_ne!(
@@ -6417,23 +5661,54 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn edit_proposal_does_not_write_lifemodel_until_later_accept() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
+    fn v2_value_add_diff(
+        base: Option<&openlife_core::life_model::v2::LifeModelVersionV2>,
+        item_id: &str,
+        statement: &str,
+    ) -> openlife_core::life_model::v2::LifeModelTypedDiffV2 {
+        use openlife_core::life_model::v2::{
+            LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
+            LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
+        };
+
+        let item = LifeModelStatementV2 {
+            id: item_id.into(),
+            statement: statement.into(),
+            source_refs: vec!["message:user:v2-review".into()],
+            confirmed_at: "2026-08-08T10:00:00Z".into(),
+        };
+        let mut result = base
+            .map(|version| version.document.clone())
+            .unwrap_or_else(|| LifeModelDocumentV2::empty("primary"));
+        result.values.push(item.clone());
+        LifeModelTypedDiffV2 {
+            schema_version: LIFE_MODEL_V2_TYPED_DIFF_SCHEMA.into(),
+            model_id: "primary".into(),
+            base_version: base.map(|version| version.model_version),
+            base_document_digest: base.map(|version| version.document_digest.clone()),
+            operations: vec![LifeModelTypedOperationV2::Add {
+                section: LifeModelSectionV2::Values,
+                item: LifeModelItemV2::Statement(item),
+            }],
+            result_document_digest: result.digest().unwrap(),
+        }
+    }
+
+    async fn store_v2_diff_proposal(
+        state: &Arc<AppState>,
+        diff: openlife_core::life_model::v2::LifeModelTypedDiffV2,
+    ) -> String {
         let mut proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!("original proposed style"),
-            "User wants to edit before accepting.",
-            0.82,
-            RiskLevel::Low,
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            serde_json::to_value(&diff).unwrap(),
+            "User reviewed an exact LifeModel v2 change.",
+            1.0,
+            RiskLevel::Medium,
             ProposalSource::Manual,
         );
-        proposal.before = Some(serde_json::json!(""));
-        proposal.run_id = Some("run-edit-then-accept".into());
-        stamp_lifemodel_base_hash(&mut proposal, &state).await;
-        let proposal_id = proposal.id.clone();
+        proposal.base_hash = diff.base_document_digest.clone();
+        let id = proposal.id.clone();
         state
             .proposal_store
             .as_ref()
@@ -6442,59 +5717,260 @@ mod tests {
             .await
             .create_proposal(&proposal)
             .unwrap();
-
-        let edit_result = edit_proposal_with_state(
-            proposal_id.clone(),
-            serde_json::json!("edited style"),
-            &state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(edit_result["durable_write_executed"], false);
-        let model_after_edit = state.life_model_manager.lock().await.load().unwrap();
-        assert_ne!(
-            model_after_edit.preferences.communication_style,
-            "edited style"
-        );
-
-        accept_proposal_with_state(proposal_id.clone(), &state)
-            .await
-            .unwrap();
-
-        let model_after_accept = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(
-            model_after_accept.preferences.communication_style,
-            "edited style"
-        );
-        let stored = state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .get_proposal(&proposal_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ProposalStatus::Accepted);
-        assert!(stored.resolved_at.is_some());
+        id
     }
 
     #[tokio::test]
-    async fn stale_lifemodel_proposal_base_hash_conflicts_without_accepting() {
+    async fn reviewed_v2_typed_diff_advances_head_only_after_accept_and_stale_stays_pending() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
+        assert!(state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .is_none());
+
+        let initial_id = store_v2_diff_proposal(
+            &state,
+            v2_value_add_diff(None, "value:autonomy", "Autonomy matters."),
+        )
+        .await;
+        assert!(state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .is_none());
+
+        let accepted = accept_proposal_with_state(initial_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["success"], true);
+        let first = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.model_version, 1);
+        assert_eq!(first.source_refs, vec![format!("proposal:{initial_id}")]);
+        let audit = state
+            .feedback_store
+            .lock()
+            .await
+            .analytics_details_for_event("lifemodel_v2_gateway_materialized", 5)
+            .unwrap();
+        let audit = audit
+            .iter()
+            .find_map(|detail| serde_json::from_str::<serde_json::Value>(detail).ok())
+            .expect("v2 materialization audit");
+        assert_eq!(audit["proposalId"], initial_id);
+        assert_eq!(audit["lane"], "canonical_lifemodel_v2_truth");
+        assert_eq!(audit["afterHash"], first.document_digest);
+        assert_eq!(audit["containsRawContent"], false);
+
+        let stale_id = store_v2_diff_proposal(
+            &state,
+            v2_value_add_diff(Some(&first), "value:clarity", "Clarity matters."),
+        )
+        .await;
+        let winner_id = store_v2_diff_proposal(
+            &state,
+            v2_value_add_diff(Some(&first), "value:care", "Care matters."),
+        )
+        .await;
+        accept_proposal_with_state(winner_id.clone(), &state)
+            .await
+            .unwrap();
+        let winner_replay = accept_proposal_with_state(winner_id, &state).await.unwrap();
+        assert_eq!(winner_replay["success"], true);
+
+        let error = accept_proposal_with_state(stale_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("lifemodel_v2_typed_diff_stale_base"));
+        let current = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.model_version, 2);
+        assert!(current
+            .document
+            .values
+            .iter()
+            .any(|item| item.id == "value:care"));
+        assert!(!current
+            .document
+            .values
+            .iter()
+            .any(|item| item.id == "value:clarity"));
+        let stale = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&stale_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.status, ProposalStatus::Pending);
+    }
+
+    async fn draft_test_legacy_migration(state: &Arc<AppState>) -> String {
+        use openlife_core::life_model::v2::{
+            LegacyLifeModelMigrationDecisionV2, LegacyLifeModelMigrationPreviewV2,
+            LegacyLifeModelMigrationSelectionV2,
+        };
+
+        let source = state
+            .life_model_manager
+            .lock()
+            .await
+            .load_existing_with_source()
+            .unwrap()
+            .unwrap()
+            .1;
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source).unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect();
+        crate::commands::life_model::draft_legacy_lifemodel_migration_with_state(
+            crate::commands::life_model::DraftLegacyLifeModelMigrationRequest {
+                source_digest: preview.source_digest,
+                selections,
+                non_lifemodel_items_acknowledged: true,
+            },
+            state,
+        )
+        .await
+        .unwrap()
+        .proposal_id
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_draft_has_no_effect_and_accept_atomically_switches_owner() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut legacy = manager.load().unwrap();
+            legacy.identity.name = "Alice".into();
+            manager.save(&legacy).unwrap();
+        }
+
+        let proposal_id = draft_test_legacy_migration(&state).await;
+        let manager = state.life_model_manager.lock().await;
+        assert!(manager.load_v2_current("primary").unwrap().is_none());
+        assert!(manager.load_v2_cutover("primary").unwrap().is_none());
+        assert!(!manager.v2_store_path().exists());
+        drop(manager);
+
+        let accepted = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["effect_status"], "confirmed");
+        let manager = state.life_model_manager.lock().await;
+        let version = manager.load_v2_current("primary").unwrap().unwrap();
+        let cutover = manager.load_v2_cutover("primary").unwrap().unwrap();
+        assert_eq!(version.model_version, 1);
+        assert_eq!(cutover.proposal_id, proposal_id);
+        assert_eq!(cutover.document_digest, version.document_digest);
+        assert!(manager
+            .load_active_legacy_runtime_model()
+            .unwrap()
+            .is_none());
+        let backup_dir = manager
+            .v2_store_path()
+            .parent()
+            .unwrap()
+            .join("legacy-backups");
+        assert_eq!(std::fs::read_dir(backup_dir).unwrap().count(), 1);
+        drop(manager);
+
+        let view = crate::read_models::life_model::get_life_model_view_model_with_state(&state)
+            .await
+            .unwrap();
+        let data = view.data.unwrap();
+        assert_eq!(
+            data.truth_mode,
+            openlife_core::agent::LifeModelTruthMode::Canonical
+        );
+        assert!(data.legacy_migration_preview.is_none());
+        assert!(
+            crate::commands::life_model::load_legacy_lifemodel_for_test(&state)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("legacy_lifemodel_read_owner_retired")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_source_drift_after_review_fails_before_cutover_and_stays_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut legacy = manager.load().unwrap();
+            legacy.identity.name = "Alice".into();
+            manager.save(&legacy).unwrap();
+        }
+        let proposal_id = draft_test_legacy_migration(&state).await;
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut changed = manager.load().unwrap();
+            changed.identity.name = "Bob".into();
+            manager.save(&changed).unwrap();
+        }
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Patch 应用前校验失败"), "{error}");
+        let manager = state.life_model_manager.lock().await;
+        assert!(manager.load_v2_current("primary").unwrap().is_none());
+        assert!(manager.load_v2_cutover("primary").unwrap().is_none());
+        drop(manager);
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal_id).unwrap().as_deref(),
+            Some("failed_before_effect")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal_id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_typed_diff_proposal_base_mismatch_is_rejected_before_store_creation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let diff = v2_value_add_diff(None, "value:autonomy", "Autonomy matters.");
         let mut proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!("proposal style"),
-            "This proposal was based on an older model.",
-            0.82,
-            RiskLevel::Low,
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            serde_json::to_value(diff).unwrap(),
+            "The review snapshot is intentionally inconsistent.",
+            1.0,
+            RiskLevel::Medium,
             ProposalSource::Manual,
         );
-        proposal.before = Some(serde_json::json!(""));
-        proposal.run_id = Some("run-stale-base".into());
-        stamp_lifemodel_base_hash(&mut proposal, &state).await;
+        proposal.base_hash =
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".into());
         let proposal_id = proposal.id.clone();
         state
             .proposal_store
@@ -6505,25 +5981,16 @@ mod tests {
             .create_proposal(&proposal)
             .unwrap();
 
-        {
-            let manager = state.life_model_manager.lock().await;
-            let mut model = manager.load().unwrap();
-            model.preferences.communication_style = "changed outside proposal".into();
-            manager.save(&model).unwrap();
-        }
-
-        let err = accept_proposal_with_state(proposal_id.clone(), &state)
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("accepted_proposal_base_hash_stale"),
-            "stale accept must report gateway stale conflict: {err}"
-        );
-        let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(
-            model.preferences.communication_style,
-            "changed outside proposal"
-        );
+        assert!(error.contains("lifemodel_v2_typed_diff_proposal_base_mismatch"));
+        assert!(!state
+            .life_model_manager
+            .lock()
+            .await
+            .v2_store_path()
+            .exists());
         let stored = state
             .proposal_store
             .as_ref()
@@ -6645,64 +6112,6 @@ mod tests {
             .unwrap();
         assert_eq!(rule_result["memoryGateway"]["lane"], "procedural_rule");
         assert_eq!(rule_result["memoryLifecycle"]["category"], "workflow");
-    }
-
-    #[tokio::test]
-    async fn accepted_lifemodel_proposal_audit_contains_gateway_hashes_and_lane() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let mut proposal = AgentProposal::new(
-            ProposalType::PreferenceUpdate,
-            "preferences.communication_style",
-            serde_json::json!("audit style"),
-            "User accepted communication style update.",
-            0.82,
-            RiskLevel::Low,
-            ProposalSource::Manual,
-        );
-        proposal.before = Some(serde_json::json!(""));
-        proposal.run_id = Some("run-audit-lifemodel".into());
-        proposal.source_detail = Some("evidence:evidence-audit".into());
-        stamp_lifemodel_base_hash(&mut proposal, &state).await;
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        accept_proposal_with_state(proposal_id.clone(), &state)
-            .await
-            .unwrap();
-
-        let details = state
-            .feedback_store
-            .lock()
-            .await
-            .analytics_details_for_event("lifemodel_gateway_materialized", 5)
-            .unwrap();
-        let detail = details
-            .iter()
-            .find_map(|detail| serde_json::from_str::<serde_json::Value>(detail).ok())
-            .expect("lifemodel gateway audit detail");
-        assert_eq!(detail["proposalId"], proposal_id);
-        assert_eq!(detail["runId"], "run-audit-lifemodel");
-        assert_eq!(detail["evidenceId"], "evidence-audit");
-        assert_eq!(detail["lane"], "canonical_lifemodel_truth");
-        assert!(detail["baseHash"].as_str().is_some_and(|v| !v.is_empty()));
-        assert!(detail["currentHash"]
-            .as_str()
-            .is_some_and(|v| !v.is_empty()));
-        assert!(detail["beforeHash"].as_str().is_some_and(|v| !v.is_empty()));
-        assert!(detail["afterHash"].as_str().is_some_and(|v| !v.is_empty()));
-        assert_eq!(detail["conflictStatus"], serde_json::Value::Null);
-        assert_eq!(
-            detail["reasonCode"],
-            "accepted_proposal_materialization_allowed"
-        );
     }
 
     #[tokio::test]
@@ -7474,7 +6883,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_invalid_life_model_path_keeps_proposal_pending() {
+    async fn legacy_lifemodel_write_fails_before_effect_and_stays_pending() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
@@ -7500,7 +6909,10 @@ mod tests {
         let err = accept_proposal_with_state(id.clone(), &state)
             .await
             .unwrap_err();
-        assert!(err.contains("Invalid path") || err.contains("no_such_field"));
+        assert!(
+            err.contains("Legacy 4D LifeModel writes are retired"),
+            "{err}"
+        );
         let stored = state
             .proposal_store
             .as_ref()
@@ -7511,6 +6923,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Pending);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&id)
+                .unwrap()
+                .as_deref(),
+            Some("failed_before_effect")
+        );
     }
 
     #[tokio::test]
@@ -9410,21 +8834,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_proposal_edit_rejects_builder_typed_batch_without_typed_editor() {
+    async fn generic_proposal_edit_rejects_retired_builder_batch() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let batch = openlife_core::life_model::patch::LifeModelPatchBatchV1::new(vec![
-            openlife_core::life_model::patch::LifeModelPatchBatchOperationV1 {
-                candidate_id: "candidate-1".into(),
-                path: "goals.short_term".into(),
-                candidate: serde_json::json!([{"title": "typed candidate"}]),
-            },
-        ])
-        .unwrap();
+        let batch = serde_json::json!({
+            "schemaVersion": "lifemodel_patch_batch_v1",
+            "operations": [{
+                "candidateId": "candidate-1",
+                "path": "goals.short_term",
+                "candidate": [{"title": "typed candidate"}]
+            }]
+        });
         let proposal = AgentProposal::new(
             ProposalType::LifeModelUpdate,
             openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH,
-            serde_json::to_value(&batch).unwrap(),
+            batch.clone(),
             "Builder typed batch awaiting review",
             0.9,
             RiskLevel::Medium,
@@ -9447,7 +8871,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.contains("typed Builder editor"), "{error}");
+        assert!(
+            error.contains("Legacy Builder batch editing is retired"),
+            "{error}"
+        );
         let stored = state
             .proposal_store
             .as_ref()
@@ -9458,25 +8885,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Pending);
-        assert_eq!(stored.after, serde_json::to_value(batch).unwrap());
+        assert_eq!(stored.after, batch);
+    }
+
+    #[tokio::test]
+    async fn generic_proposal_edit_rejects_v2_typed_diff_without_schema_aware_editor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
+            serde_json::json!({"schemaVersion": "lifemodel_typed_diff_v2"}),
+            "v2 change awaiting review",
+            1.0,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = edit_proposal_with_state(
+            proposal_id.clone(),
+            serde_json::json!({"arbitrary": "generic replacement"}),
+            &state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("schema-aware editor"), "{error}");
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+        assert_eq!(
+            stored.after,
+            serde_json::json!({"schemaVersion": "lifemodel_typed_diff_v2"})
+        );
     }
 
     #[tokio::test]
     async fn legacy_builder_batch_for_statestore_field_fails_before_effect_not_unknown() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let batch = openlife_core::life_model::patch::LifeModelPatchBatchV1::new(vec![
-            openlife_core::life_model::patch::LifeModelPatchBatchOperationV1 {
-                candidate_id: "legacy-daily-candidate".into(),
-                path: "goals.daily".into(),
-                candidate: serde_json::json!([{"name": "legacy pending task", "done": false}]),
-            },
-        ])
-        .unwrap();
+        let batch = serde_json::json!({
+            "schemaVersion": "lifemodel_patch_batch_v1",
+            "operations": [{
+                "candidateId": "legacy-daily-candidate",
+                "path": "goals.daily",
+                "candidate": [{"name": "legacy pending task", "done": false}]
+            }]
+        });
         let proposal = AgentProposal::new(
             ProposalType::LifeModelUpdate,
             openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH,
-            serde_json::to_value(batch).unwrap(),
+            batch,
             "persisted before the StateStore ownership cutover",
             0.9,
             RiskLevel::Low,
@@ -10073,67 +9548,6 @@ mod tests {
                 .unwrap()
                 .status,
             AgentRunStatus::Completed
-        );
-    }
-
-    #[tokio::test]
-    async fn accepted_proposal_linked_after_review_cannot_be_projected_back_to_waiting() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let proposal = scheduled_builder_proposal("accepted before AgentRun projection");
-        let proposal_id = proposal.id.clone();
-        state
-            .proposal_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_proposal(&proposal)
-            .unwrap();
-
-        let run = AgentRun::new_builder_run("builder-accept-before-link");
-        let run_id = run.id.clone();
-        state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_run(&run)
-            .unwrap();
-
-        accept_proposal_with_state(proposal_id.clone(), &state)
-            .await
-            .unwrap();
-
-        // This mirrors the old Builder/Calibration producer shape: it retained
-        // a pre-review row, then wrote that full stale row after Proposal review.
-        crate::terminal_owner_write_gateway::project_agent_run_from_proposal_staging(
-            &state,
-            &run_id,
-            std::slice::from_ref(&proposal_id),
-            crate::terminal_owner_write_gateway::AgentRunProposalStagingReceipt {
-                kind: crate::terminal_owner_write_gateway::AgentRunProposalStagingKind::Builder,
-                requested_count: 1,
-                failed_count: 0,
-            },
-        )
-        .await
-        .unwrap();
-
-        let canonical = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .get_run(&run_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            canonical.status,
-            AgentRunStatus::Completed,
-            "link finalization must derive the already-confirmed Proposal instead of trusting a stale WaitingPermission row"
         );
     }
 

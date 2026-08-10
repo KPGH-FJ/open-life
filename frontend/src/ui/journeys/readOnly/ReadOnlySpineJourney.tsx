@@ -65,10 +65,8 @@ import {
   durableTruthContext,
   durableTruthInspector,
   DurableTruthView,
-  useLifeModelBuilder,
   useDurableTruthJourney,
   type DurableTruthDataSource,
-  type LifeModelBuilderDataSource,
 } from "@/ui/journeys/durableTruth";
 import {
   settingsPrivacyContext,
@@ -96,7 +94,7 @@ function routeEntryAnnouncement(surface: ReadOnlyProductSurfaceId): string {
     case "review":
       return "已进入审核中心；决定状态与后续应用结果分别核对。";
     case "life-model":
-      return "已进入 LifeModel；长期状态只显示后端已经证明的结果。";
+      return "已进入个人智能；LifeModel 与 Agent Memory 分别显示各自后端已经证明的结果。";
   }
 }
 
@@ -105,7 +103,7 @@ const productNavigation: readonly WorkbenchNavigationItem[] = [
   { id: "workspace", label: "工作区", meta: "当前执行", icon: Monitor },
   { id: "tasks", label: "任务", meta: "队列与连续性", icon: ListTodo },
   { id: "review", label: "审核中心", meta: "建议与权限决定", icon: ShieldCheck },
-  { id: "life-model", label: "LifeModel", meta: "长期状态", icon: UserRound },
+  { id: "life-model", label: "个人智能", meta: "关于我与记忆", icon: UserRound },
 ];
 
 const settingsNavigation: readonly WorkbenchNavigationItem[] = [
@@ -173,8 +171,8 @@ const unavailableCopy: Record<
     reason: "后端没有提供可确认的待决定项；页面不会用旧建议列表代替，也不会把查看解释成批准。",
   },
   "life-model": {
-    title: "LifeModel 状态源不可用",
-    reason: "后端没有同时提供长期理解、记忆与审核状态；页面不会从旧记录补造当前结论。",
+    title: "个人智能状态源不可用",
+    reason: "后端没有提供可用的 LifeModel 或 Agent Memory 读模型；页面不会从旧记录补造当前结论。",
   },
 };
 
@@ -466,7 +464,6 @@ export function ReadOnlySpineJourney({
   durableTruthDataSource,
   settingsPrivacyDataSource,
   workspaceConversationDataSource,
-  lifeModelBuilderDataSource,
   initialSurface = "today",
   initialMode = "product",
   onRouteChange,
@@ -476,7 +473,6 @@ export function ReadOnlySpineJourney({
   durableTruthDataSource?: DurableTruthDataSource;
   settingsPrivacyDataSource?: SettingsPrivacyDataSource;
   workspaceConversationDataSource?: WorkspaceConversationDataSource;
-  lifeModelBuilderDataSource?: LifeModelBuilderDataSource;
   initialSurface?: ReadOnlyProductSurfaceId;
   initialMode?: ReadOnlySpineRouteState["mode"];
   onRouteChange?: (route: ReadOnlySpineRouteState) => void;
@@ -500,6 +496,7 @@ export function ReadOnlySpineJourney({
   const [selectedTask, setSelectedTask] = useState<TaskViewModelItem | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedEvidence, setSelectedEvidence] = useState("");
+  const [focusedLifeModelItemRef, setFocusedLifeModelItemRef] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState(() => routeEntryAnnouncement(initialSurface));
   const [focusKey, setFocusKey] = useState("initial");
   const modeRef = useRef(mode);
@@ -511,13 +508,15 @@ export function ReadOnlySpineJourney({
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) await governed.load(false);
   }, [governed.load, governedActionDataSource]);
+  const preferredWorkspaceConversationId =
+    governed.snapshot?.workspaceEnvelope.data?.activeTask?.conversationId ?? null;
   const conversation = useWorkspaceConversation(
     workspaceConversationDataSource,
     setAnnouncement,
-    refreshGovernedAfterTurn
+    refreshGovernedAfterTurn,
+    preferredWorkspaceConversationId
   );
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
-  const lifeModelBuilder = useLifeModelBuilder(lifeModelBuilderDataSource, setAnnouncement);
   const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, announceSettings);
   const focusSequenceRef = useRef(0);
   const todayRequestRef = useRef(0);
@@ -641,12 +640,6 @@ export function ReadOnlySpineJourney({
   }, [conversation.ensureLoaded, initialSurface, workspaceConversationDataSource]);
 
   useEffect(() => {
-    if (initialSurface === "life-model" && lifeModelBuilderDataSource) {
-      lifeModelBuilder.ensureLoaded();
-    }
-  }, [initialSurface, lifeModelBuilder.ensureLoaded, lifeModelBuilderDataSource]);
-
-  useEffect(() => {
     if (mode !== "settings" || !settingsPrivacyDataSource) return;
     let cancelled = false;
     setAnnouncement("已进入设置上下文，正在核对清理后的配置与模型传输边界。 ");
@@ -677,8 +670,13 @@ export function ReadOnlySpineJourney({
     };
   }, [mode, settingsPrivacy.ensureLoaded, settingsPrivacyDataSource]);
 
-  function navigateProduct(id: string, reviewOrigin?: "workspace" | "life-model"): void {
+  function navigateProduct(
+    id: string,
+    reviewOrigin?: "workspace" | "life-model",
+    lifeModelItemRef?: string
+  ): void {
     const next = id as ReadOnlyProductSurfaceId;
+    setFocusedLifeModelItemRef(next === "life-model" ? (lifeModelItemRef ?? null) : null);
     if (next === "review") {
       setReviewReturnSurface(
         reviewOrigin ?? (activeSurface === "life-model" ? "life-model" : "workspace")
@@ -705,7 +703,6 @@ export function ReadOnlySpineJourney({
       }
     } else if (next === "life-model" && durableTruthDataSource) {
       void durable.load(false);
-      if (lifeModelBuilderDataSource) lifeModelBuilder.ensureLoaded();
     } else {
       setAnnouncement(`“${unavailableCopy[next].title}”，当前没有替代数据或重定向。`);
     }
@@ -844,12 +841,7 @@ export function ReadOnlySpineJourney({
       return reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
     }
     if (activeSurface === "life-model" && durableTruthDataSource) {
-      return durableTruthInspector(
-        durable.snapshot,
-        durable.selectedItem,
-        selectedEvidence,
-        lifeModelBuilderDataSource ? lifeModelBuilder.error : null
-      );
+      return durableTruthInspector(durable.snapshot, durable.selectedItem, selectedEvidence, null);
     }
     return unavailableInspector(unavailableCopy[activeSurface].title);
   }, [
@@ -865,8 +857,6 @@ export function ReadOnlySpineJourney({
     governed.selectedItem,
     governed.snapshot,
     governedActionDataSource,
-    lifeModelBuilder.error,
-    lifeModelBuilderDataSource,
     settingsPrivacy,
     settingsPrivacyDataSource,
     todaySnapshot,
@@ -970,6 +960,7 @@ export function ReadOnlySpineJourney({
         onConfirmResume={governed.confirmResume}
         onCancelResume={governed.cancelResumeConfirmation}
         onOpenInspector={openInspector}
+        onOpenLifeModel={itemRef => navigateProduct("life-model", undefined, itemRef)}
         conversation={workspaceConversationDataSource ? conversation : undefined}
       />
     );
@@ -989,9 +980,10 @@ export function ReadOnlySpineJourney({
         onRequestAction={governed.requestReviewAction}
         onConfirmAction={governed.confirmReviewAction}
         onCancelConfirmation={governed.cancelReviewConfirmation}
+        onEditLifeModelLearning={governed.editLifeModelLearning}
         backLabel={
           reviewReturnSurface === "life-model"
-            ? "返回 LifeModel"
+            ? "返回个人智能"
             : reviewReturnSurface === "settings"
               ? "返回模型与供应商"
               : undefined
@@ -1017,8 +1009,13 @@ export function ReadOnlySpineJourney({
     content = (
       <DurableTruthView
         snapshot={durable.snapshot}
+        focusedLifeModelItemRef={focusedLifeModelItemRef}
         selectedItem={durable.selectedItem}
         refreshing={durable.refreshing}
+        memoryAction={durable.memoryAction}
+        migrationAction={durable.migrationAction}
+        lifeModelAction={durable.lifeModelAction}
+        learningAction={durable.learningAction}
         onRefresh={() => void durable.load(true)}
         onSelectItem={item => {
           durable.selectItem(item);
@@ -1027,10 +1024,22 @@ export function ReadOnlySpineJourney({
         }}
         onOpenReview={openReviewItem}
         onOpenInspector={openInspector}
-        builder={lifeModelBuilderDataSource ? lifeModelBuilder : undefined}
-        onOpenReviewCenter={
-          lifeModelBuilderDataSource ? () => navigateProduct("review", "life-model") : undefined
-        }
+        onCorrectMemory={durable.correctMemory}
+        onArchiveMemory={durable.archiveMemory}
+        onStopRecall={durable.stopRecall}
+        onRestoreMemory={durable.restoreMemory}
+        onRollbackMemory={durable.rollbackMemory}
+        onPrivacyEraseMemory={durable.privacyEraseMemory}
+        onDraftLegacyMigration={durable.draftLegacyMigration}
+        onDraftLifeModelChange={durable.draftLifeModelChange}
+        onDraftLifeModelRollback={durable.draftLifeModelRollback}
+        onDraftLifeModelExport={durable.draftLifeModelExport}
+        onConfirmLearningCandidate={durable.confirmLifeModelLearningCandidate}
+        onStageLearningCandidate={durable.stageLifeModelLearningCandidate}
+        onDeleteLearningCandidate={durable.deleteLifeModelLearningCandidate}
+        onRejectLearningCandidate={durable.rejectLifeModelLearningCandidate}
+        onPauseLearningSuggestionClass={durable.pauseLifeModelLearningSuggestionClass}
+        onOpenReviewCenter={() => navigateProduct("review", "life-model")}
       />
     );
   } else {

@@ -1118,19 +1118,6 @@ enum AgentRunWriteLane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentRunProposalStagingKind {
-    Builder,
-    Calibration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AgentRunProposalStagingReceipt {
-    pub kind: AgentRunProposalStagingKind,
-    pub requested_count: usize,
-    pub failed_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentRunMainChatFailureKind {
     Timeout,
     Cancelled,
@@ -1968,44 +1955,11 @@ pub(crate) async fn update_agent_run_after_startup_review_reconciliation(
     .await
 }
 
-/// Finalizes Builder/Calibration proposal staging from canonical owners. The
+/// Finalizes proposal staging from canonical owners. The
 /// producer may supply only newly returned Proposal references and numeric
 /// staging counts; it cannot submit a caller-shaped AgentRun status or body.
 /// The per-run causal lock is acquired before re-reading the canonical row, so
 /// a review that wins the race cannot be overwritten by a stale full-row save.
-pub(crate) async fn project_agent_run_from_proposal_staging(
-    state: &Arc<AppState>,
-    run_id: &str,
-    proposal_ids: &[String],
-    staging: AgentRunProposalStagingReceipt,
-) -> Result<(), String> {
-    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
-    let _causal_guard = causal_lock.lock().await;
-    let store = clone_agent_run_store(state).await?;
-    let mut run = load_live_agent_run(state, &store, run_id)?;
-    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
-    for proposal_id in proposal_ids {
-        let proposal_id = proposal_id.trim();
-        if proposal_id.is_empty() {
-            return Err("agent_run_proposal_staging_empty_reference".into());
-        }
-        if !run
-            .generated_proposals
-            .iter()
-            .any(|item| item == proposal_id)
-        {
-            run.generated_proposals.push(proposal_id.to_string());
-        }
-    }
-    apply_staging_receipt(&mut run, staging)?;
-    project_canonical_review_lifecycle(state, &store, &mut run, AgentRunWriteLane::Normal).await?;
-    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
-    commit_agent_run_update(state, &store, &run, &admission).await
-}
-
-/// Re-projects a Planning AgentRun from the canonical PlanExecuteSession and
-/// canonical linked Proposal owners. Mutable session fields are never accepted
-/// from the caller.
 pub(crate) async fn project_agent_run_from_plan_execute_session(
     state: &Arc<AppState>,
     run_id: &str,
@@ -2052,45 +2006,6 @@ pub(crate) async fn project_agent_run_from_plan_execute_session(
     commit_agent_run_update(state, &store, &run, &admission).await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentRunOwnedFailure {
-    BuilderProposalSubmission,
-    PlanSessionCreate,
-    PlanCreatedEventProjection,
-}
-
-/// Applies a bounded owner failure to a freshly created AgentRun without
-/// accepting a mutable AgentRun row from the product caller.
-pub(crate) async fn fail_agent_run_from_owned_phase(
-    state: &Arc<AppState>,
-    run_id: &str,
-    failure: AgentRunOwnedFailure,
-) -> Result<(), String> {
-    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
-    let _causal_guard = causal_lock.lock().await;
-    let store = clone_agent_run_store(state).await?;
-    let mut run = load_live_agent_run(state, &store, run_id)?;
-    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
-    let (message, phase) = match failure {
-        AgentRunOwnedFailure::BuilderProposalSubmission => {
-            ("builder_proposal_submission_failed", "review_staging")
-        }
-        AgentRunOwnedFailure::PlanSessionCreate => {
-            ("plan_execute_session_create_failed", "execution")
-        }
-        AgentRunOwnedFailure::PlanCreatedEventProjection => {
-            ("plan_execute_created_event_failed", "finalize")
-        }
-    };
-    run.fail(AgentRunError {
-        message: message.into(),
-        phase: phase.into(),
-        recoverable: true,
-    });
-    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
-    commit_agent_run_update(state, &store, &run, &admission).await
-}
-
 fn load_live_agent_run(
     state: &Arc<AppState>,
     store: &AgentRunStore,
@@ -2122,54 +2037,39 @@ async fn load_plan_execute_session(
         .ok_or_else(|| "agent_run_review_projection_plan_session_missing".to_string())
 }
 
-fn apply_staging_receipt(
-    run: &mut AgentRun,
-    staging: AgentRunProposalStagingReceipt,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRunOwnedFailure {
+    PlanSessionCreate,
+    PlanCreatedEventProjection,
+}
+
+/// Applies a bounded owner failure to a freshly created AgentRun without
+/// accepting a mutable AgentRun row from the product caller.
+pub(crate) async fn fail_agent_run_from_owned_phase(
+    state: &Arc<AppState>,
+    run_id: &str,
+    failure: AgentRunOwnedFailure,
 ) -> Result<(), String> {
-    let expected_kind = match staging.kind {
-        AgentRunProposalStagingKind::Builder => openlife_core::agent::AgentTaskKind::Builder,
-        AgentRunProposalStagingKind::Calibration => {
-            openlife_core::agent::AgentTaskKind::Calibration
+    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
+    let _causal_guard = causal_lock.lock().await;
+    let store = clone_agent_run_store(state).await?;
+    let mut run = load_live_agent_run(state, &store, run_id)?;
+    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
+    let (message, phase) = match failure {
+        AgentRunOwnedFailure::PlanSessionCreate => {
+            ("plan_execute_session_create_failed", "execution")
+        }
+        AgentRunOwnedFailure::PlanCreatedEventProjection => {
+            ("plan_execute_created_event_failed", "finalize")
         }
     };
-    if run.kind != expected_kind {
-        return Err("agent_run_proposal_staging_kind_mismatch".into());
-    }
-    if staging.failed_count > staging.requested_count {
-        return Err("agent_run_proposal_staging_count_invalid".into());
-    }
-    if staging.failed_count > 0 {
-        run.error = Some(AgentRunError {
-            message: "proposal_staging_partial_or_failed".into(),
-            phase: if run.generated_proposals.is_empty() {
-                "review_staging"
-            } else {
-                "review_staging_partial"
-            }
-            .into(),
-            recoverable: true,
-        });
-    } else if run
-        .error
-        .as_ref()
-        .is_some_and(|error| error.phase == "review_staging_partial")
-    {
-        run.error = None;
-    }
-    run.status_updates.push(AgentLoopStatusUpdate {
-        phase: if staging.failed_count > 0 {
-            AgentLoopPhase::Failed
-        } else if run.generated_proposals.is_empty() {
-            AgentLoopPhase::Completed
-        } else {
-            AgentLoopPhase::WaitingPermission
-        },
-        message: "proposal_staging_count_receipt".into(),
-        step_index: u32::try_from(staging.requested_count).unwrap_or(u32::MAX),
-        tool_call_index: Some(u32::try_from(staging.failed_count).unwrap_or(u32::MAX)),
-        timestamp: chrono::Utc::now(),
+    run.fail(AgentRunError {
+        message: message.into(),
+        phase: phase.into(),
+        recoverable: true,
     });
-    Ok(())
+    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
+    commit_agent_run_update(state, &store, &run, &admission).await
 }
 
 fn plan_execute_context_summary() -> ContextSummary {
@@ -3232,6 +3132,8 @@ pub(crate) struct TerminalOwnerWriteGateway {
     task_store: AgentTaskSessionStore,
     proposal_store: ProposalStore,
     memory_store: MemoryLifecycleStore,
+    workspace_memory_root: Option<String>,
+    project_memory_root: Option<String>,
     action_queue_store: Option<Arc<tokio::sync::Mutex<ActionQueueStore>>>,
 }
 
@@ -3265,7 +3167,15 @@ impl TerminalOwnerWriteGateway {
             .lock()
             .await
             .clone();
-        let mut gateway = Self::new(&event_store, &task_store, &proposal_store, &memory_store);
+        let (workspace_memory_root, project_memory_root) = {
+            let config = state.config.lock().await;
+            (
+                config.system.workspace_memory_root.clone(),
+                config.system.project_memory_root.clone(),
+            )
+        };
+        let mut gateway = Self::new(&event_store, &task_store, &proposal_store, &memory_store)
+            .with_memory_scope_roots(workspace_memory_root, project_memory_root);
         if let Some(action_queue_store) = state.main_chat_action_queue_store.as_ref() {
             gateway = gateway.with_action_queue_store(action_queue_store.clone());
         }
@@ -3283,8 +3193,20 @@ impl TerminalOwnerWriteGateway {
             task_store: task_store.clone(),
             proposal_store: proposal_store.clone(),
             memory_store: memory_store.clone(),
+            workspace_memory_root: None,
+            project_memory_root: None,
             action_queue_store: None,
         }
+    }
+
+    fn with_memory_scope_roots(
+        mut self,
+        workspace_memory_root: Option<String>,
+        project_memory_root: Option<String>,
+    ) -> Self {
+        self.workspace_memory_root = workspace_memory_root;
+        self.project_memory_root = project_memory_root;
+        self
     }
 
     pub(crate) fn with_action_queue_store(
@@ -3527,7 +3449,7 @@ impl TerminalOwnerWriteGateway {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
-                let input =
+                let mut input =
                     MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                         &proposal,
                         content.to_string(),
@@ -3536,6 +3458,12 @@ impl TerminalOwnerWriteGateway {
                         origin.canonical_user_message_ref(),
                         origin.canonical_user_message_digest(),
                     )?;
+                openlife_core::agent::bind_memory_fact_scope_owner(
+                    &mut input.fact,
+                    Some(origin.task_session_id()),
+                    self.workspace_memory_root.as_deref(),
+                    self.project_memory_root.as_deref(),
+                )?;
                 self.memory_store.accept_memory_proposal(input)?;
             }
         } else if dispatch_state != "confirmed_projection_pending" {
@@ -3619,7 +3547,7 @@ impl TerminalOwnerWriteGateway {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
-                let input =
+                let mut input =
                     MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                         &proposal,
                         content.to_string(),
@@ -3628,6 +3556,12 @@ impl TerminalOwnerWriteGateway {
                         origin.canonical_user_message_ref(),
                         origin.canonical_user_message_digest(),
                     )?;
+                openlife_core::agent::bind_memory_fact_scope_owner(
+                    &mut input.fact,
+                    Some(origin.task_session_id()),
+                    self.workspace_memory_root.as_deref(),
+                    self.project_memory_root.as_deref(),
+                )?;
                 self.memory_store.accept_memory_proposal(input)?;
             }
             if dispatch_state == "claimed" {
