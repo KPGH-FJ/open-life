@@ -1523,6 +1523,30 @@ scheduler 的 external endpoint label。没有破坏 Keychain 或制造混合状
 看到的对话、凭据动作与 Provider 路由身份可从 canonical backend owner 追溯，形成
 C—F 可复用的干净 exact-build 基线。
 
+5.6B 已于 2026-08-10 在 commit
+`1c995779a98d6c0ed69f51228113281d65995072` 完成实现，候选 executable SHA-256 为
+`b3f352b9b6677744efe8dd36d52741e2c5e5ec6cb1009d9d35564fa065ceb202`。Workspace 现在
+在全局活动任务与选中对话不同时，明确显示执行记录所属的 task title、conversation ID
+和 canonical task ID；Settings 在混合快照中只把 unavailable 子集绑定到本次恢复数量，
+重启后才重新判断 initialization_required；Main Chat generation metadata 以 canonical
+route 修正 endpoint kind，Ollama/local 写入 `local_openai_compatible`，脚本响应继续保持
+`scripted_scheduler_response`，route/provider 自相矛盾时写入 `inconsistent`。
+
+自动化反例先证明旧 Workspace 文案和混合凭据计数失败，再在修复后通过；canonical
+Ollama/local 与 external scheduler label 的冲突也由 Rust 反例锁定。全量结果为前端格式、
+typecheck、260 项 Vitest 与 production build/absence guard 通过；严格 Clippy 通过；Core
+1408 passed / 2 ignored、Tauri 1130 passed / 13 ignored、scheduler 8 passed、resource
+binary 2 passed、doc tests 8 passed。
+
+原生复核在 5.6A 的同一数据目录和隔离 Keychain service 中完成：新 exact-build 经一次
+原生确认恢复 5 类既有内部凭据并完全重启，安全模式消失；一项网络读取请求停在 Review，
+没有外发，随后切换到新对话时页面显示“全局活动任务”，展开执行记录可看到原任务的
+conversation/task identity。隔离配置只把已安装本地模型改为 `llama3`，真实本地回答完成；
+UI 显示“本地路由，未外传”，canonical AgentRun 为 provider `ollama`、routeType `local`，
+同一 transcript 的 providerEndpointKind 为 `local_openai_compatible`。混合凭据状态没有通过
+破坏 Keychain 人为制造；其精确子集语义由 backend current source、前端失败反例和全
+unavailable 原生恢复共同证明，证据等级不冒充自然混合原生复现。
+
 ###### 5.6C Agent Memory 与长任务连续性原生闭环
 
 目标：证明 Agent 自身能跨会话、跨项目和跨重启继续工作，而不是依赖 LifeModel
@@ -1808,9 +1832,10 @@ audit-event 职责，旧表的数据处理明确留给 5.5E。旧 LifeModel whol
 caller。前后端静态发布合同、259 项前端测试、production build、8 条 browser-shell E2E、
 严格 Clippy 与全仓 Rust 测试均通过。
 
-当前板块：**5.5A—5.5F 已完成并通过 PR #87 合入 `main`。5.6A 已完成有效双重隔离
-基线并把三个已知问题分类为 SOURCE-CONFIRMED；一次误开默认 profile 的作废运行已按
-UNKNOWN 明确记录。当前正在执行 5.6B 的三个最小事实呈现修复；不得自行新增 5.6G。**
+当前板块：**5.5A—5.5F 已完成并通过 PR #87 合入 `main`。5.6A 的有效双重隔离基线和
+5.6B 的三个事实呈现修复均已完成；一次误开默认 profile 的作废运行继续按 UNKNOWN
+保留。下一步按固定顺序进入 5.6C Agent Memory 与长任务连续性原生闭环；不得自行新增
+5.6G。**
 
 第五阶段第一步实际完成：
 
