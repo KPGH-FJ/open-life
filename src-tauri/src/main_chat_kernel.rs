@@ -7518,7 +7518,10 @@ async fn build_successful_kernel_command_surface_result(
     } else if memory_governance_is_terminal_action {
         "main_chat_memory_governance"
     } else {
-        main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response)
+        main_chat_provider_endpoint_kind_for_canonical_route(
+            &route_metadata,
+            main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response),
+        )
     };
     // Validate every provider attempt before any proposal, canonical mutation,
     // or terminal AgentRun projection. The selected response is bound to the
@@ -10392,7 +10395,10 @@ async fn build_kernel_write_outcome_command_surface_result(
         "routeReason": route_metadata.reason,
         "scriptedProviderResponse": route_metadata.scripted_response_configured,
         "liveProviderInvoked": provider_live_invoked,
-        "providerEndpointKind": main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
+        "providerEndpointKind": main_chat_provider_endpoint_kind_for_canonical_route(
+            &route_metadata,
+            main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
+        ),
     });
     agent_run.tool_call_count = tool_calls.len() as u32;
     agent_run.step_count = agent_run.tool_call_count.saturating_add(1);
@@ -14051,7 +14057,10 @@ where
         "routeReason": route_metadata.reason,
         "scriptedProviderResponse": route_metadata.scripted_response_configured,
         "liveProviderInvoked": false,
-        "providerEndpointKind": main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
+        "providerEndpointKind": main_chat_provider_endpoint_kind_for_canonical_route(
+            &route_metadata,
+            main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
+        ),
         "planExecuteSessionId": plan_session.session_id,
         "stepCount": plan_session.steps.len(),
     });
@@ -14405,6 +14414,22 @@ fn route_metadata_from_provider_receipt(
     route
 }
 
+fn main_chat_provider_endpoint_kind_for_canonical_route(
+    route: &MainChatRouteMetadata,
+    configured_endpoint_kind: &'static str,
+) -> &'static str {
+    if configured_endpoint_kind == "scripted_scheduler_response" {
+        return configured_endpoint_kind;
+    }
+    let provider_is_ollama = route.provider.trim().eq_ignore_ascii_case("ollama");
+    let route_is_local = route.route_type.trim().eq_ignore_ascii_case("local");
+    match (provider_is_ollama, route_is_local) {
+        (true, true) => "local_openai_compatible",
+        (true, false) | (false, true) => "inconsistent",
+        (false, false) => configured_endpoint_kind,
+    }
+}
+
 fn bounded_label(value: &str, max_chars: usize) -> String {
     let mut output = String::new();
     let mut last_was_space = false;
@@ -14454,6 +14479,50 @@ mod tests {
         assert_eq!(
             typed_kernel_read_policy_code(Some("tool_gateway_timeout")),
             Some("timeout")
+        );
+    }
+
+    #[test]
+    fn canonical_local_ollama_route_overrides_external_scheduler_endpoint_label() {
+        let route = MainChatRouteMetadata {
+            provider: "ollama".into(),
+            model: "llama3".into(),
+            provider_request_id: Some("provider-request-local".into()),
+            route_type: "local".into(),
+            prefer_local: true,
+            local_model: "llama3".into(),
+            reason: "provider_adapter_receipt".into(),
+            privacy_level: RedactionLevel::None,
+            tools_enabled: false,
+            live_eval_required: false,
+            final_acceptance_gate_required: false,
+            readiness_gate_required: false,
+            scripted_response_configured: false,
+        };
+
+        assert_eq!(
+            main_chat_provider_endpoint_kind_for_canonical_route(&route, "external_provider"),
+            "local_openai_compatible"
+        );
+        assert_eq!(
+            main_chat_provider_endpoint_kind_for_canonical_route(
+                &route,
+                "scripted_scheduler_response"
+            ),
+            "scripted_scheduler_response"
+        );
+
+        let inconsistent_route = MainChatRouteMetadata {
+            provider: "ollama".into(),
+            route_type: "cloud".into(),
+            ..route
+        };
+        assert_eq!(
+            main_chat_provider_endpoint_kind_for_canonical_route(
+                &inconsistent_route,
+                "external_provider"
+            ),
+            "inconsistent"
         );
     }
 

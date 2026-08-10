@@ -376,19 +376,19 @@ export function useSettingsPrivacyJourney(
   );
 
   const validation = useMemo(() => validateSettingsDraft(draft), [draft]);
-  const eligibleCredentialPurposes = useMemo(
-    () =>
-      dataSource?.initializeRequiredCredentials
-        ? (snapshot?.credentialBootstrap?.purposes ?? [])
-            .filter(
-              purpose =>
-                purpose.status === "initialization_required" || purpose.status === "unavailable"
-            )
-            .map(purpose => purpose.purpose)
-            .sort()
-        : [],
-    [dataSource, snapshot?.credentialBootstrap]
-  );
+  const eligibleCredentialPurposes = useMemo(() => {
+    if (!dataSource?.initializeRequiredCredentials) return [];
+    const purposes = snapshot?.credentialBootstrap?.purposes ?? [];
+    const unavailable = purposes
+      .filter(purpose => purpose.status === "unavailable")
+      .map(purpose => purpose.purpose)
+      .sort();
+    if (unavailable.length > 0) return unavailable;
+    return purposes
+      .filter(purpose => purpose.status === "initialization_required")
+      .map(purpose => purpose.purpose)
+      .sort();
+  }, [dataSource, snapshot?.credentialBootstrap]);
   const credentialAccessRecoveryRequired = useMemo(
     () =>
       (snapshot?.credentialBootstrap?.purposes ?? []).some(

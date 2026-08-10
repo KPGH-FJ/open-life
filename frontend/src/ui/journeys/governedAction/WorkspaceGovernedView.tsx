@@ -394,6 +394,13 @@ export function WorkspaceGovernedView({
 
       <details className="ol-workspace-activity">
         <summary id="workspace-activity-title">执行记录</summary>
+        <p>
+          执行记录属于{taskMatchesSelectedConversation ? "当前对话任务" : "全局活动任务"}：
+          {task.title}
+        </p>
+        <p className="ol-governed-muted">
+          任务会话：{task.conversationId ?? "后端未提供"} · 任务：{task.canonicalTaskId}
+        </p>
         {model?.activity.length ? (
           <ol aria-labelledby="workspace-activity-title">
             {model.activity.map(item => (

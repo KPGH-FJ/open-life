@@ -1478,6 +1478,27 @@ authority 收敛与有界原生回归退出标准成立；上述问题保持为 
 重启并继续使用；没有访问默认 profile 的证据；三个已知问题分别成为 REPRODUCED 或
 SOURCE-CONFIRMED，无法确认的保持 UNKNOWN，不制造失败证据。
 
+2026-08-10 的 5.6A 有效基线为 commit
+`6804f983b9e38ee9854f0c45751f007c5b6ea055`，debug app executable SHA-256 为
+`c616abbd6d1cfbfd6f3d000e4ab6afc123b196a74a9885f2715b15a37482eed6`。有效运行只通过
+精确 `.app` 路径启动，产品数据位于 `target/qa/phase5-native-closure`，Keychain service
+为 `com.openlife.desktop.trial.c616abbd6d1cfbfd6f3d000e4ab6afc123b196a74a9885f2715b15a37482eed6`。
+5 类缺失内部凭据经一次原生确认初始化；完全退出并以同一环境重启后，安全模式和初始化
+入口均消失，证明同一隔离 service 可重新读取。六个产品路由均可到达，Workspace、Tasks、
+Review 与 LifeModel 初态为空；`/today` 刷新后仍显示 stale，根因保持 UNKNOWN，先归入
+5.6E 的降级/恢复核对，不把空页面冒充 ready。
+
+三项 5.5F 问题均由 current source 确认为 SOURCE-CONFIRMED：Workspace activity 是
+全局 active task activity，但呈现中未显示其 task/conversation identity；Settings 在
+存在 unavailable 时 backend 只恢复 unavailable 子集，而前端把 initialization_required
+一并计数；Main Chat generation metadata 在已有 canonical Ollama/local route 时仍可沿用
+scheduler 的 external endpoint label。没有破坏 Keychain 或制造混合状态来伪造原生失败。
+
+最初一次以应用名称而非精确路径定位的操作误打开了默认 profile；该运行立即作废且不计入
+5.6A 证据。默认 profile 的若干 SQLite/WAL mtime 因读取发生变化，事前没有内容快照，
+因此内容影响保持 UNKNOWN；未尝试猜测恢复或删除用户数据。后续有效运行均用精确 `.app`
+路径与上述双重隔离环境。5.6B 之后的原生结论不得引用该作废运行。
+
 ###### 5.6B 修复原生事实呈现阻塞并冻结干净基线
 
 目标：只修复 5.6A 当前复现或从 current source 确认的事实身份问题，确保 C—F 不在
@@ -1787,10 +1808,9 @@ audit-event 职责，旧表的数据处理明确留给 5.5E。旧 LifeModel whol
 caller。前后端静态发布合同、259 项前端测试、production build、8 条 browser-shell E2E、
 严格 Clippy 与全仓 Rust 测试均通过。
 
-当前板块：**5.5A—5.5F 已完成并通过 PR #87 合入 `main`。5.6 原生闭环验收已经
-固定为 5.6A—5.6F 六个切片但尚未开始实现；不得自行新增 5.6G。下一步先由 5.6A
-建立数据与 Keychain 双重隔离 QA，并在未改代码的 baseline bundle 上复现三个已知
-原生事实呈现问题，再按固定顺序执行。**
+当前板块：**5.5A—5.5F 已完成并通过 PR #87 合入 `main`。5.6A 已完成有效双重隔离
+基线并把三个已知问题分类为 SOURCE-CONFIRMED；一次误开默认 profile 的作废运行已按
+UNKNOWN 明确记录。当前正在执行 5.6B 的三个最小事实呈现修复；不得自行新增 5.6G。**
 
 第五阶段第一步实际完成：
 

@@ -247,6 +247,30 @@ describe("SettingsPrivacyView", () => {
     expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
   });
 
+  it("binds a mixed credential snapshot to the unavailable recovery subset only", async () => {
+    const source = credentialSettingsSource("unavailable", true);
+    const snapshot = await source.loadSettingsPrivacy();
+    source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
+      ...snapshot,
+      credentialBootstrap: {
+        ...snapshot.credentialBootstrap!,
+        purposes: [
+          { purpose: "agent_run_receipts", status: "unavailable" },
+          { purpose: "main_chat_events", status: "unavailable" },
+          { purpose: "action_queue", status: "initialization_required" },
+          { purpose: "task_store", status: "initialization_required" },
+          { purpose: "mcp_audit", status: "initialization_required" },
+        ],
+      },
+    });
+
+    render(<SafeModeSettings source={source} />);
+
+    expect(await screen.findByRole("heading", { name: "凭据访问恢复" })).toBeInTheDocument();
+    expect(screen.getByText(/后端确认有 2 类既有凭据需要恢复访问/)).toBeInTheDocument();
+    expect(screen.queryByText(/5 类既有凭据需要恢复访问/)).not.toBeInTheDocument();
+  });
+
   it("does not contradict an explicit credential initialization eligibility", async () => {
     const source = credentialSettingsSource("initialization_required", true);
     render(<SafeModeSettings source={source} />);

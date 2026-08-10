@@ -571,6 +571,10 @@ describe("Workbench governed action journey", () => {
 
     expect(await screen.findByText("全局活动任务")).toBeInTheDocument();
     expect(
+      screen.getByText("执行记录属于全局活动任务：整理三次客户访谈，归纳下周要验证的问题")
+    ).toBeInTheDocument();
+    expect(screen.getByText(/任务会话：another-conversation/)).toBeInTheDocument();
+    expect(
       screen.getByText(
         "后端仍有这项任务，但对应会话记录已经缺失；当前不会从摘要猜测上下文或继续执行。"
       )
