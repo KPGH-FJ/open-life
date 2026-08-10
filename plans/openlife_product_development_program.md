@@ -1396,6 +1396,39 @@ Rust 门禁通过。测试夹具曾隐式依赖退役 HS projection 生成 legac
 退出标准：阶段五产品路径不存在并行旧个性化/学习 authority；release handler、启动
 store、文档与源码一致；全仓门禁和一轮真实原生回归通过，工作树停在用户审阅边界。
 
+2026-08-10 完成记录：最终 caller scan 已把当前
+`RuntimePolicyContext` 构建迁入 `PolicyStore`，删除 accepted-guidance、HeuristicStore、
+HS selector、HS authority registry 及 legacy LifeModel compatibility projection 的源码与
+专用测试，并移除 ModelRouter/Governor/PlanExecute 中的旧 HS 路由和 guidance 分支。
+当前新 AgentRun 不再产生 HS selection 或 behavior-check 事实；只保留一个只读
+`legacy_hs_audit` DTO，用于解码、最小化和展示现有 AgentRun 历史列。历史 provider
+provenance、task/proposal/patch source 枚举只承担持久数据解码和拒绝/展示职责，没有当前
+生产 constructor；退出条件是对应历史行被显式迁移或按保留策略删除。
+
+前端格式、typecheck、259 项 Vitest、production build/absence guard、8 项 browser-shell
+E2E，以及 Rust 格式、严格 Clippy、全仓测试和文档测试均已通过。首轮原生启动真实暴露：
+历史 transcript 已标记为 v2，但仍含刚退役的 `hsContextAvailable`、`hsPacketSelected`、
+`hsWarningCodes` 等 metadata；当前校验删除这些字段后却没有提升格式版本，导致合法历史
+数据被误报为 unsupported。修复没有恢复 HS allowlist，而是把 transcript 格式提升为 v3，
+以 receipt-key 绑定的事务重新最小化旧 v2 metadata、移除退役字段并执行物理清理；新增
+回归测试先复现失败再证明迁移。最终全仓结果为 Core 1407 passed / 2 ignored、Tauri
+1129 passed / 13 ignored、scheduler 8 passed、resource binary 2 passed、doc tests 8 passed。
+
+最终 debug 原生包 SHA-256 为
+`07e761bca78da543b3fa9887b93912ebc13aa1610cadb4be2c15f6882c056939`。在同一
+`phase5-lifemodel-v2` 数据目录恢复后端快照列出的 5 类既有凭据并完全重启后，安全模式
+关闭，路由明确为 `local model · llama3`、未外传；168 条 transcript 全部为 v3，
+上述 4 类退役 HS metadata 行为零。原生 Run
+`0d6e7359-a7fe-4f9e-b0f1-3b2f9e6032ef` 完成一条新建普通对话，task/run 均为 completed，
+`tool_call_count = 0`、generated proposal count = 0、action queue 与 blockers 均为空，
+Review Center 没有产生新项目。该 QA 只隔离数据目录，5 类内部凭据仍位于默认
+`com.openlife.desktop` Keychain service；双重隔离继续属于 5.6 QA 环境质量。
+
+原生复核还发现一个不影响本轮 backend truth、但必须进入 5.6 的产品呈现问题：Workspace
+在选中当前已完成对话时仍展示另一对话的“全局活动任务”和执行记录；界面虽标注“任务与
+当前对话不同”，但执行记录的归属仍容易被误解。5.6 必须让 selected conversation 与
+global activity 的身份、记录和控制边界在界面上不可混淆。至此 5.5F 退出标准成立。
+
 ##### 5.6 原生闭环验收
 
 最后用真实 Tauri 和隔离 QA profile 完成：
@@ -1602,8 +1635,8 @@ audit-event 职责，旧表的数据处理明确留给 5.5E。旧 LifeModel whol
 caller。前后端静态发布合同、259 项前端测试、production build、8 条 browser-shell E2E、
 严格 Clippy 与全仓 Rust 测试均通过。
 
-下一板块：**按既定顺序进入 5.5E，收敛启动存储、兼容数据与 authority registry；
-5.5F 的范围保持不变，不新增 5.5G。**
+当前板块：**5.5A—5.5F 已完成。不得新增 5.5G；下一步仅在用户审阅并提交这个干净
+基线后，按既定 5.6 原生闭环验收范围继续。**
 
 第五阶段第一步实际完成：
 

@@ -1,4 +1,3 @@
-pub mod accepted_guidance;
 pub mod action_executor;
 pub mod agent_loop;
 pub mod canonical_write_admission;
@@ -7,9 +6,7 @@ pub mod conversation_context;
 pub mod evidence_graph;
 pub mod evidence_store;
 pub mod governor;
-pub mod heuristic_store;
-pub mod hs_asset_authority;
-pub mod hs_selector;
+pub mod legacy_hs_audit;
 pub mod life_event_store;
 pub mod life_model_explicit_read;
 pub mod life_model_learning;
@@ -52,12 +49,6 @@ pub use crate::tool_execution_receipt::{
     ToolExecutionOutcome, ToolExecutionReceipt, ToolExecutionReceiptRegistration,
     ToolTransportStatus,
 };
-pub use accepted_guidance::{
-    build_lifemodel_version_read_model, create_accepted_guidance_from_maturation_candidate,
-    deactivate_accepted_guidance, AcceptedGuidanceLifecycleInput, AcceptedGuidanceLifecycleReport,
-    AcceptedGuidanceRollbackPath, AcceptedGuidanceVersionRef, LifeModelRollbackReadModelRef,
-    LifeModelVersionAssetDiffRef, LifeModelVersionReadModel,
-};
 pub use action_executor::{
     A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
     ActionExecutorConfig, AgentActionRequest, CanonicalStateSnapshot, DurableStoreFailureObserver,
@@ -89,28 +80,9 @@ pub use evidence_store::{
 pub use governor::{
     ExternalWriteGovernanceInput, GovernanceDecision, GovernanceDecisionClassification,
     GovernanceDecisionKind, GovernanceSubject, GovernorDecisionReport, LifeModelGovernor,
-    MemoryWriteGovernanceInput, ModelRouteGovernanceInput, ToolGovernanceInput,
+    MemoryWriteGovernanceInput, ToolGovernanceInput,
 };
-pub use heuristic_store::{
-    DomainCapDiagnostic, HeuristicActivationAuthority, HeuristicConstraintSet, HeuristicDraft,
-    HeuristicLifecycleStatus, HeuristicLineage, HeuristicQuery, HeuristicRecord, HeuristicStore,
-    HeuristicUsageMetadata, HeuristicValidationState,
-};
-pub use hs_asset_authority::{
-    build_collaboration_guidance_projection, complete_collaboration_guidance_cutover,
-    digest_string, reconcile_collaboration_guidance_authority, CollaborationGuidanceCutoverReport,
-    CollaborationGuidanceCutoverStatus, CollaborationGuidanceProjection, HSAssetAuthorityRecord,
-    HSAssetAuthorityRegistry, HSAssetCategory, HSAssetOwner, HSAssetWriteKind, HSAssetWriteRequest,
-    ProductScenarioReceipt, RollbackRehearsalReceipt, ShadowParityReceipt,
-};
-pub use hs_selector::{
-    behavior_checks_for_packet, build_guidance_impact_read_model, build_runtime_hs_packet,
-    build_runtime_policy_context, GuidanceAffectedSurface, GuidanceImpactReadModel,
-    GuidanceImpactRef, GuidancePolicyBoundarySummary, HSAssetExclusion, HSAssetKind,
-    HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
-    RuntimeHSPacketBuildInput, RuntimePolicyContextBuildInput, SelectedGuidanceRef,
-    SelectedHeuristic, SelectedPolicyRef,
-};
+pub use legacy_hs_audit::{HSBehaviorCheckSummary, HSSelectionAudit};
 #[cfg(any(test, feature = "test-utils"))]
 pub use life_event_store::CanonicalLifeEventSourceProof;
 pub use life_event_store::{
@@ -183,9 +155,8 @@ pub use plan_execute::{
     PlanGovernanceDecisionSummary, PlanObservationSummary, PlanStep, PlanStepStatus, PlanStepTrace,
 };
 pub use policy_store::{
-    ContextPolicyDecision, HeuristicPolicyEffect, ModelRoutePolicy, PolicyConflictAudit,
-    PolicyEvaluationRequest, PolicyRecord, PolicyStore, PolicyTopic, ToolPolicyDecision,
-    BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
+    build_runtime_policy_context, ContextPolicyDecision, ModelRoutePolicy, PolicyEvaluationRequest,
+    PolicyRecord, PolicyStore, PolicyTopic, RuntimePolicyContextBuildInput, ToolPolicyDecision,
     BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
 };
 pub use product_read_model::{

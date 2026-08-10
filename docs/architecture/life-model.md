@@ -48,17 +48,22 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 ADR 0013's broad LifeModel-HS target is superseded. HeuristicStore and the HS
 asset-authority registry are no longer initialized, reconciled, or attached to
 product state; existing database files remain inert historical data and are not
-deleted during startup. EvidenceStore, StateStore, PolicyStore, and audit-event
-storage remain only under their current narrow product owners. None of them is
-jointly the canonical LifeModel.
+deleted during startup. Their selector, lifecycle, materializer and authority
+registry source modules have also been removed. EvidenceStore, StateStore,
+PolicyStore, and audit-event storage remain only under their current narrow
+product owners. None of them is jointly the canonical LifeModel.
 
 ## Current Model Shape
 
 `openlife-core/src/life_model.rs` defines the legacy LifeModel structure:
 metadata, identity, goals, capabilities, state, relationships, preferences, and
-evolution rules. Historical HS compatibility view types may still be decoded by
-unshipped compatibility code, but the product has no writer or startup authority
-registry for that projection.
+evolution rules. The retired HS compatibility projection builder and decoder are
+no longer part of the source tree. A small `legacy_hs_audit` DTO remains solely
+to decode and minimize historical AgentRun selection-audit and behavior-check
+metadata; it has no selector, provider capability, write path, or runtime
+authority. New AgentRun constructors leave both historical fields empty. Its
+exit condition is the removal or explicit migration of AgentRun rows that still
+contain `hs_selection_audit_json` or `behavior_checks_json`.
 
 New empty legacy skeletons no longer invent a focus, health state, mood, stress,
 fulfilment, or energy value. Existing YAML values continue to load exactly as

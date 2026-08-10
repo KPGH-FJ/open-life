@@ -98,6 +98,13 @@ accepted-guidance/HS context in parallel. PlanExecute receives the same
 canonical v2 planning hints; its product entrypoint does not enable legacy
 runtime-guidance consumption.
 
+Historical AgentRun rows can still expose minimized HS selection-audit and
+behavior-check metadata through the product read model. Those DTOs are
+read-only compatibility: current constructors initialize them empty, and no
+selector, provider authorization, tool capability, or durable-write path can
+be reconstructed from them. They can be removed when the corresponding
+historical AgentRun columns are explicitly migrated or retired.
+
 Scheduled tasks consume their durable task claim, typed Policy, canonical
 StateStore snapshot and Agent Memory. Planner mode does not advertise the
 legacy `life_model.read` or mixed-owner `goal.read` tools. The authenticated

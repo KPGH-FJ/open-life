@@ -82,12 +82,15 @@ impl ProviderPayloadCategory {
 pub enum ProviderPolicyProvenanceKind {
     MainChatRouteDecision,
     PolicyStoreRouteDecision,
+    /// Historical ContextManifest decode only; current runtime cannot mint it.
     HsRouteDecision,
     ScheduledRouteDecision,
     ExplicitProviderProbeDecision,
     FailClosedRouteDecision,
     PolicyStorePolicy,
+    /// Historical ContextManifest decode only; current runtime cannot mint it.
     HsPolicy,
+    /// Historical ContextManifest decode only; current runtime cannot mint it.
     HsGuidance,
 }
 
@@ -247,6 +250,7 @@ pub enum ProviderDataRoute {
 pub enum ProviderPolicyAuthority {
     MainChatPolicyRouter,
     PolicyStore,
+    /// Historical provider-receipt decode only; no current constructor exists.
     HsPolicyStore,
     ScheduledPolicy,
     ExplicitProviderProbePolicy,
@@ -301,9 +305,6 @@ enum ProviderPolicySubject {
     MainChatCurrentUser {
         message_id: String,
         message_digest: String,
-    },
-    HsCurrentUser {
-        message_digest: Option<String>,
     },
     PolicyStoreCurrentUser {
         message_digest: Option<String>,
@@ -463,34 +464,6 @@ impl ProviderPolicyAuthorization {
         })
     }
 
-    pub(crate) fn from_hs_context_decision(
-        decision: &crate::agent::ContextPolicyDecision,
-        decision_id: impl Into<String>,
-    ) -> Result<Self> {
-        decision.validate_provider_authority()?;
-        let decision_id = decision_id.into();
-        if decision_id.trim().is_empty() {
-            anyhow::bail!("HS provider policy decision is missing its decision reference");
-        }
-        let data_route = match decision.route() {
-            crate::agent::ModelRoutePolicy::CloudAllowed => ProviderDataRoute::PolicyAllowed,
-            crate::agent::ModelRoutePolicy::LocalOnly => ProviderDataRoute::LocalOnly,
-        };
-        Ok(Self {
-            decision_id,
-            policy_version: "hs_policy_store_v1".into(),
-            data_route,
-            authority: ProviderPolicyAuthority::HsPolicyStore,
-            effective_local_restriction: None,
-            subject: ProviderPolicySubject::HsCurrentUser {
-                message_digest: None,
-            },
-            authorized_unfiltered_payload_purpose: None,
-            authorized_unfiltered_payload_digest: None,
-            prepared_envelope_digest: None,
-        })
-    }
-
     pub(crate) fn from_policy_store_context_decision(
         decision: &crate::agent::ContextPolicyDecision,
         decision_id: impl Into<String>,
@@ -628,26 +601,6 @@ impl ProviderPolicyAuthorization {
         }
     }
 
-    /// Bind the HS policy decision to the actual current task text. HS policy
-    /// selection is performed before the provider payload is compiled, so the
-    /// selector cannot safely infer this subject from an intent summary.
-    pub(crate) fn bind_hs_current_user_subject(mut self, user_text: &str) -> Result<Self> {
-        match &mut self.subject {
-            ProviderPolicySubject::HsCurrentUser { message_digest } => {
-                let digest = response_body_digest(user_text);
-                if let Some(existing) = message_digest {
-                    if existing != &digest {
-                        anyhow::bail!("HS provider policy subject cannot be rebound");
-                    }
-                } else {
-                    *message_digest = Some(digest);
-                }
-                Ok(self)
-            }
-            _ => anyhow::bail!("only HS policy authority can bind an HS task subject"),
-        }
-    }
-
     pub(crate) fn bind_policy_store_current_user_subject(
         mut self,
         user_text: &str,
@@ -677,7 +630,6 @@ impl ProviderPolicyAuthorization {
             ProviderPolicySubject::MainChatCurrentUser { message_digest, .. } => {
                 Some(message_digest.as_str())
             }
-            ProviderPolicySubject::HsCurrentUser { message_digest } => message_digest.as_deref(),
             ProviderPolicySubject::PolicyStoreCurrentUser { message_digest } => {
                 message_digest.as_deref()
             }
@@ -700,10 +652,6 @@ impl ProviderPolicyAuthorization {
                 message_id,
                 message_digest,
             } => format!("main_chat:{message_id}:{message_digest}"),
-            ProviderPolicySubject::HsCurrentUser { message_digest } => format!(
-                "hs:{}",
-                message_digest.as_deref().unwrap_or("unbound_subject")
-            ),
             ProviderPolicySubject::PolicyStoreCurrentUser { message_digest } => format!(
                 "policy_store:{}",
                 message_digest.as_deref().unwrap_or("unbound_subject")

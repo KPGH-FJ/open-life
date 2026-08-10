@@ -1955,7 +1955,7 @@ pub(crate) async fn update_agent_run_after_startup_review_reconciliation(
     .await
 }
 
-/// Finalizes Builder/Calibration proposal staging from canonical owners. The
+/// Finalizes proposal staging from canonical owners. The
 /// producer may supply only newly returned Proposal references and numeric
 /// staging counts; it cannot submit a caller-shaped AgentRun status or body.
 /// The per-run causal lock is acquired before re-reading the canonical row, so

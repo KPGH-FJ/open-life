@@ -1,9 +1,5 @@
 use crate::agent::types::RedactionLevel;
-use crate::agent::RuntimeHSPacket;
-use crate::agent::{
-    GovernanceDecisionKind, GovernorDecisionReport, LifeModelGovernor, ModelRouteGovernanceInput,
-    ModelRouteTrace, RiskLevel,
-};
+use crate::agent::{GovernorDecisionReport, ModelRouteTrace};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -425,54 +421,6 @@ impl ModelRouter {
             fallback_model: fallback.map(|s| s.model.clone()),
             governance_report: None,
         }
-    }
-
-    pub fn route_with_hs_packet(
-        &self,
-        task_type: TaskType,
-        tools_needed: bool,
-        hs_packet: &RuntimeHSPacket,
-    ) -> Result<ModelRouteDecision> {
-        let local_model_available = self
-            .score_provider(
-                "ollama",
-                task_type,
-                PrivacyRequirement::Critical,
-                tools_needed,
-            )
-            .is_some();
-        let governor_decision = LifeModelGovernor.govern_model_route(ModelRouteGovernanceInput {
-            hs_packet: Some(hs_packet.clone()),
-            risk_level: if crate::agent::governor::packet_requires_local_only(Some(hs_packet)) {
-                RiskLevel::High
-            } else {
-                RiskLevel::Low
-            },
-            local_model_available,
-        });
-
-        if governor_decision.kind == GovernanceDecisionKind::Block {
-            return Err(anyhow::anyhow!("{}", governor_decision.reason));
-        }
-
-        let hs_requires_local_only =
-            governor_decision.kind == GovernanceDecisionKind::RequireLocalOnly;
-        let mut decision = self.route(
-            task_type,
-            tools_needed,
-            hs_requires_local_only.then_some(PrivacyRequirement::Critical),
-        )?;
-        if hs_requires_local_only {
-            decision.reason = format!(
-                "{}; HS policy enforced LocalOnly via {:?}",
-                decision.reason, hs_packet.audit.selected_policy_ids
-            );
-            decision.fallback_provider = None;
-            decision.fallback_model = None;
-            decision.privacy_level = RedactionLevel::LocalOnly;
-        }
-        decision.governance_report = Some(governor_decision.to_report());
-        Ok(decision)
     }
 
     /// Quick route for chat messages (backward compatible with existing scheduler logic).

@@ -1497,7 +1497,7 @@ mod tests {
     async fn readonly_agent_run_delete_failure_degrades_runtime_before_more_effects() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent-runs.db");
-        let run = AgentRun::new_calibration_run();
+        let run = AgentRun::new_tool_execution_run("readonly-delete-fixture");
         {
             let writable = openlife_core::agent::AgentRunStore::new(&path).unwrap();
             writable.create_run(&run).unwrap();
@@ -1533,7 +1533,7 @@ mod tests {
         let path = directory.path().join("agent-runs.db");
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let memory_store = state.memory_store.lock().await.clone();
-        let run = AgentRun::new_calibration_run();
+        let run = AgentRun::new_tool_execution_run("readonly-restore-fixture");
         {
             let writable = openlife_core::agent::AgentRunStore::new(&path).unwrap();
             writable.bind_canonical_memory_store(&memory_store).unwrap();
@@ -1566,7 +1566,7 @@ mod tests {
     async fn logical_create_delete_restore_conflicts_do_not_degrade_runtime() {
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         install_release_like_persistence_coordinator(&mut state);
-        let run = AgentRun::new_calibration_run();
+        let run = AgentRun::new_tool_execution_run("logical-conflict-fixture");
         crate::terminal_owner_write_gateway::create_agent_run(&state, &run)
             .await
             .unwrap();

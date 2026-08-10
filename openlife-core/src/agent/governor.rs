@@ -1,8 +1,4 @@
-use crate::agent::hs_selector::RuntimeHSPacket;
-use crate::agent::policy_store::{
-    ModelRoutePolicy, BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
-    BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
-};
+use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
 use crate::agent::runtime_contract::RuntimeInput;
 use crate::agent::types::{ProposalType, RiskLevel};
 use ring::digest::{digest, SHA256};
@@ -168,14 +164,6 @@ pub struct ExternalWriteGovernanceInput {
     pub risk_level: RiskLevel,
     pub source_run_id: Option<String>,
     pub proposal_already_created: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelRouteGovernanceInput {
-    pub hs_packet: Option<RuntimeHSPacket>,
-    pub risk_level: RiskLevel,
-    pub local_model_available: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -359,93 +347,6 @@ impl LifeModelGovernor {
             Vec::new(),
         )
     }
-
-    pub fn govern_model_route(&self, input: ModelRouteGovernanceInput) -> GovernanceDecision {
-        let source_run_id = input
-            .hs_packet
-            .as_ref()
-            .and_then(|packet| packet.audit.agent_run_id.as_deref());
-        let selected_policy_ids = input
-            .hs_packet
-            .as_ref()
-            .map(|packet| packet.audit.selected_policy_ids.clone())
-            .unwrap_or_default();
-
-        if packet_requires_local_only(input.hs_packet.as_ref()) {
-            if !input.local_model_available {
-                let mut metadata_safe_summary = summary(
-                    GovernanceSubject::ModelRoute,
-                    None,
-                    None,
-                    input.risk_level,
-                    source_run_id,
-                    Some("model_route"),
-                    "sensitive_local_only_no_local_model",
-                );
-                insert_selected_policy_ids(&mut metadata_safe_summary, selected_policy_ids);
-                return decision(
-                    GovernanceSubject::ModelRoute,
-                    GovernanceDecisionKind::Block,
-                    input.risk_level,
-                    "fail-closed: local-only policy selected but no local model is available",
-                    metadata_safe_summary,
-                    Vec::new(),
-                );
-            }
-
-            let mut metadata_safe_summary = summary(
-                GovernanceSubject::ModelRoute,
-                None,
-                None,
-                input.risk_level,
-                source_run_id,
-                Some("model_route"),
-                "sensitive_local_only",
-            );
-            insert_selected_policy_ids(&mut metadata_safe_summary, selected_policy_ids);
-            return decision(
-                GovernanceSubject::ModelRoute,
-                GovernanceDecisionKind::RequireLocalOnly,
-                input.risk_level,
-                "sensitive runtime policy requires local-only model routing",
-                metadata_safe_summary,
-                Vec::new(),
-            );
-        }
-
-        let mut metadata_safe_summary = summary(
-            GovernanceSubject::ModelRoute,
-            None,
-            None,
-            input.risk_level,
-            source_run_id,
-            Some("model_route"),
-            "model_route_allowed",
-        );
-        insert_selected_policy_ids(&mut metadata_safe_summary, selected_policy_ids);
-        decision(
-            GovernanceSubject::ModelRoute,
-            GovernanceDecisionKind::Allow,
-            input.risk_level,
-            "model route is allowed by governor",
-            metadata_safe_summary,
-            Vec::new(),
-        )
-    }
-}
-
-pub fn packet_requires_local_only(packet: Option<&RuntimeHSPacket>) -> bool {
-    packet.is_some_and(|packet| {
-        packet
-            .audit
-            .selected_policy_ids
-            .iter()
-            .any(|id| id == BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY)
-            || packet.selected_policies.iter().any(|policy| {
-                policy.policy_id == BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY
-                    || policy.route == Some(ModelRoutePolicy::LocalOnly)
-            })
-    })
 }
 
 fn decision(
@@ -484,15 +385,6 @@ fn summary(
         "eventType": event_type,
         "policyReasonCode": reason_code,
     })
-}
-
-fn insert_selected_policy_ids(summary: &mut Value, selected_policy_ids: Vec<String>) {
-    if let Some(object) = summary.as_object_mut() {
-        object.insert(
-            "selectedPolicyIds".into(),
-            Value::Array(selected_policy_ids.into_iter().map(Value::String).collect()),
-        );
-    }
 }
 
 fn is_write_like_action(tool_name: &str, action_kind: &str) -> bool {

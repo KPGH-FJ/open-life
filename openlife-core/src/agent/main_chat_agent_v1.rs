@@ -3625,7 +3625,7 @@ pub const PRE_DISPATCH_PERSISTENCE_FAILURE_KIND: &str =
     "durable_event_store_unavailable_before_dispatch";
 const TASK_SESSION_PAYLOAD_VERSION: i64 = 2;
 const TASK_SESSION_CANONICAL_OWNER_VERSION: u64 = 1;
-const TRANSCRIPT_PAYLOAD_VERSION: i64 = 2;
+const TRANSCRIPT_PAYLOAD_VERSION: i64 = 3;
 const TASK_SESSION_V2_PHYSICAL_PURGE_MARKER: &str =
     "task_session_transcript_v2_physical_purge_complete";
 const MAX_TASK_SESSION_METADATA_ITEMS: usize = 512;
@@ -4126,7 +4126,7 @@ impl AgentTaskSessionStore {
                 summary TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT 'null',
                 created_at TEXT NOT NULL,
-                payload_minimized_version INTEGER NOT NULL DEFAULT 2
+                payload_minimized_version INTEGER NOT NULL DEFAULT 3
             )",
             [],
         )?;
@@ -11250,7 +11250,7 @@ fn transcript_metadata_field_value_allowed(
     false
 }
 
-fn transcript_metadata_v2_is_valid(kind: ExecutionTranscriptEntryKind, value: &Value) -> bool {
+fn current_transcript_metadata_is_valid(kind: ExecutionTranscriptEntryKind, value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.iter().all(|(field, value)| match field.as_str() {
             "summaryCode" => value.as_str().is_some_and(|code| {
@@ -11307,7 +11307,7 @@ fn row_to_transcript_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Executio
     let summary: String = row.get(3)?;
     if minimized_version != TRANSCRIPT_PAYLOAD_VERSION
         || summary != transcript_summary_code(kind)
-        || !transcript_metadata_v2_is_valid(kind, &metadata)
+        || !current_transcript_metadata_is_valid(kind, &metadata)
     {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             6,
@@ -13827,18 +13827,26 @@ fn runtime_eval_provider_route_observation(
     let mut router = crate::agent::ModelRouter::new();
     seed_runtime_eval_model_router(&mut router);
 
-    let route = if decision.privacy_risk.local_only_required {
-        let packet = runtime_eval_local_only_hs_packet(case, task_session_id);
-        router
-            .route_with_hs_packet(crate::agent::TaskType::Chat, false, &packet)
-            .map_err(|err| {
-                runtime_eval_failure(case, "provider_local_only_route_failed", &err.to_string())
-            })?
-    } else {
-        router
-            .route(crate::agent::TaskType::Chat, false, None)
-            .map_err(|err| runtime_eval_failure(case, "provider_route_failed", &err.to_string()))?
-    };
+    let route = router
+        .route(
+            crate::agent::TaskType::Chat,
+            false,
+            decision
+                .privacy_risk
+                .local_only_required
+                .then_some(crate::agent::PrivacyRequirement::Critical),
+        )
+        .map_err(|err| {
+            runtime_eval_failure(
+                case,
+                if decision.privacy_risk.local_only_required {
+                    "provider_local_only_route_failed"
+                } else {
+                    "provider_route_failed"
+                },
+                &err.to_string(),
+            )
+        })?;
 
     let local_only_provider_guard_exercised = if decision.privacy_risk.local_only_required {
         if route.provider != "ollama"
@@ -13912,40 +13920,6 @@ fn seed_runtime_eval_model_router(router: &mut crate::agent::ModelRouter) {
             health_is_estimated: false,
         },
     );
-}
-
-fn runtime_eval_local_only_hs_packet(
-    case: &MainChatRuntimeEvalCase,
-    task_session_id: &str,
-) -> crate::agent::RuntimeHSPacket {
-    crate::agent::RuntimeHSPacket {
-        selected_policies: vec![crate::agent::SelectedPolicyRef {
-            policy_id: crate::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
-            reason: "runtime_eval_sensitive_local_only".into(),
-            route: Some(crate::agent::ModelRoutePolicy::LocalOnly),
-            digest: format!("runtime-eval-local-only-{}", case.id),
-        }],
-        selected_heuristics: vec![],
-        guidance_refs: vec![],
-        estimated_tokens: 0,
-        audit: crate::agent::HSSelectionAudit {
-            agent_task_id: Some(task_session_id.into()),
-            agent_run_id: None,
-            input_digest: format!("runtime-eval-input-{}", case.id),
-            selected_policy_ids: vec![
-                crate::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()
-            ],
-            selected_heuristic_ids: vec![],
-            selected_guidance_ids: vec![],
-            selected_guidance_refs: vec![],
-            excluded_assets: vec![],
-            estimated_tokens: 0,
-            token_budget: 128,
-        },
-        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-            crate::llm::ProviderLocalOnlyReason::TestFixture,
-        ),
-    }
 }
 
 struct RuntimeEvalTempRoot(std::path::PathBuf);
@@ -17542,6 +17516,7 @@ mod session_content_minimization_tests {
     use super::*;
 
     const SESSION_PAYLOAD_VERSION_V2: i64 = 2;
+    const TRANSCRIPT_PAYLOAD_VERSION_V3: i64 = 3;
 
     #[test]
     fn task_session_and_transcript_persist_only_canonical_ref_and_keyed_receipts() {
@@ -17969,7 +17944,7 @@ mod session_content_minimization_tests {
         assert!(session_payload.contains("tool_permission_required"));
         assert!(session_payload.contains("mainchat_ctx_deadbeef"));
         assert_eq!(session_version, SESSION_PAYLOAD_VERSION_V2);
-        assert_eq!(transcript_version, SESSION_PAYLOAD_VERSION_V2);
+        assert_eq!(transcript_version, TRANSCRIPT_PAYLOAD_VERSION_V3);
     }
 
     #[test]
@@ -18027,7 +18002,7 @@ mod session_content_minimization_tests {
     }
 
     #[test]
-    fn task_session_and_transcript_v2_migration_physically_purges_legacy_bodies() {
+    fn task_session_v2_and_transcript_v3_migration_physically_purges_legacy_bodies() {
         const LEGACY_SENTINEL: &str = "LEGACY_TASK_SESSION_TRANSCRIPT_BODY_SENTINEL";
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("task-session-v1-physical-purge.db");
@@ -18098,7 +18073,7 @@ mod session_content_minimization_tests {
             .unwrap();
         assert_eq!(
             versions,
-            (SESSION_PAYLOAD_VERSION_V2, SESSION_PAYLOAD_VERSION_V2)
+            (SESSION_PAYLOAD_VERSION_V2, TRANSCRIPT_PAYLOAD_VERSION_V3)
         );
         drop(conn);
         drop(migrated);
@@ -18115,6 +18090,88 @@ mod session_content_minimization_tests {
                     .any(|window| window == LEGACY_SENTINEL.as_bytes()));
             }
         }
+    }
+
+    #[test]
+    fn transcript_v2_hs_metadata_is_minimized_during_v3_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript-v2-hs-metadata.db");
+        let key = AgentRunReceiptKey::from_bytes([0x75; 32]).unwrap();
+        let store = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "transcript-v2-hs-metadata-chat".into(),
+                user_goal: "verify retired HS metadata migration".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .unwrap();
+        let entry = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::FollowUp,
+                summary: "historical follow-up".into(),
+                metadata: serde_json::json!({
+                    "modelGenerated": true,
+                    "providerEndpointKind": "local_openai_compatible"
+                }),
+            })
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            let metadata_json: String = conn
+                .query_row(
+                    "SELECT metadata_json FROM execution_transcript_entries WHERE id = ?1",
+                    [&entry.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut metadata = serde_json::from_str::<Value>(&metadata_json).unwrap();
+            let object = metadata.as_object_mut().unwrap();
+            object.insert("hsContextAvailable".into(), false.into());
+            object.insert("hsPacketSelected".into(), false.into());
+            object.insert("hsWarningCodes".into(), serde_json::json!([]));
+            conn.execute(
+                "UPDATE execution_transcript_entries
+                 SET metadata_json = ?2, payload_minimized_version = 2
+                 WHERE id = ?1",
+                params![entry.id, serde_json::to_string(&metadata).unwrap()],
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let migrated = AgentTaskSessionStore::new_with_receipt_key(&path, key).unwrap();
+        let conn = migrated.conn.lock().unwrap();
+        let (metadata_json, version): (String, i64) = conn
+            .query_row(
+                "SELECT metadata_json, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap();
+        assert_eq!(version, TRANSCRIPT_PAYLOAD_VERSION);
+        let schema_default: String = conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('execution_transcript_entries')
+                 WHERE name = 'payload_minimized_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_default, TRANSCRIPT_PAYLOAD_VERSION.to_string());
+        assert_eq!(metadata["modelGenerated"], true);
+        assert_eq!(metadata["providerEndpointKind"], "local_openai_compatible");
+        assert!(metadata.get("hsContextAvailable").is_none());
+        assert!(metadata.get("hsPacketSelected").is_none());
+        assert!(metadata.get("hsWarningCodes").is_none());
+        assert!(metadata
+            .get("defaultDeniedMetadataReceipt")
+            .and_then(Value::as_str)
+            .is_some_and(is_exact_hmac_receipt));
     }
 
     #[test]

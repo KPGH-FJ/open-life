@@ -2,7 +2,6 @@ use crate::agent::governor::{
     GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
     ToolGovernanceInput,
 };
-use crate::agent::hs_selector::GuidanceImpactReadModel;
 use crate::agent::review_workflow::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
 };
@@ -354,8 +353,6 @@ pub struct PlanExecuteReport {
     pub governance_decisions: Vec<PlanGovernanceDecisionSummary>,
     pub observation_summaries: Vec<PlanObservationSummary>,
     pub warnings: Vec<String>,
-    #[serde(default)]
-    pub guidance_impact: Option<Box<GuidanceImpactReadModel>>,
     pub metadata_safe_summary: Value,
 }
 
@@ -467,7 +464,6 @@ impl PlanExecuteService {
             });
         }
 
-        let guidance_impact = None;
         let report = PlanExecuteReport::new(
             plan_id,
             source_run_id,
@@ -475,7 +471,6 @@ impl PlanExecuteService {
             governance_decisions,
             observation_summaries,
             warnings.clone(),
-            guidance_impact,
         );
 
         PlanExecutionOutput {
@@ -1510,38 +1505,6 @@ fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
             },
         );
     }
-    if has_gentle_planning_guidance(input) {
-        push_step(
-            &mut steps,
-            max_steps,
-            PlanStepSpec {
-                title: "Choose one small weekly focus",
-                intent: "read_only_planning",
-                tool_name: None,
-                action_kind: "plan",
-                risk_level: RiskLevel::Low,
-                declared_write: false,
-            },
-        );
-        push_step(
-            &mut steps,
-            max_steps,
-            PlanStepSpec {
-                title: "Prepare lightweight weekly check-in proposal",
-                intent: "write_like_schedule_task",
-                tool_name: Some("review_center.propose_scheduled_task"),
-                action_kind: "schedule",
-                risk_level: RiskLevel::Medium,
-                declared_write: true,
-            },
-        );
-
-        return PlanDraft {
-            objective: metadata_safe_weekly_objective(input),
-            steps,
-        };
-    }
-
     push_step(
         &mut steps,
         max_steps,
@@ -2130,7 +2093,6 @@ impl PlanExecuteReport {
         governance_decisions: Vec<PlanGovernanceDecisionSummary>,
         observation_summaries: Vec<PlanObservationSummary>,
         warnings: Vec<String>,
-        guidance_impact: Option<Box<GuidanceImpactReadModel>>,
     ) -> Self {
         let step_count = traces.len();
         let executed_read_only_step_count = traces
@@ -2155,10 +2117,6 @@ impl PlanExecuteReport {
             "blockedOrProposalRequiredStepCount": blocked_or_proposal_required_step_count,
             "governanceDecisionCount": governance_decisions.len(),
             "observationSummaryCount": observation_summaries.len(),
-            "selectedGuidanceCount": guidance_impact
-                .as_ref()
-                .map(|impact| impact.selected_guidance_count)
-                .unwrap_or(0),
             "warningCount": warnings.len(),
         });
 
@@ -2171,15 +2129,9 @@ impl PlanExecuteReport {
             governance_decisions,
             observation_summaries,
             warnings,
-            guidance_impact,
             metadata_safe_summary,
         }
     }
-}
-
-fn has_gentle_planning_guidance(input: &PlanExecuteInput) -> bool {
-    let _ = input;
-    false
 }
 
 fn source_run_id(input: &RuntimeInput) -> Option<String> {

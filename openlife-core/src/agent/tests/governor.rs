@@ -1,41 +1,10 @@
-use crate::agent::policy_store::{ModelRoutePolicy, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY};
 use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, ExternalWriteGovernanceInput,
-    GovernanceDecisionClassification, GovernanceDecisionKind, HSSelectionAudit, LifeModelGovernor,
-    MemoryWriteGovernanceInput, ModelRouteGovernanceInput, RiskLevel, RuntimeHSPacket,
-    RuntimeInput, RuntimePolicyContext, SelectedPolicyRef, ToolGovernanceInput,
+    GovernanceDecisionClassification, GovernanceDecisionKind, LifeModelGovernor,
+    MemoryWriteGovernanceInput, RiskLevel, RuntimeInput, RuntimePolicyContext, ToolGovernanceInput,
 };
 use crate::layer::Layer;
 use crate::llm::ChatMessage;
-
-fn sensitive_packet() -> RuntimeHSPacket {
-    RuntimeHSPacket {
-        selected_policies: vec![SelectedPolicyRef {
-            policy_id: BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
-            reason: "sensitive_topic_route".into(),
-            route: Some(ModelRoutePolicy::LocalOnly),
-            digest: "digest-sensitive".into(),
-        }],
-        selected_heuristics: Vec::new(),
-        guidance_refs: Vec::new(),
-        estimated_tokens: 12,
-        audit: HSSelectionAudit {
-            agent_task_id: Some("task-governor".into()),
-            agent_run_id: Some("run-governor".into()),
-            input_digest: "digest-input".into(),
-            selected_policy_ids: vec![BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()],
-            selected_heuristic_ids: Vec::new(),
-            selected_guidance_ids: Vec::new(),
-            selected_guidance_refs: Vec::new(),
-            excluded_assets: Vec::new(),
-            estimated_tokens: 12,
-            token_budget: 128,
-        },
-        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-            crate::llm::ProviderLocalOnlyReason::TestFixture,
-        ),
-    }
-}
 
 fn runtime_input(tools_prompt: &str) -> RuntimeInput {
     RuntimeInput::from_agent_task(
@@ -97,37 +66,8 @@ fn broad_tools_prompt_does_not_create_write_governance_decision() {
 }
 
 #[test]
-fn sensitive_runtime_requires_local_only() {
-    let governor = LifeModelGovernor;
-    let decision = governor.govern_model_route(ModelRouteGovernanceInput {
-        hs_packet: Some(sensitive_packet()),
-        risk_level: RiskLevel::High,
-        local_model_available: true,
-    });
-
-    assert_eq!(decision.kind, GovernanceDecisionKind::RequireLocalOnly);
-    assert_eq!(
-        decision.metadata_safe_summary["policyReasonCode"],
-        serde_json::json!("sensitive_local_only")
-    );
-}
-
-#[test]
 fn unified_governor_report_classifies_core_decision_types_without_raw_payloads() {
     let governor = LifeModelGovernor;
-
-    let model_route = governor
-        .govern_model_route(ModelRouteGovernanceInput {
-            hs_packet: Some(sensitive_packet()),
-            risk_level: RiskLevel::High,
-            local_model_available: true,
-        })
-        .to_report();
-    assert_eq!(
-        model_route.classification,
-        GovernanceDecisionClassification::LocalOnly
-    );
-    assert!(model_route.requires_local_only);
 
     let read_tool = governor
         .govern_tool_action(ToolGovernanceInput {
@@ -174,7 +114,7 @@ fn unified_governor_report_classifies_core_decision_types_without_raw_payloads()
         Some("external_write_action")
     );
 
-    for report in [model_route, read_tool, memory_write, external_write] {
+    for report in [read_tool, memory_write, external_write] {
         assert_eq!(report.report_kind, "governor_decision_report");
         assert!(report.metadata_safe);
         assert!(!report.contains_raw_content);

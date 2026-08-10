@@ -533,7 +533,6 @@ export interface ReasoningTrace {
   };
   layer_timings_ms?: Record<string, number>;
   stable_steps?: string[];
-  hsSelectionAudit?: HSSelectionAudit;
   behaviorChecks?: HSBehaviorCheckSummary[];
 }
 
@@ -570,49 +569,6 @@ export interface MainChatMemoryGovernanceEvidence {
 export interface MainChatGenerationResult {
   memoryGovernance?: MainChatMemoryGovernanceEvidence;
   [key: string]: any;
-}
-
-export interface HSAssetExclusion {
-  assetId: string;
-  assetKind: string;
-  reason: string;
-}
-
-export interface HSSelectionAudit {
-  selectedPolicyIds?: string[];
-  selectedHeuristicIds?: string[];
-  selectedGuidanceIds?: string[];
-  selectedGuidanceRefs?: SelectedGuidanceRef[];
-  excludedAssets?: HSAssetExclusion[];
-  estimatedTokens?: number;
-  tokenBudget?: number;
-}
-
-export interface SelectedGuidanceRef {
-  guidanceId: string;
-  guidanceDigest: string;
-  guidanceType: string;
-  lifecycleStatus: string;
-  domain: string;
-  triggerDigest: string;
-  selectedReason: string;
-  impactKind: string;
-  impactSummary: string;
-  riskLevel: string;
-  privacyLevel: string;
-  sourceProposalId?: string;
-  sourceEvidenceCount: number;
-  sourceLineageDigest: string;
-  policyBoundary: {
-    hardPolicyBoundary: boolean;
-    routePolicyRelaxed: boolean;
-    toolPolicyRelaxed: boolean;
-    proposalFirstPreserved: boolean;
-    privacyConstraintCount: number;
-    modelConstraintCount: number;
-    toolConstraintCount: number;
-    constraintDigest: string;
-  };
 }
 
 export interface HSBehaviorCheckSummary {

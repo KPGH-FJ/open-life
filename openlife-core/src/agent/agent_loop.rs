@@ -2273,16 +2273,15 @@ mod tests {
             crate::agent::PolicyEvaluationRequest {
                 topic: crate::agent::PolicyTopic::Health,
                 requested_route: crate::agent::ModelRoutePolicy::CloudAllowed,
-                heuristic_effect: None,
             },
         );
-        let hs_local = ProviderPolicyAuthorization::from_hs_context_decision(
+        let policy_store_local = ProviderPolicyAuthorization::from_policy_store_context_decision(
             &hs_decision,
-            "hs-local-intersection-decision",
+            "policy-store-local-intersection-decision",
         )
         .unwrap();
 
-        let intersected = intersect_provider_authorizations(Some(main_chat), hs_local);
+        let intersected = intersect_provider_authorizations(Some(main_chat), policy_store_local);
         assert_eq!(
             intersected.data_route(),
             crate::llm::ProviderDataRoute::LocalOnly
