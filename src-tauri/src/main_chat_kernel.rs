@@ -24,13 +24,12 @@ use openlife_core::agent::main_chat_agent_v1::{
 use openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot;
 use openlife_core::agent::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig,
-    AgentActionRequest, AgentRun, AgentRunStatus, AgentTask, CanonicalMemoryFactDescriptor,
-    ContextSummary, MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind,
-    MemoryDestination, MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity,
-    ModelRoutePolicy, ModelRouteTrace, ReasoningTrace, RedactionLevel, RiskLevel, RuntimeHSPacket,
+    AgentActionRequest, AgentRun, AgentRunStatus, CanonicalMemoryFactDescriptor, ContextSummary,
+    MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
+    MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity, ModelRouteTrace,
+    ReasoningTrace, RedactionLevel, RiskLevel,
 };
 use openlife_core::config::{AppConfig, NetworkPolicy};
-use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::{
     BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
@@ -66,7 +65,6 @@ use crate::main_chat_event_stream::{
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, main_chat_provider_endpoint_kind, preview_text,
 };
-use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 #[cfg(test)]
 use crate::main_chat_react_runtime::MainChatReactCanonicalToolDelta;
 use crate::main_chat_react_runtime::{
@@ -401,8 +399,6 @@ pub struct MainChatKernelContextMetadata {
     pub system_prompt_chars: usize,
     #[serde(default)]
     pub life_model_context: Option<MainChatKernelLifeModelContextMetadata>,
-    #[serde(default)]
-    pub hs_context: Option<MainChatKernelHsContextMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -494,37 +490,6 @@ pub struct MainChatKernelLifeModelContext {
     pub tool_preference_hints: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatKernelHsContextMetadata {
-    pub available: bool,
-    pub summary_source_id: Option<String>,
-    pub summary_digest: Option<String>,
-    pub summary_chars: usize,
-    pub source_provenance: Option<String>,
-    pub freshness: Option<String>,
-    pub privacy_class: Option<String>,
-    pub included_life_model_sections: Vec<String>,
-    pub selected_policy_ids: Vec<String>,
-    pub accepted_guidance_ids: Vec<String>,
-    pub accepted_guidance_count: usize,
-    pub policy_blocker_codes: Vec<String>,
-    pub proposal_policy_active: bool,
-    pub route_policy_relaxed_by_guidance: bool,
-    pub tool_policy_relaxed_by_guidance: bool,
-    pub proposal_first_preserved: bool,
-    pub raw_life_model_yaml_included: bool,
-    pub raw_unbounded_memory_included: bool,
-    pub warning_codes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatKernelHsContext {
-    pub metadata: MainChatKernelHsContextMetadata,
-    pub candidates: Vec<ContextSourceCandidate>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MainChatKernelEvent {
@@ -546,12 +511,6 @@ pub enum MainChatKernelEvent {
         selected_item_refs: Vec<String>,
         reason_codes: Vec<String>,
         receipt: MainChatLifeModelProductReceipt,
-    },
-    HsContextLoaded {
-        available: bool,
-        warning_count: usize,
-        selected_policy_count: usize,
-        accepted_guidance_count: usize,
     },
     RouteSelected {
         route_metadata: MainChatRouteMetadata,
@@ -2354,13 +2313,7 @@ where
         main_chat_policy_direct_reflex_response(&main_chat_agent_turn.decision, &user_text)
             .map(CommandSurfaceDirectReply::direct_reflex)
     };
-    let (mut life_model_context, hs_context) = command_surface_kernel_runtime_contexts(
-        state,
-        &task_session_id,
-        &user_text,
-        main_chat_agent_turn.decision.task_kind,
-    )
-    .await;
+    let mut life_model_context = command_surface_kernel_runtime_context(state, &user_text).await;
     let extra_candidates = command_surface_kernel_context_candidates(
         state,
         &provider_config.system.knowledge_roots,
@@ -2441,7 +2394,6 @@ where
         token_budget: 160,
         extra_candidates,
         life_model_context,
-        hs_context,
         stream_provider_tokens: event_sink_label == "streaming",
         authorized_memory_routing: Some(
             main_chat_agent_turn
@@ -4009,7 +3961,6 @@ pub struct MainChatKernelContextConfig {
     pub token_budget: u32,
     pub extra_candidates: Vec<ContextSourceCandidate>,
     pub life_model_context: Option<MainChatKernelLifeModelContext>,
-    pub hs_context: Option<MainChatKernelHsContext>,
     pub stream_provider_tokens: bool,
     pub authorized_memory_routing: Option<MainChatMemoryRoutingResult>,
 }
@@ -4021,7 +3972,6 @@ impl Default for MainChatKernelContextConfig {
             token_budget: KERNEL_CONTEXT_TOKEN_BUDGET,
             extra_candidates: Vec::new(),
             life_model_context: None,
-            hs_context: None,
             stream_provider_tokens: false,
             authorized_memory_routing: None,
         }
@@ -5656,15 +5606,6 @@ where
                 receipt: life_model_context.product_receipt(),
             });
         }
-        if let Some(hs_context) = context_metadata.hs_context.as_ref() {
-            event_sink.emit(MainChatKernelEvent::HsContextLoaded {
-                available: hs_context.available,
-                warning_count: hs_context.warning_codes.len(),
-                selected_policy_count: hs_context.selected_policy_ids.len(),
-                accepted_guidance_count: hs_context.accepted_guidance_count,
-            });
-        }
-
         let replayed_read_observations = self.replayed_read_observations.clone();
         let external_read_required =
             policy_authorizes_kernel_read_lane(&input) || !replayed_read_observations.is_empty();
@@ -5844,10 +5785,7 @@ where
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
             selected_context_refs: context_metadata.selected_source_ids.clone(),
             raw_life_model_included: context_metadata.raw_life_model_yaml_included,
-            raw_unbounded_memory_included: context_metadata
-                .hs_context
-                .as_ref()
-                .is_some_and(|context| context.raw_unbounded_memory_included),
+            raw_unbounded_memory_included: false,
             selected_skill_id,
             payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: self.context_config.stream_provider_tokens,
@@ -6444,10 +6382,7 @@ where
                 context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
                 selected_context_refs: context_metadata.selected_source_ids.clone(),
                 raw_life_model_included: context_metadata.raw_life_model_yaml_included,
-                raw_unbounded_memory_included: context_metadata
-                    .hs_context
-                    .as_ref()
-                    .is_some_and(|context| context.raw_unbounded_memory_included),
+                raw_unbounded_memory_included: false,
                 selected_skill_id: sanitize_main_chat_selected_skill_id(
                     input.selected_skill_id.as_deref(),
                 ),
@@ -6752,10 +6687,7 @@ where
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
             selected_context_refs: context_metadata.selected_source_ids.clone(),
             raw_life_model_included: context_metadata.raw_life_model_yaml_included,
-            raw_unbounded_memory_included: context_metadata
-                .hs_context
-                .as_ref()
-                .is_some_and(|context| context.raw_unbounded_memory_included),
+            raw_unbounded_memory_included: false,
             selected_skill_id: sanitize_main_chat_selected_skill_id(
                 input.selected_skill_id.as_deref(),
             ),
@@ -7083,9 +7015,6 @@ where
         if let Some(life_model_context) = self.context_config.life_model_context.as_ref() {
             candidates.extend(life_model_context.candidates.clone());
         }
-        if let Some(hs_context) = self.context_config.hs_context.as_ref() {
-            candidates.extend(hs_context.candidates.clone());
-        }
         candidates.extend(self.context_config.extra_candidates.clone());
 
         let compiled = ContextCompiler.compile(ContextCompilerInput {
@@ -7165,37 +7094,6 @@ where
             }
         }
 
-        let mut hs_context = self
-            .context_config
-            .hs_context
-            .as_ref()
-            .map(|context| context.metadata.clone());
-        if let Some(hs_context) = hs_context.as_mut() {
-            let summary_selected = hs_context
-                .summary_source_id
-                .as_ref()
-                .is_some_and(|source_id| {
-                    compiled
-                        .selected_sources
-                        .iter()
-                        .any(|source| source.source_id == *source_id)
-                });
-            hs_context.accepted_guidance_ids = hs_context
-                .accepted_guidance_ids
-                .iter()
-                .filter(|guidance_id| {
-                    let expected_source_id = format!("hs.accepted_guidance.{guidance_id}");
-                    compiled
-                        .selected_sources
-                        .iter()
-                        .any(|source| source.source_id == expected_source_id)
-                })
-                .cloned()
-                .collect();
-            hs_context.accepted_guidance_count = hs_context.accepted_guidance_ids.len();
-            hs_context.available = summary_selected || hs_context.accepted_guidance_count > 0;
-        }
-
         (
             MainChatKernelContextMetadata {
                 context_snapshot_ref: compiled.context_snapshot_ref.clone(),
@@ -7208,7 +7106,6 @@ where
                 workspace_policy_override_blocked: compiled.workspace_policy_override_blocked,
                 system_prompt_chars: system_prompt.chars().count(),
                 life_model_context,
-                hs_context,
             },
             system_prompt,
         )
@@ -7713,10 +7610,6 @@ async fn build_successful_kernel_command_surface_result(
         }
     }
     let kernel_event_count = kernel_events.len();
-    let hs_metadata = kernel_result
-        .context_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.hs_context.clone());
     if let Some(context_snapshot_ref) = kernel_result
         .context_metadata
         .as_ref()
@@ -7733,29 +7626,6 @@ async fn build_successful_kernel_command_surface_result(
         .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
     }
     let mut generation_metadata = serde_json::json!({
-        "hsPacketSelected": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                || !metadata.accepted_guidance_ids.is_empty()),
-        "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-        "hsWarningCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.warning_codes.clone())
-            .unwrap_or_default(),
-        "hsSelectedPolicyIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.selected_policy_ids.clone())
-            .unwrap_or_default(),
-        "hsAcceptedGuidanceIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.accepted_guidance_ids.clone())
-            .unwrap_or_default(),
-        "hsProposalPolicyActive": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.proposal_policy_active),
-        "hsRawLifeModelYamlIncluded": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
         "toolCallCount": kernel_result.tool_calls.len(),
         "toolCalled": read_tool_loop_used,
         "directWritesExecuted": false,
@@ -10499,36 +10369,12 @@ async fn build_kernel_write_outcome_command_surface_result(
         }
     }
 
-    let hs_metadata = kernel_result
-        .context_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.hs_context.clone());
     let generation_metadata = serde_json::json!({
         "text": reply,
         "mainChatAgentV1": true,
         "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
         "legacyFallbackUsed": false,
         "directWritesExecuted": false,
-        "hsPacketSelected": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                || !metadata.accepted_guidance_ids.is_empty()),
-        "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-        "hsWarningCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.warning_codes.clone())
-            .unwrap_or_default(),
-        "hsSelectedPolicyIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.selected_policy_ids.clone())
-            .unwrap_or_default(),
-        "hsPolicyBlockerCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.policy_blocker_codes.clone())
-            .unwrap_or_default(),
-        "hsProposalPolicyActive": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.proposal_policy_active),
         "kernelBackedProposalOnlyWrite": true,
         "kernelBackedReadBeforeWriteProposal": !tool_calls.is_empty(),
         "toolCallCount": tool_calls.len(),
@@ -10815,10 +10661,6 @@ async fn build_blocked_kernel_command_surface_result(
         agent_run.error = None;
         agent_run.finished_at = None;
     }
-    let hs_metadata = kernel_result
-        .context_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.hs_context.clone());
     let mut reasoning_trace = ReasoningTrace {
         generation_result: Some(serde_json::json!({
             "text": reply,
@@ -10826,23 +10668,6 @@ async fn build_blocked_kernel_command_surface_result(
             "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
             "legacyFallbackUsed": false,
             "directWritesExecuted": false,
-            "hsPacketSelected": hs_metadata
-                .as_ref()
-                .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                    || !metadata.accepted_guidance_ids.is_empty()),
-            "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-            "hsWarningCodes": hs_metadata
-                .as_ref()
-                .map(|metadata| metadata.warning_codes.clone())
-                .unwrap_or_default(),
-            "hsSelectedPolicyIds": hs_metadata
-                .as_ref()
-                .map(|metadata| metadata.selected_policy_ids.clone())
-                .unwrap_or_default(),
-            "hsPolicyBlockerCodes": hs_metadata
-                .as_ref()
-                .map(|metadata| metadata.policy_blocker_codes.clone())
-                .unwrap_or_default(),
             "kernelBackedDirectAnswer": !read_tool_loop_used,
             "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
             "kernelBackedGovernedBlocker": governed_strategy_blocker,
@@ -11763,16 +11588,10 @@ fn tool_call_status_from_kernel_status(status: &str) -> ToolCallStatus {
     }
 }
 
-async fn command_surface_kernel_runtime_contexts(
+async fn command_surface_kernel_runtime_context(
     state: &Arc<AppState>,
-    task_session_id: &str,
     user_text: &str,
-    task_kind: openlife_core::agent::AgentTaskKind,
-) -> (
-    Option<MainChatKernelLifeModelContext>,
-    Option<MainChatKernelHsContext>,
-) {
-    let mut hs_warnings = Vec::new();
+) -> Option<MainChatKernelLifeModelContext> {
     let mut life_model_warnings = Vec::new();
     let canonical_life_model = {
         let manager = state.life_model_manager.lock().await;
@@ -11790,35 +11609,12 @@ async fn command_surface_kernel_runtime_contexts(
         }
     };
 
-    let task = AgentTask {
-        kind: task_kind,
-        session_id: task_session_id.to_string(),
-        user_text: user_text.to_string(),
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: user_text.to_string(),
-        }],
-        layer: Layer::L2,
-    };
-    let hs_packet =
-        match build_chat_runtime_hs_packet(state, &task, "", Some(task_session_id.to_string()))
-            .await
-        {
-            Ok(packet) => packet,
-            Err(error) => {
-                log::warn!("[MainChatKernel] bounded HS packet build failed: {}", error);
-                hs_warnings.push("hs_packet_build_failed".to_string());
-                None
-            }
-        };
-
     let life_model_context = build_kernel_lifemodel_context(
         canonical_life_model.as_ref(),
         user_text,
         life_model_warnings,
     );
-    let hs_context = build_kernel_hs_context(hs_packet.as_ref(), hs_warnings);
-    (Some(life_model_context), Some(hs_context))
+    Some(life_model_context)
 }
 
 async fn command_surface_kernel_context_candidates(
@@ -12084,126 +11880,6 @@ fn build_kernel_lifemodel_context(
     }
 }
 
-fn build_kernel_hs_context(
-    packet: Option<&RuntimeHSPacket>,
-    mut warning_codes: Vec<String>,
-) -> MainChatKernelHsContext {
-    warning_codes.sort();
-    warning_codes.dedup();
-    let selected_policy_ids = packet
-        .map(|packet| packet.audit.selected_policy_ids.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| bounded_label(&id, MAX_ROUTE_LABEL_CHARS))
-        .collect::<Vec<_>>();
-    let accepted_guidance_ids = packet
-        .map(|packet| packet.audit.selected_guidance_ids.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| bounded_label(&id, MAX_ROUTE_LABEL_CHARS))
-        .collect::<Vec<_>>();
-    let proposal_policy_active = selected_policy_ids
-        .iter()
-        .any(|id| id == openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST);
-    let policy_blocker_codes = packet
-        .map(kernel_hs_policy_blocker_codes)
-        .unwrap_or_default();
-    let route_policy_relaxed_by_guidance = packet
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .any(|guidance| guidance.policy_boundary.route_policy_relaxed)
-        })
-        .unwrap_or(false);
-    let tool_policy_relaxed_by_guidance = packet
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .any(|guidance| guidance.policy_boundary.tool_policy_relaxed)
-        })
-        .unwrap_or(false);
-    let proposal_first_preserved = packet
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .all(|guidance| guidance.policy_boundary.proposal_first_preserved)
-        })
-        .unwrap_or(true);
-    let source_provenance = Some(match packet {
-        Some(packet) => format!(
-            "hs_selector.audit:{}",
-            bounded_label(&packet.audit.input_digest, MAX_ROUTE_LABEL_CHARS)
-        ),
-        None => "hs_selector.none".into(),
-    });
-    let privacy_class = Some("private".to_string());
-    let mut metadata = MainChatKernelHsContextMetadata {
-        available: packet.is_some(),
-        summary_source_id: None,
-        summary_digest: None,
-        summary_chars: 0,
-        source_provenance,
-        freshness: None,
-        privacy_class,
-        included_life_model_sections: Vec::new(),
-        selected_policy_ids,
-        accepted_guidance_ids,
-        accepted_guidance_count: 0,
-        policy_blocker_codes,
-        proposal_policy_active,
-        route_policy_relaxed_by_guidance,
-        tool_policy_relaxed_by_guidance,
-        proposal_first_preserved,
-        raw_life_model_yaml_included: false,
-        raw_unbounded_memory_included: false,
-        warning_codes,
-    };
-    metadata.accepted_guidance_count = metadata.accepted_guidance_ids.len();
-
-    let mut candidates = Vec::new();
-    if let Some(packet) = packet {
-        for guidance in &packet.guidance_refs {
-            let guidance_id = bounded_label(&guidance.guidance_id, MAX_ROUTE_LABEL_CHARS);
-            let content = bounded_text(
-                &format!(
-                    "Accepted HS guidance summary\nid: {}\ntype: {}\ndomain: {}\nimpact: {}\nsource_proposal: {}\nsource_evidence_count: {}\npolicy_boundary: hard={}, route_relaxed={}, tool_relaxed={}, proposal_first_preserved={}",
-                    guidance_id,
-                    bounded_label(&guidance.guidance_type, MAX_ROUTE_LABEL_CHARS),
-                    bounded_label(&guidance.domain, MAX_ROUTE_LABEL_CHARS),
-                    bounded_label(&guidance.impact_summary, MAX_REASON_CHARS),
-                    guidance
-                        .source_proposal_id
-                        .as_deref()
-                        .map(|id| bounded_label(id, MAX_ROUTE_LABEL_CHARS))
-                        .unwrap_or_else(|| "none".into()),
-                    guidance.source_evidence_count,
-                    guidance.policy_boundary.hard_policy_boundary,
-                    guidance.policy_boundary.route_policy_relaxed,
-                    guidance.policy_boundary.tool_policy_relaxed,
-                    guidance.policy_boundary.proposal_first_preserved,
-                ),
-                MAX_CONTEXT_CONTENT_CHARS,
-            );
-            candidates.push(ContextSourceCandidate::new(
-                ContextSourceKind::AcceptedGuidance,
-                format!("hs.accepted_guidance.{guidance_id}"),
-                content,
-                "accepted guidance summary; cannot override privacy/tool/write policy",
-                "private",
-                12,
-            ));
-        }
-    }
-
-    MainChatKernelHsContext {
-        metadata,
-        candidates,
-    }
-}
-
 fn life_model_section_label(
     section: openlife_core::life_model::v2::LifeModelSectionV2,
 ) -> &'static str {
@@ -12220,21 +11896,6 @@ fn life_model_section_label(
         LifeModelSectionV2::DecisionPrinciples => "decision_principles",
         LifeModelSectionV2::CollaborationPreferences => "collaboration_preferences",
     }
-}
-
-fn kernel_hs_policy_blocker_codes(packet: &RuntimeHSPacket) -> Vec<String> {
-    let mut blockers = Vec::new();
-    for policy in &packet.selected_policies {
-        if policy.route == Some(ModelRoutePolicy::LocalOnly) {
-            blockers.push("hs_policy_local_only".to_string());
-        }
-        if policy.policy_id == openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST {
-            blockers.push("hs_policy_proposal_first".to_string());
-        }
-    }
-    blockers.sort();
-    blockers.dedup();
-    blockers
 }
 
 fn plan_kernel_read_tools(
@@ -14211,14 +13872,6 @@ where
             receipt: life_model_context.product_receipt(),
         });
     }
-    if let Some(hs_context) = context_metadata.hs_context.as_ref() {
-        event_sink.emit(MainChatKernelEvent::HsContextLoaded {
-            available: hs_context.available,
-            warning_count: hs_context.warning_codes.len(),
-            selected_policy_count: hs_context.selected_policy_ids.len(),
-            accepted_guidance_count: hs_context.accepted_guidance_count,
-        });
-    }
     let mut route_metadata = kernel.model_client.route_metadata();
     route_metadata.tools_enabled = false;
     event_sink.emit(MainChatKernelEvent::RouteSelected {
@@ -14380,7 +14033,6 @@ where
         content_chars: reply.chars().count(),
     });
     let kernel_events = event_sink.events().to_vec();
-    let hs_metadata = context_metadata.hs_context.clone();
     let generation_metadata = serde_json::json!({
         "text": reply,
         "mainChatAgentV1": true,
@@ -14395,22 +14047,6 @@ where
             .life_model_context
             .as_ref()
             .map(|metadata| metadata.influence_receipt.clone()),
-        "hsPacketSelected": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
-                || !metadata.accepted_guidance_ids.is_empty()),
-        "hsContextAvailable": hs_metadata.as_ref().is_some_and(|metadata| metadata.available),
-        "hsWarningCodes": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.warning_codes.clone())
-            .unwrap_or_default(),
-        "hsSelectedPolicyIds": hs_metadata
-            .as_ref()
-            .map(|metadata| metadata.selected_policy_ids.clone())
-            .unwrap_or_default(),
-        "hsRawLifeModelYamlIncluded": hs_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
         "modelGenerated": false,
         "schedulerGenerationCalled": false,
         "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
@@ -15637,7 +15273,6 @@ mod tests {
                 token_budget: 120,
                 extra_candidates: Vec::new(),
                 life_model_context,
-                hs_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             });
@@ -17948,7 +17583,6 @@ mod tests {
                 token_budget: 80,
                 extra_candidates,
                 life_model_context: None,
-                hs_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             })
@@ -17966,146 +17600,12 @@ mod tests {
                 token_budget: 80,
                 extra_candidates,
                 life_model_context: None,
-                hs_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: Some(
                     openlife_core::agent::plan_main_chat_memory_routing(current_user_message),
                 ),
             })
             .with_canonical_run_id("kernel-test-canonical-run")
-    }
-
-    fn test_kernel_with_hs(
-        model: ScriptedModelClient,
-        hs_context: MainChatKernelHsContext,
-        extra_candidates: Vec<ContextSourceCandidate>,
-    ) -> MainChatKernel<ScriptedModelClient> {
-        MainChatKernel::new(model)
-            .with_context_config(MainChatKernelContextConfig {
-                load_workspace_knowledge: false,
-                token_budget: 120,
-                extra_candidates,
-                life_model_context: None,
-                hs_context: Some(hs_context),
-                stream_provider_tokens: false,
-                authorized_memory_routing: None,
-            })
-            .with_canonical_run_id("kernel-test-canonical-run")
-    }
-
-    fn test_kernel_with_hs_and_authorized_memory_routing(
-        model: ScriptedModelClient,
-        hs_context: MainChatKernelHsContext,
-        extra_candidates: Vec<ContextSourceCandidate>,
-        current_user_message: &str,
-    ) -> MainChatKernel<ScriptedModelClient> {
-        MainChatKernel::new(model)
-            .with_context_config(MainChatKernelContextConfig {
-                load_workspace_knowledge: false,
-                token_budget: 120,
-                extra_candidates,
-                life_model_context: None,
-                hs_context: Some(hs_context),
-                stream_provider_tokens: false,
-                authorized_memory_routing: Some(
-                    openlife_core::agent::plan_main_chat_memory_routing(current_user_message),
-                ),
-            })
-            .with_canonical_run_id("kernel-test-canonical-run")
-    }
-
-    fn sample_hs_life_model() -> LifeModel {
-        let mut life_model = LifeModel::default_model();
-        life_model.identity.name = "RAW_LIFEMODEL_YAML_SECRET".into();
-        life_model.identity.mission_statement = "Build useful local-first agents.".into();
-        life_model.state.health_status.energy_level = 2;
-        life_model.state.current_focus = "MainChatKernel rescue".into();
-        life_model
-            .goals
-            .short_term
-            .push(openlife_core::life_model::GoalItem {
-                name: "Ship Goal 6".into(),
-                status: "active".into(),
-                priority: 9,
-                progress: 0.4,
-                ..Default::default()
-            });
-        life_model
-    }
-
-    fn accepted_guidance_ref() -> openlife_core::agent::SelectedGuidanceRef {
-        openlife_core::agent::SelectedGuidanceRef {
-            guidance_id: "accepted_guidance_kernel_low_energy".into(),
-            guidance_digest: "sha256:accepted-guidance-digest".into(),
-            guidance_type: "accepted_guidance".into(),
-            lifecycle_status: openlife_core::agent::HeuristicLifecycleStatus::Trial,
-            domain: "planning".into(),
-            trigger_digest: "sha256:trigger-digest".into(),
-            selected_reason: "task_domain_and_trigger_match".into(),
-            impact_kind: "gentle_planning".into(),
-            impact_summary: "Prefer one tiny next step for planning.".into(),
-            risk_level: openlife_core::agent::RiskLevel::Low,
-            privacy_level: openlife_core::agent::EvidencePrivacyLevel::Internal,
-            source_proposal_id: Some("proposal-accepted-guidance".into()),
-            source_evidence_count: 2,
-            source_lineage_digest: "sha256:lineage-digest".into(),
-            policy_boundary: openlife_core::agent::GuidancePolicyBoundarySummary {
-                hard_policy_boundary: true,
-                route_policy_relaxed: false,
-                tool_policy_relaxed: false,
-                proposal_first_preserved: true,
-                privacy_constraint_count: 1,
-                model_constraint_count: 1,
-                tool_constraint_count: 1,
-                constraint_digest: "sha256:constraint-digest".into(),
-            },
-        }
-    }
-
-    fn hs_packet(include_external_policy: bool, include_guidance: bool) -> RuntimeHSPacket {
-        let mut selected_policies = Vec::new();
-        if include_external_policy {
-            selected_policies.push(openlife_core::agent::SelectedPolicyRef {
-                policy_id: openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST
-                    .into(),
-                reason: "tool_requirement_write".into(),
-                route: None,
-                digest: "policy-digest".into(),
-            });
-        }
-        let guidance_refs = if include_guidance {
-            vec![accepted_guidance_ref()]
-        } else {
-            Vec::new()
-        };
-        RuntimeHSPacket {
-            selected_policies: selected_policies.clone(),
-            selected_heuristics: Vec::new(),
-            guidance_refs: guidance_refs.clone(),
-            estimated_tokens: 12,
-            audit: openlife_core::agent::HSSelectionAudit {
-                agent_task_id: Some("task-kernel-hs".into()),
-                agent_run_id: Some("run-kernel-hs".into()),
-                input_digest: "hs-input-digest".into(),
-                selected_policy_ids: selected_policies
-                    .iter()
-                    .map(|policy| policy.policy_id.clone())
-                    .collect(),
-                selected_heuristic_ids: Vec::new(),
-                selected_guidance_ids: guidance_refs
-                    .iter()
-                    .map(|guidance| guidance.guidance_id.clone())
-                    .collect(),
-                selected_guidance_refs: guidance_refs,
-                excluded_assets: Vec::new(),
-                estimated_tokens: 12,
-                token_budget: 128,
-            },
-            provider_authorization:
-                openlife_core::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-                    openlife_core::llm::ProviderLocalOnlyReason::TestFixture,
-                ),
-        }
     }
 
     #[test]
@@ -19282,7 +18782,6 @@ mod tests {
                 token_budget: 80,
                 extra_candidates: Vec::new(),
                 life_model_context: None,
-                hs_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             })
@@ -19494,7 +18993,6 @@ mod tests {
                 token_budget: 80,
                 extra_candidates: Vec::new(),
                 life_model_context: None,
-                hs_context: None,
                 stream_provider_tokens: true,
                 authorized_memory_routing: None,
             })
@@ -20588,7 +20086,6 @@ mod tests {
                 token_budget: 80,
                 extra_candidates: Vec::new(),
                 life_model_context: None,
-                hs_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             },
@@ -20872,13 +20369,8 @@ mod tests {
                 .unwrap();
         }
 
-        let (life_model_context, _hs_context) = command_surface_kernel_runtime_contexts(
-            &state,
-            "task-runtime-v2",
-            "请写一封简洁的项目邮件",
-            openlife_core::agent::AgentTaskKind::Conversation,
-        )
-        .await;
+        let life_model_context =
+            command_surface_kernel_runtime_context(&state, "请写一封简洁的项目邮件").await;
         let context = life_model_context.expect("bounded context");
 
         assert_eq!(
@@ -20908,7 +20400,6 @@ mod tests {
                 token_budget: 120,
                 extra_candidates: Vec::new(),
                 life_model_context: Some(context),
-                hs_context: None,
                 stream_provider_tokens: false,
                 authorized_memory_routing: None,
             });
@@ -21047,52 +20538,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_accepted_guidance_can_influence_without_policy_override() {
-        let model = ScriptedModelClient::ok("Guided answer.");
-        let packet = hs_packet(false, true);
-        let hs_context = build_kernel_hs_context(Some(&packet), Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
-        let mut events = BufferedMainChatEventSink::default();
-
-        let result = kernel
-            .run_turn(
-                MainChatTurnInput {
-                    session_id: "session-hs-guidance".into(),
-                    provider_authorization: policy_allowed_authorization("hs-guidance"),
-                    messages: vec![user_message("Plan the next step gently.")],
-                    selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
-                    model_supplied_tool_arguments: None,
-                    runtime_fact_direct_answer: false,
-                },
-                &mut events,
-            )
-            .await;
-
-        let hs = result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .expect("hs metadata");
-        assert_eq!(hs.accepted_guidance_count, 1);
-        assert!(hs
-            .accepted_guidance_ids
-            .contains(&"accepted_guidance_kernel_low_energy".to_string()));
-        assert!(!hs.route_policy_relaxed_by_guidance);
-        assert!(!hs.tool_policy_relaxed_by_guidance);
-        assert!(hs.proposal_first_preserved);
-        let prompt = model.observed_prompts().join("\n");
-        assert!(prompt.contains("Accepted HS guidance summary"));
-        assert!(prompt.contains("Prefer one tiny next step for planning."));
-        assert!(!prompt.contains("RAW_GUIDANCE_SECRET"));
-        assert!(!result.direct_writes_executed);
-    }
-
-    #[tokio::test]
-    async fn main_chat_kernel_goal_6_routes_explicit_lifemodel_preference_to_learning_candidate() {
+    async fn main_chat_kernel_routes_memory_and_lifemodel_learning_without_hs_personalization() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let packet = hs_packet(false, true);
-        let hs_context = build_kernel_hs_context(Some(&packet), Vec::new());
         let memory_user_text =
             "Please remember this private health fact: coffee causes heart palpitations.";
         let memory_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
@@ -21109,12 +20556,8 @@ mod tests {
         let memory_provider_authorization =
             MainChatProviderAuthorization::from_ingress_decision(&memory_decision)
                 .expect("Memory provider authorization from the same ingress decision");
-        let kernel = test_kernel_with_hs_and_authorized_memory_routing(
-            model.clone(),
-            hs_context.clone(),
-            Vec::new(),
-            memory_user_text,
-        );
+        let kernel =
+            test_kernel_with_authorized_memory_routing(model.clone(), Vec::new(), memory_user_text);
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
@@ -21154,11 +20597,6 @@ mod tests {
         }));
         assert!(!result.direct_writes_executed);
         assert!(!result.legacy_fallback_used);
-        assert!(result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .is_some_and(|hs| hs.accepted_guidance_count == 1));
 
         let life_model_user_text =
             "Update my life model: communication style is concise and direct.";
@@ -21176,9 +20614,8 @@ mod tests {
         let life_model_provider_authorization =
             MainChatProviderAuthorization::from_ingress_decision(&life_model_decision)
                 .expect("LifeModel provider authorization from the same ingress decision");
-        let life_model_kernel = test_kernel_with_hs_and_authorized_memory_routing(
+        let life_model_kernel = test_kernel_with_authorized_memory_routing(
             model.clone(),
-            hs_context,
             Vec::new(),
             life_model_user_text,
         );
@@ -21231,18 +20668,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_hs_policy_can_surface_blocker_or_proposal_outcome() {
+    async fn main_chat_policy_can_surface_external_write_blocker_without_hs_context() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let packet = hs_packet(true, true);
-        let hs_context = build_kernel_hs_context(Some(&packet), Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
+        let kernel = test_kernel(model.clone(), Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-policy".into(),
-                    provider_authorization: policy_allowed_authorization("hs-policy"),
+                    session_id: "session-policy-blocker".into(),
+                    provider_authorization: policy_allowed_authorization("policy-blocker"),
                     messages: vec![user_message("Send email to publish this update.")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(
@@ -21265,15 +20700,6 @@ mod tests {
             outcome.blocker_code.as_deref(),
             Some("external_write_requires_confirmation")
         );
-        let hs = result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .expect("hs metadata");
-        assert!(hs.proposal_policy_active);
-        assert!(hs
-            .policy_blocker_codes
-            .contains(&"hs_policy_proposal_first".to_string()));
         assert!(!outcome.governed_input["directWritesExecuted"]
             .as_bool()
             .unwrap_or(true));
@@ -21281,23 +20707,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_missing_or_malformed_hs_degrades_to_warning_metadata() {
+    async fn main_chat_without_lifemodel_context_continues_as_a_normal_agent() {
         let model = ScriptedModelClient::ok("Basic answer still works.");
-        let hs_context = build_kernel_hs_context(
-            None,
-            vec![
-                "hs_lifemodel_missing".into(),
-                "hs_lifemodel_malformed".into(),
-            ],
-        );
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
+        let kernel = test_kernel(model.clone(), Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-missing".into(),
-                    provider_authorization: policy_allowed_authorization("hs-missing"),
+                    session_id: "session-no-lifemodel".into(),
+                    provider_authorization: policy_allowed_authorization("no-lifemodel"),
                     messages: vec![user_message("Give a basic direct answer.")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
@@ -21317,23 +20736,13 @@ mod tests {
             Some("Basic answer still works.")
         );
         assert!(result.blockers.is_empty());
-        let hs = result
-            .context_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.hs_context.as_ref())
-            .expect("hs metadata");
-        assert!(!hs.available);
-        assert!(hs.warning_codes.contains(&"hs_lifemodel_missing".into()));
-        assert!(hs.warning_codes.contains(&"hs_lifemodel_malformed".into()));
         assert!(!result.direct_writes_executed);
         assert!(!result.legacy_fallback_used);
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_goal_6_no_raw_lifemodel_yaml_or_unbounded_memory_dump() {
+    async fn main_chat_kernel_rejects_raw_lifemodel_yaml_and_unbounded_memory_dump() {
         let model = ScriptedModelClient::ok("No raw prompt dump.");
-        let packet = hs_packet(false, true);
-        let hs_context = build_kernel_hs_context(Some(&packet), Vec::new());
         let raw_candidates = vec![
             ContextSourceCandidate::new(
                 ContextSourceKind::LifeModelYaml,
@@ -21352,14 +20761,14 @@ mod tests {
                 1,
             ),
         ];
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, raw_candidates);
+        let kernel = test_kernel(model.clone(), raw_candidates);
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
-                    session_id: "session-hs-no-raw".into(),
-                    provider_authorization: policy_allowed_authorization("hs-no-raw"),
+                    session_id: "session-no-raw".into(),
+                    provider_authorization: policy_allowed_authorization("no-raw"),
                     messages: vec![user_message("Answer using bounded context only.")],
                     selected_skill_id: None,
                     policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
@@ -21371,22 +20780,18 @@ mod tests {
             .await;
 
         let prompt = model.observed_prompts().join("\n");
-        assert!(prompt.contains("Accepted HS guidance summary"));
         assert!(!prompt.contains("RAW_LIFEMODEL_YAML_SECRET"));
         assert!(!prompt.contains("RAW_MEMORY_DUMP_SECRET"));
         let context = result.context_metadata.as_ref().expect("context metadata");
         assert!(!context.raw_life_model_yaml_included);
         assert!(!context.raw_topk_memory_trusted);
-        let hs = context.hs_context.as_ref().expect("hs metadata");
-        assert!(!hs.raw_life_model_yaml_included);
-        assert!(!hs.raw_unbounded_memory_included);
     }
 
     #[tokio::test]
     async fn command_surface_missing_canonical_model_does_not_materialize_or_mix_legacy_yaml() {
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let missing_life_model_root = std::env::temp_dir().join(format!(
-            "openlife-main-chat-missing-hs-{}",
+            "openlife-main-chat-missing-lifemodel-{}",
             uuid::Uuid::new_v4()
         ));
         Arc::get_mut(&mut state)
@@ -21399,28 +20804,16 @@ mod tests {
             assert!(manager.load_existing().unwrap().is_none());
         }
 
-        let (life_model_context, hs_context) = command_surface_kernel_runtime_contexts(
-            &state,
-            "task-missing-hs",
-            "Give a basic answer without HS.",
-            openlife_core::agent::AgentTaskKind::Conversation,
-        )
-        .await;
+        let life_model_context =
+            command_surface_kernel_runtime_context(&state, "Give a basic answer.").await;
 
         {
             let manager = state.life_model_manager.lock().await;
             assert!(
                 manager.load_existing().unwrap().is_none(),
-                "bounded HS assembly must not create default LifeModel YAML"
+                "LifeModel context assembly must not create default legacy YAML"
             );
         }
-        let hs = hs_context
-            .as_ref()
-            .map(|context| &context.metadata)
-            .expect("hs metadata");
-        assert!(!hs.available);
-        assert!(hs.warning_codes.is_empty());
-        assert!(!hs.raw_life_model_yaml_included);
         let life_model = life_model_context
             .as_ref()
             .map(|context| &context.metadata)

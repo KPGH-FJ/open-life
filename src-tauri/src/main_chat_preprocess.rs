@@ -16,7 +16,7 @@ use openlife_core::vectors::{
     VectorSearchOutcome,
 };
 
-use crate::main_chat_hs_runtime::classify_hs_policy_topic;
+use crate::main_chat_policy_runtime::classify_main_chat_policy_topic;
 use crate::memory_gateway::{
     prepare_memory_search_access_telemetry, prepare_vector_search_access_telemetry,
     record_text_search_access_telemetry_with_state,
@@ -385,13 +385,13 @@ pub(crate) async fn preprocess_chat_input_with_options(
     let mut privacy_map = HashMap::new();
     for msg in messages {
         if msg.role == "user" {
-            let hs_local_only = classify_hs_policy_topic(&msg.content, &tools_prompt)
+            let policy_local_only = classify_main_chat_policy_topic(&msg.content, &tools_prompt)
                 != openlife_core::agent::PolicyTopic::General;
             let (masked, map) = sanitize_for_capability_privacy_mode(
                 &privacy_engine,
                 &msg.content,
                 options.capability_privacy_mode,
-                hs_local_only,
+                policy_local_only,
             );
             privacy_map.extend(map);
             let mut final_text = masked;
@@ -438,13 +438,14 @@ pub(crate) async fn preprocess_chat_input_with_options(
     };
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
-            let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
-                != openlife_core::agent::PolicyTopic::General;
+            let policy_local_only =
+                classify_main_chat_policy_topic(&user_msg.content, &tools_prompt)
+                    != openlife_core::agent::PolicyTopic::General;
             let (memory_query, _) = sanitize_for_capability_privacy_mode(
                 &privacy_engine,
                 &user_msg.content,
                 options.capability_privacy_mode,
-                hs_local_only,
+                policy_local_only,
             );
             let text_telemetry_ticket = prepare_memory_search_access_telemetry(state);
             let text_hits = {
@@ -456,8 +457,9 @@ pub(crate) async fn preprocess_chat_input_with_options(
                     })?
             };
 
-            let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
-                != openlife_core::agent::PolicyTopic::General;
+            let policy_local_only =
+                classify_main_chat_policy_topic(&user_msg.content, &tools_prompt)
+                    != openlife_core::agent::PolicyTopic::General;
             let vector_hits = match prepare_embedding_request_recorded(
                 &memory_query,
                 EmbeddingRouteConfig::from_product_config(
@@ -469,7 +471,7 @@ pub(crate) async fn preprocess_chat_input_with_options(
                     credential_version,
                     network_policy.clone(),
                 ),
-                plan_embedding_privacy(&memory_query, &privacy_engine, hs_local_only),
+                plan_embedding_privacy(&memory_query, &privacy_engine, policy_local_only),
             ) {
                 PreparedEmbeddingRequestOutcome::Rejected(outcome) => {
                     embed_err = Some(embedding_runtime_evidence(

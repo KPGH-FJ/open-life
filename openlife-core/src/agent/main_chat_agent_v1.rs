@@ -3115,7 +3115,6 @@ pub enum ContextSourceKind {
     Observation,
     LifeModelContext,
     HsSummary,
-    AcceptedGuidance,
     LifeModelYaml,
     RawMemorySnippet,
 }
@@ -3136,7 +3135,6 @@ impl ContextSourceKind {
             Self::Observation => "observation",
             Self::LifeModelContext => "life_model_context",
             Self::HsSummary => "hs_summary",
-            Self::AcceptedGuidance => "accepted_guidance",
             Self::LifeModelYaml => "life_model_yaml",
             Self::RawMemorySnippet => "raw_memory_snippet",
         }
@@ -11151,9 +11149,6 @@ fn transcript_metadata_field_value_allowed(
         "fileWritten",
         "fixtureBacked",
         "hardBlocked",
-        "hsContextAvailable",
-        "hsPacketSelected",
-        "hsRawLifeModelYamlIncluded",
         "kernelBackedPlanExecuteDraft",
         "kernelBackedProposalOnlyWrite",
         "kernelBackedReadOnlyToolLoop",
@@ -11244,10 +11239,7 @@ fn transcript_metadata_field_value_allowed(
             code.len() <= 96 && safe_typed_session_identifier(code) && !code.starts_with("hmac-")
         });
     }
-    if matches!(
-        field,
-        "sources" | "hsWarningCodes" | "toolSelectionCandidateCapabilityLabels"
-    ) {
+    if matches!(field, "sources" | "toolSelectionCandidateCapabilityLabels") {
         return value.as_array().is_some_and(|items| {
             items.len() <= MAX_TASK_SESSION_METADATA_ITEMS
                 && items
@@ -11720,7 +11712,6 @@ pub struct MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence {
     pub kernel_proposal_write_case_count: u32,
     pub kernel_plan_execute_case_count: u32,
     pub kernel_blocker_case_count: u32,
-    pub kernel_hs_context_case_count: u32,
     pub kernel_web_tool_case_count: u32,
     pub kernel_mcp_tool_case_count: u32,
     pub final_completion_ready: bool,
@@ -12060,9 +12051,6 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
     if command.kernel_blocker_case_count == 0 {
         push_unique_blocker(&mut blockers, "command_surface_kernel_blocker_missing");
     }
-    if command.kernel_hs_context_case_count == 0 {
-        push_unique_blocker(&mut blockers, "command_surface_kernel_hs_context_missing");
-    }
     if command.kernel_web_tool_case_count == 0 {
         push_unique_blocker(&mut blockers, "command_surface_kernel_web_tool_missing");
     }
@@ -12115,7 +12103,6 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
         && command.kernel_proposal_write_case_count > 0
         && command.kernel_plan_execute_case_count > 0
         && command.kernel_blocker_case_count > 0
-        && command.kernel_hs_context_case_count > 0
         && command.kernel_web_tool_case_count > 0
         && command.kernel_mcp_tool_case_count > 0
         && command.final_completion_ready;

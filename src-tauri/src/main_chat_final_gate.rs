@@ -546,7 +546,6 @@ pub(crate) fn command_surface_evidence_with_live_provider(
         && evidence.kernel_proposal_write_case_count > 0
         && evidence.kernel_plan_execute_case_count > 0
         && evidence.kernel_blocker_case_count > 0
-        && evidence.kernel_hs_context_case_count > 0
         && evidence.kernel_web_tool_case_count > 0
         && evidence.kernel_mcp_tool_case_count > 0
         && live_provider_ready;

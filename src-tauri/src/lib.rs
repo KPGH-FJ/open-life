@@ -32,12 +32,12 @@ pub(crate) mod main_chat_event_stream;
 pub(crate) mod main_chat_final_gate;
 #[allow(dead_code)]
 pub(crate) mod main_chat_generation_support;
-pub(crate) mod main_chat_hs_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
 #[allow(dead_code)]
 pub(crate) mod main_chat_live_provider_harness;
 pub(crate) mod main_chat_memory_proposals;
+pub(crate) mod main_chat_policy_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_preprocess;
 pub(crate) mod main_chat_react_execution;
@@ -97,7 +97,7 @@ mod main_chat_react_boundary_tests;
 mod main_chat_react_unit_tests;
 
 #[cfg(test)]
-mod main_chat_hs_runtime_tests;
+mod main_chat_policy_runtime_tests;
 
 #[cfg(test)]
 mod main_chat_task_control_tests;

@@ -1553,8 +1553,17 @@ path orchestration、LifeSignal extractor/bridge 和只服务这些路径的 pro
 删除前后的测试数量差异已与 81 项退役平台测试逐项闭合，全仓 Rust、前端和浏览器壳
 门禁通过，没有新增替代平台、治理账本或产品行为。
 
-下一板块：**按既定顺序进入 5.5B，收敛 Main Chat 与 PlanExecute 的 HS/Heuristic
-平行个性化；5.5C—5.5F 的范围与顺序保持不变。**
+5.5B“收敛 Main Chat 与 PlanExecute 的 HS/Heuristic 平行个性化”已于 2026-08-10
+完成：`main_chat_policy_runtime` 取代旧 `main_chat_hs_runtime`，只从 PolicyStore 计算敏感
+主题 LocalOnly 与外部写入 proposal-first，不再读取 HeuristicStore 或 authority registry；
+Main Chat Kernel 的 `hs_context`、`HsContextLoaded`、accepted-guidance prompt source 与对应
+metadata 已删除；React 与 PlanExecute 只携带不含 heuristic/guidance 的过渡 Policy packet，
+PlanExecute 不再启用 legacy guidance consumption，个性化由 Agent Memory 与 canonical
+LifeModel v2 的 planning、communication、retrieval、tool preference 路径承担。正常回答、
+无 LifeModel、当前指令覆盖、敏感 LocalOnly 与外部写入 blocker 反例均保持通过。
+
+下一板块：**按既定顺序进入 5.5C，收敛 generic runtime、scheduler、A2A 与 Proactive
+的旧个人模型输入；5.5D—5.5F 的范围与顺序保持不变。**
 
 第五阶段第一步实际完成：
 

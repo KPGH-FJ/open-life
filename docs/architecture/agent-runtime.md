@@ -17,7 +17,7 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-07-31 during repository cleanup source tracing.
+2026-08-10 during Phase 5.5B runtime personalization convergence.
 
 ## Source map
 
@@ -27,7 +27,7 @@ current source. Superseded execution plans remain in Git history.
 - `src-tauri/src/main_chat_turn_pipeline.rs`
 - `src-tauri/src/main_chat_kernel.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
-- `src-tauri/src/main_chat_hs_runtime.rs`
+- `src-tauri/src/main_chat_policy_runtime.rs`
 - `src-tauri/src/main_chat_react_tool_selection.rs`
 - `src-tauri/src/main_chat_react_runtime.rs`
 - `src-tauri/src/main_chat_react_execution.rs`
@@ -80,9 +80,16 @@ context from workspace/configured files such as `AGENTS.md`, `SOUL.md`,
 `USER.md`, `MEMORY.md`, and selected `SKILL.md`. Those surfaces are context,
 not policy override and not user truth promotion.
 
-`src-tauri/src/main_chat_hs_runtime.rs` constructs the HS runtime packet and
-classifies policy topic/risk. Sensitive or non-general topics can force local
-policy through the routing layer.
+`src-tauri/src/main_chat_policy_runtime.rs` classifies the current task's
+policy topic, risk, and write-side-effect requirements. It reads PolicyStore
+only: sensitive topics remain LocalOnly and unconfirmed external writes remain
+proposal-first. It does not read HeuristicStore or inject personalization.
+
+Main Chat personalization has one product path: bounded Agent Memory plus the
+canonical LifeModel v2 runtime context. The kernel no longer compiles an
+accepted-guidance/HS context in parallel. PlanExecute receives the same
+canonical v2 planning hints; its product entrypoint does not enable legacy
+runtime-guidance consumption.
 
 ## ReAct And Tool Execution
 

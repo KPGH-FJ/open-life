@@ -106,10 +106,11 @@ pub use hs_asset_authority::{
 };
 pub use hs_selector::{
     behavior_checks_for_packet, build_guidance_impact_read_model, build_runtime_hs_packet,
-    GuidanceAffectedSurface, GuidanceImpactReadModel, GuidanceImpactRef,
-    GuidancePolicyBoundarySummary, HSAssetExclusion, HSAssetKind, HSExclusionReason,
-    HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
-    SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
+    build_runtime_policy_packet, GuidanceAffectedSurface, GuidanceImpactReadModel,
+    GuidanceImpactRef, GuidancePolicyBoundarySummary, HSAssetExclusion, HSAssetKind,
+    HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
+    RuntimeHSPacketBuildInput, RuntimePolicyPacketBuildInput, SelectedGuidanceRef,
+    SelectedHeuristic, SelectedPolicyRef,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use life_event_store::CanonicalLifeEventSourceProof;

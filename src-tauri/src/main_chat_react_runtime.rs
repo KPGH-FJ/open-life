@@ -8,8 +8,8 @@ use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::ProviderInvocationProgress;
 
 use crate::main_chat_generation_support::{main_chat_provider_endpoint_kind, preview_text};
-use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::main_chat_kernel::{MainChatModelProgress, MainChatProviderAuthorization};
+use crate::main_chat_policy_runtime::build_chat_runtime_policy_packet;
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_agent_loop_messages, main_chat_react_agent_loop_execution_plan,
     rank_main_chat_react_tool_candidates_with_authorization_and_progress, MainChatReactActionPlan,
@@ -813,8 +813,8 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         messages: agent_loop_messages,
         layer: Layer::L2,
     };
-    let hs_packet = match build_chat_runtime_hs_packet(state, &task, &tools_prompt, None).await {
-        Ok(packet) => packet,
+    let policy_packet = match build_chat_runtime_policy_packet(state, &task, &tools_prompt, None) {
+        Ok(packet) => Some(packet),
         Err(err) => {
             let model_error_digest =
                 openlife_core::agent::metadata_safe::metadata_safe_value_digest(
@@ -1011,7 +1011,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             action_ctx = action_ctx.with_canonical_state(canonical_state);
         }
         action_ctx = action_ctx.with_agent_run_store(&resources.execution.agent_run_store);
-        if let Some(ref packet) = hs_packet {
+        if let Some(ref packet) = policy_packet {
             action_ctx = action_ctx.with_hs_runtime_packet(packet);
         }
         if let Some(ref fixture_output) = web_search_fixture_output {

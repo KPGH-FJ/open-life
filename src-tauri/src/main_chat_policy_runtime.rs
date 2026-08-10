@@ -1,75 +1,40 @@
 use std::sync::Arc;
 
 use openlife_core::agent::{
-    AgentTask, AgentTaskKind, HSAssetAuthorityRegistry, HSAssetCategory, HSAssetOwner, PolicyTopic,
-    RiskLevel, RuntimeHSPacket,
+    AgentTask, AgentTaskKind, PolicyTopic, RiskLevel, RuntimeHSPacket,
+    RuntimePolicyPacketBuildInput,
 };
 use openlife_core::privacy::{PrivacyEngine, PrivacyType};
 
 use crate::AppState;
 
-pub(crate) async fn build_chat_runtime_hs_packet(
+pub(crate) fn build_chat_runtime_policy_packet(
     state: &Arc<AppState>,
     task: &AgentTask,
     tools_prompt: &str,
     agent_run_id: Option<String>,
-) -> Result<Option<RuntimeHSPacket>, String> {
-    let authority_registry_path = {
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .hs_asset_authority_registry_path()
-    };
-    let authority_registry = HSAssetAuthorityRegistry::new(authority_registry_path)
-        .map_err(|error| format!("HS asset authority registry unavailable: {error}"))?;
-    let collaboration_authority = authority_registry
-        .authority(HSAssetCategory::CollaborationGuidance)
-        .map_err(|error| format!("HS collaboration guidance authority unavailable: {error}"))?;
-    let topic = classify_hs_policy_topic(&task.user_text, tools_prompt);
-    let tool_requirements = hs_tool_requirements(&task.user_text, tools_prompt);
-    let risk_level = hs_risk_level(topic, &tool_requirements);
-    // Current state is not owned by LifeModel v2. Until a typed StateStore
-    // fact is supplied here, omit state hints rather than reading legacy YAML.
-    let state_hints = serde_json::json!({});
+) -> Result<RuntimeHSPacket, String> {
+    let topic = classify_main_chat_policy_topic(&task.user_text, tools_prompt);
+    let tool_requirements = main_chat_policy_tool_requirements(&task.user_text, tools_prompt);
+    let risk_level = main_chat_policy_risk_level(topic, &tool_requirements);
     let sanitized_intent_summary =
-        sanitized_hs_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
+        sanitized_policy_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
 
-    let packet = {
-        let heuristic_store = state.heuristic_store.lock().await;
-        openlife_core::agent::build_runtime_hs_packet(
-            &state.policy_store,
-            &heuristic_store,
-            openlife_core::agent::RuntimeHSPacketBuildInput {
-                task,
-                sanitized_intent_summary,
-                privacy_topic: topic,
-                risk_level,
-                tool_requirements,
-                current_state_hints: state_hints,
-                token_budget: 384,
-                agent_run_id,
-            },
-        )
-        .map_err(|e| format!("HS runtime packet build failed: {}", e))?
-    };
-
-    if collaboration_authority.owner == HSAssetOwner::AcceptedHsStore {
-        return Ok(packet);
-    }
-
-    // LM-B shadow selection is evidence about deterministic materialization,
-    // not evidence that a product turn completed with the candidate owner.
-    // This pre-provider seam must never manufacture a product-scenario
-    // receipt: no provider/tool/final fact exists yet and the packet below is
-    // deliberately withheld while YAML remains canonical. A later, explicit
-    // trial verifier may record a receipt only after linking a successful
-    // terminal turn to the selected asset references and output digest.
-    let _shadow_packet = packet;
-    Ok(None)
+    openlife_core::agent::build_runtime_policy_packet(
+        &state.policy_store,
+        RuntimePolicyPacketBuildInput {
+            task,
+            sanitized_intent_summary,
+            privacy_topic: topic,
+            risk_level,
+            tool_requirements,
+            agent_run_id,
+        },
+    )
+    .map_err(|error| format!("Main Chat Policy runtime packet build failed: {error}"))
 }
 
-pub(crate) fn classify_hs_policy_topic(user_text: &str, _tools_prompt: &str) -> PolicyTopic {
+pub(crate) fn classify_main_chat_policy_topic(user_text: &str, _tools_prompt: &str) -> PolicyTopic {
     let text = user_text.to_lowercase();
     let privacy_engine = PrivacyEngine::new();
     let privacy_findings = privacy_engine.detect(&text);
@@ -223,7 +188,10 @@ pub(crate) fn classify_hs_policy_topic(user_text: &str, _tools_prompt: &str) -> 
     }
 }
 
-pub(crate) fn hs_tool_requirements(user_text: &str, _tools_prompt: &str) -> Vec<String> {
+pub(crate) fn main_chat_policy_tool_requirements(
+    user_text: &str,
+    _tools_prompt: &str,
+) -> Vec<String> {
     let text = user_text.to_lowercase();
     let mut requirements = Vec::new();
     if contains_any(
@@ -258,7 +226,7 @@ pub(crate) fn hs_tool_requirements(user_text: &str, _tools_prompt: &str) -> Vec<
     requirements
 }
 
-fn hs_risk_level(topic: PolicyTopic, tool_requirements: &[String]) -> RiskLevel {
+fn main_chat_policy_risk_level(topic: PolicyTopic, tool_requirements: &[String]) -> RiskLevel {
     if topic != PolicyTopic::General
         || tool_requirements
             .iter()
@@ -270,7 +238,7 @@ fn hs_risk_level(topic: PolicyTopic, tool_requirements: &[String]) -> RiskLevel 
     }
 }
 
-fn sanitized_hs_intent_summary(
+fn sanitized_policy_intent_summary(
     task_kind: AgentTaskKind,
     topic: PolicyTopic,
     tool_requirements: &[String],

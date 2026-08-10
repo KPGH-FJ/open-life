@@ -2314,7 +2314,6 @@ async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix()
     assert!(report.kernel_proposal_write_case_count > 0);
     assert!(report.kernel_plan_execute_case_count > 0);
     assert!(report.kernel_blocker_case_count > 0);
-    assert!(report.kernel_hs_context_case_count > 0);
     assert!(report.kernel_web_tool_case_count > 0);
     assert!(report.kernel_mcp_tool_case_count > 0);
     assert_eq!(

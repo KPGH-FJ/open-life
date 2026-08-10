@@ -6742,6 +6742,7 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
         "policyAuthority",
         &[
             "main_chat_policy_router",
+            "policy_store",
             "hs_policy_store",
             "scheduled_policy",
             "explicit_provider_probe_policy",
@@ -13621,6 +13622,26 @@ mod tests {
         )
         .unwrap();
         draft
+    }
+
+    #[test]
+    fn policy_store_provider_authority_is_accepted_as_typed_policy_evidence() {
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let request_id = "request-policy-store-authority";
+        let mut event = store
+            .append(provider_started_draft(
+                "task-policy-store-authority",
+                "run-policy-store-authority",
+                request_id,
+                "provider-a",
+            ))
+            .unwrap();
+        event.payload["policyAuthority"] = json!("policy_store");
+        event.payload["policyVersion"] = json!("policy_store_v1");
+
+        assert_eq!(event.payload["policyAuthority"], "policy_store");
+        assert_eq!(event.payload["policyVersion"], "policy_store_v1");
+        validate_persisted_provider_event_shape(&event).unwrap();
     }
 
     fn provider_terminal_draft(

@@ -66,6 +66,18 @@ pub struct RuntimeHSPacketBuildInput<'a> {
     pub agent_run_id: Option<String>,
 }
 
+/// Narrow input for callers that need PolicyStore authority but must not load
+/// the legacy HS/Heuristic personalization path.
+#[derive(Debug, Clone)]
+pub struct RuntimePolicyPacketBuildInput<'a> {
+    pub task: &'a AgentTask,
+    pub sanitized_intent_summary: String,
+    pub privacy_topic: PolicyTopic,
+    pub risk_level: RiskLevel,
+    pub tool_requirements: Vec<String>,
+    pub agent_run_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectedPolicyRef {
@@ -194,6 +206,9 @@ impl RuntimeHSPacket {
             crate::llm::ProviderPolicyAuthority::MainChatPolicyRouter => {
                 crate::llm::ProviderPolicyProvenanceKind::MainChatRouteDecision
             }
+            crate::llm::ProviderPolicyAuthority::PolicyStore => {
+                crate::llm::ProviderPolicyProvenanceKind::PolicyStoreRouteDecision
+            }
             crate::llm::ProviderPolicyAuthority::HsPolicyStore => {
                 crate::llm::ProviderPolicyProvenanceKind::HsRouteDecision
             }
@@ -212,9 +227,16 @@ impl RuntimeHSPacket {
             self.provider_authorization.decision_id(),
             route_digest,
         )];
+        let policy_kind = if self.provider_authorization.authority()
+            == crate::llm::ProviderPolicyAuthority::PolicyStore
+        {
+            crate::llm::ProviderPolicyProvenanceKind::PolicyStorePolicy
+        } else {
+            crate::llm::ProviderPolicyProvenanceKind::HsPolicy
+        };
         refs.extend(self.selected_policies.iter().map(|policy| {
             crate::llm::ProviderPolicyProvenanceRef::new(
-                crate::llm::ProviderPolicyProvenanceKind::HsPolicy,
+                policy_kind,
                 &policy.policy_id,
                 &policy.digest,
             )
@@ -437,6 +459,78 @@ pub fn build_runtime_hs_packet(
     // force downstream runtimes either to self-authorize or silently lose
     // cloud capability.
     Ok(Some(packet))
+}
+
+/// Build the transitional runtime packet from PolicyStore only.
+///
+/// Main Chat and PlanExecute still pass this envelope into generic runtime
+/// contracts until 5.5C removes the legacy packet type there. Unlike
+/// `build_runtime_hs_packet`, this function never reads HeuristicStore and can
+/// never select guidance or another personalization input.
+pub fn build_runtime_policy_packet(
+    policy_store: &PolicyStore,
+    input: RuntimePolicyPacketBuildInput<'_>,
+) -> Result<RuntimeHSPacket> {
+    let context_policy = policy_store.evaluate_context_policy(PolicyEvaluationRequest {
+        topic: input.privacy_topic,
+        requested_route: ModelRoutePolicy::CloudAllowed,
+        heuristic_effect: None,
+    });
+    let mut selected_policies = Vec::new();
+    if context_policy.hard_boundary() {
+        selected_policies.push(SelectedPolicyRef {
+            policy_id: context_policy.policy_id().to_string(),
+            reason: "sensitive_topic_route".into(),
+            route: Some(context_policy.route()),
+            digest: digest_str(context_policy.policy_id()),
+        });
+    }
+    if input
+        .tool_requirements
+        .iter()
+        .any(|requirement| matches!(requirement.as_str(), "write" | "external_side_effect"))
+    {
+        selected_policies.push(SelectedPolicyRef {
+            policy_id: BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.into(),
+            reason: "tool_requirement_write".into(),
+            route: None,
+            digest: digest_str(BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST),
+        });
+    }
+    let input_digest = digest_str(&format!(
+        "{}:{}:{}",
+        input.task.kind, input.risk_level, input.sanitized_intent_summary
+    ));
+    let selected_policy_ids = selected_policies
+        .iter()
+        .map(|policy| policy.policy_id.clone())
+        .collect();
+    let provider_authorization =
+        crate::llm::ProviderPolicyAuthorization::from_policy_store_context_decision(
+            &context_policy,
+            input_digest.clone(),
+        )?
+        .bind_policy_store_current_user_subject(&input.task.user_text)?;
+
+    Ok(RuntimeHSPacket {
+        selected_policies,
+        selected_heuristics: Vec::new(),
+        guidance_refs: Vec::new(),
+        estimated_tokens: 0,
+        audit: HSSelectionAudit {
+            agent_task_id: None,
+            agent_run_id: input.agent_run_id,
+            input_digest,
+            selected_policy_ids,
+            selected_heuristic_ids: Vec::new(),
+            selected_guidance_ids: Vec::new(),
+            selected_guidance_refs: Vec::new(),
+            excluded_assets: Vec::new(),
+            estimated_tokens: 0,
+            token_budget: 0,
+        },
+        provider_authorization,
+    })
 }
 
 pub fn behavior_checks_for_packet(packet: &RuntimeHSPacket) -> Vec<HSBehaviorCheckSummary> {
