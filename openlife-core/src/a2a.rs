@@ -521,12 +521,10 @@ pub fn validate_external_task_request(req: &SendTaskRequest) -> anyhow::Result<(
 use crate::agent::context_assembler::AssembleOutput;
 use crate::agent::types::{AgentTaskKind, ContextSummary, RedactionLevel};
 use crate::agent::{LayeredReasoner, ReasoningInput, ReasoningStrategy, ReasoningTrace};
-use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 
 pub struct A2AServerHandler {
-    pub life_model: LifeModel,
     pub privacy_engine: PrivacyEngine,
 }
 
@@ -563,28 +561,6 @@ struct A2ATaskExecution {
 }
 
 impl A2ATaskExecution {
-    fn completed(text: String) -> Self {
-        let text = if text.len() > A2A_MAX_RESULT_BYTES {
-            let (_, digest) = crate::agent::metadata_safe::metadata_safe_value_digest(
-                &serde_json::Value::String(text),
-            );
-            serde_json::json!({
-                "truncated": true,
-                "resultDigest": digest,
-                "reason": "a2a_result_exceeded_response_limit",
-            })
-            .to_string()
-        } else {
-            text
-        };
-        Self {
-            state: TaskState::Completed,
-            text,
-            reasoning_trace: None,
-            provider_summary: crate::scheduler::ProviderReceiptSummary::default(),
-        }
-    }
-
     fn failed(reason_code: &str) -> Self {
         Self {
             state: TaskState::Failed,
@@ -773,7 +749,7 @@ impl A2AServerHandler {
         }
     }
 
-    pub fn default_agent_card(port: u16, _model: &LifeModel) -> AgentCard {
+    pub fn default_agent_card(port: u16) -> AgentCard {
         AgentCard {
             name: "OpenLife".into(),
             description: "Private OpenLife agent endpoint. Pairing is required for tasks.".into(),
@@ -795,28 +771,7 @@ impl A2AServerHandler {
             }),
             default_input_modes: vec!["text".into()],
             default_output_modes: vec!["text".into()],
-            skills: vec![
-                AgentSkill {
-                    id: "openlife.query_life_model".into(),
-                    name: "Query Life Model".into(),
-                    description: "Returns a policy-filtered view after authenticated task review."
-                        .into(),
-                    tags: vec!["lifemodel".into()],
-                    examples: None,
-                    input_modes: None,
-                    output_modes: None,
-                },
-                AgentSkill {
-                    id: "openlife.assess_values".into(),
-                    name: "Assess Values".into(),
-                    description: "Assesses alignment without exposing private values in discovery."
-                        .into(),
-                    tags: vec!["values".into()],
-                    examples: None,
-                    input_modes: None,
-                    output_modes: None,
-                },
-                AgentSkill {
+            skills: vec![AgentSkill {
                     id: "openlife.reasoning_bridge".into(),
                     name: "Reasoning Bridge".into(),
                     description: "Runs the Layered Reasoning Meaning→Strategy→Generation pipeline and returns a structured trace".into(),
@@ -824,8 +779,7 @@ impl A2AServerHandler {
                     examples: None,
                     input_modes: None,
                     output_modes: None,
-                },
-            ],
+                }],
         }
     }
 
@@ -838,92 +792,10 @@ impl A2AServerHandler {
             .unwrap_or("");
 
         let execution = match skill_hint {
-            "openlife.query_life_model" => A2ATaskExecution::completed(self.query_life_model()),
-            "openlife.assess_values" => A2ATaskExecution::completed(self.assess_values(&req)),
             "openlife.reasoning_bridge" => self.reasoning_bridge(&req).await,
             _ => A2ATaskExecution::failed("a2a_skill_not_authorized"),
         };
         execution.into_response(req.id)
-    }
-
-    fn query_life_model(&self) -> String {
-        let summary = serde_json::json!({
-            "identity": {
-                "name": self.life_model.identity.name,
-                "values": self.life_model.identity.values.iter().map(|v| serde_json::json!({
-                    "name": v.name,
-                    "weight": v.weight,
-                })).collect::<Vec<_>>(),
-                "personality_traits": self.life_model.identity.personality_traits.iter().map(|t| &t.trait_name).collect::<Vec<_>>(),
-                "life_philosophy": self.life_model.identity.life_philosophy,
-            },
-            "goals": {
-                "short_term": self.life_model.goals.short_term.iter().map(|g| &g.name).collect::<Vec<_>>(),
-                "medium_term": self.life_model.goals.medium_term.iter().map(|g| &g.name).collect::<Vec<_>>(),
-                "long_term": self.life_model.goals.long_term.iter().map(|g| &g.name).collect::<Vec<_>>(),
-                "life_goals": self.life_model.goals.life_goals.iter().map(|g| &g.name).collect::<Vec<_>>(),
-            },
-            "capabilities": {
-                "skills": self.life_model.capabilities.skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
-                "resources": self.life_model.capabilities.resources.iter().map(|r| &r.name).collect::<Vec<_>>(),
-                "networks": self.life_model.capabilities.networks,
-            },
-            "state": {
-                "current_focus": self.life_model.state.current_focus,
-                "emotional_state": {
-                    "current_mood": self.life_model.state.emotional_state.current_mood,
-                    "stress_level": self.life_model.state.emotional_state.stress_level,
-                    "fulfillment_score": self.life_model.state.emotional_state.fulfillment_score,
-                },
-                "health_status": {
-                    "physical": self.life_model.state.health_status.physical,
-                    "mental": self.life_model.state.health_status.mental,
-                    "energy_level": self.life_model.state.health_status.energy_level,
-                },
-            },
-        });
-        let json_str = serde_json::to_string_pretty(&summary).unwrap_or_default();
-        let (sanitized, _) = self.privacy_engine.desensitize(&json_str);
-        sanitized
-    }
-
-    fn assess_values(&self, req: &SendTaskRequest) -> String {
-        let user_text = extract_text_from_message(&req.message);
-        let issues = self.privacy_engine.detect(&user_text);
-        let filtered = self.privacy_engine.desensitize(&user_text);
-        let passes = crate::core_value_signal_extractor::contains_core_value_signal(&filtered.0);
-
-        // Desensitize values and goal names so external agents never see raw PII
-        let raw_values = self
-            .life_model
-            .identity
-            .values
-            .iter()
-            .map(|v| v.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let (desensitized_values, _) = self.privacy_engine.desensitize(&raw_values);
-        let raw_goals = self
-            .life_model
-            .goals
-            .short_term
-            .iter()
-            .chain(self.life_model.goals.medium_term.iter())
-            .chain(self.life_model.goals.long_term.iter())
-            .chain(self.life_model.goals.life_goals.iter())
-            .map(|g| g.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let (desensitized_goals, _) = self.privacy_engine.desensitize(&raw_goals);
-
-        serde_json::to_string_pretty(&serde_json::json!({
-            "core_values": desensitized_values,
-            "goals_summary": desensitized_goals,
-            "privacy_issues_detected": issues.len(),
-            "privacy_issue_types": issues.iter().map(|(t, _)| format!("{:?}", t)).collect::<Vec<_>>(),
-            "values_alignment_passed": passes,
-            "desensitized_input": filtered.0,
-        })).unwrap_or_default()
     }
 
     async fn reasoning_bridge(&self, req: &SendTaskRequest) -> A2ATaskExecution {
@@ -976,7 +848,6 @@ impl A2AServerHandler {
 
         let (desensitized_user_text, _) = self.privacy_engine.desensitize(&user_text);
         let assemble_output = AssembleOutput {
-            life_model: std::sync::Arc::new(self.life_model.clone()),
             tools_prompt: String::new(),
             privacy_map: HashMap::new(),
             desensitized_messages: std::sync::Arc::new(vec![ChatMessage {
@@ -985,7 +856,7 @@ impl A2AServerHandler {
             }]),
             memory_context: String::new(),
             context_summary: ContextSummary {
-                life_model_empty: self.life_model.is_effectively_empty(),
+                life_model_empty: true,
                 included_life_model_sections: vec![],
                 memory_hit_count: 0,
                 memory_sources: vec![],
@@ -999,8 +870,13 @@ impl A2AServerHandler {
         let run_id = uuid::Uuid::new_v4().to_string();
         let collector = crate::scheduler::ProviderReceiptCollector::default();
         let scheduler = scheduler.with_provider_receipt_collector(collector.clone());
-        let reasoner = LayeredReasoner::new(scheduler, self.life_model.clone())
+        let policy_context = crate::agent::RuntimePolicyContext::fail_closed();
+        let reasoner = LayeredReasoner::new(scheduler)
             .with_network_policy(network_policy)
+            .with_provider_policy_context(
+                policy_context.provider_authorization().clone(),
+                policy_context.policy_provenance_refs().to_vec(),
+            )
             .with_privacy_engine(self.privacy_engine.clone());
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -1419,7 +1295,6 @@ mod tests {
     #[tokio::test]
     async fn missing_or_unknown_skill_fails_without_falling_back_to_life_model_query() {
         let handler = A2AServerHandler {
-            life_model: LifeModel::default(),
             privacy_engine: PrivacyEngine::new(),
         };
         let request = A2AClient::build_text_task(None, "untrusted peer request");
@@ -1439,7 +1314,6 @@ mod tests {
     #[test]
     fn reasoning_trace_projection_is_bounded_and_digest_only_when_oversized() {
         let handler = A2AServerHandler {
-            life_model: LifeModel::default(),
             privacy_engine: PrivacyEngine::new(),
         };
         let mut trace = ReasoningTrace {
@@ -1541,7 +1415,6 @@ mod tests {
         )
         .with_scripted_generation_response("must-not-run");
         let handler = A2AServerHandler {
-            life_model: LifeModel::default(),
             privacy_engine: PrivacyEngine::new(),
         };
         let mut req = A2AClient::build_text_task(Some("a2a-failure".into()), "reason");
@@ -1584,7 +1457,6 @@ mod tests {
         )
         .with_scripted_generation_response("下一步 fixture");
         let handler = A2AServerHandler {
-            life_model: LifeModel::default(),
             privacy_engine: PrivacyEngine::new(),
         };
         let req = A2AClient::build_text_task(Some("a2a-scripted".into()), "reason");
@@ -1605,6 +1477,16 @@ mod tests {
         assert_eq!(task.message.role, "user");
         let text = extract_text_from_message(&task.message);
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn dev_agent_card_exposes_only_bounded_reasoning_skill() {
+        let card = A2AServerHandler::default_agent_card(8766);
+        assert_eq!(card.skills.len(), 1);
+        assert_eq!(card.skills[0].id, "openlife.reasoning_bridge");
+        let serialized = serde_json::to_string(&card).unwrap();
+        assert!(!serialized.contains("query_life_model"));
+        assert!(!serialized.contains("assess_values"));
     }
 
     #[test]

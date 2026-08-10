@@ -320,12 +320,26 @@ impl LifeModelGovernor {
         input: &RuntimeInput,
         local_model_available: bool,
     ) -> GovernanceDecision {
-        if input.hs_packet.is_some() {
-            return self.govern_model_route(ModelRouteGovernanceInput {
-                hs_packet: input.hs_packet.clone(),
-                risk_level: runtime_risk_level(input.hs_packet.as_ref()),
-                local_model_available,
-            });
+        if input.policy_context.provider_authorization().data_route()
+            == crate::llm::ProviderDataRoute::LocalOnly
+            && !local_model_available
+        {
+            return decision(
+                GovernanceSubject::ModelRoute,
+                GovernanceDecisionKind::Block,
+                RiskLevel::High,
+                "typed Policy requires local execution but no local model is available",
+                summary(
+                    GovernanceSubject::ModelRoute,
+                    None,
+                    None,
+                    RiskLevel::High,
+                    input.source_run_id.as_deref(),
+                    None,
+                    "local_only_model_unavailable",
+                ),
+                Vec::new(),
+            );
         }
 
         decision(
@@ -517,14 +531,6 @@ fn is_write_like_action(tool_name: &str, action_kind: &str) -> bool {
     ]
     .iter()
     .any(|needle| normalized_tool.contains(needle))
-}
-
-fn runtime_risk_level(packet: Option<&RuntimeHSPacket>) -> RiskLevel {
-    if packet_requires_local_only(packet) {
-        RiskLevel::High
-    } else {
-        RiskLevel::Low
-    }
 }
 
 fn classify_decision_kind(kind: GovernanceDecisionKind) -> GovernanceDecisionClassification {

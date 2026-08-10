@@ -3,10 +3,9 @@ use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, ExternalWriteGovernanceInput,
     GovernanceDecisionClassification, GovernanceDecisionKind, HSSelectionAudit, LifeModelGovernor,
     MemoryWriteGovernanceInput, ModelRouteGovernanceInput, RiskLevel, RuntimeHSPacket,
-    RuntimeInput, SelectedPolicyRef, ToolGovernanceInput,
+    RuntimeInput, RuntimePolicyContext, SelectedPolicyRef, ToolGovernanceInput,
 };
 use crate::layer::Layer;
-use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 
 fn sensitive_packet() -> RuntimeHSPacket {
@@ -50,10 +49,9 @@ fn runtime_input(tools_prompt: &str) -> RuntimeInput {
             }],
             layer: Layer::L2,
         },
-        LifeModel::default(),
         None,
         tools_prompt,
-        None,
+        RuntimePolicyContext::fail_closed(),
         AgentExecutionBudget::default(),
     )
 }

@@ -30,7 +30,6 @@ use openlife_core::agent::{
     ReasoningTrace, RedactionLevel, RiskLevel,
 };
 use openlife_core::config::{AppConfig, NetworkPolicy};
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::{
     BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
     ProviderInvocationReceipt, ProviderInvocationStatus, ProviderPayloadCategory,
@@ -2448,10 +2447,6 @@ where
                 .collect::<Vec<_>>(),
         );
         let agent_loop_attempt = {
-            // The generic AgentRuntime still carries a legacy LifeModel type.
-            // Main Chat must not feed it legacy YAML user facts: canonical v2
-            // personalization is already supplied through the bounded packet.
-            let empty_legacy_agent_runtime_model = LifeModel::default();
             let progress_session_id = session_id.to_string();
             let mut emit_progress = |progress| {
                 emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
@@ -2463,7 +2458,6 @@ where
                 session_id,
                 &user_text,
                 &react_messages,
-                &empty_legacy_agent_runtime_model,
                 &privacy_engine,
                 &privacy_map,
                 &plan,

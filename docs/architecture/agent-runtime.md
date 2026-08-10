@@ -17,7 +17,7 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-08-10 during Phase 5.5B runtime personalization convergence.
+2026-08-10 during Phase 5.5C generic runtime input convergence.
 
 ## Source map
 
@@ -85,11 +85,27 @@ policy topic, risk, and write-side-effect requirements. It reads PolicyStore
 only: sensitive topics remain LocalOnly and unconfirmed external writes remain
 proposal-first. It does not read HeuristicStore or inject personalization.
 
+Generic `AgentRuntime` and `AgentLoop` accept an explicit `RuntimePolicyContext`
+containing provider authorization, metadata-safe provenance and the
+proposal-first action fact. They do not accept a legacy YAML `LifeModel`, an
+HS packet, heuristic guidance or an implicit personalization prompt. Agent
+Memory remains an explicit input; canonical LifeModel v2 personalization is
+compiled by the owning product adapter before the generic runtime boundary.
+
 Main Chat personalization has one product path: bounded Agent Memory plus the
 canonical LifeModel v2 runtime context. The kernel no longer compiles an
 accepted-guidance/HS context in parallel. PlanExecute receives the same
 canonical v2 planning hints; its product entrypoint does not enable legacy
 runtime-guidance consumption.
+
+Scheduled tasks consume their durable task claim, typed Policy, canonical
+StateStore snapshot and Agent Memory. Planner mode does not advertise the
+legacy `life_model.read` or mixed-owner `goal.read` tools. The authenticated
+development A2A sidecar exposes only its bounded reasoning bridge and does not
+serve legacy personal-profile query skills. Proactive suggestions consume a
+bounded projection assembled from canonical LifeModel v2 plus StateStore;
+EvidenceStore affects reminder priority only and does not become a learning or
+personal-model authority.
 
 ## ReAct And Tool Execution
 

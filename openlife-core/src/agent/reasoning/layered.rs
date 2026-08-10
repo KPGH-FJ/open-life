@@ -3,7 +3,6 @@ use crate::agent::reasoning::{
     ReasoningConfig, ReasoningError, ReasoningInput, ReasoningOutput, ReasoningPhaseKind,
     ReasoningStrategy, ReasoningTrace,
 };
-use crate::life_model::LifeModel;
 use crate::llm::{
     BoundedContextBlock, ChatMessage, ContextManifest, PreparedProviderOutcome,
     PreparedProviderRequest, ProviderInvocationReceipt, ProviderLocalOnlyReason,
@@ -14,14 +13,10 @@ use crate::scheduler::InferenceScheduler;
 use serde_json::json;
 // use tokio::time::{timeout, Duration};
 
-const MAX_LAYERED_LIFE_GUIDANCE_ITEMS: usize = 6;
-const MAX_LAYERED_LIFE_GUIDANCE_CHARS: usize = 2_048;
-
 /// Layered reasoning strategy: three-phase sequential reasoning.
 /// Layered reasoning strategy with meaning, strategy, and generation phases.
 pub struct LayeredReasoner {
     scheduler: InferenceScheduler,
-    life_model: LifeModel,
     config: ReasoningConfig,
     network_policy: crate::config::NetworkPolicy,
     provider_authorization: ProviderPolicyAuthorization,
@@ -31,10 +26,9 @@ pub struct LayeredReasoner {
 }
 
 impl LayeredReasoner {
-    pub fn new(scheduler: InferenceScheduler, life_model: LifeModel) -> Self {
+    pub fn new(scheduler: InferenceScheduler) -> Self {
         Self {
             scheduler,
-            life_model,
             config: ReasoningConfig::default(),
             network_policy: crate::config::NetworkPolicy::default(),
             provider_authorization: ProviderPolicyAuthorization::local_only_fail_closed(
@@ -46,14 +40,9 @@ impl LayeredReasoner {
         }
     }
 
-    pub fn with_config(
-        scheduler: InferenceScheduler,
-        life_model: LifeModel,
-        config: ReasoningConfig,
-    ) -> Self {
+    pub fn with_config(scheduler: InferenceScheduler, config: ReasoningConfig) -> Self {
         Self {
             scheduler,
-            life_model,
             config,
             network_policy: crate::config::NetworkPolicy::default(),
             provider_authorization: ProviderPolicyAuthorization::local_only_fail_closed(
@@ -90,50 +79,6 @@ impl LayeredReasoner {
         self
     }
 
-    fn truncate_to_chars(value: String, max_chars: usize) -> String {
-        if value.chars().count() <= max_chars {
-            value
-        } else {
-            value.chars().take(max_chars).collect()
-        }
-    }
-
-    fn selected_life_guidance(&self) -> Option<String> {
-        let mut guidance = self
-            .life_model
-            .identity
-            .values
-            .iter()
-            .take(3)
-            .map(|value| format!("value: {} — {}", value.name, value.description))
-            .collect::<Vec<_>>();
-        guidance.extend(
-            self.life_model
-                .goals
-                .short_term
-                .iter()
-                .chain(self.life_model.goals.medium_term.iter())
-                .chain(self.life_model.goals.long_term.iter())
-                .chain(self.life_model.goals.life_goals.iter())
-                .filter(|goal| goal.priority >= 3)
-                .take(MAX_LAYERED_LIFE_GUIDANCE_ITEMS.saturating_sub(guidance.len()))
-                .map(|goal| {
-                    format!(
-                        "goal(priority={}): {} — {}",
-                        goal.priority, goal.name, goal.description
-                    )
-                }),
-        );
-        if guidance.is_empty() {
-            None
-        } else {
-            Some(Self::truncate_to_chars(
-                guidance.join("\n"),
-                MAX_LAYERED_LIFE_GUIDANCE_CHARS,
-            ))
-        }
-    }
-
     fn prepare_phase_payload(
         &self,
         phase: &str,
@@ -145,13 +90,6 @@ impl LayeredReasoner {
             category: "reasoning_instruction".into(),
             content: system_prompt.to_string(),
         }];
-        if let Some(content) = self.selected_life_guidance() {
-            context_blocks.push(BoundedContextBlock {
-                source_ref: "life_model.selected_guidance".into(),
-                category: "selected_life_guidance".into(),
-                content,
-            });
-        }
 
         // One batch keeps placeholders unique across messages and context blocks.
         let raw_payload = messages
@@ -173,11 +111,7 @@ impl LayeredReasoner {
             .iter_mut()
             .zip(masked_payload.into_iter().skip(message_count))
         {
-            block.content = if block.category == "selected_life_guidance" {
-                Self::truncate_to_chars(masked, MAX_LAYERED_LIFE_GUIDANCE_CHARS)
-            } else {
-                masked
-            };
+            block.content = masked;
         }
 
         let mut selected_context_refs = context_blocks
@@ -782,13 +716,12 @@ mod tests {
             false,
         )
         .with_scripted_generation_response("fixture");
-        let reasoner = LayeredReasoner::new(scheduler, LifeModel::default())
-            .with_provider_policy_context(
-                crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
-                    crate::llm::ProviderLocalOnlyReason::TestFixture,
-                ),
-                Vec::new(),
-            );
+        let reasoner = LayeredReasoner::new(scheduler).with_provider_policy_context(
+            crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+                crate::llm::ProviderLocalOnlyReason::TestFixture,
+            ),
+            Vec::new(),
+        );
 
         let prepared = reasoner
             .prepare_phase_request(
@@ -811,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn layered_life_guidance_is_bounded_privacy_filtered_and_manifested() {
+    fn layered_reasoning_has_no_implicit_lifemodel_context() {
         let scheduler = InferenceScheduler::new(
             "local-model".into(),
             true,
@@ -823,17 +756,7 @@ mod tests {
             false,
         )
         .with_scripted_generation_response("fixture");
-        let mut life_model = LifeModel::default();
-        life_model
-            .goals
-            .short_term
-            .push(crate::life_model::GoalItem {
-                name: "Contact private@example.com".into(),
-                description: "Call 13812345678 and then continue ".repeat(400),
-                priority: 9,
-                ..Default::default()
-            });
-        let reasoner = LayeredReasoner::new(scheduler, life_model);
+        let reasoner = LayeredReasoner::new(scheduler);
 
         let (messages, blocks, manifest) = reasoner.prepare_phase_payload(
             "strategy",
@@ -841,25 +764,20 @@ mod tests {
                 role: "user".into(),
                 content: "My email is user@example.com".into(),
             }],
-            "Use the selected guidance only.",
+            "Use only the explicit task context.",
         );
         let serialized = serde_json::to_string(&(messages, &blocks)).unwrap();
 
-        assert!(!serialized.contains("private@example.com"));
         assert!(!serialized.contains("user@example.com"));
-        assert!(!serialized.contains("13812345678"));
         assert!(serialized.contains("<EMAIL_"));
-        let guidance = blocks
-            .iter()
-            .find(|block| block.category == "selected_life_guidance")
-            .expect("selected LifeModel guidance must be an explicit bounded block");
-        assert!(guidance.content.chars().count() <= MAX_LAYERED_LIFE_GUIDANCE_CHARS);
-        assert!(manifest
+        assert!(!manifest
             .included_context_categories
-            .contains(&"selected_life_guidance".to_string()));
-        assert!(manifest
+            .iter()
+            .any(|category| category.contains("life")));
+        assert!(!manifest
             .selected_context_refs
-            .contains(&"life_model.selected_guidance".to_string()));
+            .iter()
+            .any(|source| source.contains("life_model")));
         assert!(!manifest.raw_life_model_included);
     }
 

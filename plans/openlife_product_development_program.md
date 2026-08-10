@@ -1275,10 +1275,11 @@ authority 收敛，不建设新学习平台，也不重新实现 5.1—5.4 已�
 `golden_paths` 没有 shipped product caller，主要在彼此和测试中互相调用；旧 backend
 completion/readiness report 也没有产品消费者。另一方面，不能按名称整包删除：
 `EvidenceStore` 仍被 Proactive 与来源证据使用；`LifeEventStore` 仍在启动和 Memory
-gateway 中有真实 owner；`HeuristicStore`、`RuntimeHSPacket` 和
-`HSAssetAuthorityRegistry` 仍被 Main Chat、PlanExecute、scheduler 和启动流程调用；
-generic runtime、A2A 与 Proactive 仍读取 legacy `LifeModel`。因此每个切片必须先证明
-替代，再删除 caller 和 store，不能把“看起来历史”当成无调用证据。
+gateway 中有真实 owner。5.5B—5.5C 已移除 Main Chat、PlanExecute、generic runtime、
+scheduler、A2A 与 Proactive 对 `RuntimeHSPacket`/legacy `LifeModel` 的运行时依赖；
+`HeuristicStore`、`RuntimeHSPacket`、`HSAssetAuthorityRegistry` 与 legacy model router
+仍有启动、兼容或历史测试 caller，必须在 5.5D—5.5E 按真实 command 与数据条件继续
+收敛，不能把“看起来历史”当成无调用证据。
 
 ###### 5.5A 删除零产品调用的验证与成熟化平台
 
@@ -1557,13 +1558,26 @@ path orchestration、LifeSignal extractor/bridge 和只服务这些路径的 pro
 完成：`main_chat_policy_runtime` 取代旧 `main_chat_hs_runtime`，只从 PolicyStore 计算敏感
 主题 LocalOnly 与外部写入 proposal-first，不再读取 HeuristicStore 或 authority registry；
 Main Chat Kernel 的 `hs_context`、`HsContextLoaded`、accepted-guidance prompt source 与对应
-metadata 已删除；React 与 PlanExecute 只携带不含 heuristic/guidance 的过渡 Policy packet，
+metadata 已删除；ReAct 与 PlanExecute 在 5.5B 完成时只携带不含 heuristic/guidance 的
+过渡 Policy packet，
 PlanExecute 不再启用 legacy guidance consumption，个性化由 Agent Memory 与 canonical
 LifeModel v2 的 planning、communication、retrieval、tool preference 路径承担。正常回答、
 无 LifeModel、当前指令覆盖、敏感 LocalOnly 与外部写入 blocker 反例均保持通过。
 
-下一板块：**按既定顺序进入 5.5C，收敛 generic runtime、scheduler、A2A 与 Proactive
-的旧个人模型输入；5.5D—5.5F 的范围与顺序保持不变。**
+5.5C“收敛 generic runtime、scheduler、A2A 与 Proactive 的旧个人模型输入”已于
+2026-08-10 完成开发：generic `AgentRuntime`/`AgentLoop`/`RuntimeInput` 不再接受 legacy
+YAML `LifeModel`、`RuntimeHSPacket` 或 guidance mode，统一消费 typed
+`RuntimePolicyContext`、显式 Agent Memory 与工具合同；Main Chat、PlanExecute 与 scheduler
+均在 owner 边界先完成 Policy 计算。scheduled Planner 只读取 task、Policy、StateStore、
+Agent Memory 与 proposal 能力，不再宣称不可用的 legacy LifeModel/goal 读取；A2A 删除
+旧画像查询/价值评估 skill，只保留受认证 dev sidecar 的 bounded reasoning bridge，外发
+仍经权限与网络治理；Proactive 改为由 Tauri 从 canonical LifeModel v2 和 StateStore
+组装 bounded read model，EvidenceStore 只影响同类提醒优先级。旧 runtime guidance 专用
+测试已删除，保留的正常、缺失、LocalOnly、proposal-first、A2A 故障与提醒拒绝反例已
+迁移到新合同。
+
+下一板块：**按既定顺序进入 5.5D，删除退役 command、bridge 与前端合同；5.5E—5.5F
+的范围与顺序保持不变，不新增 5.5G。**
 
 第五阶段第一步实际完成：
 

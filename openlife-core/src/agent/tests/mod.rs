@@ -14,7 +14,6 @@ mod plan_execute;
 mod policy_store;
 mod runtime_contract;
 mod runtime_convergence;
-mod runtime_guidance_integration;
 mod runtime_integration;
 mod selector;
 mod strategy;

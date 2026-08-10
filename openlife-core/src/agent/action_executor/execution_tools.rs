@@ -1,9 +1,10 @@
 use crate::agent::action_executor::helpers::{
     call_a2a_agent, canonical_tool_source, ensure_external_write_content_size,
     external_write_content_preview, extract_host_from_url, fetch_url_async,
-    filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
-    is_path_in_safe_paths_async, is_path_lexically_in_safe_paths, prepare_web_content_observation,
-    reserve_web_search_rate_limit, search_web_async, ToolCallInternalResult,
+    filesystem_access_error, is_direct_external_write_tool, is_path_in_safe_paths_async,
+    is_path_lexically_in_safe_paths, policy_requires_external_write_proposal,
+    prepare_web_content_observation, reserve_web_search_rate_limit, search_web_async,
+    ToolCallInternalResult,
 };
 use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
@@ -432,7 +433,7 @@ impl super::ActionExecutor {
                     });
                 };
 
-                if hs_requires_external_write_proposal(ctx)
+                if policy_requires_external_write_proposal(ctx)
                     && is_direct_external_write_tool(&target_manifest)
                 {
                     ctx.authorize_tool_dispatch(

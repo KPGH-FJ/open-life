@@ -8,15 +8,12 @@ use crate::agent::policy_store::{
 };
 use crate::agent::{
     ActionExecutionContext, ActionExecutorConfig, AgentActionRequest, AgentRun, AgentRunStore,
-    AgentRuntime, AgentRuntimeConfig, AgentTask, AgentTaskKind, GovernanceDecisionClassification,
-    HSBehaviorCheckSummary, HSSelectionAudit, HeuristicStore, ModelRouter, ProviderAvailability,
-    RiskLevel, TaskType, ToolGateway,
+    AgentTask, AgentTaskKind, GovernanceDecisionClassification, HSBehaviorCheckSummary,
+    HSSelectionAudit, HeuristicStore, ModelRouter, ProviderAvailability, RiskLevel, TaskType,
+    ToolGateway,
 };
 use crate::layer::Layer;
-use crate::life_model::LifeModel;
-use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
-use crate::scheduler::InferenceScheduler;
 use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
 use crate::tool_permissions::ToolPermissionPolicy;
 use std::sync::{
@@ -261,114 +258,6 @@ fn hs_model_router_fails_closed_when_local_only_audit_id_has_no_local_model() {
         .contains("local-only policy selected but no local model is available"));
 }
 
-#[tokio::test]
-async fn hs_runtime_packet_keeps_seeded_heuristics_out_of_runtime_guidance_prompt_by_default() {
-    let packet = seeded_packet(
-        AgentTaskKind::Planning,
-        PolicyTopic::General,
-        serde_json::json!({ "energy": 2 }),
-        vec![],
-    );
-    let runtime = AgentRuntime::with_config(
-        LifeModel::default(),
-        InferenceScheduler::default(),
-        AgentRuntimeConfig::default(),
-    );
-    let task = AgentTask {
-        kind: AgentTaskKind::Planning,
-        session_id: "session-runtime".into(),
-        user_text: "raw-private-planning-text-789".into(),
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: "Plan my day while tired".into(),
-        }],
-        layer: Layer::L1,
-    };
-
-    let output = runtime
-        .generate_direct_with_hs_packet(
-            &task,
-            &LifeModel::default(),
-            "",
-            None,
-            vec![],
-            PrivacyEngine::new(),
-            Some(packet),
-        )
-        .await
-        .unwrap();
-
-    let system_prompt = output
-        .final_messages
-        .iter()
-        .find(|message| message.role == "system")
-        .map(|message| message.content.as_str())
-        .unwrap_or("");
-    assert!(!system_prompt.contains("gentle_planning"));
-    assert!(!system_prompt.contains("Reduce planning intensity"));
-    assert!(output
-        .hs_selection_audit
-        .as_ref()
-        .unwrap()
-        .selected_heuristic_ids
-        .contains(&BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.to_string()));
-
-    let audit_json = serde_json::to_string(&output.hs_selection_audit).unwrap();
-    assert!(!audit_json.contains("raw-private-planning-text-789"));
-    assert!(!audit_json.contains("Reduce planning intensity"));
-}
-
-#[tokio::test]
-async fn agent_runtime_execute_task_can_receive_hs_packet_on_real_path() {
-    let packet = seeded_packet(
-        AgentTaskKind::Planning,
-        PolicyTopic::General,
-        serde_json::json!({ "energy": 2 }),
-        vec![],
-    );
-    let runtime = AgentRuntime::with_config(
-        LifeModel::default(),
-        InferenceScheduler::default(),
-        AgentRuntimeConfig::default(),
-    );
-    let task = AgentTask {
-        kind: AgentTaskKind::Planning,
-        session_id: "session-runtime-main".into(),
-        user_text: "raw-main-runtime-text-123".into(),
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: "Plan my day with low energy".into(),
-        }],
-        layer: Layer::L1,
-    };
-
-    let output = runtime
-        .execute_task_with_hs_packet(
-            &task,
-            &LifeModel::default(),
-            "",
-            None,
-            vec![],
-            PrivacyEngine::new(),
-            Some(packet),
-        )
-        .await
-        .unwrap();
-
-    let system_prompt = output
-        .final_messages
-        .iter()
-        .find(|message| message.role == "system")
-        .map(|message| message.content.as_str())
-        .unwrap_or("");
-    assert!(!system_prompt.contains("gentle_planning"));
-    assert!(!system_prompt.contains("Reduce planning intensity"));
-    assert!(output.hs_selection_audit.is_some());
-
-    let audit_json = serde_json::to_string(&output.hs_selection_audit).unwrap();
-    assert!(!audit_json.contains("raw-main-runtime-text-123"));
-}
-
 #[test]
 fn agent_run_store_persists_metadata_safe_hs_audit_and_behavior_checks() {
     let packet = seeded_packet(
@@ -477,7 +366,7 @@ async fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: Some(&packet),
+        external_write_requires_proposal: true,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -803,13 +692,7 @@ async fn file_write_proposal_rejects_oversized_content_before_proposal_insertion
 }
 
 #[tokio::test]
-async fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion() {
-    let packet = seeded_packet(
-        AgentTaskKind::ToolExecution,
-        PolicyTopic::General,
-        serde_json::json!({}),
-        vec!["write".into()],
-    );
+async fn typed_policy_direct_external_write_rejects_oversized_content_before_proposal_insertion() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_builtin(
         ToolManifest {
@@ -852,7 +735,7 @@ async fn hs_direct_external_write_rejects_oversized_content_before_proposal_inse
     .with_canonical_write_admission(
         &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
     )
-    .with_hs_runtime_packet(&packet);
+    .with_external_write_proposal_policy(true);
 
     let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
@@ -887,13 +770,7 @@ async fn hs_direct_external_write_rejects_oversized_content_before_proposal_inse
 }
 
 #[tokio::test]
-async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_insertion() {
-    let packet = seeded_packet(
-        AgentTaskKind::ToolExecution,
-        PolicyTopic::General,
-        serde_json::json!({}),
-        vec!["write".into()],
-    );
+async fn typed_policy_wrapped_external_write_rejects_oversized_content_before_proposal_insertion() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_builtin(
         ToolManifest {
@@ -948,7 +825,7 @@ async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal
     .with_canonical_write_admission(
         &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
     )
-    .with_hs_runtime_packet(&packet);
+    .with_external_write_proposal_policy(true);
 
     let result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
         .execute(
@@ -982,14 +859,7 @@ async fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal
 }
 
 #[tokio::test]
-async fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
-    let packet = seeded_packet(
-        AgentTaskKind::ToolExecution,
-        PolicyTopic::General,
-        serde_json::json!({}),
-        vec!["write".into()],
-    );
-
+async fn typed_policy_external_write_overrides_allow_until_revoked_and_skips_executor() {
     let executor_ran = Arc::new(AtomicBool::new(false));
     let executor_ran_for_tool = executor_ran.clone();
     let mut registry = crate::mcp::McpRegistry::new();
@@ -1052,7 +922,7 @@ async fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_execut
         bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: Some(&packet),
+        external_write_requires_proposal: true,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,
@@ -1116,14 +986,7 @@ async fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_execut
 }
 
 #[tokio::test]
-async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() {
-    let packet = seeded_packet(
-        AgentTaskKind::ToolExecution,
-        PolicyTopic::General,
-        serde_json::json!({}),
-        vec!["write".into()],
-    );
-
+async fn typed_policy_intercepts_mcp_call_tool_target_even_when_allowed() {
     let executor_ran = Arc::new(AtomicBool::new(false));
     let executor_ran_for_tool = executor_ran.clone();
     let mut registry = crate::mcp::McpRegistry::new();
@@ -1201,7 +1064,7 @@ async fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allo
         bound_content_receipt_issuer: Some(&agent_run_store),
         network_policy: None,
         web_search_fixture_output: None,
-        hs_runtime_packet: Some(&packet),
+        external_write_requires_proposal: true,
         tool_dispatch_observer: None,
         tool_started_transition_observer: None,
         tool_audit_persistence_observer: None,

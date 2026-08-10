@@ -1,37 +1,35 @@
 use std::sync::Arc;
 
 use openlife_core::agent::{
-    AgentTask, AgentTaskKind, PolicyTopic, RiskLevel, RuntimeHSPacket,
-    RuntimePolicyPacketBuildInput,
+    AgentTask, AgentTaskKind, PolicyTopic, RiskLevel, RuntimePolicyContext,
+    RuntimePolicyContextBuildInput,
 };
 use openlife_core::privacy::{PrivacyEngine, PrivacyType};
 
 use crate::AppState;
 
-pub(crate) fn build_chat_runtime_policy_packet(
+pub(crate) fn build_chat_runtime_policy_context(
     state: &Arc<AppState>,
     task: &AgentTask,
     tools_prompt: &str,
-    agent_run_id: Option<String>,
-) -> Result<RuntimeHSPacket, String> {
+) -> Result<RuntimePolicyContext, String> {
     let topic = classify_main_chat_policy_topic(&task.user_text, tools_prompt);
     let tool_requirements = main_chat_policy_tool_requirements(&task.user_text, tools_prompt);
     let risk_level = main_chat_policy_risk_level(topic, &tool_requirements);
     let sanitized_intent_summary =
         sanitized_policy_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
 
-    openlife_core::agent::build_runtime_policy_packet(
+    openlife_core::agent::build_runtime_policy_context(
         &state.policy_store,
-        RuntimePolicyPacketBuildInput {
+        RuntimePolicyContextBuildInput {
             task,
             sanitized_intent_summary,
             privacy_topic: topic,
             risk_level,
             tool_requirements,
-            agent_run_id,
         },
     )
-    .map_err(|error| format!("Main Chat Policy runtime packet build failed: {error}"))
+    .map_err(|error| format!("Main Chat typed Policy context build failed: {error}"))
 }
 
 pub(crate) fn classify_main_chat_policy_topic(user_text: &str, _tools_prompt: &str) -> PolicyTopic {

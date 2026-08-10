@@ -1,71 +1,128 @@
 use crate::agent::action_executor::ActionExecutionContext;
 use crate::agent::agent_loop::{AgentLoopConfig, AgentLoopResult};
 use crate::agent::types::{AgentAction, AgentExecutionBudget, AgentObservation, AgentTask};
-use crate::agent::RuntimeHSPacket;
-use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
+use crate::llm::{ProviderPolicyAuthorization, ProviderPolicyProvenanceRef};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeGuidanceConsumptionMode {
-    #[default]
-    Disabled,
-    ExplicitRuntime,
+/// Narrow, typed policy result consumed by generic Agent runtime paths.
+///
+/// It deliberately contains no heuristic, guidance, LifeModel, or prompt
+/// content. Product owners evaluate policy before entering the runtime and
+/// pass only the provider capability, its provenance, and the one tool-policy
+/// fact the action boundary needs.
+#[derive(Debug, Clone)]
+pub struct RuntimePolicyContext {
+    provider_authorization: ProviderPolicyAuthorization,
+    policy_provenance_refs: Vec<ProviderPolicyProvenanceRef>,
+    external_write_requires_proposal: bool,
 }
 
-impl RuntimeGuidanceConsumptionMode {
-    pub fn is_enabled(self) -> bool {
-        matches!(self, Self::ExplicitRuntime)
+impl RuntimePolicyContext {
+    pub fn new(
+        provider_authorization: ProviderPolicyAuthorization,
+        mut policy_provenance_refs: Vec<ProviderPolicyProvenanceRef>,
+        external_write_requires_proposal: bool,
+    ) -> Self {
+        policy_provenance_refs.sort();
+        policy_provenance_refs.dedup();
+        Self {
+            provider_authorization,
+            policy_provenance_refs,
+            external_write_requires_proposal,
+        }
+    }
+
+    pub fn fail_closed() -> Self {
+        let authorization = ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::MissingCanonicalPolicy,
+        );
+        let route_digest = crate::agent::metadata_safe::metadata_safe_text_digest(&format!(
+            "{}:{}:{:?}",
+            authorization.decision_id(),
+            authorization.policy_version(),
+            authorization.data_route(),
+        ))
+        .1;
+        let provenance = vec![ProviderPolicyProvenanceRef::new(
+            crate::llm::ProviderPolicyProvenanceKind::FailClosedRouteDecision,
+            authorization.decision_id(),
+            route_digest,
+        )];
+        Self::new(authorization, provenance, true)
+    }
+
+    pub fn from_scheduled_claim(claim: &crate::tasks::ScheduledTaskClaim) -> anyhow::Result<Self> {
+        let authorization = ProviderPolicyAuthorization::from_scheduled_claim(claim)?;
+        let provenance = vec![ProviderPolicyProvenanceRef::new(
+            crate::llm::ProviderPolicyProvenanceKind::ScheduledRouteDecision,
+            authorization.decision_id(),
+            &claim.provider_grant().policy_decision_digest,
+        )];
+        Ok(Self::new(authorization, provenance, true))
+    }
+
+    pub fn provider_authorization(&self) -> &ProviderPolicyAuthorization {
+        &self.provider_authorization
+    }
+
+    pub fn policy_provenance_refs(&self) -> &[ProviderPolicyProvenanceRef] {
+        &self.policy_provenance_refs
+    }
+
+    pub fn external_write_requires_proposal(&self) -> bool {
+        self.external_write_requires_proposal
     }
 }
 
 /// Thin input boundary shared by current Direct/Layered/ReAct adapters.
 ///
 /// This is intentionally a contract layer, not a RuntimeStrategy abstraction.
-/// Future maturation work can derive LifeEvent candidates from the same input
-/// without making raw task data accepted HS truth.
+/// The contract carries task, Agent Memory context, tools, and an evaluated
+/// Policy result. LifeModel personalization is owned by explicit canonical-v2
+/// product adapters and is never inferred from a legacy YAML compatibility
+/// model here.
 #[derive(Debug, Clone)]
 pub struct RuntimeInput {
     pub task: AgentTask,
-    pub life_model_compat: LifeModel,
+    pub source_run_id: Option<String>,
     pub memory_context: Option<String>,
     pub tools_prompt: String,
-    pub hs_packet: Option<RuntimeHSPacket>,
-    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+    pub policy_context: RuntimePolicyContext,
     pub execution_budget: AgentExecutionBudget,
 }
 
 impl RuntimeInput {
     pub fn from_agent_task(
         task: AgentTask,
-        life_model_compat: LifeModel,
         memory_context: Option<String>,
         tools_prompt: impl Into<String>,
-        hs_packet: Option<RuntimeHSPacket>,
+        policy_context: RuntimePolicyContext,
         execution_budget: AgentExecutionBudget,
     ) -> Self {
         Self {
             task,
-            life_model_compat,
+            source_run_id: None,
             memory_context,
             tools_prompt: tools_prompt.into(),
-            hs_packet,
-            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
+            policy_context,
             execution_budget,
         }
     }
 
-    pub fn with_guidance_consumption_mode(mut self, mode: RuntimeGuidanceConsumptionMode) -> Self {
-        self.guidance_consumption_mode = mode;
+    pub fn with_source_run_id(mut self, source_run_id: impl Into<String>) -> Self {
+        let source_run_id = source_run_id.into();
+        if !source_run_id.trim().is_empty() {
+            self.source_run_id = Some(source_run_id);
+        }
         self
     }
 
     pub fn new_chat(
         session_id: impl Into<String>,
         user_text: impl Into<String>,
-        life_model_compat: LifeModel,
         tools_prompt: impl Into<String>,
+        policy_context: RuntimePolicyContext,
     ) -> Self {
         let user_text = user_text.into();
         Self::from_agent_task(
@@ -79,10 +136,9 @@ impl RuntimeInput {
                 user_text,
                 layer: crate::layer::Layer::L2,
             },
-            life_model_compat,
             None,
             tools_prompt,
-            None,
+            policy_context,
             AgentExecutionBudget::default(),
         )
     }
@@ -90,11 +146,9 @@ impl RuntimeInput {
     pub fn agent_runtime_params(&self) -> AgentRuntimeParams<'_> {
         AgentRuntimeParams {
             task: &self.task,
-            life_model: &self.life_model_compat,
             tools_prompt: &self.tools_prompt,
             memory_context: self.memory_context.clone(),
-            hs_packet: self.hs_packet.clone(),
-            guidance_consumption_mode: self.guidance_consumption_mode,
+            policy_context: self.policy_context.clone(),
         }
     }
 
@@ -109,13 +163,12 @@ impl RuntimeInput {
         }
     }
 
-    pub fn attach_hs_packet_to_action_context<'a>(
+    pub fn attach_policy_to_action_context<'a>(
         &'a self,
         mut context: ActionExecutionContext<'a>,
     ) -> ActionExecutionContext<'a> {
-        if let Some(packet) = self.hs_packet.as_ref() {
-            context.hs_runtime_packet = Some(packet);
-        }
+        context.external_write_requires_proposal =
+            self.policy_context.external_write_requires_proposal();
         context
     }
 
@@ -128,18 +181,16 @@ impl RuntimeInput {
 
 pub struct AgentRuntimeParams<'a> {
     pub task: &'a AgentTask,
-    pub life_model: &'a LifeModel,
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
-    pub hs_packet: Option<RuntimeHSPacket>,
-    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+    pub policy_context: RuntimePolicyContext,
 }
 
 /// Candidate event shape for the future maturation loop.
 ///
-/// RuntimeOutput only carries these drafts. Persisting them into EvidenceStore,
-/// LifeModel-HS assets, or the compatibility LifeModel must happen in a later
-/// governed maturation path.
+/// RuntimeOutput only carries these drafts. Persisting them into Agent Memory
+/// or a canonical LifeModel proposal must happen through its owning governed
+/// product path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LifeEventDraft {

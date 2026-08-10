@@ -64,7 +64,6 @@ pub use action_executor::{
     DurableToolExecutionOwner, ToolAuditPersistenceObserver, ToolDispatchAttempt,
     ToolDispatchObserver, ToolStartedTransitionObserver,
 };
-pub use agent_loop::apply_react_guidance_to_config;
 pub use agent_loop::{
     AgentLoop, AgentLoopAllowedToolAction, AgentLoopConfig, AgentLoopResult, AgentLoopRunRequest,
     AgentLoopTerminalDisposition, StreamingCallback,
@@ -74,8 +73,8 @@ pub use canonical_write_admission::{
     CanonicalWritePermit,
 };
 pub use context_assembler::{
-    AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
-    MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,
+    AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, MemoryAssembler,
+    MemoryHit, PrivacyAssembler, ToolsAssembler,
 };
 pub use evidence_graph::{
     build_evidence_timeline, evaluate_evidence_graph, EvidenceClusterSummary,
@@ -106,10 +105,10 @@ pub use hs_asset_authority::{
 };
 pub use hs_selector::{
     behavior_checks_for_packet, build_guidance_impact_read_model, build_runtime_hs_packet,
-    build_runtime_policy_packet, GuidanceAffectedSurface, GuidanceImpactReadModel,
+    build_runtime_policy_context, GuidanceAffectedSurface, GuidanceImpactReadModel,
     GuidanceImpactRef, GuidancePolicyBoundarySummary, HSAssetExclusion, HSAssetKind,
     HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
-    RuntimeHSPacketBuildInput, RuntimePolicyPacketBuildInput, SelectedGuidanceRef,
+    RuntimeHSPacketBuildInput, RuntimePolicyContextBuildInput, SelectedGuidanceRef,
     SelectedHeuristic, SelectedPolicyRef,
 };
 #[cfg(any(test, feature = "test-utils"))]
@@ -229,7 +228,7 @@ pub use review_workflow::{
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{
-    AgentRuntimeParams, LifeEventDraft, RuntimeGuidanceConsumptionMode, RuntimeInput, RuntimeOutput,
+    AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput, RuntimePolicyContext,
 };
 pub use runtime_strategy_contract::{
     RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,

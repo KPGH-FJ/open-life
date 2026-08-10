@@ -7,7 +7,6 @@ use openlife_core::embedding::{
     execute_embedding, prepare_embedding_request_recorded, EmbeddingInvocationReceipt,
     EmbeddingProfile, EmbeddingRouteConfig, PreparedEmbeddingRequestOutcome,
 };
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemorySearchHit;
 use openlife_core::privacy::PrivacyEngine;
@@ -321,7 +320,6 @@ pub(crate) async fn preprocess_chat_input(
     state: &Arc<AppState>,
 ) -> Result<
     (
-        LifeModel,
         String,
         PrivacyEngine,
         HashMap<String, String>,
@@ -350,7 +348,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
     options: MainChatPreprocessOptions,
 ) -> Result<
     (
-        LifeModel,
         String,
         PrivacyEngine,
         HashMap<String, String>,
@@ -360,21 +357,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
     ),
     String,
 > {
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager
-            .load_active_legacy_runtime_model()
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(LifeModel::default_model)
-    };
-
-    {
-        let mut cache = state.hot_cache.write().await;
-        if cache.is_stale(&life_model) {
-            cache.refresh(&life_model);
-        }
-    }
-
     let tools_prompt = {
         let reg = state.mcp_registry.lock().await;
         reg.tools_prompt()
@@ -639,20 +621,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
         String::new()
     };
 
-    let hot_context = {
-        let cache = state.hot_cache.read().await;
-        cache.to_context_string()
-    };
-    if !hot_context.is_empty() {
-        desensitized_messages.insert(
-            0,
-            ChatMessage {
-                role: "system".into(),
-                content: hot_context,
-            },
-        );
-    }
-
     if !memory_context.is_empty() {
         if let Some(last_user) = desensitized_messages.iter_mut().rfind(|m| m.role == "user") {
             last_user.content = format!("{}\n\n{}", last_user.content, memory_context);
@@ -660,13 +628,8 @@ pub(crate) async fn preprocess_chat_input_with_options(
     }
 
     let context_summary = openlife_core::agent::types::ContextSummary {
-        life_model_empty: life_model.identity.name.is_empty(),
-        included_life_model_sections: vec![
-            "identity".to_string(),
-            "goals".to_string(),
-            "capabilities".to_string(),
-            "state".to_string(),
-        ],
+        life_model_empty: true,
+        included_life_model_sections: Vec::new(),
         memory_hit_count: memory_hit_count as i64,
         memory_sources,
         used_tools_prompt: !tools_prompt.is_empty(),
@@ -679,7 +642,6 @@ pub(crate) async fn preprocess_chat_input_with_options(
     };
 
     Ok((
-        life_model,
         tools_prompt,
         privacy_engine,
         privacy_map,
@@ -1144,7 +1106,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let evidence = direct.5.expect("rebuild evidence must reach Main Chat");
+        let evidence = direct.4.expect("rebuild evidence must reach Main Chat");
         assert!(evidence.contains("rebuild_required"), "{evidence}");
         assert!(evidence.contains("\"unknownProfileCount\":1"), "{evidence}");
     }

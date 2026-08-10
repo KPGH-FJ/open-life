@@ -1,5 +1,7 @@
 use crate::AppState;
-use openlife_core::proactive::{ProactiveConfig, ProactiveEngine};
+use openlife_core::proactive::{
+    ProactiveConfig, ProactiveEngine, ProactiveLongTermGoal, ProactivePersonalContext,
+};
 use std::sync::Arc;
 use tauri::State;
 
@@ -20,13 +22,62 @@ pub(crate) async fn get_proactive_suggestions_with_state(
         ..Default::default()
     };
 
-    let life_model = {
+    let canonical_life_model = {
         let manager = state.life_model_manager.lock().await;
         manager
-            .load_active_legacy_runtime_model()
-            .map_err(|e| format!("Failed to load LifeModel: {}", e))?
-            .unwrap_or_else(openlife_core::life_model::LifeModel::default_model)
+            .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .map_err(|e| format!("Failed to load canonical LifeModel v2: {e}"))?
     };
+    let state_store = state
+        .state_store
+        .as_ref()
+        .ok_or_else(|| "Proactive StateStore unavailable".to_string())?;
+    let daily_tasks = state_store
+        .get_product_daily_tasks()
+        .map_err(|e| format!("Failed to load proactive daily tasks: {e}"))?
+        .into_iter()
+        .map(|task| task.title)
+        .collect::<Vec<_>>();
+    let latest_state_observation_at = state_store
+        .list_state_observations(false)
+        .map_err(|e| format!("Failed to load proactive state observations: {e}"))?
+        .into_iter()
+        .map(|observation| observation.updated_at)
+        .max();
+    let (values, long_term_goals) = if let Some(version) = canonical_life_model {
+        version
+            .validate_integrity()
+            .map_err(|e| format!("Canonical LifeModel v2 integrity failed: {e}"))?;
+        let values = version
+            .document
+            .values
+            .iter()
+            .map(|value| value.statement.clone())
+            .collect();
+        let long_term_goals = version
+            .document
+            .long_term_goals
+            .iter()
+            .map(|goal| {
+                let confirmed_at = chrono::DateTime::parse_from_rfc3339(&goal.confirmed_at)
+                    .map_err(|_| "Canonical LifeModel goal has invalid confirmedAt".to_string())?
+                    .with_timezone(&chrono::Utc);
+                Ok(ProactiveLongTermGoal {
+                    direction: goal.direction.clone(),
+                    confirmed_at,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        (values, long_term_goals)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let personal_context = ProactivePersonalContext::bounded(
+        daily_tasks,
+        values,
+        long_term_goals,
+        latest_state_observation_at,
+    );
 
     // Count pending proposals
     let (pending_count, high_risk_count, oldest_days) = {
@@ -61,7 +112,7 @@ pub(crate) async fn get_proactive_suggestions_with_state(
     let engine = ProactiveEngine::new(config);
     let evidence_store = state.evidence_store.lock().await;
     Ok(engine.generate_suggestions_with_evidence(
-        &life_model,
+        &personal_context,
         pending_count,
         high_risk_count,
         oldest_days,

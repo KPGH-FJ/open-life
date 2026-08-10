@@ -1,4 +1,4 @@
-use crate::main_chat_policy_runtime::build_chat_runtime_policy_packet;
+use crate::main_chat_policy_runtime::build_chat_runtime_policy_context;
 use crate::AppState;
 use openlife_core::agent::main_chat_runtime_contract::{
     ActionEvidence, BlockerEvidence, ObservationEvidence, PlanArtifactFactView,
@@ -6,14 +6,13 @@ use openlife_core::agent::main_chat_runtime_contract::{
     PlanArtifactStepView, PlanArtifactView, ProposalEvidence, StrategyEvidence,
 };
 use openlife_core::agent::{
-    behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentTask, AgentTaskKind,
-    ContextSummary, LifeModelGovernor, PlanExecuteInput, PlanExecuteProductContract,
-    PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteSessionStatus,
-    PlanExecuteStepEdit, PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace,
-    RedactionLevel, RiskLevel, RuntimeInput, RuntimeStrategyRegistry,
+    AgentExecutionBudget, AgentRun, AgentTask, AgentTaskKind, ContextSummary, LifeModelGovernor,
+    PlanExecuteInput, PlanExecuteProductContract, PlanExecuteProductScenario, PlanExecuteService,
+    PlanExecuteSession, PlanExecuteSessionStatus, PlanExecuteStepEdit,
+    PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace, RedactionLevel, RiskLevel,
+    RuntimeInput, RuntimeStrategyRegistry,
 };
 use openlife_core::layer::Layer;
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -282,10 +281,6 @@ async fn create_plan_execute_session_with_source_run(
         .or_else(|| owned_plan_run.as_ref().map(|run| run.id.clone()))
         .ok_or_else(|| "Plan-Execute source AgentRun id missing".to_string())?;
 
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().unwrap_or_else(|_| LifeModel::default())
-    };
     let tools_prompt = {
         let registry = state.mcp_registry.lock().await;
         registry.tools_prompt()
@@ -303,23 +298,12 @@ async fn create_plan_execute_session_with_source_run(
         }],
         layer: Layer::L2,
     };
-    let policy_packet = Some(build_chat_runtime_policy_packet(
-        state,
-        &task,
-        &tools_prompt,
-        Some(run_id.clone()),
-    )?);
-    let behavior_checks = policy_packet
-        .as_ref()
-        .map(behavior_checks_for_packet)
-        .unwrap_or_default();
-    let policy_selection_audit = policy_packet.as_ref().map(|packet| packet.audit.clone());
+    let policy_context = build_chat_runtime_policy_context(state, &task, &tools_prompt)?;
     let runtime_input = RuntimeInput::from_agent_task(
         task,
-        life_model.clone(),
         None,
         tools_prompt,
-        policy_packet,
+        policy_context,
         AgentExecutionBudget {
             max_steps: max_steps as u32,
             max_tool_calls: 0,
@@ -327,7 +311,8 @@ async fn create_plan_execute_session_with_source_run(
             allow_cloud: false,
             allow_writes: false,
         },
-    );
+    )
+    .with_source_run_id(run_id.clone());
     let service = PlanExecuteService;
     let plan_input = PlanExecuteInput::from_runtime_input(
         runtime_input,
@@ -346,8 +331,6 @@ async fn create_plan_execute_session_with_source_run(
 
     if let Some(run) = owned_plan_run.as_mut() {
         run.task_id = session.session_id.clone();
-        run.hs_selection_audit = policy_selection_audit;
-        run.behavior_checks = behavior_checks;
         initialize_product_run_immutable_evidence(run, &session);
         create_product_run(state, run).await?;
     }

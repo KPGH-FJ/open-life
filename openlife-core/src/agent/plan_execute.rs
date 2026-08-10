@@ -2,9 +2,7 @@ use crate::agent::governor::{
     GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
     ToolGovernanceInput,
 };
-use crate::agent::hs_selector::{
-    build_guidance_impact_read_model, GuidanceAffectedSurface, GuidanceImpactReadModel,
-};
+use crate::agent::hs_selector::GuidanceImpactReadModel;
 use crate::agent::review_workflow::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
 };
@@ -239,9 +237,7 @@ impl PlanExecuteProductContract {
                 "scenarioId": self.scenario.as_id(),
                 "taskKind": input.task.kind.to_string(),
                 "maxStepCount": self.max_step_count,
-                "hasHsPacket": input.hs_packet.is_some(),
-                "selectedGuidanceCount": selected_guidance_count(input),
-                "guidanceImpactKinds": selected_guidance_impact_kinds(input),
+                "typedPolicyPresent": true,
                 "toolsPromptPresent": !input.tools_prompt.trim().is_empty(),
                 "memoryContextPresent": input.memory_context.is_some(),
                 "proposalFirstWriteBoundary": true,
@@ -471,18 +467,7 @@ impl PlanExecuteService {
             });
         }
 
-        let guidance_impact = if input.runtime_input.guidance_consumption_mode.is_enabled() {
-            input.runtime_input.hs_packet.as_ref().map(|packet| {
-                Box::new(build_guidance_impact_read_model(
-                    source_run_id.as_deref(),
-                    "plan_execute",
-                    packet,
-                    vec![GuidanceAffectedSurface::PlanExecuteTrace],
-                ))
-            })
-        } else {
-            None
-        };
+        let guidance_impact = None;
         let report = PlanExecuteReport::new(
             plan_id,
             source_run_id,
@@ -1602,10 +1587,9 @@ fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
 
 fn metadata_safe_weekly_objective(input: &PlanExecuteInput) -> String {
     format!(
-        "scenario=weekly_planning task_kind={} max_steps={} selected_guidance_count={} lifemodel_hint_count={}",
+        "scenario=weekly_planning task_kind={} max_steps={} lifemodel_hint_count={}",
         input.runtime_input.task.kind,
         input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT),
-        selected_guidance_count(&input.runtime_input),
         input.life_model_hints.len(),
     )
 }
@@ -2193,58 +2177,13 @@ impl PlanExecuteReport {
     }
 }
 
-fn selected_guidance_count(input: &RuntimeInput) -> usize {
-    if !input.guidance_consumption_mode.is_enabled() {
-        return 0;
-    }
-    input
-        .hs_packet
-        .as_ref()
-        .map(|packet| packet.guidance_refs.len())
-        .unwrap_or(0)
-}
-
-fn selected_guidance_impact_kinds(input: &RuntimeInput) -> Vec<String> {
-    if !input.guidance_consumption_mode.is_enabled() {
-        return Vec::new();
-    }
-    input
-        .hs_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .map(|guidance| guidance.impact_kind.clone())
-                .fold(Vec::new(), |mut kinds, kind| {
-                    push_unique(&mut kinds, kind);
-                    kinds
-                })
-        })
-        .unwrap_or_default()
-}
-
 fn has_gentle_planning_guidance(input: &PlanExecuteInput) -> bool {
-    if !input.runtime_input.guidance_consumption_mode.is_enabled() {
-        return false;
-    }
-    input
-        .runtime_input
-        .hs_packet
-        .as_ref()
-        .is_some_and(|packet| {
-            packet
-                .guidance_refs
-                .iter()
-                .any(|guidance| guidance.impact_kind == "gentle_planning")
-        })
+    let _ = input;
+    false
 }
 
 fn source_run_id(input: &RuntimeInput) -> Option<String> {
-    input
-        .hs_packet
-        .as_ref()
-        .and_then(|packet| packet.audit.agent_run_id.clone())
+    input.source_run_id.clone()
 }
 
 fn execute_internal_read_only_step(step: &PlanStep) -> PlanObservationSummary {

@@ -1,12 +1,13 @@
 use crate::agent::types::ContextSummary;
-use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Assembles context for an AgentRun by combining LifeModel, Memory, Privacy, and Tools.
+/// Assembles context for an AgentRun from Agent Memory, privacy, and tools.
+/// Canonical LifeModel v2 context is selected by the owning product adapter and
+/// passed as bounded messages instead of being loaded implicitly here.
 pub trait ContextAssembler: Send + Sync {
     fn name(&self) -> &'static str;
     fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()>;
@@ -33,7 +34,6 @@ pub struct MemoryHit {
 pub struct AssembleInput {
     pub session_id: String,
     pub messages: Arc<Vec<ChatMessage>>,
-    pub life_model: Arc<LifeModel>,
     pub tools_prompt: String,
     pub privacy_engine: PrivacyEngine,
     // Memory prefetch data (async-retrieved, passed in for sync assembly)
@@ -44,7 +44,6 @@ pub struct AssembleInput {
 
 /// Output from context assembly.
 pub struct AssembleOutput {
-    pub life_model: Arc<LifeModel>,
     pub tools_prompt: String,
     pub privacy_map: HashMap<String, String>,
     pub desensitized_messages: Arc<Vec<ChatMessage>>,
@@ -56,13 +55,12 @@ pub struct AssembleOutput {
 impl AssembleOutput {
     fn from_input(input: &AssembleInput) -> Self {
         Self {
-            life_model: input.life_model.clone(),
             tools_prompt: input.tools_prompt.clone(),
             privacy_map: HashMap::new(),
             desensitized_messages: input.messages.clone(),
             memory_context: String::new(),
             context_summary: ContextSummary {
-                life_model_empty: input.life_model.is_effectively_empty(),
+                life_model_empty: true,
                 included_life_model_sections: Vec::new(),
                 memory_hit_count: 0,
                 memory_sources: Vec::new(),
@@ -72,27 +70,6 @@ impl AssembleOutput {
             },
             embed_error: None,
         }
-    }
-}
-
-/// LifeModel assembler: loads and refreshes hot cache.
-pub struct LifeModelAssembler;
-
-impl ContextAssembler for LifeModelAssembler {
-    fn name(&self) -> &'static str {
-        "life_model"
-    }
-
-    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()> {
-        output.life_model = input.life_model.clone();
-        output.context_summary.life_model_empty = input.life_model.is_effectively_empty();
-        output.context_summary.included_life_model_sections = vec![
-            "identity".to_string(),
-            "goals".to_string(),
-            "capabilities".to_string(),
-            "state".to_string(),
-        ];
-        Ok(())
     }
 }
 
@@ -235,23 +212,12 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello world".to_string(),
             }]),
-            life_model: Arc::new(LifeModel::default()),
             tools_prompt: String::new(),
             privacy_engine: PrivacyEngine::default(),
             memory_context: None,
             memory_hits: vec![],
             memory_retrieval_time_ms: 0,
         }
-    }
-
-    #[test]
-    fn test_life_model_assembler() {
-        let assembler = LifeModelAssembler;
-        let input = create_test_input();
-        let output = assembler.assemble(&input).unwrap();
-
-        assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
-        // Note: LifeModel::default() may not be effectively empty depending on implementation
     }
 
     #[test]
@@ -317,9 +283,7 @@ mod tests {
 
     #[test]
     fn test_composite_assembler_with_memory() {
-        let assembler = CompositeAssembler::new()
-            .with(Box::new(LifeModelAssembler))
-            .with(Box::new(MemoryAssembler));
+        let assembler = CompositeAssembler::new().with(Box::new(MemoryAssembler));
 
         let mut input = create_test_input();
         input.memory_context = Some("关键记忆".to_string());
@@ -333,7 +297,10 @@ mod tests {
 
         let output = assembler.assemble(&input).unwrap();
 
-        assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
+        assert!(output
+            .context_summary
+            .included_life_model_sections
+            .is_empty());
         assert!(output.memory_context.contains("关键记忆"));
         assert_eq!(output.context_summary.memory_hit_count, 1);
     }
@@ -341,7 +308,6 @@ mod tests {
     #[test]
     fn production_composite_preserves_privacy_transform_after_memory_and_tools() {
         let assembler = CompositeAssembler::new()
-            .with(Box::new(LifeModelAssembler))
             .with(Box::new(PrivacyAssembler))
             .with(Box::new(MemoryAssembler))
             .with(Box::new(ToolsAssembler));
@@ -395,7 +361,10 @@ mod tests {
         assert!(output.context_summary.redaction_applied);
         assert!(output.memory_context.contains("bounded memory context"));
         assert_eq!(output.tools_prompt, "typed tool manifest");
-        assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
+        assert!(output
+            .context_summary
+            .included_life_model_sections
+            .is_empty());
     }
 
     #[test]

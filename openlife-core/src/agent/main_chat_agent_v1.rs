@@ -14449,10 +14449,8 @@ fn runtime_eval_multi_step_agent_loop_observation(
         )
     })?;
 
-    let life_model = crate::life_model::LifeModel::default();
     let scheduler = crate::scheduler::InferenceScheduler::default();
-    let runtime =
-        crate::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &Default::default());
+    let runtime = crate::agent::AgentRuntime::new(scheduler.clone(), &Default::default());
     let agent_loop = crate::agent::AgentLoop::new(
         runtime,
         crate::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
@@ -14608,11 +14606,11 @@ fn runtime_eval_multi_step_agent_loop_observation(
     let result = runtime_eval_block_on(agent_loop.run_existing_with_provider_observer(
         crate::agent::AgentLoopRunRequest::new(
             &task,
-            &life_model,
             proof.tools_prompt,
             None,
             privacy_engine.clone(),
             &action_ctx,
+            crate::agent::RuntimePolicyContext::fail_closed(),
         ),
         canonical_run,
         &mut provider_progress,

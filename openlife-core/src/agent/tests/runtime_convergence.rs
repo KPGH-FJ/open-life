@@ -1,9 +1,9 @@
 use crate::agent::{
     ActionExecutionContext, ActionExecutorConfig, AgentExecutionBudget, AgentLoop, AgentLoopConfig,
     AgentTask, AgentTaskKind, ModelRouter, ProviderAvailability, RuntimeInput,
+    RuntimePolicyContext,
 };
 use crate::layer::Layer;
-use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
@@ -56,7 +56,6 @@ fn test_task(text: &str) -> AgentTask {
 
 fn test_runtime() -> crate::agent::AgentRuntime {
     crate::agent::AgentRuntime::with_config(
-        LifeModel::default(),
         no_network_scheduler(),
         crate::agent::AgentRuntimeConfig::default(),
     )
@@ -65,7 +64,6 @@ fn test_runtime() -> crate::agent::AgentRuntime {
 fn test_agent_loop(config: AgentLoopConfig) -> AgentLoop {
     let scheduler = no_network_scheduler();
     let runtime = crate::agent::AgentRuntime::with_config(
-        LifeModel::default(),
         scheduler.clone(),
         crate::agent::AgentRuntimeConfig::default(),
     );
@@ -99,10 +97,9 @@ fn test_action_context_deps() -> (
 async fn runtime_input_executes_through_agent_runtime_and_returns_runtime_output() {
     let input = RuntimeInput::from_agent_task(
         test_task("Summarize the current context without writing anything."),
-        LifeModel::default(),
         Some("memory: prefers concise answers".into()),
         "No tools available.",
-        None,
+        RuntimePolicyContext::fail_closed(),
         AgentExecutionBudget::default(),
     );
 
@@ -121,10 +118,9 @@ async fn runtime_input_executes_through_agent_runtime_and_returns_runtime_output
 async fn agent_loop_runtime_input_entry_matches_existing_run_entry_for_final_only_task() {
     let input = RuntimeInput::from_agent_task(
         test_task("Answer briefly without using tools."),
-        LifeModel::default(),
         None,
         "Available tools: memory.search",
-        None,
+        RuntimePolicyContext::fail_closed(),
         AgentExecutionBudget::default(),
     );
     let loop_config = input.agent_loop_config();
@@ -149,11 +145,11 @@ async fn agent_loop_runtime_input_entry_matches_existing_run_entry_for_final_onl
     let legacy = legacy_loop
         .run(
             &input.task,
-            &input.life_model_compat,
             &input.tools_prompt,
             input.memory_context.clone(),
             privacy_engine.clone(),
             &action_ctx,
+            input.policy_context.clone(),
         )
         .await
         .unwrap();
@@ -181,10 +177,9 @@ async fn runtime_input_with_broad_tools_prompt_does_not_infer_external_write_int
     "#;
     let input = RuntimeInput::from_agent_task(
         test_task("What can you infer from my recent notes? Do not write or schedule anything."),
-        LifeModel::default(),
         None,
         broad_tools_prompt,
-        None,
+        RuntimePolicyContext::fail_closed(),
         AgentExecutionBudget::default(),
     );
     let loop_instance = test_agent_loop(input.agent_loop_config());
@@ -220,10 +215,9 @@ async fn runtime_input_with_broad_tools_prompt_does_not_infer_external_write_int
 async fn runtime_input_execution_budget_controls_agent_loop_run() {
     let input = RuntimeInput::from_agent_task(
         test_task("This should stop before model generation."),
-        LifeModel::default(),
         None,
         "Available tools: memory.search",
-        None,
+        RuntimePolicyContext::fail_closed(),
         AgentExecutionBudget {
             max_steps: 0,
             max_tool_calls: 0,

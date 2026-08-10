@@ -6,9 +6,10 @@ use serde_json::Value;
 
 use super::helpers::{
     canonical_tool_source, configured_web_search_endpoint, ensure_external_write_content_size,
-    external_write_content_preview, filesystem_access_error, hs_requires_external_write_proposal,
-    is_direct_external_write_tool, is_path_lexically_in_safe_paths, is_proposal_generation_tool,
-    minimized_external_write_arguments, normalize_tool_name, should_mark_needs_confirmation,
+    external_write_content_preview, filesystem_access_error, is_direct_external_write_tool,
+    is_path_lexically_in_safe_paths, is_proposal_generation_tool,
+    minimized_external_write_arguments, normalize_tool_name,
+    policy_requires_external_write_proposal, should_mark_needs_confirmation,
     ToolCallInternalResult,
 };
 use super::ActionExecutionContext;
@@ -585,7 +586,7 @@ impl super::ActionExecutor {
             .is_none_or(|m| is_proposal_generation_tool(&m.name));
 
         if let Some(m) = manifest.as_ref().filter(|m| {
-            hs_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
+            policy_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
         }) {
             if let Some(result) =
                 self.create_external_write_action_proposal(&request, ctx, tool_name, &args, m)
@@ -676,11 +677,11 @@ impl super::ActionExecutor {
 
             let needs_confirmation = should_mark_needs_confirmation(&decision, &inspection);
 
-            // HS proposal-first policies convert blocked direct writes into
+            // PolicyStore proposal-first decisions convert blocked direct writes into
             // user-reviewable ExternalWriteAction proposals.
             if needs_confirmation {
                 if let Some(m) = manifest.as_ref().filter(|m| {
-                    hs_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
+                    policy_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
                 }) {
                     if let Some(result) = self
                         .create_external_write_action_proposal(&request, ctx, tool_name, &args, m)

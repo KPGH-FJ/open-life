@@ -1,4 +1,3 @@
-use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
 use crate::agent::ActionExecutionContext;
 use crate::mcp::McpArgumentInspection;
 use crate::mcp::McpRegistry;
@@ -240,13 +239,8 @@ pub fn minimized_external_write_arguments(
     Value::Object(minimized)
 }
 
-pub fn hs_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {
-    ctx.hs_runtime_packet.is_some_and(|packet| {
-        packet
-            .selected_policies
-            .iter()
-            .any(|policy| policy.policy_id == BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST)
-    })
+pub fn policy_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {
+    ctx.external_write_requires_proposal
 }
 
 pub fn is_direct_external_write_tool(manifest: &ToolManifest) -> bool {

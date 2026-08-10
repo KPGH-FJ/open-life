@@ -52,7 +52,7 @@ pub struct StrategyCandidateEvaluation {
     pub risk_level: String,
     pub planning_allowed: bool,
     pub local_model_available: bool,
-    pub has_hs_packet: bool,
+    pub has_policy_context: bool,
     pub blocked: bool,
     pub fallback: bool,
 }
@@ -67,7 +67,7 @@ pub struct StrategySelectionReport {
     pub risk_level: String,
     pub planning_allowed: bool,
     pub local_model_available: bool,
-    pub has_hs_packet: bool,
+    pub has_policy_context: bool,
     pub blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_kind: Option<RuntimeStrategyKind>,
@@ -87,7 +87,7 @@ impl Default for StrategySelectionReport {
             risk_level: "low".into(),
             planning_allowed: false,
             local_model_available: false,
-            has_hs_packet: false,
+            has_policy_context: true,
             blocked: false,
             fallback_kind: None,
             candidates: Vec::new(),
@@ -103,7 +103,7 @@ pub(crate) fn select_historical_runtime_strategy(
     let governor = LifeModelGovernor;
     let governance_decision =
         governor.govern_runtime_input(&input.runtime_input, input.local_model_available);
-    let has_hs_packet = input.runtime_input.hs_packet.is_some();
+    let has_policy_context = true;
     let task_kind = input.runtime_input.task.kind.to_string();
     let user_text = input.runtime_input.task.user_text.to_ascii_lowercase();
     let intent = StrategyIntent::from_user_text(&user_text);
@@ -168,7 +168,7 @@ pub(crate) fn select_historical_runtime_strategy(
         intent,
         planning_allowed: input.allow_planning,
         local_model_available: input.local_model_available,
-        has_hs_packet,
+        has_policy_context,
         risk_level,
         governance_decision_kind: governance_decision.kind,
         reason_code,
@@ -183,7 +183,7 @@ pub(crate) fn select_historical_runtime_strategy(
             kind,
             task_kind,
             risk_level,
-            has_hs_packet,
+            has_policy_context,
             governance_decision.kind,
             reason_code,
         ),
@@ -207,7 +207,7 @@ struct SelectionReportContext<'a> {
     intent: StrategyIntent,
     planning_allowed: bool,
     local_model_available: bool,
-    has_hs_packet: bool,
+    has_policy_context: bool,
     risk_level: RiskLevel,
     governance_decision_kind: GovernanceDecisionKind,
     reason_code: &'a str,
@@ -249,7 +249,7 @@ fn selection_summary(
     kind: RuntimeStrategyKind,
     task_kind: String,
     risk_level: RiskLevel,
-    has_hs_packet: bool,
+    has_policy_context: bool,
     governance_decision_kind: GovernanceDecisionKind,
     reason_code: &str,
 ) -> Value {
@@ -257,7 +257,7 @@ fn selection_summary(
         "selectedStrategyKind": kind.as_str(),
         "taskKind": task_kind,
         "riskLevel": risk_level.to_string(),
-        "hasHsPacket": has_hs_packet,
+        "hasPolicyContext": has_policy_context,
         "governanceDecisionKind": governance_decision_kind_str(governance_decision_kind),
         "reasonCode": reason_code,
     })
@@ -269,7 +269,7 @@ fn selection_report(context: SelectionReportContext<'_>) -> StrategySelectionRep
         intent,
         planning_allowed,
         local_model_available,
-        has_hs_packet,
+        has_policy_context,
         risk_level,
         governance_decision_kind,
         reason_code,
@@ -292,7 +292,7 @@ fn selection_report(context: SelectionReportContext<'_>) -> StrategySelectionRep
         risk_level: risk_level_text.clone(),
         planning_allowed,
         local_model_available,
-        has_hs_packet,
+        has_policy_context,
         blocked,
         fallback_kind,
         candidates: vec![
@@ -301,7 +301,7 @@ fn selection_report(context: SelectionReportContext<'_>) -> StrategySelectionRep
                 intent,
                 planning_allowed,
                 local_model_available,
-                has_hs_packet,
+                has_policy_context,
                 blocked,
                 reason_code,
                 governance_decision_kind_text,
@@ -312,7 +312,7 @@ fn selection_report(context: SelectionReportContext<'_>) -> StrategySelectionRep
                 intent,
                 planning_allowed,
                 local_model_available,
-                has_hs_packet,
+                has_policy_context,
                 blocked,
                 reason_code,
                 governance_decision_kind_text,
@@ -333,7 +333,7 @@ fn react_candidate(
     intent: StrategyIntent,
     planning_allowed: bool,
     local_model_available: bool,
-    has_hs_packet: bool,
+    has_policy_context: bool,
     blocked: bool,
     selected_reason_code: &str,
     governance_decision_kind: &str,
@@ -358,7 +358,7 @@ fn react_candidate(
         risk_level: risk_level.into(),
         planning_allowed,
         local_model_available,
-        has_hs_packet,
+        has_policy_context,
         blocked,
         fallback: selected_reason_code == "planning_disabled_fallback",
     }
@@ -373,7 +373,7 @@ fn plan_execute_candidate(
     intent: StrategyIntent,
     planning_allowed: bool,
     local_model_available: bool,
-    has_hs_packet: bool,
+    has_policy_context: bool,
     blocked: bool,
     selected_reason_code: &str,
     governance_decision_kind: &str,
@@ -402,7 +402,7 @@ fn plan_execute_candidate(
         risk_level: risk_level.into(),
         planning_allowed,
         local_model_available,
-        has_hs_packet,
+        has_policy_context,
         blocked,
         fallback: false,
     }
