@@ -4344,7 +4344,8 @@ impl AgentTaskSessionStore {
                 legacy_transcript_entries
             {
                 let kind = ExecutionTranscriptEntryKind::from_db_str(&kind, 2)?;
-                let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap_or(Value::Null);
+                let metadata = serde_json::from_str::<Value>(&metadata_json)
+                    .context("invalid legacy transcript metadata")?;
                 let minimized = minimize_transcript_metadata(
                     &metadata,
                     self.receipt_key.as_ref(),
@@ -18172,6 +18173,65 @@ mod session_content_minimization_tests {
             .get("defaultDeniedMetadataReceipt")
             .and_then(Value::as_str)
             .is_some_and(is_exact_hmac_receipt));
+    }
+
+    #[test]
+    fn transcript_v2_malformed_metadata_fails_closed_without_mutation() {
+        const MALFORMED_METADATA: &str = "{malformed-transcript-v2-metadata";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript-v2-malformed-metadata.db");
+        let key = AgentRunReceiptKey::from_bytes([0x76; 32]).unwrap();
+        let store = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "transcript-v2-malformed-metadata-chat".into(),
+                user_goal: "verify malformed transcript migration fails closed".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .unwrap();
+        let entry = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::FollowUp,
+                summary: "historical follow-up".into(),
+                metadata: serde_json::json!({"modelGenerated": true}),
+            })
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE execution_transcript_entries
+                 SET metadata_json = ?2, payload_minimized_version = 2
+                 WHERE id = ?1",
+                params![entry.id, MALFORMED_METADATA],
+            )
+            .unwrap();
+        drop(store);
+
+        let error = AgentTaskSessionStore::new_with_receipt_key(&path, key)
+            .err()
+            .expect("malformed v2 transcript metadata must fail closed")
+            .to_string();
+        assert!(
+            error.contains("invalid legacy transcript metadata"),
+            "{error}"
+        );
+
+        let raw = Connection::open(&path).unwrap();
+        let (metadata_json, version): (String, i64) = raw
+            .query_row(
+                "SELECT metadata_json, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(metadata_json, MALFORMED_METADATA);
+        assert_eq!(version, 2, "failed migration must not claim v3 completion");
     }
 
     #[test]

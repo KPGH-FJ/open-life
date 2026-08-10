@@ -23,7 +23,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-09 during Phase 5.4F runtime-influence closeout.
+2026-08-10 during Phase 5.5F authority-convergence closeout.
 
 ## Source map
 
@@ -35,7 +35,6 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 - `openlife-core/src/life_model/patch_store.rs`
 - `openlife-core/src/life_model_write_gateway.rs`
 - `openlife-core/src/agent/proposal_store.rs`
-- `openlife-core/src/agent/proposal_outcome.rs`
 - `openlife-core/src/agent/memory_lifecycle.rs`
 - `src-tauri/src/life_model_write_gateway.rs`
 - `src-tauri/src/life_model_materializer_guard.rs`
@@ -155,10 +154,6 @@ state, task progress, Agent tool capability, or procedural work experience.
 `openlife-core/src/agent/proposal_store.rs` persists proposal lifecycle state,
 including pending, accepted, rejected, edited, and postponed records.
 
-`openlife-core/src/agent/proposal_outcome.rs` records maturation evidence only
-for low-risk supported proposal domains. High-risk or unsupported domains do not
-become maturation evidence through that helper.
-
 ## Write Gateway
 
 `openlife-core/src/life_model_write_gateway.rs` classifies LifeModel write
@@ -186,9 +181,11 @@ The former patch/snapshot-backed current-view DTO and its frontend 4D dimension
 contract are deleted. Materialization credit now comes from the current Review
 item and canonical v2 version evidence. The unshipped feedback-evolution and
 calibration implementation, its release commands, and its frontend contracts
-were removed in Phase 5.5D. `FeedbackStore` remains temporarily as a narrow
-audit-event store while Phase 5.5E classifies legacy on-disk tables; it has no
-authority to learn or mutate LifeModel.
+were removed in Phase 5.5D. `FeedbackStore` is retained as a narrow audit-event
+store for current LifeModel gateway and proposal receipts; it has no authority
+to learn or mutate LifeModel. Fresh profiles create only its current `analytics`
+table. Existing legacy feedback and conversation-inference tables remain inert
+and are not modified during startup.
 
 Until legacy owner cutover is complete, a typed remove may not produce an empty
 v2 head. After cutover, the persisted receipt authorizes an empty canonical head;
