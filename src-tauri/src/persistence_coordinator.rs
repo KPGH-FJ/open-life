@@ -18,7 +18,6 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "LifeModelFileStore",
     "LifeModelFileJournal",
     "GovernedDataImportJournal",
-    "HSAssetAuthorityRegistry",
     "PluginRegistry",
     "PrivacyPolicyStore",
     "McpAuditKeyReferenceStore",
@@ -28,7 +27,6 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "AgentRunStore",
     "EvidenceStore",
     "LifeEventStore",
-    "HeuristicStore",
     "ProposalStore",
     "MemoryLifecycleStore",
     "PlanExecuteSessionStore",
@@ -48,11 +46,9 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
 const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
     "LifeModelFileStore",
     "LifeModelFileJournal",
-    "HSAssetAuthorityRegistry",
     "FeedbackStore",
     "VectorStore",
     "EvidenceStore",
-    "HeuristicStore",
     "MemoryLifecycleStore",
     "PatchStore",
 ];
@@ -1671,7 +1667,6 @@ mod tests {
             "LifeModelFileStore",
             "LifeModelFileJournal",
             "GovernedDataImportJournal",
-            "HSAssetAuthorityRegistry",
             "PluginRegistry",
         ] {
             assert!(expected.contains(required));

@@ -260,7 +260,6 @@ pub struct AppState {
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
     pub life_event_store: Option<Arc<Mutex<openlife_core::agent::LifeEventStore>>>,
-    pub heuristic_store: Arc<Mutex<openlife_core::agent::HeuristicStore>>,
     pub policy_store: Arc<openlife_core::agent::PolicyStore>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub memory_lifecycle_store: Option<Arc<Mutex<openlife_core::agent::MemoryLifecycleStore>>>,

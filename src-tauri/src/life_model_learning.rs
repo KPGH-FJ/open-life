@@ -860,13 +860,21 @@ mod tests {
     use super::*;
 
     async fn establish_empty_v2_owner(state: &Arc<AppState>) {
-        let (_, source) = state
-            .life_model_manager
-            .lock()
-            .await
-            .load_existing_with_source()
-            .unwrap()
-            .expect("isolated evaluation has a legacy source");
+        let source = {
+            let manager = state.life_model_manager.lock().await;
+            if manager.load_existing().unwrap().is_none() {
+                // This helper exercises the governed legacy-to-v2 migration
+                // path. Own its isolated legacy input explicitly instead of
+                // relying on an unrelated retired HS fixture to manufacture
+                // life_model.yaml as a side effect.
+                manager.save(&manager.load().unwrap()).unwrap();
+            }
+            manager
+                .load_existing_with_source()
+                .unwrap()
+                .expect("isolated migration fixture has a legacy source")
+                .1
+        };
         let preview =
             openlife_core::life_model::v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
                 &source,

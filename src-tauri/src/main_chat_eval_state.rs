@@ -134,11 +134,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             )
             .unwrap(),
         ))),
-        heuristic_store: Arc::new(Mutex::new({
-            let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
-            store.seed_mvp_heuristics().unwrap();
-            store
-        })),
         policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
         proposal_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
@@ -185,45 +180,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
-    // This isolated eval profile explicitly promotes the category with a
-    // test-only receipt so existing runtime contract tests exercise the
-    // post-cutover read path. It is local fixture evidence and must never be
-    // counted as a real product-runtime or live-trial receipt.
-    {
-        let manager = state
-            .life_model_manager
-            .try_lock()
-            .expect("isolated eval LifeModel manager must be uncontended");
-        let heuristic_store = state
-            .heuristic_store
-            .try_lock()
-            .expect("isolated eval heuristic store must be uncontended");
-        let registry = openlife_core::agent::HSAssetAuthorityRegistry::new(
-            manager.hs_asset_authority_registry_path(),
-        )
-        .expect("isolated eval HS authority registry");
-        let scenario = registry
-            .record_product_scenario(
-                openlife_core::agent::HSAssetCategory::CollaborationGuidance,
-                1,
-                "test-fixture:isolated-main-chat-eval-state",
-                openlife_core::agent::HSAssetOwner::AcceptedHsStore,
-                &[openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.into()],
-                openlife_core::agent::digest_string("isolated-eval-hs-runtime-audit"),
-            )
-            .expect("isolated eval product receipt shape");
-        let model = manager.load().expect("isolated eval LifeModel");
-        let report = openlife_core::agent::complete_collaboration_guidance_cutover(
-            &registry,
-            &model,
-            &heuristic_store,
-            &scenario,
-        )
-        .expect("isolated eval collaboration guidance cutover fixture");
-        manager
-            .save_hs_compatibility_view(&report.projection.yaml)
-            .expect("isolated eval derived compatibility view");
-    }
     {
         let manager = state
             .life_model_manager

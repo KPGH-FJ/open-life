@@ -17,10 +17,9 @@ use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapSta
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
-    reconcile_collaboration_guidance_authority, AgentProposal, AgentRunReceiptKey,
-    CollaborationGuidanceCutoverStatus, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, HSAssetAuthorityRegistry, MemoryLifecycleStore, PlanExecuteSessionStore,
-    ProposalSource, ProposalStore, ProposalType, ReviewWorkflow, RiskLevel,
+    AgentProposal, AgentRunReceiptKey, DurableWriteRequest, DurableWriteSource,
+    DurableWriteSubject, MemoryLifecycleStore, PlanExecuteSessionStore, ProposalSource,
+    ProposalStore, ProposalType, ReviewWorkflow, RiskLevel,
 };
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -1529,42 +1528,6 @@ fn init_life_event_store(
     }
 }
 
-fn init_heuristic_store(
-    db_path: &Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<openlife_core::agent::HeuristicStore, String> {
-    match openlife_core::agent::HeuristicStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            if !ephemeral_store_fallback_allowed() {
-                return Err(format!(
-                    "heuristics.db durable initialization failed: {primary_err}"
-                ));
-            }
-            let fallback = recovery_db_path("heuristics.db");
-            startup_warnings.borrow_mut().push(format!(
-                "heuristics.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match openlife_core::agent::HeuristicStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 heuristics.db 初始化也失败，已降级为内存数据库：{}",
-                        fallback_err
-                    ));
-                    openlife_core::agent::HeuristicStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 heuristic store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
 fn init_proposal_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -2358,100 +2321,7 @@ fn bootstrap_with_secret_store(
             }
         });
 
-    let heuristics_db_path = data_dir.join("heuristics.db");
-    let heuristic_store = init_store(
-        || init_heuristic_store(&heuristics_db_path, &startup_warnings),
-        || {
-            openlife_core::agent::HeuristicStore::open_read_only_existing(&heuristics_db_path)
-                .map_err(|e| e.to_string())
-        },
-        || openlife_core::agent::HeuristicStore::new_in_memory().map_err(|e| e.to_string()),
-        "HeuristicStore",
-        &startup_warnings,
-        &persistence,
-    );
-    let heuristic_store =
-        required_store_or_unavailable(heuristic_store, "HeuristicStore", &startup_warnings, || {
-            openlife_core::agent::HeuristicStore::unavailable_sentinel()
-                .map_err(|error| error.to_string())
-        });
-    if let Err(e) = heuristic_store.seed_mvp_heuristics() {
-        startup_warnings
-            .borrow_mut()
-            .push(format!("initial heuristics seed failed: {}", e));
-    }
     let policy_store = openlife_core::agent::PolicyStore::mvp_builtin();
-    match HSAssetAuthorityRegistry::new(life_model_manager.hs_asset_authority_registry_path()) {
-        Ok(hs_authority_registry) => {
-            persistence.register_read_write("HSAssetAuthorityRegistry");
-            let hs_reconciliation = if persistence.bootstrap_mutations_safe() {
-                (|| -> Result<(), String> {
-                    let Some(hs_authority_model) =
-                        life_model_manager.load_existing().map_err(|error| {
-                            format!(
-                    "LifeModel could not be loaded for HS asset authority reconciliation: {error}"
-                )
-                        })?
-                    else {
-                        // A fresh profile has no legacy authority to reconcile.
-                        // In particular, do not manufacture an empty YAML
-                        // compatibility owner during bootstrap.
-                        return Ok(());
-                    };
-                    let hs_cutover = reconcile_collaboration_guidance_authority(
-                        &hs_authority_registry,
-                        &hs_authority_model,
-                        &heuristic_store,
-                    )
-                    .map_err(|error| {
-                        format!("collaboration guidance authority reconciliation failed: {error}")
-                    })?;
-                    match hs_cutover.status {
-                        CollaborationGuidanceCutoverStatus::Promoted
-                        | CollaborationGuidanceCutoverStatus::AlreadyPromoted => life_model_manager
-                            .save_hs_compatibility_view(&hs_cutover.projection.yaml)
-                            .map_err(|error| {
-                                format!(
-                            "derived collaboration guidance YAML projection failed: {error}"
-                        )
-                            })?,
-                        CollaborationGuidanceCutoverStatus::ShadowEvidencePending => {
-                            log::info!(
-                                "collaboration guidance remains LifeModel YAML-owned until a real product runtime receipt is observed; LM-C promotion is fail-closed"
-                            );
-                        }
-                    }
-                    Ok(())
-                })()
-            } else {
-                startup_warnings.borrow_mut().push(
-                    "HS asset authority reconciliation skipped because another canonical store is degraded"
-                        .into(),
-                );
-                Ok(())
-            };
-            if let Err(error) = hs_reconciliation {
-                persistence.register_unavailable(
-                    "HSAssetAuthorityRegistry",
-                    "hs_asset_authority_reconciliation_failed",
-                    &error,
-                );
-                startup_warnings.borrow_mut().push(format!(
-                    "HS asset authority is unavailable; product entered read-only degraded mode: {error}"
-                ));
-            }
-        }
-        Err(error) => {
-            persistence.register_unavailable(
-                "HSAssetAuthorityRegistry",
-                "hs_asset_authority_registry_open_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "HS asset authority registry is unavailable; product entered read-only degraded mode: {error}"
-            ));
-        }
-    }
 
     let proposals_db_path = data_dir.join("proposals.db");
     let proposal_store = init_store(
@@ -3285,7 +3155,6 @@ fn bootstrap_with_secret_store(
         agent_run_store: agent_run_store.map(|store| Arc::new(Mutex::new(store))),
         evidence_store: Arc::new(Mutex::new(evidence_store)),
         life_event_store: life_event_store.map(|store| Arc::new(Mutex::new(store))),
-        heuristic_store: Arc::new(Mutex::new(heuristic_store)),
         policy_store: Arc::new(policy_store),
         proposal_store: proposal_store.map(|store| Arc::new(Mutex::new(store))),
         memory_lifecycle_store: memory_lifecycle_store.map(|store| Arc::new(Mutex::new(store))),
@@ -3326,9 +3195,7 @@ fn bootstrap_with_secret_store(
 mod tests {
     use super::*;
     use crate::secret_store::SecretStore;
-    use openlife_core::agent::{
-        EvidenceQuery, HeuristicQuery, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
-    };
+    use openlife_core::agent::EvidenceQuery;
 
     #[test]
     fn future_legacy_schedule_is_staged_once_through_review_workflow() {
@@ -4406,7 +4273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_initializes_hs_stores_and_seeds_mvp_heuristics() {
+    async fn fresh_bootstrap_keeps_retired_hs_stores_absent_and_preserves_current_owners() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let result =
             bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
@@ -4425,16 +4292,20 @@ mod tests {
             .query(EvidenceQuery::default())
             .unwrap();
 
-        let heuristic_store = result.state.heuristic_store.lock().await;
-        let heuristics = heuristic_store
-            .query(HeuristicQuery {
-                domain: Some("planning".into()),
-                ..Default::default()
-            })
-            .unwrap();
-        assert!(heuristics
+        assert!(!temp_dir.path().join("heuristics.db").exists());
+        assert!(!temp_dir
+            .path()
+            .join("life-model/current/hs_asset_authority.db")
+            .exists());
+        let persistence = result.state.persistence_coordinator.snapshot();
+        assert!(!persistence
+            .stores
             .iter()
-            .any(|heuristic| heuristic.id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING));
+            .any(|store| store.store == "HeuristicStore"));
+        assert!(!persistence
+            .stores
+            .iter()
+            .any(|store| store.store == "HSAssetAuthorityRegistry"));
         assert!(result
             .state
             .policy_store
@@ -4515,6 +4386,27 @@ mod tests {
         );
         assert!(projection.safe_mode.active);
         assert_eq!(projection.readiness.database_status, "degraded");
+    }
+
+    #[test]
+    fn legacy_hs_files_remain_inert_and_byte_unchanged_during_bootstrap() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heuristic_path = temp_dir.path().join("heuristics.db");
+        let authority_path = temp_dir
+            .path()
+            .join("life-model/current/hs_asset_authority.db");
+        std::fs::create_dir_all(authority_path.parent().unwrap()).unwrap();
+        let heuristic_marker = b"retired-heuristic-store-must-remain-inert";
+        let authority_marker = b"retired-authority-registry-must-remain-inert";
+        std::fs::write(&heuristic_path, heuristic_marker).unwrap();
+        std::fs::write(&authority_path, authority_marker).unwrap();
+
+        let result =
+            bootstrap_with_default_initialized_test_credentials(temp_dir.path().to_path_buf());
+
+        assert!(result.state.startup_warnings.is_empty());
+        assert_eq!(std::fs::read(heuristic_path).unwrap(), heuristic_marker);
+        assert_eq!(std::fs::read(authority_path).unwrap(), authority_marker);
     }
 
     #[tokio::test]
@@ -4906,39 +4798,6 @@ mod tests {
         let secrets = TestSecretStore::default();
         let preparation =
             bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
-        {
-            let manager = preparation.state.life_model_manager.lock().await;
-            let heuristic_store = preparation.state.heuristic_store.lock().await;
-            let registry = openlife_core::agent::HSAssetAuthorityRegistry::new(
-                manager.hs_asset_authority_registry_path(),
-            )
-            .expect("restart test HS authority registry");
-            let revision = registry
-                .authority(openlife_core::agent::HSAssetCategory::CollaborationGuidance)
-                .expect("restart test HS authority")
-                .revision;
-            let scenario = registry
-                .record_product_scenario(
-                    openlife_core::agent::HSAssetCategory::CollaborationGuidance,
-                    revision,
-                    "test-fixture:provider-consent-restart",
-                    openlife_core::agent::HSAssetOwner::AcceptedHsStore,
-                    &[openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.into()],
-                    openlife_core::agent::digest_string("provider-consent-restart-runtime-audit"),
-                )
-                .expect("restart test product receipt shape");
-            let model = manager.load().expect("restart test LifeModel");
-            let report = openlife_core::agent::complete_collaboration_guidance_cutover(
-                &registry,
-                &model,
-                &heuristic_store,
-                &scenario,
-            )
-            .expect("restart test HS cutover fixture");
-            manager
-                .save_hs_compatibility_view(&report.projection.yaml)
-                .expect("restart test HS compatibility view");
-        }
         drop(preparation);
 
         let first =

@@ -1760,13 +1760,6 @@ impl LifeModelManager {
         self.data_dir.join("life_model_mutation_journal.db")
     }
 
-    /// Durable per-asset authority registry. It is colocated with the YAML
-    /// compatibility view so profile moves and isolated test profiles retain
-    /// the same authority decisions across restart.
-    pub fn hs_asset_authority_registry_path(&self) -> PathBuf {
-        self.data_dir.join("hs_asset_authority.db")
-    }
-
     pub fn v2_store_path(&self) -> PathBuf {
         self.data_dir.join("life_model_v2.db")
     }
@@ -1979,22 +1972,6 @@ impl LifeModelManager {
         let content = serde_yaml::to_string(model).with_context(|| "序列化人生模型失败")?;
         crate::atomic_file::write_atomic(&path, content.as_bytes())
             .with_context(|| format!("写入人生模型失败: {:?}", path))?;
-        Ok(())
-    }
-
-    /// Persist a validated derived HS compatibility projection. Product
-    /// callers must first pass `HSAssetAuthorityRegistry::authorize_write`;
-    /// this bottom file primitive intentionally does not decide authority.
-    pub fn save_hs_compatibility_view(&self, yaml: &str) -> Result<()> {
-        let _: LifeModel = serde_yaml::from_str(yaml)
-            .with_context(|| "验证 LifeModel HS 兼容视图中的 LifeModel 失败")?;
-        let view = extract_hs_compatibility_view_from_yaml(yaml)?;
-        if view.source_digest.trim().is_empty() {
-            return Err(anyhow::anyhow!("LifeModel HS 兼容视图缺少 source_digest"));
-        }
-        let path = self.data_dir.join("life_model.yaml");
-        crate::atomic_file::write_atomic(&path, yaml.as_bytes())
-            .with_context(|| format!("写入 LifeModel HS 兼容视图失败: {path:?}"))?;
         Ok(())
     }
 }

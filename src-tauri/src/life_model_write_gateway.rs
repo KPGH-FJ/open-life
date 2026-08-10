@@ -1427,50 +1427,6 @@ async fn write_prepared_life_model_compare_and_swap(
             }
         }
     }
-    let hs_compatibility_yaml = if matches!(
-        post_commit_policy,
-        LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly { .. }
-    ) {
-        None
-    } else {
-        let registry_path = state
-            .life_model_manager
-            .lock()
-            .await
-            .hs_asset_authority_registry_path();
-        let registry = openlife_core::agent::HSAssetAuthorityRegistry::new(registry_path)
-            .map_err(|error| error.to_string())?;
-        let authority = registry
-            .authority(openlife_core::agent::HSAssetCategory::CollaborationGuidance)
-            .map_err(|error| error.to_string())?;
-        if authority.owner == openlife_core::agent::HSAssetOwner::AcceptedHsStore {
-            registry
-                .authorize_write(openlife_core::agent::HSAssetWriteRequest {
-                    category: openlife_core::agent::HSAssetCategory::CollaborationGuidance,
-                    source_owner: openlife_core::agent::HSAssetOwner::AcceptedHsStore,
-                    target_owner: openlife_core::agent::HSAssetOwner::LifeModelYaml,
-                    kind: openlife_core::agent::HSAssetWriteKind::DerivedCompatibilityProjection,
-                })
-                .map_err(|error| error.to_string())?;
-            let heuristic_store = state.heuristic_store.lock().await;
-            let projection = openlife_core::agent::build_collaboration_guidance_projection(
-                &life_model,
-                &heuristic_store,
-            )
-            .map_err(|error| error.to_string())?;
-            if projection.canonical_digest != projection.compatibility_digest
-                || projection.canonical_digest != projection.repeated_materialization_digest
-            {
-                return Err(
-                    "derived collaboration guidance compatibility projection failed digest parity"
-                        .into(),
-                );
-            }
-            Some(projection.yaml)
-        } else {
-            None
-        }
-    };
     let journal_path = {
         state
             .life_model_manager
@@ -1544,12 +1500,7 @@ async fn write_prepared_life_model_compare_and_swap(
             }
             return Ok(None);
         }
-        let save_result = match hs_compatibility_yaml.as_deref() {
-            Some(yaml) => manager
-                .save_hs_compatibility_view(yaml)
-                .map_err(|error| error.to_string()),
-            None => manager.save(&life_model).map_err(|error| error.to_string()),
-        };
+        let save_result = manager.save(&life_model).map_err(|error| error.to_string());
         let observed = manager.load().map_err(|error| error.to_string())?;
         let observed_digest = hash_life_model(&observed).map_err(|error| error.to_string())?;
         (save_result, observed_digest)

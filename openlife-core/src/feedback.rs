@@ -39,7 +39,7 @@ impl FeedbackStore {
         let conn = crate::sqlite_migration::open_existing_read_only(
             &db_path,
             "feedback_store",
-            &["feedback", "analytics", "conversation_inferences"],
+            &["analytics"],
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -59,18 +59,6 @@ impl FeedbackStore {
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        // Keep legacy tables readable until 5.5E has classified real on-disk data.
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                message_index INTEGER NOT NULL,
-                feedback_type TEXT NOT NULL,
-                content_preview TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )",
-            [],
-        )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS analytics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,27 +67,6 @@ impl FeedbackStore {
                 detail TEXT,
                 created_at TEXT NOT NULL
             )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS conversation_inferences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                dimension TEXT NOT NULL,
-                target_name TEXT NOT NULL,
-                suggested_delta REAL,
-                confidence REAL,
-                reason TEXT,
-                created_at TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id, created_at)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_inference_created ON conversation_inferences(created_at)",
             [],
         )?;
         Ok(())
@@ -152,5 +119,72 @@ impl FeedbackStore {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map(|items| items.into_iter().flatten().collect())
             .map_err(|e| e.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_store_creates_only_the_current_audit_event_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feedback.db");
+        let _store = FeedbackStore::new(&path).unwrap();
+        let connection = Connection::open(path).unwrap();
+        let mut statement = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(names.contains(&"analytics".to_string()));
+        assert!(!names.contains(&"feedback".to_string()));
+        assert!(!names.contains(&"conversation_inferences".to_string()));
+    }
+
+    #[test]
+    fn existing_legacy_tables_remain_inert_and_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feedback.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE feedback (id INTEGER PRIMARY KEY, marker TEXT NOT NULL);
+                     CREATE TABLE conversation_inferences (id INTEGER PRIMARY KEY, marker TEXT NOT NULL);
+                     INSERT INTO feedback (id, marker) VALUES (1, 'legacy-feedback');
+                     INSERT INTO conversation_inferences (id, marker) VALUES (1, 'legacy-inference');",
+                )
+                .unwrap();
+        }
+
+        let store = FeedbackStore::new(&path).unwrap();
+        store.log_event("current-audit", None, None).unwrap();
+        drop(store);
+
+        let connection = Connection::open(path).unwrap();
+        let feedback_marker: String = connection
+            .query_row("SELECT marker FROM feedback WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let inference_marker: String = connection
+            .query_row(
+                "SELECT marker FROM conversation_inferences WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let audit_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM analytics", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(feedback_marker, "legacy-feedback");
+        assert_eq!(inference_marker, "legacy-inference");
+        assert_eq!(audit_count, 1);
     }
 }

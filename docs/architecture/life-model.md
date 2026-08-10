@@ -45,18 +45,20 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Current boundary
 
-ADR 0013's broad LifeModel-HS target is superseded. EvidenceStore,
-HeuristicStore, StateStore, PolicyStore, regression, and audit code may still
-exist, but they are not jointly the canonical LifeModel. Existing code is
-reviewed by its real owner and may be narrowed or removed in later slices.
+ADR 0013's broad LifeModel-HS target is superseded. HeuristicStore and the HS
+asset-authority registry are no longer initialized, reconciled, or attached to
+product state; existing database files remain inert historical data and are not
+deleted during startup. EvidenceStore, StateStore, PolicyStore, and audit-event
+storage remain only under their current narrow product owners. None of them is
+jointly the canonical LifeModel.
 
 ## Current Model Shape
 
 `openlife-core/src/life_model.rs` defines the legacy LifeModel structure:
 metadata, identity, goals, capabilities, state, relationships, preferences, and
-evolution rules. It also defines a `LifeModelHSCompatibilityView` and provenance
-fields that explicitly mark the compatibility view as not accepted source of
-truth and not durable truth materialization.
+evolution rules. Historical HS compatibility view types may still be decoded by
+unshipped compatibility code, but the product has no writer or startup authority
+registry for that projection.
 
 New empty legacy skeletons no longer invent a focus, health state, mood, stress,
 fulfilment, or energy value. Existing YAML values continue to load exactly as

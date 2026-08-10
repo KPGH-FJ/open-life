@@ -687,11 +687,6 @@ mod tests {
             life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
             ))),
-            heuristic_store: Arc::new(tokio::sync::Mutex::new({
-                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
-                store.seed_mvp_heuristics().unwrap();
-                store
-            })),
             policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),

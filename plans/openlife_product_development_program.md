@@ -1365,6 +1365,18 @@ scheduler、A2A 与 Proactive 对 `RuntimeHSPacket`/legacy `LifeModel` 的运行
 退出标准：启动只初始化当前产品 owner；旧数据不影响 runtime 且没有被自动删除；保留
 兼容均有真实数据条件、只读边界和明确退出标准。
 
+2026-08-10 完成记录：实际 release/dev/隔离 QA 数据只发现两个内建 heuristic seed，
+没有 `accepted_guidance_%` 用户物化记录；现有 HS authority 行仍全部指向 legacy YAML，
+没有完成过 AcceptedHsStore 产品切换。因此已从启动、`AppState`、persistence manifest 和
+LifeModel 写入后处理移除 HeuristicStore 初始化/seed、HS registry reconciliation 与兼容
+投影写入。旧 `heuristics.db`、`hs_asset_authority.db` 和 legacy feedback/inference 表不删除、
+不改写并保持 inert；fresh profile 不再创建它们。FeedbackStore 新 profile 只创建仍有真实
+caller 的 audit-event 表，EvidenceStore、LifeEventStore、PolicyStore 继续归各自窄 owner。
+fresh、legacy inert、v2 owner、legacy migration、read-only 与 corrupt/fail-closed 反例及全仓
+Rust 门禁通过。测试夹具曾隐式依赖退役 HS projection 生成 legacy YAML，已改为显式拥有隔离
+迁移输入，未恢复产品旧权威。剩余只在历史/测试模块互相调用的 HS/Heuristic 源码归 5.5F
+最终 caller scan 处理。
+
 ###### 5.5F 最终 caller/authority 收口与原生验收
 
 目标：证明阶段五主路径已经没有平行旧权威，并形成 5.6 可复用的干净基线。
