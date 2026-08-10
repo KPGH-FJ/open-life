@@ -1443,30 +1443,170 @@ authority 收敛与有界原生回归退出标准成立；上述问题保持为 
 
 ##### 5.6 原生闭环验收
 
-最后用真实 Tauri 和隔离 QA profile 完成：
+5.6 不是新的能力建设阶段，也不建立验收平台。它只用真实 Tauri 证明 5.1 至 5.5
+已经形成可使用、可解释、可恢复的产品闭环，并修复在该闭环中真实复现的阻塞。
+单元测试、browser-shell、原生 Tauri、本地模型和 external-live Provider 继续是不同
+证据等级；低等级证据不得替代高等级证据。
 
-- 多次会话和跨重启的 Agent Memory；
-- Markdown Memory 查看、受治理编辑、遗忘和恢复；
-- 真实任务产生候选，用户修改并确认 LifeModel proposal；
-- 结构化版本物化和确定性 YAML 更新；
-- 后续任务真实使用并解释使用原因；
-- 冲突、过期、拒绝、回滚和删除；
-- LifeModel 或增强 Memory 故障时，健康的普通 Agent 仍可继续工作；
-- must-not-recall 和跨 Workspace/Project 泄漏场景为零；所有进入上下文的 Memory
-  与 LifeModel fact 均有真实 source ref；
-- 隐私擦除后正文不再存在于 canonical、FTS、Vector、cache、YAML projection 和
-  runtime context；
-- 长上下文压缩保留黄金场景中的目标、约束、未决 Review 与关键证据引用；
-- 同一任务的 LifeModel A/B 人工 rubric 至少检查正确性、个性化相关性、当前指令
-  遵循和权限边界，不以“字段出现在 prompt”代替效果改善；
-- 5.1E 固定的 context budget 与检索延迟目标在同一 QA 机器上满足，任何超出保持
-  可测量、可解释而不是通过扩大超时掩盖；
-- 只在具备产品意义的候选构建上做原生验收，不因每次小修改重复建立新的 finalN
-  profile、反复初始化同类凭据或把人工授权过程当作开发成果。
+5.6 固定为 A—F 六个切片。不得为普通缺陷追加 5.6G；新发现必须归入已有切片，
+只有产品目标或范围发生变化时才由用户明确审批调整本 Program。
 
-退出标准：第五阶段完整黄金路径在同一精确构建和隔离 QA 中跨重启成立，底层
-数据库、产品读模型和用户界面相互一致；自动化、本地原生和 external-live 证据
-等级保持分离。
+###### 5.6A 建立双重隔离 QA 并复现已知阻塞
+
+目标：先建立可复用的原生验收环境，再在该环境中复现 5.5F 已发现的事实呈现问题；
+不得先修改代码、后补验收基线。
+
+- 从通过全仓门禁的候选提交构建一次 debug Tauri bundle，记录 commit SHA 和 bundle
+  SHA-256；后续只有产品代码变化才重建，纯记录变化不触发新构建；
+- 使用一个语义化的 `phase5-native-closure` 数据目录，并通过现有
+  `OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1`、
+  `OPENLIFE_NATIVE_TAURI_ISOLATION_TRIAL=1` 与合法的
+  `com.openlife.desktop.trial.<digest>` service 同时隔离 Keychain；不得读取或改写默认
+  OpenLife profile、真实用户数据和默认 Keychain service；
+- 正向黄金路径使用一个长期复用的隔离 profile；故障注入另用一个可丢弃 profile，
+  防止损坏正向证据。两者使用同一精确 bundle；
+- 只初始化实际缺失的内部系统凭据一次，随后完全退出并重启验证。凭据授权是前置
+  环境事实，不作为产品功能完成量；
+- 核对六个产品路由、安全模式、配置读模型、空 Review 队列和初始数据库状态。
+  任何前置阻塞必须保持 blocked/unknown，不允许通过跳过步骤得到绿色结论；
+- 在未修改产品代码的基线 bundle 上精确复现：当前对话与全局活动身份混淆、混合
+  凭据状态的数量/动作概括错误，以及 Provider 配置字段与 canonical route 结论不一致。
+  若任一问题不能复现，则回到当前 source/receipt 重新分类，不因为 5.5F 曾记录就假定
+  它仍存在。
+
+退出标准：一个 baseline exact-build 在数据和 Keychain 双重隔离下可稳定启动、完全
+重启并继续使用；没有访问默认 profile 的证据；三个已知问题分别成为 REPRODUCED 或
+SOURCE-CONFIRMED，无法确认的保持 UNKNOWN，不制造失败证据。
+
+###### 5.6B 修复原生事实呈现阻塞并冻结干净基线
+
+目标：只修复 5.6A 当前复现或从 current source 确认的事实身份问题，确保 C—F 不在
+错误界面或错误证据字段上继续验收。
+
+- Workspace 必须把当前选中对话和全局活动任务作为两个明确对象展示；任务、执行
+  记录和待处理动作都显示自己的 conversation/task identity，不能因同页出现而让用户
+  误以为属于当前对话；
+- Settings 将 `initialization_required` 与 `unavailable` 分成两组真实目的和两种操作
+  语义。当前 backend 已优先恢复 unavailable 集合、重启后才初始化缺失集合；前端数量、
+  按钮、原生确认文案和结果 receipt 必须只绑定本次实际操作的精确目的集合，不要求
+  为了视觉对称同时开放两个动作，也不能再用“恢复 N 类”概括混合状态；
+- transcript 和检查器的 Provider endpoint 证据以已完成 AgentRun 的 canonical route
+  为权威；调度器配置只能表示候选配置。新记录不得在 canonical route 为本地 Ollama
+  时写入 `external_provider` 结论，历史不一致行显示 unknown/inconsistent，不批量猜测改写；
+- 三项修复都先用失败反例锁定根因，再改 backend ViewModel/receipt 或最小前端呈现；
+  不在前端通过字符串拼接重建 backend truth，不改变凭据或 Provider 权限模型；
+- 聚焦测试和全仓门禁通过后，只构建一次修复候选 bundle，在 5.6A 的同一隔离环境中
+  完成原生复核；代码再次变化才允许生成下一 bundle。
+
+退出标准：三个问题均有与当前结论匹配的自动化反例和真实 Tauri 复核；后续验收
+看到的对话、凭据动作与 Provider 路由身份可从 canonical backend owner 追溯，形成
+C—F 可复用的干净 exact-build 基线。
+
+###### 5.6C Agent Memory 与长任务连续性原生闭环
+
+目标：证明 Agent 自身能跨会话、跨项目和跨重启继续工作，而不是依赖 LifeModel
+承担工作记忆。
+
+- 在用户明确选择的临时 Workspace/Project 根中，通过产品界面查看 Markdown Memory，
+  创建或编辑 proposal，经 Review 批准并证明文件实际物化；停用和恢复使用同一受治理
+  路径，不直接修改文件冒充产品能力；
+- 在会话一建立 global、conversation、Workspace 和 Project 中具有代表性的显式 Memory，
+  经 Review 物化后在会话二验证 should-recall；切换到另一个 Project/Workspace 验证
+  must-not-recall 和 scope 泄漏为零；完全重启后重复关键召回；
+- 真实完成纠正、停止召回、归档、恢复和 rollback。每次动作都分别核对 Review 状态、
+  materialization receipt、backend MemoryViewModel 与界面终态，proposal accepted 不得
+  直接等同于应用成功；
+- 构造一段超过近期原文预算的真实长会话，证明压缩后仍保留当前目标、用户约束、
+  未决 Review 和关键 source ref；原始 transcript 仍是 canonical owner；
+- 核对单回合 lifecycle/Markdown Memory 注入各自不超过既定 4 条与 4,800 字符上限，
+  conversation provider 正文不超过 65,536 字符；在同一 QA 机器运行现有聚焦 debug
+  检索门禁并保持小于 2 秒。该结果只证明本地检索路径，不包含 Provider 或完整回合
+  延迟；当前产品没有原生检索延迟 receipt 时，不为验收编造 UI 结论或建设遥测平台。
+  超出时定位原因，不扩大预算或超时掩盖；
+- Vector/embedding 不可用时显示明确降级并保留合法 FTS 结果；canonical/FTS owner
+  不可用时保持 fail-closed，不把空结果描述为健康。
+
+退出标准：真实项目跨多次会话和完整重启保持连续；Markdown 与 lifecycle Memory
+可由用户控制；错误 scope、暂停、归档、冲突和过期内容不进入上下文；每条召回均有
+真实 source ref、scope、freshness 和选择原因。
+
+###### 5.6D LifeModel 学习、物化与后续增强原生闭环
+
+目标：用一次真实日常任务完成“使用 → Observation → Candidate → Review → 用户编辑
+与确认 → canonical LifeModel v2 → YAML projection → 后续任务使用”的完整闭环。
+
+- 选择一个确有长期意义、可由现有 schema 表达且不敏感的用户事实；任务必须先产生
+  可追溯 Observation/Candidate，不能通过测试夹具、直接数据库写入或显式要求修改
+  LifeModel 绕过学习桥梁；
+- 核对去重、稳定性、长期意义、敏感度和 cooldown 结果；不值得沉淀的候选结束于
+  no-op，不为凑齐路径制造 proposal；
+- 在 Review Center 查看 exact source、base version 和 typed diff，进行一次用户编辑后
+  确认；随后分别核对 proposal、materialization receipt、SQLite canonical version、
+  document digest 与确定性 YAML projection，缺一项都不能声称已写入；
+- 在 LifeModel 物化前先对固定任务采集“无相关 LifeModel”基线；完全重启后用完全相同
+  的任务输入采集“相关 LifeModel”结果，界面显示使用的 LifeModel version、item id、
+  source ref、选择原因和影响面；第三次用相同基础任务加明确当前指令覆盖，形成三组
+  可比较 A/B。不得在物化后临时清空模型来伪造前置基线，也不得改变 Provider、工具、
+  Workspace 或其他影响变量；
+- 人工 rubric 固定检查正确性、个性化相关性、当前指令遵循和权限边界。LifeModel 只可
+  调整已经合法的计划、沟通、Memory 排序或等价工具偏好，不能扩大工具候选、权限、
+  凭据或 durable write 能力；不以“字段进入 prompt”代替效果改善。
+
+退出标准：同一 exact-build 跨重启完成真实学习和使用；canonical SQLite 与 YAML、
+backend ViewModel 和界面相互一致；A/B 能说明实际帮助，并能说明使用了什么及为什么。
+
+###### 5.6E 控制、隐私与故障降级反例
+
+目标：证明用户能撤回和纠正个人智能，同时可选个人化故障不会拖垮健康基础 Agent。
+
+- 对 LifeModel 分别验证拒绝、用户编辑、stale base/并发冲突、过期来源、rollback、
+  单项删除和 clear；拒绝或 materialization 失败不得改变 canonical version 或 YAML；
+- 对一条隔离 QA Memory 执行隐私擦除，核对 canonical body、FTS、Vector、cache、
+  Review payload、普通产品读取和 runtime context 均不再含正文，只留下不含正文的
+  最小 tombstone/audit metadata；重启和索引重建后不得复活；
+- 在可丢弃 failure profile 中分别制造 LifeModel v2 读取失败、增强 Memory/Vector
+  不可用和损坏 projection。精确能力保持 unknown/failed/fail-closed，但不需要这些
+  能力的普通对话仍能完成；
+- 验证当前指令、Policy、权限与 ToolGateway 始终优先。LifeModel、Memory、proposal、
+  历史 receipt 和 UI 按钮都不能授权网络、Provider、文件或其他外部/持久写入；
+- 故障注入只操作临时隔离 profile，并在操作前保存可恢复副本；不得碰真实用户数据、
+  默认 Keychain、真实 Workspace 文件或未授权外部服务。
+
+退出标准：冲突、拒绝、撤回、删除和故障都有真实终态；隐私擦除无正文残留或复活；
+个人化不可用时健康基础 Agent 仍可继续工作，界面没有假绿或越权表述。
+
+###### 5.6F 最终 exact-build 复核、合入与阶段关闭
+
+目标：在最终源码上重新完成最小但完整的第五阶段黄金路径，形成可审阅的干净基线。
+
+- 修复 C—E 中真实复现的 P0/P1 阻塞后，先跑受影响的聚焦测试，再通过 Rust/前端
+  全仓门禁；测试数量不是质量结论，blocked prerequisite 不能 return 假通过；
+- 用最终 commit 重新构建一次 exact bundle，并在正向隔离 profile 中完成启动、Memory
+  跨会话与重启、Markdown 受治理写入、LifeModel 学习/物化/YAML/后续使用和用户撤回；
+  failure profile 只复核代表性 fail-closed/degraded 反例；
+- 证据只写入本 Program 的完成记录和现有架构/测试文档，不创建 JSON ledger、任务包、
+  append-only evidence registry、截图目录体系或自进化平台；
+- external-live Provider 不作为 5.6 默认退出条件。若某项主张必须依赖真实 Provider，
+  只对该精确主张单独授权一次，并把 external-live 结果与本地模型/原生证据分开；
+- 代码 Review 只接受与真实阻塞、测试或当前文档一致性有关的改动；不顺手增加新 Agent
+  能力、LifeModel Coding、安装包、更新器、公开发行、广义重构或新的兼容层；
+- 通过 Review 后提交、推送、合入，删除短期分支并回到与 `origin/main` 一致的干净
+  `main`；随后把第五阶段标记完成，在进入第六阶段前单独向用户报告并等待批准。
+
+退出标准：第五阶段完整黄金路径在同一最终 exact-build 和隔离 QA 中跨重启成立，
+底层数据库、产品读模型和用户界面相互一致；没有影响第五阶段退出标准的未解决
+P0/P1；其他产品问题按真实等级进入后续阶段且不被隐藏；所有已知限制保持明确；
+自动化、browser-shell、本地原生、本地模型和 external-live 证据等级不混淆。
+
+###### 5.6 执行纪律
+
+- 固定顺序为 5.6A → 5.6B → 5.6C → 5.6D → 5.6E → 5.6F；每个切片先复现、再定位
+  owner、最小修复、聚焦测试、原生复核、代码 Review 和提交，然后进入下一切片；
+- 原生试用发现 P0/P1 时停止该切片并修复；P2/P3 只有直接影响第五阶段退出标准时才在
+  5.6 处理，否则记录为普通产品 backlog，不扩大当前范围；
+- 同类问题连续两次来自同一共同根因时先修共同 owner，不继续补页面特例；没有当前
+  source/receipt/原生证据的结论保持 unknown；
+- 5.6 期间不再回头重做 5.1—5.5，除非真实验收证明其退出标准未成立。
 
 #### 小板块执行规则
 
@@ -1647,8 +1787,10 @@ audit-event 职责，旧表的数据处理明确留给 5.5E。旧 LifeModel whol
 caller。前后端静态发布合同、259 项前端测试、production build、8 条 browser-shell E2E、
 严格 Clippy 与全仓 Rust 测试均通过。
 
-当前板块：**5.5A—5.5F 已完成。不得新增 5.5G；下一步仅在用户审阅并提交这个干净
-基线后，按既定 5.6 原生闭环验收范围继续。**
+当前板块：**5.5A—5.5F 已完成并通过 PR #87 合入 `main`。5.6 原生闭环验收已经
+固定为 5.6A—5.6F 六个切片但尚未开始实现；不得自行新增 5.6G。下一步先由 5.6A
+建立数据与 Keychain 双重隔离 QA，并在未改代码的 baseline bundle 上复现三个已知
+原生事实呈现问题，再按固定顺序执行。**
 
 第五阶段第一步实际完成：
 
