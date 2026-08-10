@@ -1411,23 +1411,35 @@ E2E，以及 Rust 格式、严格 Clippy、全仓测试和文档测试均已通�
 `hsWarningCodes` 等 metadata；当前校验删除这些字段后却没有提升格式版本，导致合法历史
 数据被误报为 unsupported。修复没有恢复 HS allowlist，而是把 transcript 格式提升为 v3，
 以 receipt-key 绑定的事务重新最小化旧 v2 metadata、移除退役字段并执行物理清理；新增
-回归测试先复现失败再证明迁移。最终全仓结果为 Core 1407 passed / 2 ignored、Tauri
-1129 passed / 13 ignored、scheduler 8 passed、resource binary 2 passed、doc tests 8 passed。
+回归测试先复现失败再证明迁移。随后又补上 malformed v2 metadata 的 fail-closed
+反例，证明迁移失败不会把损坏行改写或误标为 v3。当前 HEAD 的最终全仓结果为 Core
+1408 passed / 2 ignored、Tauri 1129 passed / 13 ignored、scheduler 8 passed、resource
+binary 2 passed、doc tests 8 passed；前端格式、typecheck、259 项 Vitest、production
+build/absence guard 与 8 项 browser-shell E2E 也重新通过。
 
-最终 debug 原生包 SHA-256 为
-`07e761bca78da543b3fa9887b93912ebc13aa1610cadb4be2c15f6882c056939`。在同一
-`phase5-lifemodel-v2` 数据目录恢复后端快照列出的 5 类既有凭据并完全重启后，安全模式
-关闭，路由明确为 `local model · llama3`、未外传；168 条 transcript 全部为 v3，
-上述 4 类退役 HS metadata 行为零。原生 Run
-`0d6e7359-a7fe-4f9e-b0f1-3b2f9e6032ef` 完成一条新建普通对话，task/run 均为 completed，
+当前代码的最终 debug 原生 bundle SHA-256 为
+`c5b99226609890c07d2d04d3ba2a23b3221d9ae8ee410c7e2a109eab0f64ef9b`。在本次临时
+隔离 QA 中，凭据恢复事实为 4 类既有内部凭据加 1 类首次初始化；完全重启后安全模式关闭，
+路由明确为 `local model · llama3`、未外传。15 条 transcript 全部为 v3、JSON 可解码，
+且不存在退役 HS metadata。新建普通对话的 task/run 均为 completed，
 `tool_call_count = 0`、generated proposal count = 0、action queue 与 blockers 均为空，
-Review Center 没有产生新项目。该 QA 只隔离数据目录，5 类内部凭据仍位于默认
-`com.openlife.desktop` Keychain service；双重隔离继续属于 5.6 QA 环境质量。
+Review Center 没有产生新项目。该 QA 隔离了产品数据目录，但内部凭据仍使用默认
+`com.openlife.desktop` Keychain service；数据与 Keychain 双重隔离继续属于 5.6 QA
+环境质量。
 
-原生复核还发现一个不影响本轮 backend truth、但必须进入 5.6 的产品呈现问题：Workspace
-在选中当前已完成对话时仍展示另一对话的“全局活动任务”和执行记录；界面虽标注“任务与
-当前对话不同”，但执行记录的归属仍容易被误解。5.6 必须让 selected conversation 与
-global activity 的身份、记录和控制边界在界面上不可混淆。至此 5.5F 退出标准成立。
+原生复核还发现三个不改变本轮 backend truth、但必须进入 5.6 的产品/证据呈现问题：
+
+- Workspace 在选中当前已完成对话时仍展示另一对话的“全局活动任务”和执行记录；界面虽
+  标注“任务与当前对话不同”，但执行记录归属仍容易被误解；
+- Settings 把 `initialization_required` 与 `unavailable` 合并为一个数量，在 4 类恢复加
+  1 类初始化的真实状态下会把操作文案错误概括成“恢复 5 类”；
+- transcript 的 `providerEndpointKind` 仍可能依据调度器配置写成
+  `external_provider`，而同一 AgentRun 的 canonical route 已明确是本地 Ollama；5.6
+  不得用这个辅助字段替代 canonical route truth。
+
+5.6 必须让 selected conversation 与 global activity 的身份边界不可混淆，拆开凭据恢复
+与初始化的用户动作，并让 provider endpoint 证据读取 canonical route。至此 5.5F 的
+authority 收敛与有界原生回归退出标准成立；上述问题保持为 5.6 的显式未完成项。
 
 ##### 5.6 原生闭环验收
 
