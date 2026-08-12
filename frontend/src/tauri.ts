@@ -2885,6 +2885,8 @@ export type TaskLatestResultPreview = {
 };
 
 export type CanonicalTaskItemKind =
+  | "instruction"
+  | "provider_generation"
   | "artifact_draft"
   | "review_checkpoint"
   | "artifact_materialized";

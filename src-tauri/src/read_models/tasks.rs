@@ -924,6 +924,11 @@ mod tests {
                 execution_session_id: "execution-report-view",
                 run_id: "run-report-view",
                 outcome_digest: &format!("sha256:{:x}", Sha256::digest(b"report view outcome")),
+                provider_request_id: "provider-request-report-view",
+                provider_receipt_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"provider receipt report view")
+                ),
                 target_reference: "/tmp/openlife/report-view.md",
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -952,7 +957,16 @@ mod tests {
             task.lifecycle_status,
             openlife_core::agent::TaskLifecycleStatus::WaitingReview
         );
-        assert_eq!(task.items.len(), 2);
+        assert_eq!(task.items.len(), 4);
+        assert_eq!(
+            task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
+            ]
+        );
         assert_eq!(task.artifacts.len(), 1);
         assert_eq!(
             task.artifacts[0].status,
@@ -993,7 +1007,7 @@ mod tests {
             .latest_result_preview
             .as_ref()
             .is_some_and(|preview| preview.final_delivery_ref.is_some()));
-        assert_eq!(task.items.len(), 3);
+        assert_eq!(task.items.len(), 5);
         assert_eq!(
             task.artifacts[0].materialized_reference.as_deref(),
             Some("/tmp/openlife/report-view.md")

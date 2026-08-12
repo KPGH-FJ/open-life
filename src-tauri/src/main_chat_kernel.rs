@@ -9332,12 +9332,18 @@ async fn expand_generated_artifact_outcomes(
     Ok(expanded)
 }
 
+struct CanonicalReportAdmissionContext<'a> {
+    conversation_id: &'a str,
+    execution_session_id: &'a str,
+    run_id: &'a str,
+    instruction_digest: &'a str,
+    provider_request_id: &'a str,
+    provider_receipt_digest: &'a str,
+}
+
 async fn prepare_canonical_report_artifact_for_review(
     state: &Arc<AppState>,
-    conversation_id: &str,
-    execution_session_id: &str,
-    run_id: &str,
-    outcome_digest: &str,
+    context: &CanonicalReportAdmissionContext<'_>,
     outcome: &mut MainChatKernelWriteOutcome,
 ) -> Result<(), String> {
     if outcome.kind != MainChatKernelWriteOutcomeKind::FileWriteProposal
@@ -9377,10 +9383,12 @@ async fn prepare_canonical_report_artifact_for_review(
         .lock()
         .await
         .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
-            conversation_id,
-            execution_session_id,
-            run_id,
-            outcome_digest,
+            conversation_id: context.conversation_id,
+            execution_session_id: context.execution_session_id,
+            run_id: context.run_id,
+            outcome_digest: context.instruction_digest,
+            provider_request_id: context.provider_request_id,
+            provider_receipt_digest: context.provider_receipt_digest,
             target_reference,
             content_digest,
             media_type,
@@ -9403,6 +9411,69 @@ async fn prepare_canonical_report_artifact_for_review(
         "artifactVersion".into(),
         serde_json::json!(prepared.version),
     );
+    Ok(())
+}
+
+fn canonical_report_provider_receipt_digest(
+    receipt: &ProviderInvocationReceipt,
+) -> Result<String, String> {
+    if receipt.status != ProviderInvocationStatus::Completed || receipt.error_digest.is_some() {
+        return Err("canonical_report_provider_receipt_not_completed".into());
+    }
+    let policy_evidence = receipt
+        .policy_evidence
+        .as_ref()
+        .ok_or_else(|| "canonical_report_provider_policy_evidence_missing".to_string())?;
+    let policy_evidence_digest = policy_evidence
+        .evidence_digest()
+        .map_err(|error| format!("canonical_report_provider_policy_evidence_invalid:{error}"))?;
+    Ok(
+        openlife_core::agent::metadata_safe_value_digest(&serde_json::json!({
+            "requestId": receipt.request_id,
+            "provider": receipt.provider,
+            "model": receipt.model,
+            "status": receipt.status,
+            "startedAt": receipt.started_at,
+            "finishedAt": receipt.finished_at,
+            "simulated": receipt.simulated,
+            "policyEvidenceDigest": policy_evidence_digest,
+        }))
+        .1,
+    )
+}
+
+async fn prepare_canonical_report_artifacts_after_provider_receipt(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+    execution_session_id: &str,
+    run_id: &str,
+    instruction_digest: &str,
+    provider_receipt: Option<&ProviderInvocationReceipt>,
+    outcomes: &mut [MainChatKernelWriteOutcome],
+) -> Result<(), String> {
+    if !outcomes.iter().any(|outcome| {
+        outcome
+            .governed_input
+            .get("generatedByProvider")
+            .and_then(Value::as_bool)
+            == Some(true)
+    }) {
+        return Ok(());
+    }
+    let receipt =
+        provider_receipt.ok_or_else(|| "canonical_report_provider_receipt_missing".to_string())?;
+    let receipt_digest = canonical_report_provider_receipt_digest(receipt)?;
+    let context = CanonicalReportAdmissionContext {
+        conversation_id,
+        execution_session_id,
+        run_id,
+        instruction_digest,
+        provider_request_id: &receipt.request_id,
+        provider_receipt_digest: &receipt_digest,
+    };
+    for outcome in outcomes {
+        prepare_canonical_report_artifact_for_review(state, &context, outcome).await?;
+    }
     Ok(())
 }
 
@@ -10972,20 +11043,6 @@ async fn build_kernel_write_outcome_command_surface_result(
             .await;
         }
     };
-    for expanded_outcome in &mut expanded_outcomes {
-        prepare_canonical_report_artifact_for_review(
-            state,
-            session_id,
-            task_session_id,
-            canonical_run_id,
-            &main_chat_agent_turn
-                .decision
-                .policy_decision
-                .authorized_user_message_digest,
-            expanded_outcome,
-        )
-        .await?;
-    }
     let mut agent_run = load_existing_canonical_main_chat_agent_run(
         state,
         canonical_run_id,
@@ -11039,6 +11096,19 @@ async fn build_kernel_write_outcome_command_surface_result(
     if provider_generated_draft != selected_provider_receipt.is_some() {
         return Err("generated_artifact_provider_receipt_mismatch".into());
     }
+    prepare_canonical_report_artifacts_after_provider_receipt(
+        state,
+        session_id,
+        task_session_id,
+        canonical_run_id,
+        &main_chat_agent_turn
+            .decision
+            .policy_decision
+            .authorized_user_message_digest,
+        selected_provider_receipt,
+        &mut expanded_outcomes,
+    )
+    .await?;
     let provider_generated = selected_provider_receipt.is_some();
     let provider_live_invoked = selected_provider_receipt.is_some_and(|receipt| !receipt.simulated)
         && !route_metadata.scripted_response_configured;
@@ -22340,7 +22410,7 @@ mod tests {
             None,
             openlife_core::agent::AgentTaskKind::Conversation,
         );
-        let mut outcome = MainChatKernelWriteOutcome {
+        let outcome = MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
             action_type: "file.write".into(),
             target: target.to_string_lossy().into_owned(),
@@ -22363,21 +22433,47 @@ mod tests {
             hard_blocked: false,
             replayable: false,
         };
-        prepare_canonical_report_artifact_for_review(
+        let provider_receipt = ScriptedModelClient::ok("unused")
+            .with_provider_receipt(ProviderInvocationStatus::Completed)
+            .provider_receipt
+            .unwrap();
+        let mut outcomes = vec![outcome];
+        prepare_canonical_report_artifacts_after_provider_receipt(
             &state,
             "conversation-canonical-report",
             "execution-session-canonical-report",
             "run-canonical-report",
             &ingress.policy_decision.authorized_user_message_digest,
-            &mut outcome,
+            Some(&provider_receipt),
+            &mut outcomes,
         )
         .await
         .unwrap();
+        let outcome = outcomes.pop().unwrap();
         let artifact_id = outcome.governed_input["artifactId"]
             .as_str()
             .unwrap()
             .to_string();
         assert!(artifact_id.starts_with("artifact:"));
+        let canonical_items = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_items(outcome.governed_input["canonicalTaskId"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            canonical_items
+                .iter()
+                .map(|item| item.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
+            ]
+        );
 
         let registry = state
             .main_chat_runtime_state
@@ -22424,6 +22520,74 @@ mod tests {
             stored.proposal_id.as_deref(),
             Some(review.proposal_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn generated_report_without_completed_provider_receipt_has_zero_canonical_admission() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let content_digest = openlife_core::agent::metadata_safe_text_digest("# Report").1;
+        let generated_outcome = || MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
+            action_type: "file.write".into(),
+            target: "/tmp/openlife/report.md".into(),
+            reason: "generated report requires Review".into(),
+            payload_summary: "one Markdown report".into(),
+            governed_input: serde_json::json!({
+                "path": "/tmp/openlife/report.md",
+                "content": "# Report",
+                "content_hash": content_digest,
+                "artifactKind": "markdown",
+                "generatedByProvider": true,
+            }),
+            proposal_type: Some("external_write_action".into()),
+            blocker_code: None,
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: false,
+        };
+        let instruction_digest = openlife_core::agent::metadata_safe_text_digest("instruction").1;
+
+        let mut missing_receipt_outcomes = vec![generated_outcome()];
+        let missing = prepare_canonical_report_artifacts_after_provider_receipt(
+            &state,
+            "conversation-missing-receipt",
+            "execution-missing-receipt",
+            "run-missing-receipt",
+            &instruction_digest,
+            None,
+            &mut missing_receipt_outcomes,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing, "canonical_report_provider_receipt_missing");
+
+        let failed_receipt = ScriptedModelClient::ok("unused")
+            .with_provider_receipt(ProviderInvocationStatus::Failed)
+            .provider_receipt
+            .unwrap();
+        let mut failed_receipt_outcomes = vec![generated_outcome()];
+        let failed = prepare_canonical_report_artifacts_after_provider_receipt(
+            &state,
+            "conversation-failed-receipt",
+            "execution-failed-receipt",
+            "run-failed-receipt",
+            &instruction_digest,
+            Some(&failed_receipt),
+            &mut failed_receipt_outcomes,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed, "canonical_report_provider_receipt_not_completed");
+
+        let snapshots = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_task_snapshots(100)
+            .unwrap();
+        assert!(snapshots.is_empty());
     }
 
     #[tokio::test]

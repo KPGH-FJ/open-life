@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 1;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +54,8 @@ impl CanonicalTaskStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalTaskItemKind {
+    Instruction,
+    ProviderGeneration,
     ArtifactDraft,
     ReviewCheckpoint,
     ArtifactMaterialized,
@@ -62,6 +64,8 @@ pub enum CanonicalTaskItemKind {
 impl CanonicalTaskItemKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Instruction => "instruction",
+            Self::ProviderGeneration => "provider_generation",
             Self::ArtifactDraft => "artifact_draft",
             Self::ReviewCheckpoint => "review_checkpoint",
             Self::ArtifactMaterialized => "artifact_materialized",
@@ -70,6 +74,8 @@ impl CanonicalTaskItemKind {
 
     fn from_db(value: &str) -> Result<Self> {
         match value {
+            "instruction" => Ok(Self::Instruction),
+            "provider_generation" => Ok(Self::ProviderGeneration),
             "artifact_draft" => Ok(Self::ArtifactDraft),
             "review_checkpoint" => Ok(Self::ReviewCheckpoint),
             "artifact_materialized" => Ok(Self::ArtifactMaterialized),
@@ -208,6 +214,7 @@ pub struct CanonicalTaskRunRecord {
     pub run_id: String,
     pub execution_session_id: String,
     pub ordinal: u64,
+    pub execution_facts_version: u64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -232,6 +239,8 @@ pub struct ReportArtifactDraftInput<'a> {
     pub execution_session_id: &'a str,
     pub run_id: &'a str,
     pub outcome_digest: &'a str,
+    pub provider_request_id: &'a str,
+    pub provider_receipt_digest: &'a str,
     pub target_reference: &'a str,
     pub content_digest: &'a str,
     pub media_type: &'a str,
@@ -314,7 +323,7 @@ impl CanonicalTaskRuntimeStore {
     }
 
     fn initialize(&self) -> Result<()> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
@@ -339,6 +348,8 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL UNIQUE,
                 execution_session_id TEXT NOT NULL,
                 ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                execution_facts_version INTEGER NOT NULL DEFAULT 2
+                    CHECK(execution_facts_version IN (1, 2)),
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(task_id, run_id),
                 FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
@@ -349,7 +360,8 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL CHECK(sequence > 0),
                 kind TEXT NOT NULL CHECK(kind IN (
-                    'artifact_draft', 'review_checkpoint', 'artifact_materialized'
+                    'instruction', 'provider_generation', 'artifact_draft',
+                    'review_checkpoint', 'artifact_materialized'
                 )),
                 status TEXT NOT NULL CHECK(status IN (
                     'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
@@ -398,23 +410,95 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '1')
+             VALUES ('schema_version', '2')
              ON CONFLICT(key) DO NOTHING;",
         )?;
+        if Self::schema_version(&conn)? == 1 {
+            Self::migrate_v1_to_v2(&mut conn)?;
+        }
         Self::validate_schema(&conn)
     }
 
-    fn validate_schema(conn: &Connection) -> Result<()> {
-        let version = conn
-            .query_row(
-                "SELECT value FROM canonical_task_runtime_metadata
-                 WHERE key = 'schema_version'",
+    fn schema_version(conn: &Connection) -> Result<i64> {
+        conn.query_row(
+            "SELECT value FROM canonical_task_runtime_metadata
+             WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("canonical_task_runtime_schema_version_missing"))?
+        .parse::<i64>()
+        .context("canonical_task_runtime_schema_version_invalid")
+    }
+
+    fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE canonical_task_runs
+                     ADD COLUMN execution_facts_version INTEGER NOT NULL DEFAULT 1
+                     CHECK(execution_facts_version IN (1, 2));
+                 ALTER TABLE canonical_task_items RENAME TO canonical_task_items_v1;
+                 CREATE TABLE canonical_task_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'instruction', 'provider_generation', 'artifact_draft',
+                        'review_checkpoint', 'artifact_materialized'
+                    )),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
+                    )),
+                    summary_code TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, sequence),
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO canonical_task_items (
+                    id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+                 ) SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                          payload_digest, created_at, updated_at
+                   FROM canonical_task_items_v1;
+                 DROP TABLE canonical_task_items_v1;
+                 CREATE INDEX idx_canonical_task_items_run
+                    ON canonical_task_items(run_id, sequence);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value = '2'
+                 WHERE key = 'schema_version' AND value = '1'",
                 [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("canonical_task_runtime_schema_version_missing"))?;
-        if version != TASK_RUNTIME_SCHEMA_VERSION.to_string() {
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v1_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let pragma_restore =
+            conn.execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;");
+        migration?;
+        pragma_restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v1_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
+    fn validate_schema(conn: &Connection) -> Result<()> {
+        let version = Self::schema_version(conn)?;
+        if version != TASK_RUNTIME_SCHEMA_VERSION {
             anyhow::bail!("canonical_task_runtime_schema_version_unsupported:{version}");
         }
         Ok(())
@@ -428,6 +512,8 @@ impl CanonicalTaskRuntimeStore {
         validate_nonempty("execution_session_id", input.execution_session_id, 512)?;
         validate_nonempty("run_id", input.run_id, 512)?;
         validate_digest("outcome_digest", input.outcome_digest)?;
+        validate_nonempty("provider_request_id", input.provider_request_id, 512)?;
+        validate_digest("provider_receipt_digest", input.provider_receipt_digest)?;
         validate_nonempty("target_reference", input.target_reference, 4096)?;
         validate_digest("content_digest", input.content_digest)?;
         validate_nonempty("media_type", input.media_type, 256)?;
@@ -444,6 +530,16 @@ impl CanonicalTaskRuntimeStore {
             ],
         );
         let item_id = stable_id("item", &["artifact_draft", &artifact_id]);
+        let instruction_item_id = stable_id("item", &["instruction", &task_id, input.run_id]);
+        let provider_generation_item_id = stable_id(
+            "item",
+            &[
+                "provider_generation",
+                &task_id,
+                input.run_id,
+                input.provider_request_id,
+            ],
+        );
         let now = Utc::now();
         let now_text = now.to_rfc3339();
         let mut conn = self.lock_conn()?;
@@ -473,16 +569,30 @@ impl CanonicalTaskRuntimeStore {
 
         let existing_run = tx
             .query_row(
-                "SELECT task_id, execution_session_id FROM canonical_task_runs
+                "SELECT task_id, execution_session_id, execution_facts_version
+                 FROM canonical_task_runs
                  WHERE run_id = ?1",
                 [input.run_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((existing_task, existing_session)) = existing_run {
+        let is_new_run = existing_run.is_none();
+        let execution_facts_version = if let Some((
+            existing_task,
+            existing_session,
+            execution_facts_version,
+        )) = existing_run
+        {
             if existing_task != task_id || existing_session != input.execution_session_id {
                 anyhow::bail!("canonical_report_run_membership_conflict");
             }
+            execution_facts_version
         } else {
             let ordinal: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM canonical_task_runs
@@ -492,8 +602,9 @@ impl CanonicalTaskRuntimeStore {
             )?;
             tx.execute(
                 "INSERT INTO canonical_task_runs (
-                    task_id, run_id, execution_session_id, ordinal, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    task_id, run_id, execution_session_id, ordinal,
+                    execution_facts_version, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 2, ?5)",
                 params![
                     task_id,
                     input.run_id,
@@ -501,6 +612,61 @@ impl CanonicalTaskRuntimeStore {
                     ordinal,
                     now_text
                 ],
+            )?;
+            2
+        };
+
+        if execution_facts_version == 2 {
+            if !is_new_run {
+                let existing_instruction_id = tx
+                    .query_row(
+                        "SELECT id FROM canonical_task_items
+                         WHERE task_id = ?1 AND run_id = ?2 AND kind = 'instruction'",
+                        params![task_id, input.run_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if existing_instruction_id.as_deref() != Some(instruction_item_id.as_str()) {
+                    anyhow::bail!("canonical_report_instruction_item_missing_or_conflicting");
+                }
+                let existing_generation_id = tx
+                    .query_row(
+                        "SELECT id FROM canonical_task_items
+                         WHERE task_id = ?1 AND run_id = ?2
+                           AND kind = 'provider_generation'",
+                        params![task_id, input.run_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if existing_generation_id.as_deref() != Some(provider_generation_item_id.as_str()) {
+                    anyhow::bail!(
+                        "canonical_report_provider_generation_item_missing_or_conflicting"
+                    );
+                }
+            }
+            ensure_completed_item(
+                &tx,
+                CompletedItemInput {
+                    item_id: &instruction_item_id,
+                    task_id: &task_id,
+                    run_id: input.run_id,
+                    kind: CanonicalTaskItemKind::Instruction,
+                    summary_code: "report_instruction_bound",
+                    payload_digest: input.outcome_digest,
+                    now: &now_text,
+                },
+            )?;
+            ensure_completed_item(
+                &tx,
+                CompletedItemInput {
+                    item_id: &provider_generation_item_id,
+                    task_id: &task_id,
+                    run_id: input.run_id,
+                    kind: CanonicalTaskItemKind::ProviderGeneration,
+                    summary_code: "report_provider_generation_completed",
+                    payload_digest: input.provider_receipt_digest,
+                    now: &now_text,
+                },
             )?;
         }
 
@@ -533,6 +699,9 @@ impl CanonicalTaskRuntimeStore {
                 anyhow::bail!("canonical_report_artifact_identity_conflict");
             }
         } else {
+            if execution_facts_version != 2 {
+                anyhow::bail!("canonical_report_legacy_run_cannot_add_artifact");
+            }
             tx.execute(
                 "UPDATE canonical_tasks SET status = 'running', updated_at = ?2
                  WHERE id = ?1",
@@ -1013,7 +1182,8 @@ impl CanonicalTaskRuntimeStore {
         for task in tasks {
             let runs = {
                 let mut statement = tx.prepare(
-                    "SELECT task_id, run_id, execution_session_id, ordinal, created_at
+                    "SELECT task_id, run_id, execution_session_id, ordinal,
+                            execution_facts_version, created_at
                      FROM canonical_task_runs WHERE task_id = ?1
                      ORDER BY ordinal ASC, run_id ASC",
                 )?;
@@ -1081,6 +1251,82 @@ impl CanonicalTaskRuntimeStore {
             })
             .unwrap_or(false)
     }
+}
+
+struct CompletedItemInput<'a> {
+    item_id: &'a str,
+    task_id: &'a str,
+    run_id: &'a str,
+    kind: CanonicalTaskItemKind,
+    summary_code: &'a str,
+    payload_digest: &'a str,
+    now: &'a str,
+}
+
+fn ensure_completed_item(
+    tx: &rusqlite::Transaction<'_>,
+    input: CompletedItemInput<'_>,
+) -> Result<()> {
+    let existing = tx
+        .query_row(
+            "SELECT task_id, run_id, kind, status, summary_code, payload_digest
+             FROM canonical_task_items WHERE id = ?1",
+            [input.item_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((
+        stored_task,
+        stored_run,
+        stored_kind,
+        stored_status,
+        stored_summary,
+        stored_payload,
+    )) = existing
+    {
+        if stored_task != input.task_id
+            || stored_run != input.run_id
+            || stored_kind != input.kind.as_str()
+            || stored_status != CanonicalTaskItemStatus::Completed.as_str()
+            || stored_summary != input.summary_code
+            || stored_payload != input.payload_digest
+        {
+            anyhow::bail!("canonical_report_execution_item_conflict");
+        }
+        return Ok(());
+    }
+    let sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items
+         WHERE task_id = ?1",
+        [input.task_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO canonical_task_items (
+            id, task_id, run_id, sequence, kind, status, summary_code,
+            payload_digest, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, ?8, ?8)",
+        params![
+            input.item_id,
+            input.task_id,
+            input.run_id,
+            sequence,
+            input.kind.as_str(),
+            input.summary_code,
+            input.payload_digest,
+            input.now
+        ],
+    )?;
+    Ok(())
 }
 
 fn validate_nonempty(field: &str, value: &str, max_bytes: usize) -> Result<()> {
@@ -1240,13 +1486,17 @@ fn row_to_task_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalTaskRun
     let ordinal = u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Integer, error.into())
     })?;
+    let execution_facts_version = u64::try_from(row.get::<_, i64>(4)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Integer, error.into())
+    })?;
     Ok(CanonicalTaskRunRecord {
         task_id: row.get(0)?,
         run_id: row.get(1)?,
         execution_session_id: row.get(2)?,
         ordinal,
-        created_at: parse_timestamp(row.get(4)?, "task_run_created_at").map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+        execution_facts_version,
+        created_at: parse_timestamp(row.get(5)?, "task_run_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
         })?,
     })
 }
@@ -1320,11 +1570,200 @@ mod tests {
                 execution_session_id: run,
                 run_id: run,
                 outcome_digest: &outcome_digest,
+                provider_request_id: &format!("provider-request-{run}"),
+                provider_receipt_digest: &digest_of(&format!("provider-receipt-{run}")),
                 target_reference: "/tmp/openlife/report.md",
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
             })
             .unwrap()
+    }
+
+    fn prepare_artifact_with_facts(
+        store: &CanonicalTaskRuntimeStore,
+        conversation: &str,
+        run: &str,
+        outcome_digest: &str,
+        provider_request_id: &str,
+        provider_receipt_digest: &str,
+        target_reference: &str,
+        content_digest: &str,
+    ) -> Result<PreparedReportArtifact> {
+        store.prepare_report_artifact(ReportArtifactDraftInput {
+            conversation_id: conversation,
+            execution_session_id: run,
+            run_id: run,
+            outcome_digest,
+            provider_request_id,
+            provider_receipt_digest,
+            target_reference,
+            content_digest,
+            media_type: "text/markdown; charset=utf-8",
+        })
+    }
+
+    fn create_v1_report_database(path: &Path) -> PreparedReportArtifact {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE canonical_task_runtime_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE canonical_tasks (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL UNIQUE,
+                task_kind TEXT NOT NULL CHECK(task_kind = 'report'),
+                initial_outcome_digest TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'running', 'waiting_review', 'completed', 'blocked',
+                    'failed', 'effect_unknown'
+                )),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE canonical_task_runs (
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL UNIQUE,
+                execution_session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, run_id),
+                FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE TABLE canonical_task_items (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence > 0),
+                kind TEXT NOT NULL CHECK(kind IN (
+                    'artifact_draft', 'review_checkpoint', 'artifact_materialized'
+                )),
+                status TEXT NOT NULL CHECK(status IN (
+                    'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
+                )),
+                summary_code TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(task_id, sequence),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             );
+             CREATE TABLE canonical_artifacts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                source_item_id TEXT NOT NULL UNIQUE,
+                current_version INTEGER NOT NULL CHECK(current_version > 0),
+                status TEXT NOT NULL CHECK(status IN (
+                    'draft', 'waiting_review', 'materialized', 'failed', 'effect_unknown'
+                )),
+                media_type TEXT NOT NULL,
+                target_reference_digest TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                proposal_id TEXT UNIQUE,
+                materialized_reference TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT,
+                FOREIGN KEY(source_item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+             );
+             CREATE TABLE canonical_artifact_versions (
+                artifact_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
+                source_item_id TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                materialized_reference TEXT,
+                observed_content_digest TEXT,
+                created_at TEXT NOT NULL,
+                materialized_at TEXT,
+                PRIMARY KEY(artifact_id, version),
+                FOREIGN KEY(artifact_id) REFERENCES canonical_artifacts(id) ON DELETE RESTRICT,
+                FOREIGN KEY(source_item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE INDEX idx_canonical_task_items_run
+                ON canonical_task_items(run_id, sequence);
+             CREATE INDEX idx_canonical_artifacts_task
+                ON canonical_artifacts(task_id, created_at, id);
+             INSERT INTO canonical_task_runtime_metadata(key, value)
+             VALUES ('schema_version', '1');",
+        )
+        .unwrap();
+
+        let conversation_id = "conversation-v1";
+        let run_id = "run-v1";
+        let outcome_digest = digest_of("report outcome");
+        let content_digest = digest_of("# Report");
+        let target_reference = "/tmp/openlife/report.md";
+        let task_id = stable_id("task", &["report", conversation_id]);
+        let target_reference_digest = sha256_text(target_reference);
+        let artifact_id = stable_id(
+            "artifact",
+            &[&task_id, run_id, &target_reference_digest, &content_digest],
+        );
+        let item_id = stable_id("item", &["artifact_draft", &artifact_id]);
+        let payload_digest = sha256_text(&format!(
+            "{}\0{}\0{}",
+            target_reference_digest, content_digest, "text/markdown; charset=utf-8"
+        ));
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO canonical_tasks (
+                id, conversation_id, task_kind, initial_outcome_digest,
+                status, created_at, updated_at
+             ) VALUES (?1, ?2, 'report', ?3, 'running', ?4, ?4)",
+            params![task_id, conversation_id, outcome_digest, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO canonical_task_runs (
+                task_id, run_id, execution_session_id, ordinal, created_at
+             ) VALUES (?1, ?2, ?2, 1, ?3)",
+            params![task_id, run_id, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO canonical_task_items (
+                id, task_id, run_id, sequence, kind, status, summary_code,
+                payload_digest, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 1, 'artifact_draft', 'completed',
+                       'report_artifact_draft_prepared', ?4, ?5, ?5)",
+            params![item_id, task_id, run_id, payload_digest, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO canonical_artifacts (
+                id, task_id, source_item_id, current_version, status,
+                media_type, target_reference_digest, content_digest,
+                proposal_id, materialized_reference, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 1, 'draft', 'text/markdown; charset=utf-8',
+                       ?4, ?5, NULL, NULL, ?6, ?6)",
+            params![
+                artifact_id,
+                task_id,
+                item_id,
+                target_reference_digest,
+                content_digest,
+                now
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO canonical_artifact_versions (
+                artifact_id, version, source_item_id, content_digest,
+                materialized_reference, observed_content_digest,
+                created_at, materialized_at
+             ) VALUES (?1, 1, ?2, ?3, NULL, NULL, ?4, NULL)",
+            params![artifact_id, item_id, content_digest, now],
+        )
+        .unwrap();
+
+        PreparedReportArtifact {
+            task_id,
+            artifact_draft_item_id: item_id,
+            artifact_id,
+            version: 1,
+        }
     }
 
     #[test]
@@ -1335,7 +1774,14 @@ mod tests {
         assert_eq!(first, replay);
         assert!(first.artifact_id.starts_with("artifact:"));
         assert!(!first.artifact_id.contains("proposal"));
-        assert_eq!(store.list_items(&first.task_id).unwrap().len(), 1);
+        let items = store.list_items(&first.task_id).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].kind, CanonicalTaskItemKind::Instruction);
+        assert_eq!(items[1].kind, CanonicalTaskItemKind::ProviderGeneration);
+        assert_eq!(items[2].kind, CanonicalTaskItemKind::ArtifactDraft);
+        assert!(items
+            .iter()
+            .all(|item| item.status == CanonicalTaskItemStatus::Completed));
 
         let review = store
             .bind_report_review(&first.artifact_id, "proposal-1")
@@ -1344,7 +1790,7 @@ mod tests {
             .bind_report_review(&first.artifact_id, "proposal-1")
             .unwrap();
         assert_eq!(review, review_replay);
-        assert_eq!(store.list_items(&first.task_id).unwrap().len(), 2);
+        assert_eq!(store.list_items(&first.task_id).unwrap().len(), 4);
         assert_eq!(
             store
                 .load_artifact(&first.artifact_id)
@@ -1363,6 +1809,139 @@ mod tests {
         assert_eq!(first.task_id, second.task_id);
         assert_ne!(first.artifact_id, second.artifact_id);
         assert_eq!(store.run_count(&first.task_id).unwrap(), 2);
+        let items = store.list_items(&first.task_id).unwrap();
+        assert_eq!(items.len(), 6);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Instruction)
+                .count(),
+            2
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ProviderGeneration)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn one_run_reuses_execution_facts_for_multiple_artifacts() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let outcome_digest = digest_of("report outcome");
+        let provider_receipt_digest = digest_of("provider receipt");
+        let first_content = digest_of("# First report");
+        let second_content = digest_of("# Second report");
+        let first = prepare_artifact_with_facts(
+            &store,
+            "conversation-1",
+            "run-1",
+            &outcome_digest,
+            "provider-request-1",
+            &provider_receipt_digest,
+            "/tmp/openlife/first.md",
+            &first_content,
+        )
+        .unwrap();
+        let second = prepare_artifact_with_facts(
+            &store,
+            "conversation-1",
+            "run-1",
+            &outcome_digest,
+            "provider-request-1",
+            &provider_receipt_digest,
+            "/tmp/openlife/second.md",
+            &second_content,
+        )
+        .unwrap();
+
+        assert_eq!(first.task_id, second.task_id);
+        assert_ne!(first.artifact_id, second.artifact_id);
+        let items = store.list_items(&first.task_id).unwrap();
+        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Instruction)
+                .count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ProviderGeneration)
+                .count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ArtifactDraft)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn changed_execution_facts_fail_without_partial_writes() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let outcome_digest = digest_of("report outcome");
+        let provider_receipt_digest = digest_of("provider receipt");
+        let content_digest = digest_of("# Report");
+        let prepared = prepare_artifact_with_facts(
+            &store,
+            "conversation-1",
+            "run-1",
+            &outcome_digest,
+            "provider-request-1",
+            &provider_receipt_digest,
+            "/tmp/openlife/report.md",
+            &content_digest,
+        )
+        .unwrap();
+        let before = store.list_task_snapshots(100).unwrap();
+
+        let changed_instruction = prepare_artifact_with_facts(
+            &store,
+            "conversation-1",
+            "run-1",
+            &digest_of("changed report outcome"),
+            "provider-request-1",
+            &provider_receipt_digest,
+            "/tmp/openlife/report.md",
+            &content_digest,
+        )
+        .unwrap_err();
+        assert!(changed_instruction
+            .to_string()
+            .contains("canonical_report_execution_item_conflict"));
+        assert_eq!(store.list_task_snapshots(100).unwrap(), before);
+
+        let changed_receipt = prepare_artifact_with_facts(
+            &store,
+            "conversation-1",
+            "run-1",
+            &outcome_digest,
+            "provider-request-1",
+            &digest_of("changed provider receipt"),
+            "/tmp/openlife/report.md",
+            &content_digest,
+        )
+        .unwrap_err();
+        assert!(changed_receipt
+            .to_string()
+            .contains("canonical_report_execution_item_conflict"));
+        assert_eq!(store.list_task_snapshots(100).unwrap(), before);
+        assert_eq!(
+            store
+                .load_artifact(&prepared.artifact_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            CanonicalArtifactStatus::Draft
+        );
     }
 
     #[test]
@@ -1558,6 +2137,58 @@ mod tests {
     }
 
     #[test]
+    fn v1_runtime_migrates_without_rewriting_legacy_execution_facts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task_runtime_v1.db");
+        let legacy = create_v1_report_database(&path);
+
+        let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let snapshots = store.list_task_snapshots(100).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].task.id, legacy.task_id);
+        assert_eq!(snapshots[0].runs.len(), 1);
+        assert_eq!(snapshots[0].runs[0].execution_facts_version, 1);
+        assert_eq!(snapshots[0].items.len(), 1);
+        assert_eq!(
+            snapshots[0].items[0].kind,
+            CanonicalTaskItemKind::ArtifactDraft
+        );
+        assert_eq!(snapshots[0].artifacts[0].artifact.id, legacy.artifact_id);
+
+        let replay = prepare_artifact_with_facts(
+            &store,
+            "conversation-v1",
+            "run-v1",
+            &digest_of("report outcome"),
+            "provider-request-v1",
+            &digest_of("provider receipt v1"),
+            "/tmp/openlife/report.md",
+            &digest_of("# Report"),
+        )
+        .unwrap();
+        assert_eq!(replay, legacy);
+        assert_eq!(store.list_items(&legacy.task_id).unwrap().len(), 1);
+
+        let second = prepare_artifact_with_facts(
+            &store,
+            "conversation-v1",
+            "run-v2",
+            &digest_of("second report outcome"),
+            "provider-request-v2",
+            &digest_of("provider receipt v2"),
+            "/tmp/openlife/second.md",
+            &digest_of("# Second report"),
+        )
+        .unwrap();
+        assert_eq!(second.task_id, legacy.task_id);
+        let migrated = store.list_task_snapshots(100).unwrap();
+        assert_eq!(migrated[0].runs.len(), 2);
+        assert_eq!(migrated[0].runs[0].execution_facts_version, 1);
+        assert_eq!(migrated[0].runs[1].execution_facts_version, 2);
+        assert_eq!(migrated[0].items.len(), 4);
+    }
+
+    #[test]
     fn read_only_recovery_reopens_existing_runtime_without_mutation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("task_runtime.db");
@@ -1582,6 +2213,8 @@ mod tests {
                 execution_session_id: "run-2",
                 run_id: "run-2",
                 outcome_digest: &outcome_digest,
+                provider_request_id: "provider-request-run-2",
+                provider_receipt_digest: &digest_of("provider-receipt-run-2"),
                 target_reference: "/tmp/openlife/report.md",
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -1606,7 +2239,7 @@ mod tests {
         let snapshot = &snapshots[0];
         assert_eq!(snapshot.task.id, first.task_id);
         assert_eq!(snapshot.runs.len(), 2);
-        assert_eq!(snapshot.items.len(), 4);
+        assert_eq!(snapshot.items.len(), 8);
         assert_eq!(snapshot.artifacts.len(), 2);
         assert!(snapshot.artifacts.iter().all(|artifact| {
             artifact.artifact.current_version == artifact.current_version.version

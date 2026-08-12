@@ -6376,6 +6376,29 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
         proposals[0].status,
         openlife_core::agent::ProposalStatus::Pending
     );
+    let canonical_task_id = proposals[0].after["canonicalTaskId"]
+        .as_str()
+        .expect("CC01 proposal carries canonical report Task identity");
+    let canonical_items = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .expect("CC01 canonical Task runtime")
+        .lock()
+        .await
+        .list_items(canonical_task_id)
+        .expect("read CC01 canonical report Items");
+    assert_eq!(
+        canonical_items
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
+        ]
+    );
     let report_path = safe_workspace.join("summary.md");
     assert!(
         !report_path.exists(),
