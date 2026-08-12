@@ -1004,6 +1004,39 @@ impl McpRegistry {
             ToolIdempotencyContract::Idempotent,
         );
 
+        self.register_builtin(
+            ToolManifest {
+                id: "document.read".into(),
+                name: "document.read".into(),
+                description: "读取当前任务已绑定并完成解析的文档资源".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "message_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "query": { "type": "string", "minLength": 1, "maxLength": 262144 },
+                        "selection_request_id": { "type": "string", "format": "uuid" },
+                        "privacy_decision_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+                    },
+                    "required": ["message_id", "query", "selection_request_id", "privacy_decision_id"]
+                }),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["read".into(), "imported_resource".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                idempotency_contract: ToolIdempotencyContract::Idempotent,
+                tags: vec!["execution".into(), "document".into()],
+            },
+            Box::new(|_args| {
+                Ok("document.read completed with the current governed resource executor".into())
+            }),
+        );
+
         self.register_execution_tool(
             "file.write_proposal",
             "提议写入文件（生成 ExternalWriteAction Proposal，不直接写入）",
@@ -2209,6 +2242,7 @@ mod tests {
 
         assert!(names.contains("web.search"));
         assert!(names.contains("file.read"));
+        assert!(names.contains("document.read"));
         assert!(names.contains("memory.propose_write"));
         assert!(!names.contains("builtin_echo"));
         assert!(!names.contains("mcp.call_tool"));

@@ -105,6 +105,93 @@ impl super::ActionExecutor {
         }
 
         let mut result = match tool_name {
+            "document.read" => {
+                let message_id = args
+                    .get("message_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("document_read_message_id_missing"))?;
+                let query = args
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("document_read_query_missing"))?;
+                let selection_request_id = args
+                    .get("selection_request_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("document_read_selection_request_id_missing"))?;
+                let privacy_decision_id = args
+                    .get("privacy_decision_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                    anyhow::anyhow!("document_read_privacy_decision_id_missing")
+                })?;
+                let Some(store) = ctx.resource_store else {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some("document_read_resource_store_unavailable".into()),
+                    });
+                };
+                if message_id.trim().is_empty() || query.trim().is_empty() {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some("document_read_bound_input_invalid".into()),
+                    });
+                }
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?
+                    .observe_local()
+                    .await?;
+                let selected = crate::resource_selection::DeterministicResourceSelector
+                    .select_for_message(
+                        store,
+                        selection_request_id,
+                        privacy_decision_id,
+                        message_id,
+                        query,
+                        vec![crate::llm::ProviderPayloadCategory::CurrentUserConversation],
+                    );
+                match selected {
+                    Ok(selected) if selected.context_blocks.is_empty() => {
+                        Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some("document_read_no_bound_content".into()),
+                        })
+                    }
+                    Ok(selected) => {
+                        let chunks = selected
+                            .context_blocks
+                            .iter()
+                            .map(|block| {
+                                serde_json::json!({
+                                    "sourceRef": block.source_ref,
+                                    "content": block.content,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        Ok(ToolCallInternalResult {
+                            success: true,
+                            output: Some(
+                                serde_json::json!({
+                                    "schemaVersion": 1,
+                                    "messageId": message_id,
+                                    "selectionDigest": selected.citation_set.selection_digest(),
+                                    "selectedChunkCount": chunks.len(),
+                                    "chunks": chunks,
+                                })
+                                .to_string(),
+                            ),
+                            error: None,
+                        })
+                    }
+                    Err(error) => Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("document_read_selection_failed:{error}")),
+                    }),
+                }
+            }
             "file.read" => {
                 let path = args
                     .get("path")

@@ -648,6 +648,7 @@ pub enum AllowedCapability {
     TransientStateCommit,
     MemoryRead,
     SessionRead,
+    ImportedResourceRead,
     WorkspaceFileRead,
     WebSearch,
     WebFetch,
@@ -678,6 +679,7 @@ impl AllowedCapability {
             Self::TransientStateCommit => "state.transient_commit",
             Self::MemoryRead => "memory.read",
             Self::SessionRead => "session.read",
+            Self::ImportedResourceRead => "document.read",
             Self::WorkspaceFileRead => "workspace_file.read",
             Self::WebSearch => "web.search",
             Self::WebFetch => "web.fetch",
@@ -2328,7 +2330,9 @@ fn policy_allowed_capabilities(
             // collection before the artifact draft is staged. Reuse the same
             // read-capability authority as the read-only route; this does not
             // authorize the later file effect or bypass ReviewWorkflow.
-            if intent.requires_external_read {
+            if intent.requires_external_read
+                || requests_imported_resource_read(&intent.user_goal.to_ascii_lowercase())
+            {
                 capabilities.extend(requested_read_capabilities(intent));
             }
             capabilities
@@ -2389,6 +2393,9 @@ fn policy_allowed_capabilities(
 fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     let lower = intent.user_goal.to_ascii_lowercase();
     let mut capabilities = Vec::new();
+    if requests_imported_resource_read(&lower) {
+        capabilities.push(AllowedCapability::ImportedResourceRead);
+    }
     // PolicyRouter already classified the current authenticated message as a
     // current external read. Do not run a second, narrower keyword classifier
     // here: doing so can turn the typed WebSearch route into the unrelated
@@ -2488,12 +2495,48 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     if capabilities.iter().any(|capability| {
         matches!(
             capability,
-            AllowedCapability::WebSearch | AllowedCapability::WebFetch
+            AllowedCapability::ImportedResourceRead
+                | AllowedCapability::WebSearch
+                | AllowedCapability::WebFetch
         )
     }) {
         capabilities.push(AllowedCapability::ProviderGeneration);
     }
     capabilities
+}
+
+fn requests_imported_resource_read(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "附件",
+            "这份文件",
+            "这两份文件",
+            "这些文件",
+            "这份文档",
+            "这两份文档",
+            "这些文档",
+            "这份表格",
+            "这两份表格",
+            "这些表格",
+            "attached file",
+            "attached files",
+            "attached document",
+            "attached documents",
+            "attachment",
+            "attachments",
+            "bound document",
+            "bound documents",
+            "uploaded document",
+            "uploaded documents",
+            "uploaded file",
+            "uploaded files",
+            "上传的文档",
+            "上传的文件",
+            "已绑定文档",
+            "已绑定文件",
+        ],
+    )
 }
 
 fn policy_authorized_explicit_memory_candidate_ids(intent: &IntentFrame) -> Vec<String> {
@@ -16710,34 +16753,43 @@ fn has_explicit_governed_read_intent(lower: &str) -> bool {
     if is_governed_file_write_intent(lower) {
         return false;
     }
-    contains_any(
-        lower,
-        &[
-            "file.read",
-            "read file",
-            "read agents",
-            "agents.md",
-            "cargo.toml",
-            "读取工作区",
-            "读取文件",
-            "读取 ../",
-            "读取 ../../",
-            "memory.search",
-            "memory search",
-            "search memory",
-            "my memory",
-            "从我的记忆",
-            "session.search",
-            "session search",
-            "past sessions",
-            "mcp",
-            "web.fetch",
-            "http://",
-            "https://",
-            "抓取",
-            "read-only",
-        ],
-    ) || looks_like_workspace_file_read_intent(lower)
+    requests_imported_resource_read(lower)
+        || contains_any(
+            lower,
+            &[
+                "file.read",
+                "read file",
+                "read agents",
+                "agents.md",
+                "cargo.toml",
+                "读取工作区",
+                "读取文件",
+                "读取 ../",
+                "读取 ../../",
+                "附件",
+                "attached file",
+                "attachment",
+                "bound document",
+                "uploaded document",
+                "上传的文档",
+                "已绑定文档",
+                "memory.search",
+                "memory search",
+                "search memory",
+                "my memory",
+                "从我的记忆",
+                "session.search",
+                "session search",
+                "past sessions",
+                "mcp",
+                "web.fetch",
+                "http://",
+                "https://",
+                "抓取",
+                "read-only",
+            ],
+        )
+        || looks_like_workspace_file_read_intent(lower)
 }
 
 fn is_pure_offline_planning_expression(lower: &str) -> bool {
@@ -17380,6 +17432,9 @@ mod generated_artifact_policy_tests {
             .allows(AllowedCapability::WebSearch));
         assert!(decision
             .policy_decision
+            .allows(AllowedCapability::ImportedResourceRead));
+        assert!(decision
+            .policy_decision
             .allows(AllowedCapability::ProviderGeneration));
         assert!(decision
             .policy_decision
@@ -17420,6 +17475,9 @@ mod generated_artifact_policy_tests {
         assert!(decision
             .policy_decision
             .allows(AllowedCapability::WebSearch));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ImportedResourceRead));
         assert!(decision
             .policy_decision
             .allows(AllowedCapability::ProviderGeneration));
@@ -17496,6 +17554,9 @@ mod roadshow_external_read_policy_tests {
         assert!(decision
             .policy_decision
             .allows(AllowedCapability::WebSearch));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ImportedResourceRead));
         assert_eq!(
             decision.policy_decision.action_effect,
             PolicyActionEffect::ReadOnly
@@ -17541,6 +17602,9 @@ mod roadshow_external_read_policy_tests {
         assert!(decision
             .policy_decision
             .allows(AllowedCapability::WebSearch));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ImportedResourceRead));
         assert_eq!(
             decision.policy_decision.action_effect,
             PolicyActionEffect::ReadOnly

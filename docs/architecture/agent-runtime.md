@@ -138,6 +138,17 @@ candidates as explicit blockers instead of silently executing a fallback.
 through `ToolGateway` and the ActionExecutor with write access disabled. Local
 network policy can convert a web/network attempt into a structured blocker.
 
+The first migrated knowledge-work path also exposes production
+`document.read`. Policy grants it only for explicit attachment/bound-document
+requests, including ordinary phrases such as “这两份文件” or “这两份表格”. The
+executor selects only resources bound to the exact task operation, records a
+metadata-safe selection digest, and returns untrusted evidence. For document-
+only, Web-only, or combined reports, the kernel records ordered read Items,
+then invokes the user-selected provider once with exact request-scoped source
+contracts. A rejected local-resource or Web citation receives at most one
+provider retry; read tools are not redispatched, and a second failure produces
+no ArtifactDraft or Proposal.
+
 ## Runtime Support And Task Evidence
 
 `src-tauri/src/main_chat_runtime_support.rs` creates task sessions, appends

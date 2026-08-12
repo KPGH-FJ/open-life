@@ -9280,6 +9280,7 @@ mod provider_start_admission_tests {
             payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens,
             additional_resource_context_allowed: true,
+            required_resource_selection_digest: None,
         }
     }
 

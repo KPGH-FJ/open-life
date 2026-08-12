@@ -55,6 +55,22 @@ the completing Run's canonical FinalResult. This is current product code for
 that path, not yet a
 claim that every Main Chat route has migrated.
 
+S3 extends that same report Run rather than adding another execution owner.
+Policy can authorize the bounded production `document.read` capability for
+resources already imported and bound to the current message/task operation.
+The kernel executes `document.read` before `web.search`/`web.fetch` when both
+are requested, and each successful read becomes an ordered canonical ToolCall
+and Observation Item before ProviderGeneration. The document ToolCall uses the
+real `ResourceStore` and deterministic selector; its durable metadata contains
+selection identity, digest, and count, never document bodies. Provider context
+is reselected from the same bound resources for the actual provider request,
+must match the ToolCall selection digest, and receives newly issued
+request-scoped citations. Local-resource and Web citation authorities validate
+model output before a report ArtifactDraft or ReviewCheckpoint can exist.
+Missing/failed reads or a failed one-shot citation repair therefore stop before
+provider-backed completion and durable effects. Restart replay reuses committed
+read observations without creating fresh read graphs.
+
 The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a
 consistent canonical report snapshot and project its Run memberships, typed
 Items, Artifact versions, Review wait, rejection, verified delivery, and

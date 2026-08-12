@@ -110,6 +110,48 @@ pub(crate) async fn configure_live_resource_and_web_artifact_eval_state_with_cit
     captured_requests
 }
 
+pub(crate) async fn configure_live_resource_artifact_eval_state_with_citation_echo_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::ResourceArtifact,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
+pub(crate) async fn configure_live_forged_resource_artifact_eval_state_with_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::ResourceForgedArtifact,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
+pub(crate) async fn configure_live_web_artifact_eval_state_with_citation_echo_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::WebArtifact,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
 pub(crate) async fn configure_live_resource_and_forged_web_artifact_eval_state_with_local_http_provider(
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -299,7 +341,10 @@ async fn fake_local_chat_provider_endpoint(
 enum LocalCitationEcho {
     None,
     Web,
+    WebArtifact,
     AllResources,
+    ResourceArtifact,
+    ResourceForgedArtifact,
     ResourceAndWeb,
     ResourceAndWebArtifact,
     ResourceAndForgedWebArtifact,
@@ -330,6 +375,21 @@ impl LocalCitationEcho {
             Self::Web => issued_citation("webref_", 31)
                 .map(|citation| format!("The retrieved Web evidence is available [{citation}]."))
                 .unwrap_or_else(|| "No issued Web citation was observed.".into()),
+            Self::WebArtifact => issued_citation("webref_", 31)
+                .map(|citation| {
+                    serde_json::json!({
+                        "markdown": format!(
+                            "# Web 报告\n\n公开网页证据 [{citation}] 已纳入报告。"
+                        )
+                    })
+                    .to_string()
+                })
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "markdown": "Provider did not observe an issued Web citation."
+                    })
+                    .to_string()
+                }),
             Self::AllResources => {
                 let citations = request_text
                     .match_indices("cite_")
@@ -351,6 +411,25 @@ impl LocalCitationEcho {
                     )
                 }
             }
+            Self::ResourceArtifact => issued_citation("cite_", 29)
+                .map(|citation| {
+                    serde_json::json!({
+                        "markdown": format!(
+                            "# 附件报告\n\n附件证据 [{citation}] 已纳入报告。"
+                        )
+                    })
+                    .to_string()
+                })
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "markdown": "Provider did not observe an issued Resource citation."
+                    })
+                    .to_string()
+                }),
+            Self::ResourceForgedArtifact => serde_json::json!({
+                "markdown": "# 伪造附件引用\n\n这不是本次签发的引用 [cite_aaaaaaaaaaaaaaaaaaaaaaaa]。"
+            })
+            .to_string(),
             Self::ResourceAndWeb => {
                 let resource = issued_citation("cite_", 29);
                 let web = issued_citation("webref_", 31);

@@ -330,6 +330,7 @@ pub(crate) fn attach_main_chat_read_observation_metadata(
     succeeded: bool,
 ) {
     let source_kind = match queue_action_type {
+        "document.read" => "document",
         "file.read" => "file",
         "web.search" | "web.fetch" | "web.read" => "web",
         "mcp.read_only" => "mcp",
@@ -338,6 +339,7 @@ pub(crate) fn attach_main_chat_read_observation_metadata(
         _ => "tool",
     };
     let source_label = match queue_action_type {
+        "document.read" => "current_task_bound_resources",
         "file.read" => arguments
             .get("path")
             .and_then(serde_json::Value::as_str)
@@ -346,6 +348,7 @@ pub(crate) fn attach_main_chat_read_observation_metadata(
         _ => execution_target,
     };
     let evidence_kind = match queue_action_type {
+        "document.read" => "imported_resource_read",
         "file.read" => "file_system_read",
         "web.search" if fixture_backed => "web_search_fixture",
         "web.search" => "web_search_network",

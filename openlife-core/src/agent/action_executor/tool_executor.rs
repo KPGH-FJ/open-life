@@ -912,6 +912,39 @@ impl super::ActionExecutor {
                 observed_body_admission,
             });
         }
+        let document_blocker = (tool_name == "document.read")
+            .then(|| result.error.as_deref()?.split(':').next())
+            .flatten()
+            .filter(|reason| {
+                matches!(
+                    *reason,
+                    "document_read_no_bound_content"
+                        | "document_read_resource_store_unavailable"
+                        | "document_read_bound_input_invalid"
+                        | "document_read_selection_failed"
+                )
+            });
+        if let Some(reason) = document_blocker {
+            action.status = "blocked".into();
+            action.permission_decision = Some(reason.into());
+            if let Some(object) = observation
+                .structured_result
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
+                object.insert("status".into(), serde_json::json!("blocked"));
+                object.insert("permission_decision".into(), serde_json::json!(reason));
+            }
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some(reason.into()),
+                governance_report: None,
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission,
+            });
+        }
 
         // For mcp.call_tool: override tool_scope with target manifest and handle
         // target tool permission failures as NeedsConfirmation instead of Failed
@@ -1054,8 +1087,17 @@ impl super::ActionExecutor {
         } else {
             ActionExecutionStatus::Failed
         };
-        let stop_reason = (!result.success && tool_name == "file.read")
-            .then(|| "filesystem_read_failed".to_string());
+        let stop_reason = if !result.success && tool_name == "file.read" {
+            Some("filesystem_read_failed".to_string())
+        } else if !result.success && tool_name == "document.read" {
+            result
+                .error
+                .as_deref()
+                .and_then(|error| error.split(':').next())
+                .map(str::to_string)
+        } else {
+            None
+        };
 
         Ok(ActionExecutionResult {
             action,

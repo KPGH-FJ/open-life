@@ -566,6 +566,10 @@ pub struct ActionExecutionContext<'a> {
     pub canonical_state: Option<&'a CanonicalStateSnapshot>,
     pub memory_store: Option<&'a crate::memory::MemoryStore>,
     pub memory_lifecycle_retrieval_reader: Option<&'a crate::agent::MemoryLifecycleRetrievalReader>,
+    /// Canonical owner for resources explicitly bound to the current task.
+    /// `document.read` requires this store plus an exact message identity; it
+    /// never scans arbitrary filesystem paths.
+    pub resource_store: Option<&'a crate::resource::ResourceStore>,
     pub proposal_store: Option<&'a crate::agent::ProposalStore>,
     pub agent_run_store: Option<&'a crate::agent::AgentRunStore>,
     pub(crate) bound_content_receipt_issuer: Option<&'a dyn BoundContentReceiptIssuer>,
@@ -641,6 +645,7 @@ impl<'a> ActionExecutionContext<'a> {
             canonical_state: None,
             memory_store: None,
             memory_lifecycle_retrieval_reader: None,
+            resource_store: None,
             proposal_store: None,
             agent_run_store: None,
             bound_content_receipt_issuer: None,
@@ -678,6 +683,14 @@ impl<'a> ActionExecutionContext<'a> {
         memory_lifecycle_retrieval_reader: &'a crate::agent::MemoryLifecycleRetrievalReader,
     ) -> Self {
         self.memory_lifecycle_retrieval_reader = Some(memory_lifecycle_retrieval_reader);
+        self
+    }
+
+    pub fn with_resource_store(
+        mut self,
+        resource_store: &'a crate::resource::ResourceStore,
+    ) -> Self {
+        self.resource_store = Some(resource_store);
         self
     }
 
