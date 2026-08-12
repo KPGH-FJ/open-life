@@ -47,6 +47,16 @@ its Proposal; Review is a checkpoint relation, and confirmed materialization
 updates the same ArtifactVersion. This is current product code for that path,
 not yet a claim that every Main Chat route has migrated.
 
+The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a
+consistent canonical report snapshot and project its Run memberships, typed
+Items, Artifact versions, Review wait, rejection, verified delivery, and
+effect-unknown states. Exact Run membership overlays the migrated report onto
+its compatibility execution session instead of showing two tasks. Canonical
+report lifecycle wins when compatibility TaskSession state disagrees; the
+compatibility session remains only the current control target until that control
+path is migrated. The frontend renders this bounded metadata and materialized
+file reference without reading `task_runtime.db` or joining stores itself.
+
 ## Canonical task runtime target
 
 ADR 0017 accepts one product lifecycle:
