@@ -6805,6 +6805,67 @@ async fn s3_web_only_report_uses_web_tool_before_reviewed_materialization() {
 }
 
 #[tokio::test]
+async fn inline_report_approval_rejects_wrong_task_owner_before_materialization() {
+    let workspace = tempfile::tempdir().expect("inline approval workspace");
+    let safe_workspace = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical inline approval workspace");
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    state.config.lock().await.system.safe_paths = vec![safe_workspace.display().to_string()];
+    configure_command_surface_sequenced_local_http_provider(
+        &state,
+        vec![
+            "unused ranking response".into(),
+            serde_json::json!({
+                "markdown": "# Owner-bound report\n\nThis draft must remain pending."
+            })
+            .to_string(),
+        ],
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "inline-approval-owner-boundary",
+        "Create owner-bound-report.md and save it only after I confirm.",
+    )
+    .await;
+    let task_session_id = task_session_id_from_response(&response);
+    let proposal = find_command_surface_proposal_for_task(
+        &state,
+        &task_session_id,
+        openlife_core::agent::ProposalType::ExternalWriteAction,
+    )
+    .await;
+    let target = safe_workspace.join("owner-bound-report.md");
+    assert!(!target.exists());
+
+    let error = crate::commands::proposal::ensure_proposal_task_owner(
+        &state,
+        &proposal.id,
+        "different-task-owner",
+    )
+    .await
+    .expect_err("wrong task owner must fail before native confirmation or materialization");
+    assert_eq!(error, "accept_proposal_and_continue_owner_mismatch");
+    assert!(!target.exists());
+    assert_eq!(
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn roadshow_cc01_forged_web_citation_blocks_artifact_proposal_after_verified_read() {
     const PROMPT: &str =
         "读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。";

@@ -1,72 +1,77 @@
 # Current OpenLife Product Development Plan
 
-Status: complete
+Status: blocked
 
 ## Objective
 
-Complete S5 by turning the canonical report lifecycle into a reviewable product
-result: users can see Results, proposed or applied Changes, a bounded Preview,
-and independent Verification without the frontend reconstructing truth.
+Complete S6 by proving the accepted report task path as one behavior matrix on
+the exact current source: controlled tests for every safety and recovery
+contract, an exact native Tauri build and product-path review, and only the
+external-live provider/Web checks required to prove real execution.
 
 ## Product path
 
 ```text
-canonical Task/Run/Item/ArtifactVersion
-  -> backend TasksViewModel presentation projection
-  -> Result summary
-  -> exact Change target and create/replace state
-  -> bounded Markdown/CSV Preview
-  -> expected versus observed digest Verification
+Workspace request
+  -> canonical Task / Run / Item execution
+  -> document.read and/or Web read
+  -> user-selected provider synthesis
+  -> ArtifactVersion + Review checkpoint
+  -> confirmed materialization
+  -> Results / Changes / Preview / Verification
 ```
 
 ## In scope
 
-1. Extend `TaskArtifactViewModel` with backend-owned change, preview, and
-   verification projections.
-2. For a pending draft, read preview/change facts only from the exact proposal
-   bound to the Artifact id, version, target, and content digest.
-3. For a materialized Artifact, read preview bytes only from the exact regular
-   file reference and expose them only when the observed digest matches the
-   canonical content digest.
-4. Keep preview bounded and UTF-8/text-only; never follow symlinks or infer
-   content from filenames, status prose, or frontend state.
-5. Show Results, Changes, Preview, and Verification as distinct sections on the
-   Tasks product surface, including truthful pending, failed, and unknown states.
-6. Preserve Review and task controls as separate actions; viewing a preview
-   does not approve, apply, retry, or complete anything.
+1. Define one report behavior matrix covering document-only, Web-only, and
+   combined reports plus their failure boundaries.
+2. Prove steering consumption, inline approval continuation, restart recovery,
+   cancellation, and bounded concurrency without creating a second lifecycle.
+3. Prove proposed, materialized, drifted, missing, failed, and effect-unknown
+   artifact projections through backend product truth.
+4. Build the exact current native Tauri application and review the Workspace,
+   Tasks, and Review product path with an isolated data profile.
+5. Run a bounded external-live provider/Web report case only through the
+   explicit live-eval gate. Never credit local HTTP, fixtures, or scripted
+   providers as external-live evidence.
+6. Keep the evidence summary concise and tied to commands and current commit;
+   do not create an evidence registry or store user content in planning docs.
 
 ## Out of scope
 
-- rich document editing, PDF rendering, image preview, or diff algorithms;
-- opening arbitrary local paths or adding shell/computer-use capability;
-- a second artifact store or frontend-owned lifecycle state;
-- provider routing, Memory, LifeModel, connectors, or old-path deletion;
-- native/external-live behavior-matrix closure, which belongs to S6.
+- new connectors, computer-use, shell, provider auto-routing, Memory, or
+  LifeModel capability;
+- rich editors, PDF/image preview, or additional artifact formats;
+- S7 old-path deletion and release cleanup;
+- touching the default OpenLife profile or using historical native/live runs
+  as proof for the current build.
 
-## Ownership
+## Behavior matrix
 
-- `CanonicalTaskRuntimeStore` remains Task/Run/Item/ArtifactVersion authority.
-- ProposalStore may supply an exact pending draft and target precondition only
-  after all canonical artifact bindings match.
-- The verified materialized file may supply preview bytes only after type,
-  size, path, and digest checks.
-- `TasksViewModel` owns product presentation facts. React only renders its typed
-  status and never compares raw stores or computes completion.
+| Scenario | Required product truth | Required evidence |
+| --- | --- | --- |
+| Document-only report | exact bound document read before provider; reviewable report | controlled command-surface + exact native |
+| Web-only report | observed Web evidence and verified citations before proposal | controlled command-surface + external-live |
+| Combined report | ordered document and Web Items feed one provider synthesis | controlled command-surface + external-live |
+| Missing/drifted document | no Web/provider dispatch and no Artifact | controlled negative test |
+| Missing/forged Web citation | one bounded provider retry, then no Artifact | controlled negative test + external-live valid case |
+| Steering | authenticated in-scope input consumed once at checkpoint | restart/integration test + native UI |
+| Scope-expanding steering | blocked without capability or policy expansion | controlled negative test |
+| Review approval | exact Artifact materializes, then same task may continue | integration test + native UI |
+| Restart recovery | no duplicate reads, proposal, effect, or steering consume | file-backed/restart test |
+| Concurrency/cancellation | admission before mutation; one owner; bounded parallelism | integration test |
+| Result surfaces | backend-owned Result, Change, Preview, Verification agree | projection/UI test + native UI |
+| Drift/missing/effect unknown | no delivered claim, no fabricated preview, no blind replay | controlled negative test |
 
-## Acceptance
+## Evidence boundaries
 
-| Scenario | Required result |
-| --- | --- |
-| Pending new report | Change says create; bounded draft Preview; Verification pending |
-| Pending replacement | Change says replace and identifies expected prior digest |
-| Materialized matching file | Result delivered; applied Change; verified Preview and digest |
-| Materialized file drift | no Preview; Verification failed; no delivered claim |
-| Missing materialized file | no Preview; Verification failed/unknown, never empty success |
-| Effect unknown | Change and Verification remain unknown; no automatic replay |
-| Failed artifact | failed result with no fabricated preview or verification |
-| Oversized or non-UTF-8 content | preview unavailable/truncated by backend contract |
-| Multiple artifacts | each version has independent Change, Preview, and Verification |
-| Frontend refresh | same backend projection is rendered without local inference |
+- Source/unit/integration tests prove deterministic contracts only.
+- Browser-shell tests prove React behavior only.
+- Native evidence must use the exact current bundle and an isolated profile.
+- External-live evidence must use the configured user-selected provider and
+  real Web access through `scripts/live-eval.zsh`.
+- A missing key, unavailable account, or provider/network refusal stops S6 as
+  blocked; it is never replaced by a fixture.
 
 ## Checks
 
@@ -84,25 +89,26 @@ corepack pnpm --dir frontend test:e2e
 
 ## Stop condition
 
-S5 closes only when all four surfaces are driven by backend truth, negative
-preview/digest cases fail closed, full gates pass, docs agree, the commit is
-reviewable, and the working tree is clean. Then move to S6 exact native and
-required live evidence.
+S6 closes only when every matrix row has its required current-source evidence,
+the exact native path is reviewed from an isolated profile, the required live
+case succeeds or is truthfully blocked on user-supplied credentials, all gates
+pass, and the working tree is clean. Then move to S7 old-path deletion and a
+clean release baseline.
 
-## Closure
+## Current result
 
-- Each canonical report ArtifactVersion now exposes backend-owned Result,
-  Change, Preview, and Verification projections.
-- Pending preview content is accepted only from an exact proposal binding;
-  materialized preview content is accepted only from a regular file inside the
-  configured safe paths whose current digest matches canonical observation and
-  Verification Item truth.
-- Drift, missing files, unsafe file types, oversize content, and invalid UTF-8
-  fail closed and remove delivered product credit.
-- The Tasks surface renders all four states without reading files, joining raw
-  stores, or treating Review acceptance as delivery.
+- The controlled report matrix passes for document/Web execution, typed retry,
+  steering, approval ownership, cancellation, recovery, concurrency, artifact
+  materialization, and backend result projections.
+- Full Rust and frontend gates pass. The exact current release bundle builds.
+- The explicitly gated external-live document + Web report completes through
+  one pending Review item and materializes once after acceptance.
+- The exact native bundle was reviewed with a fresh isolated data profile and
+  correctly fails closed when its credential store is unavailable.
 
-## Next pointer
+## Current blocker
 
-After S5 closes, begin S6: run the accepted behavior matrix with exact native
-evidence and only the required explicitly authorized live-provider checks.
+Completing the report workflow inside that exact isolated native profile needs
+macOS Keychain initialization/recovery. That creates or accesses persistent
+credentials, so it requires the user's confirmation at action time. Do not use
+the default OpenLife profile or substitute fixture credentials.

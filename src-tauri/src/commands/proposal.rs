@@ -4203,13 +4203,11 @@ pub(crate) struct AcceptProposalAndContinueResponse {
     pub continued_same_run: bool,
 }
 
-#[tauri::command]
-pub(crate) async fn accept_proposal_and_continue(
-    proposal_id: String,
-    task_session_id: String,
-    window: tauri::WebviewWindow,
-    state: State<'_, Arc<AppState>>,
-) -> Result<AcceptProposalAndContinueResponse, String> {
+pub(crate) async fn ensure_proposal_task_owner(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    task_session_id: &str,
+) -> Result<(), String> {
     if task_session_id.trim().is_empty() {
         return Err("accept_proposal_and_continue_task_missing".to_string());
     }
@@ -4221,13 +4219,24 @@ pub(crate) async fn accept_proposal_and_continue(
             .lock()
             .await;
         store
-            .terminal_owner_origin_binding(&proposal_id)
+            .terminal_owner_origin_binding(proposal_id)
             .map_err(|error| error.to_string())?
     }
     .ok_or_else(|| "accept_proposal_and_continue_owner_missing".to_string())?;
     if origin.task_session_id() != task_session_id {
         return Err("accept_proposal_and_continue_owner_mismatch".to_string());
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn accept_proposal_and_continue(
+    proposal_id: String,
+    task_session_id: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AcceptProposalAndContinueResponse, String> {
+    ensure_proposal_task_owner(state.inner(), &proposal_id, &task_session_id).await?;
     let proposal = get_proposal_with_state(state.inner(), &proposal_id).await?;
     let mut expected_native_confirmation_digest = None;
     if proposal_requires_native_confirmation(&proposal)

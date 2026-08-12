@@ -1496,6 +1496,45 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
     .await
     .expect("CC01 external live turn timeout")
     .expect("CC01 external live structured terminal");
+    let boundary_events = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("CC01 external live EventStore")
+        .lock()
+        .await
+        .list(&operation_id, 0, 250)
+        .expect("list CC01 external live boundary facts");
+    let provider_boundaries = boundary_events
+        .iter()
+        .filter(|event| event.event_type.starts_with("provider."))
+        .map(|event| {
+            serde_json::json!({
+                "eventType": event.event_type,
+                "sequence": event.sequence,
+                "status": event.payload.get("status"),
+                "errorDigest": event.payload.get("errorDigest"),
+                "payloadPurpose": event.payload.get("payloadPurpose"),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    eprintln!(
+        "CC01 external live boundary summary: {}",
+        serde_json::json!({
+            "status": result["status"],
+            "blockers": result["blockers"],
+            "modelInvoked": result["model_invoked"],
+            "toolInvoked": result["tool_invoked"],
+            "legacyFallbackUsed": result["legacy_fallback_used"],
+            "selectedStrategy": result["agent_ingress"]["selectedStrategy"],
+            "generationStatus": result["reasoning_trace"]["generation_result"]["status"],
+            "providerAttempted": result["reasoning_trace"]["generation_result"]["providerAttempted"],
+            "providerCompleted": result["reasoning_trace"]["generation_result"]["providerCompleted"],
+            "providerErrorKind": result["reasoning_trace"]["generation_result"]["providerErrorKind"],
+            "toolNames": result["reasoning_trace"]["generation_result"]["toolNames"],
+            "providerBoundaries": provider_boundaries,
+        })
+    );
 
     assert_eq!(
         result["status"], "completed_with_pending_items",
@@ -1629,22 +1668,36 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
         .await
         .list(&operation_id, 0, 250)
         .expect("list CC01 external live facts");
-    for event_type in [
-        "tool.started",
-        "tool.completed",
-        "provider.started",
-        "provider.completed",
-        "final_delivery.created",
+    for (event_type, expected_count) in [
+        ("tool.started", 2),
+        ("tool.completed", 2),
+        ("final_delivery.created", 1),
     ] {
         assert_eq!(
             durable
                 .iter()
                 .filter(|event| event.event_type == event_type)
                 .count(),
-            1,
-            "CC01 external live scenario requires exactly one {event_type}"
+            expected_count,
+            "CC01 external live scenario requires exactly {expected_count} {event_type} events"
         );
     }
+    let provider_started_count = durable
+        .iter()
+        .filter(|event| event.event_type == "provider.started")
+        .count();
+    let provider_completed_count = durable
+        .iter()
+        .filter(|event| event.event_type == "provider.completed")
+        .count();
+    assert!(
+        (1..=2).contains(&provider_started_count),
+        "CC01 permits one initial artifact synthesis and at most one bounded repair"
+    );
+    assert_eq!(
+        provider_completed_count, provider_started_count,
+        "every live artifact provider attempt must have a completed terminal"
+    );
     assert!(durable
         .iter()
         .all(|event| event.event_type != "effect_committed"));
@@ -1655,11 +1708,37 @@ async fn roadshow_cc01_external_live_resource_web_report_waits_for_review_then_m
             .unwrap_or_else(|| panic!("missing CC01 external live {event_type}"))
     };
     assert!(
-        durable_event("tool.completed").created_at <= durable_event("provider.started").created_at,
-        "the Web observation must finish before Provider synthesis starts"
-    );
-    assert!(
         durable_event("provider.started").sequence < durable_event("provider.completed").sequence
+    );
+
+    let canonical_task_id = proposals[0].after["canonicalTaskId"]
+        .as_str()
+        .expect("CC01 external live canonical Task id");
+    let canonical_items = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .expect("CC01 external live canonical Task store")
+        .lock()
+        .await
+        .list_items(canonical_task_id)
+        .expect("list CC01 external live canonical Items");
+    assert_eq!(
+        canonical_items
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Observation,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Observation,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
+        ],
+        "canonical Item order, not batched durable projection order, proves both reads precede synthesis"
     );
 
     let accepted =

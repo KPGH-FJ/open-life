@@ -4955,15 +4955,15 @@ fn validate_resource_artifact_model_output(
             .strip_prefix("```json")
             .and_then(|value| value.strip_suffix("```"))
             .map(str::trim)
-            .ok_or_else(|| "artifact_generation_contract_invalid".to_string())?
+            .ok_or_else(|| "artifact_generation_json_invalid".to_string())?
     } else {
         trimmed
     };
-    let mut envelope: Value = serde_json::from_str(json)
-        .map_err(|_| "artifact_generation_contract_invalid".to_string())?;
+    let mut envelope: Value =
+        serde_json::from_str(json).map_err(|_| "artifact_generation_json_invalid".to_string())?;
     let object = envelope
         .as_object_mut()
-        .ok_or_else(|| "artifact_generation_contract_invalid".to_string())?;
+        .ok_or_else(|| "artifact_generation_json_invalid".to_string())?;
     let mut validated_artifact_count = 0usize;
     if let Some(markdown) = object.get("markdown").and_then(Value::as_str) {
         let rendered = citation_set
@@ -4983,7 +4983,22 @@ fn validate_resource_artifact_model_output(
     if validated_artifact_count == 0 {
         return Err("artifact_generation_field_set_mismatch".into());
     }
-    serde_json::to_string(&envelope).map_err(|_| "artifact_generation_contract_invalid".into())
+    serde_json::to_string(&envelope).map_err(|_| "artifact_generation_json_invalid".into())
+}
+
+fn resource_validation_blocker(
+    payload_purpose: ProviderPayloadPurpose,
+    error: &str,
+) -> &'static str {
+    if payload_purpose == ProviderPayloadPurpose::MainChatArtifactDraft {
+        match error {
+            "artifact_generation_json_invalid" => "artifact_generation_json_invalid",
+            "artifact_generation_field_set_mismatch" => "artifact_generation_field_set_mismatch",
+            _ => "resource_citation_validation_failed",
+        }
+    } else {
+        "resource_citation_validation_failed"
+    }
 }
 
 #[async_trait]
@@ -5376,9 +5391,11 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                                 backend_resource_sources_verified: resource_citation_set.is_some(),
                             }),
                             Err(message) => Err(MainChatModelFailure {
+                                blocker_code: Some(
+                                    resource_validation_blocker(payload_purpose, &message).into(),
+                                ),
                                 message,
                                 provider_receipt: Some(*receipt),
-                                blocker_code: Some("resource_citation_validation_failed".into()),
                                 proposal_ids: Vec::new(),
                             }),
                         };
@@ -5438,9 +5455,11 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                         backend_resource_sources_verified: resource_citation_set.is_some(),
                     }),
                     Err(message) => Err(MainChatModelFailure {
+                        blocker_code: Some(
+                            resource_validation_blocker(payload_purpose, &message).into(),
+                        ),
                         message,
                         provider_receipt: outcome.receipt,
-                        blocker_code: Some("resource_citation_validation_failed".into()),
                         proposal_ids: Vec::new(),
                     }),
                 }
@@ -7825,8 +7844,11 @@ where
                             continue;
                         }
                         Err(code)
-                            if code == "artifact_generation_field_set_mismatch"
-                                && retry.is_none() =>
+                            if matches!(
+                                code.as_str(),
+                                "artifact_generation_field_set_mismatch"
+                                    | "artifact_generation_json_invalid"
+                            ) && retry.is_none() =>
                         {
                             retry = Some(ArtifactDraftRetry::FieldSet);
                             continue;
@@ -7886,6 +7908,17 @@ where
                         {
                             return blocked;
                         }
+                    }
+                    if matches!(
+                        failure.blocker_code.as_deref(),
+                        Some(
+                            "artifact_generation_field_set_mismatch"
+                                | "artifact_generation_json_invalid"
+                        )
+                    ) && retry.is_none()
+                    {
+                        retry = Some(ArtifactDraftRetry::FieldSet);
+                        continue;
                     }
                     if failure.blocker_code.as_deref()
                         == Some("resource_citation_validation_failed")
